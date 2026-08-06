@@ -108,12 +108,12 @@ const cursorProfiles: readonly SupervisedPermissionProfile[] = [
     status: "gated", risk: "medium", detail: "Cursor supervised prompt bridging is not available yet.", isDefault: false,
   },
   {
-    id: "sandboxed_write", label: "Workspace writes", description: "Lets Cursor read, edit, and run normal development commands inside the selected workspace.",
-    status: "available", risk: "medium", detail: "Cursor's native sandbox and a path-based LetAgents host boundary remain enabled without inventorying project files.", isDefault: true,
+    id: "sandboxed_write", label: "Workspace writes", description: "Lets Cursor inspect, edit source files, and run repository tools in a private turn workspace.",
+    status: "available", risk: "medium", detail: "Cursor's native sandbox stays enabled. LetAgents reconciles conflict-checked, nonignored file edits after the turn; ignored dependencies stay read-only and project authority files stay protected.", isDefault: true,
   },
   {
     id: "full_access", label: "Workspace writes (compatibility)", description: "Disables Cursor's inner sandbox for repository tool compatibility.",
-    status: "available", risk: "high", detail: "Disables Cursor's native sandbox while LetAgents restricts direct write paths to the selected workspace without inventorying project files.", isDefault: false,
+    status: "available", risk: "high", detail: "Disables Cursor's native sandbox inside the same private turn workspace. Direct host writes remain blocked; only conflict-checked, nonignored file edits are carried back.", isDefault: false,
   },
 ];
 

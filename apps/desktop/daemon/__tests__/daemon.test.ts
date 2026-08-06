@@ -20,13 +20,19 @@ import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+
+const TEST_PROVIDER_TURN_AUTHORITY = {
+  work_attempt_id: "attempt",
+  origin_execution_generation_id: "generation",
+  provider_continuation_id: "continuation",
+} as const;
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { SupervisedDeliveryHttp } from "../supervised-agent-delivery.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
-import { advanceReconciliationState, recordReconciliationActionFailure } from "../reconciler-state.js";
+import { advanceReconciliationState, recordReconciliationActionFailure, rememberCompletedControlAction } from "../reconciler-state.js";
 import type { ProviderActionPort } from "../provider-action-port.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
@@ -3060,6 +3066,41 @@ test("reconciliation bookkeeping keeps rolling exits independent from action bac
   assert.equal(recordReconciliationActionFailure(afterAnotherAction, "generation-2", 5_000), afterAnotherAction, "non-adjacent replay is rejected");
 });
 
+test("human-control manifest projection remains bounded while durable storage owns lifetime replay", () => {
+  let state = advanceReconciliationState(undefined, "idle", 1_000);
+  for (let index = 0; index < 80; index += 1) {
+    state = rememberCompletedControlAction(state, `control-${index}`);
+  }
+  assert.equal(state.completed_action_ids.length, 32);
+  assert.equal(state.completed_action_ids[0], "control-48");
+  state = rememberCompletedControlAction(state, "control-48");
+  assert.equal(state.completed_action_ids.length, 32, "an idempotent projection refresh never duplicates the id");
+  assert.equal(state.completed_action_ids.at(-1), "control-48");
+});
+
+test("new turn-control admissions are bounded per agent while recovery retries remain outside the bucket", async () => {
+  const env = await fixture();
+  let nowMs = 10_000;
+  const paths = {
+    lockPath: join(env.root, "rate.lock"), socketPath: join(env.root, "rate.sock"),
+    manifestPath: join(env.root, "rate.sqlite"), auditPath: join(env.root, "rate-audit.jsonl"),
+    attemptsPath: join(env.root, "rate-attempts.sqlite"), attemptsRoot: join(env.root, "rate-attempts"),
+    workspaceRoot: env.root, workerBindingsPath: join(env.root, "rate-bindings.json"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, { nowMs: () => nowMs });
+  const internals = daemon as unknown as { admitNewTurnControl(entryId: string): void };
+  try {
+    for (let index = 0; index < 24; index += 1) internals.admitNewTurnControl("agent-rate");
+    assert.throws(() => internals.admitNewTurnControl("agent-rate"), /temporarily rate limited/i);
+    assert.doesNotThrow(() => internals.admitNewTurnControl("other-agent"), "one agent cannot consume another agent's budget");
+    nowMs += 60_001;
+    assert.doesNotThrow(() => internals.admitNewTurnControl("agent-rate"), "the bounded window recovers without deleting lifetime tombstones");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("reconciler executes only fenced, capability-negotiated port actions", async () => {
   const calls: string[] = [];
   const handle = { workAttemptId: "attempt", pid: 1, providerContinuationId: "thread", observedState: "failed" as const };
@@ -3511,8 +3552,10 @@ test("an intentional stop-turn terminal remains idle without restarting the runn
       execution_generation_id: executionGenerationId,
       provider_connection: null,
     },
+    last_turn_control_sequence: 1,
     turn_control: {
       action_id: "stop-turn-action",
+      action_sequence: 1,
       work_attempt_id: "stop-turn-attempt",
       execution_generation_id: executionGenerationId,
       has_correction: false,
@@ -3557,14 +3600,17 @@ test("an intentional stop-turn terminal remains idle without restarting the runn
   }
 });
 
-test("restart recovery re-drives a dispatched stop-then-resend as retryable, but leaves native/plain dispatches uncertain", async () => {
+test("restart recovery quarantines every dispatched turn control regardless of correction strategy", async () => {
   const env = await fixture();
   const manifestPath = join(env.root, "manifest.json");
-  const dispatchedControl = (actionId: string, hasCorrection: boolean) => ({
+  const dispatchedControl = (actionId: string, hasCorrection: boolean, correctionStrategy: "native" | "stop_then_resend" | null) => ({
     action_id: actionId,
+    action_sequence: 1,
     work_attempt_id: "attempt",
     execution_generation_id: "generation",
     has_correction: hasCorrection,
+    correction_text: hasCorrection ? "one correction" : null,
+    correction_strategy: correctionStrategy,
     status: "dispatching" as const,
     capability: "native_interrupt" as const,
     interrupted: null,
@@ -3577,13 +3623,13 @@ test("restart recovery re-drives a dispatched stop-then-resend as retryable, but
   });
   await new ManifestStore(manifestPath).write(0, [
     // Stop-only provider on daemon_inbox + a correction ⇒ stop-then-resend.
-    { ...entry, id: "resend_agent", room_id: "room-a", provider: "open-model", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", turn_control: dispatchedControl("control-resend", true) },
+    { ...entry, id: "resend_agent", room_id: "room-a", provider: "open-model", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", last_turn_control_sequence: 1, turn_control: dispatchedControl("control-resend", true, "stop_then_resend") },
     // Native-correction provider (midTurnCorrection) ⇒ not re-drivable blindly.
-    { ...entry, id: "native_agent", room_id: "room-b", provider: "codex", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", turn_control: dispatchedControl("control-native", true) },
+    { ...entry, id: "native_agent", room_id: "room-b", provider: "codex", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", last_turn_control_sequence: 1, turn_control: dispatchedControl("control-native", true, "native") },
     // A plain Stop (no correction) is always uncertain after a dispatched crash.
-    { ...entry, id: "plain_agent", room_id: "room-c", provider: "open-model", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", turn_control: dispatchedControl("control-plain", false) },
+    { ...entry, id: "plain_agent", room_id: "room-c", provider: "open-model", delivery_mode: "daemon_inbox", work_attempt_id: "attempt", last_turn_control_sequence: 1, turn_control: dispatchedControl("control-plain", false, null) },
   ]);
-  // Static capability by provider: recovery re-derives stop-then-resend from it.
+  // Recovery does not re-derive or replay any strategy after native dispatch.
   const port: ProviderActionPort = {
     capabilities: async (_workAttemptId, provider) => ({ deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false, midTurnCorrection: provider === "codex", transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true, turnControl: "native_interrupt" }),
     spawn: async () => { throw new Error("unreachable"); }, attach: async () => null, attachAction: async () => ({ state: "absent" }), resume: async () => { throw new Error("unreachable"); }, poke: async () => {}, stop: async () => ({ endedAt: "now", exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: null }), onExit: async () => () => {},
@@ -3597,14 +3643,334 @@ test("restart recovery re-drives a dispatched stop-then-resend as retryable, but
   try {
     await daemon.start();
     const byId = new Map((await new ManifestStore(manifestPath).load()).entries.map((candidate) => [candidate.id, candidate.turn_control]));
-    // A dispatched stop-then-resend is idempotent to re-drive, so it recovers
-    // retryable (the client reapplies the correction) — never lost.
-    assert.equal(byId.get("resend_agent")?.status, "retryable");
-    assert.match(byId.get("resend_agent")?.error ?? "", /stop-then-resend/i);
+    // Native Stop may already have applied. The exact payload is durable, but
+    // recovery must never replay it against a successor turn.
+    assert.equal(byId.get("resend_agent")?.status, "uncertain");
+    assert.match(byId.get("resend_agent")?.error ?? "", /predates exact causal target fencing/i);
     // A native correction's provider effect is ambiguous after a crash — uncertain.
     assert.equal(byId.get("native_agent")?.status, "uncertain");
     // A plain Stop (no correction) is likewise uncertain.
     assert.equal(byId.get("plain_agent")?.status, "uncertain");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("restart treats every exact predecessor correction row state as applied evidence without replaying it", async () => {
+  const env = await fixture();
+  const manifestPath = join(env.root, "legacy-turn-controls.sqlite");
+  const makeEntry = (id: string, roomId: string, status: "prepared" | "retryable" | "dispatching" | "uncertain"): DaemonManifestEntry => ({
+    ...entry,
+    id,
+    room_id: roomId,
+    provider: "cursor",
+    observed_state: "working",
+    delivery_mode: "daemon_inbox",
+    work_attempt_id: "legacy-attempt",
+    provider_ref: {
+      work_attempt_id: "legacy-attempt",
+      provider_continuation_id: "legacy-cursor-chat",
+      execution_generation_id: "legacy-generation",
+      provider_connection: { kind: "cursor_cli", pid: 4400, processIdentity: "cursor:4400" },
+    },
+    last_turn_control_sequence: 1,
+    turn_control: {
+      action_id: `legacy-${id}`,
+      action_sequence: 1,
+      work_attempt_id: "legacy-attempt",
+      execution_generation_id: "legacy-generation",
+      inbox_item_id: null,
+      provider_turn_id: null,
+      has_correction: true,
+      correction_text: null,
+      correction_strategy: null,
+      status,
+      capability: "restart_resume",
+      interrupted: null,
+      resumed: null,
+      state: null,
+      stages: [],
+      error: null,
+      recorded_at: "2026-08-05T00:00:00.000Z",
+      updated_at: "2026-08-05T00:00:00.000Z",
+    },
+  });
+  const evidenced = [
+    makeEntry("evidence-pending", "legacy-room-pending", "prepared"),
+    makeEntry("evidence-active", "legacy-room-active", "retryable"),
+    makeEntry("evidence-published", "legacy-room-published", "uncertain"),
+    makeEntry("evidence-blocked", "legacy-room-blocked", "dispatching"),
+    makeEntry("evidence-cancelled", "legacy-room-cancelled", "uncertain"),
+  ];
+  const retired = makeEntry("retired", "legacy-room-retired", "retryable");
+  const quarantined = makeEntry("quarantined", "legacy-room-quarantined", "uncertain");
+  const seedStore = new ManifestStore(manifestPath);
+  const seedInbox = new SupervisedAgentInboxStore(manifestPath);
+  let daemon: ProductionSupervisorDaemon | null = null;
+  try {
+    await seedStore.write(0, [...evidenced, retired, quarantined].map((candidate) => ({ ...candidate, turn_control: undefined })));
+    const correctionRows = new Map<string, string>();
+    for (const candidate of evidenced) {
+      const row = await seedInbox.enqueueCorrection({
+        agent_id: candidate.id,
+        room_id: candidate.room_id,
+        source_message_id: `correction:${candidate.turn_control!.action_id}`,
+        source_message: { text: `recover exact ${candidate.id}`, sender: { kind: "supervisor_correction" } },
+        activation: { decision: "activate", reason: "human_correction", addressed: true },
+      });
+      correctionRows.set(candidate.id, row.inbox_item_id);
+    }
+    const activeId = correctionRows.get("evidence-active")!;
+    await seedInbox.claimHead("evidence-active");
+    const legacyProviderAuthority = {
+      work_attempt_id: "legacy-attempt",
+      origin_execution_generation_id: "legacy-generation",
+      provider_continuation_id: "legacy-cursor-chat",
+    } as const;
+    await seedInbox.checkpointTurnStarted(activeId, "turn-evidence-active", legacyProviderAuthority);
+    const publishedId = correctionRows.get("evidence-published")!;
+    await seedInbox.claimHead("evidence-published");
+    await seedInbox.checkpointTurnStarted(publishedId, "turn-evidence-published", legacyProviderAuthority);
+    await seedInbox.transition(publishedId, "awaiting_result", { outcome: JSON.stringify({ kind: "no_reply" }) });
+    await seedInbox.transition(publishedId, "acknowledged_no_reply");
+    const blockedId = correctionRows.get("evidence-blocked")!;
+    await seedInbox.claimHead("evidence-blocked");
+    await seedInbox.transition(blockedId, "blocked", { last_error: "manual recovery" });
+    const cancelledId = correctionRows.get("evidence-cancelled")!;
+    await seedInbox.transition(cancelledId, "blocked", { last_error: "cancel before recovery" });
+    await seedInbox.transition(cancelledId, "cancelled_by_user");
+    const expectedStates = new Map(await Promise.all(evidenced.map(async (candidate) => [
+      candidate.id,
+      (await seedInbox.get(correctionRows.get(candidate.id)!))!.state,
+    ] as const)));
+    await seedStore.write(1, [...evidenced, retired, quarantined]);
+    await seedInbox.close();
+    await seedStore.close();
+
+    daemon = new ProductionSupervisorDaemon({
+      lockPath: join(env.root, "legacy-turn-controls.lock"),
+      socketPath: join(env.root, "legacy-turn-controls.sock"),
+      manifestPath,
+      auditPath: join(env.root, "legacy-turn-controls.audit.jsonl"),
+    }, "darwin", undefined, false);
+    await daemon.start();
+    const readStore = new ManifestStore(manifestPath);
+    const byId = new Map((await readStore.load()).entries.map((candidate) => [candidate.id, candidate]));
+    await readStore.close();
+    const verifyInbox = new SupervisedAgentInboxStore(manifestPath);
+    for (const candidate of evidenced) {
+      const recovered = byId.get(candidate.id)!;
+      assert.equal(recovered.turn_control?.status, "completed", `${candidate.id} journal is tombstoned`);
+      assert.equal(recovered.turn_control?.correction_text, `recover exact ${candidate.id}`);
+      assert.equal(recovered.turn_control?.correction_strategy, "stop_then_resend");
+      assert.equal(recovered.turn_control?.resumed, true);
+      assert.deepEqual(recovered.turn_control?.stages, ["delivered", "applied", "resumed"]);
+      assert.equal((await verifyInbox.get(correctionRows.get(candidate.id)!))?.state, expectedStates.get(candidate.id), `${candidate.id} correction row is preserved exactly`);
+    }
+    await verifyInbox.close();
+
+    assert.equal(byId.get(retired.id)?.turn_control?.status, "uncertain");
+    assert.equal(byId.get(retired.id)?.turn_control?.resumed, null);
+    assert.deepEqual(byId.get(retired.id)?.turn_control?.stages, []);
+    assert.ok(!byId.get(retired.id)?.reconciliation?.completed_action_ids.includes(retired.turn_control!.action_id));
+    assert.match(byId.get(retired.id)?.turn_control?.error ?? "", /legacy correction payload is unavailable.*reissue/i);
+
+    assert.equal(byId.get(quarantined.id)?.turn_control?.status, "uncertain");
+    assert.equal(byId.get(quarantined.id)?.turn_control?.resumed, null);
+    assert.match(byId.get(quarantined.id)?.turn_control?.error ?? "", /legacy correction payload is unavailable.*reissue/i);
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await seedInbox.close().catch(() => undefined);
+    await seedStore.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("legacy delivery cutover converges across pre-dispatch failure, dispatch crash, uncertainty, and stale generations", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "delivery-cutover.lock"),
+    socketPath: join(env.root, "delivery-cutover.sock"),
+    manifestPath: join(env.root, "delivery-cutover.sqlite"),
+    auditPath: join(env.root, "delivery-cutover.audit.jsonl"),
+  };
+  const connection = {
+    kind: "codex_app_server" as const,
+    url: "http://127.0.0.1:47891",
+    pid: 47891,
+    processIdentity: "codex-cutover-birth",
+  };
+  const handles = new Map<string, {
+    workAttemptId: string;
+    pid: number;
+    providerContinuationId: string;
+    providerConnection: typeof connection;
+    observedState: "working";
+  }>();
+  const controlTargets = new Map<string, Array<string | null>>();
+  const inspectTargets = new Map<string, string[]>();
+  const retryCalls = new Map<string, number>();
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      deliveryModes: ["mcp_polling", "daemon_inbox"], resume: true, midTurnInjection: false,
+      transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true,
+    }),
+    spawn: async () => { throw new Error("cutover test must not spawn"); },
+    attach: async () => null,
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("cutover test must not resume"); },
+    poke: async () => {},
+    stop: async () => { throw new Error("cutover test never stops the provider process"); },
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+    inspectTurn: async (handle, turnId) => {
+      const id = handle.workAttemptId;
+      inspectTargets.set(id, [...(inspectTargets.get(id) ?? []), turnId]);
+      if (id === "attempt-dispatch-crash") {
+        return (inspectTargets.get(id)?.length ?? 0) === 1 ? "active" : "terminal";
+      }
+      if (id === "attempt-uncertain") return "terminal";
+      return "unknown";
+    },
+    controlExactTurn: async (handle, options) => {
+      const id = handle.workAttemptId;
+      controlTargets.set(id, [...(controlTargets.get(id) ?? []), options.targetTurnId ?? null]);
+      if (id === "attempt-retryable") {
+        const call = (retryCalls.get(id) ?? 0) + 1;
+        retryCalls.set(id, call);
+        await options.checkpointTargetTurn("turn-retryable-A");
+        if (call === 1) throw new Error("transient failure before native dispatch");
+        await options.markDispatched();
+        return { outcome: "terminal", targetTurnId: "turn-retryable-A" };
+      }
+      if (id === "attempt-dispatch-crash") {
+        assert.equal(options.targetTurnId, "turn-dispatch-A");
+        await options.checkpointTargetTurn("turn-dispatch-A");
+        await options.markDispatched();
+        return { outcome: "interrupt_dispatched", targetTurnId: "turn-dispatch-A" };
+      }
+      throw new Error(`unexpected cutover control for ${id}`);
+    },
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, true);
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      store: ManifestStore;
+      durability: WorkDurabilityStore & { getAttempt: (workAttemptId: string) => Promise<unknown> };
+      liveHandles: Map<string, (typeof handles extends Map<string, infer T> ? T : never)>;
+      requestConvergence: (entryId: string) => void;
+      scheduleDeliveryCutoverRetry: (entryId: string, delayMs: number) => void;
+      startDeliveryCutover: (entryId: string) => Promise<void>;
+    };
+    internals.requestConvergence = () => {};
+    // Timers are an availability mechanism, not part of these state-machine
+    // assertions. Drive retries explicitly so every crash edge is deterministic.
+    internals.scheduleDeliveryCutoverRetry = () => {};
+    const liveEntry = (
+      id: string,
+      workAttemptId: string,
+      executionGenerationId: string,
+      providerContinuationId: string,
+      deliveryCutover?: DaemonManifestEntry["delivery_cutover"],
+    ): DaemonManifestEntry => ({
+      ...entry,
+      id,
+      provider: "codex",
+      delivery_mode: "mcp_polling",
+      observed_state: "working",
+      work_attempt_id: workAttemptId,
+      provider_ref: {
+        work_attempt_id: workAttemptId,
+        execution_generation_id: executionGenerationId,
+        provider_continuation_id: providerContinuationId,
+        provider_connection: connection,
+      },
+      delivery_cutover: deliveryCutover,
+    });
+    const installLive = async (candidate: DaemonManifestEntry) => {
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: candidate })).ok, true);
+      const ref = candidate.provider_ref!;
+      const handle = {
+        workAttemptId: candidate.work_attempt_id!, pid: connection.pid,
+        providerContinuationId: ref.provider_continuation_id,
+        providerConnection: connection, observedState: "working" as const,
+      };
+      handles.set(candidate.id, handle);
+      internals.liveHandles.set(candidate.id, handle);
+    };
+
+    const retryable = liveEntry("cutover-retryable", "attempt-retryable", "run-retryable", "thread-retryable");
+    await installLive(retryable);
+    await internals.startDeliveryCutover(retryable.id);
+    let saved = await internals.store.getEntry(retryable.id);
+    assert.equal(saved?.delivery_mode ?? "mcp_polling", "mcp_polling");
+    assert.equal(saved?.delivery_cutover?.phase, "retryable");
+    assert.equal(saved?.delivery_cutover?.provider_turn_id, "turn-retryable-A");
+    await internals.startDeliveryCutover(retryable.id);
+    saved = await internals.store.getEntry(retryable.id);
+    assert.equal(saved?.delivery_mode, "daemon_inbox", "a pre-dispatch failure retries and completes without operator repair");
+    assert.equal(saved?.delivery_cutover ?? null, null);
+    assert.deepEqual(controlTargets.get("attempt-retryable"), [null, "turn-retryable-A"], "retry never rediscovers or retargets A");
+
+    const dispatchCrash = liveEntry("cutover-dispatch-crash", "attempt-dispatch-crash", "run-dispatch", "thread-dispatch", {
+      work_attempt_id: "attempt-dispatch-crash", execution_generation_id: "run-dispatch",
+      provider_continuation_id: "thread-dispatch", provider_turn_id: "turn-dispatch-A",
+      phase: "dispatching", error: null, updated_at: "2026-08-05T12:00:00.000Z",
+    });
+    await installLive(dispatchCrash);
+    await internals.startDeliveryCutover(dispatchCrash.id);
+    saved = await internals.store.getEntry(dispatchCrash.id);
+    assert.equal(saved?.delivery_mode, "daemon_inbox", "dispatching recovery re-inspects and safely redrives exact active A");
+    assert.deepEqual(inspectTargets.get("attempt-dispatch-crash"), ["turn-dispatch-A", "turn-dispatch-A"]);
+    assert.deepEqual(controlTargets.get("attempt-dispatch-crash"), ["turn-dispatch-A"]);
+
+    const uncertain = liveEntry("cutover-uncertain", "attempt-uncertain", "run-uncertain", "thread-uncertain", {
+      work_attempt_id: "attempt-uncertain", execution_generation_id: "run-uncertain",
+      provider_continuation_id: "thread-uncertain", provider_turn_id: "turn-uncertain-A",
+      phase: "uncertain", error: "response lost", updated_at: "2026-08-05T12:01:00.000Z",
+    });
+    await installLive(uncertain);
+    await internals.startDeliveryCutover(uncertain.id);
+    saved = await internals.store.getEntry(uncertain.id);
+    assert.equal(saved?.delivery_mode, "daemon_inbox", "terminal inspection converges an ambiguous dispatch without replay");
+    assert.deepEqual(inspectTargets.get("attempt-uncertain"), ["turn-uncertain-A"]);
+    assert.equal(controlTargets.has("attempt-uncertain"), false);
+
+    const terminalAttempts = new Set(["attempt-stale", "attempt-detached"]);
+    internals.durability.getAttempt = async (workAttemptId: string) => terminalAttempts.has(workAttemptId) ? ({
+      execution_generations: [{
+        execution_generation_id: workAttemptId === "attempt-stale" ? "run-old" : "run-detached",
+        terminal: { terminal_cause: "process_exit" },
+      }],
+    }) : null;
+    const stale = liveEntry("cutover-stale", "attempt-successor", "run-successor", "thread-successor", {
+      work_attempt_id: "attempt-stale", execution_generation_id: "run-old",
+      provider_continuation_id: "thread-old", provider_turn_id: "turn-old-A",
+      phase: "uncertain", error: "old response lost", updated_at: "2026-08-05T12:02:00.000Z",
+    });
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: stale })).ok, true);
+    await internals.startDeliveryCutover(stale.id);
+    saved = await internals.store.getEntry(stale.id);
+    assert.equal(saved?.delivery_mode ?? "mcp_polling", "mcp_polling", "a terminal stale generation cannot flip a successor runtime's ingress owner");
+    assert.equal(saved?.delivery_cutover ?? null, null);
+    assert.equal(saved?.provider_ref?.execution_generation_id, "run-successor");
+
+    const detached: DaemonManifestEntry = {
+      ...entry, id: "cutover-detached", provider: "codex", delivery_mode: "mcp_polling",
+      observed_state: "failed", work_attempt_id: "attempt-detached", provider_ref: undefined,
+      delivery_cutover: {
+        work_attempt_id: "attempt-detached", execution_generation_id: "run-detached",
+        provider_continuation_id: "thread-detached", provider_turn_id: "turn-detached-A",
+        phase: "uncertain", error: "daemon crashed", updated_at: "2026-08-05T12:03:00.000Z",
+      },
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: detached })).ok, true);
+    await internals.startDeliveryCutover(detached.id);
+    saved = await internals.store.getEntry(detached.id);
+    assert.equal(saved?.delivery_mode, "daemon_inbox", "terminal durability closes a detached cutover instead of leaving a permanent tombstone");
+    assert.equal(saved?.delivery_cutover ?? null, null);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
@@ -3766,6 +4132,36 @@ test("cross-version negotiation is allowed before a generation handoff", async (
     assert.equal((response.result as { generation: number }).generation, 9);
     await socket.stop();
   } finally { await env.cleanup(); }
+});
+
+test("normal daemon shutdown drains an admitted bounded-effect journal mutation before closing shared stores", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"),
+    socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "manifest.json"),
+    auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  let stopped = false;
+  try {
+    await daemon.start();
+    let releaseJournal!: () => void;
+    const journalGate = new Promise<void>((resolve) => { releaseJournal = resolve; });
+    const admittedJournal = (daemon as unknown as {
+      reserveBoundedEffectJournal: <T>(operation: () => Promise<T>) => Promise<T>;
+    }).reserveBoundedEffectJournal(() => journalGate);
+    const stopping = daemon.stop().then(() => { stopped = true; });
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    assert.equal(stopped, false, "shutdown cannot close SQLite while an admitted effect mutation is unresolved");
+    releaseJournal();
+    await admittedJournal;
+    await within(stopping, "normal shutdown effect-journal drain", 1_000);
+    assert.equal(stopped, true);
+  } finally {
+    if (!stopped) await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
 });
 
 test("version handoff releases authority without waiting for wedged callbacks and preserves provider work", async () => {
@@ -4200,6 +4596,207 @@ test("explicit runtime recovery retires a proven-dead provider generation withou
     assert.equal(durable.execution_generations.length, 1, "recovery does not start a provider generation inline");
     assert.equal(durable.execution_generations[0]?.execution_generation_id, execution.execution_generation_id);
     assert.ok(durable.execution_generations[0]?.terminal, "exact terminal evidence is persisted before replacement");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("runtime recovery atomically fails a pre-join room move without losing its activating authority evidence", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "move-recovery.lock"), socketPath: join(env.root, "move-recovery.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "move-recovery-audit.jsonl"),
+    attemptsPath: join(env.root, "move-recovery-attempts.json"), attemptsRoot: join(env.root, "move-recovery-attempt-data"), workspaceRoot: env.root,
+  };
+  const id = "recover_runtime_with_waiting_move";
+  const workspace = await provisionedWorkspace(env.root, id);
+  const durability = new WorkDurabilityStore(
+    paths.attemptsPath,
+    paths.attemptsRoot,
+    undefined,
+    join(env.root, "worktrees"),
+    undefined,
+    fakeGit(env.root),
+    undefined,
+    TEST_SUPERVISOR,
+  );
+  const attempt = await durability.createAttempt({
+    taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id,
+  });
+  const execution = await durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+  await durability.close();
+  const continuation = "recovery-move-continuation";
+  let attachCalls = 0;
+  const port: ProviderActionPort = {
+    capabilities: async () => ({
+      deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+      transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true,
+    }),
+    spawn: async () => { throw new Error("recovery test does not launch inline"); },
+    attach: async () => {
+      attachCalls += 1;
+      return {
+        state: "terminal",
+        terminal: {
+          endedAt: "2099-08-05T10:00:00.000Z", exitCode: 1, signal: null,
+          terminalCause: "crashed", providerContinuationId: continuation,
+        },
+      };
+    },
+    attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("dead runtime must not resume"); },
+    poke: async () => {},
+    stop: async () => ({
+      endedAt: "2099-08-05T10:00:00.000Z", exitCode: 1, signal: null,
+      terminalCause: "crashed", providerContinuationId: continuation,
+    }),
+    onExit: async () => () => {},
+    onStream: async () => () => {},
+  };
+  let joinCalls = 0;
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+    joinRoom: async (input) => { joinCalls += 1; return { roomId: input.roomId }; },
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      requestConvergence: (entryId: string) => void;
+      store: ManifestStore;
+      supervisedInbox: SupervisedAgentInboxStore;
+      reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+    };
+    internals.requestConvergence = () => {};
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id,
+      provider: "open-model",
+      delivery_mode: "daemon_inbox",
+      desired_state: "running",
+      observed_state: "recovering",
+      condition: "none",
+      last_error: null,
+      workspace_path: attempt.workspace_path,
+      work_attempt_id: attempt.work_attempt_id,
+      run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      provider_ref: {
+        work_attempt_id: attempt.work_attempt_id,
+        provider_continuation_id: continuation,
+        provider_connection: {
+          kind: "opencode_server",
+          url: "http://127.0.0.1:52487",
+          pid: 45_551,
+          processIdentity: "opencode-birth-45551",
+          serverAuthPath: join(env.root, "opencode", "server-auth.json"),
+        },
+        execution_generation_id: execution.execution_generation_id,
+      },
+    } });
+    assert.equal(put.ok, true, put.error);
+    const [activating] = await internals.supervisedInbox.ingestPoll({
+      agent_id: id,
+      room_id: entry.room_id,
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "move before recovery" }, activation: { decision: "activate" } }],
+    });
+    assert(activating);
+    assert.equal((await internals.supervisedInbox.claimHead(id))?.inbox_item_id, activating.inbox_item_id);
+    const providerTurnId = "recover-move-turn";
+    await internals.supervisedInbox.checkpointTurnStarted(activating.inbox_item_id, providerTurnId, {
+      work_attempt_id: attempt.work_attempt_id,
+      origin_execution_generation_id: execution.execution_generation_id,
+      provider_continuation_id: continuation,
+    });
+    const ambiguous = await internals.supervisedInbox.prepareRoomMoveEffect({
+      agent_id: id,
+      room_id: entry.room_id,
+      effect_execution_generation_id: execution.execution_generation_id,
+      provider_turn_id: providerTurnId,
+      mcp_request_id: "recover-move-request",
+      request: { name: "room-after-recovery" },
+      destination_room_id: "room-after-recovery",
+      daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+      work_attempt_id: attempt.work_attempt_id,
+      execution_generation_id: execution.execution_generation_id,
+      provider_continuation_id: continuation,
+      agent_session_id: "recover-move-session",
+      activating_inbox_item_id: activating.inbox_item_id,
+    });
+    const pending = (await internals.store.pendingRoomMoves(id))[0]!;
+    assert.equal((await internals.reconcileRoomMove(pending)).phase, "waiting_for_current_turn");
+    await internals.store.advanceRoomMove({
+      operationId: pending.operation_id,
+      agentId: id,
+      expectedDaemonGeneration: pending.daemon_generation,
+      expectedExecutionGenerationId: execution.execution_generation_id,
+      from: ["waiting_for_current_turn"],
+      to: "joining_destination",
+    });
+    const blocked = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", {
+      entry_id: id,
+      daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+    });
+    assert.equal(blocked.ok, false);
+    assert.match(String(blocked.error), /blocked while a room move may have changed destination membership/i);
+    assert.equal(attachCalls, 0, "post-join recovery rejects before attaching or recording terminal evidence");
+    assert.ok((((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntryView[])[0])?.provider_ref);
+    assert.equal((await internals.store.getRoomMove(`room_move:${ambiguous.effect.effect_id}`))?.phase, "joining_destination");
+    assert.ok(await internals.supervisedInbox.preparedRoomMove(id, execution.execution_generation_id, providerTurnId));
+
+    // Retire the synthetic ambiguity without claiming an external join, then
+    // seed the genuine pre-join case this test originally covered.
+    await internals.store.advanceRoomMove({
+      operationId: pending.operation_id,
+      agentId: id,
+      expectedDaemonGeneration: pending.daemon_generation,
+      expectedExecutionGenerationId: execution.execution_generation_id,
+      from: ["joining_destination"],
+      to: "failed",
+      error: "Test fixture proved no external join was issued.",
+    });
+    const prepared = await internals.supervisedInbox.prepareRoomMoveEffect({
+      agent_id: id,
+      room_id: entry.room_id,
+      effect_execution_generation_id: execution.execution_generation_id,
+      provider_turn_id: providerTurnId,
+      mcp_request_id: "recover-move-request-prejoin",
+      request: { name: "room-after-recovery" },
+      destination_room_id: "room-after-recovery",
+      daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+      work_attempt_id: attempt.work_attempt_id,
+      execution_generation_id: execution.execution_generation_id,
+      provider_continuation_id: continuation,
+      agent_session_id: "recover-move-session",
+      activating_inbox_item_id: activating.inbox_item_id,
+    });
+    const prejoin = (await internals.store.pendingRoomMoves(id))[0]!;
+    assert.equal((await internals.reconcileRoomMove(prejoin)).phase, "waiting_for_current_turn");
+
+    const result = await daemonRequest(paths.socketPath, "supervisor.recover_agent_runtime", {
+      entry_id: id,
+      daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+    });
+    assert.equal(result.ok, true, result.error);
+    const recovered = (result.result as { entry: DaemonManifestEntryView }).entry;
+    assert.equal(recovered.id, id);
+    assert.equal(recovered.work_attempt_id, attempt.work_attempt_id);
+    assert.equal(recovered.provider_ref, null);
+    assert.equal(recovered.observed_state, "starting");
+    assert.equal(attachCalls, 1);
+    assert.equal(joinCalls, 0);
+    assert.equal((await internals.store.getRoomMove(`room_move:${prepared.effect.effect_id}`))?.phase, "failed");
+    assert.deepEqual(await internals.store.pendingRoomMoves(id), []);
+    assert.equal((await internals.supervisedInbox.preparedRoomMove(id, execution.execution_generation_id, providerTurnId)), null);
+    assert.equal((await internals.supervisedInbox.get(activating.inbox_item_id))?.state, "dispatching");
+    assert.equal((await internals.supervisedInbox.providerTurnBinding(activating.inbox_item_id))?.provider_turn_id, providerTurnId);
+    const durable = (await daemonRequest(paths.socketPath, "attempt.read", { id })).result as {
+      execution_generations: Array<{ execution_generation_id: string; terminal: unknown }>;
+    };
+    assert.ok(durable.execution_generations.find((candidate) =>
+      candidate.execution_generation_id === execution.execution_generation_id)?.terminal);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
@@ -6011,8 +6608,14 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     workerBindingsPath: join(env.root, "worker-bindings.json"),
   };
   const workspace = await provisionedWorkspace(env.root, id);
+  const providerNeutralId = "provider_neutral_effect";
+  const providerNeutralWorkspace = await provisionedWorkspace(env.root, providerNeutralId);
   const durability = new WorkDurabilityStore(paths.attemptsPath, paths.attemptsRoot, undefined, join(env.root, "worktrees"));
   const attempt = await durability.createAttempt({ taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id });
+  const providerNeutralAttempt = await durability.createAttempt({
+    taskId: providerNeutralId, leaseId: providerNeutralId, leaseEpoch: 0,
+    workspacePath: providerNeutralWorkspace.path, workAttemptId: providerNeutralWorkspace.id,
+  });
   await durability.close();
   const handle = {
     workAttemptId: attempt.work_attempt_id, pid: null, providerContinuationId: "cursor-cap-session",
@@ -6037,7 +6640,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       1,
     );
     const inserted = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
-      ...entry, id, provider: "cursor", desired_state: "paused", observed_state: "paused",
+      ...entry, id, provider: "cursor", desired_state: "running", observed_state: "working",
       delivery_mode: "daemon_inbox", permission_profile_id: "read_only",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
       run_id: execution.execution_generation_id,
@@ -6052,7 +6655,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       liveHandles: Map<string, typeof handle>;
       workerBindings: WorkerBindingStore;
       supervisedInbox: SupervisedAgentInboxStore;
-      supervisedDelivery: { activeTurn: () => { inboxItemId: string; sourceMessageId: string; phase: "dispatching" } | null };
+      supervisedDelivery: { activeTurn: (agent: { agentId: string }) => { inboxItemId: string; sourceMessageId: string; phase: "dispatching" } | null };
     };
     internals.liveHandles.set(id, handle);
     await internals.workerBindings.bind({
@@ -6066,7 +6669,12 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     });
     assert(item);
     await internals.supervisedInbox.transition(item.inbox_item_id, "dispatching");
-    await internals.supervisedInbox.checkpointTurnStarted(item.inbox_item_id, "cursor-turn-current");
+    const providerTurnOriginGeneration = "cursor-cap-origin-generation";
+    await internals.supervisedInbox.checkpointTurnStarted(item.inbox_item_id, "cursor-turn-current", {
+      work_attempt_id: attempt.work_attempt_id,
+      origin_execution_generation_id: providerTurnOriginGeneration,
+      provider_continuation_id: handle.providerContinuationId,
+    });
     internals.supervisedDelivery.activeTurn = () => ({
       inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id, phase: "dispatching",
     });
@@ -6093,13 +6701,295 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       tool_name: "send_message", input: { text: "allowed" }, mutation: true,
     });
     assert.equal(currentEffect.ok, true, currentEffect.error);
+    const effectId = String((currentEffect.result as { effect_id: string }).effect_id);
+    const completedEffect = await daemonRequest(paths.socketPath, "supervisor.complete_bounded_effect", {
+      ...coordinates, provider_turn_id: "cursor-turn-current", effect_id: effectId,
+      result: { delivered: true },
+    });
+    assert.equal(completedEffect.ok, true, completedEffect.error);
+    const exactRetry = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-current",
+      tool_name: "send_message", input: { text: "allowed" }, mutation: true,
+    });
+    assert.equal(exactRetry.ok, true, exactRetry.error);
+    assert.deepEqual(exactRetry.result, { state: "completed", result: { delivered: true } },
+      "a successor execution reaches the same origin-scoped effect journal");
+
+    const interruptedMutationParams = {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-uncertain",
+      tool_name: "send_message", input: { text: "send at most once" }, mutation: true,
+    };
+    const interruptedMutation = await daemonRequest(
+      paths.socketPath, "supervisor.prepare_bounded_effect", interruptedMutationParams,
+    );
+    assert.equal(interruptedMutation.ok, true, interruptedMutation.error);
+    assert.equal((interruptedMutation.result as { action: string }).action, "execute");
+    const uncertainRetry = await daemonRequest(
+      paths.socketPath, "supervisor.prepare_bounded_effect", interruptedMutationParams,
+    );
+    assert.equal(uncertainRetry.ok, true, uncertainRetry.error);
+    assert.equal((uncertainRetry.result as { state: string }).state, "uncertain");
+    assert.match(String((uncertainRetry.result as { error: string }).error), /may have completed.*verify external state/i);
+
+    const interruptedReadParams = {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-read-redrive",
+      tool_name: "get_board", input: {}, mutation: false,
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", interruptedReadParams)).ok, true);
+    const readRetry = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", interruptedReadParams);
+    assert.equal(readRetry.ok, true, readRetry.error);
+    assert.deepEqual(readRetry.result, {
+      state: "prepared",
+      effect_id: (readRetry.result as { effect_id: string }).effect_id,
+      action: "execute",
+      mutation: false,
+    }, "the exact read-only request safely reacquires execution authority");
+
+    const inspector = await daemonRequest(paths.socketPath, "supervisor.get_agent_inspector_detail", {
+      entry_id: id, room_id: entry.room_id, source_message_id: null,
+    });
+    assert.equal(inspector.ok, true, inspector.error);
+    assert.equal((inspector.result as { uncertain_effects: Array<{ effect_id: string }> }).uncertain_effects.length, 1);
+    const effectInspection = new DatabaseSync(paths.manifestPath);
+    try {
+      const rows = effectInspection.prepare(`SELECT execution_generation_id FROM supervised_agent_effects
+        WHERE agent_id=? AND provider_turn_id=? AND mcp_request_id=?`).all(id, "cursor-turn-current", "effect-current") as Array<{ execution_generation_id: string }>;
+      assert.equal(rows.length, 1);
+      assert.equal(rows[0]?.execution_generation_id, providerTurnOriginGeneration);
+    } finally { effectInspection.close(); }
     const currentBorrow = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
       ...coordinates, provider_turn_id: "cursor-turn-current",
     });
     assert.deepEqual(currentBorrow.result, { status: "available", credential: "cursor-cap-bearer" });
+
+    const providerNeutralExecution = await (daemon as unknown as { durability: WorkDurabilityStore }).durability.startGeneration(
+      providerNeutralAttempt.work_attempt_id,
+      "daemon-provider",
+      1,
+    );
+    const providerNeutralHandle = {
+      ...handle,
+      workAttemptId: providerNeutralAttempt.work_attempt_id,
+      providerContinuationId: "provider-neutral-continuation",
+    };
+    const codexProjection = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry, id: providerNeutralId, room_id: "provider-neutral-room", provider: "codex",
+      desired_state: "running", observed_state: "working",
+      delivery_mode: "daemon_inbox", permission_profile_id: "read_only",
+      workspace_path: providerNeutralAttempt.workspace_path, work_attempt_id: providerNeutralAttempt.work_attempt_id,
+      run_id: providerNeutralExecution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(providerNeutralId, providerNeutralExecution.execution_generation_id),
+      provider_ref: {
+        work_attempt_id: providerNeutralAttempt.work_attempt_id,
+        provider_continuation_id: providerNeutralHandle.providerContinuationId,
+        provider_connection: providerNeutralHandle.providerConnection,
+        execution_generation_id: providerNeutralExecution.execution_generation_id,
+      },
+    } });
+    assert.equal(codexProjection.ok, true, codexProjection.error);
+    internals.liveHandles.set(providerNeutralId, providerNeutralHandle);
+    await internals.workerBindings.bind({
+      entry_id: providerNeutralId, room_id: "provider-neutral-room",
+      work_attempt_id: providerNeutralAttempt.work_attempt_id,
+      execution_generation_id: providerNeutralExecution.execution_generation_id,
+      agent_session_id: "provider-neutral-worker", agent_session_token: "provider-neutral-bearer",
+      api_url: "https://letagents.example",
+    });
+    const [providerNeutralItem] = await internals.supervisedInbox.ingestPoll({
+      agent_id: providerNeutralId, room_id: "provider-neutral-room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "provider neutral" }, activation: {} }],
+    });
+    assert(providerNeutralItem);
+    await internals.supervisedInbox.transition(providerNeutralItem.inbox_item_id, "dispatching");
+    await internals.supervisedInbox.checkpointTurnStarted(providerNeutralItem.inbox_item_id, "provider-neutral-turn", {
+      work_attempt_id: providerNeutralAttempt.work_attempt_id,
+      origin_execution_generation_id: providerNeutralExecution.execution_generation_id,
+      provider_continuation_id: providerNeutralHandle.providerContinuationId,
+    });
+    internals.supervisedDelivery.activeTurn = (agent) => agent.agentId === providerNeutralId
+      ? { inboxItemId: providerNeutralItem.inbox_item_id, sourceMessageId: providerNeutralItem.source_message_id, phase: "dispatching" }
+      : { inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id, phase: "dispatching" };
+    const providerNeutralCoordinates = {
+      entry_id: providerNeutralId, room_id: "provider-neutral-room",
+      work_attempt_id: providerNeutralAttempt.work_attempt_id,
+      execution_generation_id: providerNeutralExecution.execution_generation_id,
+      agent_session_id: "provider-neutral-worker", daemon_generation: generation,
+      api_url: "https://letagents.example",
+    };
+    const providerNeutral = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...providerNeutralCoordinates, provider_turn_id: "", mcp_request_id: "effect-provider-neutral",
+      tool_name: "claim_task", input: { task_id: "provider-neutral" }, mutation: true,
+    });
+    assert.equal(providerNeutral.ok, true, providerNeutral.error);
+    const providerNeutralEffectId = String((providerNeutral.result as { effect_id: string }).effect_id);
+    const providerNeutralCompletion = await daemonRequest(paths.socketPath, "supervisor.complete_bounded_effect", {
+      ...providerNeutralCoordinates, provider_turn_id: "", effect_id: providerNeutralEffectId,
+      result: { claimed: true },
+    });
+    assert.equal(providerNeutralCompletion.ok, true, providerNeutralCompletion.error);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
+  }
+});
+
+test("Pause and Stop fence room-move reconciliation while the activating turn remains restartable", async () => {
+  for (const desiredState of ["paused", "stopped"] as const) {
+    const env = await fixture();
+    const id = `room_move_lifecycle_${desiredState}`;
+    const paths = {
+      lockPath: join(env.root, `${desiredState}.lock`),
+      socketPath: join(env.root, `${desiredState}.sock`),
+      manifestPath: join(env.root, `${desiredState}.sqlite`),
+      auditPath: join(env.root, `${desiredState}-audit.jsonl`),
+      workerBindingsPath: join(env.root, `${desiredState}-bindings.json`),
+    };
+    const workAttemptId = `attempt_${desiredState}`;
+    const executionGenerationId = `run_${desiredState}`;
+    const providerContinuationId = `continuation_${desiredState}`;
+    const port: ProviderActionPort = {
+      capabilities: async () => ({
+        deliveryModes: ["daemon_inbox"], resume: true, midTurnInjection: false,
+        transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true,
+      }),
+      spawn: async () => { throw new Error("lifecycle test does not launch providers"); },
+      attach: async () => null,
+      attachAction: async () => ({ state: "absent" }),
+      resume: async () => { throw new Error("lifecycle test does not resume providers"); },
+      poke: async () => {},
+      stop: async () => ({
+        endedAt: new Date().toISOString(), exitCode: 0, signal: null,
+        terminalCause: "stopped", providerContinuationId,
+      }),
+      onExit: async () => () => {},
+      onStream: async () => () => {},
+      runRoomTurn: async () => ({ turnId: "unused", outcome: "no_reply", text: null }),
+    };
+    let joinCalls = 0;
+    const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+      poll: async () => ({ messages: [] }),
+      publish: async () => {},
+      joinRoom: async (input) => { joinCalls += 1; return { roomId: input.roomId }; },
+    });
+    try {
+      await daemon.start();
+      const internals = daemon as unknown as {
+        requestConvergence: (entryId: string) => void;
+        store: ManifestStore;
+        workerBindings: WorkerBindingStore;
+        supervisedInbox: SupervisedAgentInboxStore;
+        supervisedDelivery: {
+          stop: (agentId: string) => Promise<void>;
+          ensureStarted: (agent: unknown) => Promise<void>;
+        };
+        reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+        startSupervisedDelivery: (entryId: string, mode: "ensure") => Promise<void>;
+      };
+      internals.requestConvergence = () => {};
+      let resumedExactWaiter = 0;
+      internals.supervisedDelivery.ensureStarted = async () => { resumedExactWaiter += 1; };
+      const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry,
+        id,
+        room_id: `source_${desiredState}`,
+        provider: "codex",
+        delivery_mode: "daemon_inbox",
+        desired_state: "running",
+        observed_state: "working",
+        condition: "none",
+        last_error: null,
+        work_attempt_id: workAttemptId,
+        provider_ref: {
+          work_attempt_id: workAttemptId,
+          provider_continuation_id: providerContinuationId,
+          provider_connection: null,
+          execution_generation_id: executionGenerationId,
+        },
+      } });
+      assert.equal(put.ok, true, put.error);
+      await internals.workerBindings.bind({
+        entry_id: id,
+        room_id: `source_${desiredState}`,
+        work_attempt_id: workAttemptId,
+        execution_generation_id: executionGenerationId,
+        agent_session_id: `session_${desiredState}`,
+        agent_session_token: `secret_${desiredState}`,
+        api_url: "https://letagents.example",
+      });
+      const [activating] = await internals.supervisedInbox.ingestPoll({
+        agent_id: id,
+        room_id: `source_${desiredState}`,
+        last_observed_message_id: "1",
+        messages: [{ source_message_id: "1", source_message: { text: "move" }, activation: { decision: "activate" } }],
+      });
+      assert(activating);
+      assert.equal((await internals.supervisedInbox.claimHead(id))?.inbox_item_id, activating.inbox_item_id);
+      const providerTurnId = `turn_${desiredState}`;
+      await internals.supervisedInbox.checkpointTurnStarted(activating.inbox_item_id, providerTurnId, {
+        work_attempt_id: workAttemptId,
+        origin_execution_generation_id: executionGenerationId,
+        provider_continuation_id: providerContinuationId,
+      });
+      const prepared = await internals.supervisedInbox.prepareRoomMoveEffect({
+        agent_id: id,
+        room_id: `source_${desiredState}`,
+        effect_execution_generation_id: executionGenerationId,
+        provider_turn_id: providerTurnId,
+        mcp_request_id: `move_request_${desiredState}`,
+        request: { name: `destination_${desiredState}` },
+        destination_room_id: `destination_${desiredState}`,
+        daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+        work_attempt_id: workAttemptId,
+        execution_generation_id: executionGenerationId,
+        provider_continuation_id: providerContinuationId,
+        agent_session_id: `session_${desiredState}`,
+        activating_inbox_item_id: activating.inbox_item_id,
+      });
+      const pending = (await internals.store.pendingRoomMoves(id))[0]!;
+      const waiting = await internals.reconcileRoomMove(pending);
+      assert.equal(waiting.phase, "waiting_for_current_turn");
+
+      const [normalized] = await internals.supervisedInbox.normalizeStartupRecovery(id);
+      assert.equal(normalized?.inbox_item_id, activating.inbox_item_id);
+      assert.equal(normalized?.state, "pending", "first restart normalizes the exact started turn for recovery");
+      assert.equal(normalized?.provider_turn_id, providerTurnId, "normalization preserves the exact recovery identity");
+
+      await internals.startSupervisedDelivery(id, "ensure");
+      assert.equal(resumedExactWaiter, 1,
+        "a second restart resumes the normalized exact activating turn instead of wedging behind its own move");
+
+      let enterDrain!: () => void;
+      const drainEntered = new Promise<void>((resolve) => { enterDrain = resolve; });
+      let releaseDrain!: () => void;
+      const drainGate = new Promise<void>((resolve) => { releaseDrain = resolve; });
+      const originalStop = internals.supervisedDelivery.stop.bind(internals.supervisedDelivery);
+      internals.supervisedDelivery.stop = async (agentId) => {
+        enterDrain();
+        await drainGate;
+        await originalStop(agentId);
+      };
+      const lifecycle = daemonRequest(paths.socketPath, "manifest.set_desired_state", {
+        id,
+        desired_state: desiredState,
+      });
+      await drainEntered;
+      const duringDrain = await internals.reconcileRoomMove(waiting);
+      assert.equal(duringDrain.phase, "waiting_for_current_turn");
+      assert.equal(joinCalls, 0, "reconciliation cannot begin destination join during lifecycle drain");
+      releaseDrain();
+      const lifecycleResult = await lifecycle;
+      assert.equal(lifecycleResult.ok, true, lifecycleResult.error);
+      assert.equal((lifecycleResult.result as DaemonManifestEntry).desired_state, desiredState);
+      assert.equal((await internals.store.getRoomMove(waiting.operation_id))?.phase, "failed");
+      assert.deepEqual(await internals.store.pendingRoomMoves(id), []);
+      assert.equal((await internals.supervisedInbox.preparedRoomMove(id, executionGenerationId, providerTurnId)), null);
+      assert.equal((await internals.supervisedInbox.get(activating.inbox_item_id))?.state, "pending");
+      assert.equal((await internals.supervisedInbox.providerTurnBinding(activating.inbox_item_id))?.provider_turn_id, providerTurnId);
+      assert.equal(joinCalls, 0);
+    } finally {
+      await daemon.stop().catch(() => undefined);
+      await env.cleanup();
+    }
   }
 });
 
@@ -7388,6 +8278,289 @@ test("ambiguous destination join retries when the server commits before the resp
     assert.equal(move.phase, "rotating_credentials");
     assert.equal(move.source_credentials_revoked, false);
     assert.equal((await internals.store.getEntry(moving.id))?.room_id, "destination-room");
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("handoff drains an admitted room join and leaves its ambiguity for the successor without stale commits", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "move-handoff.lock"),
+    socketPath: join(env.root, "move-handoff.sock"),
+    manifestPath: join(env.root, "move-handoff.sqlite"),
+    auditPath: join(env.root, "move-handoff-audit.jsonl"),
+    workerBindingsPath: join(env.root, "move-handoff-bindings.json"),
+  };
+  let joinEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { joinEntered = resolve; });
+  let releaseJoin!: () => void;
+  const joinGate = new Promise<void>((resolve) => { releaseJoin = resolve; });
+  let deferJoin = true;
+  const joinedRooms: string[] = [];
+  const deliveryHttp: SupervisedDeliveryHttp = {
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+    latest: async () => ({ messages: [] }),
+    joinRoom: async ({ roomId }) => {
+      joinedRooms.push(roomId);
+      if (deferJoin) { joinEntered(); await joinGate; }
+      return { roomId };
+    },
+  };
+  type Internals = {
+    store: ManifestStore;
+    workerBindings: WorkerBindingStore;
+    reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+  };
+  let first: SupervisorDaemon | null = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+  let second: SupervisorDaemon | null = null;
+  try {
+    await first.start();
+    const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const moving: DaemonManifestEntry = {
+      ...entry,
+      id: "move_handoff",
+      room_id: "source-room",
+      delivery_mode: "daemon_inbox",
+      condition: "none",
+      work_attempt_id: "attempt-move-handoff",
+      provider_ref: {
+        ...entry.provider_ref!,
+        work_attempt_id: "attempt-move-handoff",
+        execution_generation_id: "generation-move-handoff",
+      },
+      last_worker_binding: null,
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: moving })).ok, true);
+    const internals = first as unknown as Internals;
+    await internals.workerBindings.bind({
+      entry_id: moving.id,
+      room_id: moving.room_id,
+      work_attempt_id: moving.work_attempt_id!,
+      execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "move-handoff-session",
+      agent_session_token: "move-handoff-secret",
+      api_url: "https://letagents.test",
+    });
+    const prepared = (await internals.store.prepareRoomMove({
+      operation_id: "move-handoff-operation",
+      request_id: "move-handoff-operation",
+      agent_id: moving.id,
+      source_room_id: moving.room_id,
+      destination_room_id: "destination-room",
+      daemon_generation: generation,
+      work_attempt_id: moving.work_attempt_id,
+      execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "move-handoff-session",
+      activating_inbox_item_id: null,
+      provider_turn_id: null,
+      effect_id: null,
+      phase: "prepared",
+    })).move;
+    const reconciliation = internals.reconcileRoomMove(prepared);
+    await entered;
+    const handoffCompletion = first.waitForHandoff();
+    let acknowledged = false;
+    const prepareHandoff = daemonRequest(paths.socketPath, "daemon.prepare_handoff").then((result) => {
+      acknowledged = true;
+      return result;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(acknowledged, false, "handoff acknowledgement waits for the admitted bounded room effect");
+    releaseJoin();
+    assert.equal((await prepareHandoff).ok, true);
+    await within(handoffCompletion, "room-move handoff drain", 1_000);
+    await reconciliation;
+    first = null;
+
+    const inspection = new ManifestStore(paths.manifestPath);
+    const durable = await inspection.getRoomMove(prepared.operation_id);
+    assert.equal(durable?.phase, "joining_destination", "the fenced old daemon cannot claim a post-await journal commit");
+    await inspection.close();
+
+    deferJoin = false;
+    second = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, deliveryHttp);
+    await second.start();
+    const successor = second as unknown as Internals;
+    await successor.workerBindings.bind({
+      entry_id: moving.id,
+      room_id: moving.room_id,
+      work_attempt_id: moving.work_attempt_id!,
+      execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "move-handoff-session",
+      agent_session_token: "move-handoff-successor-secret",
+      api_url: "https://letagents.test",
+    });
+    const adopted = await successor.reconcileRoomMove((await successor.store.getRoomMove(prepared.operation_id))!);
+    assert.equal(adopted.phase, "rotating_credentials", "the successor idempotently resumes the durable join ambiguity");
+    assert.deepEqual(joinedRooms, ["destination-room", "destination-room"]);
+  } finally {
+    await second?.stop().catch(() => undefined);
+    await first?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("shutdown wakes a room move queued behind unrelated entry work without waiting or touching closed stores", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "queued-move.lock"),
+    socketPath: join(env.root, "queued-move.sock"),
+    manifestPath: join(env.root, "queued-move.sqlite"),
+    auditPath: join(env.root, "queued-move-audit.jsonl"),
+  };
+  let joinCalls = 0;
+  let daemon: SupervisorDaemon | null = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+    joinRoom: async ({ roomId }) => { joinCalls += 1; return { roomId }; },
+  });
+  try {
+    await daemon.start();
+    const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const moving: DaemonManifestEntry = {
+      ...entry,
+      id: "queued_move_shutdown",
+      room_id: "source-room",
+      delivery_mode: "daemon_inbox",
+      condition: "none",
+      work_attempt_id: "attempt-queued-move",
+      provider_ref: {
+        ...entry.provider_ref!,
+        work_attempt_id: "attempt-queued-move",
+        execution_generation_id: "generation-queued-move",
+      },
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: moving })).ok, true);
+    const internals = daemon as unknown as {
+      store: ManifestStore;
+      serializeEntryTick: <T>(entryId: string, operation: () => Promise<T>) => Promise<T>;
+      reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+    };
+    const prepared = (await internals.store.prepareRoomMove({
+      operation_id: "queued-move-operation",
+      request_id: "queued-move-operation",
+      agent_id: moving.id,
+      source_room_id: moving.room_id,
+      destination_room_id: "destination-room",
+      daemon_generation: generation,
+      work_attempt_id: moving.work_attempt_id,
+      execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "queued-move-session",
+      activating_inbox_item_id: null,
+      provider_turn_id: null,
+      effect_id: null,
+      phase: "prepared",
+    })).move;
+    let laneEntered!: () => void;
+    const entered = new Promise<void>((resolve) => { laneEntered = resolve; });
+    let releaseLane!: () => void;
+    const laneGate = new Promise<void>((resolve) => { releaseLane = resolve; });
+    const heldLane = internals.serializeEntryTick(moving.id, async () => {
+      laneEntered();
+      await laneGate;
+    });
+    await entered;
+    const queuedReconciliation = internals.reconcileRoomMove(prepared);
+    const stopped = daemon.stop();
+    await within(stopped, "shutdown with queued room move", 1_000);
+    daemon = null;
+    assert.equal((await queuedReconciliation).phase, "prepared");
+    assert.equal(joinCalls, 0);
+    releaseLane();
+    await heldLane;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(joinCalls, 0, "the queued callback returns its captured snapshot after store closure");
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("a restarted joining-destination mismatch requires source compensation instead of claiming pre-join failure", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "ambiguous.lock"),
+    socketPath: join(env.root, "ambiguous.sock"),
+    manifestPath: join(env.root, "ambiguous.sqlite"),
+    auditPath: join(env.root, "ambiguous-audit.jsonl"),
+    workerBindingsPath: join(env.root, "ambiguous-bindings.json"),
+  };
+  const joinedRooms: string[] = [];
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, undefined, {}, {
+    poll: async () => ({ messages: [] }),
+    publish: async () => {},
+    joinRoom: async ({ roomId }) => { joinedRooms.push(roomId); return { roomId }; },
+  });
+  try {
+    await daemon.start();
+    const generation = Number(((await daemonRequest(paths.socketPath, "daemon.negotiate")).result as { generation: number }).generation);
+    const moving: DaemonManifestEntry = {
+      ...entry,
+      id: "ambiguous_join_mismatch",
+      room_id: "source-room",
+      delivery_mode: "daemon_inbox",
+      condition: "none",
+      work_attempt_id: "attempt-ambiguous-join",
+      provider_ref: {
+        ...entry.provider_ref!,
+        work_attempt_id: "attempt-ambiguous-join",
+        execution_generation_id: "generation-ambiguous-join",
+      },
+      last_worker_binding: null,
+    };
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: moving })).ok, true);
+    const internals = daemon as unknown as {
+      store: ManifestStore;
+      workerBindings: WorkerBindingStore;
+      updateManifestEntry: (entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry) => Promise<DaemonManifestEntry>;
+      reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
+    };
+    await internals.workerBindings.bind({
+      entry_id: moving.id,
+      room_id: moving.room_id,
+      work_attempt_id: moving.work_attempt_id!,
+      execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "source-session",
+      agent_session_token: "source-secret",
+      api_url: "https://letagents.test",
+    });
+    const prepared = (await internals.store.prepareRoomMove({
+      operation_id: "ambiguous-mismatch-move",
+      request_id: "ambiguous-mismatch-move",
+      agent_id: moving.id,
+      source_room_id: moving.room_id,
+      destination_room_id: "requested-destination",
+      daemon_generation: generation,
+      work_attempt_id: moving.work_attempt_id,
+      execution_generation_id: moving.provider_ref!.execution_generation_id,
+      agent_session_id: "source-session",
+      activating_inbox_item_id: null,
+      provider_turn_id: null,
+      effect_id: null,
+      phase: "prepared",
+    })).move;
+    const joining = await internals.store.advanceRoomMove({
+      operationId: prepared.operation_id,
+      agentId: moving.id,
+      expectedDaemonGeneration: generation,
+      expectedExecutionGenerationId: moving.provider_ref!.execution_generation_id,
+      from: ["prepared"],
+      to: "joining_destination",
+    });
+    await internals.updateManifestEntry(moving.id, (current) => ({ ...current, desired_state: "paused" }));
+
+    const ambiguous = await internals.reconcileRoomMove(joining);
+    assert.equal(ambiguous.phase, "rollback_required");
+    assert.equal(ambiguous.remote_room_id, null);
+    assert.deepEqual(joinedRooms, [], "runtime mismatch never claims that the ambiguous destination join was absent");
+
+    const compensated = await internals.reconcileRoomMove(ambiguous);
+    assert.equal(compensated.phase, "failed");
+    assert.deepEqual(joinedRooms, ["source-room"], "unknown canonical destination is compensated by exact source rejoin");
+    assert.equal((await internals.store.getEntry(moving.id))?.room_id, "source-room");
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();

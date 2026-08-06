@@ -69,6 +69,7 @@
           :busy="actionState?.status === 'running'"
           @stop-turn="emitTurnControl('stop_turn')"
           @correct-turn="emitTurnControl('steer_turn', $event)"
+          @retry-turn-control="emitTurnControl('retry_turn_control')"
           @resolve-turn-control="emitTurnControl('resolve_turn_control', undefined, $event)"
           @restore-conversation="emitRecoveryControl('restore_conversation', $event)"
           @skip-message="emitRecoveryControl('skip_message', $event)"
@@ -244,7 +245,7 @@ function selectTab(tab: InspectorTab): void {
 }
 
 function emitTurnControl(
-  kind: Extract<AgentInspectorActionIntent["kind"], "stop_turn" | "steer_turn" | "resolve_turn_control">,
+  kind: Extract<AgentInspectorActionIntent["kind"], "stop_turn" | "steer_turn" | "retry_turn_control" | "resolve_turn_control">,
   correction?: string,
   turnControlResolution?: "not_applied" | "applied",
 ): void {

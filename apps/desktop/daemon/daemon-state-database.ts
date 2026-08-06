@@ -1,6 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 14;
+export const DAEMON_STATE_SCHEMA_VERSION = 17;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
@@ -85,11 +85,23 @@ createSchema(database: DatabaseSync): void {
     this.migrateV13ToV14(database);
     return;
   }
+  if (existingVersion === 14) {
+    this.migrateV14ToV15(database);
+    return;
+  }
+  if (existingVersion === 15) {
+    this.migrateV15ToV16(database);
+    return;
+  }
+  if (existingVersion === 16) {
+    this.migrateV16ToV17(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV14Shape(database);
+    this.repairAndValidateV17Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -257,10 +269,18 @@ createSchema(database: DatabaseSync): void {
       agent_id TEXT PRIMARY KEY REFERENCES agent_identities(agent_id) ON DELETE CASCADE,
       turn_control_present INTEGER NOT NULL CHECK (turn_control_present IN (0, 1)),
       action_id TEXT,
+      action_sequence INTEGER,
       turn_work_attempt_id TEXT,
       turn_execution_generation_id TEXT,
+      target_room_id TEXT,
+      target_source_message_id TEXT,
+      target_provider_continuation_id TEXT,
+      inbox_item_id TEXT,
       provider_turn_id TEXT,
       has_correction INTEGER,
+      correction_text TEXT,
+      correction_strategy TEXT CHECK (correction_strategy IS NULL OR correction_strategy IN ('native','stop_then_resend')),
+      operator_resolution TEXT CHECK (operator_resolution IS NULL OR operator_resolution IN ('applied','not_applied')),
       status TEXT,
       capability TEXT,
       interrupted INTEGER,
@@ -312,6 +332,14 @@ createSchema(database: DatabaseSync): void {
       sort_order INTEGER NOT NULL,
       action_id TEXT NOT NULL,
       PRIMARY KEY(agent_id, sort_order)
+    ) STRICT;
+    -- Lifetime replay authority is intentionally separate from the bounded
+    -- manifest projection. Targeted entry replacement deletes/reinserts the
+    -- projection graph, but must never erase historical effect identity.
+    CREATE TABLE IF NOT EXISTS reconciliation_action_tombstones (
+      agent_id TEXT NOT NULL,
+      action_id TEXT NOT NULL,
+      PRIMARY KEY(agent_id, action_id)
     ) STRICT;
     CREATE TABLE IF NOT EXISTS reconciliation_exit_timestamps (
       agent_id TEXT NOT NULL REFERENCES reconciliation_records(agent_id) ON DELETE CASCADE,
@@ -680,6 +708,12 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.validateV13Shape(database);
     this.applyV14Shape(database);
     this.validateV14Shape(database);
+    this.applyV15Shape(database);
+    this.validateV15Shape(database);
+    this.applyV16Shape(database);
+    this.validateV16Shape(database);
+    this.applyV17Shape(database, true);
+    this.validateV17Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -697,6 +731,69 @@ migrateV13ToV14(database: DatabaseSync): void {
   try {
     this.applyV14Shape(database);
     this.validateV14Shape(database);
+    this.applyV15Shape(database);
+    this.validateV15Shape(database);
+    this.applyV16Shape(database);
+    this.validateV16Shape(database);
+    this.applyV17Shape(database, true);
+    this.validateV17Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V15 separates lifetime action replay memory from the bounded manifest view. */
+migrateV14ToV15(database: DatabaseSync): void {
+  this.repairAndValidateV14Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV15Shape(database);
+    this.validateV15Shape(database);
+    this.applyV16Shape(database);
+    this.validateV16Shape(database);
+    this.applyV17Shape(database, true);
+    this.validateV17Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V16 binds every native turn id to its immutable provider authority scope. */
+migrateV15ToV16(database: DatabaseSync): void {
+  this.repairAndValidateV15Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV16Shape(database);
+    this.validateV16Shape(database);
+    this.applyV17Shape(database, true);
+    this.validateV17Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V17 gives every ordinary MCP effect a durable class and honest ambiguity lifecycle. */
+migrateV16ToV17(database: DatabaseSync): void {
+  this.repairAndValidateV16Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV17Shape(database, true);
+    this.validateV17Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1015,6 +1112,12 @@ private applyCurrentSchemaTail(database: DatabaseSync): void {
   this.validateV13Shape(database);
   this.applyV14Shape(database);
   this.validateV14Shape(database);
+  this.applyV15Shape(database);
+  this.validateV15Shape(database);
+  this.applyV16Shape(database);
+  this.validateV16Shape(database);
+  this.applyV17Shape(database, true);
+  this.validateV17Shape(database);
 }
 
 private validateV12Shape(database: DatabaseSync): void {
@@ -1225,12 +1328,14 @@ private applyV13Shape(database: DatabaseSync): void {
 private validateV13Shape(database: DatabaseSync): void {
   this.validateV12Shape(database);
   const inboxColumns = this.tableColumns(database, "supervised_agent_inbox");
+  const hasV17TerminalReason = inboxColumns.has("terminal_reason");
   const repairColumns = this.tableColumns(database, "provider_continuation_repairs");
   const expectedInboxColumns = [
     "inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json",
     "activation_json", "fifo_sequence", "state", "attempt_count", "action_id",
     "reply_client_message_id", "provider_turn_id", "outcome", "last_error", "failure_code",
     "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at",
+    ...(hasV17TerminalReason ? ["terminal_reason"] : []),
   ];
   const expectedRepairColumns = [
     "repair_id", "agent_id", "room_id", "inbox_item_id", "daemon_generation",
@@ -1348,6 +1453,569 @@ repairAndValidateV14Shape(database: DatabaseSync): void {
   try {
     this.applyV14Shape(database);
     this.validateV14Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+private applyV15Shape(database: DatabaseSync): void {
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS reconciliation_action_tombstones (
+      agent_id TEXT NOT NULL,
+      action_id TEXT NOT NULL,
+      PRIMARY KEY(agent_id, action_id)
+    ) STRICT;
+    INSERT OR IGNORE INTO reconciliation_action_tombstones(agent_id, action_id)
+      SELECT agent_id, action_id FROM reconciliation_completed_actions;
+  `);
+}
+
+private validateV15Shape(database: DatabaseSync): void {
+  this.validateV14Shape(database);
+  const expected = ["agent_id", "action_id"];
+  const actual = database.prepare("PRAGMA table_xinfo(reconciliation_action_tombstones)").all() as Row[];
+  if (actual.length !== expected.length || expected.some((column, index) => actual[index]?.name !== column)
+    || actual.some((column) => Number(column.hidden) !== 0 || String(column.type).toUpperCase() !== "TEXT" || Number(column.notnull) !== 1)
+    || Number(actual[0]?.pk) !== 1 || Number(actual[1]?.pk) !== 2) {
+    throw new Error("Daemon state v15 action-tombstone table has an invalid shape.");
+  }
+  const foreignKeys = database.prepare("PRAGMA foreign_key_list(reconciliation_action_tombstones)").all() as Row[];
+  if (foreignKeys.length !== 0) {
+    throw new Error("Daemon state v15 lifetime action tombstones must survive targeted identity replacement.");
+  }
+  if (!this.hasUniqueIndex(database, "reconciliation_action_tombstones", ["agent_id", "action_id"], false)) {
+    throw new Error("Daemon state v15 action-tombstone identity constraint is missing.");
+  }
+}
+
+repairAndValidateV15Shape(database: DatabaseSync): void {
+  this.repairAndValidateV14Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV15Shape(database);
+    this.validateV15Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+private applyV16Shape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "turn_control_journals").has("action_sequence")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN action_sequence INTEGER");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("target_room_id")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN target_room_id TEXT");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("target_source_message_id")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN target_source_message_id TEXT");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("target_provider_continuation_id")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN target_provider_continuation_id TEXT");
+  }
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS supervised_agent_provider_turn_bindings (
+      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      work_attempt_id TEXT NOT NULL,
+      origin_execution_generation_id TEXT NOT NULL,
+      provider_continuation_id TEXT NOT NULL,
+      provider_turn_id TEXT NOT NULL,
+      UNIQUE(agent_id, provider_continuation_id, provider_turn_id),
+      FOREIGN KEY(inbox_item_id, agent_id, room_id)
+        REFERENCES supervised_agent_inbox(inbox_item_id, agent_id, room_id) ON DELETE CASCADE
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS turn_control_sequence_watermarks (
+      agent_id TEXT PRIMARY KEY,
+      last_sequence INTEGER NOT NULL CHECK(last_sequence >= 0)
+    ) STRICT;
+    UPDATE turn_control_journals
+      SET action_sequence=1
+      WHERE turn_control_present=1 AND action_id IS NOT NULL AND action_sequence IS NULL;
+    INSERT INTO turn_control_sequence_watermarks(agent_id,last_sequence)
+      SELECT agent_id,MAX(action_sequence) FROM turn_control_journals
+      WHERE action_sequence IS NOT NULL GROUP BY agent_id
+      ON CONFLICT(agent_id) DO UPDATE SET last_sequence=MAX(last_sequence,excluded.last_sequence);
+    DELETE FROM reconciliation_action_tombstones;
+  `);
+  database.exec(`
+    UPDATE turn_control_journals AS j
+    SET target_room_id=(SELECT i.room_id FROM supervised_agent_inbox i WHERE i.inbox_item_id=j.inbox_item_id),
+        target_source_message_id=(SELECT i.source_message_id FROM supervised_agent_inbox i WHERE i.inbox_item_id=j.inbox_item_id),
+        target_provider_continuation_id=(SELECT b.provider_continuation_id FROM supervised_agent_provider_turn_bindings b WHERE b.inbox_item_id=j.inbox_item_id)
+    WHERE j.turn_control_present=1 AND j.inbox_item_id IS NOT NULL
+      AND (j.target_room_id IS NULL OR j.target_source_message_id IS NULL OR j.target_provider_continuation_id IS NULL)
+      AND EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b
+        WHERE b.inbox_item_id=j.inbox_item_id
+          AND b.work_attempt_id=j.turn_work_attempt_id
+          AND b.origin_execution_generation_id=j.turn_execution_generation_id);
+    UPDATE turn_control_journals
+    SET status='uncertain',
+        error='This turn-control action predates exact causal target fencing and cannot be replayed automatically.'
+    WHERE turn_control_present=1 AND status IN ('prepared','dispatching','retryable')
+      AND (target_room_id IS NULL OR target_source_message_id IS NULL
+        OR target_provider_continuation_id IS NULL OR inbox_item_id IS NULL OR provider_turn_id IS NULL);
+  `);
+  // Missing legacy provider-turn authority is classified by v17 after its
+  // explicit terminal-reason column exists. v16 must not misrepresent an
+  // upgrade retirement as a user cancellation, even transiently inside the
+  // all-the-way-to-current migration transaction.
+  database.exec(`
+    UPDATE supervised_agent_effects AS e
+    SET state='failed',
+        error='Upgrade fenced a legacy effect whose exact provider-turn authority cannot be reconstructed; it will not be replayed.',
+        updated_at=datetime('now')
+    WHERE e.state IN ('prepared','executing') AND e.tool_name<>'join_room'
+      AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b
+        WHERE b.agent_id=e.agent_id AND b.room_id=e.room_id
+          AND b.origin_execution_generation_id=e.execution_generation_id
+          AND b.provider_turn_id=e.provider_turn_id);
+    UPDATE agent_room_moves
+    SET phase='failed',
+        error='Upgrade fenced a supervised room move before any external membership mutation because its activating turn authority cannot be reconstructed.',
+        updated_at=datetime('now')
+    WHERE effect_id IS NOT NULL AND activating_inbox_item_id IS NOT NULL
+      AND phase IN ('prepared','waiting_for_current_turn')
+      AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b
+        WHERE b.inbox_item_id=agent_room_moves.activating_inbox_item_id
+          AND b.agent_id=agent_room_moves.agent_id
+          AND b.work_attempt_id=agent_room_moves.work_attempt_id
+          AND b.origin_execution_generation_id=agent_room_moves.execution_generation_id
+          AND b.provider_turn_id=agent_room_moves.provider_turn_id);
+    UPDATE supervised_agent_effects AS e
+    SET state='failed',
+        error='Upgrade fenced the legacy supervised room move before external membership mutation; it will not be replayed.',
+        updated_at=datetime('now')
+    WHERE e.state IN ('prepared','executing') AND e.tool_name='join_room'
+      AND EXISTS (SELECT 1 FROM agent_room_moves m
+        WHERE m.effect_id=e.effect_id AND m.phase='failed'
+          AND m.error LIKE 'Upgrade fenced a supervised room move%');
+    UPDATE supervised_agent_effects AS e
+    SET state='failed',
+        error='Upgrade fenced an orphaned legacy room-move effect with no durable recovery journal; it will not be replayed.',
+        updated_at=datetime('now')
+    WHERE e.state IN ('prepared','executing') AND e.tool_name='join_room'
+      AND NOT EXISTS (SELECT 1 FROM agent_room_moves m WHERE m.effect_id=e.effect_id);
+    UPDATE supervised_agent_effects AS e
+    SET state='completed',
+        result_json=(SELECT json_object(
+          'phase','active','moved',json('true'),'old_room',m.source_room_id,
+          'destination_room',COALESCE(m.remote_room_id,m.destination_room_id),
+          'destination_cursor',m.destination_cursor)
+          FROM agent_room_moves m WHERE m.effect_id=e.effect_id AND m.phase='active'),
+        error=NULL,updated_at=datetime('now')
+    WHERE e.state IN ('prepared','executing') AND e.tool_name='join_room'
+      AND EXISTS (SELECT 1 FROM agent_room_moves m WHERE m.effect_id=e.effect_id AND m.phase='active');
+    UPDATE supervised_agent_effects AS e
+    SET state='failed',
+        error=COALESCE((SELECT m.error FROM agent_room_moves m
+          WHERE m.effect_id=e.effect_id AND m.phase='failed'),
+          'The legacy room move failed before its effect journal was settled.'),
+        updated_at=datetime('now')
+    WHERE e.state IN ('prepared','executing') AND e.tool_name='join_room'
+      AND EXISTS (SELECT 1 FROM agent_room_moves m WHERE m.effect_id=e.effect_id AND m.phase='failed');
+  `);
+  // Earlier v16 builds could commit two internally valid but mutually split
+  // states. Repair only exact, non-effectful evidence before validating:
+  //
+  // 1. Cursor may have advanced runtime+binding from its wrapper's temporary
+  //    continuation to the real session while an already-prepared control
+  //    retained the temporary id. The exact inbox/turn/work/generation tuple
+  //    proves this is the same turn, so the journal can advance with it.
+  // 2. Retention could prune the terminal inbox row referenced by the single
+  //    completed control journal. The native action is already terminal; clear
+  //    its unverifiable causal tuple to an honest audit-only record rather than
+  //    preventing daemon startup forever. Active controls remain fail-closed.
+  database.exec(`
+    UPDATE turn_control_journals AS j
+    SET target_provider_continuation_id=(
+          SELECT b.provider_continuation_id
+          FROM supervised_agent_provider_turn_bindings b
+          WHERE b.inbox_item_id=j.inbox_item_id
+        ),
+        updated_at=datetime('now')
+    WHERE j.turn_control_present=1
+      AND j.target_provider_continuation_id LIKE 'cursor-pending:%'
+      AND EXISTS (
+        SELECT 1
+        FROM supervised_agent_inbox i
+        JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
+        JOIN agent_configurations c ON c.agent_id=j.agent_id
+        JOIN runtime_deployments d ON d.agent_id=j.agent_id
+        WHERE i.inbox_item_id=j.inbox_item_id
+          AND i.agent_id=j.agent_id AND i.room_id=j.target_room_id
+          AND i.source_message_id=j.target_source_message_id
+          AND i.provider_turn_id=j.provider_turn_id
+          AND b.agent_id=j.agent_id AND b.room_id=j.target_room_id
+          AND b.work_attempt_id=j.turn_work_attempt_id
+          AND b.origin_execution_generation_id=j.turn_execution_generation_id
+          AND b.provider_turn_id=j.provider_turn_id
+          AND b.provider_continuation_id NOT LIKE 'cursor-pending:%'
+          AND c.provider='cursor' AND d.provider_ref_present=1
+          AND d.provider_work_attempt_id=b.work_attempt_id
+          AND d.provider_execution_generation_id=b.origin_execution_generation_id
+          AND d.provider_continuation_id=b.provider_continuation_id
+      );
+    UPDATE turn_control_journals AS j
+    SET target_room_id=NULL,target_source_message_id=NULL,
+        target_provider_continuation_id=NULL,inbox_item_id=NULL,provider_turn_id=NULL,
+        error=CASE WHEN error IS NULL OR length(trim(error))=0
+          THEN 'Historical completed turn-control target is unavailable after predecessor retention; retained as audit-only.'
+          ELSE error || ' Historical exact target is unavailable after predecessor retention; retained as audit-only.' END,
+        updated_at=datetime('now')
+    WHERE j.turn_control_present=1 AND j.status='completed'
+      AND j.target_room_id IS NOT NULL
+      AND j.inbox_item_id IS NOT NULL
+      AND NOT EXISTS (
+        SELECT 1 FROM supervised_agent_inbox i
+        WHERE i.inbox_item_id=j.inbox_item_id
+      )
+      AND EXISTS (
+        SELECT 1 FROM supervised_agent_pruned_sources p
+        WHERE p.agent_id=j.agent_id
+          AND p.room_id=j.target_room_id
+          AND p.source_message_id=j.target_source_message_id
+      );
+  `);
+}
+
+private validateV16Shape(database: DatabaseSync): void {
+  this.validateV15Shape(database);
+  if (!this.tableColumns(database, "turn_control_journals").has("action_sequence")) {
+    throw new Error("Daemon state v16 turn-control journal is missing its durable action sequence.");
+  }
+  for (const column of ["target_room_id", "target_source_message_id", "target_provider_continuation_id"]) {
+    if (!this.tableColumns(database, "turn_control_journals").has(column)) {
+      throw new Error(`Daemon state v16 turn-control journal is missing ${column}.`);
+    }
+  }
+  const expected = [
+    "inbox_item_id", "agent_id", "room_id", "work_attempt_id",
+    "origin_execution_generation_id", "provider_continuation_id", "provider_turn_id",
+  ];
+  const actual = database.prepare("PRAGMA table_xinfo(supervised_agent_provider_turn_bindings)").all() as Row[];
+  if (actual.length !== expected.length || expected.some((column, index) => actual[index]?.name !== column)
+    || actual.some((column) => Number(column.hidden) !== 0 || String(column.type).toUpperCase() !== "TEXT" || Number(column.notnull) !== 1)
+    || Number(actual[0]?.pk) !== 1) {
+    throw new Error("Daemon state v16 provider-turn authority binding table has an invalid shape.");
+  }
+  const invalid = database.prepare(`SELECT 1
+    FROM supervised_agent_provider_turn_bindings b
+    LEFT JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
+    WHERE i.inbox_item_id IS NULL OR i.agent_id<>b.agent_id OR i.room_id<>b.room_id
+      OR i.provider_turn_id IS NULL OR i.provider_turn_id<>b.provider_turn_id
+    LIMIT 1`).get();
+  if (invalid) throw new Error("Daemon state v16 provider-turn authority binding is detached from its exact inbox turn.");
+  if (!this.hasUniqueIndex(database, "supervised_agent_provider_turn_bindings", ["agent_id", "provider_continuation_id", "provider_turn_id"], false)) {
+    throw new Error("Daemon state v16 provider-turn scoped identity constraint is missing.");
+  }
+  const watermarkColumns = database.prepare("PRAGMA table_xinfo(turn_control_sequence_watermarks)").all() as Row[];
+  if (watermarkColumns.length !== 2
+    || watermarkColumns[0]?.name !== "agent_id" || watermarkColumns[1]?.name !== "last_sequence"
+    || String(watermarkColumns[0]?.type).toUpperCase() !== "TEXT"
+    || String(watermarkColumns[1]?.type).toUpperCase() !== "INTEGER"
+    || Number(watermarkColumns[0]?.pk) !== 1
+    || watermarkColumns.some((column) => Number(column.notnull) !== 1 || Number(column.hidden) !== 0)) {
+    throw new Error("Daemon state v16 turn-control sequence watermark has an invalid shape.");
+  }
+  if (database.prepare("SELECT 1 FROM reconciliation_action_tombstones LIMIT 1").get()) {
+    throw new Error("Daemon state v16 retained legacy lifetime action tombstones.");
+  }
+  if (database.prepare(`SELECT 1 FROM turn_control_sequence_watermarks
+    WHERE last_sequence<0 OR last_sequence>9007199254740991 LIMIT 1`).get()) {
+    throw new Error("Daemon state v16 turn-control sequence watermark is outside the safe integer range.");
+  }
+  if (database.prepare(`SELECT 1 FROM turn_control_journals j
+    LEFT JOIN turn_control_sequence_watermarks w ON w.agent_id=j.agent_id
+    WHERE j.turn_control_present=1 AND j.action_id IS NOT NULL
+      AND (j.action_sequence IS NULL OR j.action_sequence<1 OR j.action_sequence>9007199254740991
+        OR w.agent_id IS NULL OR w.last_sequence<>j.action_sequence)
+    LIMIT 1`).get()) {
+    throw new Error("Daemon state v16 turn-control journal does not exactly match its sequence watermark.");
+  }
+  if (database.prepare(`SELECT 1 FROM turn_control_journals j
+    LEFT JOIN supervised_agent_inbox i ON i.inbox_item_id=j.inbox_item_id
+    LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=j.inbox_item_id
+    WHERE j.turn_control_present=1
+      AND ((j.target_room_id IS NULL)+(j.target_source_message_id IS NULL)
+        +(j.target_provider_continuation_id IS NULL)) NOT IN (0,3)
+      OR j.turn_control_present=1 AND j.target_room_id IS NOT NULL
+      AND (j.inbox_item_id IS NULL OR j.provider_turn_id IS NULL
+        OR i.inbox_item_id IS NULL OR i.agent_id<>j.agent_id OR i.room_id<>j.target_room_id
+        OR i.source_message_id<>j.target_source_message_id
+        OR i.provider_turn_id<>j.provider_turn_id
+        OR b.inbox_item_id IS NULL OR b.agent_id<>j.agent_id
+        OR b.provider_continuation_id<>j.target_provider_continuation_id
+        OR b.work_attempt_id<>j.turn_work_attempt_id
+        OR b.origin_execution_generation_id<>j.turn_execution_generation_id)
+    LIMIT 1`).get()) {
+    throw new Error("Daemon state v16 turn-control causal target is detached from its exact inbox binding.");
+  }
+  if (database.prepare(`SELECT 1 FROM turn_control_journals
+    WHERE turn_control_present=1 AND target_room_id IS NULL
+      AND status NOT IN ('uncertain','completed') LIMIT 1`).get()) {
+    throw new Error("Daemon state v16 active turn-control journal is missing its exact causal target.");
+  }
+}
+
+repairAndValidateV16Shape(database: DatabaseSync): void {
+  this.repairAndValidateV15Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV16Shape(database);
+    this.validateV16Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+private applyV17Shape(database: DatabaseSync, migrateInterruptedEffects: boolean): void {
+  if (!this.tableColumns(database, "supervised_agent_inbox").has("terminal_reason")) {
+    database.exec(`ALTER TABLE supervised_agent_inbox ADD COLUMN terminal_reason TEXT
+      CHECK(terminal_reason IS NULL OR terminal_reason='upgrade_authority_unavailable')`);
+  }
+
+  const effectColumns = this.tableColumns(database, "supervised_agent_effects");
+  if (!effectColumns.has("mutation")) {
+    // SQLite cannot extend the existing state CHECK in place. Rebuild exactly
+    // once while preserving the stable effect id and request-id uniqueness.
+    database.exec(`
+      ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_pre_v17;
+      CREATE TABLE supervised_agent_effects (
+        effect_id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        room_id TEXT NOT NULL,
+        execution_generation_id TEXT NOT NULL,
+        provider_turn_id TEXT NOT NULL,
+        mcp_request_id TEXT NOT NULL,
+        tool_name TEXT NOT NULL,
+        request_json TEXT NOT NULL,
+        mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
+        state TEXT NOT NULL CHECK(state IN ('prepared','executing','uncertain','completed','failed')),
+        result_json TEXT,
+        error TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
+      ) STRICT;
+      INSERT INTO supervised_agent_effects
+        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
+         tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+      SELECT effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
+        tool_name,request_json,
+        CASE WHEN tool_name IN (
+          'get_current_room','check_repo','check_repo_visibility',
+          'read_messages','wait_for_messages','get_board','get_board_settings',
+          'get_room_artifacts','get_room_events','list_board_intents',
+          'get_onboarding_status','status_local_codex_session','rental_list_requests'
+        ) THEN 0 ELSE 1 END,
+        state,result_json,error,created_at,updated_at
+      FROM supervised_agent_effects_pre_v17;
+      DROP TABLE supervised_agent_effects_pre_v17;
+      CREATE INDEX supervised_agent_effects_turn
+        ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
+    `);
+  }
+
+  // Inspector diagnostics retain only a bounded set of full uncertain rows.
+  // This compact journal preserves the exact dedupe identity and delayed
+  // completion authority until retention removes the owning provider-turn
+  // binding. It intentionally stores only a request fingerprint and byte
+  // count, never the potentially large original request payload.
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS supervised_agent_effect_tombstones (
+      effect_id TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      execution_generation_id TEXT NOT NULL,
+      provider_turn_id TEXT NOT NULL,
+      mcp_request_id TEXT NOT NULL,
+      tool_name TEXT NOT NULL,
+      request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
+      request_bytes INTEGER NOT NULL CHECK(request_bytes>=0),
+      mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
+      state TEXT NOT NULL CHECK(state IN ('uncertain','completed','failed')),
+      result_json TEXT,
+      error TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
+    ) STRICT;
+    CREATE INDEX IF NOT EXISTS supervised_agent_effect_tombstones_turn
+      ON supervised_agent_effect_tombstones(agent_id,execution_generation_id,provider_turn_id);
+  `);
+
+  // Correct rows written by the predecessor v16 migration, then classify any
+  // v15 in-flight turn that reached this all-the-way-to-current transaction.
+  // acknowledged_no_reply is only transport shape here; terminal_reason is the
+  // authoritative explanation and the outcome remains null/unknown.
+  database.exec(`
+    UPDATE supervised_agent_inbox_events
+    SET idempotency_key='v17_missing_authority_retired',phase='no_reply',
+        detail='Upgrade retired an unrecoverable legacy provider turn because its exact authority is unavailable; provider work was not replayed.'
+    WHERE idempotency_key='v16_missing_authority_cancelled';
+    INSERT INTO supervised_agent_inbox_events
+      (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+    SELECT i.inbox_item_id,
+      COALESCE((SELECT MAX(e.event_sequence) FROM supervised_agent_inbox_events e
+        WHERE e.inbox_item_id=i.inbox_item_id),0)+1,
+      'v17_missing_authority_retired','no_reply',datetime('now'),
+      'Upgrade retired an unrecoverable legacy provider turn because its exact authority is unavailable; provider work was not replayed.'
+    FROM supervised_agent_inbox i
+    WHERE i.provider_turn_id IS NOT NULL
+      AND i.state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+      AND CASE WHEN i.outcome IS NOT NULL AND json_valid(i.outcome)
+        AND COALESCE(json_extract(i.outcome,'$.kind')='no_reply'
+          OR (json_extract(i.outcome,'$.kind')='reply'
+            AND json_type(i.outcome,'$.text')='text'
+            AND length(trim(json_extract(i.outcome,'$.text')))>0),0)=1
+        THEN 0 ELSE 1 END
+      AND NOT EXISTS (SELECT 1 FROM supervised_agent_provider_turn_bindings b
+        WHERE b.inbox_item_id=i.inbox_item_id)
+      AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e
+        WHERE e.inbox_item_id=i.inbox_item_id AND e.idempotency_key='v17_missing_authority_retired');
+    UPDATE supervised_agent_inbox AS i
+    SET state='acknowledged_no_reply', failure_code=NULL,
+        terminal_reason='upgrade_authority_unavailable',
+        last_error='Upgrade retired this legacy provider turn because its exact durable authority is unavailable; the outcome is unknown and provider work was not replayed.',
+        blocked_by_inbox_item_id=NULL, next_attempt_at_ms=NULL,
+        updated_at=datetime('now'), acknowledged_at=COALESCE(acknowledged_at,datetime('now'))
+    WHERE EXISTS (SELECT 1 FROM supervised_agent_inbox_events e
+      WHERE e.inbox_item_id=i.inbox_item_id AND e.idempotency_key='v17_missing_authority_retired');
+  `);
+
+  if (migrateInterruptedEffects) {
+    database.exec(`
+      UPDATE supervised_agent_effects
+      SET state='prepared',
+          error='A read-only supervised effect was interrupted before its result checkpoint and may be executed again safely.',
+          updated_at=datetime('now')
+      WHERE state='executing' AND mutation=0 AND tool_name<>'join_room';
+      UPDATE supervised_agent_effects
+      SET state='uncertain',
+          error='A mutating supervised effect crossed its execution boundary without a durable result; it may have completed and must not be repeated without verification.',
+          updated_at=datetime('now')
+      WHERE state='executing' AND mutation=1 AND tool_name<>'join_room';
+    `);
+  }
+}
+
+private validateV17Shape(database: DatabaseSync): void {
+  this.validateV16Shape(database);
+  const expectedEffects = [
+    "effect_id", "agent_id", "room_id", "execution_generation_id", "provider_turn_id",
+    "mcp_request_id", "tool_name", "request_json", "mutation", "state", "result_json",
+    "error", "created_at", "updated_at",
+  ];
+  const effects = database.prepare("PRAGMA table_xinfo(supervised_agent_effects)").all() as Row[];
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_effects'").get() as Row | undefined;
+  const effectsTable = (database.prepare("PRAGMA table_list").all() as Row[])
+    .find((row) => row.name === "supervised_agent_effects" && row.type === "table");
+  if (effects.length !== expectedEffects.length
+    || expectedEffects.some((column, index) => effects[index]?.name !== column)
+    || effects.some((column) => Number(column.hidden) !== 0)
+    || !/mutation\s+INTEGER\s+NOT\s+NULL\s+CHECK\s*\(\s*mutation\s+IN\s*\(\s*0\s*,\s*1\s*\)\s*\)/i.test(String(definition?.sql))
+    || !/state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\([^)]*'uncertain'/i.test(String(definition?.sql))) {
+    throw new Error("Daemon state v17 supervised-effect journal has an invalid durable classification shape.");
+  }
+  if (!effectsTable || Number(effectsTable.strict) !== 1 || Number(effectsTable.wr) !== 0
+    || String(effects[0]?.type).toUpperCase() !== "TEXT"
+    || Number(effects[0]?.notnull) !== 1 || Number(effects[0]?.pk) !== 1
+    || effects.slice(1).some((column) => Number(column.pk) !== 0)) {
+    throw new Error("Daemon state v17 supervised-effect journal effect_id must be its exact TEXT primary key.");
+  }
+  const exactIndexTerms = (indexName: string, expected: string[]): boolean => {
+    const escaped = indexName.replace(/"/g, '""');
+    const terms = (database.prepare(`PRAGMA index_xinfo("${escaped}")`).all() as Row[])
+      .filter((row) => Number(row.key) === 1)
+      .sort((left, right) => Number(left.seqno) - Number(right.seqno));
+    return terms.length === expected.length && terms.every((term, position) =>
+      Number(term.cid) >= 0 && String(term.name) === expected[position]
+      && Number(term.desc) === 0 && String(term.coll).toUpperCase() === "BINARY");
+  };
+  const effectIndexes = database.prepare("PRAGMA index_list(supervised_agent_effects)").all() as Row[];
+  const effectIdentity = ["agent_id", "execution_generation_id", "provider_turn_id", "mcp_request_id"];
+  const hasExactIdentityConstraint = effectIndexes.some((index) => Number(index.unique) === 1
+    && Number(index.partial) === 0 && String(index.origin) === "u"
+    && exactIndexTerms(String(index.name), effectIdentity));
+  if (!hasExactIdentityConstraint) {
+    throw new Error("Daemon state v17 supervised-effect journal is missing its exact request identity constraint.");
+  }
+  const turnIndex = effectIndexes.find((index) => index.name === "supervised_agent_effects_turn");
+  if (!turnIndex || Number(turnIndex.unique) !== 0 || Number(turnIndex.partial) !== 0
+    || String(turnIndex.origin) !== "c"
+    || !exactIndexTerms("supervised_agent_effects_turn", ["agent_id", "execution_generation_id", "provider_turn_id"])) {
+    throw new Error("Daemon state v17 supervised-effect turn index is missing or malformed.");
+  }
+  const expectedTombstones = [
+    "effect_id", "agent_id", "room_id", "execution_generation_id", "provider_turn_id",
+    "mcp_request_id", "tool_name", "request_sha256", "request_bytes", "mutation", "state",
+    "result_json", "error", "created_at", "updated_at",
+  ];
+  const tombstones = database.prepare("PRAGMA table_xinfo(supervised_agent_effect_tombstones)").all() as Row[];
+  const tombstoneDefinition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_effect_tombstones'").get() as Row | undefined;
+  const tombstoneTable = (database.prepare("PRAGMA table_list").all() as Row[])
+    .find((row) => row.name === "supervised_agent_effect_tombstones" && row.type === "table");
+  if (tombstones.length !== expectedTombstones.length
+    || expectedTombstones.some((column, index) => tombstones[index]?.name !== column)
+    || tombstones.some((column) => Number(column.hidden) !== 0)
+    || !/request_sha256\s+TEXT\s+NOT\s+NULL\s+CHECK/i.test(String(tombstoneDefinition?.sql))
+    || !/mutation\s+INTEGER\s+NOT\s+NULL\s+CHECK\s*\(\s*mutation\s+IN\s*\(\s*0\s*,\s*1\s*\)\s*\)/i.test(String(tombstoneDefinition?.sql))) {
+    throw new Error("Daemon state v17 supervised-effect tombstone journal has an invalid compact shape.");
+  }
+  if (!tombstoneTable || Number(tombstoneTable.strict) !== 1 || Number(tombstoneTable.wr) !== 0
+    || String(tombstones[0]?.type).toUpperCase() !== "TEXT"
+    || Number(tombstones[0]?.notnull) !== 1 || Number(tombstones[0]?.pk) !== 1
+    || tombstones.slice(1).some((column) => Number(column.pk) !== 0)) {
+    throw new Error("Daemon state v17 supervised-effect tombstone effect_id must be its exact TEXT primary key.");
+  }
+  const tombstoneIndexes = database.prepare("PRAGMA index_list(supervised_agent_effect_tombstones)").all() as Row[];
+  if (!tombstoneIndexes.some((index) => Number(index.unique) === 1 && Number(index.partial) === 0
+      && String(index.origin) === "u" && exactIndexTerms(String(index.name), effectIdentity))) {
+    throw new Error("Daemon state v17 supervised-effect tombstone identity constraint is missing.");
+  }
+  const tombstoneTurnIndex = tombstoneIndexes.find((index) => index.name === "supervised_agent_effect_tombstones_turn");
+  if (!tombstoneTurnIndex || Number(tombstoneTurnIndex.unique) !== 0 || Number(tombstoneTurnIndex.partial) !== 0
+    || String(tombstoneTurnIndex.origin) !== "c"
+    || !exactIndexTerms("supervised_agent_effect_tombstones_turn", ["agent_id", "execution_generation_id", "provider_turn_id"])) {
+    throw new Error("Daemon state v17 supervised-effect tombstone turn index is missing or malformed.");
+  }
+  const inbox = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
+  if (!this.tableColumns(database, "supervised_agent_inbox").has("terminal_reason")
+    || !/terminal_reason\s+TEXT\s+CHECK\s*\(\s*terminal_reason\s+IS\s+NULL\s+OR\s+terminal_reason\s*=\s*'upgrade_authority_unavailable'\s*\)/i.test(String(inbox?.sql))) {
+    throw new Error("Daemon state v17 inbox is missing its honest upgrade terminal classification.");
+  }
+  if (database.prepare(`SELECT 1 FROM supervised_agent_effects
+    WHERE mutation NOT IN (0,1) OR state NOT IN ('prepared','executing','uncertain','completed','failed') LIMIT 1`).get()) {
+    throw new Error("Daemon state v17 contains an invalid supervised-effect classification.");
+  }
+  if (database.prepare(`SELECT 1 FROM supervised_agent_effect_tombstones
+    WHERE mutation NOT IN (0,1) OR state NOT IN ('uncertain','completed','failed')
+      OR length(request_sha256)<>64 OR request_sha256 GLOB '*[^0-9a-f]*' OR request_bytes<0 LIMIT 1`).get()) {
+    throw new Error("Daemon state v17 contains an invalid supervised-effect tombstone.");
+  }
+  if (database.prepare(`SELECT 1 FROM supervised_agent_inbox
+    WHERE terminal_reason IS NOT NULL
+      AND (terminal_reason<>'upgrade_authority_unavailable' OR state<>'acknowledged_no_reply') LIMIT 1`).get()) {
+    throw new Error("Daemon state v17 contains a mismatched upgrade terminal classification.");
+  }
+  if (database.prepare("SELECT 1 FROM supervised_agent_inbox_events WHERE idempotency_key='v16_missing_authority_cancelled' LIMIT 1").get()) {
+    throw new Error("Daemon state v17 retained a legacy upgrade event represented as user cancellation.");
+  }
+}
+
+repairAndValidateV17Shape(database: DatabaseSync): void {
+  this.repairAndValidateV16Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV17Shape(database, false);
+    this.validateV17Shape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
@@ -1651,7 +2319,11 @@ repairAndValidateV7Shape(database: DatabaseSync): void {
     || !this.tableColumns(database, "runtime_deployments").has("provider_process_identity_present");
   const needsBoundedDeliveryRepair = !this.tableColumns(database, "agent_configurations").has("delivery_mode")
     || !this.tableColumns(database, "agent_configurations").has("delivery_cutover_json")
-    || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id");
+    || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id")
+    || !this.tableColumns(database, "turn_control_journals").has("inbox_item_id")
+    || !this.tableColumns(database, "turn_control_journals").has("correction_text")
+    || !this.tableColumns(database, "turn_control_journals").has("correction_strategy")
+    || !this.tableColumns(database, "turn_control_journals").has("operator_resolution");
   const needsV7AdditiveRepair = !this.tableColumns(database, "supervised_agent_terminal_results").size
     || (!hasV13DeliveryShape && !this.tableColumns(database, "supervised_agent_inbox_events").size);
   const deferMissingV13Events = hasV13DeliveryShape
@@ -1698,7 +2370,11 @@ repairAndValidateV6Shape(database: DatabaseSync): void {
     && Boolean(database.prepare("SELECT 1 FROM reconciliation_records WHERE exit_timestamps_json IS NOT NULL LIMIT 1").get());
   const needsBoundedDeliveryRepair = !this.tableColumns(database, "agent_configurations").has("delivery_mode")
     || !this.tableColumns(database, "agent_configurations").has("delivery_cutover_json")
-    || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id");
+    || !this.tableColumns(database, "turn_control_journals").has("provider_turn_id")
+    || !this.tableColumns(database, "turn_control_journals").has("inbox_item_id")
+    || !this.tableColumns(database, "turn_control_journals").has("correction_text")
+    || !this.tableColumns(database, "turn_control_journals").has("correction_strategy")
+    || !this.tableColumns(database, "turn_control_journals").has("operator_resolution");
   try {
     this.validateV2Shape(database);
     this.validateV3Shape(database);
@@ -1741,6 +2417,18 @@ private applyBoundedDeliveryV6Shape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "turn_control_journals").has("provider_turn_id")) {
     database.exec("ALTER TABLE turn_control_journals ADD COLUMN provider_turn_id TEXT");
   }
+  if (!this.tableColumns(database, "turn_control_journals").has("inbox_item_id")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN inbox_item_id TEXT");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("correction_text")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN correction_text TEXT");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("correction_strategy")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN correction_strategy TEXT CHECK (correction_strategy IS NULL OR correction_strategy IN ('native','stop_then_resend'))");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("operator_resolution")) {
+    database.exec("ALTER TABLE turn_control_journals ADD COLUMN operator_resolution TEXT CHECK (operator_resolution IS NULL OR operator_resolution IN ('applied','not_applied'))");
+  }
 }
 
 private validateBoundedDeliveryV6Shape(database: DatabaseSync): void {
@@ -1752,6 +2440,22 @@ private validateBoundedDeliveryV6Shape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "turn_control_journals").has("provider_turn_id")) {
     throw new Error("Daemon state v6 provider_turn_id is missing.");
   }
+  if (!this.tableColumns(database, "turn_control_journals").has("inbox_item_id")) {
+    throw new Error("Daemon state v6 inbox_item_id is missing.");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("correction_text")) {
+    throw new Error("Daemon state v6 correction_text is missing.");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("correction_strategy")) {
+    throw new Error("Daemon state v6 correction_strategy is missing.");
+  }
+  if (!this.tableColumns(database, "turn_control_journals").has("operator_resolution")) {
+    throw new Error("Daemon state v6 operator_resolution is missing.");
+  }
+  const invalidCorrectionStrategy = database.prepare("SELECT 1 FROM turn_control_journals WHERE correction_strategy IS NOT NULL AND correction_strategy NOT IN ('native','stop_then_resend') LIMIT 1").get();
+  if (invalidCorrectionStrategy) throw new Error("Daemon state v6 correction_strategy is invalid.");
+  const invalidOperatorResolution = database.prepare("SELECT 1 FROM turn_control_journals WHERE operator_resolution IS NOT NULL AND operator_resolution NOT IN ('applied','not_applied') LIMIT 1").get();
+  if (invalidOperatorResolution) throw new Error("Daemon state v6 operator_resolution is invalid.");
 }
 
 private finishPendingV6SecretScrub(database: DatabaseSync): void {
@@ -2250,12 +2954,14 @@ validateV7Shape(database: DatabaseSync, includeInboxEvents = true): void {
   // the additive repair journal may be absent while the authoritative inbox
   // has already reached v13.
   const hasV13DeliveryShape = this.tableColumns(database, "supervised_agent_inbox").has("failure_code");
+  const hasV17TerminalReason = this.tableColumns(database, "supervised_agent_inbox").has("terminal_reason");
+  const hasV17EffectShape = this.tableColumns(database, "supervised_agent_effects").has("mutation");
   const required: Record<string, string[]> = {
-    supervised_agent_inbox: ["inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "fifo_sequence", "state", "attempt_count", "action_id", "reply_client_message_id", "provider_turn_id", "outcome", "last_error", ...(hasV13DeliveryShape ? ["failure_code"] : []), "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at"],
+    supervised_agent_inbox: ["inbox_item_id", "agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "fifo_sequence", "state", "attempt_count", "action_id", "reply_client_message_id", "provider_turn_id", "outcome", "last_error", ...(hasV13DeliveryShape ? ["failure_code"] : []), "blocked_by_inbox_item_id", "next_attempt_at_ms", "created_at", "updated_at", "acknowledged_at", ...(hasV17TerminalReason ? ["terminal_reason"] : [])],
     supervised_agent_inbox_events: ["inbox_item_id", "event_sequence", "idempotency_key", "phase", "observed_at", "detail"],
     supervised_agent_terminal_results: ["inbox_item_id", "agent_id", "execution_generation_id", "provider_turn_id", "outcome", "normalized_text", "evidence_source", "terminal_evidence_json", "observed_at", "updated_at"],
     supervised_agent_observed_messages: ["agent_id", "room_id", "source_message_id", "source_message_json", "activation_json", "activation_decision", "observed_at"],
-    supervised_agent_effects: ["effect_id", "agent_id", "room_id", "execution_generation_id", "provider_turn_id", "mcp_request_id", "tool_name", "request_json", "state", "result_json", "error", "created_at", "updated_at"],
+    supervised_agent_effects: ["effect_id", "agent_id", "room_id", "execution_generation_id", "provider_turn_id", "mcp_request_id", "tool_name", "request_json", ...(hasV17EffectShape ? ["mutation"] : []), "state", "result_json", "error", "created_at", "updated_at"],
     supervised_agent_ingress_health: ["agent_id", "room_id", "execution_generation_id", "state", "detail", "observed_at", "updated_at"],
   };
   if (!includeInboxEvents) delete required.supervised_agent_inbox_events;
@@ -2571,7 +3277,9 @@ normalizeLegacyPresenceEncodings(database: DatabaseSync): void {
         OR recorded_at IS NULL OR updated_at IS NULL);
     UPDATE turn_control_journals
     SET action_id = NULL, turn_work_attempt_id = NULL, turn_execution_generation_id = NULL,
-        has_correction = NULL, status = NULL, capability = NULL, interrupted = NULL,
+        inbox_item_id = NULL, provider_turn_id = NULL, has_correction = NULL,
+        correction_text = NULL, correction_strategy = NULL, operator_resolution = NULL,
+        status = NULL, capability = NULL, interrupted = NULL,
         resumed = NULL, turn_state = NULL, error = NULL, recorded_at = NULL, updated_at = NULL
     WHERE turn_control_present = 0 OR action_id IS NULL;
     DELETE FROM turn_control_stages

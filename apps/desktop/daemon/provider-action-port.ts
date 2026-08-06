@@ -55,6 +55,33 @@ export function sameProviderActionConnectionIdentity(
   return true;
 }
 
+/**
+ * Compare durable provider-state snapshots, including the honest idle shape
+ * used by Cursor between turns. This is deliberately different from
+ * `sameProviderActionConnectionIdentity`: an idle snapshot is valid state but
+ * is never evidence that a native process is alive.
+ */
+export function sameProviderActionConnectionSnapshot(
+  expected: ProviderActionConnectionRef | null | undefined,
+  actual: ProviderActionConnectionRef | null | undefined,
+): boolean {
+  if (!expected || !actual) return !expected && !actual;
+  if (expected.kind !== actual.kind || expected.pid !== actual.pid) return false;
+  const expectedIdentity = expected.processIdentity ?? null;
+  const actualIdentity = actual.processIdentity ?? null;
+  if (expectedIdentity !== actualIdentity) return false;
+  if ((expected.pid === null) !== (expectedIdentity === null)) return false;
+  if (expected.kind === "codex_app_server") {
+    return actual.kind === "codex_app_server" && expected.url === actual.url;
+  }
+  if (expected.kind === "opencode_server") {
+    return actual.kind === "opencode_server"
+      && expected.url === actual.url
+      && expected.serverAuthPath === actual.serverAuthPath;
+  }
+  return true;
+}
+
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; provider?: string; providerConnection?: ProviderActionConnectionRef | null };
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
 export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
@@ -136,6 +163,7 @@ export interface ProviderActionPort {
   poke(handle: ProviderActionHandle, message: string, options?: { actionId?: string }): Promise<void>;
   controlTurn?(handle: ProviderActionHandle, correction?: string | null, options?: {
     actionId?: string;
+    targetTurnId?: string | null;
     checkpointTurnStarted?: (turnId: string) => Promise<void>;
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderTurnControlResult>;
@@ -146,6 +174,15 @@ export interface ProviderActionPort {
     beforeNativeDispatch?: () => Promise<void>;
     /** Durable exact turn checkpoint; completes after turn/start returns and before terminal observation. */
     checkpointTurnStarted?: (turnId: string) => Promise<void>;
+    /**
+     * Cursor-only atomic boundary: bind a paused wrapper birth and exact turn
+     * id in one transaction before native work is released.
+     */
+    checkpointPreparedTurn?: (state: {
+      providerTurnId: string;
+      providerContinuationId: string;
+      providerConnection: ProviderActionConnectionRef;
+    }) => Promise<void>;
     /** Persist a provider's dynamic continuation/process identity before native work proceeds. */
     checkpointProviderState?: (state: {
       providerContinuationId: string;

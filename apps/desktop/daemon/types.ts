@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.87";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.96";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -13,7 +13,7 @@ export type ReconciliationState = {
   consecutive_action_failures: number;
   last_observed_state: ObservedState;
   next_restart_at_ms: number | null;
-  /** Bounded action journal: rejects replayed or out-of-order provider calls. */
+  /** Bounded compatibility/debug projection; last_action_sequence is the replay fence. */
   completed_action_ids: string[];
   last_action_sequence: number;
   pending_action: { id: string; sequence: number; kind: "poke" | "restart_fresh" | "restart_with_resume" | "stop"; recorded_at_ms: number } | null;
@@ -173,7 +173,7 @@ export type DaemonDeliveryCutover = {
   provider_continuation_id: string;
   /** Null only before the one permitted active-turn discovery completes. */
   provider_turn_id: string | null;
-  phase: "prepared" | "dispatching" | "uncertain";
+  phase: "prepared" | "retryable" | "dispatching" | "uncertain";
   /** Redacted operator-facing reason when the handoff remains fenced. */
   error?: string | null;
   updated_at: string;
@@ -204,11 +204,26 @@ export type DaemonProviderRuntimeReference = {
 /** Durable human turn-control effect journal for one agent. */
 export type DaemonTurnControlEffect = {
   action_id: string;
+  /** Daemon-enforced exact-next sequence; bounds replay authority to O(1). */
+  action_sequence: number;
   work_attempt_id: string;
   execution_generation_id: string;
+  /** Exact causal target. Nullable/absent values exist only for legacy
+   * completed journals that predate durable target fencing. */
+  target_room_id?: string | null;
+  target_source_message_id?: string | null;
+  target_provider_continuation_id?: string | null;
+  /** Exact daemon FIFO row reserved before the native control side effect. */
+  inbox_item_id?: string | null;
   /** Exact native turn fenced before the first interrupt side effect. */
   provider_turn_id?: string | null;
   has_correction: boolean;
+  /** Exact bounded correction, persisted before native dispatch for replay and idempotency. */
+  correction_text?: string | null;
+  /** Durable correction semantics; recovery must never re-derive this from mutable provider capabilities. */
+  correction_strategy?: "native" | "stop_then_resend" | null;
+  /** Exact operator decision, persisted so opposite retries cannot share an acknowledgement. */
+  operator_resolution?: "applied" | "not_applied" | null;
   status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
   capability: "native_interrupt" | "restart_resume" | "unsupported";
   interrupted: boolean | null;
@@ -257,6 +272,7 @@ export type DaemonAgentReadinessRecord = {
 /** Accepted turn-control effects are durable and are never blindly replayed. */
 export type DaemonTurnControlJournalRecord = {
   agent_id: string;
+  last_turn_control_sequence: number;
   turn_control?: DaemonTurnControlEffect | null;
 };
 
@@ -309,6 +325,8 @@ export type DaemonManifestEntry = {
   native_liveness?: DaemonLivenessAxis<NativeExecutionActivity>;
   ready_reached_at?: string | null;
   activity?: DaemonActivityEvent[];
+  /** O(1) durable replay watermark for human turn-control actions. */
+  last_turn_control_sequence?: number;
   turn_control?: DaemonTurnControlEffect | null;
   last_worker_binding?: DaemonWorkerBindingProjection | null;
   reconciliation?: ReconciliationState;
@@ -332,7 +350,7 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     /** Exact room message created by this inbox item's final-answer publication. */
     canonical_message_id: string | null;
     state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "retryable" | "blocked" | "restoring_conversation" | "cancelled_by_room_move" | "cancelled_by_user" | "queued_behind_blocked";
-    attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code: "provider_continuation_missing" | null; updated_at: string;
+    attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; updated_at: string;
     timeline: Array<{ phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
   }>;
 };

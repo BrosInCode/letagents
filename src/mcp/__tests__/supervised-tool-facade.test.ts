@@ -64,15 +64,44 @@ test("failure-reporting errors do not mask the original callback error", async (
   await assert.rejects(() => handler({}, { requestId: "request_failed" }), /tool failed first/);
 });
 
-test("check_repo_visibility is classified as a read-only supervised effect", async () => {
-  let mutation: boolean | null = null;
+test("every registered read-only tool is classified for safe supervised redrive", async () => {
+  for (const toolName of [
+    "get_current_room", "check_repo", "check_repo_visibility", "read_messages", "wait_for_messages",
+    "get_board", "get_board_settings", "get_room_artifacts", "get_room_events", "list_board_intents",
+    "get_onboarding_status", "status_local_codex_session", "rental_list_requests",
+  ]) {
+    let mutation: boolean | null = null;
+    const handler = registeredHandler({
+      prepareEffect: async (input) => {
+        mutation = input.mutation;
+        return { state: "prepared", effectId: `effect_${toolName}`, action: "execute" };
+      },
+      completeEffect: async () => {},
+    }, async () => result("read"), toolName);
+    assert.deepEqual(await handler({}, { requestId: `request_${toolName}` }), result("read"));
+    assert.equal(mutation, false, toolName);
+  }
+});
+
+test("an uncertain mutation returns a durable safety instruction without invoking the tool again", async () => {
+  let callbackCount = 0;
+  let completionCount = 0;
   const handler = registeredHandler({
-    prepareEffect: async (input) => {
-      mutation = input.mutation;
-      return { state: "prepared", effectId: "effect_read", action: "execute" };
-    },
-    completeEffect: async () => {},
-  }, async () => result("visible"), "check_repo_visibility");
-  assert.deepEqual(await handler({}, { requestId: "request_read" }), result("visible"));
-  assert.equal(mutation, false);
+    prepareEffect: async () => ({
+      state: "uncertain",
+      effectId: "effect_uncertain",
+      error: "The message may already have been sent.",
+    }),
+    completeEffect: async () => { completionCount += 1; },
+  }, async () => { callbackCount += 1; return result("must not run"); });
+
+  const response = await handler({ text: "send once" }, { requestId: "request_uncertain" });
+  assert.equal(callbackCount, 0);
+  assert.equal(completionCount, 0);
+  assert.deepEqual(response.structuredContent, {
+    code: "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN",
+    effect_id: "effect_uncertain",
+    detail: "The message may already have been sent.",
+    instruction: "This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.",
+  });
 });

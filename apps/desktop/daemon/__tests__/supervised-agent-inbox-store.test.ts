@@ -8,10 +8,44 @@ import test from "node:test";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { ManifestStore } from "../manifest-store.js";
+import type { DaemonManifestEntry } from "../types.js";
+
+const TEST_PROVIDER_TURN_AUTHORITY = {
+  work_attempt_id: "attempt",
+  origin_execution_generation_id: "generation",
+  provider_continuation_id: "continuation",
+} as const;
 
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervised-inbox-"));
   return { root, database: join(root, "daemon-state.sqlite"), legacy: join(root, "legacy.json"), cleanup: () => rm(root, { recursive: true, force: true }) };
+}
+
+async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: {
+  agentId: string; roomId: string; workAttemptId: string; executionGenerationId: string; providerContinuationId: string;
+}): Promise<void> {
+  const manifest = new ManifestStore(env.database);
+  const loaded = await manifest.load();
+  const active: DaemonManifestEntry = {
+    id: input.agentId, room_id: input.roomId, display_name: input.agentId,
+    provider: "codex", model: null, charter: "test", desired_state: "running",
+    observed_state: "working", condition: "none", permission_profile_id: null,
+    delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
+    created_at: "2026-08-05T00:00:00.000Z", workspace_path: "/tmp/workspace",
+    work_attempt_id: input.workAttemptId,
+    provider_ref: {
+      work_attempt_id: input.workAttemptId,
+      provider_continuation_id: input.providerContinuationId,
+      provider_connection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "test:4311" },
+      execution_generation_id: input.executionGenerationId,
+    },
+    workplace_liveness: { state: "reachable", observed_at: "2026-08-05T00:00:00.000Z", detail: null },
+    native_liveness: { state: "active", observed_at: "2026-08-05T00:00:00.000Z", detail: null },
+    activity: [], restart_count: 0, last_turn_control_sequence: 0,
+  };
+  await manifest.write(loaded.generation, [...loaded.entries.filter((entry) => entry.id !== input.agentId), active]);
+  await manifest.close();
 }
 
 async function prepareSecretBearingV5(env: Awaited<ReturnType<typeof fixture>>): Promise<void> {
@@ -70,13 +104,27 @@ test("an exact never-dispatched provider turn can be atomically reset without co
     });
     await store.claimHead("cursor-agent");
     await store.checkpointDispatchIntent(item!.inbox_item_id);
-    const started = await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:prepared-only");
+    const started = await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:prepared-only", TEST_PROVIDER_TURN_AUTHORITY);
     assert.equal(started.attempt_count, 1);
+    assert.deepEqual(await store.providerTurnBinding(item!.inbox_item_id), {
+      inbox_item_id: item!.inbox_item_id,
+      agent_id: "cursor-agent",
+      room_id: "room",
+      provider_turn_id: "cursor:prepared-only",
+      ...TEST_PROVIDER_TURN_AUTHORITY,
+    });
+    const idempotent = await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:prepared-only", TEST_PROVIDER_TURN_AUTHORITY);
+    assert.equal(idempotent.attempt_count, 1, "an exact checkpoint retry never consumes another attempt");
+    await assert.rejects(() => store.checkpointTurnStarted(item!.inbox_item_id, "cursor:prepared-only", {
+      ...TEST_PROVIDER_TURN_AUTHORITY,
+      provider_continuation_id: "different-continuation",
+    }), /durable authority binding/);
 
     const reset = await store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:prepared-only");
     assert.equal(reset.state, "pending");
     assert.equal(reset.provider_turn_id, null);
     assert.equal(reset.attempt_count, 0);
+    assert.equal(await store.providerTurnBinding(item!.inbox_item_id), null, "reset removes the exact recovery authority with the turn id");
     assert.equal((await store.claimHead("cursor-agent"))?.inbox_item_id, item!.inbox_item_id);
     await assert.rejects(
       store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:different"),
@@ -84,6 +132,78 @@ test("an exact never-dispatched provider turn can be atomically reset without co
     );
     const timeline = (await store.receipts("cursor-agent"))[0]!.timeline;
     assert.equal(timeline.some((event) => event.phase === "retry_scheduled"), true);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("an undispatched reset refuses compact effect evidence without erasing turn authority", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-02T00:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "cursor-tombstone", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.claimHead("cursor-tombstone");
+    await store.checkpointDispatchIntent(item!.inbox_item_id);
+    await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:compacted-effect", TEST_PROVIDER_TURN_AUTHORITY);
+
+    const evidence = new DatabaseSync(env.database);
+    try {
+      evidence.prepare(`INSERT INTO supervised_agent_effect_tombstones
+        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
+         tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        "compacted-effect", "cursor-tombstone", "room", TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id,
+        "cursor:compacted-effect", "request-1", "send_message", "0".repeat(64), 2, 1, "uncertain", null,
+        "The mutating tool may have completed.", "2026-08-02T00:00:00.000Z", "2026-08-02T00:00:00.000Z",
+      );
+    } finally { evidence.close(); }
+
+    await assert.rejects(
+      store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:compacted-effect"),
+      /terminal or effect evidence/,
+    );
+    const preserved = await store.inboxForProviderTurn("cursor-tombstone", "cursor:compacted-effect");
+    assert.equal(preserved?.state, "dispatching");
+    assert.equal(preserved?.attempt_count, 1);
+    assert.ok(await store.providerTurnBinding(item!.inbox_item_id),
+      "refusing reset preserves exact recovery authority for the evidenced turn");
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("an undispatched reset ignores compact evidence from an older execution generation", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-02T00:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "cursor-reused-turn", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "hello" }, activation: {} }],
+    });
+    await store.claimHead("cursor-reused-turn");
+    await store.checkpointDispatchIntent(item!.inbox_item_id);
+    const currentAuthority = {
+      ...TEST_PROVIDER_TURN_AUTHORITY,
+      origin_execution_generation_id: "execution-generation-current",
+    };
+    await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:reused-turn", currentAuthority);
+
+    const evidence = new DatabaseSync(env.database);
+    try {
+      evidence.prepare(`INSERT INTO supervised_agent_effect_tombstones
+        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
+         tool_name,request_sha256,request_bytes,mutation,state,result_json,error,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        "old-generation-effect", "cursor-reused-turn", "room", "execution-generation-old",
+        "cursor:reused-turn", "request-old", "send_message", "0".repeat(64), 2, 1, "uncertain", null,
+        "Old generation evidence.", "2026-08-02T00:00:00.000Z", "2026-08-02T00:00:00.000Z",
+      );
+    } finally { evidence.close(); }
+
+    const reset = await store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:reused-turn");
+    assert.equal(reset.state, "pending");
+    assert.equal(reset.provider_turn_id, null);
+    assert.equal(reset.attempt_count, 0);
+    assert.equal(await store.providerTurnBinding(item!.inbox_item_id), null);
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -108,7 +228,7 @@ test("a clean pre-native handoff can atomically restore only an evidence-free di
     await store.transition(item!.inbox_item_id, "retryable", { last_error: "pre-native retry backoff" });
     assert.equal((await store.resetPreNativeHandoff(item!.inbox_item_id)).state, "pending");
     await store.claimHead("cursor-handoff");
-    await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:started");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "cursor:started", TEST_PROVIDER_TURN_AUTHORITY);
     await assert.rejects(
       store.resetPreNativeHandoff(item!.inbox_item_id),
       /exact unstarted dispatch or retry-backoff intent/,
@@ -152,6 +272,7 @@ test("blocked FIFO head exposes the causal wait and retry resumes that exact ite
       { source_message_id: "1", source_message: { text: "one" }, activation: {} },
     ] });
     await store.transition(one!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(one!.inbox_item_id, "turn_1", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(one!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn_1" });
     const noReply = await store.transition(one!.inbox_item_id, "acknowledged_no_reply", { outcome: "no_reply" });
     assert.equal(noReply.state, "acknowledged_no_reply");
@@ -319,8 +440,21 @@ test("v12 migration types only exact pre-turn historical missing-thread failures
       messages: [{ source_message_id: "started", source_message: {}, activation: {} }],
     });
     await store.transition(started!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(started!.inbox_item_id, "turn_started");
+    await store.checkpointTurnStarted(started!.inbox_item_id, "turn_started", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(started!.inbox_item_id, "blocked", { last_error: historicalError });
+
+    const [durableReply] = await store.ingestPoll({
+      agent_id: "durable-reply",
+      room_id: "room",
+      last_observed_message_id: "1",
+      messages: [{ source_message_id: "durable-reply", source_message: {}, activation: {} }],
+    });
+    await store.transition(durableReply!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(durableReply!.inbox_item_id, "turn_with_reply", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.transition(durableReply!.inbox_item_id, "awaiting_result", {
+      outcome: JSON.stringify({ kind: "reply", text: "already durable", evidence: "transcript" }),
+    });
+    await store.transition(durableReply!.inbox_item_id, "publishing");
 
     const [wrapped] = await store.ingestPoll({
       agent_id: "wrapped",
@@ -339,6 +473,7 @@ test("v12 migration types only exact pre-turn historical missing-thread failures
     database.exec(`
       PRAGMA foreign_keys=OFF;
       BEGIN IMMEDIATE;
+      DROP TABLE supervised_agent_provider_turn_bindings;
       DROP TABLE provider_continuation_repairs;
       DROP TABLE supervised_agent_inbox_events;
       DROP TABLE supervised_agent_terminal_results;
@@ -398,6 +533,13 @@ test("v12 migration types only exact pre-turn historical missing-thread failures
     const migrated = new SupervisedAgentInboxStore(env.database);
     assert.equal((await migrated.get(safe!.inbox_item_id))?.failure_code, "provider_continuation_missing");
     assert.equal((await migrated.get(started!.inbox_item_id))?.failure_code, null, "a started turn remains ambiguous");
+    assert.equal((await migrated.get(started!.inbox_item_id))?.state, "acknowledged_no_reply",
+      "the upgrade retires an unbound legacy provider turn without fabricating a user cancellation");
+    assert.equal((await migrated.get(started!.inbox_item_id))?.terminal_reason, "upgrade_authority_unavailable");
+    assert.match((await migrated.get(started!.inbox_item_id))?.last_error ?? "", /upgrade.*exact durable authority.*not replayed/i);
+    assert.equal((await migrated.receipts("started"))[0]?.timeline.at(-1)?.phase, "no_reply");
+    assert.equal((await migrated.get(durableReply!.inbox_item_id))?.state, "publishing",
+      "a durable legacy reply remains publication-only and never needs provider authority recovery");
     assert.equal((await migrated.get(wrapped!.inbox_item_id))?.failure_code, null, "similar prose is never promoted to recovery authority");
     await migrated.close();
   } finally { await env.cleanup(); }
@@ -676,7 +818,7 @@ test("skip message is honest, pre-turn only, and releases the next FIFO item", a
       messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
     });
     await store.transition(ambiguous!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(ambiguous!.inbox_item_id, "turn-started");
+    await store.checkpointTurnStarted(ambiguous!.inbox_item_id, "turn-started", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(ambiguous!.inbox_item_id, "blocked", { last_error: "terminal evidence ambiguous" });
     await assert.rejects(
       store.skipBlocked(ambiguous!.inbox_item_id),
@@ -685,6 +827,41 @@ test("skip message is honest, pre-turn only, and releases the next FIFO item", a
     assert.equal((await store.get(ambiguous!.inbox_item_id))?.state, "blocked");
     await store.close();
   } finally { await env.cleanup(); }
+});
+
+test("repeated pre-turn skips retain exactly bounded physical history", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:00:00.000Z");
+  let oldest = "";
+  let newest = "";
+  try {
+    for (let index = 1; index <= 205; index += 1) {
+      const item = await store.enqueueCorrection({
+        agent_id: "bounded-skip", room_id: "room", source_message_id: `skip-${index}`,
+        source_message: { index }, activation: { decision: "activate" },
+      });
+      if (index === 1) oldest = item.inbox_item_id;
+      newest = item.inbox_item_id;
+      await store.transition(item.inbox_item_id, "blocked", { last_error: "safe pre-turn failure" });
+      assert.equal((await store.skipBlocked(item.inbox_item_id)).state, "cancelled_by_user");
+    }
+    const inspection = new DatabaseSync(env.database);
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+      WHERE agent_id='bounded-skip' AND state='cancelled_by_user'`).get() as { count: number }).count), 200);
+    assert.ok(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox_events e
+      JOIN supervised_agent_inbox i USING (inbox_item_id) WHERE i.agent_id='bounded-skip'`).get() as { count: number }).count) <= 800);
+    assert.equal(inspection.prepare("SELECT 1 FROM supervised_agent_inbox WHERE inbox_item_id=?").get(oldest), undefined);
+    assert.ok(inspection.prepare("SELECT 1 FROM supervised_agent_inbox WHERE inbox_item_id=?").get(newest));
+    assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
+    inspection.close();
+    await store.close();
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await reopened.receipts("bounded-skip")).length, 200);
+    await reopened.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
 });
 
 test("cancelInterruptedTurn settles an in-flight head and releases the next FIFO item", async () => {
@@ -711,7 +888,7 @@ test("cancelInterruptedTurn settles an in-flight head and releases the next FIFO
 
     // Awaiting-result is still pre-publish, so it is also interruptible.
     const outcome = JSON.stringify({ kind: "reply", text: "partial", evidence: "transcript" });
-    await store.checkpointTurnStarted(second!.inbox_item_id, "turn-2");
+    await store.checkpointTurnStarted(second!.inbox_item_id, "turn-2", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(second!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-2", outcome });
     const settledSecond = await store.cancelInterruptedTurn(second!.inbox_item_id, "Redirected by the user.");
     assert.equal(settledSecond?.state, "cancelled_by_user");
@@ -719,6 +896,56 @@ test("cancelInterruptedTurn settles an in-flight head and releases the next FIFO
 
     // A vanished item is an idempotent no-op (an interrupt that already settled).
     assert.equal(await store.cancelInterruptedTurn("does-not-exist"), null);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("startup recovery requeues only checkpoint-gated unstarted work and preserves exact-turn recovery", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database);
+    for (const agentId of ["cursor-gated", "provider-ambiguous", "exact-recovery", "no-reply-crash"]) {
+      await store.ingestPoll({
+        agent_id: agentId,
+        room_id: "room",
+        last_observed_message_id: "1",
+        messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
+      });
+      await store.claimHead(agentId);
+    }
+    await store.normalizeStartupRecovery("cursor-gated", { resetCheckpointGatedUnstartedDispatch: true });
+    assert.equal((await store.head("cursor-gated"))?.state, "pending", "Cursor's turn-id-before-release contract proves no native dispatch");
+
+    await store.normalizeStartupRecovery("provider-ambiguous");
+    assert.equal((await store.head("provider-ambiguous"))?.state, "blocked", "the same shape remains ambiguous for other providers");
+
+    const exact = await store.head("exact-recovery");
+    assert.ok(exact);
+    await store.checkpointTurnStarted(exact.inbox_item_id, "provider:exact-turn", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.transition(exact.inbox_item_id, "retryable", { last_error: "idle provider-state checkpoint failed" });
+    await store.normalizeStartupRecovery("exact-recovery");
+    const recovered = await store.head("exact-recovery");
+    assert.equal(recovered?.state, "pending");
+    assert.equal(recovered?.provider_turn_id, "provider:exact-turn", "recovery inspects the exact turn and never reruns it");
+
+    const noReply = await store.head("no-reply-crash");
+    assert.ok(noReply);
+    await store.checkpointTurnStarted(noReply.inbox_item_id, "provider:no-reply", TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, {
+      agentId: "no-reply-crash", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation",
+    });
+    const orphanInput = {
+      agent_id: "no-reply-crash", room_id: "room", execution_generation_id: "generation",
+      work_attempt_id: "attempt", current_execution_generation_id: "generation",
+      provider_continuation_id: "continuation", provider_turn_id: "provider:no-reply",
+      mcp_request_id: "handoff-orphan", tool_name: "send_message", request: { text: "unused" },
+    };
+    await store.prepareEffect(orphanInput);
+    await store.checkpointTerminalOutcome(noReply.inbox_item_id, JSON.stringify({ kind: "no_reply", text: null }));
+    await store.normalizeStartupRecovery("no-reply-crash");
+    assert.equal((await store.get(noReply.inbox_item_id))?.state, "acknowledged_no_reply");
+    assert.equal((await store.prepareEffect(orphanInput)).effect.state, "failed",
+      "restart normalization settles a prepared effect that never acquired execution authority");
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -732,7 +959,7 @@ test("cancelInterruptedTurn never overrides a committed publication or a termina
     });
     const outcome = JSON.stringify({ kind: "reply", text: "hi", evidence: "transcript" });
     await store.claimHead("publisher");
-    await store.checkpointTurnStarted(publishing!.inbox_item_id, "turn-1");
+    await store.checkpointTurnStarted(publishing!.inbox_item_id, "turn-1", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(publishing!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-1", outcome });
     await store.transition(publishing!.inbox_item_id, "publishing", { outcome });
     // Once the turn commits to publishing, the interrupt loses the race: the
@@ -746,7 +973,7 @@ test("cancelInterruptedTurn never overrides a committed publication or a termina
       messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
     });
     await store.claimHead("settled");
-    await store.checkpointTurnStarted(done!.inbox_item_id, "turn-9");
+    await store.checkpointTurnStarted(done!.inbox_item_id, "turn-9", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(done!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-9", outcome: JSON.stringify({ kind: "no_reply", text: null, evidence: "transcript" }) });
     await store.transition(done!.inbox_item_id, "acknowledged_no_reply", {});
     const terminal = await store.cancelInterruptedTurn(done!.inbox_item_id);
@@ -807,7 +1034,7 @@ test("room move compensation restores only its source queue and exact pre-move c
     });
     await store.setIngressHealth({ agent_id: "mover", room_id: "old-room", execution_generation_id: "run", state: "observing" });
     await store.transition(current!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(current!.inbox_item_id, "turn-move");
+    await store.checkpointTurnStarted(current!.inbox_item_id, "turn-move", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(current!.inbox_item_id, "awaiting_result");
     await store.transition(current!.inbox_item_id, "acknowledged_no_reply");
     const cancelled = await store.commitRoomMoveQueue({ operation_id: "move_1", agent_id: "mover", old_room_id: "old-room", after_fifo_sequence: current!.fifo_sequence });
@@ -835,6 +1062,91 @@ test("room move compensation restores only its source queue and exact pre-move c
   } finally { await env.cleanup(); }
 });
 
+test("room-move compensation pins cancelled history until rollback or terminal release", async () => {
+  const env = await fixture();
+  const inbox = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T12:30:00.000Z");
+  const manifest = new ManifestStore(env.database);
+  try {
+    await seedActiveAgent(env, {
+      agentId: "bounded-move", roomId: "old-room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation",
+    });
+    const generation = (await manifest.load()).generation;
+    for (let index = 1; index <= 205; index += 1) {
+      await inbox.enqueueCorrection({
+        agent_id: "bounded-move", room_id: "old-room", source_message_id: `move-${index}`,
+        source_message: { text: `queued ${index}` }, activation: { decision: "activate" },
+      });
+    }
+    const prepareMove = (operationId: string, destinationRoomId: string) => manifest.prepareRoomMove({
+      operation_id: operationId,
+      request_id: operationId,
+      agent_id: "bounded-move",
+      source_room_id: "old-room",
+      destination_room_id: destinationRoomId,
+      daemon_generation: generation,
+      work_attempt_id: "attempt",
+      execution_generation_id: "generation",
+      agent_session_id: "session",
+      activating_inbox_item_id: null,
+      provider_turn_id: null,
+      effect_id: null,
+      phase: "membership_committed",
+    });
+
+    await prepareMove("move-rollback", "new-room");
+    assert.equal(await inbox.commitRoomMoveQueue({
+      operation_id: "move-rollback", agent_id: "bounded-move", old_room_id: "old-room", after_fifo_sequence: 0,
+    }), 205);
+    let inspection = new DatabaseSync(env.database);
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+      WHERE agent_id='bounded-move' AND state='cancelled_by_room_move'`).get() as { count: number }).count), 205,
+    "nonterminal move authority may temporarily exceed receipt history because every row is rollback state");
+    inspection.close();
+
+    assert.equal(await inbox.rollbackRoomMoveIngress({
+      operation_id: "move-rollback", agent_id: "bounded-move", source_room_id: "old-room", destination_room_id: "new-room",
+      source_cursor_present: false, source_cursor: null, after_fifo_sequence: 0,
+    }), 205, "all compensation rows survive long enough to be restored");
+    await manifest.advanceRoomMove({
+      operationId: "move-rollback", agentId: "bounded-move", expectedDaemonGeneration: generation,
+      expectedExecutionGenerationId: "generation", from: ["membership_committed"], to: "failed",
+    });
+    inspection = new DatabaseSync(env.database);
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+      WHERE agent_id='bounded-move' AND state='pending'`).get() as { count: number }).count), 205);
+    inspection.close();
+
+    await prepareMove("move-success", "final-room");
+    assert.equal(await inbox.commitRoomMoveQueue({
+      operation_id: "move-success", agent_id: "bounded-move", old_room_id: "old-room", after_fifo_sequence: 0,
+    }), 205);
+    await manifest.advanceRoomMove({
+      operationId: "move-success", agentId: "bounded-move", expectedDaemonGeneration: generation,
+      expectedExecutionGenerationId: "generation", from: ["membership_committed"], to: "active",
+    });
+    inspection = new DatabaseSync(env.database);
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+      WHERE agent_id='bounded-move' AND state='cancelled_by_room_move'`).get() as { count: number }).count), 200,
+    "terminal move release converges compensation rows to the ordinary history budget");
+    assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
+    inspection.close();
+
+    await inbox.close();
+    await manifest.close();
+    const reopenedInbox = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await reopenedInbox.receipts("bounded-move")).length, 200);
+    await reopenedInbox.close();
+    const reopenedManifest = new ManifestStore(env.database);
+    assert.equal((await reopenedManifest.getRoomMove("move-success"))?.phase, "active");
+    await reopenedManifest.close();
+  } finally {
+    await inbox.close().catch(() => undefined);
+    await manifest.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("prepared room moves remain discoverable across restart until their acknowledged turn is reconciled", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
@@ -843,17 +1155,17 @@ test("prepared room moves remain discoverable across restart until their acknowl
       messages: [{ source_message_id: "1", source_message: { text: "move" }, activation: {} }],
     });
     await store.transition(item!.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-move");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-move", TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, { agentId: "mover", roomId: "old-room", workAttemptId: "attempt", executionGenerationId: "generation", providerContinuationId: "continuation" });
+    const prepared = await store.prepareRoomMoveEffect({
+      agent_id: "mover", room_id: "old-room", effect_execution_generation_id: "generation",
+      provider_turn_id: "turn-move", mcp_request_id: "join-1", request: { name: "new-room" },
+      destination_room_id: "new-room", daemon_generation: 1, work_attempt_id: "attempt",
+      execution_generation_id: "generation", provider_continuation_id: "continuation",
+      agent_session_id: "session", activating_inbox_item_id: item!.inbox_item_id,
+    });
     await store.transition(item!.inbox_item_id, "awaiting_result");
     await store.transition(item!.inbox_item_id, "acknowledged_no_reply");
-    const prepared = await store.prepareEffect({
-      agent_id: "mover", room_id: "old-room", execution_generation_id: "run",
-      provider_turn_id: "turn-move", mcp_request_id: "join-1", tool_name: "join_room",
-      request: { name: "new-room" },
-    });
-    await store.stagePreparedEffectResult(prepared.effect.effect_id, {
-      requested_room: "new-room", destination_room: "new-room", phase: "validated",
-    });
     await store.close();
 
     const reopened = new SupervisedAgentInboxStore(env.database);
@@ -878,7 +1190,7 @@ test("terminal receipts and observed context are bounded while prepared effects 
     const items = await store.ingestPoll({ agent_id: "bounded", room_id: "room", last_observed_message_id: "1204", messages });
     for (const item of items) {
       await store.transition(item.inbox_item_id, "dispatching");
-      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${item.source_message_id}`);
+      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${item.source_message_id}`, TEST_PROVIDER_TURN_AUTHORITY);
       await store.transition(item.inbox_item_id, "awaiting_result");
       await store.transition(item.inbox_item_id, "acknowledged_no_reply");
     }
@@ -894,7 +1206,7 @@ test("terminal receipts and observed context are bounded while prepared effects 
     ] });
     for (const item of next) {
       await store.transition(item.inbox_item_id, "dispatching");
-      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${item.source_message_id}`);
+      await store.checkpointTurnStarted(item.inbox_item_id, `turn-${item.source_message_id}`, TEST_PROVIDER_TURN_AUTHORITY);
       await store.transition(item.inbox_item_id, "awaiting_result");
       await store.transition(item.inbox_item_id, "acknowledged_no_reply");
     }
@@ -928,6 +1240,60 @@ test("terminal receipts and observed context are bounded while prepared effects 
       "agent removal must cascade through its retained timeline",
     );
     afterRemoval.close();
+  } finally { await env.cleanup(); }
+});
+
+test("history pruning cannot delete a newer generation's exactly-once effect when provider turn ids repeat", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T12:00:00.000Z");
+    const settle = async (sourceMessageId: string, providerTurnId: string, authority: typeof TEST_PROVIDER_TURN_AUTHORITY) => {
+      const item = await store.enqueueCorrection({
+        agent_id: "reused-turn", room_id: "room", source_message_id: sourceMessageId,
+        source_message: { text: sourceMessageId }, activation: {},
+      });
+      await store.transition(item.inbox_item_id, "dispatching");
+      await store.checkpointTurnStarted(item.inbox_item_id, providerTurnId, authority);
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      return item;
+    };
+    const old = await settle("old", "shared-turn", {
+      work_attempt_id: "attempt",
+      origin_execution_generation_id: "origin-old",
+      provider_continuation_id: "continuation-old",
+    });
+    await store.transition(old.inbox_item_id, "acknowledged_no_reply");
+    for (let index = 0; index < 199; index += 1) {
+      const filler = await settle(`filler-${index}`, `filler-turn-${index}`, TEST_PROVIDER_TURN_AUTHORITY);
+      await store.transition(filler.inbox_item_id, "acknowledged_no_reply");
+    }
+    const current = await settle("current", "shared-turn", {
+      work_attempt_id: "attempt",
+      origin_execution_generation_id: "origin-current",
+      provider_continuation_id: "continuation-current",
+    });
+    await seedActiveAgent(env, { agentId: "reused-turn", roomId: "room", workAttemptId: "attempt", executionGenerationId: "origin-current", providerContinuationId: "continuation-current" });
+    const effectInput = {
+      agent_id: "reused-turn", room_id: "room", execution_generation_id: "origin-current",
+      work_attempt_id: "attempt", current_execution_generation_id: "origin-current", provider_continuation_id: "continuation-current",
+      provider_turn_id: "shared-turn", mcp_request_id: "effect-current", tool_name: "claim_task",
+      request: { task_id: "task-current" },
+    };
+    const prepared = await store.prepareEffect(effectInput);
+    await store.markEffectExecuting({ effect_id: prepared.effect.effect_id, ...effectInput });
+    await store.completeEffect({
+      effect_id: prepared.effect.effect_id,
+      result: { claimed: true },
+      expected: {
+        agent_id: "reused-turn", work_attempt_id: "attempt", provider_turn_id: "shared-turn",
+      },
+    });
+    await store.transition(current.inbox_item_id, "acknowledged_no_reply");
+    assert.equal(await store.get(old.inbox_item_id), null, "the old generation receipt is independently prunable");
+    const replay = await store.prepareEffect(effectInput);
+    assert.equal(replay.created, false, "the newer generation's durable request id remains an exactly-once barrier");
+    assert.equal(replay.effect.state, "completed");
+    assert.deepEqual(replay.effect.result, { claimed: true });
+    await store.close();
   } finally { await env.cleanup(); }
 });
 
@@ -971,8 +1337,9 @@ test("inspector detail checkpoints canonical publication and records a monotonic
     const items = await store.ingestPoll({ agent_id: "detail", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: { id: "1", sender: "Ada", text: "ship it", timestamp: "2026-07-23T12:00:00.000Z", thread_root_id: "1" }, activation: { decision: "activate" } }] });
     const item = items[0]!;
     await store.transition(item.inbox_item_id, "dispatching");
-    await store.checkpointTurnStarted(item.inbox_item_id, "turn-detail");
-    await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "detail", execution_generation_id: "run", provider_turn_id: "turn-detail", outcome: "reply", text: "done", evidence: "transcript", terminal_evidence: { provider: "normalized-only" } });
+    await store.checkpointTurnStarted(item.inbox_item_id, "turn-detail", TEST_PROVIDER_TURN_AUTHORITY);
+    await assert.rejects(() => store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "detail", execution_generation_id: "wrong-generation", provider_turn_id: "turn-detail", outcome: "reply", text: "wrong", evidence: "transcript", terminal_evidence: { provider: "wrong" } }), /authority binding/i);
+    await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "detail", execution_generation_id: "generation", provider_turn_id: "turn-detail", outcome: "reply", text: "done", evidence: "transcript", terminal_evidence: { provider: "normalized-only" } });
     await store.transition(item.inbox_item_id, "awaiting_result");
     await store.transition(item.inbox_item_id, "publishing");
     const beforePublication = await store.detail("detail", "room", "1");
@@ -1012,6 +1379,154 @@ test("v9 validation rejects malformed delivery-history table and relational shap
       const database = new DatabaseSync(env.database); database.exec(mutation); database.close();
       const rejected = new SupervisedAgentInboxStore(env.database);
       await assert.rejects(() => rejected.receipts("shape"), /Daemon state v(?:8|9) (?:table|index|delivery-history constraints|publication index)/);
+      await rejected.close();
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("v17 validation rejects malformed mutation policy and upgrade terminal classifications", async () => {
+  {
+    const env = await fixture(); try {
+      const store = new SupervisedAgentInboxStore(env.database);
+      await store.receipts("shape-v17");
+      await store.close();
+      const database = new DatabaseSync(env.database);
+      database.exec(`
+        DROP INDEX supervised_agent_effects_turn;
+        ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_valid_v17;
+        CREATE TABLE supervised_agent_effects (
+          effect_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+          execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+          mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
+          mutation INTEGER NOT NULL,
+          state TEXT NOT NULL CHECK(state IN ('prepared','executing','uncertain','completed','failed')),
+          result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+          UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
+        ) STRICT;
+        INSERT INTO supervised_agent_effects SELECT * FROM supervised_agent_effects_valid_v17;
+        DROP TABLE supervised_agent_effects_valid_v17;
+        CREATE INDEX supervised_agent_effects_turn
+          ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
+      `);
+      database.close();
+      const rejected = new SupervisedAgentInboxStore(env.database);
+      await assert.rejects(() => rejected.receipts("shape-v17"), /v17 supervised-effect journal.*invalid durable classification shape/i);
+      await rejected.close();
+    } finally { await env.cleanup(); }
+  }
+
+  {
+    const env = await fixture(); try {
+      const store = new SupervisedAgentInboxStore(env.database);
+      const [item] = await store.ingestPoll({
+        agent_id: "terminal-v17", room_id: "room", last_observed_message_id: "1",
+        messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
+      });
+      await store.close();
+      const database = new DatabaseSync(env.database);
+      database.exec("PRAGMA ignore_check_constraints=ON");
+      database.prepare("UPDATE supervised_agent_inbox SET terminal_reason='upgrade_authority_unavailable' WHERE inbox_item_id=?")
+        .run(item!.inbox_item_id);
+      database.close();
+      const rejected = new SupervisedAgentInboxStore(env.database);
+      await assert.rejects(() => rejected.receipts("terminal-v17"), /mismatched upgrade terminal classification/i);
+      await rejected.close();
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("v17 validation requires the exact supervised-effect request identity and turn index", async () => {
+  for (const malformed of ["missing_identity", "missing_turn_index"] as const) {
+    const env = await fixture(); try {
+      const store = new SupervisedAgentInboxStore(env.database);
+      await store.receipts(`shape-v17-${malformed}`);
+      await store.close();
+      const database = new DatabaseSync(env.database);
+      if (malformed === "missing_turn_index") {
+        database.exec("DROP INDEX supervised_agent_effects_turn");
+      } else {
+        database.exec(`
+          DROP INDEX supervised_agent_effects_turn;
+          ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_valid_identity;
+          CREATE TABLE supervised_agent_effects (
+            effect_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+            execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+            mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
+            mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
+            state TEXT NOT NULL CHECK(state IN ('prepared','executing','uncertain','completed','failed')),
+            result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          ) STRICT;
+          INSERT INTO supervised_agent_effects SELECT * FROM supervised_agent_effects_valid_identity;
+          DROP TABLE supervised_agent_effects_valid_identity;
+          CREATE INDEX supervised_agent_effects_turn
+            ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
+        `);
+      }
+      database.close();
+      const rejected = new SupervisedAgentInboxStore(env.database);
+      await assert.rejects(
+        () => rejected.receipts(`shape-v17-${malformed}`),
+        malformed === "missing_identity" ? /exact request identity constraint/i : /turn index is missing or malformed/i,
+      );
+      await rejected.close();
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("v17 validation requires exact effect_id primary keys for full and compact effect journals", async () => {
+  for (const malformed of ["effects", "tombstones"] as const) {
+    const env = await fixture(); try {
+      const store = new SupervisedAgentInboxStore(env.database);
+      await store.receipts(`shape-v17-${malformed}-primary-key`);
+      await store.close();
+      const database = new DatabaseSync(env.database);
+      if (malformed === "effects") {
+        database.exec(`
+          DROP INDEX supervised_agent_effects_turn;
+          ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_valid_primary_key;
+          CREATE TABLE supervised_agent_effects (
+            effect_id TEXT NOT NULL, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+            execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+            mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
+            mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
+            state TEXT NOT NULL CHECK(state IN ('prepared','executing','uncertain','completed','failed')),
+            result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
+          ) STRICT;
+          INSERT INTO supervised_agent_effects SELECT * FROM supervised_agent_effects_valid_primary_key;
+          DROP TABLE supervised_agent_effects_valid_primary_key;
+          CREATE INDEX supervised_agent_effects_turn
+            ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
+        `);
+      } else {
+        database.exec(`
+          DROP INDEX supervised_agent_effect_tombstones_turn;
+          ALTER TABLE supervised_agent_effect_tombstones RENAME TO supervised_agent_effect_tombstones_valid_primary_key;
+          CREATE TABLE supervised_agent_effect_tombstones (
+            effect_id TEXT NOT NULL, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+            execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+            mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL,
+            request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
+            request_bytes INTEGER NOT NULL CHECK(request_bytes>=0),
+            mutation INTEGER NOT NULL CHECK(mutation IN (0,1)),
+            state TEXT NOT NULL CHECK(state IN ('uncertain','completed','failed')),
+            result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+            UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
+          ) STRICT;
+          INSERT INTO supervised_agent_effect_tombstones SELECT * FROM supervised_agent_effect_tombstones_valid_primary_key;
+          DROP TABLE supervised_agent_effect_tombstones_valid_primary_key;
+          CREATE INDEX supervised_agent_effect_tombstones_turn
+            ON supervised_agent_effect_tombstones(agent_id,execution_generation_id,provider_turn_id);
+        `);
+      }
+      database.close();
+      const rejected = new SupervisedAgentInboxStore(env.database);
+      await assert.rejects(
+        () => rejected.receipts(`shape-v17-${malformed}-primary-key`),
+        malformed === "effects"
+          ? /supervised-effect journal effect_id.*TEXT primary key/i
+          : /supervised-effect tombstone effect_id.*TEXT primary key/i,
+      );
       await rejected.close();
     } finally { await env.cleanup(); }
   }
@@ -1066,17 +1581,29 @@ test("older marker with physical v7 delivery tables installs v9 before advancing
 test("effect journal is exactly-once and rejects request-id or turn identity reuse", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-22T12:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "stone", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "run effect" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn", {
+      ...TEST_PROVIDER_TURN_AUTHORITY,
+      origin_execution_generation_id: "run",
+    });
+    await seedActiveAgent(env, { agentId: "stone", roomId: "room", workAttemptId: "attempt", executionGenerationId: "run", providerContinuationId: "continuation" });
     const authority = {
       agent_id: "stone", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn",
+      work_attempt_id: "attempt", current_execution_generation_id: "run", provider_continuation_id: "continuation",
       mcp_request_id: "request-1", tool_name: "claim_task", request: { task_id: "task-1" },
     };
+    await assert.rejects(() => store.prepareEffect({ ...authority, execution_generation_id: "other-run" }), /authority binding/i);
     const first = await store.prepareEffect(authority);
     assert.equal(first.created, true);
-    await store.markEffectExecuting(first.effect.effect_id);
+    await store.markEffectExecuting({ effect_id: first.effect.effect_id, ...authority });
     const completed = await store.completeEffect({
       effect_id: first.effect.effect_id,
       result: { claimed: true },
-      expected: { agent_id: "stone", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn" },
+      expected: { agent_id: "stone", work_attempt_id: "attempt", provider_turn_id: "turn" },
     });
     assert.equal(completed.state, "completed");
     assert.deepEqual(completed.result, { claimed: true });
@@ -1087,8 +1614,690 @@ test("effect journal is exactly-once and rejects request-id or turn identity reu
     await assert.rejects(() => store.prepareEffect({ ...authority, tool_name: "cancel_task" }), /request id was reused/);
     await assert.rejects(() => store.completeEffect({
       effect_id: first.effect.effect_id,
-      expected: { agent_id: "stone", room_id: "room", execution_generation_id: "other-run", provider_turn_id: "turn" },
-    }), /exact active turn/);
+      expected: { agent_id: "stone", work_attempt_id: "other-attempt", provider_turn_id: "turn" },
+    }), /durable provider-turn authority binding/);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("effect recovery redrives reads, quarantines mutations, and accepts a late exact completion", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T18:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "effect-recovery", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "recover tools" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn", {
+      work_attempt_id: "attempt", origin_execution_generation_id: "run", provider_continuation_id: "continuation",
+    });
+    await seedActiveAgent(env, {
+      agentId: "effect-recovery", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "run", providerContinuationId: "continuation",
+    });
+    const base = {
+      agent_id: "effect-recovery", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn",
+      work_attempt_id: "attempt", current_execution_generation_id: "run", provider_continuation_id: "continuation",
+    };
+    const read = { ...base, mcp_request_id: "read", tool_name: "get_board", request: {} };
+    const mutation = { ...base, mcp_request_id: "mutation", tool_name: "send_message", request: { text: "once" } };
+
+    const firstRead = await store.prepareEffect(read);
+    assert.equal(firstRead.effect.mutation, false);
+    await store.markEffectExecuting({ effect_id: firstRead.effect.effect_id, ...read });
+    const retriedRead = await store.prepareEffect(read);
+    assert.equal(retriedRead.effect.state, "prepared", "an exact duplicate safely reopens a read-only execution");
+    await store.markEffectExecuting({ effect_id: firstRead.effect.effect_id, ...read });
+    assert.equal((await store.completeEffect({
+      effect_id: firstRead.effect.effect_id, result: { tasks: [] },
+      expected: { agent_id: base.agent_id, work_attempt_id: base.work_attempt_id, provider_turn_id: base.provider_turn_id },
+    })).state, "completed");
+
+    const firstMutation = await store.prepareEffect(mutation);
+    assert.equal(firstMutation.effect.mutation, true);
+    await store.markEffectExecuting({ effect_id: firstMutation.effect.effect_id, ...mutation });
+    const uncertain = await store.prepareEffect(mutation);
+    assert.equal(uncertain.effect.state, "uncertain", "a mutation crossing its execution boundary is never invoked twice");
+    assert.match(uncertain.effect.error ?? "", /may have completed.*verify external state/i);
+    assert.equal((await store.prepareEffect(mutation)).effect.state, "uncertain", "uncertainty is durable and idempotent");
+    assert.deepEqual((await store.completeEffect({
+      effect_id: firstMutation.effect.effect_id, result: { sent: true },
+      expected: { agent_id: base.agent_id, work_attempt_id: base.work_attempt_id, provider_turn_id: base.provider_turn_id },
+    })).result, { sent: true }, "a delayed exact completion can converge the durable outcome");
+
+    const restartRead = { ...read, mcp_request_id: "restart-read" };
+    const restartMutation = { ...mutation, mcp_request_id: "restart-mutation" };
+    const restartReadEffect = await store.prepareEffect(restartRead);
+    const restartMutationEffect = await store.prepareEffect(restartMutation);
+    await store.markEffectExecuting({ effect_id: restartReadEffect.effect.effect_id, ...restartRead });
+    await store.markEffectExecuting({ effect_id: restartMutationEffect.effect.effect_id, ...restartMutation });
+    await store.normalizeInterruptedEffects(base.agent_id);
+
+    const inspection = new DatabaseSync(env.database);
+    try {
+      const state = (effectId: string) => (inspection.prepare("SELECT state FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as { state: string }).state;
+      assert.equal(state(restartReadEffect.effect.effect_id), "prepared");
+      assert.equal(state(restartMutationEffect.effect.effect_id), "uncertain");
+    } finally { inspection.close(); }
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("v16 migration durably classifies interrupted reads and mutations", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T18:10:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "v16-effects", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn", {
+      work_attempt_id: "attempt", origin_execution_generation_id: "run", provider_continuation_id: "continuation",
+    });
+    await seedActiveAgent(env, {
+      agentId: "v16-effects", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "run", providerContinuationId: "continuation",
+    });
+    const base = {
+      agent_id: "v16-effects", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn",
+      work_attempt_id: "attempt", current_execution_generation_id: "run", provider_continuation_id: "continuation",
+    };
+    const read = { ...base, mcp_request_id: "read", tool_name: "wait_for_messages", request: {} };
+    const mutation = { ...base, mcp_request_id: "mutation", tool_name: "claim_task", request: { task_id: "1" } };
+    const readEffect = await store.prepareEffect(read);
+    const mutationEffect = await store.prepareEffect(mutation);
+    await store.markEffectExecuting({ effect_id: readEffect.effect.effect_id, ...read });
+    await store.markEffectExecuting({ effect_id: mutationEffect.effect.effect_id, ...mutation });
+    await store.close();
+
+    const legacy = new DatabaseSync(env.database);
+    legacy.exec(`
+      DROP INDEX supervised_agent_effects_turn;
+      ALTER TABLE supervised_agent_effects RENAME TO supervised_agent_effects_v17;
+      CREATE TABLE supervised_agent_effects (
+        effect_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
+        execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+        mcp_request_id TEXT NOT NULL, tool_name TEXT NOT NULL, request_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK(state IN ('prepared','executing','completed','failed')),
+        result_json TEXT, error TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+        UNIQUE(agent_id,execution_generation_id,provider_turn_id,mcp_request_id)
+      ) STRICT;
+      INSERT INTO supervised_agent_effects
+        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
+         tool_name,request_json,state,result_json,error,created_at,updated_at)
+      SELECT effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,
+        tool_name,request_json,state,result_json,error,created_at,updated_at
+      FROM supervised_agent_effects_v17;
+      DROP TABLE supervised_agent_effects_v17;
+      CREATE INDEX supervised_agent_effects_turn
+        ON supervised_agent_effects(agent_id,execution_generation_id,provider_turn_id);
+      UPDATE manifest_metadata SET schema_version=16 WHERE singleton=1;
+      PRAGMA user_version=16;
+    `);
+    legacy.close();
+
+    const migrated = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T18:11:00.000Z");
+    assert.equal((await migrated.prepareEffect(read)).effect.state, "prepared", "the interrupted read remains safely redrivable");
+    const migratedMutation = await migrated.prepareEffect(mutation);
+    assert.equal(migratedMutation.effect.state, "uncertain");
+    assert.equal(migratedMutation.effect.mutation, true);
+    const inspection = new DatabaseSync(env.database);
+    try {
+      assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    } finally { inspection.close(); }
+    await migrated.close();
+  } finally { await env.cleanup(); }
+});
+
+test("33 active-turn uncertain mutations retain exact replay and late-completion authority beyond bounded diagnostics", async () => {
+  const env = await fixture(); try {
+    let clock = Date.parse("2026-08-05T18:20:00.000Z");
+    const store = new SupervisedAgentInboxStore(env.database, () => new Date(clock++).toISOString());
+    const [item] = await store.ingestPoll({
+      agent_id: "uncertain-budget", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "current-turn", {
+      work_attempt_id: "attempt", origin_execution_generation_id: "run", provider_continuation_id: "continuation",
+    });
+    await seedActiveAgent(env, {
+      agentId: "uncertain-budget", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "run", providerContinuationId: "continuation",
+    });
+    const base = {
+      agent_id: "uncertain-budget", room_id: "room", execution_generation_id: "run",
+      provider_turn_id: "current-turn", work_attempt_id: "attempt", current_execution_generation_id: "run",
+      provider_continuation_id: "continuation",
+    };
+    const requests = Array.from({ length: 33 }, (_, index) => ({
+      ...base, mcp_request_id: `mutation-${index + 1}`,
+      tool_name: "send_message", request: { text: `message-${index + 1}` },
+    }));
+    const effects = [];
+    for (const request of requests) {
+      const prepared = await store.prepareEffect(request);
+      effects.push(prepared.effect);
+      await store.markEffectExecuting({ effect_id: prepared.effect.effect_id, ...request });
+      assert.equal((await store.prepareEffect(request)).effect.state, "uncertain");
+    }
+
+    const compacted = new DatabaseSync(env.database);
+    try {
+      assert.equal((compacted.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effects WHERE agent_id=? AND state='uncertain'")
+        .get(base.agent_id) as { count: number }).count, 32, "only the Inspector diagnostic window retains full rows");
+      assert.equal((compacted.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effect_tombstones WHERE agent_id=?")
+        .get(base.agent_id) as { count: number }).count, 1, "request 1 retains a compact durable identity");
+      assert.equal((compacted.prepare(`SELECT COUNT(*) AS count FROM (
+          SELECT effect_id FROM supervised_agent_effects
+          WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+          UNION ALL
+          SELECT effect_id FROM supervised_agent_effect_tombstones
+          WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+        )`).get(
+        base.agent_id, base.execution_generation_id, base.provider_turn_id,
+        base.agent_id, base.execution_generation_id, base.provider_turn_id,
+      ) as { count: number }).count, requests.length,
+      "compaction preserves the same identities counted by bounded per-turn effect admission");
+      assert.equal(compacted.prepare("SELECT 1 FROM supervised_agent_effects WHERE effect_id=?").get(effects[0]!.effect_id), undefined);
+    } finally { compacted.close(); }
+
+    const firstReplay = await store.prepareEffect(requests[0]!);
+    assert.equal(firstReplay.created, false);
+    assert.equal(firstReplay.effect.effect_id, effects[0]!.effect_id);
+    assert.equal(firstReplay.effect.state, "uncertain", "request 1 cannot become executable after diagnostic compaction");
+    await assert.rejects(() => store.prepareEffect({ ...requests[0]!, request: { text: "different" } }), /request id was reused/i);
+    const lateCompletion = await store.completeEffect({
+      effect_id: effects[0]!.effect_id, result: { message_id: "remote-1" },
+      expected: { agent_id: base.agent_id, work_attempt_id: base.work_attempt_id, provider_turn_id: base.provider_turn_id },
+    });
+    assert.equal(lateCompletion.state, "completed");
+    assert.deepEqual(lateCompletion.result, { message_id: "remote-1" });
+    const completedReplay = await store.prepareEffect(requests[0]!);
+    assert.equal(completedReplay.effect.state, "completed");
+    assert.deepEqual(completedReplay.effect.result, { message_id: "remote-1" });
+
+    const admitted = await store.prepareEffect({
+      ...base, mcp_request_id: "new-live-effect",
+      tool_name: "get_board", request: {},
+    });
+    assert.equal(admitted.created, true, "terminal uncertainty does not consume unresolved-effect admission quota");
+    const visible = await store.detail(base.agent_id, "room", "1");
+    assert.equal(visible.uncertain_effects.length, 32);
+    assert.equal(visible.uncertain_effects.some((effect) => effect.effect_id === effects[0]!.effect_id), false,
+      "the compact tombstone remains dedupe authority without expanding the Inspector window");
+    assert.match(visible.uncertain_effects[0]?.error ?? "", /may have completed/i);
+
+    await store.transition(item!.inbox_item_id, "awaiting_result");
+    await store.transition(item!.inbox_item_id, "acknowledged_no_reply");
+    const terminalAuthority = new DatabaseSync(env.database);
+    try {
+      assert.equal((terminalAuthority.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effect_tombstones WHERE effect_id=?")
+        .get(effects[0]!.effect_id) as { count: number }).count, 1,
+      "terminal receipt retention keeps delayed completion/replay authority while its binding exists");
+    } finally { terminalAuthority.close(); }
+    const later = await store.ingestPoll({
+      agent_id: "uncertain-budget", room_id: "room", last_observed_message_id: "201",
+      messages: Array.from({ length: 200 }, (_, index) => ({
+        source_message_id: String(index + 2), source_message: {}, activation: {},
+      })),
+    });
+    for (const laterItem of later) {
+      await store.transition(laterItem.inbox_item_id, "blocked", { last_error: "terminal retention fixture" });
+      await store.skipBlocked(laterItem.inbox_item_id);
+    }
+    const detail = await store.detail("uncertain-budget", "room", "1");
+    assert.equal(detail.availability, "pruned", "uncertain effects do not pin their parent receipt beyond ordinary retention");
+    assert.equal(detail.uncertain_effects.length, 0,
+      "full diagnostics are removed once ordinary receipt retention removes the exact provider-turn binding");
+    assert.equal((await store.receipts("uncertain-budget")).length, 200);
+
+    const bounded = new DatabaseSync(env.database);
+    try {
+      assert.equal((bounded.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effects WHERE agent_id=? AND state='uncertain'")
+        .get("uncertain-budget") as { count: number }).count, 0);
+      assert.equal((bounded.prepare("SELECT COUNT(*) AS count FROM supervised_agent_effect_tombstones WHERE agent_id=?")
+        .get("uncertain-budget") as { count: number }).count, 0,
+      "bounded receipt retention removes the provider-turn binding before compact dedupe identity is discarded");
+    } finally { bounded.close(); }
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("effect journal bounds per-turn rows and payload bytes without stranding completed side effects", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "bounded-effects", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "many tools" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "bounded-turn", {
+      ...TEST_PROVIDER_TURN_AUTHORITY,
+      origin_execution_generation_id: "run",
+    });
+    await seedActiveAgent(env, {
+      agentId: "bounded-effects", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "run", providerContinuationId: "continuation",
+    });
+    const base = {
+      agent_id: "bounded-effects", room_id: "room", execution_generation_id: "run",
+      provider_turn_id: "bounded-turn", work_attempt_id: "attempt",
+      current_execution_generation_id: "run", provider_continuation_id: "continuation",
+      tool_name: "send_message",
+    };
+    await assert.rejects(() => store.prepareEffect({
+      ...base, mcp_request_id: "oversized-request", request: { text: "x".repeat(65 * 1024) },
+    }), /request exceeds the 65536-byte durable limit/i);
+
+    const effects = [];
+    const first = await store.prepareEffect({
+      ...base, mcp_request_id: "effect-0", request: { text: "small" },
+    });
+    effects.push(first.effect);
+    for (let index = 1; index <= 8; index += 1) {
+      effects.push((await store.prepareEffect({
+        ...base, mcp_request_id: `effect-${index}`, request: { text: "x".repeat(60 * 1024) },
+      })).effect);
+    }
+    await assert.rejects(() => store.prepareEffect({
+      ...base, mcp_request_id: "request-budget-overflow", request: { text: "x".repeat(60 * 1024) },
+    }), /durable request budget/i);
+    for (let index = effects.length; index < 127; index += 1) {
+      effects.push((await store.prepareEffect({
+        ...base, mcp_request_id: `effect-${index}`, request: { index },
+      })).effect);
+    }
+    const competingStore = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+    const raced = await Promise.allSettled([
+      store.prepareEffect({ ...base, mcp_request_id: "effect-final-a", request: { contender: "a" } }),
+      competingStore.prepareEffect({ ...base, mcp_request_id: "effect-final-b", request: { contender: "b" } }),
+    ]);
+    const admitted = raced.filter((result): result is PromiseFulfilledResult<Awaited<ReturnType<typeof store.prepareEffect>>> => result.status === "fulfilled");
+    const rejected = raced.filter((result): result is PromiseRejectedResult => result.status === "rejected");
+    assert.equal(admitted.length, 1, "BEGIN IMMEDIATE serializes independent stores racing the final turn slot");
+    assert.equal(rejected.length, 1);
+    assert.match(String(rejected[0]!.reason), /at most 128 effects/i);
+    effects.push(admitted[0]!.value.effect);
+    await competingStore.close();
+    await assert.rejects(() => store.prepareEffect({
+      ...base, mcp_request_id: "effect-128", request: { over: true },
+    }), /at most 128 effects/i);
+    assert.equal((await store.prepareEffect({
+      ...base, mcp_request_id: "effect-0", request: { text: "small" },
+    })).created, false, "an exact replay remains available after admission reaches its cap");
+    await assert.rejects(() => store.prepareRoomMoveEffect({
+      agent_id: base.agent_id,
+      room_id: base.room_id,
+      effect_execution_generation_id: base.execution_generation_id,
+      provider_turn_id: base.provider_turn_id,
+      mcp_request_id: "move-after-cap",
+      request: { name: "destination" },
+      destination_room_id: "destination",
+      daemon_generation: 1,
+      work_attempt_id: base.work_attempt_id,
+      execution_generation_id: base.current_execution_generation_id,
+      provider_continuation_id: base.provider_continuation_id,
+      agent_session_id: "agent-session",
+      activating_inbox_item_id: item!.inbox_item_id,
+    }), /at most 128 effects/i, "room moves share the same transactional per-turn admission cap");
+
+    for (let index = 0; index < 4; index += 1) {
+      await store.markEffectExecuting({ effect_id: effects[index]!.effect_id, ...base });
+      const completed = await store.completeEffect({
+        effect_id: effects[index]!.effect_id,
+        result: { text: "r".repeat(250 * 1024) },
+        expected: { agent_id: base.agent_id, work_attempt_id: base.work_attempt_id, provider_turn_id: base.provider_turn_id },
+      });
+      assert.equal(completed.state, "completed");
+    }
+    await store.markEffectExecuting({ effect_id: effects[4]!.effect_id, ...base });
+    const omittedForBudget = await store.completeEffect({
+      effect_id: effects[4]!.effect_id,
+      result: { text: "r".repeat(250 * 1024) },
+      expected: { agent_id: base.agent_id, work_attempt_id: base.work_attempt_id, provider_turn_id: base.provider_turn_id },
+    });
+    assert.deepEqual(omittedForBudget.result, {
+      supervised_effect_result_omitted: true,
+      reason: "durable_size_limit",
+      serialized_bytes: 256011,
+    }, "an already-executed effect settles with explicit omission instead of becoming immortal");
+
+    await store.markEffectExecuting({ effect_id: effects[5]!.effect_id, ...base });
+    const omittedUnserializable = await store.completeEffect({
+      effect_id: effects[5]!.effect_id,
+      result: { value: 1n },
+      expected: { agent_id: base.agent_id, work_attempt_id: base.work_attempt_id, provider_turn_id: base.provider_turn_id },
+    });
+    assert.deepEqual(omittedUnserializable.result, {
+      supervised_effect_result_omitted: true,
+      reason: "not_json_serializable",
+      serialized_bytes: null,
+    });
+    await assert.rejects(() => store.stagePreparedEffectResult(
+      effects[6]!.effect_id, { text: "r".repeat(257 * 1024) },
+    ), /prepared result exceeds the 262144-byte durable limit/i);
+
+    await store.markEffectExecuting({ effect_id: effects[7]!.effect_id, ...base });
+    const failed = await store.completeEffect({
+      effect_id: effects[7]!.effect_id,
+      error: "failure ".repeat(8 * 1024),
+      expected: { agent_id: base.agent_id, work_attempt_id: base.work_attempt_id, provider_turn_id: base.provider_turn_id },
+    });
+    assert.equal(failed.state, "failed");
+    assert.ok(Buffer.byteLength(failed.error ?? "", "utf8") <= 16 * 1024);
+    assert.match(failed.error ?? "", /\[truncated\]$/);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("effect retention is globally bounded across terminal turns while unresolved evidence remains durable", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:30:00.000Z");
+    await seedActiveAgent(env, {
+      agentId: "unresolved-retention", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "run-unresolved", providerContinuationId: "continuation",
+    });
+    const unresolvedItems = await store.ingestPoll({
+      agent_id: "unresolved-retention",
+      room_id: "room",
+      last_observed_message_id: "129",
+      messages: Array.from({ length: 129 }, (_, index) => ({
+        source_message_id: String(index + 1), source_message: { index }, activation: {},
+      })),
+    });
+    for (let index = 0; index < 128; index += 1) {
+      const item = unresolvedItems[index]!;
+      const providerTurnId = `unresolved-turn-${index}`;
+      await store.transition(item.inbox_item_id, "dispatching");
+      await store.checkpointTurnStarted(item.inbox_item_id, providerTurnId, {
+        work_attempt_id: "attempt",
+        origin_execution_generation_id: "run-unresolved",
+        provider_continuation_id: "continuation",
+      });
+      const input = {
+        agent_id: "unresolved-retention", room_id: "room", execution_generation_id: "run-unresolved",
+        provider_turn_id: providerTurnId, work_attempt_id: "attempt",
+        current_execution_generation_id: "run-unresolved", provider_continuation_id: "continuation",
+        mcp_request_id: `unresolved-effect-${index}`, tool_name: "send_message", request: { index },
+      };
+      const prepared = await store.prepareEffect(input);
+      await store.markEffectExecuting({ effect_id: prepared.effect.effect_id, ...input });
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, "acknowledged_no_reply");
+    }
+    const blockedItem = unresolvedItems[128]!;
+    await store.transition(blockedItem.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(blockedItem.inbox_item_id, "unresolved-turn-blocked", {
+      work_attempt_id: "attempt",
+      origin_execution_generation_id: "run-unresolved",
+      provider_continuation_id: "continuation",
+    });
+    await assert.rejects(() => store.prepareEffect({
+      agent_id: "unresolved-retention", room_id: "room", execution_generation_id: "run-unresolved",
+      provider_turn_id: "unresolved-turn-blocked", work_attempt_id: "attempt",
+      current_execution_generation_id: "run-unresolved", provider_continuation_id: "continuation",
+      mcp_request_id: "unresolved-effect-blocked", tool_name: "send_message", request: { blocked: true },
+    }), /at most 128 unresolved effects across turns/i);
+    await store.transition(blockedItem.inbox_item_id, "awaiting_result");
+    await store.transition(blockedItem.inbox_item_id, "acknowledged_no_reply");
+
+    await seedActiveAgent(env, {
+      agentId: "completed-retention", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "run-completed", providerContinuationId: "continuation",
+    });
+    const completedItems = await store.ingestPoll({
+      agent_id: "completed-retention",
+      room_id: "room",
+      last_observed_message_id: "205",
+      messages: Array.from({ length: 205 }, (_, index) => ({
+        source_message_id: String(index + 1), source_message: { index }, activation: {},
+      })),
+    });
+    for (let index = 0; index < completedItems.length; index += 1) {
+      const item = completedItems[index]!;
+      const providerTurnId = `completed-turn-${index}`;
+      await store.transition(item.inbox_item_id, "dispatching");
+      await store.checkpointTurnStarted(item.inbox_item_id, providerTurnId, {
+        work_attempt_id: "attempt",
+        origin_execution_generation_id: "run-completed",
+        provider_continuation_id: "continuation",
+      });
+      const input = {
+        agent_id: "completed-retention", room_id: "room", execution_generation_id: "run-completed",
+        provider_turn_id: providerTurnId, work_attempt_id: "attempt",
+        current_execution_generation_id: "run-completed", provider_continuation_id: "continuation",
+        mcp_request_id: `completed-effect-${index}`, tool_name: "send_message", request: { index },
+      };
+      const prepared = await store.prepareEffect(input);
+      await store.markEffectExecuting({ effect_id: prepared.effect.effect_id, ...input });
+      await store.completeEffect({
+        effect_id: prepared.effect.effect_id,
+        result: { index },
+        expected: { agent_id: input.agent_id, work_attempt_id: input.work_attempt_id, provider_turn_id: input.provider_turn_id },
+      });
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, "acknowledged_no_reply");
+      if (index === 0) {
+        // A completed turn-control journal intentionally keeps its exact
+        // provider-turn coordinates for audit/operator history. Reproduce that
+        // durable terminal shape before enough later receipts trigger pruning.
+        const journal = new DatabaseSync(env.database);
+        journal.prepare(`INSERT INTO turn_control_sequence_watermarks(agent_id,last_sequence)
+          VALUES (?,?) ON CONFLICT(agent_id) DO UPDATE SET last_sequence=excluded.last_sequence`)
+          .run("completed-retention", 1);
+        journal.prepare(`UPDATE turn_control_journals SET
+          turn_control_present=1,action_id=?,action_sequence=1,
+          turn_work_attempt_id=?,turn_execution_generation_id=?,
+          target_room_id=?,target_source_message_id=?,target_provider_continuation_id=?,
+          inbox_item_id=?,provider_turn_id=?,has_correction=0,correction_text=NULL,
+          correction_strategy=NULL,operator_resolution=NULL,status='completed',
+          capability='native_interrupt',interrupted=1,resumed=0,turn_state='stopped',
+          error=NULL,recorded_at=?,updated_at=? WHERE agent_id=?`).run(
+          "completed-control", "attempt", "run-completed", "room", item.source_message_id,
+          "continuation", item.inbox_item_id, providerTurnId,
+          "2026-08-05T17:30:00.000Z", "2026-08-05T17:30:00.000Z", "completed-retention",
+        );
+        journal.close();
+      }
+    }
+    assert.equal((await store.receipts("unresolved-retention")).length, 129,
+      "unresolved execution evidence pins only the globally capped receipt set");
+    assert.equal((await store.receipts("completed-retention")).length, 200);
+    assert.equal((await store.get(completedItems[0]!.inbox_item_id))?.source_message_id, "1",
+      "the exact completed turn-control target remains inside the fixed receipt budget");
+    assert.equal(await store.get(completedItems[1]!.inbox_item_id), null,
+      "pinning the control target does not grow the bounded terminal history");
+    await store.close();
+
+    const inspection = new DatabaseSync(env.database);
+    assert.equal((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+      WHERE agent_id='unresolved-retention' AND state IN ('prepared','executing')`).get() as { count: number }).count, 128);
+    assert.equal((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+      WHERE agent_id='completed-retention'`).get() as { count: number }).count, 200,
+    "completed effects are pruned with the same retained receipt scope");
+    assert.equal(inspection.prepare("PRAGMA foreign_key_check").get(), undefined);
+    assert.doesNotThrow(() => new DaemonStateSchema().createSchema(inspection),
+      "retention cannot detach a completed turn-control journal from its exact inbox binding on reopen");
+    assert.ok(inspection.prepare(`SELECT 1 FROM supervised_agent_provider_turn_bindings
+      WHERE inbox_item_id=?`).get(completedItems[0]!.inbox_item_id),
+    "the pinned receipt keeps its exact provider-turn authority binding");
+
+    // Simulate the predecessor retention bug on a current-v16 database. Since
+    // the control is completed, startup repair must preserve its action audit
+    // while honestly dropping the now-unprovable causal target tuple.
+    inspection.prepare(`INSERT INTO supervised_agent_pruned_sources
+      (agent_id,room_id,source_message_id,pruned_at) VALUES (?,?,?,?)`).run(
+      "completed-retention", "room", completedItems[0]!.source_message_id, "2026-08-05T17:31:00.000Z",
+    );
+    inspection.prepare("DELETE FROM supervised_agent_inbox WHERE inbox_item_id=?")
+      .run(completedItems[0]!.inbox_item_id);
+    assert.doesNotThrow(() => new DaemonStateSchema().createSchema(inspection));
+    const repairedControl = inspection.prepare(`SELECT status,target_room_id,
+      target_source_message_id,target_provider_continuation_id,inbox_item_id,
+      provider_turn_id,error FROM turn_control_journals WHERE agent_id=?`)
+      .get("completed-retention") as Record<string, unknown>;
+    assert.equal(repairedControl.status, "completed");
+    for (const column of ["target_room_id", "target_source_message_id", "target_provider_continuation_id", "inbox_item_id", "provider_turn_id"]) {
+      assert.equal(repairedControl[column], null, `${column} is cleared instead of guessed`);
+    }
+    assert.match(String(repairedControl.error), /retained as audit-only/i);
+    inspection.close();
+  } finally { await env.cleanup(); }
+});
+
+test("effect completion releases every terminal receipt pin and converges physical history", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T18:00:00.000Z");
+  try {
+    await seedActiveAgent(env, {
+      agentId: "effect-unpin", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "run", providerContinuationId: "continuation",
+    });
+    const settle = async (index: number, withEffect: boolean) => {
+      const item = await store.enqueueCorrection({
+        agent_id: "effect-unpin", room_id: "room", source_message_id: `effect-unpin-${index}`,
+        source_message: { index }, activation: { decision: "activate" },
+      });
+      assert.equal((await store.claimHead("effect-unpin"))?.inbox_item_id, item.inbox_item_id);
+      const providerTurnId = `effect-unpin-turn-${index}`;
+      await store.checkpointTurnStarted(item.inbox_item_id, providerTurnId, {
+        work_attempt_id: "attempt", origin_execution_generation_id: "run", provider_continuation_id: "continuation",
+      });
+      let effectId: string | null = null;
+      if (withEffect) {
+        const input = {
+          agent_id: "effect-unpin", room_id: "room", execution_generation_id: "run",
+          provider_turn_id: providerTurnId, work_attempt_id: "attempt",
+          current_execution_generation_id: "run", provider_continuation_id: "continuation",
+          mcp_request_id: `effect-unpin-request-${index}`, tool_name: "send_message", request: { index },
+        };
+        const prepared = await store.prepareEffect(input);
+        await store.markEffectExecuting({ effect_id: prepared.effect.effect_id, ...input });
+        effectId = prepared.effect.effect_id;
+      }
+      await store.transition(item.inbox_item_id, "awaiting_result");
+      await store.transition(item.inbox_item_id, "acknowledged_no_reply");
+      return { effectId, providerTurnId };
+    };
+
+    for (let index = 0; index < 200; index += 1) await settle(index, false);
+    const executing = [];
+    for (let index = 200; index < 328; index += 1) executing.push(await settle(index, true));
+    let inspection = new DatabaseSync(env.database);
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+      WHERE agent_id='effect-unpin'`).get() as { count: number }).count), 328,
+    "executing effects intentionally pin their terminal receipts above ordinary history retention");
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+      WHERE agent_id='effect-unpin' AND state='executing'`).get() as { count: number }).count), 128);
+    inspection.close();
+
+    for (const effect of executing) {
+      await store.completeEffect({
+        effect_id: effect.effectId!, result: { completed: true },
+        expected: { agent_id: "effect-unpin", work_attempt_id: "attempt", provider_turn_id: effect.providerTurnId },
+      });
+    }
+    inspection = new DatabaseSync(env.database);
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox
+      WHERE agent_id='effect-unpin'`).get() as { count: number }).count), 200,
+    "the final unpin transaction converges immediately to the exact receipt budget");
+    assert.equal(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+      WHERE agent_id='effect-unpin' AND state IN ('prepared','executing')`).get() as { count: number }).count), 0);
+    assert.ok(Number((inspection.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_effects
+      WHERE agent_id='effect-unpin'`).get() as { count: number }).count) <= 128);
+    assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
+    inspection.close();
+
+    await store.close();
+    const reopened = new SupervisedAgentInboxStore(env.database);
+    assert.equal((await reopened.receipts("effect-unpin")).length, 200);
+    await reopened.close();
+    const reopenedManifest = new ManifestStore(env.database);
+    assert.equal((await reopenedManifest.getEntry("effect-unpin"))?.provider_ref?.execution_generation_id, "run");
+    await reopenedManifest.close();
+  } finally {
+    await store.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("an effect that loses runtime authority before execution is durably failed", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:00:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "stop-race", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "run effect" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-stop-race", TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, {
+      agentId: "stop-race", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation",
+    });
+    const authority = {
+      agent_id: "stop-race", room_id: "room", execution_generation_id: "generation",
+      provider_turn_id: "turn-stop-race", work_attempt_id: "attempt",
+      current_execution_generation_id: "generation", provider_continuation_id: "continuation",
+      mcp_request_id: "request-stop-race", tool_name: "claim_task", request: { task_id: "task" },
+    };
+    const prepared = await store.prepareEffect(authority);
+
+    const manifest = new ManifestStore(env.database);
+    const current = await manifest.load();
+    await manifest.write(current.generation, current.entries.map((candidate) => candidate.id === "stop-race"
+      ? { ...candidate, desired_state: "stopped" as const }
+      : candidate));
+    await manifest.close();
+
+    await assert.rejects(
+      () => store.markEffectExecuting({ effect_id: prepared.effect.effect_id, ...authority }),
+      /lost its exact current runtime authority/,
+    );
+    const replay = await store.prepareEffect(authority);
+    assert.equal(replay.effect.state, "failed", "the rejected execution CAS cannot leave an immortal prepared row");
+    assert.match(replay.effect.error ?? "", /lost its exact current runtime authority/);
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
+test("reply publication settles unexecuted ordinary effects but preserves prepared room moves", async () => {
+  const env = await fixture(); try {
+    const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T13:15:00.000Z");
+    const [item] = await store.ingestPoll({
+      agent_id: "terminal-effect", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { text: "finish" }, activation: {} }],
+    });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-terminal", TEST_PROVIDER_TURN_AUTHORITY);
+    await seedActiveAgent(env, {
+      agentId: "terminal-effect", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation",
+    });
+    const base = {
+      agent_id: "terminal-effect", room_id: "room", execution_generation_id: "generation",
+      provider_turn_id: "turn-terminal", work_attempt_id: "attempt",
+      current_execution_generation_id: "generation", provider_continuation_id: "continuation",
+    };
+    const ordinary = await store.prepareEffect({
+      ...base, mcp_request_id: "use-final", tool_name: "send_message", request: { reply_to: "1", text: "answer" },
+    });
+    const move = await store.prepareEffect({
+      ...base, mcp_request_id: "move", tool_name: "join_room", request: { name: "next-room" },
+    });
+    await store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind: "reply", text: "answer" }));
+    await store.transition(item!.inbox_item_id, "awaiting_result");
+    await store.transition(item!.inbox_item_id, "publishing");
+    await store.checkpointPublication({
+      inbox_item_id: item!.inbox_item_id, room_id: "room", canonical_message_id: "published-answer",
+    });
+
+    assert.equal((await store.prepareEffect({
+      ...base, mcp_request_id: "use-final", tool_name: "send_message", request: { reply_to: "1", text: "answer" },
+    })).effect.state, "failed");
+    assert.equal((await store.preparedRoomMoves("terminal-effect"))[0]?.effect_id, move.effect.effect_id,
+      "the post-publication room-move journal remains available for reconciliation");
+    assert.notEqual(ordinary.effect.effect_id, move.effect.effect_id);
     await store.close();
   } finally { await env.cleanup(); }
 });
@@ -1099,7 +2308,7 @@ test("delivery timeline records causal phases durably across a daemon restart", 
     const [item] = await store.ingestPoll({ agent_id: "timeline", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
     await store.claimHead("timeline");
     await store.checkpointDispatchIntent(item!.inbox_item_id);
-    await store.checkpointTurnStarted(item!.inbox_item_id, "turn");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn", TEST_PROVIDER_TURN_AUTHORITY);
     await store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind: "reply", text: "durable" }));
     await store.transition(item!.inbox_item_id, "awaiting_result", { provider_turn_id: "turn" });
     await store.transition(item!.inbox_item_id, "publishing");
@@ -1156,7 +2365,7 @@ test("retry attempts retain distinct causal phases while replaying one transitio
     await store.transition(item!.inbox_item_id, "pending");
     await store.claimHead("attempts");
     await store.checkpointDispatchIntent(item!.inbox_item_id);
-    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-2");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "turn-2", TEST_PROVIDER_TURN_AUTHORITY);
     const phases = (await store.receipts("attempts"))[0]!.timeline.map((event) => event.phase);
     assert.deepEqual(phases, ["received", "queued", "retry_scheduled", "queued", "turn_started"]);
     await store.close();

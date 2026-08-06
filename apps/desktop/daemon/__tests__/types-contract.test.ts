@@ -50,6 +50,7 @@ const entry = {
   },
   ready_reached_at: "2026-07-19T00:01:00.000Z",
   activity: [],
+  last_turn_control_sequence: 0,
   turn_control: null,
   last_worker_binding: null,
   reconciliation: {

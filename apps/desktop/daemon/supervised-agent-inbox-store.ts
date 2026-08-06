@@ -1,7 +1,13 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import {
+  pruneSupervisedAgentHistory,
+  RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
+  RETAINED_TERMINAL_RECEIPTS_PER_AGENT,
+  settlePreparedSupervisedEffectsForTerminalItem,
+} from "./supervised-agent-history-retention.js";
 
 export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "cancelled_by_room_move" | "cancelled_by_user";
 export type SupervisedInboxReceiptState = SupervisedInboxState | "queued_behind_blocked";
@@ -13,7 +19,17 @@ export type SupervisedInboxItem = {
   source_message: unknown; activation: InboxActivation; fifo_sequence: number; state: SupervisedInboxState;
   attempt_count: number; action_id: string; reply_client_message_id: string; provider_turn_id: string | null;
   outcome: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; blocked_by_inbox_item_id: string | null;
-  next_attempt_at_ms: number | null; created_at: string; updated_at: string; acknowledged_at: string | null;
+  next_attempt_at_ms: number | null; terminal_reason: "upgrade_authority_unavailable" | null;
+  created_at: string; updated_at: string; acknowledged_at: string | null;
+};
+export type SupervisedProviderTurnBinding = {
+  inbox_item_id: string;
+  agent_id: string;
+  room_id: string;
+  work_attempt_id: string;
+  origin_execution_generation_id: string;
+  provider_continuation_id: string;
+  provider_turn_id: string;
 };
 export type SupervisedInboxReceipt = SupervisedInboxItem & { receipt_state: SupervisedInboxReceiptState };
 export type SupervisedInboxEvent = {
@@ -27,23 +43,39 @@ export type SupervisedInboxReceiptWithTimeline = SupervisedInboxReceipt & {
 };
 export type SupervisedEffectRecord = {
   effect_id: string; agent_id: string; room_id: string; execution_generation_id: string; provider_turn_id: string;
-  mcp_request_id: string; tool_name: string; request: unknown; state: "prepared" | "executing" | "completed" | "failed";
-  result: unknown | null; error: string | null;
+  mcp_request_id: string; tool_name: string; request: unknown; mutation: boolean;
+  state: "prepared" | "executing" | "uncertain" | "completed" | "failed";
+  result: unknown | null; error: string | null; created_at: string; updated_at: string;
 };
 export type AgentInspectorDetail = {
   availability: "available" | "pruned" | "not_loaded";
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: InboxActivation | null } | null;
-  receipt: { state: SupervisedInboxState; attempt_count: number; provider_turn_id: string | null; outcome: unknown; last_error: string | null; failure_code: "provider_continuation_missing" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
+  receipt: { state: SupervisedInboxState; attempt_count: number; provider_turn_id: string | null; outcome: unknown; last_error: string | null; failure_code: "provider_continuation_missing" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null; terminal_reason: "upgrade_authority_unavailable" | null } | null;
   terminal: { outcome: string; normalized_text: string | null; evidence_source: string; observed_at: string } | null;
   publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
   continuation_repair: ProviderContinuationRepair | null;
   timeline: SupervisedInboxEvent[];
-  items: Array<{ source_message_id: string; inbox_item_id: string; state: SupervisedInboxState; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: unknown; provider_turn_id: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; canonical_message_id: string | null }>;
+  items: Array<{ source_message_id: string; inbox_item_id: string; state: SupervisedInboxState; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: unknown; provider_turn_id: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; canonical_message_id: string | null }>;
+  uncertain_effects: Array<{ effect_id: string; tool_name: string; mcp_request_id: string; error: string; created_at: string; updated_at: string }>;
   history_boundary: { earliest_retained_observed_message_id: string | null; earliest_retained_inbox_message_id: string | null; earliest_retained_receipt_sequence: number | null; pruned_before_message_id: string | null; pruned_at: string | null } | null;
 };
 type Row = Record<string, unknown>;
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
+class EffectAuthorityError extends Error {}
+const MAX_EFFECTS_PER_PROVIDER_TURN = 128;
+const MAX_UNRESOLVED_EFFECTS_PER_AGENT = 128;
+const MAX_EFFECT_REQUEST_BYTES = 64 * 1024;
+const MAX_EFFECT_REQUEST_BYTES_PER_PROVIDER_TURN = 512 * 1024;
+const MAX_EFFECT_RESULT_BYTES = 256 * 1024;
+const MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN = 1024 * 1024;
+const MAX_EFFECT_ERROR_BYTES = 16 * 1024;
+const READ_ONLY_EFFECT_TOOLS = new Set([
+  "get_current_room", "check_repo", "check_repo_visibility",
+  "read_messages", "wait_for_messages", "get_board", "get_board_settings",
+  "get_room_artifacts", "get_room_events", "list_board_intents",
+  "get_onboarding_status", "status_local_codex_session", "rental_list_requests",
+]);
 export type ProviderContinuationRepair = {
   repair_id: string;
   agent_id: string;
@@ -63,10 +95,7 @@ export type ProviderContinuationRepair = {
   updated_at: string;
 };
 const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"]);
-const RETAINED_TERMINAL_RECEIPTS_PER_AGENT = 200;
 const RETAINED_TIMELINE_EVENTS_PER_RECEIPT = 64;
-const RETAINED_OBSERVED_MESSAGES_PER_AGENT = 500;
-const RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT = 2_000;
 const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInboxState[]>> = {
   pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "retryable", "blocked"],
   awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "retryable", "blocked"],
@@ -119,16 +148,19 @@ export class SupervisedAgentInboxStore {
   }
 
   /** Atomically retire source ingress and install the response-first destination tail boundary. */
-  async commitRoomMoveCursor(input: { agent_id: string; source_room_id: string; destination_room_id: string; last_observed_message_id: string | null }): Promise<void> {
+  async commitRoomMoveCursor(
+    input: { agent_id: string; source_room_id: string; destination_room_id: string; last_observed_message_id: string | null },
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<void> {
     this.require(input.agent_id, "agent_id"); this.require(input.source_room_id, "source_room_id"); this.require(input.destination_room_id, "destination_room_id");
     if (input.source_room_id === input.destination_room_id) throw new Error("Room-move cursor requires distinct rooms.");
     if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
-    await this.exclusive(async (database) => this.transaction(database, () => {
+    await this.exclusive(async (database) => this.transactionFenced(database, () => {
       const existing = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?").get(input.agent_id, input.destination_room_id) as Row | undefined;
       if (existing && (existing.last_observed_message_id === null ? null : String(existing.last_observed_message_id)) !== input.last_observed_message_id) throw new Error("Destination ingress cursor already has a different room-move boundary.");
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.source_room_id);
       if (!existing) run(database.prepare("INSERT OR REPLACE INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)"), input.agent_id, input.destination_room_id, input.last_observed_message_id, this.now());
-    }));
+    }, commitFence));
   }
 
   /** One transaction: idempotently insert activated messages and persist the poll cursor. */
@@ -219,8 +251,25 @@ export class SupervisedAgentInboxStore {
       return row ? rowToItem(row) : null;
     });
   }
+
+  async providerTurnBinding(inboxItemId: string): Promise<SupervisedProviderTurnBinding | null> {
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      return row ? rowToProviderTurnBinding(row) : null;
+    });
+  }
   async get(inboxItemId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => { const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined; return row ? rowToItem(row) : null; });
+  }
+  /** Read one stable room-source identity, including terminal legacy rows. */
+  async getBySourceMessage(agentId: string, roomId: string, sourceMessageId: string): Promise<SupervisedInboxItem | null> {
+    this.require(agentId, "agent_id"); this.require(roomId, "room_id"); this.require(sourceMessageId, "source_message_id");
+    return this.read(async (database) => {
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1")
+        .get(agentId, roomId, sourceMessageId) as Row | undefined;
+      return row ? rowToItem(row) : null;
+    });
   }
   /** Atomically checkpoint the canonical API identity with its acknowledgement. */
   async checkpointPublication(input: { inbox_item_id: string; room_id: string; canonical_message_id: string }): Promise<SupervisedInboxItem> {
@@ -239,6 +288,7 @@ export class SupervisedAgentInboxStore {
           VALUES (?,?,?,?,?,?) ON CONFLICT(inbox_item_id) DO NOTHING`), item.inbox_item_id, item.agent_id, item.room_id, item.reply_client_message_id, input.canonical_message_id, timestamp);
         run(database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged',updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"), timestamp, timestamp, item.inbox_item_id);
         this.recordEvent(database, item.inbox_item_id, `published:${item.attempt_count}`, "published", timestamp, input.canonical_message_id);
+        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
       }
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
@@ -249,16 +299,26 @@ export class SupervisedAgentInboxStore {
     return this.read(async (database) => {
       const boundary = database.prepare("SELECT * FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?").get(agentId, roomId) as Row | undefined;
       // Work rows are newest-first so a reopened Inspector starts at current work.
-      const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,i.failure_code,p.canonical_message_id
+      const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,i.failure_code,i.terminal_reason,p.canonical_message_id
         FROM supervised_agent_inbox i LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
         WHERE i.agent_id=? AND i.room_id=? ORDER BY i.fifo_sequence DESC LIMIT 50`).all(agentId, roomId) as Row[]).map(rowToInspectorItem);
+      const uncertainEffects = (database.prepare(`SELECT effect_id,tool_name,mcp_request_id,error,created_at,updated_at
+        FROM supervised_agent_effects WHERE agent_id=? AND state='uncertain'
+        ORDER BY updated_at DESC,effect_id DESC LIMIT ?`).all(agentId, RETAINED_UNCERTAIN_EFFECTS_PER_AGENT) as Row[]).map((effect) => ({
+        effect_id: String(effect.effect_id),
+        tool_name: String(effect.tool_name),
+        mcp_request_id: String(effect.mcp_request_id),
+        error: effect.error === null ? "The mutating tool outcome is uncertain." : String(effect.error),
+        created_at: String(effect.created_at),
+        updated_at: String(effect.updated_at),
+      }));
       const row = sourceMessageId ? database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId) as Row | undefined : undefined;
       const history = boundary ? boundaryToDetail(boundary) : null;
       if (!row) {
         const pruned = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_pruned_sources WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const observed = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const availability: AgentInspectorDetail["availability"] = pruned ? "pruned" : observed ? "not_loaded" : "not_loaded";
-        return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, history_boundary: history };
+        return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, uncertain_effects: uncertainEffects, history_boundary: history };
       }
       const item = rowToItem(row);
       const events = (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
@@ -267,11 +327,11 @@ export class SupervisedAgentInboxStore {
       const repair = database.prepare("SELECT * FROM provider_continuation_repairs WHERE inbox_item_id=? ORDER BY created_at DESC LIMIT 1").get(item.inbox_item_id) as Row | undefined;
       return { availability: "available", entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
         source_message: safeSource(item.source_message, item.source_message_id, roomId, item.activation),
-        receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, failure_code: item.failure_code, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms },
+        receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, failure_code: item.failure_code, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms, terminal_reason: item.terminal_reason },
         terminal: terminal ? { outcome: String(terminal.outcome), normalized_text: terminal.normalized_text === null ? null : String(terminal.normalized_text), evidence_source: String(terminal.evidence_source), observed_at: String(terminal.observed_at) } : null,
         publication: publication ? { client_message_id: String(publication.client_message_id), canonical_message_id: String(publication.canonical_message_id), room_id: String(publication.room_id) } : null,
         continuation_repair: repair ? rowToContinuationRepair(repair) : null,
-        timeline: events, items, history_boundary: history };
+        timeline: events, items, uncertain_effects: uncertainEffects, history_boundary: history };
     });
   }
   async transition(inboxItemId: string, next: SupervisedInboxState, patch: Partial<Pick<SupervisedInboxItem, "provider_turn_id" | "outcome" | "last_error" | "failure_code" | "next_attempt_at_ms" | "blocked_by_inbox_item_id">> = {}): Promise<SupervisedInboxItem> {
@@ -284,6 +344,10 @@ export class SupervisedAgentInboxStore {
       // prevents a later item becoming blocked and hiding the real stall.
       if (!finalStates.has(next)) this.assertCurrentHead(database, item);
       if (next === "dispatching" && item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
+      if (Object.hasOwn(patch, "provider_turn_id")
+        && patch.provider_turn_id !== item.provider_turn_id) {
+        throw new Error("Provider turn identity may change only through the atomic turn-start checkpoint.");
+      }
       const attempts = item.attempt_count;
       const timestamp = this.now(); const acknowledged = finalStates.has(next) ? timestamp : null;
       run(database.prepare(`UPDATE supervised_agent_inbox SET state=?,attempt_count=?,provider_turn_id=?,outcome=?,last_error=?,failure_code=?,blocked_by_inbox_item_id=?,next_attempt_at_ms=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
@@ -297,7 +361,10 @@ export class SupervisedAgentInboxStore {
           : updated.attempt_count;
         this.recordEvent(database, inboxItemId, `${event}:${ordinal}`, event, timestamp, updated.last_error);
       }
-      if (finalStates.has(next)) this.pruneAgentHistory(database, item.agent_id);
+      if (finalStates.has(next)) {
+        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.pruneAgentHistory(database, item.agent_id);
+      }
       return updated;
     }));
   }
@@ -306,6 +373,24 @@ export class SupervisedAgentInboxStore {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
+      const turnControlBarrier = database.prepare(`SELECT inbox_item_id,status FROM turn_control_journals
+        WHERE agent_id=? AND turn_control_present=1
+          AND status IN ('prepared','dispatching','uncertain','retryable')`).get(agentId) as Row | undefined;
+      if (turnControlBarrier) {
+        const linkedInboxItemId = typeof turnControlBarrier.inbox_item_id === "string"
+          && turnControlBarrier.inbox_item_id.trim()
+          ? turnControlBarrier.inbox_item_id
+          : null;
+        const status = String(turnControlBarrier.status);
+        // Every unresolved accepted action freezes lane admission, including an
+        // idle/pre-native action that has no linked row yet. Otherwise B could
+        // be claimed between the action's idle observation and its atomic
+        // correction insert, placing an already-running B behind the newly
+        // inserted correction. The sole recovery exception is a retryable
+        // action linked to exact A: A may resume, but the same barrier keeps B
+        // blocked after A finishes until the accepted action completes.
+        if (status !== "retryable" || linkedInboxItemId === null || item.inbox_item_id !== linkedInboxItemId) return null;
+      }
       if (item.state === "result_recovery") return item;
       if (item.state !== "pending") return null;
       this.assertCurrentHead(database, item);
@@ -331,8 +416,15 @@ export class SupervisedAgentInboxStore {
     }));
   }
   /** Persist the exact provider turn id before waiting for any terminal evidence. */
-  async checkpointTurnStarted(inboxItemId: string, providerTurnId: string): Promise<SupervisedInboxItem> {
+  async checkpointTurnStarted(inboxItemId: string, providerTurnId: string, authority: {
+    work_attempt_id: string;
+    origin_execution_generation_id: string;
+    provider_continuation_id: string;
+  }): Promise<SupervisedInboxItem> {
     if (!providerTurnId.trim()) throw new Error("Provider turn id is required for the turn-start checkpoint.");
+    this.require(authority.work_attempt_id, "provider turn work_attempt_id");
+    this.require(authority.origin_execution_generation_id, "provider turn origin_execution_generation_id");
+    this.require(authority.provider_continuation_id, "provider turn provider_continuation_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
       const current = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
@@ -340,9 +432,30 @@ export class SupervisedAgentInboxStore {
       if (item.state !== "dispatching") throw new Error("Provider turn-start checkpoint requires a dispatching inbox item.");
       this.assertCurrentHead(database, item);
       if (item.provider_turn_id && item.provider_turn_id !== providerTurnId) throw new Error("Provider turn-start checkpoint conflicts with the durable exact turn id.");
+      const existingBinding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      if (item.provider_turn_id) {
+        if (!existingBinding || !sameProviderTurnBinding(rowToProviderTurnBinding(existingBinding), {
+          inbox_item_id: inboxItemId,
+          agent_id: item.agent_id,
+          room_id: item.room_id,
+          provider_turn_id: providerTurnId,
+          ...authority,
+        })) {
+          throw new Error("Provider turn-start checkpoint conflicts with the durable authority binding.");
+        }
+      } else if (existingBinding) {
+        throw new Error("Provider turn-start checkpoint found authority without a durable provider turn.");
+      }
       const timestamp = this.now();
       const nextAttemptCount = item.provider_turn_id ? item.attempt_count : item.attempt_count + 1;
       run(database.prepare("UPDATE supervised_agent_inbox SET provider_turn_id=?,attempt_count=?,updated_at=? WHERE inbox_item_id=?"), providerTurnId, nextAttemptCount, timestamp, inboxItemId);
+      if (!existingBinding) {
+        run(database.prepare(`INSERT INTO supervised_agent_provider_turn_bindings
+          (inbox_item_id,agent_id,room_id,work_attempt_id,origin_execution_generation_id,provider_continuation_id,provider_turn_id)
+          VALUES (?,?,?,?,?,?,?)`), inboxItemId, item.agent_id, item.room_id, authority.work_attempt_id,
+        authority.origin_execution_generation_id, authority.provider_continuation_id, providerTurnId);
+      }
       this.recordEvent(database, inboxItemId, `turn_started:${nextAttemptCount}:${providerTurnId}`, "turn_started", timestamp, null);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
@@ -364,12 +477,28 @@ export class SupervisedAgentInboxStore {
         throw new Error("Undispatched reset does not match the exact in-flight provider turn.");
       }
       this.assertCurrentHead(database, item);
+      const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      if (!binding || String(binding.agent_id) !== item.agent_id || String(binding.room_id) !== item.room_id
+        || String(binding.provider_turn_id) !== providerTurnId) {
+        throw new Error("Undispatched reset is missing its exact provider-turn authority binding.");
+      }
+      const executionGenerationId = String(binding.origin_execution_generation_id);
       const terminal = database.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(inboxItemId);
-      const effect = database.prepare("SELECT 1 FROM supervised_agent_effects WHERE agent_id=? AND provider_turn_id=? LIMIT 1").get(item.agent_id, providerTurnId);
+      const effect = database.prepare(`SELECT 1 FROM supervised_agent_effects
+        WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
+        UNION ALL
+        SELECT 1 FROM supervised_agent_effect_tombstones
+        WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
+        LIMIT 1`).get(
+        item.agent_id, item.room_id, executionGenerationId, providerTurnId,
+        item.agent_id, item.room_id, executionGenerationId, providerTurnId,
+      );
       if (terminal || effect || item.outcome) {
         throw new Error("Undispatched reset found terminal or effect evidence and was refused.");
       }
       const timestamp = this.now();
+      run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='pending',attempt_count=?,provider_turn_id=NULL,outcome=NULL,last_error=NULL,
             failure_code=NULL,next_attempt_at_ms=NULL,updated_at=?
@@ -422,6 +551,22 @@ export class SupervisedAgentInboxStore {
       if (item.agent_id !== input.agent_id || item.provider_turn_id !== input.provider_turn_id) throw new Error("Normalized terminal evidence does not match the exact inbox turn.");
       if (item.state !== "dispatching" && item.state !== "awaiting_result" && item.state !== "result_recovery") throw new Error("Normalized terminal evidence requires an in-flight or recovering result.");
       this.assertCurrentHead(database, item);
+      const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
+        .get(input.inbox_item_id) as Row | undefined;
+      if (!binding
+        || String(binding.agent_id) !== item.agent_id
+        || String(binding.room_id) !== item.room_id
+        || String(binding.origin_execution_generation_id) !== input.execution_generation_id
+        || String(binding.provider_turn_id) !== input.provider_turn_id) {
+        throw new Error("Normalized terminal evidence does not match the durable provider-turn authority binding.");
+      }
+      const priorTerminal = database.prepare(`SELECT agent_id,execution_generation_id,provider_turn_id
+        FROM supervised_agent_terminal_results WHERE inbox_item_id=?`).get(input.inbox_item_id) as Row | undefined;
+      if (priorTerminal && (String(priorTerminal.agent_id) !== input.agent_id
+        || String(priorTerminal.execution_generation_id) !== input.execution_generation_id
+        || String(priorTerminal.provider_turn_id) !== input.provider_turn_id)) {
+        throw new Error("Normalized terminal evidence conflicts with an earlier provider-turn authority identity.");
+      }
       const timestamp = this.now();
       run(database.prepare(`INSERT INTO supervised_agent_terminal_results
         (inbox_item_id,agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source,terminal_evidence_json,observed_at,updated_at)
@@ -478,9 +623,15 @@ export class SupervisedAgentInboxStore {
 
   async prepareEffect(input: {
     agent_id: string; room_id: string; execution_generation_id: string; provider_turn_id: string;
-    mcp_request_id: string; tool_name: string; request: unknown;
-  }): Promise<{ created: boolean; effect: SupervisedEffectRecord }> {
-    return this.exclusive(async (database) => this.transaction(database, () => {
+    work_attempt_id: string; current_execution_generation_id: string; provider_continuation_id: string;
+    mcp_request_id: string; tool_name: string; request: unknown; mutation?: boolean;
+  }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; effect: SupervisedEffectRecord }> {
+    const requestJson = serializeEffectJson(input.request, "request");
+    const expectedMutation = !READ_ONLY_EFFECT_TOOLS.has(input.tool_name);
+    if (input.mutation !== undefined && input.mutation !== expectedMutation) {
+      throw new Error("The supervised effect classification does not match the registered tool policy.");
+    }
+    return this.exclusive(async (database) => this.transactionFenced(database, () => {
       const existing = database.prepare(`SELECT * FROM supervised_agent_effects
         WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mcp_request_id=?`).get(
         input.agent_id, input.execution_generation_id, input.provider_turn_id, input.mcp_request_id,
@@ -488,51 +639,214 @@ export class SupervisedAgentInboxStore {
       if (existing) {
         const effect = rowToEffect(existing);
         if (effect.room_id !== input.room_id || effect.tool_name !== input.tool_name
-          || String(existing.request_json) !== JSON.stringify(input.request)) {
+          || effect.mutation !== expectedMutation || String(existing.request_json) !== requestJson) {
+          throw new Error("A supervised MCP request id was reused for a different effect; refusing ambiguous execution.");
+        }
+        if (effect.state === "completed" || effect.state === "failed" || effect.state === "uncertain") return { created: false, effect };
+        this.assertActiveEffectAuthority(database, input);
+        if (effect.state === "executing") {
+          const timestamp = this.now();
+          if (effect.mutation) {
+            run(database.prepare(`UPDATE supervised_agent_effects
+              SET state='uncertain',error=?,updated_at=? WHERE effect_id=? AND state='executing'`),
+            "The mutating tool crossed its execution boundary without a durable result. It may have completed; verify external state before repeating it.", timestamp, effect.effect_id);
+            this.pruneAgentHistory(database, effect.agent_id, effect.effect_id);
+          } else {
+            run(database.prepare(`UPDATE supervised_agent_effects
+              SET state='prepared',error=?,updated_at=? WHERE effect_id=? AND state='executing'`),
+            "The prior read-only execution ended without a durable result and is safe to execute again.", timestamp, effect.effect_id);
+          }
+          return { created: false, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effect.effect_id) as Row) };
+        }
+        return { created: false, effect };
+      }
+      const tombstone = database.prepare(`SELECT * FROM supervised_agent_effect_tombstones
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mcp_request_id=?`).get(
+        input.agent_id, input.execution_generation_id, input.provider_turn_id, input.mcp_request_id,
+      ) as Row | undefined;
+      if (tombstone) {
+        const effect = rowToTombstonedEffect(tombstone);
+        if (effect.room_id !== input.room_id || effect.tool_name !== input.tool_name
+          || effect.mutation !== expectedMutation
+          || String(tombstone.request_sha256) !== effectRequestFingerprint(requestJson)) {
           throw new Error("A supervised MCP request id was reused for a different effect; refusing ambiguous execution.");
         }
         return { created: false, effect };
       }
+      this.assertActiveEffectAuthority(database, input);
+      this.assertEffectAdmissionCapacity(database, input, requestJson);
       const timestamp = this.now();
       const effectId = randomUUID();
       run(database.prepare(`INSERT INTO supervised_agent_effects
-        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,state,result_json,error,created_at,updated_at)
-        VALUES (?,?,?,?,?,?,?,?,'prepared',NULL,NULL,?,?)`),
-        effectId, input.agent_id, input.room_id, input.execution_generation_id, input.provider_turn_id, input.mcp_request_id, input.tool_name, JSON.stringify(input.request), timestamp, timestamp);
+        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,?,'prepared',NULL,NULL,?,?)`),
+        effectId, input.agent_id, input.room_id, input.execution_generation_id, input.provider_turn_id, input.mcp_request_id, input.tool_name, requestJson, expectedMutation ? 1 : 0, timestamp, timestamp);
       return { created: true, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row) };
-    }));
+    }, commitFence));
   }
 
-  async markEffectExecuting(effectId: string): Promise<SupervisedEffectRecord> {
-    return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row | undefined;
-      if (!row) throw new Error("Unknown supervised effect.");
+  async markEffectExecuting(input: {
+    effect_id: string; agent_id: string; room_id: string; execution_generation_id: string; provider_turn_id: string;
+    work_attempt_id: string; current_execution_generation_id: string; provider_continuation_id: string;
+  }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<SupervisedEffectRecord> {
+    const admitted = await this.exclusive(async (database) => this.transactionFenced(database, () => {
+      const row = database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(input.effect_id) as Row | undefined;
+      if (!row) {
+        const tombstone = database.prepare("SELECT * FROM supervised_agent_effect_tombstones WHERE effect_id=?").get(input.effect_id) as Row | undefined;
+        if (tombstone) {
+          const compacted = rowToTombstonedEffect(tombstone);
+          if (compacted.agent_id !== input.agent_id || compacted.room_id !== input.room_id
+            || compacted.execution_generation_id !== input.execution_generation_id
+            || compacted.provider_turn_id !== input.provider_turn_id) {
+            throw new Error("The supervised effect does not belong to the exact active turn.");
+          }
+          throw new Error(compacted.error || "The supervised effect outcome is uncertain and cannot be executed again.");
+        }
+        throw new Error("Unknown supervised effect.");
+      }
       const effect = rowToEffect(row);
-      if (effect.state === "completed" || effect.state === "failed") return effect;
+      if (effect.agent_id !== input.agent_id || effect.room_id !== input.room_id
+        || effect.execution_generation_id !== input.execution_generation_id
+        || effect.provider_turn_id !== input.provider_turn_id) {
+        throw new Error("The supervised effect does not belong to the exact active turn.");
+      }
+      if (effect.state === "failed") throw new Error(effect.error || "The supervised effect was fenced before execution.");
+      if (effect.state === "completed") return { effect, rejection: null };
+      if (effect.state === "uncertain") throw new Error(effect.error || "The supervised effect outcome is uncertain and cannot be executed again.");
       if (effect.state === "executing") throw new Error("This supervised effect is already executing; refusing a duplicate side effect.");
-      run(database.prepare("UPDATE supervised_agent_effects SET state='executing',updated_at=? WHERE effect_id=?"), this.now(), effectId);
-      return rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row);
-    }));
+      try {
+        this.assertActiveEffectAuthority(database, input);
+      } catch (error) {
+        if (!(error instanceof EffectAuthorityError)) throw error;
+        const rejection = error.message;
+        run(database.prepare("UPDATE supervised_agent_effects SET state='failed',error=?,updated_at=? WHERE effect_id=? AND state='prepared'"),
+          rejection, this.now(), input.effect_id);
+        return {
+          effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(input.effect_id) as Row),
+          rejection,
+        };
+      }
+      run(database.prepare("UPDATE supervised_agent_effects SET state='executing',updated_at=? WHERE effect_id=?"), this.now(), input.effect_id);
+      return {
+        effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(input.effect_id) as Row),
+        rejection: null,
+      };
+    }, commitFence));
+    if (admitted.rejection) throw new EffectAuthorityError(admitted.rejection);
+    return admitted.effect;
   }
 
   /** Attach validated preparation data without claiming the side effect has
    * executed. Room moves remain prepared until the activating reply finishes. */
-  async stagePreparedEffectResult(effectId: string, result: unknown): Promise<SupervisedEffectRecord> {
-    return this.exclusive(async (database) => this.transaction(database, () => {
+  async stagePreparedEffectResult(effectId: string, result: unknown, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<SupervisedEffectRecord> {
+    const resultJson = serializeEffectJson(result, "prepared result");
+    return this.exclusive(async (database) => this.transactionFenced(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row | undefined;
       if (!row) throw new Error("Unknown supervised effect.");
       const effect = rowToEffect(row);
       if (effect.state !== "prepared") return effect;
-      run(database.prepare("UPDATE supervised_agent_effects SET result_json=?,updated_at=? WHERE effect_id=?"), JSON.stringify(result), this.now(), effectId);
+      this.assertEffectResultCapacity(database, effect, resultJson);
+      run(database.prepare("UPDATE supervised_agent_effects SET result_json=?,updated_at=? WHERE effect_id=?"), resultJson, this.now(), effectId);
       return rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row);
-    }));
+    }, commitFence));
   }
 
-  async preparedRoomMove(agentId: string, providerTurnId: string): Promise<SupervisedEffectRecord | null> {
+  /** Atomically create the exactly-once MCP effect and its local room-move
+   * journal. Handoff can therefore observe either neither record or both. */
+  async prepareRoomMoveEffect(input: {
+    agent_id: string; room_id: string; effect_execution_generation_id: string; provider_turn_id: string;
+    mcp_request_id: string; request: unknown; destination_room_id: string;
+    daemon_generation: number; work_attempt_id: string; execution_generation_id: string;
+    provider_continuation_id: string; agent_session_id: string; activating_inbox_item_id: string;
+  }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; effect: SupervisedEffectRecord }> {
+    const requestJson = serializeEffectJson(input.request, "request");
+    return this.exclusive(async (database) => this.transactionFenced(database, () => {
+      const existing = database.prepare(`SELECT * FROM supervised_agent_effects
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND mcp_request_id=?`).get(
+        input.agent_id, input.effect_execution_generation_id, input.provider_turn_id, input.mcp_request_id,
+      ) as Row | undefined;
+      let created = false;
+      let effectId: string;
+      if (existing) {
+        const effect = rowToEffect(existing);
+        if (effect.room_id !== input.room_id || effect.tool_name !== "join_room"
+          || String(existing.request_json) !== requestJson) {
+          throw new Error("A supervised MCP request id was reused for a different effect; refusing ambiguous execution.");
+        }
+        if (effect.state === "completed" || effect.state === "failed") return { created: false, effect };
+        const binding = this.assertActiveEffectAuthority(database, {
+          agent_id: input.agent_id, room_id: input.room_id,
+          execution_generation_id: input.effect_execution_generation_id, provider_turn_id: input.provider_turn_id,
+          work_attempt_id: input.work_attempt_id, current_execution_generation_id: input.execution_generation_id,
+          provider_continuation_id: input.provider_continuation_id,
+        });
+        if (binding.inbox_item_id !== input.activating_inbox_item_id) throw new Error("The supervised room move lost its exact activating inbox turn.");
+        effectId = effect.effect_id;
+      } else {
+        const binding = this.assertActiveEffectAuthority(database, {
+          agent_id: input.agent_id, room_id: input.room_id,
+          execution_generation_id: input.effect_execution_generation_id, provider_turn_id: input.provider_turn_id,
+          work_attempt_id: input.work_attempt_id, current_execution_generation_id: input.execution_generation_id,
+          provider_continuation_id: input.provider_continuation_id,
+        });
+        if (binding.inbox_item_id !== input.activating_inbox_item_id) throw new Error("The supervised room move lost its exact activating inbox turn.");
+        this.assertEffectAdmissionCapacity(database, {
+          agent_id: input.agent_id,
+          execution_generation_id: input.effect_execution_generation_id,
+          provider_turn_id: input.provider_turn_id,
+        }, requestJson);
+        created = true;
+        effectId = randomUUID();
+        const timestamp = this.now();
+      run(database.prepare(`INSERT INTO supervised_agent_effects
+        (effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,result_json,error,created_at,updated_at)
+        VALUES (?,?,?,?,?,?,?,?,1,'prepared',NULL,NULL,?,?)`),
+        effectId, input.agent_id, input.room_id, input.effect_execution_generation_id, input.provider_turn_id,
+        input.mcp_request_id, "join_room", requestJson, timestamp, timestamp);
+      }
+      const result = {
+        destination_room: input.destination_room_id,
+        requested_room: input.destination_room_id,
+        phase: "prepared",
+        room_move_operation_id: `room_move:${effectId}`,
+      };
+      const resultJson = serializeEffectJson(result, "prepared result");
+      const preparedEffect = rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row);
+      this.assertEffectResultCapacity(database, preparedEffect, resultJson);
+      run(database.prepare("UPDATE supervised_agent_effects SET result_json=?,updated_at=? WHERE effect_id=? AND state='prepared'"),
+        resultJson, this.now(), effectId);
+      const requestId = `bounded-effect:${effectId}`;
+      const operationId = `room_move:${effectId}`;
+      const existingMove = database.prepare("SELECT * FROM agent_room_moves WHERE request_id=?").get(requestId) as Row | undefined;
+      if (existingMove) {
+        if (String(existingMove.operation_id) !== operationId || String(existingMove.agent_id) !== input.agent_id
+          || String(existingMove.source_room_id) !== input.room_id || String(existingMove.destination_room_id) !== input.destination_room_id
+          || String(existingMove.execution_generation_id) !== input.execution_generation_id
+          || String(existingMove.effect_id) !== effectId) {
+          throw new Error("Room-move request id is already bound to different coordinates.");
+        }
+      } else {
+        const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
+          WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id);
+        if (unresolvedControl) throw new Error("Room move is blocked by unresolved turn control.");
+        const timestamp = this.now();
+        const sourceCursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?")
+          .get(input.agent_id, input.room_id) as Row | undefined;
+        run(database.prepare(`INSERT INTO agent_room_moves(operation_id,request_id,agent_id,source_room_id,destination_room_id,daemon_generation,work_attempt_id,execution_generation_id,agent_session_id,activating_inbox_item_id,provider_turn_id,effect_id,phase,remote_room_id,destination_cursor,error,created_at,updated_at,source_cursor_present,source_cursor) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,NULL,NULL,NULL,?,?,?,?)`),
+        operationId, requestId, input.agent_id, input.room_id, input.destination_room_id, input.daemon_generation,
+        input.work_attempt_id, input.execution_generation_id, input.agent_session_id, input.activating_inbox_item_id,
+        input.provider_turn_id, effectId, "prepared", timestamp, timestamp, sourceCursor ? 1 : 0,
+        sourceCursor?.last_observed_message_id ?? null);
+      }
+      return { created, effect: rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(effectId) as Row) };
+    }, commitFence));
+  }
+
+  async preparedRoomMove(agentId: string, originExecutionGenerationId: string, providerTurnId: string): Promise<SupervisedEffectRecord | null> {
     return this.read(async (database) => {
       const row = database.prepare(`SELECT * FROM supervised_agent_effects
-        WHERE agent_id=? AND provider_turn_id=? AND tool_name='join_room' AND state='prepared'
-        ORDER BY created_at LIMIT 1`).get(agentId, providerTurnId) as Row | undefined;
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND tool_name='join_room' AND state='prepared'
+        ORDER BY created_at LIMIT 1`).get(agentId, originExecutionGenerationId, providerTurnId) as Row | undefined;
       return row ? rowToEffect(row) : null;
     });
   }
@@ -558,8 +872,11 @@ export class SupervisedAgentInboxStore {
 
   /** Commit the queue side of a room move atomically: later old-room work is
    * cancelled and the old cursor/health authority is removed. */
-  async commitRoomMoveQueue(input: { operation_id: string; agent_id: string; old_room_id: string; after_fifo_sequence: number }): Promise<number> {
-    return this.exclusive(async (database) => this.transaction(database, () => {
+  async commitRoomMoveQueue(
+    input: { operation_id: string; agent_id: string; old_room_id: string; after_fifo_sequence: number },
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<number> {
+    return this.exclusive(async (database) => this.transactionFenced(database, () => {
       const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
         WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence`).all(input.agent_id, input.old_room_id, input.after_fifo_sequence) as Row[];
@@ -568,12 +885,17 @@ export class SupervisedAgentInboxStore {
         const item = rowToItem(row);
         run(database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_room_move',last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
           "Cancelled because the agent moved to another room.", timestamp, timestamp, item.inbox_item_id);
+        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
         this.recordEvent(database, item.inbox_item_id, `room_move_cancelled:${input.operation_id}:${item.fifo_sequence}`, "room_move_cancelled", timestamp, "Agent moved rooms after completing an earlier message.");
       }
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.old_room_id);
       run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=? AND room_id=?"), input.agent_id, input.old_room_id);
+      // This is safe during the move because the shared retention policy pins
+      // every row owned by its still-recoverable compensation journal. It can
+      // still compact unrelated terminal history in the same transaction.
+      this.pruneAgentHistory(database, input.agent_id);
       return rows.length;
-    }));
+    }, commitFence));
   }
 
   /**
@@ -583,13 +905,13 @@ export class SupervisedAgentInboxStore {
   async rollbackRoomMoveIngress(input: {
     operation_id: string; agent_id: string; source_room_id: string; destination_room_id: string;
     source_cursor_present: boolean; source_cursor: string | null; after_fifo_sequence: number;
-  }): Promise<number> {
+  }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<number> {
     this.require(input.operation_id, "operation_id"); this.require(input.agent_id, "agent_id");
     this.require(input.source_room_id, "source_room_id"); this.require(input.destination_room_id, "destination_room_id");
     if (input.source_room_id === input.destination_room_id) throw new Error("Room-move rollback requires distinct rooms.");
     if (input.source_cursor !== null) this.requireNumericCursor(input.source_cursor);
     if (!input.source_cursor_present && input.source_cursor !== null) throw new Error("Absent source cursor authority cannot carry a cursor value.");
-    return this.exclusive(async (database) => this.transaction(database, () => {
+    return this.exclusive(async (database) => this.transactionFenced(database, () => {
       // Prove exact operation ownership from the append-only cancellation
       // event before reviving each bounded source-room candidate.
       const candidates = database.prepare(`SELECT i.* FROM supervised_agent_inbox i
@@ -615,29 +937,48 @@ export class SupervisedAgentInboxStore {
       }
       run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=?"), input.agent_id);
       return restored;
-    }));
+    }, commitFence));
   }
 
   async completeEffect(input: {
     effect_id: string; result?: unknown; error?: string;
-    expected?: { agent_id: string; room_id: string; execution_generation_id: string; provider_turn_id: string };
-  }): Promise<SupervisedEffectRecord> {
-    return this.exclusive(async (database) => this.transaction(database, () => {
+    expected?: { agent_id: string; work_attempt_id: string; provider_turn_id?: string | null };
+  }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<SupervisedEffectRecord> {
+    return this.exclusive(async (database) => this.transactionFenced(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(input.effect_id) as Row | undefined;
-      if (!row) throw new Error("Unknown supervised effect.");
-      const effect = rowToEffect(row);
-      if (input.expected && (effect.agent_id !== input.expected.agent_id || effect.room_id !== input.expected.room_id
-        || effect.execution_generation_id !== input.expected.execution_generation_id
-        || effect.provider_turn_id !== input.expected.provider_turn_id)) {
+      const tombstone = row ? undefined
+        : database.prepare("SELECT * FROM supervised_agent_effect_tombstones WHERE effect_id=?").get(input.effect_id) as Row | undefined;
+      if (!row && !tombstone) throw new Error("Unknown supervised effect.");
+      const effect = row ? rowToEffect(row) : rowToTombstonedEffect(tombstone!);
+      if (input.expected && (effect.agent_id !== input.expected.agent_id
+        || (input.expected.provider_turn_id && effect.provider_turn_id !== input.expected.provider_turn_id))) {
         throw new Error("The supervised effect does not belong to the exact active turn.");
       }
-      if (effect.state === "completed" || effect.state === "failed") return effect;
-      if (effect.state !== "executing" && effect.tool_name !== "join_room") throw new Error("A supervised effect must be executing before completion.");
+      if (input.expected) {
+        const binding = database.prepare(`SELECT 1 FROM supervised_agent_provider_turn_bindings
+          WHERE agent_id=? AND room_id=? AND work_attempt_id=? AND origin_execution_generation_id=? AND provider_turn_id=?`)
+          .get(effect.agent_id, effect.room_id, input.expected.work_attempt_id,
+            effect.execution_generation_id, effect.provider_turn_id);
+        if (!binding) throw new Error("The supervised effect completion lost its durable provider-turn authority binding.");
+      }
+      if (effect.state === "completed" || effect.state === "failed") {
+        this.pruneAgentHistory(database, effect.agent_id);
+        return effect;
+      }
+      if (effect.state !== "executing" && effect.state !== "uncertain" && effect.tool_name !== "join_room") throw new Error("A supervised effect must be executing or uncertain before completion.");
       const failed = Boolean(input.error);
-      run(database.prepare("UPDATE supervised_agent_effects SET state=?,result_json=?,error=?,updated_at=? WHERE effect_id=?"),
-        failed ? "failed" : "completed", input.result === undefined ? null : JSON.stringify(input.result), input.error ?? null, this.now(), input.effect_id);
-      return rowToEffect(database.prepare("SELECT * FROM supervised_agent_effects WHERE effect_id=?").get(input.effect_id) as Row);
-    }));
+      const resultJson = input.result === undefined
+        ? null
+        : this.boundedCompletionResultJson(database, effect, input.result);
+      const error = input.error ? truncateEffectError(input.error) : null;
+      const target = tombstone ? "supervised_agent_effect_tombstones" : "supervised_agent_effects";
+      run(database.prepare(`UPDATE ${target} SET state=?,result_json=?,error=?,updated_at=? WHERE effect_id=?`),
+        failed ? "failed" : "completed", resultJson, error, this.now(), input.effect_id);
+      const completedRow = database.prepare(`SELECT * FROM ${target} WHERE effect_id=?`).get(input.effect_id) as Row;
+      const completed = tombstone ? rowToTombstonedEffect(completedRow) : rowToEffect(completedRow);
+      this.pruneAgentHistory(database, effect.agent_id);
+      return completed;
+    }, commitFence));
   }
   /** Persist provider terminal evidence before advancing out of dispatching. */
   async checkpointTerminalOutcome(inboxItemId: string, outcome: string): Promise<SupervisedInboxItem> {
@@ -882,7 +1223,9 @@ export class SupervisedAgentInboxStore {
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='cancelled_by_user',last_error=NULL,failure_code=NULL,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
+      this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, "Skipped by the user before any provider turn started.");
+      this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
@@ -929,11 +1272,30 @@ export class SupervisedAgentInboxStore {
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
+      this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, `user_cancelled:${item.fifo_sequence}`, "user_cancelled", timestamp, detail);
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
+
+  /**
+   * Recover only effect execution boundaries. Daemon startup calls this even
+   * for paused/stopped agents so a crashed mutation cannot remain an immortal
+   * purge or quota blocker while no provider pump is eligible to start.
+   */
+  async normalizeInterruptedEffects(agentId?: string): Promise<void> {
+    await this.exclusive(async (database) => this.transaction(database, () => {
+      const scope = agentId ? " AND agent_id=?" : "";
+      const affected = database.prepare(`SELECT DISTINCT agent_id FROM supervised_agent_effects
+        WHERE state='executing' AND tool_name<>'join_room'${scope}`).all(
+        ...(agentId ? [agentId] : []) as never[],
+      ) as Row[];
+      this.normalizeInterruptedEffectsInTransaction(database, agentId, this.now());
+      for (const row of affected) this.pruneAgentHistory(database, String(row.agent_id));
+    }));
+  }
+
   /**
    * Normalize work interrupted by a daemon crash before a new runtime is
    * allowed to pump it. A persisted reply is authoritative terminal evidence:
@@ -941,8 +1303,13 @@ export class SupervisedAgentInboxStore {
    * the provider again. Everything else that was in-flight is ambiguous and
    * remains visible as blocked rather than being accidentally acknowledged.
    */
-  async normalizeStartupRecovery(agentId: string): Promise<SupervisedInboxItem[]> {
+  async normalizeStartupRecovery(
+    agentId: string,
+    policy: { resetCheckpointGatedUnstartedDispatch?: boolean } = {},
+  ): Promise<SupervisedInboxItem[]> {
     return this.exclusive(async (database) => this.transaction(database, () => {
+      const interruptedAt = this.now();
+      this.normalizeInterruptedEffectsInTransaction(database, agentId, interruptedAt);
       const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
       const recovered: SupervisedInboxItem[] = [];
       for (const row of rows) {
@@ -971,11 +1338,22 @@ export class SupervisedAgentInboxStore {
           } else if (terminal?.kind === "unreadable" && item.provider_turn_id) {
             next = "result_recovery";
             error = "Provider completed, but its answer could not be read; re-reading the same turn without rerunning it.";
-          } else if (item.provider_turn_id && (item.state === "dispatching" || item.state === "awaiting_result")) {
+          } else if (item.provider_turn_id && (item.state === "dispatching" || item.state === "awaiting_result" || item.state === "retryable")) {
             // This is not a retry: delivery will ask the provider to inspect
             // precisely this persisted turn id and will block if it cannot.
             next = "pending";
             error = "Daemon restarted while awaiting the exact persisted provider turn; recovering it without rerunning.";
+          } else if (policy.resetCheckpointGatedUnstartedDispatch
+            && item.state === "dispatching"
+            && item.attempt_count === 0
+            && !item.provider_turn_id
+            && !item.outcome) {
+            // Cursor's supervised wrapper cannot release native work before
+            // its exact turn id is committed. This shape therefore proves the
+            // prior generation never dispatched and is safe to requeue. Never
+            // apply this provider capability to Codex/Claude/Open Model.
+            next = "pending";
+            error = "Recovered an unstarted checkpoint-gated Cursor delivery; retrying without duplicate provider work.";
           } else {
             next = "blocked";
             error = `Daemon restarted during ${item.state} without authoritative terminal or publication evidence; acknowledgement is unsafe.`;
@@ -988,8 +1366,13 @@ export class SupervisedAgentInboxStore {
         const updated = rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
         const phase = phaseForTransition(next);
         if (phase) this.recordEvent(database, updated.inbox_item_id, `recovery:${phase}:${updated.attempt_count}`, phase, timestamp, error);
+        if (finalStates.has(next)) {
+          this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+          this.pruneAgentHistory(database, item.agent_id);
+        }
         recovered.push(updated);
       }
+      this.pruneAgentHistory(database, agentId);
       return recovered;
     }));
   }
@@ -1082,6 +1465,7 @@ export class SupervisedAgentInboxStore {
   async removeAgent(agentId: string): Promise<void> {
     await this.exclusive(async (database) => this.transaction(database, () => {
       run(database.prepare("DELETE FROM supervised_agent_effects WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_agent_effect_tombstones WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM provider_continuation_repairs WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_observed_messages WHERE agent_id=?"), agentId);
       run(database.prepare("DELETE FROM supervised_agent_ingress_health WHERE agent_id=?"), agentId);
@@ -1112,6 +1496,28 @@ export class SupervisedAgentInboxStore {
     }
   }
   private transaction<T>(database: DatabaseSync, operation: () => T): T { database.exec("BEGIN IMMEDIATE"); try { const result = operation(); database.exec("COMMIT"); return result; } catch (error) { try { database.exec("ROLLBACK"); } catch {} throw error; } }
+  private async transactionFenced<T>(database: DatabaseSync, operation: () => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
+    let transactionOpen = false;
+    let committed = false;
+    let result!: T;
+    try {
+      const transaction = async () => {
+        if (transactionOpen || committed) throw new Error("Supervised inbox transaction was already started.");
+        database.exec("BEGIN IMMEDIATE");
+        transactionOpen = true;
+        result = operation();
+        database.exec("COMMIT");
+        transactionOpen = false;
+        committed = true;
+      };
+      if (commitFence) await commitFence(transaction); else await transaction();
+      if (!committed) throw new Error("Supervised inbox commit fence returned without committing.");
+      return result;
+    } catch (error) {
+      if (transactionOpen) { try { database.exec("ROLLBACK"); } catch {} }
+      throw error;
+    }
+  }
   private async getDatabase(): Promise<DatabaseSync> {
     if (this.closed) throw new Error("Supervised inbox store is closed.");
     if (this.database) return this.database;
@@ -1120,9 +1526,166 @@ export class SupervisedAgentInboxStore {
   }
   private require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }
   private requireNumericCursor(cursor: string): void { if (!/^(?:msg_)?\d+$/.test(cursor)) throw new Error("Supervised inbox cursor must be a numeric room message id."); }
+  /** Terminal ownership proves a prepared ordinary effect never crossed its
+   * execution CAS. Settle it in the same transaction as every terminal path
+   * so handoff/Stop races cannot leave immortal purge blockers. Room moves are
+   * intentionally prepared until the acknowledged reply is reconciled. */
+  private settlePreparedEffectsForTerminalItem(database: DatabaseSync, item: SupervisedInboxItem, timestamp: string): void {
+    settlePreparedSupervisedEffectsForTerminalItem(database, {
+      inboxItemId: item.inbox_item_id,
+      agentId: item.agent_id,
+      providerTurnId: item.provider_turn_id,
+    }, timestamp);
+  }
+  private assertEffectAdmissionCapacity(
+    database: DatabaseSync,
+    input: { agent_id: string; execution_generation_id: string; provider_turn_id: string },
+    requestJson: string,
+  ): void {
+    const requestBytes = Buffer.byteLength(requestJson, "utf8");
+    if (requestBytes > MAX_EFFECT_REQUEST_BYTES) {
+      throw new Error(`A supervised effect request exceeds the ${MAX_EFFECT_REQUEST_BYTES}-byte durable limit.`);
+    }
+    const usage = database.prepare(`SELECT COUNT(*) AS effect_count,COALESCE(SUM(request_bytes),0) AS request_bytes
+      FROM (
+        SELECT length(CAST(request_json AS BLOB)) AS request_bytes
+        FROM supervised_agent_effects
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+        UNION ALL
+        SELECT request_bytes FROM supervised_agent_effect_tombstones
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
+      )`).get(
+      input.agent_id, input.execution_generation_id, input.provider_turn_id,
+      input.agent_id, input.execution_generation_id, input.provider_turn_id,
+    ) as Row;
+    if (Number(usage.effect_count) >= MAX_EFFECTS_PER_PROVIDER_TURN) {
+      throw new Error(`A supervised provider turn may durably admit at most ${MAX_EFFECTS_PER_PROVIDER_TURN} effects.`);
+    }
+    if (Number(usage.request_bytes) + requestBytes > MAX_EFFECT_REQUEST_BYTES_PER_PROVIDER_TURN) {
+      throw new Error(`A supervised provider turn exceeds the ${MAX_EFFECT_REQUEST_BYTES_PER_PROVIDER_TURN}-byte durable request budget.`);
+    }
+    const unresolved = database.prepare(`SELECT COUNT(*) AS effect_count FROM supervised_agent_effects
+      WHERE agent_id=? AND state IN ('prepared','executing')`).get(input.agent_id) as Row;
+    if (Number(unresolved.effect_count) >= MAX_UNRESOLVED_EFFECTS_PER_AGENT) {
+      throw new Error(`A supervised agent may retain at most ${MAX_UNRESOLVED_EFFECTS_PER_AGENT} unresolved effects across turns.`);
+    }
+  }
+  private assertEffectResultCapacity(database: DatabaseSync, effect: SupervisedEffectRecord, resultJson: string): void {
+    const resultBytes = Buffer.byteLength(resultJson, "utf8");
+    if (resultBytes > MAX_EFFECT_RESULT_BYTES) {
+      throw new Error(`A supervised effect prepared result exceeds the ${MAX_EFFECT_RESULT_BYTES}-byte durable limit.`);
+    }
+    const usage = database.prepare(`SELECT COALESCE(SUM(result_bytes),0) AS result_bytes FROM (
+        SELECT length(CAST(result_json AS BLOB)) AS result_bytes FROM supervised_agent_effects
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND effect_id<>?
+        UNION ALL
+        SELECT length(CAST(result_json AS BLOB)) AS result_bytes FROM supervised_agent_effect_tombstones
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND effect_id<>?
+      )`).get(
+      effect.agent_id, effect.execution_generation_id, effect.provider_turn_id, effect.effect_id,
+      effect.agent_id, effect.execution_generation_id, effect.provider_turn_id, effect.effect_id,
+    ) as Row;
+    if (Number(usage.result_bytes) + resultBytes > MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN) {
+      throw new Error(`A supervised provider turn exceeds the ${MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN}-byte durable result budget.`);
+    }
+  }
+  private boundedCompletionResultJson(database: DatabaseSync, effect: SupervisedEffectRecord, result: unknown): string | null {
+    let serialized: string | null = null;
+    let serializedBytes: number | null = null;
+    try {
+      serialized = serializeEffectJson(result, "completion result");
+      serializedBytes = Buffer.byteLength(serialized, "utf8");
+    } catch { /* Completion must settle even when an external result is not JSON-serializable. */ }
+    const usage = database.prepare(`SELECT COALESCE(SUM(result_bytes),0) AS result_bytes FROM (
+        SELECT length(CAST(result_json AS BLOB)) AS result_bytes FROM supervised_agent_effects
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND effect_id<>?
+        UNION ALL
+        SELECT length(CAST(result_json AS BLOB)) AS result_bytes FROM supervised_agent_effect_tombstones
+        WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND effect_id<>?
+      )`).get(
+      effect.agent_id, effect.execution_generation_id, effect.provider_turn_id, effect.effect_id,
+      effect.agent_id, effect.execution_generation_id, effect.provider_turn_id, effect.effect_id,
+    ) as Row;
+    const priorBytes = Number(usage.result_bytes);
+    if (serialized !== null && serializedBytes !== null
+      && serializedBytes <= MAX_EFFECT_RESULT_BYTES
+      && priorBytes + serializedBytes <= MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN) {
+      return serialized;
+    }
+    const omission = JSON.stringify({
+      supervised_effect_result_omitted: true,
+      reason: serialized === null ? "not_json_serializable" : "durable_size_limit",
+      serialized_bytes: serializedBytes,
+    });
+    return priorBytes + Buffer.byteLength(omission, "utf8") <= MAX_EFFECT_RESULT_BYTES_PER_PROVIDER_TURN
+      ? omission
+      : null;
+  }
+  private assertActiveEffectAuthority(database: DatabaseSync, input: {
+    agent_id: string; room_id: string; execution_generation_id: string; provider_turn_id: string;
+    work_attempt_id: string; current_execution_generation_id: string; provider_continuation_id: string;
+  }): { inbox_item_id: string } {
+    const rows = database.prepare(`SELECT b.inbox_item_id,i.state
+      FROM supervised_agent_provider_turn_bindings b
+      JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
+      WHERE b.agent_id=? AND b.room_id=? AND b.work_attempt_id=?
+        AND b.origin_execution_generation_id=? AND b.provider_continuation_id=?
+        AND b.provider_turn_id=? AND i.agent_id=b.agent_id AND i.room_id=b.room_id
+        AND i.provider_turn_id=b.provider_turn_id`).all(
+      input.agent_id, input.room_id, input.work_attempt_id, input.execution_generation_id,
+      input.provider_continuation_id, input.provider_turn_id,
+    ) as Row[];
+    if (rows.length !== 1 || !["dispatching", "awaiting_result"].includes(String(rows[0]?.state))) {
+      throw new EffectAuthorityError("A supervised effect requires one exact active durable provider-turn authority binding.");
+    }
+    const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
+      WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+      ORDER BY fifo_sequence LIMIT 1`).get(input.agent_id) as Row | undefined;
+    if (!head || String(head.inbox_item_id) !== String(rows[0]?.inbox_item_id)) {
+      throw new EffectAuthorityError("The supervised effect provider turn is no longer the exact FIFO head.");
+    }
+    const runtime = database.prepare(`SELECT m.room_id,l.desired_state,d.work_attempt_id_present,d.work_attempt_id,
+        d.provider_ref_present,d.provider_work_attempt_id,d.provider_continuation_id,d.provider_execution_generation_id,s.condition
+      FROM agent_room_memberships m JOIN agent_launch_intents l USING(agent_id)
+      JOIN runtime_deployments d USING(agent_id) JOIN agent_lifecycle_states s USING(agent_id)
+      WHERE m.agent_id=?`).get(input.agent_id) as Row | undefined;
+    if (!runtime || String(runtime.room_id) !== input.room_id || String(runtime.desired_state) !== "running"
+      || String(runtime.condition) !== "none" || Number(runtime.work_attempt_id_present) !== 1
+      || String(runtime.work_attempt_id) !== input.work_attempt_id || Number(runtime.provider_ref_present) !== 1
+      || String(runtime.provider_work_attempt_id) !== input.work_attempt_id
+      || String(runtime.provider_continuation_id) !== input.provider_continuation_id
+      || String(runtime.provider_execution_generation_id) !== input.current_execution_generation_id) {
+      throw new EffectAuthorityError("The supervised effect lost its exact current runtime authority.");
+    }
+    if (database.prepare(`SELECT 1 FROM turn_control_journals
+      WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain') LIMIT 1`)
+      .get(input.agent_id)) {
+      throw new EffectAuthorityError("The supervised effect is blocked by an unresolved turn-control authority barrier.");
+    }
+    return { inbox_item_id: String(rows[0]!.inbox_item_id) };
+  }
   private assertCurrentHead(database: DatabaseSync, item: SupervisedInboxItem): void {
     const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
+  }
+  private normalizeInterruptedEffectsInTransaction(database: DatabaseSync, agentId: string | undefined, interruptedAt: string): void {
+    const scope = agentId ? " AND agent_id=?" : "";
+    const readArgs = [
+      "The daemon restarted before this read-only tool result was checkpointed. The exact request may be executed again safely.",
+      interruptedAt,
+      ...(agentId ? [agentId] : []),
+    ];
+    run(database.prepare(`UPDATE supervised_agent_effects
+      SET state='prepared',error=?,updated_at=?
+      WHERE state='executing' AND mutation=0 AND tool_name<>'join_room'${scope}`), ...readArgs);
+    const mutationArgs = [
+      "The daemon restarted after this mutating tool crossed its execution boundary. It may have completed; verify external state before repeating it.",
+      interruptedAt,
+      ...(agentId ? [agentId] : []),
+    ];
+    run(database.prepare(`UPDATE supervised_agent_effects
+      SET state='uncertain',error=?,updated_at=?
+      WHERE state='executing' AND mutation=1 AND tool_name<>'join_room'${scope}`), ...mutationArgs);
   }
   private recordEvent(database: DatabaseSync, inboxItemId: string, idempotencyKey: string, phase: SupervisedInboxEvent["phase"], observedAt: string, detail: string | null): void {
     // The ordinal is allocated in the same inbox transaction as its state
@@ -1134,49 +1697,8 @@ export class SupervisedAgentInboxStore {
         SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND idempotency_key=?
       )`), inboxItemId, inboxItemId, idempotencyKey, phase, observedAt, detail, inboxItemId, idempotencyKey);
   }
-  private pruneAgentHistory(database: DatabaseSync, agentId: string): void {
-    const stale = database.prepare(`SELECT i.inbox_item_id,i.provider_turn_id,i.room_id,i.source_message_id
-      FROM supervised_agent_inbox i
-      WHERE i.agent_id=?
-        AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
-        AND NOT EXISTS (
-          SELECT 1 FROM supervised_agent_effects e
-          WHERE e.agent_id=i.agent_id AND e.provider_turn_id=i.provider_turn_id
-            AND e.state IN ('prepared','executing')
-        )
-      ORDER BY i.fifo_sequence DESC LIMIT -1 OFFSET ?`).all(agentId, RETAINED_TERMINAL_RECEIPTS_PER_AGENT) as Row[];
-    const deleteEffects = database.prepare("DELETE FROM supervised_agent_effects WHERE agent_id=? AND provider_turn_id=? AND state IN ('completed','failed')");
-    const deleteInbox = database.prepare("DELETE FROM supervised_agent_inbox WHERE inbox_item_id=?");
-    const prunedByRoom = new Map<string, string>();
-    for (const row of stale) {
-      if (!prunedByRoom.has(String(row.room_id))) prunedByRoom.set(String(row.room_id), String(row.source_message_id));
-      run(database.prepare("INSERT INTO supervised_agent_pruned_sources(agent_id,room_id,source_message_id,pruned_at) VALUES (?,?,?,?) ON CONFLICT(agent_id,room_id,source_message_id) DO NOTHING"), agentId, String(row.room_id), String(row.source_message_id), this.now());
-      if (row.provider_turn_id !== null) run(deleteEffects, agentId, String(row.provider_turn_id));
-      run(deleteInbox, String(row.inbox_item_id));
-    }
-    const observedStale = database.prepare(`SELECT room_id,source_message_id FROM supervised_agent_observed_messages
-      WHERE agent_id=? AND rowid NOT IN (SELECT rowid FROM supervised_agent_observed_messages WHERE agent_id=? ORDER BY rowid DESC LIMIT ?)
-      ORDER BY rowid DESC`).all(agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT) as Row[];
-    run(database.prepare(`DELETE FROM supervised_agent_observed_messages
-      WHERE agent_id=? AND rowid NOT IN (
-        SELECT rowid FROM supervised_agent_observed_messages
-        WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-      )`), agentId, agentId, RETAINED_OBSERVED_MESSAGES_PER_AGENT);
-    const rooms = database.prepare("SELECT DISTINCT room_id FROM supervised_agent_inbox WHERE agent_id=? UNION SELECT DISTINCT room_id FROM supervised_agent_observed_messages WHERE agent_id=?").all(agentId, agentId) as Row[];
-    for (const row of observedStale) if (!prunedByRoom.has(String(row.room_id))) prunedByRoom.set(String(row.room_id), String(row.source_message_id));
-    for (const room of rooms) this.updateHistoryBoundary(database, agentId, String(room.room_id), prunedByRoom.get(String(room.room_id)) ?? null);
-    for (const [roomId, marker] of prunedByRoom) if (!rooms.some((room) => String(room.room_id) === roomId)) this.updateHistoryBoundary(database, agentId, roomId, marker);
-    run(database.prepare(`DELETE FROM supervised_agent_pruned_sources WHERE agent_id=? AND rowid NOT IN (
-      SELECT rowid FROM supervised_agent_pruned_sources WHERE agent_id=? ORDER BY rowid DESC LIMIT ?
-    )`), agentId, agentId, RETAINED_PRUNED_SOURCE_EVIDENCE_PER_AGENT);
-  }
-  private updateHistoryBoundary(database: DatabaseSync, agentId: string, roomId: string, prunedMarker: string | null): void {
-    const observed = database.prepare("SELECT source_message_id FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? ORDER BY rowid LIMIT 1").get(agentId, roomId) as Row | undefined;
-    const inbox = database.prepare("SELECT source_message_id,fifo_sequence FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? ORDER BY fifo_sequence LIMIT 1").get(agentId, roomId) as Row | undefined;
-    const prior = database.prepare("SELECT pruned_before_message_id,pruned_at FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?").get(agentId, roomId) as Row | undefined;
-    run(database.prepare(`INSERT INTO supervised_agent_history_boundaries(agent_id,room_id,earliest_retained_observed_message_id,earliest_retained_inbox_message_id,earliest_retained_receipt_sequence,pruned_before_message_id,pruned_at,updated_at)
-      VALUES (?,?,?,?,?,?,?,?) ON CONFLICT(agent_id,room_id) DO UPDATE SET earliest_retained_observed_message_id=excluded.earliest_retained_observed_message_id,earliest_retained_inbox_message_id=excluded.earliest_retained_inbox_message_id,earliest_retained_receipt_sequence=excluded.earliest_retained_receipt_sequence,pruned_before_message_id=COALESCE(excluded.pruned_before_message_id,supervised_agent_history_boundaries.pruned_before_message_id),pruned_at=COALESCE(excluded.pruned_at,supervised_agent_history_boundaries.pruned_at),updated_at=excluded.updated_at`),
-      agentId, roomId, observed ? String(observed.source_message_id) : null, inbox ? String(inbox.source_message_id) : null, inbox ? Number(inbox.fifo_sequence) : null, prunedMarker ?? (prior?.pruned_before_message_id ?? null), prunedMarker ? this.now() : (prior?.pruned_at ?? null), this.now());
+  private pruneAgentHistory(database: DatabaseSync, agentId: string, protectedUncertainEffectId: string | null = null): void {
+    pruneSupervisedAgentHistory(database, agentId, this.now, protectedUncertainEffectId);
   }
 }
 
@@ -1201,10 +1723,30 @@ function isNewerCursor(candidate: string, current: string | null): boolean {
 }
 
 function rowToItem(row: Row): SupervisedInboxItem {
-  return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
+  return { inbox_item_id: String(row.inbox_item_id), agent_id: String(row.agent_id), room_id: String(row.room_id), source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), fifo_sequence: Number(row.fifo_sequence), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), action_id: String(row.action_id), reply_client_message_id: String(row.reply_client_message_id), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), outcome: row.outcome === null ? null : String(row.outcome), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", blocked_by_inbox_item_id: row.blocked_by_inbox_item_id === null ? null : String(row.blocked_by_inbox_item_id), next_attempt_at_ms: row.next_attempt_at_ms === null ? null : Number(row.next_attempt_at_ms), terminal_reason: row.terminal_reason === null || row.terminal_reason === undefined ? null : String(row.terminal_reason) as "upgrade_authority_unavailable", created_at: String(row.created_at), updated_at: String(row.updated_at), acknowledged_at: row.acknowledged_at === null ? null : String(row.acknowledged_at) };
+}
+function rowToProviderTurnBinding(row: Row): SupervisedProviderTurnBinding {
+  return {
+    inbox_item_id: String(row.inbox_item_id),
+    agent_id: String(row.agent_id),
+    room_id: String(row.room_id),
+    work_attempt_id: String(row.work_attempt_id),
+    origin_execution_generation_id: String(row.origin_execution_generation_id),
+    provider_continuation_id: String(row.provider_continuation_id),
+    provider_turn_id: String(row.provider_turn_id),
+  };
+}
+function sameProviderTurnBinding(left: SupervisedProviderTurnBinding, right: SupervisedProviderTurnBinding): boolean {
+  return left.inbox_item_id === right.inbox_item_id
+    && left.agent_id === right.agent_id
+    && left.room_id === right.room_id
+    && left.work_attempt_id === right.work_attempt_id
+    && left.origin_execution_generation_id === right.origin_execution_generation_id
+    && left.provider_continuation_id === right.provider_continuation_id
+    && left.provider_turn_id === right.provider_turn_id;
 }
 function rowToEvent(row: Row): SupervisedInboxEvent { return { phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail) }; }
-function rowToInspectorItem(row: Row): AgentInspectorDetail["items"][number] { const source = safeSource(JSON.parse(String(row.source_message_json)), String(row.source_message_id), "", {}); return { source_message_id: String(row.source_message_id), inbox_item_id: String(row.inbox_item_id), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), updated_at: String(row.updated_at), sender: source?.sender ?? null, text_preview: source?.text ? source.text.slice(0, 240) : null, created_at: source?.created_at ?? null, outcome: safeOutcome(row.outcome === null ? null : String(row.outcome)), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", canonical_message_id: row.canonical_message_id === null ? null : String(row.canonical_message_id) }; }
+function rowToInspectorItem(row: Row): AgentInspectorDetail["items"][number] { const source = safeSource(JSON.parse(String(row.source_message_json)), String(row.source_message_id), "", {}); return { source_message_id: String(row.source_message_id), inbox_item_id: String(row.inbox_item_id), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), updated_at: String(row.updated_at), sender: source?.sender ?? null, text_preview: source?.text ? source.text.slice(0, 240) : null, created_at: source?.created_at ?? null, outcome: safeOutcome(row.outcome === null ? null : String(row.outcome)), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", terminal_reason: row.terminal_reason === null || row.terminal_reason === undefined ? null : String(row.terminal_reason) as "upgrade_authority_unavailable", canonical_message_id: row.canonical_message_id === null ? null : String(row.canonical_message_id) }; }
 function rowToContinuationRepair(row: Row): ProviderContinuationRepair {
   return {
     repair_id: String(row.repair_id),
@@ -1229,14 +1771,49 @@ function safeOutcome(outcome: string | null): unknown { try { return outcome ? J
 function safeSource(source: unknown, id: string, roomId: string, activation: InboxActivation): AgentInspectorDetail["source_message"] { const value = source && typeof source === "object" ? source as Record<string, unknown> : {}; const reply = value.reply_to && typeof value.reply_to === "object" ? value.reply_to as Record<string, unknown> : {}; return { id, room_id: roomId, sender: typeof value.sender === "string" ? value.sender : null, text: typeof value.text === "string" ? value.text : null, created_at: typeof value.timestamp === "string" ? value.timestamp : null, reply_to: typeof value.thread_reply_to_id === "string" ? value.thread_reply_to_id : typeof reply.id === "string" ? reply.id : null, thread_root_id: typeof value.thread_root_id === "string" ? value.thread_root_id : null, activation }; }
 function boundaryToDetail(row: Row): NonNullable<AgentInspectorDetail["history_boundary"]> { return { earliest_retained_observed_message_id: row.earliest_retained_observed_message_id === null ? null : String(row.earliest_retained_observed_message_id), earliest_retained_inbox_message_id: row.earliest_retained_inbox_message_id === null ? null : String(row.earliest_retained_inbox_message_id), earliest_retained_receipt_sequence: row.earliest_retained_receipt_sequence === null ? null : Number(row.earliest_retained_receipt_sequence), pruned_before_message_id: row.pruned_before_message_id === null ? null : String(row.pruned_before_message_id), pruned_at: row.pruned_at === null ? null : String(row.pruned_at) }; }
 
+function serializeEffectJson(value: unknown, label: string): string {
+  let serialized: string | undefined;
+  try { serialized = JSON.stringify(value); }
+  catch { throw new Error(`A supervised effect ${label} must be JSON-serializable.`); }
+  if (serialized === undefined) throw new Error(`A supervised effect ${label} must be a JSON value.`);
+  return serialized;
+}
+
+function effectRequestFingerprint(requestJson: string): string {
+  return createHash("sha256").update(requestJson).digest("hex");
+}
+
+function truncateEffectError(error: string): string {
+  if (Buffer.byteLength(error, "utf8") <= MAX_EFFECT_ERROR_BYTES) return error;
+  const suffix = "… [truncated]";
+  const prefixBytes = MAX_EFFECT_ERROR_BYTES - Buffer.byteLength(suffix, "utf8");
+  const prefix = Buffer.from(error, "utf8").subarray(0, prefixBytes).toString("utf8").replace(/\uFFFD+$/u, "");
+  return `${prefix}${suffix}`;
+}
+
 function rowToEffect(row: Row): SupervisedEffectRecord {
   return {
     effect_id: String(row.effect_id), agent_id: String(row.agent_id), room_id: String(row.room_id),
     execution_generation_id: String(row.execution_generation_id), provider_turn_id: String(row.provider_turn_id),
     mcp_request_id: String(row.mcp_request_id), tool_name: String(row.tool_name), request: JSON.parse(String(row.request_json)),
+    mutation: Number(row.mutation) === 1,
     state: String(row.state) as SupervisedEffectRecord["state"],
     result: row.result_json === null ? null : JSON.parse(String(row.result_json)),
     error: row.error === null ? null : String(row.error),
+    created_at: String(row.created_at), updated_at: String(row.updated_at),
+  };
+}
+
+function rowToTombstonedEffect(row: Row): SupervisedEffectRecord {
+  return {
+    effect_id: String(row.effect_id), agent_id: String(row.agent_id), room_id: String(row.room_id),
+    execution_generation_id: String(row.execution_generation_id), provider_turn_id: String(row.provider_turn_id),
+    mcp_request_id: String(row.mcp_request_id), tool_name: String(row.tool_name), request: null,
+    mutation: Number(row.mutation) === 1,
+    state: String(row.state) as SupervisedEffectRecord["state"],
+    result: row.result_json === null ? null : JSON.parse(String(row.result_json)),
+    error: row.error === null ? null : String(row.error),
+    created_at: String(row.created_at), updated_at: String(row.updated_at),
   };
 }
 

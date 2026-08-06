@@ -1,6 +1,7 @@
 import type {
   DesktopSupervisorActivityEvent,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorTurnControlInput,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
 import {
@@ -76,6 +77,7 @@ export type AgentInspectorActionKind =
   | "recover"
   | "stop_turn"
   | "steer_turn"
+  | "retry_turn_control"
   | "resolve_turn_control"
   | "retry_delivery"
   | "restore_conversation"
@@ -116,11 +118,20 @@ export interface AgentInspectorTurnControlProjection {
   status: AgentInspectorTurnControlStatus;
   capability: "native_interrupt" | "restart_resume" | "unsupported";
   providerTurnId: string | null;
+  targetRoomId: string | null;
+  targetSourceMessageId: string | null;
+  targetProviderContinuationId: string | null;
+  targetInboxItemId: string | null;
   actionId: string | null;
+  actionSequence: number | null;
   workAttemptId: string | null;
   executionGenerationId: string | null;
   canStop: boolean;
   canCorrect: boolean;
+  /** Retry is bound to the durable journal; it never derives a new action id. */
+  canRetry: boolean;
+  retryHasCorrection: boolean;
+  retryCorrection: string | null;
   canResolve: boolean;
   label: string;
   detail: string;
@@ -149,10 +160,49 @@ export interface AgentInspectorTurnControlActionIdentity {
   roomId: string;
   workAttemptId: string;
   executionGenerationId: string;
+  actionSequence: number;
   providerTurnId: string | null;
   inboxItemId: string | null;
   sourceMessageId: string | null;
   correction: string | null;
+}
+
+/** Build the sole renderer IPC shape allowed to retry an accepted action. */
+export function agentInspectorRetryableTurnControlInput(
+  entry: Pick<DesktopSupervisorManifestEntry, "id" | "workAttemptId" | "executionGenerationId">,
+  control: AgentInspectorTurnControlProjection | null,
+  daemonGeneration: number,
+): DesktopSupervisorTurnControlInput | null {
+  if (!control?.canRetry
+    || control.status !== "retryable"
+    || !control.actionId
+    || !control.actionSequence
+    || !control.workAttemptId
+    || !control.executionGenerationId
+    || !control.targetRoomId
+    || !control.targetSourceMessageId
+    || !control.targetProviderContinuationId
+    || !control.targetInboxItemId
+    || !control.providerTurnId
+    || !Number.isSafeInteger(daemonGeneration)
+    || daemonGeneration < 1
+    || control.workAttemptId !== entry.workAttemptId
+    || control.executionGenerationId !== entry.executionGenerationId
+    || (control.retryHasCorrection && !control.retryCorrection?.trim())) return null;
+  return {
+    entryId: entry.id,
+    daemonGeneration,
+    roomId: control.targetRoomId,
+    workAttemptId: control.workAttemptId,
+    executionGenerationId: control.executionGenerationId,
+    providerContinuationId: control.targetProviderContinuationId,
+    providerTurnId: control.providerTurnId,
+    inboxItemId: control.targetInboxItemId,
+    sourceMessageId: control.targetSourceMessageId,
+    actionId: control.actionId,
+    actionSequence: control.actionSequence,
+    correction: control.retryHasCorrection ? control.retryCorrection : null,
+  };
 }
 
 export interface AgentInspectorActionState {
@@ -590,6 +640,9 @@ function exactAssignedWork(
 function recentOutcome(entry: DesktopSupervisorManifestEntry): AgentInspectorProjection["recentOutcome"] {
   const receipt = [...(entry.deliveryReceipts ?? [])].sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0];
   if (!receipt) return null;
+  if (receipt.terminalReason === "upgrade_authority_unavailable") {
+    return { label: "Retired during a safety upgrade", observedAt: receipt.updatedAt };
+  }
   const labels: Record<string, string> = {
     acknowledged: "Published a room response",
     acknowledged_no_reply: "Chose not to reply",
@@ -627,24 +680,45 @@ export function projectAgentInspectorTurnControl(
   const journal = entry.turnControl;
   const capability = journal?.capability ?? providerTurnControlCapability(entry);
   const baseExact = turnControlBaseIsExact(entry);
-  const providerTurnId = entry.roomAgentState?.turn.providerTurnId ?? null;
+  const providerTurnId = journal && journal.status !== "completed"
+    ? journal.providerTurnId
+    : entry.roomAgentState?.turn.providerTurnId ?? null;
+  const targetRoomId = journal?.targetRoomId ?? null;
+  const targetSourceMessageId = journal?.targetSourceMessageId ?? null;
+  const targetProviderContinuationId = journal?.targetProviderContinuationId ?? null;
+  const targetInboxItemId = journal?.inboxItemId ?? null;
   const isResponding = entry.roomAgentState?.turn.state === "responding";
   const activeTurnIsCheckpointed = !isResponding || Boolean(providerTurnId);
   const canControl = baseExact && capability !== "unsupported";
 
   if (journal?.status === "uncertain") {
-    const journalMatchesExecution = journal.workAttemptId === entry.workAttemptId
-      && journal.executionGenerationId === entry.executionGenerationId;
+    // Resolution is for a durable historical action, not a capability of the
+    // currently healthy runtime. Crashes and generation replacement are the
+    // cases that most need it; the daemon/store revalidate terminal evidence.
+    const journalHasExactDurableIdentity = Boolean(
+      journal.actionId.trim()
+      && journal.workAttemptId.trim()
+      && journal.executionGenerationId.trim()
+      && journal.workAttemptId === entry.workAttemptId,
+    );
     return {
       status: "uncertain",
       capability: journal.capability,
       providerTurnId,
+      targetRoomId,
+      targetSourceMessageId,
+      targetProviderContinuationId,
+      targetInboxItemId,
       actionId: journal.actionId,
+      actionSequence: journal.actionSequence,
       workAttemptId: journal.workAttemptId,
       executionGenerationId: journal.executionGenerationId,
       canStop: false,
       canCorrect: false,
-      canResolve: baseExact && journalMatchesExecution,
+      canRetry: false,
+      retryHasCorrection: Boolean(entry.turnControl?.hasCorrection),
+      retryCorrection: entry.turnControl?.correctionText ?? null,
+      canResolve: journalHasExactDurableIdentity,
       label: "Turn control needs confirmation",
       detail: journal.error || "The last control request may have reached the provider. Confirm the outcome before another change is sent.",
     };
@@ -655,11 +729,19 @@ export function projectAgentInspectorTurnControl(
       status: "in_progress",
       capability: journal.capability,
       providerTurnId,
+      targetRoomId,
+      targetSourceMessageId,
+      targetProviderContinuationId,
+      targetInboxItemId,
       actionId: journal.actionId,
+      actionSequence: journal.actionSequence,
       workAttemptId: journal.workAttemptId,
       executionGenerationId: journal.executionGenerationId,
       canStop: false,
       canCorrect: false,
+      canRetry: false,
+      retryHasCorrection: Boolean(journal.hasCorrection),
+      retryCorrection: journal.correctionText ?? null,
       canResolve: false,
       label: journal.hasCorrection ? "Applying correction" : "Stopping current turn",
       detail: "The supervisor is applying this change to the existing agent session.",
@@ -669,21 +751,34 @@ export function projectAgentInspectorTurnControl(
   const shouldShow = canControl && (isResponding || journal?.status === "retryable");
   if (!shouldShow) return null;
   const awaitingTurnCheckpoint = isResponding && !activeTurnIsCheckpointed;
+  const retryable = journal?.status === "retryable";
   return {
     status: journal?.status === "retryable" ? "retryable" : "ready",
     capability,
     providerTurnId,
+    targetRoomId,
+    targetSourceMessageId,
+    targetProviderContinuationId,
+    targetInboxItemId,
     actionId: journal?.actionId ?? null,
+    actionSequence: journal?.actionSequence ?? null,
     workAttemptId: entry.workAttemptId,
     executionGenerationId: entry.executionGenerationId,
-    canStop: canControl && isResponding && activeTurnIsCheckpointed,
-    canCorrect: canControl && activeTurnIsCheckpointed,
+    canStop: canControl && !retryable && isResponding && activeTurnIsCheckpointed,
+    canCorrect: canControl && !retryable && activeTurnIsCheckpointed,
+    canRetry: canControl
+      && journal?.status === "retryable"
+      && journal.workAttemptId === entry.workAttemptId
+      && journal.executionGenerationId === entry.executionGenerationId
+      && (!journal.hasCorrection || Boolean(journal.correctionText?.trim())),
+    retryHasCorrection: Boolean(journal?.hasCorrection),
+    retryCorrection: journal?.correctionText ?? null,
     canResolve: false,
     label: journal?.status === "retryable" ? "Previous change was not applied" : "Control current turn",
     detail: awaitingTurnCheckpoint
       ? "This turn is still starting. Wait for its provider checkpoint before interrupting it."
       : journal?.status === "retryable"
-        ? "The previous change was verified not applied. You can safely send a new correction."
+        ? "The previous change was not applied. Retry that exact durable request before starting another change."
         : "Stop ends this response. A correction interrupts this turn, then continues on the same agent session.",
   };
 }
@@ -733,6 +828,7 @@ export async function agentInspectorTurnControlActionId(
     identity.roomId,
     identity.workAttemptId,
     identity.executionGenerationId,
+    identity.actionSequence,
     identity.providerTurnId,
     identity.inboxItemId,
     identity.sourceMessageId,
@@ -791,6 +887,7 @@ function actionAvailability(
     { kind: "reconnect", label: "Reconnect", available: stateDependentActionsAvailable && canReconnectRoomAgent(entry) },
     { kind: "recover", label: "Recover agent", available: stateDependentActionsAvailable && canRecoverSavedRoomAgent(entry) },
     { kind: "stop_turn", label: "Stop current turn", available: stateDependentActionsAvailable && canStopTurn },
+    { kind: "retry_turn_control", label: "Retry previous turn control", available: stateDependentActionsAvailable && turnControl?.canRetry === true },
     {
       kind: "retry_delivery",
       label: "Retry delivery",
@@ -863,6 +960,7 @@ export function projectAgentInspector(
       ...rawTurnControl,
       canStop: false,
       canCorrect: false,
+      canRetry: false,
       canResolve: false,
       detail: "Live supervisor state is required before this turn can be changed.",
     };

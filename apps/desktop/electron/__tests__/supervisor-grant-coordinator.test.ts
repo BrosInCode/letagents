@@ -61,7 +61,7 @@ function entry(id = "supervised_launch_1234567"): DesktopSupervisorManifestEntry
     bindingUpdatedAt: "2026-01-01T00:00:00.000Z", executionGenerationId: "execution_1", providerContinuationId: "thread_1",
     providerPid: 4242, workplaceLiveness: { state: "reachable", observedAt: null, detail: null },
     nativeLiveness: { state: "active", observedAt: null, detail: null }, readyReachedAt: null, restartCount: 0,
-    lastTerminal: null, activity: [], roomAgentState: null, deliveryReceipts: [], turnControl: null,
+    lastTerminal: null, activity: [], lastTurnControlSequence: 0, roomAgentState: null, deliveryReceipts: [], turnControl: null,
   };
 }
 

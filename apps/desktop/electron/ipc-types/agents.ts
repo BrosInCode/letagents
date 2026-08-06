@@ -520,6 +520,7 @@ export interface DesktopRoomAgentDeliveryReceipt {
   blockedByMessageId: string | null;
   error: string | null;
   failureCode: "provider_continuation_missing" | null;
+  terminalReason: "upgrade_authority_unavailable" | null;
   updatedAt: string;
   timeline: DesktopRoomAgentCausalEvent[];
 }
@@ -592,15 +593,25 @@ export interface DesktopSupervisorManifestEntry {
   restartCount: number;
   lastTerminal: Record<string, unknown> | null;
   activity: DesktopSupervisorActivityEvent[];
+  /** Exact-next replay watermark for bounded human turn controls. */
+  lastTurnControlSequence: number;
   /** Additive causal projection for daemon-owned bounded room delivery. */
   roomAgentState?: DesktopRoomAgentStateProjection | null;
   deliveryReceipts?: DesktopRoomAgentDeliveryReceipt[];
   turnControl: {
     actionId: string;
+    actionSequence: number;
     workAttemptId: string;
     executionGenerationId: string;
+    targetRoomId: string | null;
+    targetSourceMessageId: string | null;
+    targetProviderContinuationId: string | null;
+    inboxItemId: string | null;
+    providerTurnId: string | null;
     /** Whether the durable action was a correction rather than a stop. */
     hasCorrection?: boolean;
+    /** Bounded human-authored payload retained solely to retry this exact action. */
+    correctionText?: string | null;
     status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
     capability: "native_interrupt" | "restart_resume" | "unsupported";
     interrupted: boolean | null;
@@ -629,10 +640,20 @@ export interface DesktopSupervisorCreateInput {
 
 export interface DesktopSupervisorTurnControlInput {
   entryId: string;
+  /** Renderer-observed daemon and room-turn authority. The daemon validates
+   * these again in the same transaction that admits the native effect. */
+  daemonGeneration: number;
+  roomId: string;
   workAttemptId: string;
   executionGenerationId: string;
+  providerContinuationId: string;
+  providerTurnId: string;
+  inboxItemId: string;
+  sourceMessageId: string;
   /** Stable for one click/retry; a distinct human action gets a new id. */
   actionId: string;
+  /** Must be the exact next durable value, or the journal value for retry. */
+  actionSequence: number;
   /** Null/blank is the non-destructive Stop-turn primitive. */
   correction?: string | null;
 }
@@ -690,7 +711,8 @@ export interface DesktopSupervisorAttemptDetail {
 }
 export interface DesktopSupervisorAgentInspectorDetailInput { entryId: string; roomId: string; sourceMessageId?: string | null; }
 export interface DesktopSupervisorAgentInspectorHistoryBoundary { earliest_retained_observed_message_id: string | null; earliest_retained_inbox_message_id: string | null; earliest_retained_receipt_sequence: number | null; pruned_before_message_id: string | null; pruned_at: string | null; }
-export interface DesktopSupervisorAgentInspectorItem { source_message_id: string; inbox_item_id: string; state: Exclude<DesktopRoomAgentReceiptState, "queued_behind_blocked" | "restoring_conversation">; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; provider_turn_id: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; canonical_message_id: string | null; }
+export interface DesktopSupervisorAgentInspectorItem { source_message_id: string; inbox_item_id: string; state: Exclude<DesktopRoomAgentReceiptState, "queued_behind_blocked" | "restoring_conversation">; attempt_count: number; updated_at: string; sender: string | null; text_preview: string | null; created_at: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; provider_turn_id: string | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; canonical_message_id: string | null; }
+export interface DesktopSupervisorUncertainEffect { effect_id: string; tool_name: string; mcp_request_id: string; error: string; created_at: string; updated_at: string; }
 export interface DesktopSupervisorContinuationRepair {
   repair_id: string; agent_id: string; room_id: string; inbox_item_id: string;
   daemon_generation: number; execution_generation_id: string; work_attempt_id: string;
@@ -703,11 +725,11 @@ export interface DesktopSupervisorAgentInspectorDetail {
   availability: "available" | "pruned" | "not_loaded";
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: Record<string, unknown> | null } | null;
-  receipt: { state: DesktopRoomAgentReceiptState; attempt_count: number; provider_turn_id: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
+  receipt: { state: DesktopRoomAgentReceiptState; attempt_count: number; provider_turn_id: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
   terminal: { outcome: string; normalized_text: string | null; evidence_source: string; observed_at: string } | null;
   publication: { client_message_id: string; canonical_message_id: string | null; room_id: string | null } | null;
   continuation_repair: DesktopSupervisorContinuationRepair | null;
-  timeline: DesktopRoomAgentCausalEvent[]; items: DesktopSupervisorAgentInspectorItem[]; history_boundary: DesktopSupervisorAgentInspectorHistoryBoundary | null;
+  timeline: DesktopRoomAgentCausalEvent[]; items: DesktopSupervisorAgentInspectorItem[]; uncertain_effects: DesktopSupervisorUncertainEffect[]; history_boundary: DesktopSupervisorAgentInspectorHistoryBoundary | null;
 }
 
 export interface DesktopOpenModelSettingsStatus {

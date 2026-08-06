@@ -15,6 +15,7 @@
       :busy="busy"
       @stop="emit('stop-turn')"
       @correct="emit('correct-turn', $event)"
+      @retry="emit('retry-turn-control')"
       @resolve="emit('resolve-turn-control', $event)"
     />
     <AgentInspectorReadinessRail :facts="projection.readiness" />
@@ -60,6 +61,7 @@ defineProps<{ projection: AgentInspectorProjection; busy: boolean }>();
 const emit = defineEmits<{
   "stop-turn": [];
   "correct-turn": [correction: string];
+  "retry-turn-control": [];
   "resolve-turn-control": [resolution: "not_applied" | "applied"];
   "restore-conversation": [sourceMessageId: string];
   "skip-message": [sourceMessageId: string];

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentInspectorRetryableTurnControlInput,
   agentInspectorTurnControlActionId,
   agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorTurnControlFenceMatches,
@@ -110,6 +111,7 @@ function entry(overrides: Partial<DesktopSupervisorManifestEntry> = {}): Desktop
       task: { state: "none", taskId: null, title: null },
     },
     deliveryReceipts: [],
+    lastTurnControlSequence: 0,
     turnControl: null,
     ...overrides,
   };
@@ -497,10 +499,99 @@ test("an uncertain durable control gates new actions until a verified outcome is
   assert.equal(control.canResolve, true);
 
   const staleJournal = projectAgentInspectorTurnControl(entry({
+    desiredState: "running",
+    observedState: "failed",
+    condition: "coordination_blocked",
+    agentSessionBindingState: "stale",
+    executionGenerationId: "generation_successor",
     turnControl: { ...uncertain.turnControl!, executionGenerationId: "generation_old" },
   }));
   assert.ok(staleJournal);
-  assert.equal(staleJournal.canResolve, false, "the operator cannot settle an outcome for a different generation");
+  assert.equal(staleJournal.canResolve, true, "crash/degraded state does not hide resolution of an exact historical journal");
+
+  const detachedRuntime = projectAgentInspectorTurnControl(entry({
+    observedState: "idle",
+    providerPid: null,
+    executionGenerationId: null,
+    providerContinuationId: null,
+    turnControl: { ...uncertain.turnControl!, executionGenerationId: "generation_old" },
+  }));
+  assert.equal(detachedRuntime?.canResolve, true,
+    "operator resolution belongs to the durable journal even when no current provider runtime exists");
+
+  const differentWork = projectAgentInspectorTurnControl(entry({
+    turnControl: { ...uncertain.turnControl!, workAttemptId: "another_attempt" },
+  }));
+  assert.equal(differentWork?.canResolve, false, "a journal from another durable work attempt remains fenced");
+});
+
+test("a retryable control exposes only its exact durable action and correction", () => {
+  const retryableEntry = entry({
+    turnControl: {
+      actionId: "control-retry-exact",
+      actionSequence: 7,
+      workAttemptId: "attempt_1",
+      executionGenerationId: "generation_1",
+      targetRoomId: "focus_1",
+      targetSourceMessageId: "message_1",
+      targetProviderContinuationId: "continuation_1",
+      inboxItemId: "inbox_1",
+      providerTurnId: "turn_1",
+      hasCorrection: true,
+      correctionText: "keep the durable correction",
+      status: "retryable",
+      capability: "native_interrupt",
+      interrupted: false,
+      resumed: false,
+      state: "working",
+      stages: ["delivered"],
+      error: "native dispatch was proven not applied",
+      recordedAt: "2026-08-05T10:00:00.000Z",
+      updatedAt: "2026-08-05T10:00:01.000Z",
+    },
+  });
+  const control = projectAgentInspectorTurnControl(retryableEntry);
+  assert.ok(control);
+  assert.equal(control.status, "retryable");
+  assert.equal(control.canRetry, true);
+  assert.equal(control.retryHasCorrection, true);
+  assert.equal(control.retryCorrection, "keep the durable correction");
+  assert.equal(control.canStop, false, "a new Stop cannot replace an accepted retryable action");
+  assert.equal(control.canCorrect, false, "new correction text cannot borrow the accepted action barrier");
+  assert.equal(projectAgentInspector(retryableEntry, { roomId: "focus_1" })?.actions.find((action) => action.kind === "retry_turn_control")?.available, true);
+  assert.deepEqual(agentInspectorRetryableTurnControlInput(retryableEntry, control, 12), {
+    entryId: "supervised_1",
+    daemonGeneration: 12,
+    roomId: "focus_1",
+    workAttemptId: "attempt_1",
+    executionGenerationId: "generation_1",
+    providerContinuationId: "continuation_1",
+    providerTurnId: "turn_1",
+    inboxItemId: "inbox_1",
+    sourceMessageId: "message_1",
+    actionId: "control-retry-exact",
+    actionSequence: 7,
+    correction: "keep the durable correction",
+  }, "renderer IPC retries the exact journal identity and payload");
+
+  const staleProjection = projectAgentInspector(retryableEntry, {
+    roomId: "focus_1",
+    resourceFreshness: "stale",
+  });
+  assert.equal(staleProjection?.turnControl?.status, "retryable");
+  assert.equal(staleProjection?.turnControl?.canRetry, false, "stale supervisor state cannot authorize a durable retry");
+  assert.equal(staleProjection?.actions.find((action) => action.kind === "retry_turn_control")?.available, false);
+  assert.equal(
+    agentInspectorRetryableTurnControlInput(retryableEntry, staleProjection?.turnControl ?? null, 12),
+    null,
+    "stale Retry cannot construct an IPC payload even if the historical journal remains visible",
+  );
+
+  const missingLegacyPayload = projectAgentInspectorTurnControl(entry({
+    turnControl: { ...retryableEntry.turnControl!, correctionText: null },
+  }));
+  assert.equal(missingLegacyPayload?.canRetry, false, "legacy correction intent without its payload fails closed");
+  assert.equal(agentInspectorRetryableTurnControlInput(retryableEntry, missingLegacyPayload, 12), null);
 });
 
 test("turn-control completions are fenced to exact agent, room, work, generation, daemon, and provider turn", () => {

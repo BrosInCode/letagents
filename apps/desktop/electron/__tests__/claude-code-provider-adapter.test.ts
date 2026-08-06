@@ -1027,11 +1027,15 @@ test("Claude turn control interrupts only the active bounded turn and refuses co
   await flush();
   const turnFrame = JSON.parse(child.written.at(-1)!) as { uuid: string };
 
+  let checkpointedTurnId: string | null = null;
   const controlled = adapter.controlTurn!(handle, null, {
+    targetTurnId: turnFrame.uuid,
+    checkpointTurnStarted: async (turnId) => { checkpointedTurnId = turnId; },
     markDispatched: async () => {},
   });
-  await Promise.resolve();
+  await flush();
   const controlFrame = JSON.parse(child.written.at(-1)!) as Record<string, unknown>;
+  assert.equal(checkpointedTurnId, turnFrame.uuid);
   assert.equal(controlFrame.type, "control_request");
 
   child.emit({

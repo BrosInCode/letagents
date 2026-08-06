@@ -435,6 +435,40 @@ test("Codex turn control interrupts the exact turn and resumes the same thread w
   assert.equal(handle.providerContinuationId, "thread-1");
 });
 
+test("Codex retry never retargets completed A to newer active B", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const original = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return {
+      thread: { id: handle.providerContinuationId, turns: [
+        { id: "turn-A", status: "interrupted", items: [] },
+        { id: "turn-B", status: "inProgress", items: [] },
+      ] },
+    } as T;
+    return original<T>(method, params);
+  };
+  client.requests.length = 0;
+  const checkpoints: string[] = [];
+
+  const stopped = await adapter.controlTurn!(handle, null, {
+    targetTurnId: "turn-A",
+    checkpointTurnStarted: async (turnId) => { checkpoints.push(turnId); },
+    markDispatched: async () => { throw new Error("must not dispatch against B"); },
+  });
+  assert.deepEqual(stopped, { capability: "native_interrupt", interrupted: false, resumed: false, state: "working" });
+  await assert.rejects(() => adapter.controlTurn!(handle, "apply exact correction", {
+    targetTurnId: "turn-A",
+    checkpointTurnStarted: async () => {},
+    markDispatched: async () => { throw new Error("must not dispatch against B"); },
+  }), /newer turn is active/);
+  assert.deepEqual(checkpoints, ["turn-A"]);
+  assert.equal(client.requests.some((request) => request.method === "turn/interrupt"), false);
+  assert.equal(client.requests.some((request) => request.method === "turn/start"), false);
+});
+
 test("Codex exact legacy-turn control checkpoints once and never selects a newer latest turn", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

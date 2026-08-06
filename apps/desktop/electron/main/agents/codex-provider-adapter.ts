@@ -458,18 +458,41 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (read.thread?.id !== handle.providerContinuationId) {
       throw new Error("Codex turn control resolved a different continuation thread.");
     }
-    const latestTurn = read.thread?.turns?.at(-1);
-    const turnId = latestTurn?.id;
-    const rawStatus = typeof latestTurn?.status === "string"
-      ? latestTurn.status
-      : latestTurn?.status?.status;
+    const expectedTurnId = options.targetTurnId?.trim() || null;
+    const selectedTurn = expectedTurnId
+      ? read.thread?.turns?.find((candidate) => candidate.id === expectedTurnId)
+      : read.thread?.turns?.at(-1);
+    if (expectedTurnId && !selectedTurn) {
+      throw new ProviderTurnControlError(
+        "Codex no longer exposes the exact checkpointed turn; refusing to target a newer latest turn.",
+        "uncertain",
+      );
+    }
+    const turnId = selectedTurn?.id;
+    const rawStatus = typeof selectedTurn?.status === "string"
+      ? selectedTurn.status
+      : selectedTurn?.status?.status;
     const terminal = /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(rawStatus ?? ""));
     const active = Boolean(turnId && isActiveCodexTurnStatus(rawStatus));
+    const newerActiveTurnExists = Boolean(expectedTurnId && read.thread?.turns?.some((candidate) => {
+      if (candidate.id === expectedTurnId) return false;
+      const candidateStatus = typeof candidate.status === "string" ? candidate.status : candidate.status?.status;
+      return isActiveCodexTurnStatus(candidateStatus);
+    }));
     if (turnId && !active && !terminal) {
       throw new Error("Codex returned an unknown latest-turn state; refusing ambiguous turn control.");
     }
+    if (turnId) await options.checkpointTurnStarted?.(turnId);
+    if (newerActiveTurnExists) {
+      if (text) {
+        throw new ProviderTurnControlError(
+          "Codex's checkpointed turn ended and a newer turn is active; the correction was not applied to that successor.",
+          "not_applied",
+        );
+      }
+      return { capability: "native_interrupt", interrupted: false, resumed: false, state: "working" };
+    }
     if (active) {
-      await options.checkpointTurnStarted?.(turnId!);
       await options.markDispatched?.();
       const dispatchRead = await handle.client.request<ThreadReadResult>("thread/read", {
         threadId: handle.providerContinuationId,

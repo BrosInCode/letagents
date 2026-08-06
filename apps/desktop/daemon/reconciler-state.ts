@@ -1,7 +1,7 @@
 import { CRASH_LOOP_WINDOW_MS, restartBackoffMs } from "./reconciler-policy.js";
 import type { ObservedState, ReconciliationState } from "./types.js";
 
-const MAX_ACTION_IDS = 32;
+export const MAX_PROJECTED_COMPLETED_ACTION_IDS = 32;
 
 function liveExits(previous: ReconciliationState | undefined, nowMs: number): number[] {
   return (previous?.exit_timestamps_ms ?? []).filter((at) => at >= nowMs - CRASH_LOOP_WINDOW_MS);
@@ -9,7 +9,11 @@ function liveExits(previous: ReconciliationState | undefined, nowMs: number): nu
 
 function completed(previous: ReconciliationState | undefined, actionId?: string): string[] {
   const ids = previous?.completed_action_ids ?? [];
-  return actionId ? [...ids.filter((id) => id !== actionId), actionId].slice(-MAX_ACTION_IDS) : ids;
+  // This is a bounded compatibility/debugging projection only. Internal
+  // reconciliation effects are fenced by last_action_sequence; human turn
+  // controls use their separate exact-next durable sequence watermark.
+  const recent = actionId ? [...ids.filter((id) => id !== actionId), actionId] : ids;
+  return recent.slice(-MAX_PROJECTED_COMPLETED_ACTION_IDS);
 }
 
 /**
@@ -48,7 +52,7 @@ export function beginReconciliationAction(previous: ReconciliationState, action:
   return { ...previous, last_action_sequence: action.sequence, pending_action: action };
 }
 
-/** Records a failed provider action exactly once, with bounded replay memory. */
+/** Records a failed provider action; the monotonic sequence remains the lifetime replay fence. */
 export function recordReconciliationActionFailure(previous: ReconciliationState, actionId: string, nowMs: number): ReconciliationState {
   if (previous.completed_action_ids.includes(actionId)) return previous;
   const failures = previous.consecutive_action_failures + 1;

@@ -753,9 +753,13 @@ test("Open Model refuses a fresh spawn without exact supervisor coordinates", as
 test("Open Model interrupts the exact active session through the native abort endpoint", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   harness.holdTurnOpen();
+  (handle as unknown as { activeRoomTurnId: string | null }).activeRoomTurnId = "turn-active";
   let dispatchMarked = false;
+  let checkpointedTurnId: string | null = null;
 
   const result = await adapter.controlTurn(handle, null, {
+    targetTurnId: "turn-active",
+    checkpointTurnStarted: async (turnId) => { checkpointedTurnId = turnId; },
     markDispatched: async () => { dispatchMarked = true; },
   });
 
@@ -765,6 +769,7 @@ test("Open Model interrupts the exact active session through the native abort en
     resumed: false,
     state: "idle",
   });
+  assert.equal(checkpointedTurnId, "turn-active");
   assert.equal(dispatchMarked, true);
   assert.deepEqual(harness.aborts, ["session-open-model-1"]);
 });
@@ -976,10 +981,11 @@ test("Open Model bounds a hung status probe to the turn-control budget instead o
     turnControlTimeoutMs: 120,
   });
   const handle = await adapter.spawn(spawnRequest());
+  (handle as unknown as { activeRoomTurnId: string | null }).activeRoomTurnId = "turn-hung-status";
 
   const startedAt = Date.now();
   await assert.rejects(
-    adapter.controlTurn(handle, null, {}),
+    adapter.controlTurn(handle, null, { targetTurnId: "turn-hung-status" }),
     (error: unknown) => {
       assert.ok(error instanceof ProviderTurnControlError);
       assert.equal(error.turnControlOutcome, "uncertain");

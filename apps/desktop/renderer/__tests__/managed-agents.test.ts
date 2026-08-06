@@ -1562,8 +1562,8 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
   };
   const compatibility = supervisedCursorPermissionProfilePresentation(base);
   assert.equal(compatibility.label, "Workspace writes (compatibility)");
-  assert.match(compatibility.detail ?? "", /restricts direct write paths to the launched workspace/i);
-  assert.match(compatibility.detail ?? "", /without inventorying project files/i);
+  assert.match(compatibility.detail ?? "", /private turn workspace/i);
+  assert.match(compatibility.detail ?? "", /does not change Git history/i);
 
   const writable = supervisedCursorPermissionProfilePresentation({
     ...base,
@@ -1572,7 +1572,7 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
     risk: "medium",
   });
   assert.equal(writable.label, "Workspace writes");
-  assert.match(writable.description, /inside the launched workspace/i);
+  assert.match(writable.description, /private turn workspace/i);
 });
 
 test("managed permission profile selection is scoped by provider", () => {

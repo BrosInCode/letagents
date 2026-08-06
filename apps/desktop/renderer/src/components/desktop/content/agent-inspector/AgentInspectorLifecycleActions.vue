@@ -77,6 +77,7 @@ const availableActions = computed(() => props.actions.filter((action) =>
   action.available
   && !action.danger
   && action.kind !== "stop_turn"
+  && action.kind !== "retry_turn_control"
   && action.kind !== "restore_conversation"
   && action.kind !== "skip_message"));
 const compactPriority: Record<AgentInspectorActionAvailability["kind"], number> = {
@@ -85,6 +86,7 @@ const compactPriority: Record<AgentInspectorActionAvailability["kind"], number> 
   skip_message: 1,
   stop_turn: 1,
   steer_turn: 1,
+  retry_turn_control: 1,
   resolve_turn_control: 1,
   mention: 2,
   reconnect: 3,
