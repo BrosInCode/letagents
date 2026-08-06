@@ -19,7 +19,7 @@ import {
   getStoredAgentIdentity,
   listStoredCodexLiveSessions,
   toPublicAgentIdentity,
-  toPublicRoomState,
+  toPublicCurrentRoomState,
   withJoinRoomAgentPrompt,
 } from "../../runtime.js";
 import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
@@ -69,6 +69,7 @@ export function registerRoomInspectionTools(server: McpServer): void {
 
 export async function getCurrentRoomPayload(conversationId?: string) {
   const runtime = requireValidWorkerBearerRuntime();
+  const publicCurrentRoom = toPublicCurrentRoomState();
   const workerAuth = runtime.mode !== "owner"
     ? { source: runtime.mode === "worker" ? "worker_bearer" : "daemon_supervised", expires_at: null, account: null }
     : null;
@@ -78,7 +79,7 @@ export async function getCurrentRoomPayload(conversationId?: string) {
         current_local_codex_session: getCurrentLiveSessionPayload(currentRoom?.room_id),
         local_codex_session_count: listStoredCodexLiveSessions().length,
       };
-  if (!currentRoom) {
+  if (!publicCurrentRoom) {
     return {
       connected: false,
       message: "Not currently in any room",
@@ -90,9 +91,10 @@ export async function getCurrentRoomPayload(conversationId?: string) {
   const auth = runtime.mode !== "owner"
     ? null
     : (await ownerAuthStoreLoader()).getStoredAuth();
-  return withJoinRoomAgentPrompt({
+  const payload = {
     connected: true,
-    ...toPublicRoomState(currentRoom),
+    ...publicCurrentRoom,
+    ...(runtime.mode === "supervised" ? { room_binding: "daemon_supervised" } : {}),
     ...localCodexDetails,
     agent_identity: toPublicAgentIdentity(
       getConversationIdentity(conversationId)
@@ -106,10 +108,15 @@ export async function getCurrentRoomPayload(conversationId?: string) {
           account: auth.account ?? null,
         }
       : null),
-  });
+  };
+  // A daemon-supervised worker is already bound to its exact authorized room.
+  // A normal join prompt is both false and dangerous here because it can lead
+  // the provider to request an unrelated room move.
+  return runtime.mode === "supervised" ? payload : withJoinRoomAgentPrompt(payload);
 }
 
 function getRepoInspectionPayload(targetDir?: string) {
+  const runtime = requireValidWorkerBearerRuntime();
   const startDir = targetDir || process.cwd();
   const repoRoot = resolveGitRoot(startDir);
   const configDir = repoRoot ? findExistingConfig(startDir) : null;
@@ -142,10 +149,16 @@ function getRepoInspectionPayload(targetDir?: string) {
     git_current_branch: gitContext?.currentBranch ?? configGitContext?.currentBranch ?? null,
     git_default_branch: gitContext?.defaultBranch ?? configGitContext?.defaultBranch ?? null,
     detected_room_from_context: detectedRoom ?? null,
-    current_room: toPublicRoomState(currentRoom),
-    current_room_scope: currentRoomScope(currentRoomMatchesContext, detectedRoom),
-    warning: repoWarning({ repoRoot, detectedRoom, currentRoomMatchesContext }),
-    join_hint: joinHint({ repoRoot, detectedRoom, currentRoomMatchesContext }),
+    current_room: toPublicCurrentRoomState(),
+    current_room_scope: runtime.mode === "supervised"
+      ? "daemon_supervised_exact_room"
+      : currentRoomScope(currentRoomMatchesContext, detectedRoom),
+    warning: runtime.mode === "supervised"
+      ? null
+      : repoWarning({ repoRoot, detectedRoom, currentRoomMatchesContext }),
+    join_hint: runtime.mode === "supervised"
+      ? null
+      : joinHint({ repoRoot, detectedRoom, currentRoomMatchesContext }),
   };
 }
 

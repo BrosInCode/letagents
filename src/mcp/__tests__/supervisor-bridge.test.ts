@@ -8,6 +8,9 @@ import test from "node:test";
 import type { StoredAgentSessionState } from "../local-state.js";
 import { toPublicAgentSession } from "../server/runtime/agent-sessions.js";
 import {
+  runWithSupervisedRoomAuthority,
+} from "../server/runtime/supervised-room-authority.js";
+import {
   borrowSupervisedWorkerCredential,
   borrowCurrentSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
@@ -46,22 +49,24 @@ test("supervisor bridge is inert outside a daemon-supervised provider", async ()
 });
 
 test("Open Model supervised coordinates resolve without a Codex context file", async () => {
-  const resolved = await resolveCurrentSupervisedWorkerSession(undefined, {
-    LETAGENTS_SUPERVISOR_PROVIDER: "open-model",
-    LETAGENTS_SUPERVISOR_ENTRY_ID: "open_model_exact",
-    LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-open-model.sock",
-    LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_open_model",
-    LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_open_model",
-    LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session_open_model",
-    LETAGENTS_SUPERVISOR_ROOM_ID: "room_open_model",
-    LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "Local Qwen",
-  });
+  await runWithSupervisedRoomAuthority("room_open_model", async () => {
+    const resolved = await resolveCurrentSupervisedWorkerSession(undefined, {
+      LETAGENTS_SUPERVISOR_PROVIDER: "open-model",
+      LETAGENTS_SUPERVISOR_ENTRY_ID: "open_model_exact",
+      LETAGENTS_SUPERVISOR_DAEMON_SOCKET: "/tmp/letagents-open-model.sock",
+      LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_open_model",
+      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_open_model",
+      LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session_open_model",
+      LETAGENTS_SUPERVISOR_ROOM_ID: "room_open_model",
+      LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME: "Local Qwen",
+    });
 
-  assert.equal(resolved.runtime, "open-model");
-  assert.equal(resolved.ide_label, "Open Model");
-  assert.equal(resolved.session_id, "session_open_model");
-  assert.equal(resolved.room_id, "room_open_model");
-  assert.equal(resolved.display_name, "Local Qwen");
+    assert.equal(resolved.runtime, "open-model");
+    assert.equal(resolved.ide_label, "Open Model");
+    assert.equal(resolved.session_id, "session_open_model");
+    assert.equal(resolved.room_id, "room_open_model");
+    assert.equal(resolved.display_name, "Local Qwen");
+  });
 });
 
 test("Cursor credential borrowing carries the exact rotating provider-turn capability", async () => {
@@ -187,7 +192,7 @@ test("bounded effect preparation preserves a daemon-owned uncertain mutation out
       requests.push(request);
       const result = request.method === "daemon.negotiate"
         ? { protocol_version: 2, generation: 22, pid: 4343, started_at: "2026-08-05T16:00:01.000Z" }
-        : { state: "uncertain", effect_id: "effect_uncertain", error: "The mutation may already have completed." };
+        : { state: "uncertain", room_id: "room_exact", effect_id: "effect_uncertain", error: "The mutation may already have completed." };
       socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
     });
   });
@@ -203,9 +208,88 @@ test("bounded effect preparation preserves a daemon-owned uncertain mutation out
       LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_exact",
     });
     assert.deepEqual(prepared, {
-      state: "uncertain", effectId: "effect_uncertain", error: "The mutation may already have completed.",
+      state: "uncertain", roomId: "room_exact", effectId: "effect_uncertain", error: "The mutation may already have completed.",
     });
     assert.equal(requests.filter((request) => request.method === "supervisor.prepare_bounded_effect").length, 1);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded effect preparation fails closed without valid daemon room authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-room-authority-"));
+  const socketPath = join(root, "daemon.sock");
+  const roomAuthorities: unknown[] = [undefined, "   ", "room\u0000escape"];
+  let preparationIndex = 0;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 23, pid: 4343, started_at: "2026-08-05T16:00:01.000Z" }
+        : {
+            state: "prepared",
+            effect_id: `effect_invalid_room_${preparationIndex}`,
+            action: "execute",
+            room_id: roomAuthorities[preparationIndex++],
+          };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    for (let index = 0; index < roomAuthorities.length; index += 1) {
+      await assert.rejects(() => prepareCurrentSupervisedEffect({
+        toolName: "read_messages",
+        input: {},
+        mcpRequestId: `request_invalid_room_${index}`,
+        mutation: false,
+      }, {
+        ...supervisedEnv(socketPath),
+        LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+      }), /did not return valid exact room authority/i);
+    }
+    assert.equal(preparationIndex, roomAuthorities.length);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("bounded effect preparation fails closed on unknown daemon states and actions", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-effect-protocol-drift-"));
+  const socketPath = join(root, "daemon.sock");
+  const responses = [
+    { state: "future_state", room_id: "room_exact", effect_id: "effect_future", action: "execute" },
+    { state: "prepared", room_id: "room_exact", effect_id: "effect_future", action: "future_action" },
+  ];
+  let preparationIndex = 0;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      const result = request.method === "daemon.negotiate"
+        ? { protocol_version: 2, generation: 24, pid: 4343, started_at: "2026-08-05T16:00:01.000Z" }
+        : responses[preparationIndex++];
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await assert.rejects(() => prepareCurrentSupervisedEffect({
+      toolName: "read_messages", input: {}, mcpRequestId: "request_future_state", mutation: false,
+    }, { ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn" }), /unsupported state/i);
+    await assert.rejects(() => prepareCurrentSupervisedEffect({
+      toolName: "read_messages", input: {}, mcpRequestId: "request_future_action", mutation: false,
+    }, { ...supervisedEnv(socketPath), LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn" }), /unsupported action/i);
+    assert.equal(preparationIndex, responses.length);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
@@ -327,7 +411,7 @@ test("credential borrowing requires the negotiated daemon generation and defers 
   }
 });
 
-test("bounded MCP borrowing resolves its exact non-secret worker identity from the Codex context", async () => {
+test("bounded MCP identity and credential borrowing follow a daemon room move instead of stale launch context", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-current-credential-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -356,19 +440,27 @@ test("bounded MCP borrowing resolves its exact non-secret worker identity from t
       LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
       LETAGENTS_API_URL: "https://letagents.chat",
     };
-    assert.deepEqual(await borrowCurrentSupervisedWorkerCredential(env, { cwd: root, trustedDaemonSocketPath: socketPath }), {
-      state: "available", credential: "rotated-in-daemon-memory-1",
+    const destinationRoom = "focus/destination-room";
+    await runWithSupervisedRoomAuthority(destinationRoom, async () => {
+      const movedIdentity = await resolveCurrentSupervisedWorkerSession(destinationRoom, env, {
+        cwd: root,
+        trustedDaemonSocketPath: socketPath,
+      });
+      assert.equal(movedIdentity.room_id, destinationRoom, "the fresh daemon effect supersedes the source room in the context file");
+      assert.deepEqual(await borrowCurrentSupervisedWorkerCredential(env, { cwd: root, trustedDaemonSocketPath: socketPath }), {
+        state: "available", credential: "rotated-in-daemon-memory-1",
+      });
+      assert.deepEqual(await borrowCurrentSupervisedWorkerCredential(env, { cwd: root, trustedDaemonSocketPath: socketPath }), {
+        state: "available", credential: "rotated-in-daemon-memory-2",
+      });
+      assert.deepEqual(requests[1]?.params, {
+        entry_id: "manifest_exact", room_id: destinationRoom, work_attempt_id: "attempt_exact",
+        execution_generation_id: "generation_exact", agent_session_id: session.session_id, daemon_generation: 11,
+        api_url: "https://letagents.chat",
+      });
+      assert.equal(requests.filter((request) => request.method === "supervisor.borrow_worker_credential").length, 2);
+      assert.doesNotMatch(JSON.stringify(await readContext(root)), /rotated-in-daemon-memory|session-secret/);
     });
-    assert.deepEqual(await borrowCurrentSupervisedWorkerCredential(env, { cwd: root, trustedDaemonSocketPath: socketPath }), {
-      state: "available", credential: "rotated-in-daemon-memory-2",
-    });
-    assert.deepEqual(requests[1]?.params, {
-      entry_id: "manifest_exact", room_id: session.room_id, work_attempt_id: "attempt_exact",
-      execution_generation_id: "generation_exact", agent_session_id: session.session_id, daemon_generation: 11,
-      api_url: "https://letagents.chat",
-    });
-    assert.equal(requests.filter((request) => request.method === "supervisor.borrow_worker_credential").length, 2);
-    assert.doesNotMatch(JSON.stringify(await readContext(root)), /rotated-in-daemon-memory|session-secret/);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });

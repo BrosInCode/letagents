@@ -5,6 +5,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 import type { StoredAgentSessionState } from "../../local-state.js";
+import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
 
 const NEGOTIATION_PROTOCOL_VERSION = 1;
 const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2]);
@@ -74,11 +75,11 @@ export type SupervisedCredentialBorrowResult =
   | { state: "stale"; code: "SUPERVISED_CREDENTIAL_STALE" };
 
 export type PreparedSupervisedEffect =
-  | { state: "completed"; result: unknown }
-  | { state: "uncertain"; effectId: string; error: string }
-  | { state: "prepared"; effectId: string; action: "execute" }
-  | { state: "prepared"; effectId: string; action: "use_final_answer"; sourceMessageId: string }
-  | { state: "prepared"; effectId: string; action: "room_move_prepared"; destinationRoom: string };
+  | { state: "completed"; roomId: string; result: unknown }
+  | { state: "uncertain"; roomId: string; effectId: string; error: string }
+  | { state: "prepared"; roomId: string; effectId: string; action: "execute" }
+  | { state: "prepared"; roomId: string; effectId: string; action: "use_final_answer"; sourceMessageId: string }
+  | { state: "prepared"; roomId: string; effectId: string; action: "room_move_prepared"; destinationRoom: string };
 
 export async function prepareCurrentSupervisedEffect(input: {
   toolName: string;
@@ -108,22 +109,32 @@ export async function prepareCurrentSupervisedEffect(input: {
   }, timeoutMs);
   if (!response.ok) throw new Error(response.error || "The supervised effect was rejected.");
   const result = response.result && typeof response.result === "object" ? response.result as Record<string, unknown> : {};
-  if (result.state === "completed") return { state: "completed", result: result.result };
+  const roomId = typeof result.room_id === "string" ? result.room_id.trim() : "";
+  if (!roomId || roomId.length > 1_024 || /[\u0000-\u001f\u007f]/.test(roomId)) {
+    throw new Error("The supervised daemon did not return valid exact room authority.");
+  }
+  if (result.state === "completed") return { state: "completed", roomId, result: result.result };
   const effectId = typeof result.effect_id === "string" ? result.effect_id : "";
   if (!effectId) throw new Error("The supervised effect journal did not return an effect id.");
   if (result.state === "uncertain") {
     const error = typeof result.error === "string" && result.error.trim()
       ? result.error
       : "The mutating tool outcome is uncertain.";
-    return { state: "uncertain", effectId, error };
+    return { state: "uncertain", roomId, effectId, error };
   }
-  if (result.action === "use_final_answer" && typeof result.source_message_id === "string") {
-    return { state: "prepared", effectId, action: "use_final_answer", sourceMessageId: result.source_message_id };
+  if (result.state !== "prepared") {
+    throw new Error("The supervised effect journal returned an unsupported state.");
   }
-  if (result.action === "room_move_prepared" && typeof result.destination_room === "string") {
-    return { state: "prepared", effectId, action: "room_move_prepared", destinationRoom: result.destination_room };
+  if (result.action === "execute") {
+    return { state: "prepared", roomId, effectId, action: "execute" };
   }
-  return { state: "prepared", effectId, action: "execute" };
+  if (result.action === "use_final_answer" && typeof result.source_message_id === "string" && result.source_message_id.trim()) {
+    return { state: "prepared", roomId, effectId, action: "use_final_answer", sourceMessageId: result.source_message_id };
+  }
+  if (result.action === "room_move_prepared" && typeof result.destination_room === "string" && result.destination_room.trim()) {
+    return { state: "prepared", roomId, effectId, action: "room_move_prepared", destinationRoom: result.destination_room };
+  }
+  throw new Error("The supervised effect journal returned an unsupported action.");
 }
 
 export async function completeCurrentSupervisedEffect(input: {
@@ -213,13 +224,14 @@ export async function borrowCurrentSupervisedWorkerCredential(
   }
   const seed = supervisedContextSession(env);
   const coordinates = await resolveSupervisorCoordinates(seed, env, options);
-  if (!coordinates?.agentSessionId || !coordinates.roomId) {
+  const roomId = getCurrentSupervisedRoomAuthority();
+  if (!coordinates?.agentSessionId || !roomId) {
     return { state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" };
   }
   return borrowSupervisedWorkerCredential({
     ...seed,
     session_id: coordinates.agentSessionId,
-    room_id: coordinates.roomId,
+    room_id: roomId,
   }, env, { ...options, resolvedCoordinates: coordinates });
 }
 
@@ -231,17 +243,18 @@ export async function resolveCurrentSupervisedWorkerSession(
 ): Promise<StoredAgentSessionState> {
   const seed = supervisedContextSession(env);
   const coordinates = await resolveSupervisorCoordinates(seed, env, options);
-  if (!coordinates?.agentSessionId || !coordinates.roomId) {
+  const boundRoomId = getCurrentSupervisedRoomAuthority();
+  if (!coordinates?.agentSessionId || !boundRoomId) {
     throw new Error("Daemon-supervised bounded turn is missing its exact worker session context.");
   }
-  if (roomId && roomId !== coordinates.roomId) {
-    throw new Error(`Daemon-supervised worker session is registered for ${coordinates.roomId}, not ${roomId}.`);
+  if (roomId && roomId !== boundRoomId) {
+    throw new Error(`Daemon-supervised worker session is registered for ${boundRoomId}, not ${roomId}.`);
   }
   const displayName = coordinates.agentDisplayName || "Daemon-supervised worker";
   return {
     ...seed,
     session_id: coordinates.agentSessionId,
-    room_id: coordinates.roomId,
+    room_id: boundRoomId,
     agent_key: coordinates.agentSessionId,
     actor_label: displayName,
     display_name: displayName,
