@@ -151,7 +151,12 @@ const productionPersonalIdentityDependencies: Partial<CursorProviderAdapterDepen
   bindPersonalIdentity: () => {},
 };
 
-function wrapperHostedMcpFixture(root: string): Pick<
+function wrapperHostedMcpFixture(
+  root: string,
+  mcpConnectorSocketPath?: string,
+  completionContract: "valid" | "missing" | "wrong_type" | "enum_superset" | "required_text" | "frame_flood" | "byte_flood" = "valid",
+  materializeRuntime = false,
+): Pick<
   CursorManagedProfile,
   "mcpRuntimeEntryPath" | "mcpRuntimeEnv" | "nativeAllowedWriteSubpaths" | "nativeAllowedReadSubpaths"
 > {
@@ -173,10 +178,75 @@ function wrapperHostedMcpFixture(root: string): Pick<
       mkdirSync(writableRoot, { recursive: true });
     }
   }
+  const runtimeEntry = join(bridgeRoot, "runtime.cjs");
+  const completionTools = completionContract === "missing"
+    ? []
+    : [{
+      name: "complete_room_turn",
+      description: "complete the room turn",
+      inputSchema: {
+          type: completionContract === "wrong_type" ? "array" : "object",
+          properties: {
+            outcome: {
+              type: "string",
+              enum: completionContract === "enum_superset"
+                ? ["reply", "no_reply", "later"]
+                : ["reply", "no_reply"],
+            },
+            text: { type: "string" },
+          },
+          required: completionContract === "required_text" ? ["outcome", "text"] : ["outcome"],
+      },
+    }];
+  if (materializeRuntime) {
+    mkdirSync(dirname(runtimeEntry), { recursive: true });
+    writeFileSync(runtimeEntry, `
+const readline = require("node:readline");
+require("node:fs").writeFileSync(${JSON.stringify(join(bridgeRoot, "runtime.pid"))}, String(process.pid));
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  if (request.method === "tools/list" && ${JSON.stringify(completionContract === "frame_flood")}) {
+    for (let index = 0; index < 300; index += 1) {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { index } }) + "\\n");
+    }
+  }
+  if (request.method === "tools/list" && ${JSON.stringify(completionContract === "byte_flood")}) {
+    for (let index = 0; index < 200; index += 1) {
+      process.stdout.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/progress", params: { index, payload: "x".repeat(6000) } }) + "\\n");
+    }
+  }
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
+    : request.method === "tools/list"
+      ? { tools: ${JSON.stringify(completionTools)} }
+      : {};
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`);
+  }
+  if (materializeRuntime && mcpConnectorSocketPath) {
+    const cursorHome = join(root, "home", ".cursor");
+    mkdirSync(cursorHome, { recursive: true });
+    const connectorSource = `
+const net = require("node:net");
+const socket = net.createConnection({ path: process.argv[1] });
+socket.once("connect", () => { process.stdin.pipe(socket); socket.pipe(process.stdout); });
+socket.once("error", () => process.exit(1));
+socket.once("close", () => process.exit(0));
+`;
+    writeFileSync(join(cursorHome, "mcp.json"), JSON.stringify({
+      mcpServers: {
+        letagents: {
+          command: process.execPath,
+          args: ["-e", connectorSource, mcpConnectorSocketPath],
+          env: { ELECTRON_RUN_AS_NODE: "1" },
+        },
+      },
+    }));
+  }
   return {
-    // The fake Cursor binaries below never open their MCP connector. This
-    // absolute executable is therefore only a bounded wrapper-input fixture.
-    mcpRuntimeEntryPath: "/usr/bin/true",
+    mcpRuntimeEntryPath: materializeRuntime ? runtimeEntry : "/usr/bin/true",
     mcpRuntimeEnv: {
       ELECTRON_RUN_AS_NODE: "1",
       LETAGENTS_API_URL: "https://letagents.chat",
@@ -194,6 +264,50 @@ function wrapperHostedMcpFixture(root: string): Pick<
     nativeAllowedReadSubpaths: sandboxRoots,
   };
 }
+
+const cursorMcpAttestationFixtureSource = `
+function attestFixtureMcp(mode = "normal") {
+  return new Promise((resolve, reject) => {
+    const fixtureFs = require("node:fs");
+    const fixtureReadline = require("node:readline");
+    const fixtureSpawn = require("node:child_process").spawn;
+    const config = JSON.parse(fixtureFs.readFileSync(process.env.HOME + "/.cursor/mcp.json", "utf8"));
+    const server = Object.values(config.mcpServers)[0];
+    const connector = fixtureSpawn(server.command, server.args, {
+      env: { ...process.env, ...server.env }, stdio: ["pipe", "pipe", "inherit"],
+    });
+    globalThis.__fixtureMcpConnector = connector;
+    const responses = fixtureReadline.createInterface({ input: connector.stdout });
+    responses.on("line", (line) => {
+      const response = JSON.parse(line);
+      if (response.id === 2
+        && response.result
+        && Array.isArray(response.result.tools)
+        && response.result.tools.some((tool) => tool.name === "complete_room_turn")) {
+        responses.close();
+        resolve(connector);
+      }
+    });
+    connector.once("error", reject);
+    connector.once("close", (code) => reject(new Error("fixture MCP connector closed before attestation: " + code)));
+    connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\\n");
+    if (mode === "request_flood") {
+      let flood = "";
+      for (let index = 0; index < 64; index += 1) {
+        flood += JSON.stringify({ jsonrpc: "2.0", id: 100 + index, method: "tools/list", params: {} }) + "\\n";
+      }
+      connector.stdin.write(flood);
+    } else {
+      connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\\n");
+    }
+  });
+}
+function detachFixtureMcp(connector) {
+  connector.unref();
+  if (typeof connector.stdin.unref === "function") connector.stdin.unref();
+  if (typeof connector.stdout.unref === "function") connector.stdout.unref();
+}
+`;
 
 function wrapperMcpRuntimeEnv(connectorRoot: string, turnId: string): Record<string, string> {
   return {
@@ -572,6 +686,22 @@ test("cursorLaunchPolicyArgs maps mechanically and rejects adapter-owned flags",
       allowedWriteSubpaths: [process.cwd()],
     }),
     /non-empty read and write sandbox allow-lists/,
+  );
+  assert.throws(
+    () => defaultLaunchTurn({
+      ...supervisedBoundary,
+      testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+      testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+      testMcpCapabilityTimeoutMs: 0,
+    }),
+    /live MCP capability timeout seam is restricted to bounded exact-loopback unit tests/,
+  );
+  assert.throws(
+    () => defaultLaunchTurn({
+      ...supervisedBoundary,
+      testMcpCapabilityTimeoutMs: 100,
+    }),
+    /live MCP capability timeout seam is restricted to bounded exact-loopback unit tests/,
   );
 });
 
@@ -986,7 +1116,23 @@ lines.on("line", (line) => {
   const result = request.method === "initialize"
     ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
     : request.method === "tools/list"
-      ? { tools: boundaryValid ? [{ name: "connector_boundary_valid", description: "ok", inputSchema: { type: "object" } }] : [] }
+      ? { tools: boundaryValid ? [
+        { name: "connector_boundary_valid", description: "ok", inputSchema: { type: "object" } },
+        {
+          name: "complete_room_turn",
+          description: "complete the room turn",
+          inputSchema: {
+            type: "object",
+            properties: {
+              outcome: { type: "string", enum: ["reply", "no_reply"] },
+              text: { type: "string" },
+            },
+            required: ["outcome"],
+          },
+        },
+      ] : [] }
+      : request.method === "fixture/large"
+        ? { payload: "x".repeat(2 * 1024 * 1024) }
       : {};
   process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
 });
@@ -1016,12 +1162,12 @@ note("connector-spawned:" + connector.pid);
 const lines = readline.createInterface({ input: connector.stdout });
 let initialized = false;
 let listed = false;
+let largeResponse = false;
 let secondBlocked = false;
 let finished = false;
 function finishIfReady() {
-  if (finished || !initialized || !listed || !secondBlocked) return;
+  if (finished || !initialized || !listed || !largeResponse || !secondBlocked) return;
   finished = true;
-  connector.stdin.end();
   if (fs.existsSync(${JSON.stringify(stubbornModePath)})) {
     const stubborn = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], {
       stdio: "ignore",
@@ -1033,6 +1179,7 @@ function finishIfReady() {
   const session = resume ? resume.slice("--resume=".length) : "sess-connector-e2e";
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: session }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "connector-ok:" + socketPath, session_id: session }) + "\\n");
+  setTimeout(() => connector.stdin.end(), 250);
   if (fs.existsSync(${JSON.stringify(stubbornModePath)})) setTimeout(() => process.exit(0), 100);
 }
 lines.on("line", (line) => {
@@ -1040,12 +1187,14 @@ lines.on("line", (line) => {
   const response = JSON.parse(line);
   if (response.id === 1) initialized = true;
   if (response.id === 2) listed = response.result.tools.some((tool) => tool.name === "connector_boundary_valid");
+  if (response.id === 3) largeResponse = response.result.payload.length === 2 * 1024 * 1024;
   finishIfReady();
 });
 connector.once("error", () => process.exit(72));
 connector.once("close", (code, signal) => note("connector-close:" + code + ":" + signal));
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } }) + "\\n");
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\\n");
+connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "fixture/large", params: {} }) + "\\n");
 setTimeout(() => {
   const second = net.createConnection({ path: socketPath });
   let accepted = false;
@@ -1184,6 +1333,444 @@ setTimeout(() => process.exit(73), 5000).unref();
     else process.env.LETAGENTS_CURSOR_SOURCE_HOME = previousSourceHome;
     if (previousDevMode === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
     else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDevMode;
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the production wrapper refuses a recycled MCP runtime process group before signaling", {
+  skip: process.platform === "win32",
+}, async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-runtime-recycled-group-"));
+  const statePath = join(root, "turn.jsonl");
+  const cursorBin = join(root, "fake-cursor-agent");
+  const preloadPath = join(root, "recycled-group-preload.cjs");
+  const runtimePidPath = join(root, "runtime.pid");
+  const preloadLoadedPath = join(root, "preload-loaded.log");
+  const initialIdentityPath = join(root, "initial-identity.log");
+  const identityProbePath = join(root, "identity-probe.log");
+  const groupSignalPath = join(root, "group-signal.log");
+  const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
+  const connectorSocketPath = join(connectorRoot, "stdio.sock");
+  const runtimeDataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
+  writeFileSync(statePath, "");
+  const hostedMcp = wrapperHostedMcpFixture(root, connectorSocketPath, "valid", true);
+  const runtimeEntryPath = hostedMcp.mcpRuntimeEntryPath!;
+  writeFileSync(runtimeEntryPath, `
+const fs = require("node:fs");
+const readline = require("node:readline");
+fs.writeFileSync(${JSON.stringify(runtimePidPath)}, String(process.pid));
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  const request = JSON.parse(line);
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2025-06-18", capabilities: { tools: {} }, serverInfo: { name: "fixture", version: "1" } }
+    : request.method === "tools/list"
+      ? { tools: [{
+          name: "complete_room_turn",
+          description: "complete room turn",
+          inputSchema: {
+            type: "object",
+            properties: {
+              outcome: { type: "string", enum: ["reply", "no_reply"] },
+              text: { type: "string" },
+            },
+            required: ["outcome"],
+          },
+        }] }
+      : {};
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+  if (request.method === "tools/list") setTimeout(() => process.exit(0), 25);
+});
+`);
+  writeFileSync(preloadPath, `
+const fs = require("node:fs");
+const childProcess = require("node:child_process");
+const originalSpawnSync = childProcess.spawnSync;
+const originalKill = process.kill.bind(process);
+fs.appendFileSync(${JSON.stringify(preloadLoadedPath)}, String(process.pid) + "\\n");
+let exactIdentityReads = 0;
+function runtimePid() {
+  try { return Number(fs.readFileSync(${JSON.stringify(runtimePidPath)}, "utf8")); }
+  catch { return null; }
+}
+childProcess.spawnSync = function(command, args, options) {
+  if (command === "/bin/ps" && Array.isArray(args)
+    && args.includes("pid=,ppid=,pgid=,lstart=")) {
+    exactIdentityReads += 1;
+    if (exactIdentityReads === 1) {
+      const observed = originalSpawnSync.call(this, command, args, options);
+      fs.writeFileSync(${JSON.stringify(initialIdentityPath)}, JSON.stringify({
+        args, status: observed.status, stdout: observed.stdout, error: observed.error && observed.error.message,
+      }));
+      return observed;
+    }
+    const pid = Number(args[args.indexOf("-p") + 1]);
+    fs.appendFileSync(${JSON.stringify(identityProbePath)}, "recycled\\n");
+    return {
+      pid: 0,
+      output: [null, pid + " 1 " + pid + " Thu Jan  1 00:00:00 1970\\n", ""],
+      stdout: pid + " 1 " + pid + " Thu Jan  1 00:00:00 1970\\n",
+      stderr: "",
+      status: 0,
+      signal: null,
+    };
+  }
+  if (command === "/bin/ps" && Array.isArray(args)
+    && args[0] === "-axo" && args[1] === "pid=,pgid=") {
+    const pid = runtimePid();
+    if (pid) {
+      const observed = originalSpawnSync.call(this, command, args, options);
+      const stdout = String(observed.stdout || "")
+        + String(pid + 100000) + " " + String(pid) + "\\n";
+      return {
+        pid: 0,
+        output: [null, stdout, observed.stderr || ""],
+        stdout,
+        stderr: observed.stderr || "",
+        status: observed.status,
+        signal: observed.signal,
+      };
+    }
+  }
+  return originalSpawnSync.call(this, command, args, options);
+};
+process.kill = function(target, signal) {
+  const pid = runtimePid();
+  if (pid && target === -pid) {
+    fs.appendFileSync(${JSON.stringify(groupSignalPath)}, String(signal) + "\\n");
+    return true;
+  }
+  return originalKill(target, signal);
+};
+`);
+  writeFileSync(cursorBin, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+attestFixtureMcp().then(() => setInterval(() => {}, 1000)).catch((error) => {
+  process.stderr.write(String(error && error.stack ? error.stack : error) + "\\n");
+  process.exit(84);
+});
+`);
+  chmodSync(cursorBin, 0o700);
+  let child: CursorCliChild | null = null;
+  try {
+    child = defaultLaunchTurn({
+      cursorBin,
+      args: ["-p", "--output-format", "stream-json", "recycled MCP runtime group"],
+      cwd: root,
+      env: {
+        HOME: join(root, "home"),
+        CURSOR_DATA_DIR: runtimeDataRoot,
+        NODE_OPTIONS: `--require=${preloadPath}`,
+        PATH: process.env.PATH,
+      },
+      deferStart: true,
+      statePath,
+      mcpConnectorSocketPath: connectorSocketPath,
+      mcpRuntimeEntryPath: runtimeEntryPath,
+      mcpRuntimeCwd: root,
+      mcpRuntimeEnv: wrapperMcpRuntimeEnv(connectorRoot, "cursor:recycled-mcp-runtime-group"),
+      providerAuthorization: "Bearer recycled-mcp-runtime-provider-proof",
+      restrictRemoteAuthority: true,
+      allowedWriteSubpaths: [root, realpathSync(root), runtimeDataRoot, realpathSync(runtimeDataRoot)],
+      allowedReadSubpaths: [root, realpathSync(root)],
+      allowedNetworkUnixSockets: [connectorSocketPath],
+      testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+      testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+    });
+    await child.prepared;
+    child.release();
+    const exit = await withLoopAlive(child.exited);
+
+    assert.equal(exit.type, "exit");
+    const terminal = JSON.parse(readFileSync(`${statePath}.terminal.json`, "utf8"));
+    assert.equal(existsSync(preloadLoadedPath), true, `the adversarial process shim loaded: ${child.stderrTail()}`);
+    assert.equal(existsSync(initialIdentityPath), true, "spawn records the original runtime leader's exact birth and ancestry");
+    assert.equal(existsSync(identityProbePath), true, "retirement observes that the original group leader birth changed");
+    assert.equal(existsSync(groupSignalPath), false, "the recycled numeric PGID receives neither TERM nor KILL");
+    assert.equal(terminal.remote_authority_revoked, false, "ambiguous recycled-group retirement stays fail closed");
+  } finally {
+    if (child?.pid) {
+      try { process.kill(child.pid, "SIGKILL"); } catch {}
+    }
+    rmSync(connectorRoot, { recursive: true, force: true });
+    rmSync(runtimeDataRoot, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the exact live Cursor connector rejects a swapped runtime with a missing or malformed completion contract", async () => {
+  for (const completionContract of ["missing", "wrong_type", "enum_superset", "required_text"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `letagents-cursor-live-contract-${completionContract}-`));
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    const cursorBin = join(root, "fake-cursor-agent");
+    const connectorRoots: string[] = [];
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(cursorBin, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+attestFixtureMcp().then(() => {
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "unexpected" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "unexpected", session_id: "unexpected" }) + "\\n");
+}).catch(() => process.exit(81));
+`);
+    chmodSync(cursorBin, 0o700);
+    try {
+      const adapter = new CursorProviderAdapter({
+        cursorBin,
+        dependencies: {
+          ...productionPersonalIdentityDependencies,
+          launchTurn(input) {
+            connectorRoots.push(dirname(input.mcpConnectorSocketPath!));
+            return defaultLaunchTurn(input);
+          },
+        },
+        supervisedProfileFactory: (input) => ({
+          homeDir,
+          configDir,
+          dataDir: join(root, "data"),
+          cacheDir: join(root, "cache"),
+          env: { HOME: homeDir },
+          ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, completionContract, true),
+        }),
+      });
+      const handle = await adapter.spawn(daemonSpawnRequest({
+        workAttemptId: `wa-cursor-live-contract-${completionContract}`,
+        cwd: root,
+      }));
+      await assert.rejects(
+        withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+          inboxItemId: `live-contract-${completionContract}`,
+        }))),
+        /live MCP runtime does not expose the required complete_room_turn contract/,
+      );
+      assert.equal(connectorRoots.length, 1, "the earlier registry preflight passed before the exact live swap was rejected");
+      assert.equal(existsSync(connectorRoots[0]!), false, "the failed exact connector capability is revoked");
+      const runtimePid = Number(readFileSync(join(root, "bridge", "runtime.pid"), "utf8"));
+      assert.throws(
+        () => process.kill(runtimePid, 0),
+        (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+        "the rejected live runtime is reaped before the adapter reports failure",
+      );
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the exact live Cursor connector rejects bounded capability-attestation floods", async () => {
+  for (const floodMode of ["request_ids", "runtime_frames", "runtime_bytes"] as const) {
+    const root = mkdtempSync(join(tmpdir(), `letagents-cursor-live-flood-${floodMode}-`));
+    const configDir = join(root, "config");
+    const homeDir = join(root, "home");
+    const cursorBin = join(root, "fake-cursor-agent");
+    const connectorRoots: string[] = [];
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    writeFileSync(cursorBin, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+attestFixtureMcp(${JSON.stringify(floodMode === "request_ids" ? "request_flood" : "normal")}).then(() => {
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "unexpected" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "unexpected", session_id: "unexpected" }) + "\\n");
+}).catch(() => process.exit(82));
+`);
+    chmodSync(cursorBin, 0o700);
+    try {
+      const adapter = new CursorProviderAdapter({
+        cursorBin,
+        dependencies: {
+          ...productionPersonalIdentityDependencies,
+          launchTurn(input) {
+            connectorRoots.push(dirname(input.mcpConnectorSocketPath!));
+            return defaultLaunchTurn(input);
+          },
+        },
+        supervisedProfileFactory: (input) => ({
+          homeDir,
+          configDir,
+          dataDir: join(root, "data"),
+          cacheDir: join(root, "cache"),
+          env: { HOME: homeDir },
+          ...wrapperHostedMcpFixture(
+            root,
+            input.mcpConnectorSocketPath,
+            floodMode === "runtime_frames"
+              ? "frame_flood"
+              : floodMode === "runtime_bytes"
+                ? "byte_flood"
+                : "valid",
+            true,
+          ),
+        }),
+      });
+      const handle = await adapter.spawn(daemonSpawnRequest({
+        workAttemptId: `wa-cursor-live-flood-${floodMode}`,
+        cwd: root,
+      }));
+      await assert.rejects(
+        withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+          inboxItemId: `live-flood-${floodMode}`,
+        }))),
+        floodMode === "request_ids"
+          ? /bounded outstanding tools\/list requests/
+          : floodMode === "runtime_frames"
+            ? /lifetime frame limit/
+            : /lifetime byte limit/,
+      );
+      assert.equal(connectorRoots.length, 1);
+      assert.equal(existsSync(connectorRoots[0]!), false, "the flooded connector capability is revoked");
+      const runtimePidPath = join(root, "bridge", "runtime.pid");
+      if (existsSync(runtimePidPath)) {
+        const runtimePid = Number(readFileSync(runtimePidPath, "utf8"));
+        assert.throws(
+          () => process.kill(runtimePid, 0),
+          (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+          "the flooded live runtime is reaped before the adapter reports failure",
+        );
+      }
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("the exact live Cursor connector accepts a cold native MCP handshake within the turn-start deadline", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-delayed-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const cursorBin = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  writeFileSync(cursorBin, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+setTimeout(() => {
+  attestFixtureMcp().then((connector) => {
+    detachFixtureMcp(connector);
+    process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-delayed-mcp" }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "delayed-mcp-ok", session_id: "sess-delayed-mcp" }) + "\\n");
+  }).catch(() => process.exit(83));
+}, 100);
+`);
+  chmodSync(cursorBin, 0o700);
+  try {
+    const adapter = new CursorProviderAdapter({
+      cursorBin,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({
+            ...input,
+            testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+            testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+            testMcpCapabilityTimeoutMs: 500,
+          });
+        },
+      },
+      supervisedProfileFactory: (input) => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      workAttemptId: "wa-cursor-live-contract-delayed",
+      cwd: root,
+    }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: "live-contract-delayed",
+    })));
+    assert.equal(result.text, "delayed-mcp-ok");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("the exact live Cursor connector times out and reaps native work when Cursor never connects", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-no-connector-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const cursorBin = join(root, "fake-cursor-agent");
+  const nativePidPath = join(root, "tmp", "native.pid");
+  const connectorRoots: string[] = [];
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(dirname(nativePidPath), { recursive: true });
+  writeFileSync(cursorBin, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+fs.writeFileSync(${JSON.stringify(nativePidPath)}, String(process.pid));
+setInterval(() => {}, 1000);
+`);
+  chmodSync(cursorBin, 0o700);
+  try {
+    const adapter = new CursorProviderAdapter({
+      cursorBin,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          connectorRoots.push(dirname(input.mcpConnectorSocketPath!));
+          return defaultLaunchTurn({
+            ...input,
+            testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+            testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+            testMcpCapabilityTimeoutMs: 100,
+          });
+        },
+      },
+      supervisedProfileFactory: () => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      workAttemptId: "wa-cursor-live-contract-no-connector",
+      cwd: root,
+    }));
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-contract-no-connector" }))),
+      /live MCP runtime did not attest complete_room_turn before model authority/,
+    );
+    assert.equal(await waitForPath(nativePidPath), true);
+    const nativePid = Number(readFileSync(nativePidPath, "utf8"));
+    assert.throws(
+      () => process.kill(nativePid, 0),
+      (error: unknown) => (error as NodeJS.ErrnoException).code === "ESRCH",
+      "the connector deadline reaps native work that never initialized MCP",
+    );
+    assert.equal(connectorRoots.length, 1);
+    assert.equal(existsSync(connectorRoots[0]!), false, "the unclaimed connector capability is removed");
+  } finally {
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -2999,6 +3586,7 @@ test("terminal evidence waits for in-flight control and agent bearer authority t
 const fs = require("node:fs");
 const http = require("node:http");
 const http2 = require("node:http2");
+${cursorMcpAttestationFixtureSource}
 const [statusPath, controlEndpoint, agentEndpoint, placeholderToken] = process.argv.slice(1);
 let controlClosed = false;
 let agentClosed = false;
@@ -3008,6 +3596,7 @@ function finish() {
   clearInterval(keepAlive);
   fs.writeFileSync(statusPath, JSON.stringify({ controlClosed, agentClosed }));
 }
+attestFixtureMcp().then(() => {
 const control = http.request(new URL("/aiserver.v1.DashboardService/GetMe", controlEndpoint), {
   method: "POST",
   headers: { "content-length": "4", "connection": "keep-alive", "authorization": "Bearer " + placeholderToken },
@@ -3029,6 +3618,7 @@ stream.once("close", agentDone);
 session.once("error", agentDone);
 session.once("close", agentDone);
 stream.write("active-run");
+}).catch(() => process.exit(92));
 `;
     writeFileSync(executable, `#!/usr/bin/env node
 const fs = require("node:fs");
@@ -3065,13 +3655,13 @@ const ready = setInterval(() => {
           return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint, testControlPlaneUpstreamEndpoint });
         },
       },
-      supervisedProfileFactory: () => ({
+      supervisedProfileFactory: (input) => ({
         homeDir,
         configDir,
         dataDir: join(root, "data"),
         cacheDir: join(root, "cache"),
         env: { HOME: homeDir },
-        ...wrapperHostedMcpFixture(root),
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
       }),
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
@@ -3130,6 +3720,7 @@ test("the supervised agent proxy admits one exact HTTP/1 Run stream and injects 
     writeFileSync(executable, `#!/usr/bin/env node
 const http = require("node:http");
 const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
   process.exit(0);
@@ -3151,6 +3742,7 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
   });
 }
 (async () => {
+  const connector = await attestFixtureMcp();
   const wrongMedia = await request("/agent.v1.AgentService/Run", "application/connect+protobufad", "wrong");
   const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
   const staleTurn = await request("/agent.v1.AgentService/Run", "application/connect+proto", "stale", "Bearer predecessor-placeholder");
@@ -3160,6 +3752,7 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
     || accepted.status !== 200 || accepted.body !== "h1-upstream-ok" || replay.status !== 503) process.exit(78);
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h1" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h1-proxy-ok", session_id: "sess-agent-h1" }) + "\\n");
+  detachFixtureMcp(connector);
 })().catch(() => process.exit(79));
 `);
     chmodSync(executable, 0o700);
@@ -3171,13 +3764,13 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
           return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
         },
       },
-      supervisedProfileFactory: () => ({
+      supervisedProfileFactory: (input) => ({
         homeDir,
         configDir,
         dataDir: join(root, "data"),
         cacheDir: join(root, "cache"),
         env: { HOME: homeDir },
-        ...wrapperHostedMcpFixture(root),
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
       }),
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
@@ -3186,6 +3779,119 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
     assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
     assert.equal(upstreamBody, "h1-request-body");
   } finally {
+    await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("closing an attested Cursor connector revokes the model proxy before a later Run", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-lease-close-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const writableRoot = join(root, "tmp");
+  const executable = join(root, "fake-cursor-agent");
+  const attemptPath = join(writableRoot, "late-run.json");
+  const attackerPidPath = join(writableRoot, "late-run.pid");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(writableRoot, { recursive: true });
+  let upstreamRuns = 0;
+  const upstream = createHttp2Server();
+  upstream.on("stream", (stream) => {
+    upstreamRuns += 1;
+    stream.resume();
+    stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+    stream.end("must-not-arrive");
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", () => {
+      upstream.removeListener("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const upstreamAddress = upstream.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+  const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
+  let attackerPid: number | null = null;
+  try {
+    const attackerSource = `
+const fs = require("node:fs");
+const http = require("node:http");
+const [statusPath, endpoint, token] = process.argv.slice(1);
+setTimeout(() => {
+  const request = http.request(new URL("/agent.v1.AgentService/Run", endpoint), {
+    method: "POST",
+    headers: {
+      "content-type": "application/connect+proto",
+      "authorization": "Bearer " + token,
+      "content-length": "4",
+    },
+  }, (response) => {
+    response.resume();
+    response.once("end", () => fs.writeFileSync(statusPath, JSON.stringify({ status: response.statusCode })));
+  });
+  request.once("error", (error) => fs.writeFileSync(statusPath, JSON.stringify({ error: error.code || error.message })));
+  request.end("late");
+}, 250);
+`;
+    writeFileSync(executable, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+(async () => {
+  const connector = await attestFixtureMcp();
+  const attacker = spawn(process.execPath, ["-e", ${JSON.stringify(attackerSource)}, ${JSON.stringify(attemptPath)}, value("--agent-endpoint"), value("--auth-token")], {
+    detached: true,
+    stdio: "ignore",
+    env: process.env,
+  });
+  attacker.unref();
+  fs.writeFileSync(${JSON.stringify(attackerPidPath)}, String(attacker.pid));
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-live-lease-close" }) + "\\n");
+  connector.stdin.end();
+  setInterval(() => {}, 1000);
+})().catch(() => process.exit(97));
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
+        },
+      },
+      supervisedProfileFactory: (input) => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root, workAttemptId: "wa-cursor-live-lease-close" }));
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-lease-close" }))),
+      /supervised turn failed: Cursor's live MCP connector ended before the turn became terminal/,
+    );
+    assert.equal(await waitForPath(attackerPidPath), true);
+    attackerPid = Number(readFileSync(attackerPidPath, "utf8"));
+    assert.equal(await waitForPath(attemptPath), true, "the escaped late Run probe observed the retired proxy");
+    const attempt = JSON.parse(readFileSync(attemptPath, "utf8")) as { status?: number; error?: string };
+    assert.notEqual(attempt.status, 200, "the revoked lease cannot reach the model upstream");
+    assert.equal(upstreamRuns, 0, "the model upstream sees no Run after connector lease loss");
+  } finally {
+    if (attackerPid && Number.isSafeInteger(attackerPid)) {
+      try { process.kill(attackerPid, "SIGKILL"); } catch {}
+    }
     await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
     rmSync(root, { recursive: true, force: true });
   }
@@ -3227,6 +3933,7 @@ test("the supervised agent proxy relays exact HTTP/2 Run streams, survives an id
     writeFileSync(executable, `#!/usr/bin/env node
 const http2 = require("node:http2");
 const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
 if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
   process.stdout.write("letagents: ready\\n");
   process.exit(0);
@@ -3251,6 +3958,7 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
   });
 }
 (async () => {
+  const connector = await attestFixtureMcp();
   const wrongMedia = await request("/agent.v1.AgentService/Run", "application/connect+protobufad", "wrong");
   const wrongPath = await request("/agent.v1.AgentService/Other", "application/connect+proto", "wrong");
   const staleTurn = await request("/agent.v1.AgentService/Run", "application/connect+proto", "stale", "Bearer predecessor-placeholder");
@@ -3261,6 +3969,7 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
     || accepted.status !== 200 || accepted.body !== "h2-upstream-ok" || replay.status !== 503) process.exit(88);
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-agent-h2" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "h2-proxy-ok", session_id: "sess-agent-h2" }) + "\\n");
+  detachFixtureMcp(connector);
 })().catch(() => process.exit(89));
 `);
     chmodSync(executable, 0o700);
@@ -3272,13 +3981,13 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
           return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint });
         },
       },
-      supervisedProfileFactory: () => ({
+      supervisedProfileFactory: (input) => ({
         homeDir,
         configDir,
         dataDir: join(root, "data"),
         cacheDir: join(root, "cache"),
         env: { HOME: homeDir },
-        ...wrapperHostedMcpFixture(root),
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
       }),
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));

@@ -40,6 +40,7 @@ import {
   defaultGetProcessIdentity,
   defaultSignalProcess,
   delay,
+  redactCredentialText,
   safeStreamPayload,
   sameProcessBirthIdentity,
   type ProviderProcessExit,
@@ -86,11 +87,16 @@ import {
 // Generic interactive Cursor lanes retain their established local behavior.
 
 const TURN_START_TIMEOUT_MS = 30_000;
+// Live MCP capability attestation is part of native turn startup. Keep both
+// observations on one deadline so a legitimate cold Cursor process is not
+// killed before the adapter's own startup contract has expired.
+const CURSOR_LIVE_MCP_CAPABILITY_TIMEOUT_MS = TURN_START_TIMEOUT_MS;
 const MAX_DURABLE_TURN_STREAM_BYTES = 8 * 1024 * 1024;
 const MAX_DURABLE_TURN_TERMINAL_BYTES = 1024 * 1024;
 const MAX_CURSOR_STREAM_LINE_BYTES = 512 * 1024;
 const MAX_CURSOR_STREAM_EVENTS = 4_096;
 const MAX_CURSOR_SESSION_ID_LENGTH = 256;
+const MAX_CURSOR_TERMINAL_ERROR_DETAIL_LENGTH = 1_024;
 const CURSOR_SESSION_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
 // The bridge is packaged locally; a registry check must never wait on network
 // installation. Keep enough room for Cursor's native MCP handshake on a busy
@@ -129,6 +135,8 @@ export interface CursorCliChild {
   onLine(listener: (line: string) => void): () => void;
   /** Bounded stderr tail — the provider-quota signature lives here (msg_1708). */
   stderrTail(): string;
+  /** Trusted wrapper IPC detail for a failure that may prevent journal publication. */
+  terminalError?(): string | null;
   /** Release a prepared wrapper only after its exact process identity is durable. */
   release(): void;
   /** Production wrappers resolve only after their journal and IPC handlers exist. */
@@ -140,7 +148,7 @@ export interface CursorCliChild {
 }
 
 export interface CursorProviderAdapterDependencies {
-  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
+  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
   attestSupervisedMcp(input: {
     cursorBin: string;
     cwd: string;
@@ -649,6 +657,8 @@ export function defaultLaunchTurn(input: {
   testAgentUpstreamEndpoint?: string;
   /** Injectable only through direct unit tests; adapter production never sets it. */
   testControlPlaneUpstreamEndpoint?: string;
+  /** Injectable only through direct loopback unit tests; adapter production never sets it. */
+  testMcpCapabilityTimeoutMs?: number;
   /** Injectable only through direct unit tests; adapter production never sets it. */
   testStartupBarrier?: {
     path: string;
@@ -712,6 +722,21 @@ export function defaultLaunchTurn(input: {
   )) {
     throw new Error("Cursor's startup barrier is restricted to exact loopback unit tests.");
   }
+  const testMcpCapabilityTimeoutMs = input.testMcpCapabilityTimeoutMs;
+  if (testMcpCapabilityTimeoutMs !== undefined && (
+    !restrictRemoteAuthority
+    || !input.testAgentUpstreamEndpoint
+    || !input.testControlPlaneUpstreamEndpoint
+    || !isExactCursorLoopbackTestOrigin(input.testAgentUpstreamEndpoint)
+    || !isExactCursorLoopbackTestOrigin(input.testControlPlaneUpstreamEndpoint)
+    || !Number.isSafeInteger(testMcpCapabilityTimeoutMs)
+    || testMcpCapabilityTimeoutMs < 1
+    || testMcpCapabilityTimeoutMs > CURSOR_LIVE_MCP_CAPABILITY_TIMEOUT_MS
+  )) {
+    throw new Error("Cursor's live MCP capability timeout seam is restricted to bounded exact-loopback unit tests.");
+  }
+  const mcpCapabilityTimeoutMs = testMcpCapabilityTimeoutMs
+    ?? CURSOR_LIVE_MCP_CAPABILITY_TIMEOUT_MS;
   if (restrictRemoteAuthority && (!providerAuthorization
     || !/^Bearer [^\s\0]{1,16384}$/.test(providerAuthorization))) {
     throw new Error("Supervised Cursor requires an in-memory live provider authorization proof.");
@@ -752,7 +777,7 @@ const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
 const { StringDecoder } = require("node:string_decoder");
-const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
+const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, mcpCapabilityTimeoutMsValue, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
 const deniedReadPaths = JSON.parse(deniedReadPathsJson || "[]");
 const deniedReadSubpaths = JSON.parse(deniedReadSubpathsJson || "[]");
 const deniedReadMetadataPaths = JSON.parse(deniedReadMetadataPathsJson || "[]");
@@ -766,6 +791,12 @@ const allowedWriteSubpaths = JSON.parse(allowedWriteSubpathsJson || "[]");
 const allowedReadSubpaths = JSON.parse(allowedReadSubpathsJson || "[]");
 const allowedNetworkUnixSockets = JSON.parse(allowedNetworkUnixSocketsJson || "[]");
 const restrictRemoteAuthority = restrictRemoteAuthorityValue === "1";
+const mcpCapabilityTimeoutMs = Number(mcpCapabilityTimeoutMsValue);
+if (!Number.isSafeInteger(mcpCapabilityTimeoutMs)
+  || mcpCapabilityTimeoutMs < 1
+  || mcpCapabilityTimeoutMs > ${CURSOR_LIVE_MCP_CAPABILITY_TIMEOUT_MS}) {
+  throw new Error("Cursor MCP capability timeout is outside the turn-start boundary.");
+}
 let providerAuthorization = "";
 // Cursor currently decodes the exp claim before honoring the documented argv token.
 // Give each turn a fresh, syntactically JWT-shaped public placeholder. It is
@@ -795,8 +826,11 @@ let agentProxy = null;
 let mcpConnectorServer = null;
 let mcpConnectorSocket = null;
 let mcpRuntime = null;
+let mcpRuntimeProcessIdentity = null;
 let mcpRuntimeEnv = null;
 let mcpConnectorAdmitted = false;
+let mcpCapabilityAttested = !restrictRemoteAuthority;
+let mcpCapabilityDeadline = null;
 const agentProxySessions = new Set();
 const agentProxySockets = new Set();
 const agentProxyInternalServers = new Set();
@@ -1022,6 +1056,34 @@ function processGroupMembers(groupId, excludedPid = null) {
     });
   } catch { return null; }
 }
+function exactProcessGroupLeaderIdentity(pid, expectedParentPid) {
+  if (process.platform === "win32") return undefined;
+  if (!Number.isSafeInteger(pid) || pid <= 1
+    || !Number.isSafeInteger(expectedParentPid) || expectedParentPid <= 1) return undefined;
+  try {
+    const inspected = spawnSync("/bin/ps", [
+      "-p", String(pid), "-o", "pid=,ppid=,pgid=,lstart=",
+    ], {
+      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], detached: true,
+      timeout: 250, maxBuffer: 16 * 1024,
+    });
+    if (inspected.error || typeof inspected.stdout !== "string") return undefined;
+    const output = inspected.stdout.trim();
+    if (!output) return inspected.status === 1 ? null : undefined;
+    if (inspected.status !== 0) return undefined;
+    const match = output.match(/^(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/);
+    if (!match) return undefined;
+    const observedPid = Number(match[1]);
+    const observedParentPid = Number(match[2]);
+    const observedGroupId = Number(match[3]);
+    const birthIdentity = match[4].trim();
+    if (observedPid !== pid || observedParentPid !== expectedParentPid
+      || observedGroupId !== pid || !birthIdentity) return null;
+    return birthIdentity;
+  } catch {
+    return undefined;
+  }
+}
 function ownGroupMembers() {
   // This wrapper remains the process-group leader until every native
   // descendant is gone.
@@ -1102,7 +1164,77 @@ function failStreamPersistence(error) {
   exitCode = 1;
   void beginFatalReaping();
 }
+function failMcpCapabilityAttestation(detail) {
+  if (finalizing || authorityRetiring) return;
+  if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
+  mcpCapabilityDeadline = null;
+  mcpCapabilityAttested = false;
+  if (resultSnapshot) {
+    // The native provider has already emitted its terminal turn result. No
+    // further model authority is legitimate; retire the lease normally.
+    void beginTurnAuthorityRetirement();
+    return;
+  }
+  if (!exitEvidence) exitEvidence = { type: "error", error: detail };
+  // The private durable terminal remains authoritative for recovery. Also
+  // report the causal failure over the wrapper-only IPC channel so the live
+  // caller can explain it even if emergency group reaping prevents the
+  // terminal rename from completing.
+  try { if (process.send) process.send({ type: "terminal_error", error: detail }); } catch {}
+  exitCode = 1;
+  if (!native) {
+    void finishNotStarted(detail, true);
+    return;
+  }
+  void beginFatalReaping();
+}
 async function closeMcpConnector() {
+  if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
+  mcpCapabilityDeadline = null;
+  let runtimeClosed = true;
+  let runtimeGroupClosed = true;
+  const runtime = mcpRuntime;
+  let runtimeGroupSignalAuthorized = false;
+  let groupMembers = null;
+  let signalRuntimeGroup = null;
+  if (runtime) {
+    const runtimeGroupId = runtime.pid;
+    runtimeClosed = runtime.exitCode !== null || runtime.signalCode !== null;
+    runtime.once("exit", () => { runtimeClosed = true; });
+    runtime.once("error", () => { runtimeClosed = true; });
+    if (process.platform === "win32") {
+      runtimeGroupClosed = runtimeClosed;
+      signalRuntimeGroup = (signal) => {
+        try { runtime.kill(signal); } catch {}
+      };
+      if (!runtimeClosed) signalRuntimeGroup("SIGTERM");
+    } else if (Number.isSafeInteger(runtimeGroupId) && runtimeGroupId > 1) {
+      groupMembers = () => processGroupMembers(runtimeGroupId);
+      signalRuntimeGroup = (signal) => {
+        const currentIdentity = exactProcessGroupLeaderIdentity(runtimeGroupId, process.pid);
+        if (!runtimeGroupSignalAuthorized
+          || typeof mcpRuntimeProcessIdentity !== "string"
+          || currentIdentity !== mcpRuntimeProcessIdentity) {
+          runtimeGroupSignalAuthorized = false;
+          return;
+        }
+        try { process.kill(-runtimeGroupId, signal); }
+        catch (error) {
+          // EPERM is not proof of absence. Keep polling the exact PGID below and
+          // return false unless both the runtime and every group member vanish.
+          if (error && (error.code === "ESRCH" || error.code === "EPERM")) return;
+          throw error;
+        }
+      };
+      runtimeGroupSignalAuthorized = typeof mcpRuntimeProcessIdentity === "string";
+      // Re-prove the captured leader's birth and ancestry inside every signal
+      // attempt, including escalation. POSIX offers no atomic identity+signal
+      // primitive here, so this minimizes—but cannot erase—the final syscall
+      // race. An absent, changed, or ambiguous leader permanently revokes the
+      // numeric PGID's signal authority.
+      if (runtimeGroupSignalAuthorized) signalRuntimeGroup("SIGTERM");
+    }
+  }
   if (mcpConnectorServer) { try { mcpConnectorServer.close(); } catch {} }
   mcpConnectorServer = null;
   let socketClosed = true;
@@ -1111,51 +1243,56 @@ async function closeMcpConnector() {
     mcpConnectorSocket.once("close", () => { socketClosed = true; });
     try { mcpConnectorSocket.destroy(); } catch {}
   }
-  let runtimeClosed = true;
-  let runtimeGroupClosed = true;
-  if (mcpRuntime) {
-    const runtime = mcpRuntime;
-    const runtimeGroupId = runtime.pid;
-    runtimeClosed = runtime.exitCode !== null || runtime.signalCode !== null;
-    runtime.once("exit", () => { runtimeClosed = true; });
-    runtime.once("error", () => { runtimeClosed = true; });
-    try { mcpRuntime.stdin.end(); } catch {}
-    const groupMembers = () => {
-      if (process.platform === "win32" || !Number.isSafeInteger(runtimeGroupId) || runtimeGroupId <= 1) return null;
-      return processGroupMembers(runtimeGroupId);
-    };
-    const signalRuntimeGroup = (signal) => {
-      if (process.platform === "win32" || !Number.isSafeInteger(runtimeGroupId) || runtimeGroupId <= 1) {
-        try { runtime.kill(signal); } catch {}
-        return;
-      }
-      try { process.kill(-runtimeGroupId, signal); }
-      catch (error) { if (!error || error.code !== "ESRCH") throw error; }
-    };
-    let members = groupMembers();
-    runtimeGroupClosed = members !== null && members.length === 0;
-    signalRuntimeGroup("SIGTERM");
+  if (runtime) {
+    try { runtime.stdin.end(); } catch {}
+    let members = groupMembers ? groupMembers() : null;
+    if (process.platform !== "win32") {
+      runtimeGroupClosed = members !== null && members.length === 0;
+      // Once a successful probe observes the original group empty, or any
+      // probe is ambiguous, continuity is lost forever. A later process group
+      // with the same number must not inherit this runtime's signal authority.
+      if (members === null || runtimeGroupClosed) runtimeGroupSignalAuthorized = false;
+    }
     const graceDeadline = Date.now() + 500;
     while ((!runtimeClosed || !runtimeGroupClosed) && Date.now() < graceDeadline) {
       await wait(25);
-      members = groupMembers();
-      runtimeGroupClosed = members !== null && members.length === 0;
+      if (process.platform === "win32") {
+        runtimeGroupClosed = runtimeClosed;
+      } else {
+        members = groupMembers ? groupMembers() : null;
+        runtimeGroupClosed = members !== null && members.length === 0;
+        if (members === null || runtimeGroupClosed) runtimeGroupSignalAuthorized = false;
+      }
     }
-    if (!runtimeClosed || !runtimeGroupClosed) {
+    if ((!runtimeClosed || !runtimeGroupClosed)
+      && signalRuntimeGroup
+      && (process.platform === "win32" || runtimeGroupSignalAuthorized)) {
       signalRuntimeGroup("SIGKILL");
       const killDeadline = Date.now() + 500;
       while ((!runtimeClosed || !runtimeGroupClosed) && Date.now() < killDeadline) {
         await wait(25);
-        members = groupMembers();
-        runtimeGroupClosed = members !== null && members.length === 0;
+        if (process.platform === "win32") {
+          runtimeGroupClosed = runtimeClosed;
+        } else {
+          members = groupMembers ? groupMembers() : null;
+          runtimeGroupClosed = members !== null && members.length === 0;
+          if (members === null || runtimeGroupClosed) runtimeGroupSignalAuthorized = false;
+        }
       }
     }
   }
   const socketDeadline = Date.now() + 500;
   while (!socketClosed && Date.now() < socketDeadline) await wait(5);
   const revoked = socketClosed && runtimeClosed && runtimeGroupClosed;
-  mcpConnectorSocket = null;
-  mcpRuntime = null;
+  if (socketClosed) mcpConnectorSocket = null;
+  // Preserve ambiguous runtime evidence across repeated close attempts. Some
+  // not-started paths deliberately call close twice around an in-flight start;
+  // forgetting a non-retired group here would let the second call falsely
+  // report that all remote authority was revoked.
+  if (runtimeClosed && runtimeGroupClosed) {
+    mcpRuntime = null;
+    mcpRuntimeProcessIdentity = null;
+  }
   const connectorRoot = path.dirname(mcpConnectorSocketPath || "");
   if (revoked && mcpConnectorRootPattern.test(connectorRoot)) {
     rmSync(connectorRoot, { recursive: true, force: true });
@@ -1300,13 +1437,167 @@ function startMcpConnector() {
         detached: process.platform !== "win32",
       });
       mcpRuntime = runtime;
+      mcpRuntimeProcessIdentity = exactProcessGroupLeaderIdentity(runtime.pid, process.pid);
+      if (process.platform !== "win32" && typeof mcpRuntimeProcessIdentity !== "string") {
+        failMcpCapabilityAttestation("Cursor's hosted MCP runtime did not expose an exact process-group birth identity.");
+        try { runtime.kill("SIGTERM"); } catch {}
+        return;
+      }
+      const listedRequestIds = new Set();
+      let clientInspectionBuffer = Buffer.alloc(0);
+      let runtimeInspectionBuffer = Buffer.alloc(0);
+      let inspectionBytes = 0;
+      let inspectionFrames = 0;
+      const maxInspectionBytes = 1024 * 1024;
+      const maxInspectionFrames = 256;
+      const maxOutstandingListRequests = 32;
+      const accountInspectionChunk = (chunk) => {
+        inspectionBytes += chunk.length;
+        if (inspectionBytes <= maxInspectionBytes) return true;
+        failMcpCapabilityAttestation("Cursor's live MCP capability-attestation exchange exceeded its lifetime byte limit.");
+        return false;
+      };
+      const accountInspectionFrame = () => {
+        inspectionFrames += 1;
+        if (inspectionFrames <= maxInspectionFrames) return true;
+        failMcpCapabilityAttestation("Cursor's live MCP capability-attestation exchange exceeded its lifetime frame limit.");
+        return false;
+      };
+      const requestIdKey = (value) => {
+        if (typeof value === "string") return "s:" + value;
+        if (typeof value === "number" && Number.isFinite(value)) return "n:" + String(value);
+        return null;
+      };
+      const hasRequiredCompletionContract = (response) => {
+        const tools = response && response.result && response.result.tools;
+        if (!Array.isArray(tools)) return false;
+        const matches = tools.filter((tool) => tool && tool.name === "complete_room_turn");
+        if (matches.length !== 1) return false;
+        const schema = matches[0].inputSchema;
+        const properties = schema && schema.properties;
+        const outcome = properties && properties.outcome;
+        const text = properties && properties.text;
+        return schema && typeof schema === "object" && !Array.isArray(schema)
+          && schema.type === "object"
+          && properties && typeof properties === "object" && !Array.isArray(properties)
+          && outcome && typeof outcome === "object" && !Array.isArray(outcome)
+          && outcome.type === "string"
+          && Array.isArray(outcome.enum)
+          && outcome.enum.length === 2
+          && new Set(outcome.enum).size === 2
+          && outcome.enum.includes("reply")
+          && outcome.enum.includes("no_reply")
+          && text && typeof text === "object" && !Array.isArray(text)
+          && text.type === "string"
+          && Array.isArray(schema.required)
+          && schema.required.length === 1
+          && schema.required[0] === "outcome";
+      };
+      socket.on("data", (chunk) => {
+        if (mcpCapabilityAttested || finalizing || authorityRetiring) return;
+        if (!accountInspectionChunk(chunk)) return;
+        clientInspectionBuffer = Buffer.concat([clientInspectionBuffer, chunk]);
+        if (clientInspectionBuffer.length > maxInspectionBytes) {
+          failMcpCapabilityAttestation("Cursor's live MCP client exceeded the bounded capability-attestation exchange.");
+          return;
+        }
+        for (;;) {
+          const newline = clientInspectionBuffer.indexOf(10);
+          if (newline < 0) break;
+          if (!accountInspectionFrame()) return;
+          const line = clientInspectionBuffer.subarray(0, newline).toString("utf8").trim();
+          clientInspectionBuffer = clientInspectionBuffer.subarray(newline + 1);
+          if (!line) continue;
+          let request;
+          try { request = JSON.parse(line); }
+          catch {
+            failMcpCapabilityAttestation("Cursor's live MCP client emitted invalid capability-attestation protocol.");
+            return;
+          }
+          if (request && request.method === "tools/list") {
+            const key = requestIdKey(request.id);
+            if (!key) {
+              failMcpCapabilityAttestation("Cursor's live MCP client did not issue an attributable tools/list request.");
+              return;
+            }
+            listedRequestIds.add(key);
+            if (listedRequestIds.size > maxOutstandingListRequests) {
+              failMcpCapabilityAttestation("Cursor's live MCP client exceeded the bounded outstanding tools/list requests.");
+              return;
+            }
+          }
+        }
+      });
       socket.pipe(runtime.stdin);
-      runtime.stdout.pipe(socket);
+      const inspectRuntimeCapability = (chunk) => {
+        if (finalizing || authorityRetiring) return;
+        if (!accountInspectionChunk(chunk)) return;
+        runtimeInspectionBuffer = Buffer.concat([runtimeInspectionBuffer, chunk]);
+        if (runtimeInspectionBuffer.length > maxInspectionBytes) {
+          failMcpCapabilityAttestation("Cursor's live MCP runtime exceeded the bounded capability-attestation exchange.");
+          return;
+        }
+        for (;;) {
+          const newline = runtimeInspectionBuffer.indexOf(10);
+          if (newline < 0) break;
+          if (!accountInspectionFrame()) return;
+          const framedLine = runtimeInspectionBuffer.subarray(0, newline + 1);
+          const line = runtimeInspectionBuffer.subarray(0, newline).toString("utf8").trim();
+          runtimeInspectionBuffer = runtimeInspectionBuffer.subarray(newline + 1);
+          if (!line) {
+            if (!socket.destroyed) socket.write(framedLine);
+            continue;
+          }
+          let response;
+          try { response = JSON.parse(line); }
+          catch {
+            failMcpCapabilityAttestation("Cursor's live MCP runtime emitted invalid capability-attestation protocol.");
+            return;
+          }
+          const key = requestIdKey(response && response.id);
+          if (key && listedRequestIds.has(key)) {
+            listedRequestIds.delete(key);
+            if (!hasRequiredCompletionContract(response)) {
+              failMcpCapabilityAttestation("Cursor's live MCP runtime does not expose the required complete_room_turn contract.");
+              return;
+            }
+            mcpCapabilityAttested = true;
+            if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
+            mcpCapabilityDeadline = null;
+          }
+          if (!socket.destroyed) socket.write(framedLine);
+          if (mcpCapabilityAttested && runtimeInspectionBuffer.length > 0) {
+            if (!socket.destroyed) socket.write(runtimeInspectionBuffer);
+            runtimeInspectionBuffer = Buffer.alloc(0);
+            break;
+          }
+        }
+        if (mcpCapabilityAttested && !socket.destroyed) {
+          // The bounded inspection phase has flushed every byte in original
+          // order. Restore Node's native pipe backpressure for the unbounded
+          // lifetime of normal tool traffic.
+          runtime.stdout.removeListener("data", inspectRuntimeCapability);
+          runtime.stdout.pipe(socket);
+        }
+      };
+      runtime.stdout.on("data", inspectRuntimeCapability);
       forwardBoundedStderr(runtime.stderr, "Cursor's hosted MCP runtime");
-      socket.once("error", () => { try { runtime.kill("SIGTERM"); } catch {} });
-      socket.once("close", () => { try { runtime.stdin.end(); } catch {} });
-      runtime.once("error", () => socket.destroy());
-      runtime.once("close", () => socket.destroy());
+      socket.once("error", () => {
+        failMcpCapabilityAttestation("Cursor's live MCP connector failed before the turn became terminal.");
+        try { runtime.kill("SIGTERM"); } catch {}
+      });
+      socket.once("close", () => {
+        failMcpCapabilityAttestation("Cursor's live MCP connector ended before the turn became terminal.");
+        try { runtime.stdin.end(); } catch {}
+      });
+      runtime.once("error", () => {
+        failMcpCapabilityAttestation("Cursor's live MCP runtime failed before the turn became terminal.");
+        socket.destroy();
+      });
+      runtime.once("close", () => {
+        failMcpCapabilityAttestation("Cursor's live MCP runtime ended before the turn became terminal.");
+        socket.destroy();
+      });
     });
     mcpConnectorServer = server;
     server.once("error", failStart);
@@ -1325,6 +1616,9 @@ function startMcpConnector() {
       server.removeListener("error", failStart);
       try { chmodSync(mcpConnectorSocketPath, 0o600); }
       catch (error) { void closeMcpConnector(); failStart(error); return; }
+      mcpCapabilityDeadline = setTimeout(() => {
+        failMcpCapabilityAttestation("Cursor's live MCP runtime did not attest complete_room_turn before model authority.");
+      }, mcpCapabilityTimeoutMs);
       settled = true;
       server.on("error", (error) => {
         const detail = "Cursor MCP connector failed: " + (error && error.message ? error.message : String(error));
@@ -1384,13 +1678,17 @@ function beginTurnAuthorityRetirement() {
       // every listener/socket and signals the detached MCP runtime before any
       // native-controlled cleanup or process-group escalation can block us.
       const proxyRetirement = closeAuthorityProxy().catch(() => {
-        exitEvidence = { type: "error", error: "Cursor authority proxies could not be retired." };
+        if (!exitEvidence) {
+          exitEvidence = { type: "error", error: "Cursor authority proxies could not be retired." };
+        }
         exitCode = 1;
         streamContractComplete = false;
         return false;
       });
       const mcpRetirement = closeMcpConnector().catch(() => {
-        exitEvidence = { type: "error", error: "Cursor MCP connector could not be retired." };
+        if (!exitEvidence) {
+          exitEvidence = { type: "error", error: "Cursor MCP connector could not be retired." };
+        }
         exitCode = 1;
         streamContractComplete = false;
         return false;
@@ -1408,7 +1706,9 @@ function retireTurnRuntimeData() {
   try { runtimeDataRetirementResult = purgeTurnRuntimeDataRoot(); }
   catch {
     runtimeDataRetirementResult = false;
-    exitEvidence = { type: "error", error: "Cursor's private turn data root could not be retired safely." };
+    if (!exitEvidence) {
+      exitEvidence = { type: "error", error: "Cursor's private turn data root could not be retired safely." };
+    }
     exitCode = 1;
     streamContractComplete = false;
   }
@@ -1507,6 +1807,7 @@ function startAgentProxy() {
     function requestAllowed(method, path, contentType, authorization) {
       if (finalizing
         || authorityRetiring
+        || !mcpCapabilityAttested
         || admitted
         || authorization !== expectedProxyAuthorization
         || method !== "POST"
@@ -1843,14 +2144,18 @@ async function finalize() {
   if (!remoteAuthorityRevoked) exitCode = 1;
   try { purgePublicPlaceholderCredentialFile(); }
   catch {
-    exitEvidence = { type: "error", error: "Cursor's public credential placeholder could not be purged safely." };
+    if (!exitEvidence) {
+      exitEvidence = { type: "error", error: "Cursor's public credential placeholder could not be purged safely." };
+    }
     exitCode = 1;
     streamContractComplete = false;
   }
   flushParser();
   try { purgeStatsigTemporaryFiles(); }
   catch (error) {
-    exitEvidence = { type: "error", error: "Cursor Statsig temporary state could not be purged." };
+    if (!exitEvidence) {
+      exitEvidence = { type: "error", error: "Cursor Statsig temporary state could not be purged." };
+    }
     exitCode = 1;
     streamContractComplete = false;
   }
@@ -2088,13 +2393,18 @@ async function start() {
   });
   forwardBoundedStderr(native.stderr, "Cursor native process");
   native.once("error", (error) => {
-    exitEvidence = { type: "error", error: error && error.message ? error.message : String(error) };
+    if (!exitEvidence) {
+      exitEvidence = { type: "error", error: error && error.message ? error.message : String(error) };
+    }
     exitCode = 1;
     void beginFatalReaping();
     armEvidenceDrainDeadline();
   });
   native.once("exit", (code, signal) => {
-    exitEvidence = { type: "exit", code, signal };
+    // A containment or protocol failure that initiated reaping is the causal
+    // terminal evidence. The resulting native exit must not erase that exact,
+    // actionable reason with a generic exit code.
+    if (!exitEvidence) exitEvidence = { type: "exit", code, signal };
     exitCode = code === 0 ? 0 : (typeof code === "number" ? code : 1);
     // Descendants may hold stdout open. Reaping starts at native exit, while
     // terminal publication waits for close so the final result bytes drain.
@@ -2192,6 +2502,7 @@ if (process.send) process.send({ type: "prepared" });
     input.mcpRuntimeCwd ?? "",
     testStartupBarrier?.path ?? "",
     testStartupBarrier?.stage ?? "",
+    String(mcpCapabilityTimeoutMs),
     restrictRemoteAuthority ? "1" : "0",
     ...input.args,
   ], {
@@ -2209,6 +2520,7 @@ if (process.send) process.send({ type: "prepared" });
 
   const lineListeners = new Set<(line: string) => void>();
   const stderrChunks: string[] = [];
+  let wrapperTerminalError: string | null = null;
   let wrapperPrepared = false;
   let resolvePrepared!: () => void;
   let rejectPrepared!: (error: Error) => void;
@@ -2217,6 +2529,13 @@ if (process.send) process.send({ type: "prepared" });
     rejectPrepared = reject;
   });
   child.on("message", (message) => {
+    const wrapperMessage = message && typeof message === "object"
+      ? message as { type?: unknown; error?: unknown }
+      : null;
+    if (wrapperMessage?.type === "terminal_error"
+      && typeof wrapperMessage.error === "string") {
+      wrapperTerminalError = wrapperMessage.error;
+    }
     if (!wrapperPrepared && message && typeof message === "object"
       && (message as { type?: unknown }).type === "prepared") {
       wrapperPrepared = true;
@@ -2309,6 +2628,9 @@ if (process.send) process.send({ type: "prepared" });
     },
     stderrTail() {
       return stderrChunks.join("");
+    },
+    terminalError() {
+      return safeCursorTerminalErrorDetail(wrapperTerminalError);
     },
     prepared,
     ownsDescendantReaping: process.platform !== "win32",
@@ -2861,11 +3183,20 @@ type CursorTurnTerminal = {
   providerRequestId: string | null;
   attemptTerminal: ProviderTerminalPayload | null;
   publicationContract: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0";
+  /** Safely redacted detail from the trusted private wrapper terminal. */
+  terminalError?: string;
   /** Exact init identity retained when a live post-init checkpoint fails. */
   providerContinuationId?: string;
   /** Trusted wrapper link to the exact private filesystem authority journal. */
   workspaceGenerationManifestPath?: string;
 };
+
+function safeCursorTerminalErrorDetail(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  const normalized = redactCredentialText(value).value.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.slice(0, MAX_CURSOR_TERMINAL_ERROR_DETAIL_LENGTH);
+}
 
 class CursorRoomTurnRecoveryError extends Error {
   readonly roomTurnRecoveryOutcome = "ambiguous" as const;
@@ -3488,6 +3819,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let initMessage: CursorStreamMessage;
     let resultMessage: CursorStreamMessage | null;
     let workspaceGenerationManifestPath: string | undefined;
+    let terminalError: string | undefined;
     let publicationContract: CursorTurnTerminal["publicationContract"] = "structured_room_turn_v1";
     let legacyUnversionedTerminal = false;
     try {
@@ -3547,6 +3879,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
           signal: typeof raw.signal === "string" ? raw.signal as NodeJS.Signals : null,
         }
         : { type: "error", error: new Error(typeof raw.error === "string" ? raw.error : "Cursor wrapper launch failed.") };
+      terminalError = raw.type === "error"
+        ? safeCursorTerminalErrorDetail(raw.error) ?? "Cursor wrapper launch failed."
+        : undefined;
     } catch (error) {
       if (error instanceof CursorRoomTurnNotDispatchedError) throw error;
       if (error instanceof CursorRoomTurnRecoveryError) throw error;
@@ -3597,6 +3932,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerRequestId,
         attemptTerminal: null,
         publicationContract,
+        ...(terminalError ? { terminalError } : {}),
         providerContinuationId: initSessionId,
         ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
       }
@@ -3608,9 +3944,49 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerRequestId: null,
         attemptTerminal: null,
         publicationContract,
+        ...(terminalError ? { terminalError } : {}),
         providerContinuationId: initSessionId,
         ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
       };
+  }
+
+  /**
+   * Read only the wrapper-authored containment proof needed when live MCP
+   * startup fails before Cursor can emit a provider init. This deliberately
+   * does not promote the record to a recoverable room-turn terminal: without
+   * init there is no provider continuation identity.
+   */
+  private readTrustedPreInitTurnFailure(
+    turn: LiveTurn,
+  ): { errorDetail: string } | null {
+    if (!turn.statePath) return null;
+    let raw: Record<string, unknown>;
+    try {
+      const terminalJson = readBoundedCursorTurnFile(
+        `${turn.statePath}.terminal.json`,
+        MAX_DURABLE_TURN_TERMINAL_BYTES,
+        "Cursor pre-init terminal evidence",
+      );
+      if (terminalJson === null) return null;
+      raw = JSON.parse(terminalJson) as Record<string, unknown>;
+    } catch {
+      return null;
+    }
+    const errorDetail = safeCursorTerminalErrorDetail(raw.error);
+    if (raw.type !== "error"
+      || raw.native_process_group_reaped !== true
+      || raw.reap_scope !== "native_process_group"
+      || raw.remote_authority_revoked !== true
+      || raw.turn_contract_version !== 1
+      || raw.session_contract_valid !== true
+      || raw.stream_contract_complete !== true
+      || raw.init !== null
+      || raw.result !== null
+      || raw.workspace_generation_manifest_path !== turn.workspaceGenerationManifestPath
+      || !errorDetail) {
+      return null;
+    }
+    return { errorDetail };
   }
 
   private removeDurableTurnJournal(handle: CursorProviderHandle, turnId: string): void {
@@ -4481,14 +4857,38 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // terminates the child before readiness can resolve.)
       unsubscribe();
       const exit = await child.exited;
-      await this.retireTurnWorkspaceGeneration(handle, turn);
+      const preInitFailure = this.readTrustedPreInitTurnFailure(turn);
+      const liveFailureDetail = preInitFailure?.errorDetail
+        ?? safeCursorTerminalErrorDetail(child.terminalError?.());
+      let retirementError: unknown;
+      try {
+        await this.retireTurnWorkspaceGeneration(handle, turn, preInitFailure ? true : undefined);
+      } catch (error) {
+        // Never reconcile a writable generation without durable containment
+        // proof. Preserve the causal live-MCP diagnosis while making the safe
+        // retained-for-recovery state explicit to the caller.
+        retirementError = error;
+      }
       handle.liveTurn = null;
       handle.state = "idle";
       await checkpointReleasedTurnIdle();
       this.finishAttempt(handle, exit);
+      if (retirementError) {
+        if (liveFailureDetail) {
+          const recoveryContext = preInitFailure
+            ? "Its private workspace generation was retained because safe reconciliation did not complete."
+            : "Its private workspace generation was retained for safe recovery because durable containment proof was unavailable.";
+          throw new Error(
+            `Cursor supervised startup failed: ${liveFailureDetail} ${recoveryContext}`,
+          );
+        }
+        throw retirementError;
+      }
       throw new Error(handle.protocolError
         ? "cursor-agent init violated the session contract; the turn was fenced."
-        : "cursor-agent exited before reporting its stream-json init; the turn never became observable.");
+        : liveFailureDetail
+          ? `Cursor supervised startup failed: ${liveFailureDetail}`
+          : "cursor-agent exited before reporting its stream-json init; the turn never became observable.");
     }
     if (handle.protocolError) {
       // consumeLine fenced a stranger session id in the init itself.
@@ -4617,6 +5017,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
         }, "error");
       }
     }
+    const exactTerminalError = trustedDurableTerminal?.terminalError
+      ?? safeCursorTerminalErrorDetail(turn.child.terminalError?.())
+      ?? undefined;
     if (turn.workspaceGeneration && turn.child.requiresDurableTerminalEvidence
       && !trustedDurableTerminal) {
       // Do not touch the provider-authored tree until a successor can prove the
@@ -4631,6 +5034,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerRequestId: turn.providerRequestId,
         attemptTerminal,
         publicationContract: "structured_room_turn_v1",
+        ...(exactTerminalError
+          ? {
+            terminalError: `${exactTerminalError} Its private workspace generation was retained for safe recovery because durable containment proof was unavailable.`,
+          }
+          : {}),
       });
     }
     await this.retireTurnWorkspaceGeneration(handle, turn, trustedDurableTerminal);
@@ -4644,6 +5052,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerRequestId: turn.providerRequestId,
         attemptTerminal: handle.terminal,
         publicationContract: "structured_room_turn_v1",
+        ...(exactTerminalError ? { terminalError: exactTerminalError } : {}),
       });
     }
 
@@ -4692,6 +5101,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerRequestId: turn.providerRequestId,
         attemptTerminal,
         publicationContract: "structured_room_turn_v1",
+        ...(exactTerminalError ? { terminalError: exactTerminalError } : {}),
       });
     }
 
@@ -4759,7 +5169,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private async retireTurnWorkspaceGeneration(
     handle: CursorProviderHandle,
     turn: LiveTurn,
-    trustedDurableTerminal?: CursorTurnTerminal,
+    trustedRemoteAuthorityEvidence?: CursorTurnTerminal | true,
   ): Promise<void> {
     const generation = turn.workspaceGeneration;
     if (!generation) return;
@@ -4768,7 +5178,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     // terminal before renaming, freezing, or applying any provider-authored
     // filesystem state. On failure, retain the ready generation receipt so a
     // successor can recover only after it obtains trusted containment proof.
-    if (turn.child.requiresDurableTerminalEvidence && !trustedDurableTerminal) {
+    if (turn.child.requiresDurableTerminalEvidence && !trustedRemoteAuthorityEvidence) {
       this.readTrustedDurableTurnTerminal(handle, turn);
     }
     try {
@@ -4991,6 +5401,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
       throw new CursorRoomTurnTerminalError(
         cause === "provider_quota"
           ? "Cursor could not complete this turn because the provider usage limit was reached."
+          : terminal.terminalError
+            ? `Cursor supervised turn failed: ${terminal.terminalError}`
           : "Cursor ended before the bounded room turn produced a terminal result.",
       );
     }
