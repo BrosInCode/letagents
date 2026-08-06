@@ -25,7 +25,7 @@ import {
 import { assertSupervisedPermissionProfileAvailable, supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
-import { SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
+import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedDeliveryInterruptReservation, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
@@ -461,6 +461,13 @@ function isHumanRoomActivityEvent(event: ProviderActionStreamEvent): boolean {
     && method !== "account/ratelimits/updated";
 }
 
+function isAgentInspectorLiveDisplayEvent(event: ProviderActionStreamEvent): boolean {
+  return event.method === "reasoning/summaryTextDelta"
+    || event.method === "item/reasoning/summaryTextDelta"
+    || event.method === "item/agentMessage/delta"
+    || event.method === "item/toolCall/updated";
+}
+
 /**
  * Recognize a structured LetAgents room wait across native provider payloads.
  * Free text is deliberately ignored: only an actual tool-use envelope (Claude)
@@ -798,7 +805,13 @@ export class SupervisorDaemon {
   private stateSequence = 1;
   private readonly stateWaiters = new Set<() => void>();
   /** Ephemeral per-agent live feed (not persisted): entryId -> ring buffer + waiters. */
-  private readonly agentStreams = new Map<string, { sequence: number; events: DaemonAgentStreamEvent[]; ended: boolean }>();
+  private readonly agentStreams = new Map<string, {
+    sequence: number;
+    generation: number;
+    generationStartSequence: number;
+    events: DaemonAgentStreamEvent[];
+    ended: boolean;
+  }>();
   private readonly agentStreamWaiters = new Map<string, Set<() => void>>();
   private handoffScheduled = false;
   private handoffTeardownScheduled = false;
@@ -1929,6 +1942,14 @@ export class SupervisorDaemon {
     if (!input.mcpRequestId.trim() || !input.toolName.trim()) throw new Error("A supervised effect requires MCP request and tool identities.");
     const context = await this.exactActiveBoundedContext(input);
     const args = input.input && typeof input.input === "object" && !Array.isArray(input.input) ? input.input as Record<string, unknown> : {};
+    if (input.toolName === "complete_room_turn") {
+      if (context.entry.provider !== "cursor") {
+        throw new Error("The structured room-turn completion channel is reserved for supervised Cursor turns.");
+      }
+      if (!structuredRoomTurnCompletion(input.input)) {
+        throw new Error("The supervised room-turn completion proposal is malformed.");
+      }
+    }
     if (input.toolName === "join_room") {
       const destination = typeof args.name === "string" ? args.name.trim() : "";
       if (!destination || destination.length > 1_024 || /[\u0000-\u001f\u007f]/.test(destination) || destination === context.entry.room_id) throw new Error("A room move requires a different valid destination room.");
@@ -1960,8 +1981,8 @@ export class SupervisorDaemon {
       provider_turn_id: context.inbox.provider_turn_id!, mcp_request_id: input.mcpRequestId,
       tool_name: input.toolName, request: input.input, mutation: input.mutation,
     }, (commit) => this.fenceDaemonCommit(commit));
+    if (prepared.effect.state === "completed") return { state: "completed", result: prepared.effect.result };
     if (!prepared.created) {
-      if (prepared.effect.state === "completed") return { state: "completed", result: prepared.effect.result };
       if (prepared.effect.state === "failed") throw new Error(prepared.effect.error || "The prior supervised effect failed.");
       if (prepared.effect.state === "uncertain") return {
         state: "uncertain",
@@ -5275,7 +5296,13 @@ export class SupervisorDaemon {
 
   /** Append one redacted event to an agent's ephemeral live feed and wake watchers. */
   private pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
-    const buffer = this.agentStreams.get(entryId) ?? { sequence: 0, events: [], ended: false };
+    const buffer = this.agentStreams.get(entryId) ?? {
+      sequence: 0,
+      generation: 1,
+      generationStartSequence: 1,
+      events: [],
+      ended: false,
+    };
     if (buffer.ended) return;
     buffer.sequence += 1;
     buffer.events.push({
@@ -5293,6 +5320,23 @@ export class SupervisorDaemon {
     this.notifyAgentStreamWaiters(entryId);
   }
 
+  /** Start one bounded display generation without replaying an older turn. */
+  private resetAgentStream(entryId: string): void {
+    const buffer = this.agentStreams.get(entryId) ?? {
+      sequence: 0,
+      generation: 0,
+      generationStartSequence: 1,
+      events: [],
+      ended: false,
+    };
+    buffer.generation += 1;
+    buffer.generationStartSequence = buffer.sequence + 1;
+    buffer.events = [];
+    buffer.ended = false;
+    this.agentStreams.set(entryId, buffer);
+    this.notifyAgentStreamWaiters(entryId);
+  }
+
   /** Mark an agent's live feed closed (provider handle torn down) and wake watchers. */
   private endAgentStream(entryId: string): void {
     const buffer = this.agentStreams.get(entryId);
@@ -5305,24 +5349,35 @@ export class SupervisorDaemon {
     entryId: string;
     afterSequence: number;
     waitMs: number;
-  }): Promise<{ sequence: number; events: DaemonAgentStreamEvent[]; ended: boolean }> {
+  }): Promise<{ sequence: number; stream_generation: number; dropped_events: number; events: DaemonAgentStreamEvent[]; ended: boolean }> {
     const waitMs = Number.isFinite(input.waitMs)
       ? Math.max(0, Math.min(30_000, Math.floor(input.waitMs)))
       : 25_000;
-    const snapshot = (): { sequence: number; events: DaemonAgentStreamEvent[]; ended: boolean } => {
+    const snapshot = (): { sequence: number; stream_generation: number; dropped_events: number; events: DaemonAgentStreamEvent[]; ended: boolean } => {
       const buffer = this.agentStreams.get(input.entryId);
-      if (!buffer) return { sequence: input.afterSequence, events: [], ended: false };
+      if (!buffer) return { sequence: input.afterSequence, stream_generation: 0, dropped_events: 0, events: [], ended: false };
+      const effectiveAfter = Math.max(input.afterSequence, buffer.generationStartSequence - 1);
       const events = buffer.events
-        .filter((event) => event.sequence > input.afterSequence)
+        .filter((event) => event.sequence > effectiveAfter)
         .slice(0, AGENT_STREAM_MAX_BATCH);
       // Advance the cursor only to the last event actually delivered. Returning
       // the producer's newest sequence would strand every event past the batch
       // cap: the client resumes from this cursor and would filter them all out.
-      const sequence = events.length > 0 ? events[events.length - 1]!.sequence : input.afterSequence;
-      return { sequence, events, ended: buffer.ended };
+      const sequence = events.length > 0 ? events[events.length - 1]!.sequence : Math.max(input.afterSequence, buffer.generationStartSequence - 1);
+      const oldestRetained = buffer.events[0]?.sequence ?? buffer.sequence + 1;
+      const droppedEvents = Math.max(0, oldestRetained - effectiveAfter - 1);
+      // `ended` belongs to the generation high-water mark, not merely to the
+      // producer state. A capped batch must keep the viewer draining until it
+      // has received every retained event from the ended generation.
+      const ended = buffer.ended && sequence >= buffer.sequence;
+      return { sequence, stream_generation: buffer.generation, dropped_events: droppedEvents, events, ended };
     };
     let current = snapshot();
     if (!this.handoffScheduled && current.events.length === 0 && !current.ended && waitMs > 0) {
+      // There is only one focused inspector consumer. A replacement watch must
+      // release an older long poll for the same entry instead of leaving it
+      // resident until its timeout after rapid close/reopen cycles.
+      this.notifyAgentStreamWaiters(input.entryId);
       await new Promise<void>((resolve) => {
         let settled = false;
         const finish = () => {
@@ -6511,11 +6566,9 @@ export class SupervisorDaemon {
     mayStartDelivery: () => boolean = () => true,
   ): Promise<void> {
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
-    // A fresh provider generation reopens the live feed. Keep the monotonic
-    // sequence so any in-flight watcher's cursor stays valid across the
-    // teardown/reattach; new events simply continue climbing.
-    const priorStream = this.agentStreams.get(entryId);
-    if (priorStream) priorStream.ended = false;
+    // A fresh provider generation owns a fresh ephemeral display transcript.
+    // Keep only the monotonic sequence; never replay the predecessor's tail.
+    this.resetAgentStream(entryId);
     this.liveHandles.set(entryId, handle);
     const binding = await this.workerBindings.get(entryId);
     const currentBinding = this.liveBindingIdentities.get(entryId);
@@ -6762,13 +6815,21 @@ export class SupervisorDaemon {
       payload_redacted: event.payloadRedacted,
       durable_payload_ref: event.durablePayloadRef,
     });
+    // Cursor launches one native child per bounded turn. Its verified init is
+    // the exact display-generation boundary: clear any prior turn before
+    // assistant/tool projections for this child arrive.
+    if (event.provider === "cursor" && event.method === "system/init") {
+      this.resetAgentStream(entryId);
+    }
     // Transcript probes and account telemetry remain in provider diagnostics;
     // they are transport facts, not human-readable agent activity.
     if (isHumanRoomActivityEvent(event)) {
       // Ephemeral live feed first (in-memory, non-blocking): the focused
       // inspector sees reasoning/text/tool events token-by-token without the
       // durable journal's coalescing or 200-event cap.
-      this.pushAgentStreamEvent(entryId, sanitizedEvent);
+      if (isAgentInspectorLiveDisplayEvent(event)) {
+        this.pushAgentStreamEvent(entryId, sanitizedEvent);
+      }
       await this.appendActivity(entryId, sanitizedEvent);
     }
     const waitEvidence = supervisedWaitEvidenceFromProviderEvent(event);

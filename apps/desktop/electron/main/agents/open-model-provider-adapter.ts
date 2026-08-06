@@ -701,7 +701,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   async recoverRoomTurn(
     rawHandle: ProviderHandle,
     request: ProviderRoomTurnRecoveryRequest,
-    options: { detachSignal?: AbortSignal; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> } = {},
+    options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.required(rawHandle);
     handle.activeRoomTurnId = request.providerTurnId;

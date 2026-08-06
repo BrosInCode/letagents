@@ -1,7 +1,12 @@
 <template>
   <div class="agent-inspector-live">
     <p class="agent-inspector-settings-note">
-      A live tail of this agent's reasoning, replies, and tool calls while it works. Ephemeral — it starts when you open this tab and is not a saved transcript.
+      {{ supportsReasoning === true
+        ? "A live tail of this agent's reasoning, response, and tool calls while it works."
+        : supportsReasoning === false
+          ? "A live tail of this agent's response and tool calls while it works. This provider does not expose private reasoning."
+          : "A live tail of this agent's provider-exposed response and tool calls while it works." }}
+      Ephemeral — opening this tab replays the bounded current feed, then follows new activity. It is not a saved transcript.
     </p>
 
     <ol v-if="transcript.items.length" class="agent-inspector-live-items">
@@ -26,13 +31,17 @@
             <span class="agent-inspector-live-tool-status" :data-status="item.status">{{ item.status }}</span>
           </div>
           <pre v-if="formatInput(item.input)" class="agent-inspector-live-tool-io">{{ formatInput(item.input) }}</pre>
-          <pre v-if="item.output" class="agent-inspector-live-tool-io">{{ item.output }}</pre>
+          <pre v-if="formatValue(item.output)" class="agent-inspector-live-tool-io">{{ formatValue(item.output) }}</pre>
           <p v-if="item.error" class="agent-inspector-live-tool-error">{{ item.error }}</p>
         </template>
       </li>
     </ol>
 
-    <p v-else class="agent-inspector-live-empty">
+    <p v-if="feed.droppedEvents > 0" class="agent-inspector-settings-note" role="status">
+      {{ feed.droppedEvents }} earlier live {{ feed.droppedEvents === 1 ? "event was" : "events were" }} omitted because this turn exceeded the replay limit.
+    </p>
+
+    <p v-if="!transcript.items.length" class="agent-inspector-live-empty">
       {{ transcript.ended ? "The agent's runtime is not currently streaming." : "Waiting for the agent's next activity…" }}
     </p>
 
@@ -48,12 +57,13 @@ import { foldAgentStreamEvents } from "../../../../domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../../../../../electron/ipc-types";
 
 const props = defineProps<{
-  feed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean };
+  feed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
+  supportsReasoning: boolean | null;
 }>();
 
 const transcript = computed(() => foldAgentStreamEvents(props.feed.events, props.feed.ended));
 
-function formatInput(input: unknown): string {
+function formatValue(input: unknown): string {
   if (input === null || input === undefined) return "";
   if (typeof input === "string") return input;
   try {
@@ -63,4 +73,6 @@ function formatInput(input: unknown): string {
     return "";
   }
 }
+
+const formatInput = formatValue;
 </script>

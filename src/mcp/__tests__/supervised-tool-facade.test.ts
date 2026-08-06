@@ -15,6 +15,7 @@ function registeredHandler(
   dependencies: SupervisedToolFacadeDependencies,
   callback: () => Promise<CallToolResult>,
   toolName = "send_message",
+  supervisedProvider: string | null = null,
 ) {
   let handler: ((input: unknown, extra: { requestId?: string }) => Promise<CallToolResult>) | null = null;
   const server = {
@@ -23,7 +24,7 @@ function registeredHandler(
       return {};
     },
   } as unknown as McpServer;
-  const facade = profileAwareToolServer(server, "supervised_room_turn", dependencies);
+  const facade = profileAwareToolServer(server, "supervised_room_turn", dependencies, supervisedProvider);
   (facade.tool as (...args: unknown[]) => unknown)(toolName, "description", {}, callback);
   assert.ok(handler);
   return handler;
@@ -104,4 +105,19 @@ test("an uncertain mutation returns a durable safety instruction without invokin
     detail: "The message may already have been sent.",
     instruction: "This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.",
   });
+});
+
+test("Cursor's blocked activating send retains the structured completion contract", async () => {
+  let callbackCount = 0;
+  const handler = registeredHandler({
+    prepareEffect: async () => ({
+      state: "prepared", effectId: "effect_cursor_reply", action: "use_final_answer", sourceMessageId: "msg_1",
+    }),
+    completeEffect: async () => {},
+  }, async () => { callbackCount += 1; return result("must not send"); }, "send_message", "cursor");
+
+  const response = await handler({ text: "answer" }, { requestId: "request_cursor_reply" });
+  assert.equal(callbackCount, 0);
+  assert.match(String(response.structuredContent?.instruction), /complete_room_turn/);
+  assert.doesNotMatch(String(response.structuredContent?.instruction), /Return it as your final answer/);
 });

@@ -271,8 +271,10 @@ export function boundedCursorRoomTurnPrompt(
     ...cursorPermissionProfileInstructionLines(permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"]),
     "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
-    "Answer the activating message in your final response; do not send that same reply with a message tool.",
-    `If no response should be published, return exactly ${CURSOR_NO_ROOM_REPLY_SENTINEL} with no other text.`,
+    "Assistant text generated during this turn is live activity only. Cursor's terminal result concatenates that activity, so it is never published as the room reply.",
+    "After all work is finished, call complete_room_turn exactly once with either { outcome: \"reply\", text: \"your concise public answer\" } or { outcome: \"no_reply\" }.",
+    "Do not send the activating reply with send_message or send_thread_message. The daemon publishes only the exact complete_room_turn proposal after the provider and its authority retire cleanly.",
+    "After complete_room_turn succeeds, end this provider turn without revising or repeating the proposal.",
     `Turn id: ${turnId}`,
     `Inbox item: ${request.inboxItemId}`,
     `Recent bounded room context: ${JSON.stringify(request.observedContext ?? [])}`,
@@ -407,12 +409,103 @@ function cursorTurnLaunchAbort(signal?: AbortSignal): Promise<"aborted"> {
 function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind {
   const type = typeof message.type === "string" ? message.type : "";
   if (type === "assistant") return "text_delta";
-  if (type === "user") return "tool_lifecycle";
+  // Cursor's documented `user` event is the prompt echo, not a tool result.
+  if (type === "user") return "provider_event";
   if (type === "tool_call" || type === "tool_use" || type === "tool_use_summary") return "tool_lifecycle";
   if (type === "result") return "turn_lifecycle";
   if (type === "system") return "provider_event";
   if (/error/i.test(type)) return "error";
   return "provider_event";
+}
+
+type CursorLiveDisplayProjection = {
+  method: "item/agentMessage/delta" | "item/toolCall/updated";
+  kind: "text_delta" | "tool_lifecycle";
+  payload: Record<string, unknown>;
+};
+
+function cursorRecord(value: unknown): Record<string, unknown> | null {
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function cursorToolError(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (value === null || value === undefined) return null;
+  try { return JSON.stringify(value, null, 2); }
+  catch { return "Cursor reported an unreadable tool error."; }
+}
+
+/**
+ * Project an already-redacted/bounded Cursor event into the renderer's
+ * provider-neutral display contract. Raw provider evidence is published
+ * separately and remains untouched for daemon coordination.
+ */
+export function cursorLiveDisplayProjections(
+  safeProviderPayload: unknown,
+  exactTurnNamespace: string,
+  eventNamespace: string,
+): CursorLiveDisplayProjection[] {
+  const message = cursorRecord(safeProviderPayload);
+  if (!message || !exactTurnNamespace) return [];
+  if (message.type === "assistant") {
+    const body = cursorRecord(message.message);
+    if (body?.role !== "assistant") return [];
+    const delta = typeof body.content === "string"
+      ? body.content
+      : Array.isArray(body.content)
+        ? body.content.flatMap((candidate) => {
+          const block = cursorRecord(candidate);
+          return block?.type === "text" && typeof block.text === "string" && block.text
+            ? [block.text]
+            : [];
+        }).join("")
+        : "";
+    return delta
+      ? [{
+        method: "item/agentMessage/delta" as const,
+        kind: "text_delta" as const,
+        payload: {
+          partId: `cursor:${exactTurnNamespace}:assistant:${eventNamespace}`,
+          delta,
+        },
+      }]
+      : [];
+  }
+  if (message.type !== "tool_call") return [];
+  if (message.subtype !== "started" && message.subtype !== "completed") return [];
+  if (typeof message.call_id !== "string" || !message.call_id.trim()) return [];
+  const toolCalls = cursorRecord(message.tool_call);
+  if (!toolCalls) return [];
+  // Cursor may include object-valued metadata before the actual tool envelope.
+  // Only documented `*ToolCall` keys name a callable operation; choosing the
+  // first object would turn metadata into a fake tool card.
+  const toolEntry = Object.entries(toolCalls).find(([key, value]) => /ToolCall$/.test(key) && cursorRecord(value));
+  if (!toolEntry) return [];
+  const [tool, rawCall] = toolEntry;
+  const call = cursorRecord(rawCall)!;
+  const result = cursorRecord(call.result);
+  const failure = result && (Object.hasOwn(result, "error")
+    ? result.error
+    : Object.hasOwn(result, "failure") ? result.failure : undefined);
+  const completed = message.subtype === "completed";
+  const error = completed ? cursorToolError(failure) : null;
+  const output = completed && result && Object.hasOwn(result, "success")
+    ? result.success
+    : completed && failure === undefined ? call.result ?? null : null;
+  return [{
+    method: "item/toolCall/updated",
+    kind: "tool_lifecycle",
+    payload: {
+      callID: `cursor:${exactTurnNamespace}:${message.call_id.trim()}`,
+      tool,
+      status: error ? "error" : completed ? "completed" : "running",
+      input: call.args ?? null,
+      output,
+      error,
+    },
+  }];
 }
 
 function streamMethod(message: CursorStreamMessage): string {
@@ -859,8 +952,9 @@ function inspectLine(line) {
     }
     resultSnapshot = {
       type: "result",
+      subtype: typeof message.subtype === "string" ? message.subtype : null,
       ...(sessionId ? { session_id: sessionId } : {}),
-      is_error: message.is_error === true,
+      is_error: message.is_error,
       result,
       request_id: typeof message.request_id === "string" ? message.request_id : null,
     };
@@ -1767,6 +1861,7 @@ async function finalize() {
       native_process_group_reaped: nativeGroupReaped,
       reap_scope: "native_process_group",
       remote_authority_revoked: remoteAuthorityRevoked,
+      turn_contract_version: 1,
       session_contract_valid: sessionContractValid,
       stream_contract_complete: streamContractComplete,
       workspace_generation_manifest_path: workspaceGenerationManifestPath || null,
@@ -2754,6 +2849,7 @@ interface LiveTurn {
   /** Writable turns own one private generation until its immutable tree is reconciled. */
   workspaceGeneration: SupervisedWorkspaceGenerationHandle | null;
   workspaceGenerationManifestPath: string | null;
+  liveDisplayTools: Map<string, { tool: string; input: unknown }>;
   completion?: Promise<CursorTurnTerminal>;
 }
 
@@ -2764,6 +2860,7 @@ type CursorTurnTerminal = {
   isError: boolean;
   providerRequestId: string | null;
   attemptTerminal: ProviderTerminalPayload | null;
+  publicationContract: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0";
   /** Exact init identity retained when a live post-init checkpoint fails. */
   providerContinuationId?: string;
   /** Trusted wrapper link to the exact private filesystem authority journal. */
@@ -3218,18 +3315,28 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerConnection: handle.providerConnection,
       });
       const result = this.providerRoomTurnResult(turnId, terminal);
-      await options.checkpointTerminalResult?.(result);
-      if (options.checkpointTerminalResult && result.outcome !== "unreadable") {
-        this.removeDurableTurnJournal(handle, turnId);
+      const disposition = await options.checkpointTerminalResult?.(result);
+      const acceptedResult = disposition?.acceptedResult ?? result;
+      const cleanupRecoveryEvidence = options.checkpointTerminalResult
+        ? disposition === undefined
+          ? result.outcome !== "unreadable"
+          : disposition.cleanupRecoveryEvidence
+        : false;
+      if (cleanupRecoveryEvidence) {
         if (turn.workspaceGenerationManifestPath) {
           await this.deps.removeWorkspaceGenerationReceipt(turn.workspaceGenerationManifestPath);
         }
+        // The turn journal is the only restart-readable terminal evidence.
+        // Retire it last, after every fallible generation cleanup succeeds.
+        this.removeDurableTurnJournal(handle, turnId);
       }
       // Cursor has no exact-turn read API. Keep unreadable terminal evidence
       // until the daemon performs its one result-recovery pass; replies and
       // explicit no-replies are already durably normalized and can be dropped.
-      if (result.outcome !== "unreadable") handle.roomTurnResults.delete(turnId);
-      return result;
+      if (cleanupRecoveryEvidence || (!options.checkpointTerminalResult && result.outcome !== "unreadable")) {
+        handle.roomTurnResults.delete(turnId);
+      }
+      return acceptedResult;
     } finally {
       unlinkPreparationDetach();
       settleRoomTurnOperation();
@@ -3253,7 +3360,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     options: {
       detachSignal?: AbortSignal;
       checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"];
-      checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+      checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"];
     } = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
@@ -3341,15 +3448,23 @@ export class CursorProviderAdapter implements ProviderAdapter {
       }
     }
     const result = this.providerRoomTurnResult(turnId, terminal);
-    await options.checkpointTerminalResult?.(result);
-    if (options.checkpointTerminalResult && result.outcome !== "unreadable") {
-      this.removeDurableTurnJournal(handle, turnId);
+    const disposition = await options.checkpointTerminalResult?.(result);
+    const acceptedResult = disposition?.acceptedResult ?? result;
+    const cleanupRecoveryEvidence = options.checkpointTerminalResult
+      ? disposition === undefined
+        ? result.outcome !== "unreadable"
+        : disposition.cleanupRecoveryEvidence
+      : false;
+    if (cleanupRecoveryEvidence) {
       if (terminal.workspaceGenerationManifestPath) {
         await this.deps.removeWorkspaceGenerationReceipt(terminal.workspaceGenerationManifestPath);
       }
+      this.removeDurableTurnJournal(handle, turnId);
     }
-    handle.roomTurnResults.delete(turnId);
-    return result;
+    if (cleanupRecoveryEvidence || (!options.checkpointTerminalResult && result.outcome !== "unreadable")) {
+      handle.roomTurnResults.delete(turnId);
+    }
+    return acceptedResult;
   }
 
   private readDurableTurnTerminal(
@@ -3373,6 +3488,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let initMessage: CursorStreamMessage;
     let resultMessage: CursorStreamMessage | null;
     let workspaceGenerationManifestPath: string | undefined;
+    let publicationContract: CursorTurnTerminal["publicationContract"] = "structured_room_turn_v1";
+    let legacyUnversionedTerminal = false;
     try {
       const raw = JSON.parse(terminalJson) as Record<string, unknown>;
       const currentRemoteAuthorityEvidence = raw.native_process_group_reaped === true
@@ -3391,6 +3508,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
       }
       if (raw.session_contract_valid !== true || raw.stream_contract_complete !== true) {
         throw new CursorRoomTurnRecoveryError("Cursor terminal evidence did not preserve a complete session contract.");
+      }
+      if (raw.turn_contract_version !== undefined) {
+        if (raw.turn_contract_version !== 1) {
+          throw new CursorRoomTurnRecoveryError("Cursor terminal evidence has an unsupported turn contract version.");
+        }
+        publicationContract = "structured_room_turn_v1";
+      } else {
+        legacyUnversionedTerminal = true;
       }
       if (raw.workspace_generation_manifest_path !== undefined
         && raw.workspace_generation_manifest_path !== null) {
@@ -3412,6 +3537,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
         : raw.result && typeof raw.result === "object" && !Array.isArray(raw.result)
           ? raw.result as CursorStreamMessage
           : (() => { throw new CursorRoomTurnRecoveryError("Cursor terminal result snapshot is malformed."); })();
+      if (legacyUnversionedTerminal && resultMessage && !Object.hasOwn(resultMessage, "subtype")) {
+        publicationContract = "legacy_cursor_aggregate_v0";
+      }
       exit = raw.type === "exit"
         ? {
           type: "exit",
@@ -3435,6 +3563,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
     if (pendingContinuation) handle.providerContinuationId = initSessionId;
     const resultSessionId = resultMessage ? sessionIdOf(resultMessage) : null;
+    if (resultMessage && publicationContract === "structured_room_turn_v1" && !resultSessionId) {
+      throw new CursorRoomTurnRecoveryError("Cursor terminal result has no exact provider session identity.");
+    }
     if (resultSessionId && resultSessionId !== initSessionId) {
       throw new CursorRoomTurnRecoveryError("Cursor terminal result belongs to a different provider continuation.");
     }
@@ -3443,7 +3574,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let text: string | null = null;
     let providerRequestId: string | null = null;
     if (sawResult && resultMessage) {
-      isError = resultMessage.is_error === true;
+      // Durable snapshots written before subtype capture only persisted
+      // `{type:"result",is_error:false}`. Accept exactly that absent-field
+      // legacy shape during restart recovery; live observations and newer
+      // snapshots (which persist subtype, including explicit null) retain the
+      // strict success + false contract.
+      const legacySuccess = !Object.hasOwn(resultMessage, "subtype")
+        && resultMessage.is_error === false;
+      isError = !legacySuccess
+        && (resultMessage.subtype !== "success" || resultMessage.is_error !== false);
       text = typeof resultMessage.result === "string" ? resultMessage.result : null;
       providerRequestId = typeof resultMessage.request_id === "string" && resultMessage.request_id.trim()
         ? resultMessage.request_id.trim()
@@ -3457,6 +3596,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         isError,
         providerRequestId,
         attemptTerminal: null,
+        publicationContract,
         providerContinuationId: initSessionId,
         ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
       }
@@ -3467,6 +3607,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         isError: true,
         providerRequestId: null,
         attemptTerminal: null,
+        publicationContract,
         providerContinuationId: initSessionId,
         ...(workspaceGenerationManifestPath ? { workspaceGenerationManifestPath } : {}),
       };
@@ -3774,6 +3915,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           supervisorMcpEnv: {
             LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
             LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+            LETAGENTS_SUPERVISOR_PROVIDER: "cursor",
           },
         });
         const bridgeEnv = cursorMcpInspectionEnv({
@@ -4153,6 +4295,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       statePath,
       workspaceGeneration,
       workspaceGenerationManifestPath: workspaceGeneration?.manifestPath ?? null,
+      liveDisplayTools: new Map(),
     };
     handle.liveTurn = turn;
     handle.state = "working";
@@ -4376,6 +4519,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       unsubscribe();
       await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
       const exit = await child.exited;
+      this.interruptLiveDisplayTools(handle, turn);
       const reportedContinuationId = handle.providerContinuationId;
       // Do not roll back a session identity proven by Cursor's exact init.
       // The daemon checkpoint may have committed its manifest update before a
@@ -4418,6 +4562,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
               isError: turn.resultWasError,
               providerRequestId: turn.providerRequestId,
               attemptTerminal: null,
+              publicationContract: "structured_room_turn_v1",
               ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
             }
             : {
@@ -4427,6 +4572,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
               isError: true,
               providerRequestId: turn.providerRequestId,
               attemptTerminal: null,
+              publicationContract: "structured_room_turn_v1",
               ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
             });
       }
@@ -4455,6 +4601,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
     // otherwise strand stop()/handoff on an already-exited child.
     await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
     unsubscribe();
+    // Every child exit is terminal for this turn's display lifecycle, even
+    // when Cursor omits `result`, the user interrupts, or protocol validation
+    // fails. The daemon stream spans turns, so leaving these entries in the
+    // map would strand Inspector cards in `running` indefinitely.
+    this.interruptLiveDisplayTools(handle, turn);
     let trustedDurableTerminal: CursorTurnTerminal | undefined;
     if (turn.child.requiresDurableTerminalEvidence) {
       try {
@@ -4479,6 +4630,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         isError: true,
         providerRequestId: turn.providerRequestId,
         attemptTerminal,
+        publicationContract: "structured_room_turn_v1",
       });
     }
     await this.retireTurnWorkspaceGeneration(handle, turn, trustedDurableTerminal);
@@ -4491,6 +4643,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         isError: true,
         providerRequestId: turn.providerRequestId,
         attemptTerminal: handle.terminal,
+        publicationContract: "structured_room_turn_v1",
       });
     }
 
@@ -4514,6 +4667,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         isError: true,
         providerRequestId: turn.providerRequestId,
         attemptTerminal: null,
+        publicationContract: "structured_room_turn_v1",
       });
     }
 
@@ -4537,6 +4691,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         isError: true,
         providerRequestId: turn.providerRequestId,
         attemptTerminal,
+        publicationContract: "structured_room_turn_v1",
       });
     }
 
@@ -4558,6 +4713,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       isError: turn.resultWasError,
       providerRequestId: turn.providerRequestId,
       attemptTerminal: null,
+      publicationContract: "structured_room_turn_v1",
     });
   }
 
@@ -4679,8 +4835,24 @@ export class CursorProviderAdapter implements ProviderAdapter {
         observedSessionId: sessionId,
       }, "error");
       this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
+      return;
     }
-    this.publishStream(handle, streamMethod(message), message, cursorStreamKind(message));
+    if (message.type === "result"
+      && (!turn.sawInit || !sessionId || sessionId !== handle.providerContinuationId)) {
+      handle.protocolError = true;
+      this.publishStream(handle, "result/session_invalid", {
+        reason: "Cursor result did not carry the exact verified turn session identity.",
+      }, "error");
+      this.signalExactProcess(turn.pid, turn.processIdentity, "SIGTERM");
+      return;
+    }
+    const safeProviderPayload = safeStreamPayload(message);
+    const duplicateInit = message.type === "system" && message.subtype === "init" && turn.sawInit;
+    // The daemon uses the first verified init as the per-turn display boundary.
+    // Preserve duplicate same-session init as diagnostics under a distinct
+    // method so it cannot erase assistant/tool output already shown this turn.
+    this.publishSafeStream(handle, duplicateInit ? "system/init_duplicate" : streamMethod(message), safeProviderPayload, cursorStreamKind(message));
+    const rawEventSequence = handle.streamSequence;
     const type = typeof message.type === "string" ? message.type : "";
     if (type === "system") {
       // Readiness AND identity adoption are STRICT: only a genuine system/init
@@ -4703,9 +4875,34 @@ export class CursorProviderAdapter implements ProviderAdapter {
       }
       return;
     }
+    // Display projections require the exact session established by init.
+    // Missing/foreign identities remain raw diagnostic evidence only.
+    if (turn.sawInit && sessionId && sessionId === handle.providerContinuationId) {
+      for (const projection of cursorLiveDisplayProjections(
+        safeProviderPayload.payload,
+        turn.controlTurnId,
+        String(rawEventSequence),
+      )) {
+        if (projection.method === "item/toolCall/updated") {
+          const callId = typeof projection.payload.callID === "string" ? projection.payload.callID : null;
+          if (callId) {
+            if (projection.payload.status === "running") {
+              turn.liveDisplayTools.set(callId, {
+                tool: typeof projection.payload.tool === "string" ? projection.payload.tool : "tool",
+                input: projection.payload.input ?? null,
+              });
+            } else {
+              turn.liveDisplayTools.delete(callId);
+            }
+          }
+        }
+        this.publishStream(handle, projection.method, projection.payload, projection.kind);
+      }
+    }
     if (type === "result") {
+      this.interruptLiveDisplayTools(handle, turn);
       turn.sawResult = true;
-      turn.resultWasError = message.is_error === true;
+      turn.resultWasError = message.subtype !== "success" || message.is_error !== false;
       turn.resultText = typeof message.result === "string" ? message.result : null;
       turn.providerRequestId = typeof message.request_id === "string" && message.request_id.trim()
         ? message.request_id.trim()
@@ -4722,6 +4919,20 @@ export class CursorProviderAdapter implements ProviderAdapter {
         next_action: "",
       });
     }
+  }
+
+  private interruptLiveDisplayTools(handle: CursorProviderHandle, turn: LiveTurn): void {
+    for (const [callID, tool] of turn.liveDisplayTools) {
+      this.publishStream(handle, "item/toolCall/updated", {
+        callID,
+        tool: tool.tool,
+        status: "interrupted",
+        input: tool.input,
+        output: null,
+        error: null,
+      }, "tool_lifecycle");
+    }
+    turn.liveDisplayTools.clear();
   }
 
   private rememberRoomTurnTerminal(
@@ -4788,10 +4999,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
     const text = terminal.text?.trim() || null;
     if (text === CURSOR_NO_ROOM_REPLY_SENTINEL) {
-      return { turnId, outcome: "no_reply", text: null, evidence: "stream" };
+      return { turnId, outcome: "no_reply", text: null, evidence: "stream", publicationContract: terminal.publicationContract };
     }
-    if (!text) return { turnId, outcome: "unreadable", text: null, evidence: "none" };
-    return { turnId, outcome: "reply", text, evidence: "stream" };
+    if (!text) return { turnId, outcome: "unreadable", text: null, evidence: "none", publicationContract: terminal.publicationContract };
+    return { turnId, outcome: "reply", text, evidence: "stream", publicationContract: terminal.publicationContract };
   }
 
   /** Inspect the exact checkpointed wrapper without waiting or signalling it. */
@@ -4951,7 +5162,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
   ): void {
-    const safe = safeStreamPayload(providerPayload);
+    this.publishSafeStream(handle, method, safeStreamPayload(providerPayload), kind);
+  }
+
+  private publishSafeStream(
+    handle: CursorProviderHandle,
+    method: string,
+    safe: ReturnType<typeof safeStreamPayload>,
+    kind: ProviderStreamEventKind,
+  ): void {
     const event: ProviderStreamEvent = {
       workAttemptId: handle.workAttemptId,
       providerContinuationId: handle.providerContinuationId,

@@ -347,9 +347,13 @@ export interface ProviderRoomTurnRequest {
 }
 
 export type ProviderRoomTurnResult =
-  | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream" }
-  | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream" }
-  | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none" };
+  | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
+  | { turnId: string; outcome: "unreadable"; text: null; evidence?: "none"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" };
+export type ProviderRoomTurnCheckpointDisposition = {
+  acceptedResult: ProviderRoomTurnResult;
+  cleanupRecoveryEvidence: boolean;
+};
 export interface ProviderRoomTurnRecoveryRequest { inboxItemId: string; providerTurnId: string; }
 export interface ProviderContinuationRepairRequest {
   workAttemptId: string;
@@ -404,7 +408,7 @@ export interface ProviderRoomTurnOptions {
   /** Synchronously marks that exact turn identity and process recovery state are durable. */
   markDurableTurnStarted?: () => void;
   /** Persist normalized terminal evidence before provider-local evidence is released. */
-  checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+  checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>;
   /** Detach this observer only; never interrupt the provider-native turn. */
   detachSignal?: AbortSignal;
   /** @deprecated compatibility alias; new adapters must call beforeNativeDispatch. */
@@ -455,7 +459,7 @@ export interface ProviderAdapter {
   recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
     detachSignal?: AbortSignal;
     checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"];
-    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>;
+    checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"];
   }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: ProviderHandle, request: ProviderContinuationRepairRequest, options: {
     checkpointReplacement: (providerContinuationId: string) => Promise<void>;
