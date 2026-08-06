@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
+import { DatabaseSync } from "node:sqlite";
 
 import {
   ProviderActionPortRouter,
@@ -19,6 +20,12 @@ import type {
 } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
+
+const TEST_PROVIDER_TURN_AUTHORITY = {
+  work_attempt_id: "attempt-native-resolution",
+  origin_execution_generation_id: "generation-native-resolution",
+  provider_continuation_id: "thread-native-resolution",
+} as const;
 import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
@@ -563,7 +570,11 @@ test("daemon convergence drives Claude through the router across stop and same-a
   let continuation = "claude-continuation";
   let rejectControlAfterDispatch = false;
   let proveControlNotApplied = false;
+  let reportEffectWithoutDispatchMarker = false;
+  let controlGate: Promise<void> | null = null;
   let sawAcceptedControlBeforeProvider = false;
+  let nativeTurnSequence = 0;
+  const checkpointedControlTargets: string[] = [];
   const adapter: NativeProviderAdapter = {
     // This fake models a native interrupt+resume provider (its controlTurn
     // resumes on a correction), so it declares midTurnCorrection — the daemon
@@ -574,8 +585,12 @@ test("daemon convergence drives Claude through the router across stop and same-a
     async resume(ref, input) { calls.push(`resume:${ref.workAttemptId}`); return lifecycleHandle(input.workAttemptId); },
     async poke() { throw new Error("Claude poke is intentionally unavailable"); },
     async controlTurn(handle, correction, options) {
-      await options?.markDispatched?.();
+      const exactTarget = options?.targetTurnId ?? `native-turn-${++nativeTurnSequence}`;
+      await options?.checkpointTurnStarted?.(exactTarget);
+      checkpointedControlTargets.push(exactTarget);
+      if (!reportEffectWithoutDispatchMarker) await options?.markDispatched?.();
       calls.push(`control:${handle.workAttemptId}:${correction ?? "stop"}`);
+      await controlGate;
       const current = (await new ManifestStore(paths.manifestPath).load()).entries.find((candidate) => candidate.id === entry.id);
       sawAcceptedControlBeforeProvider = current?.turn_control?.status === "dispatching"
         && current.turn_control.stages.length === 0;
@@ -643,63 +658,37 @@ test("daemon convergence drives Claude through the router across stop and same-a
     });
     const controlParams = {
       id: entry.id,
+      daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+      room_id: entry.room_id,
       work_attempt_id: first.work_attempt_id,
       execution_generation_id: firstGeneration,
+      provider_continuation_id: continuation,
+      provider_turn_id: "not-an-admitted-turn",
+      inbox_item_id: "not-an-admitted-inbox",
+      source_message_id: "not-an-admitted-message",
       action_id: "human-control-1",
+      action_sequence: 1,
       correction: "Use the revised direction",
     };
-    const controlled = await daemonRequest(paths.socketPath, "manifest.control_turn", controlParams);
-    assert.equal(controlled.ok, true);
-    assert.deepEqual(controlled.result, {
-      entryId: entry.id,
-      workAttemptId: first.work_attempt_id,
-      executionGenerationId: firstGeneration,
-      actionId: "human-control-1",
-      duplicate: false,
-      stages: ["delivered", "interrupting", "applied", "resumed"],
-      capability: "native_interrupt",
-      interrupted: true,
-      resumed: true,
-      state: "working",
+    for (const actionId of ["x".repeat(257), "human control with spaces"]) {
+      const invalidAction = await daemonRequest(paths.socketPath, "manifest.control_turn", { ...controlParams, action_id: actionId });
+      assert.equal(invalidAction.ok, false);
+      assert.match(invalidAction.error ?? "", /at most 256 UTF-8 bytes|contain only/i);
+    }
+    assert.equal(calls.some((call) => call.startsWith("control:")), false, "malformed action ids are rejected before provider dispatch");
+    const oversized = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      ...controlParams,
+      action_id: "human-control-oversized",
+      correction: "x".repeat(32 * 1024 + 1),
     });
-    const duplicate = await daemonRequest(paths.socketPath, "manifest.control_turn", controlParams);
-    assert.equal((duplicate.result as { duplicate: boolean }).duplicate, true, "durable action id makes transport retries idempotent");
-    const stale = await daemonRequest(paths.socketPath, "manifest.control_turn", { ...controlParams, action_id: "human-control-stale", execution_generation_id: "wrong-generation" });
-    assert.equal(stale.ok, false);
-    assert.match(stale.error ?? "", /stale or incomplete/);
-    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 1, "duplicate and stale requests never reach the provider");
-    assert.equal(sawAcceptedControlBeforeProvider, true, "native dispatch is durably fenced and carries no optimistic ack stages");
-    proveControlNotApplied = true;
-    const retryableParams = { ...controlParams, action_id: "human-control-retryable", correction: "Retry only after proof" };
-    const provenNotApplied = await daemonRequest(paths.socketPath, "manifest.control_turn", retryableParams);
-    assert.equal(provenNotApplied.ok, false);
-    assert.match(provenNotApplied.error ?? "", /proved the native effect was not applied/);
-    const retryableJournal = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
-    assert.equal(retryableJournal?.status, "retryable");
-    assert.deepEqual(retryableJournal?.stages, []);
-    proveControlNotApplied = false;
-    const safeRetry = await daemonRequest(paths.socketPath, "manifest.control_turn", retryableParams);
-    assert.equal(safeRetry.ok, true, "the exact correction is dispatchable again only after definitive non-application");
-    assert.equal((safeRetry.result as { duplicate?: boolean }).duplicate, false);
-    rejectControlAfterDispatch = true;
-    const uncertainParams = { ...controlParams, action_id: "human-control-uncertain", correction: "Do not replay this correction" };
-    const uncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
-    assert.equal(uncertain.ok, false);
-    assert.match(uncertain.error ?? "", /injected ambiguous provider outcome/);
-    rejectControlAfterDispatch = false;
-    const retryUncertain = await daemonRequest(paths.socketPath, "manifest.control_turn", uncertainParams);
-    assert.equal(retryUncertain.ok, false);
-    assert.match(retryUncertain.error ?? "", /durably dispatched.*unresolved.*not replayed/i);
-    const competing = await daemonRequest(paths.socketPath, "manifest.control_turn", {
-      ...uncertainParams,
-      action_id: "human-control-competing",
-    });
-    assert.equal(competing.ok, false);
-    assert.match(competing.error ?? "", /unresolved.*refusing a second action/i);
-    assert.equal(calls.filter((call) => call.startsWith("control:")).length, 4, "an ambiguous accepted effect is never dispatched twice");
-    const journaled = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.turn_control;
-    assert.equal(journaled?.status, "uncertain");
-    assert.deepEqual(journaled?.stages, []);
+    assert.equal(oversized.ok, false);
+    assert.match(oversized.error ?? "", /32 KiB durable payload limit/i);
+    assert.equal(calls.some((call) => call.startsWith("control:")), false, "oversized durable input is rejected before provider dispatch");
+    const unowned = await daemonRequest(paths.socketPath, "manifest.control_turn", controlParams);
+    assert.equal(unowned.ok, false);
+    assert.match(unowned.error ?? "", /exact room message|exact room turn|durable authority binding/i);
+    assert.equal(calls.some((call) => call.startsWith("control:")), false,
+      "session-level provider control is never dispatched without an exact daemon-owned room turn");
     await new WorkerBindingStore(paths.workerBindingsPath, undefined, paths.manifestPath).unbind(entry.id);
     const fenceDirectory = join(dirname(first.workspace_path!), ".letagents-supervisor-workspace.fences");
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", { id: entry.id, desired_state: "stopped" })).ok, true);
@@ -723,7 +712,7 @@ test("daemon convergence drives Claude through the router across stop and same-a
   }
 });
 
-test("a native-correction provider keeps its own adapter path and is never orphaned into a daemon inbox", async () => {
+test("an mcp-polling provider cannot receive Inspector control without an exact daemon-owned turn", async () => {
   // Regression guard for the Cursor routing bug: Cursor advertises only
   // mcp_polling but applies a correction natively (its controlTurn stops the
   // child and beginTurns the same session with the correction). Such a provider
@@ -806,14 +795,17 @@ test("a native-correction provider keeps its own adapter path and is never orpha
       agent_session_id: "agent_session_exact", agent_session_token: "test-session-token", api_url: "https://letagents.test",
     });
     const controlled = await daemonRequest(paths.socketPath, "manifest.control_turn", {
-      id: entry.id, work_attempt_id: first.work_attempt_id, execution_generation_id: firstGeneration,
-      action_id: "human-control-1", correction: "Use the revised direction",
+      id: entry.id,
+      daemon_generation: ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+      room_id: entry.room_id, work_attempt_id: first.work_attempt_id, execution_generation_id: firstGeneration,
+      provider_continuation_id: continuation, provider_turn_id: "missing-turn",
+      inbox_item_id: "missing-inbox", source_message_id: "missing-message",
+      action_id: "human-control-1", action_sequence: 1, correction: "Use the revised direction",
     });
-    assert.equal(controlled.ok, true);
-    assert.equal((controlled.result as { resumed: boolean }).resumed, true);
-    // The correction reached the adapter's native path verbatim — it was not
-    // stripped to a pure Stop and re-queued.
-    assert.deepEqual(calls.filter((call) => call.startsWith("control:")), [`control:${first.work_attempt_id}:Use the revised direction`]);
+    assert.equal(controlled.ok, false);
+    assert.match(controlled.error ?? "", /daemon-owned exact room turn/i);
+    assert.deepEqual(calls.filter((call) => call.startsWith("control:")), [],
+      "Inspector authority is room-turn scoped, never a provider-session-wide interrupt");
   } finally {
     await daemon.stop();
     // No synthetic correction row was enqueued into a lane that could never pump it.
@@ -829,7 +821,7 @@ test("a native-correction provider keeps its own adapter path and is never orpha
   }
 });
 
-test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native dispatch", async () => {
+test("daemon restart quarantines pre-target turn controls for explicit resolution", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-control-restart-"));
   const calls: string[] = [];
   const adapter = fakeAdapter("claude-code", calls);
@@ -851,11 +843,15 @@ test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native
       execution_generation_id: "generation_exact",
       provider_connection: { kind: "claude_cli", pid: 4242, processIdentity: "claude:4242" },
     },
+    last_turn_control_sequence: 1,
     turn_control: {
       action_id: "action_dispatching_before_crash",
+      action_sequence: 1,
       work_attempt_id: "attempt_exact",
       execution_generation_id: "generation_exact",
       has_correction: true,
+      correction_text: "one correction",
+      correction_strategy: "native",
       status: "dispatching",
       capability: "native_interrupt",
       interrupted: null,
@@ -886,25 +882,57 @@ test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native
       action_id: "action_operator_verified_applied",
     },
   };
+  const historicalActionId = "historical-control-that-must-never-return";
+  const historicalEntry: DaemonManifestEntry = {
+    ...entry,
+    id: "restart_historical_control",
+    room_id: "room-historical-control",
+    turn_control: {
+      ...entry.turn_control!,
+      action_id: "newer-completed-control",
+      status: "completed",
+      interrupted: false,
+      resumed: false,
+      state: "working",
+      stages: ["applied"],
+    },
+    reconciliation: {
+      exit_timestamps_ms: [], consecutive_action_failures: 0, last_observed_state: "working",
+      next_restart_at_ms: null,
+      completed_action_ids: [historicalActionId, ...Array.from({ length: 79 }, (_, index) => `later-control-${index}`)],
+      last_action_sequence: 0, pending_action: null,
+    },
+  };
   try {
-    await new ManifestStore(paths.manifestPath).write(0, [entry, preparedEntry, appliedEntry]);
+    await new ManifestStore(paths.manifestPath).write(0, [entry, preparedEntry, appliedEntry, historicalEntry]);
     await daemon.start();
     const recoveredEntries = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     const recovered = recoveredEntries.find((candidate) => candidate.id === entry.id)?.turn_control;
     const prepared = recoveredEntries.find((candidate) => candidate.id === preparedEntry.id)?.turn_control;
     assert.equal(recovered?.status, "uncertain");
-    assert.match(recovered?.error ?? "", /after native dispatch began/i);
-    assert.equal(prepared?.status, "retryable");
-    assert.match(prepared?.error ?? "", /before native dispatch.*safe to retry/i);
+    assert.match(recovered?.error ?? "", /predates exact causal target fencing/i);
+    assert.equal(prepared?.status, "uncertain");
+    assert.match(prepared?.error ?? "", /predates exact causal target fencing/i);
+    const historicalReplay = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: historicalEntry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: historicalActionId,
+      action_sequence: 1,
+      correction: null,
+    });
+    assert.equal(historicalReplay.ok, false);
+    assert.match(historicalReplay.error ?? "", /room_id is required|causal target/i);
     const replay = await daemonRequest(paths.socketPath, "manifest.control_turn", {
       id: entry.id,
       work_attempt_id: "attempt_exact",
       execution_generation_id: "generation_exact",
       action_id: "action_dispatching_before_crash",
+      action_sequence: 1,
       correction: "one correction",
     });
     assert.equal(replay.ok, false);
-    assert.match(replay.error ?? "", /durably dispatched.*unresolved.*not replayed/i);
+    assert.match(replay.error ?? "", /room_id is required|causal target/i);
     assert.equal(calls.some((call) => call.includes(":control:")), false);
     const resolved = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
       id: entry.id,
@@ -915,12 +943,33 @@ test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native
     });
     assert.equal(resolved.ok, true);
     const resolvedEntry = resolved.result as DaemonManifestEntry;
-    assert.equal(resolvedEntry.turn_control?.status, "retryable");
+    assert.equal(resolvedEntry.turn_control?.status, "completed");
+    assert.equal(resolvedEntry.turn_control?.interrupted, false);
     assert.equal(resolvedEntry.activity?.at(-1)?.method, "supervisor/resolve-turn-control");
     assert.deepEqual(resolvedEntry.activity?.at(-1)?.payload, {
       action_id: "action_dispatching_before_crash",
       resolution: "not_applied",
     });
+    const oppositeResolution = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
+      id: entry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_dispatching_before_crash",
+      resolution: "applied",
+    });
+    assert.equal(oppositeResolution.ok, false);
+    assert.match(oppositeResolution.error ?? "", /already completed with a different operator resolution/i);
+    const notAppliedDuplicate = await daemonRequest(paths.socketPath, "manifest.control_turn", {
+      id: entry.id,
+      work_attempt_id: "attempt_exact",
+      execution_generation_id: "generation_exact",
+      action_id: "action_dispatching_before_crash",
+      action_sequence: 1,
+      correction: "one correction",
+    });
+    assert.equal(notAppliedDuplicate.ok, false);
+    assert.match(notAppliedDuplicate.error ?? "", /room_id is required|causal target/i,
+      "a completed legacy action without a causal target cannot regain session-wide control authority");
     const appliedResolution = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
       id: appliedEntry.id,
       work_attempt_id: "attempt_exact",
@@ -938,12 +987,168 @@ test("daemon restart distinguishes safe pre-dispatch retry from ambiguous native
       work_attempt_id: "attempt_exact",
       execution_generation_id: "generation_exact",
       action_id: "action_operator_verified_applied",
+      action_sequence: 1,
       correction: "one correction",
     });
-    assert.equal(appliedDuplicate.ok, true);
-    assert.equal((appliedDuplicate.result as { duplicate?: boolean }).duplicate, true);
+    assert.equal(appliedDuplicate.ok, false);
+    assert.match(appliedDuplicate.error ?? "", /room_id is required|causal target/i);
   } finally {
     await daemon.stop();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("operator-applied legacy native correction settles its interrupted FIFO row instead of retrying it", async () => {
+  const root = await mkdtemp(join(tmpdir(), "la-ncr-"));
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"), manifestPath: join(root, "manifest.json"), auditPath: join(root, "audit.jsonl"),
+    attemptsPath: join(root, "attempts.json"), attemptsRoot: join(root, "attempt-data"), workspaceRoot: root,
+    workerBindingsPath: join(root, "worker-bindings.json"),
+  };
+  const recordedAt = "2026-08-05T13:00:00.000Z";
+  const seeded: DaemonManifestEntry = {
+    id: "native-correction-resolution", room_id: "room-native-resolution", display_name: "Codex", provider: "codex", model: null, charter: "poll",
+    desired_state: "running", observed_state: "working", condition: "none", delivery_mode: "daemon_inbox",
+    permission_profile_id: "workspace-write", created_by: "test", created_at: recordedAt,
+    work_attempt_id: "attempt-native-resolution",
+    provider_ref: {
+      work_attempt_id: "attempt-native-resolution", provider_continuation_id: "thread-native-resolution",
+      execution_generation_id: "generation-native-resolution",
+      provider_connection: { kind: "codex_app_server", url: "http://127.0.0.1:9999", pid: 9999, processIdentity: "codex:9999" },
+    },
+    last_turn_control_sequence: 1,
+    turn_control: {
+      action_id: "native-correction-action", action_sequence: 1, work_attempt_id: "attempt-native-resolution", execution_generation_id: "generation-native-resolution",
+      inbox_item_id: null, provider_turn_id: null, has_correction: true, correction_text: "keep the same turn, but revise it",
+      correction_strategy: "native", status: "uncertain", capability: "native_interrupt", interrupted: null, resumed: null,
+      state: null, stages: [], error: "native correction outcome unknown", recorded_at: recordedAt, updated_at: recordedAt,
+    },
+  };
+  const store = new ManifestStore(paths.manifestPath);
+  const inbox = new SupervisedAgentInboxStore(paths.manifestPath);
+  const router = new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", []) });
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    await store.write(0, [{ ...seeded, turn_control: undefined }]);
+    const row = await inbox.enqueueCorrection({
+      agent_id: seeded.id, room_id: seeded.room_id, source_message_id: "native-A",
+      source_message: { text: "A" }, activation: { decision: "activate" },
+    });
+    await inbox.claimHead(seeded.id);
+    await inbox.checkpointTurnStarted(row.inbox_item_id, "turn-native-A", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.replaceEntry(1, {
+      ...(await store.getEntry(seeded.id))!,
+      turn_control: { ...seeded.turn_control!, inbox_item_id: row.inbox_item_id, provider_turn_id: "turn-native-A" },
+    });
+    await store.close();
+    await inbox.close();
+
+    daemon = new SupervisorDaemon(paths, "darwin", router, false);
+    await daemon.start();
+    const resolved = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
+      id: seeded.id,
+      work_attempt_id: "attempt-native-resolution",
+      execution_generation_id: "generation-native-resolution",
+      action_id: "native-correction-action",
+      resolution: "applied",
+    });
+    assert.equal(resolved.ok, true, resolved.error ?? "native correction resolution failed");
+    const receiptStore = new SupervisedAgentInboxStore(paths.manifestPath);
+    try {
+      const settled = await receiptStore.get(row.inbox_item_id);
+      assert.equal(settled?.state, "cancelled_by_user", "the interrupted pre-correction turn is never recovered or rerun");
+      assert.equal(settled?.provider_turn_id, "turn-native-A");
+    } finally { await receiptStore.close(); }
+    const completed = resolved.result as DaemonManifestEntry;
+    assert.equal(completed.turn_control?.status, "completed");
+    assert.equal(completed.turn_control?.resumed, true);
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await store.close().catch(() => undefined);
+    await inbox.close().catch(() => undefined);
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("operator resolution remains available after the controlled runtime is detached or replaced", async () => {
+  const root = await mkdtemp(join(tmpdir(), "la-historical-control-"));
+  const paths = {
+    lockPath: join(root, "daemon.lock"), socketPath: join(root, "daemon.sock"),
+    manifestPath: join(root, "daemon-state.sqlite"), auditPath: join(root, "audit.jsonl"),
+  };
+  const workAttemptId = "11111111-1111-4111-8111-111111111111";
+  const controlledGenerationId = "22222222-2222-4222-8222-222222222222";
+  const successorGenerationId = "33333333-3333-4333-8333-333333333333";
+  const recordedAt = "2026-08-05T14:00:00.000Z";
+  const historical = (id: string, providerRef: DaemonManifestEntry["provider_ref"]): DaemonManifestEntry => ({
+    id, room_id: `room-${id}`, display_name: "Historical Codex", provider: "codex", model: null, charter: "recover exactly",
+    desired_state: "stopped", observed_state: "failed", condition: "coordination_blocked", delivery_mode: "daemon_inbox",
+    permission_profile_id: "workspace-write", created_by: "test", created_at: recordedAt,
+    work_attempt_id: workAttemptId, provider_ref: providerRef,
+    last_turn_control_sequence: 1,
+    turn_control: {
+      action_id: `action-${id}`, action_sequence: 1, work_attempt_id: workAttemptId, execution_generation_id: controlledGenerationId,
+      inbox_item_id: null, provider_turn_id: "turn-old-A", has_correction: false,
+      correction_text: null, correction_strategy: null, status: "uncertain", capability: "native_interrupt",
+      interrupted: null, resumed: null, state: null, stages: [], error: "native response was lost",
+      recorded_at: recordedAt, updated_at: recordedAt,
+    },
+  });
+  const detached = historical("detached-control", null);
+  const replaced = historical("replaced-control", {
+    work_attempt_id: workAttemptId,
+    execution_generation_id: successorGenerationId,
+    provider_continuation_id: "thread-successor-B",
+    provider_connection: {
+      kind: "codex_app_server", url: "http://127.0.0.1:48888", pid: 48888,
+      processIdentity: "codex-successor-birth",
+    },
+  });
+  const store = new ManifestStore(paths.manifestPath);
+  let daemon: SupervisorDaemon | null = null;
+  try {
+    await store.write(0, [detached, replaced]);
+    await store.close();
+    const database = new DatabaseSync(paths.manifestPath);
+    database.prepare(`INSERT INTO work_attempts
+      (work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`).run(
+      workAttemptId, "task-historical", "lease-historical", 1, join(root, "workspace"), "repo",
+      "https://example.test/repo.git", "a".repeat(40), join(root, "bare.git"), "active", recordedAt,
+    );
+    database.prepare(`INSERT INTO work_attempt_lease_epochs
+      (work_attempt_id,sort_order,lease_id,epoch,recorded_at) VALUES (?,?,?,?,?)`).run(
+      workAttemptId, 0, "lease-historical", 1, recordedAt,
+    );
+    database.prepare(`INSERT INTO work_attempt_executions
+      (execution_generation_id,work_attempt_id,started_at,actor,generation,terminal_json)
+      VALUES (?,?,?,?,?,?)`).run(
+      controlledGenerationId, workAttemptId, recordedAt, "provider", 1, JSON.stringify({
+        ended_at: "2026-08-05T14:01:00.000Z", exit_code: 1, signal: null,
+        stdio_archive_ref: null, stdio_tail: "controlled runtime ended", terminal_cause: "process_exit",
+        actor: "provider", generation: 1, provider_continuation_id: "thread-old-A",
+      }),
+    );
+    database.close();
+
+    daemon = new SupervisorDaemon(paths, "darwin", undefined, false);
+    await daemon.start();
+    for (const candidate of [detached, replaced]) {
+      const resolved = await daemonRequest(paths.socketPath, "manifest.resolve_turn_control", {
+        id: candidate.id, work_attempt_id: workAttemptId, execution_generation_id: controlledGenerationId,
+        action_id: candidate.turn_control!.action_id, resolution: "applied",
+      });
+      assert.equal(resolved.ok, true, resolved.error ?? `${candidate.id} historical resolution failed`);
+      const completed = resolved.result as DaemonManifestEntry;
+      assert.equal(completed.turn_control?.status, "completed");
+      assert.equal(completed.turn_control?.operator_resolution, "applied");
+      assert.deepEqual(completed.turn_control?.stages, ["already_applied"]);
+      if (candidate.id === detached.id) assert.equal(completed.provider_ref ?? null, null);
+      else assert.equal(completed.provider_ref?.execution_generation_id, successorGenerationId, "resolution cannot rewrite successor B");
+    }
+  } finally {
+    await daemon?.stop().catch(() => undefined);
+    await store.close().catch(() => undefined);
     await rm(root, { recursive: true, force: true });
   }
 });

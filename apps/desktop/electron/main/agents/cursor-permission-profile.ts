@@ -60,6 +60,7 @@ export function cursorPermissionProfileInstructionLines(
       return [
         "- You may edit files and run local commands when the room event requires implementation work.",
         "- Keep changes scoped to the selected repository/workspace and respect Cursor sandbox failures instead of trying to bypass them.",
+        "- LetAgents carries ordinary nonignored file edits back after the turn. Do not create commits, switch branches, or rely on ignored build output being persisted.",
         "- The Cursor sandbox does not prove that MCP tools are sandboxed; use only tools exposed by this runtime and allowed by the human's request.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
@@ -67,6 +68,7 @@ export function cursorPermissionProfileInstructionLines(
       return [
         "- You may edit files and run local commands when the room event requires implementation work.",
         "- Keep all local changes inside the selected repository/workspace. If broader changes are needed, explain the boundary instead of trying to bypass it.",
+        "- LetAgents carries ordinary nonignored file edits back after the turn. Do not create commits, switch branches, or rely on ignored build output being persisted.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
     default:
@@ -97,12 +99,12 @@ export function cursorPermissionProfileReadyDetail(
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
       if (supervised) {
-        return "Cursor can read, edit, and run normal development commands inside the selected workspace. Cursor's sandbox and a path-based LetAgents host boundary remain enabled without inventorying project files.";
+        return "Cursor works in a private per-turn Git workspace with its native sandbox enabled. LetAgents carries conflict-checked, nonignored file edits back after the turn; ignored dependencies remain read-only and Git history is not changed.";
       }
       return "Cursor will run with --force and Cursor sandbox enabled for write-capable local work. Selected MCP tools still follow the chosen MCP policy.";
     case "full_access":
       if (supervised) {
-        return "Cursor's inner sandbox is disabled for repository tool compatibility. LetAgents still restricts direct write paths to the selected workspace and blocks host authority without inventorying project files.";
+        return "Cursor works in a private per-turn Git workspace with its inner sandbox disabled for tool compatibility. Direct host writes remain blocked; LetAgents carries conflict-checked, nonignored file edits back without changing Git history.";
       }
       return "Cursor will run with --force and Cursor sandbox disabled for trusted local work. Selected MCP tools still follow the chosen MCP policy.";
     default:

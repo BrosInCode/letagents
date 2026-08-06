@@ -143,7 +143,7 @@
             <Check v-else :size="14" />
           </span>
           <strong>{{ receipt.agentName }}</strong>
-          <small v-if="receiptStateLabel(receipt.state)">{{ receiptStateLabel(receipt.state) }}</small>
+          <small v-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
           <button
             v-if="receipt.state === 'queued_behind_blocked' && receipt.blockedByMessageId"
             type="button"
@@ -318,7 +318,7 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; attemptCount: number; providerTurnId: string | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -381,7 +381,9 @@ function receiptNeedsAttention(state: string): boolean {
   return state === "blocked" || state === "queued_behind_blocked";
 }
 
-function receiptStateLabel(state: string): string {
+function receiptStateLabel(receipt: { state: string; terminalReason: string | null }): string {
+  if (receipt.terminalReason === "upgrade_authority_unavailable") return "Retired during safety upgrade";
+  const state = receipt.state;
   if (state === "retryable") return "Retrying";
   if (state === "result_recovery") return "Recovering reply";
   if (state === "restoring_conversation") return "Restoring conversation";
@@ -393,7 +395,8 @@ function receiptStateLabel(state: string): string {
   return "";
 }
 
-function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null }): string {
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null }): string {
+  if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
   if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;

@@ -118,6 +118,7 @@ export function projectDaemonManifestEntry(entry: DaemonManifestEntry): DaemonMa
     },
     turn_control_journal: {
       agent_id: entry.id,
+      last_turn_control_sequence: entry.last_turn_control_sequence ?? 0,
       ...(Object.hasOwn(entry, "turn_control") ? { turn_control: entry.turn_control } : {}),
     },
     retained_worker_binding: {
@@ -199,6 +200,7 @@ export function composeDaemonManifestEntry(projection: DaemonManifestDomainProje
     ...(Object.hasOwn(runtime, "native_liveness") ? { native_liveness: runtime.native_liveness } : {}),
     ...(Object.hasOwn(readiness, "ready_reached_at") ? { ready_reached_at: readiness.ready_reached_at } : {}),
     ...(Object.hasOwn(runtime, "activity") ? { activity: runtime.activity } : {}),
+    last_turn_control_sequence: turnControlJournal.last_turn_control_sequence,
     ...(Object.hasOwn(turnControlJournal, "turn_control") ? { turn_control: turnControlJournal.turn_control } : {}),
     ...(Object.hasOwn(retainedWorkerBinding, "last_worker_binding") ? { last_worker_binding: retainedWorkerBinding.last_worker_binding } : {}),
     ...(Object.hasOwn(reconciliation, "reconciliation") ? { reconciliation: reconciliation.reconciliation } : {}),

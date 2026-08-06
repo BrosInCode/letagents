@@ -27,6 +27,15 @@
       <p class="agent-inspector-turn-control-guidance">Waiting for the durable control record to settle.</p>
     </template>
 
+    <template v-else-if="control.status === 'retryable'">
+      <p class="agent-inspector-turn-control-guidance">
+        This retries the recorded {{ control.retryHasCorrection ? "correction" : "stop" }} with the same action identity.
+      </p>
+      <div class="agent-inspector-turn-control-actions">
+        <button type="button" class="primary" :disabled="busy || !control.canRetry" @click="emit('retry')">Retry previous change</button>
+      </div>
+    </template>
+
     <template v-else>
       <label class="agent-inspector-field" :for="fieldId">
         Correction for this session
@@ -34,6 +43,7 @@
           :id="fieldId"
           v-model="draft"
           rows="3"
+          maxlength="32768"
           :disabled="busy || !control.canCorrect"
           placeholder="Tell the agent what to change. It will continue on this same session."
         />
@@ -65,6 +75,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   stop: [];
   correct: [correction: string];
+  retry: [];
   resolve: [resolution: "not_applied" | "applied"];
 }>();
 

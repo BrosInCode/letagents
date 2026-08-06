@@ -23,12 +23,16 @@
             @click="emit('select-source', item.source_message_id)"
           >
             <span class="agent-inspector-work-item-state" :data-state="item.state" aria-hidden="true"></span>
-            <span><strong>{{ humanizeAgentInspectorReceiptState(item.state) }}</strong><small>{{ item.text_preview || 'Message content is unavailable.' }} · {{ formatRelativeTime(item.updated_at) }}</small></span>
+            <span><strong>{{ humanizeAgentInspectorReceiptState(item.state, item.terminal_reason) }}</strong><small>{{ item.text_preview || 'Message content is unavailable.' }} · {{ formatRelativeTime(item.updated_at) }}</small></span>
           </button>
           <p v-if="!detail?.items.length" class="agent-inspector-work-empty">No retained activated work is available for this agent in this room.</p>
         </nav>
 
         <div class="agent-inspector-work-detail">
+          <section v-if="detail?.uncertain_effects.length" class="agent-inspector-work-note" role="status">
+            <strong>Some mutating tool outcomes need verification.</strong>
+            <p v-for="effect in detail.uncertain_effects" :key="effect.effect_id">{{ describeAgentInspectorUncertainEffect(effect.tool_name) }}</p>
+          </section>
           <section v-if="detail?.availability === 'pruned'" class="agent-inspector-work-note"><strong>Older detail was removed by local retention.</strong><p>This item is outside the retained local work history.</p></section>
           <section v-else-if="detail?.availability === 'not_loaded'" class="agent-inspector-work-note"><strong>No retained activated work for this message.</strong><p>This message was observed but did not create retained activated work, or no exact evidence is loaded.</p></section>
           <template v-else-if="detail?.availability === 'available'">
@@ -40,10 +44,12 @@
             </section>
             <section class="agent-inspector-work-section">
               <p class="agent-inspector-work-eyebrow">Receipt and outcome</p>
-              <strong>{{ detail.receipt ? humanizeAgentInspectorReceiptState(detail.receipt.state) : 'No receipt retained' }}</strong>
+              <strong>{{ detail.receipt ? humanizeAgentInspectorReceiptState(detail.receipt.state, detail.receipt.terminal_reason) : 'No receipt retained' }}</strong>
               <p v-if="detail.terminal?.normalized_text">{{ detail.terminal.normalized_text }}</p>
               <p v-else-if="detail.receipt?.outcome?.text">{{ detail.receipt.outcome.text }}</p>
-              <p v-else>{{ detail.receipt?.failure_code === 'provider_continuation_missing'
+              <p v-else>{{ detail.receipt?.terminal_reason === 'upgrade_authority_unavailable'
+                ? 'A safety upgrade retired this legacy turn because its exact authority could not be reconstructed. The outcome is unknown, and LetAgents did not replay provider work.'
+                : detail.receipt?.failure_code === 'provider_continuation_missing'
                 ? 'The saved Codex conversation is unavailable. No model turn was started.'
                 : detail.receipt?.last_error || 'No terminal outcome is retained.' }}</p>
             </section>
@@ -77,7 +83,7 @@ import { computed } from "vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import { formatFullTimestamp, formatRelativeTime } from "../../../../domain/time";
-import { humanizeAgentInspectorReceiptState, humanizeAgentInspectorTimeline, type AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
+import { describeAgentInspectorUncertainEffect, humanizeAgentInspectorReceiptState, humanizeAgentInspectorTimeline, type AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 
 const props = defineProps<{ resource: AgentInspectorWorkResource; selectedSourceMessageId: string | null; tasks: readonly Pick<DesktopTaskSummary, 'id' | 'title' | 'status'>[]; artifacts: readonly RoomArtifactTimelineItem[] }>();
 const emit = defineEmits<{ retry: []; 'select-source': [sourceMessageId: string]; reveal: [canonicalMessageId: string] }>();

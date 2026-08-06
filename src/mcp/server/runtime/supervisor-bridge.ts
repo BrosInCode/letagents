@@ -75,6 +75,7 @@ export type SupervisedCredentialBorrowResult =
 
 export type PreparedSupervisedEffect =
   | { state: "completed"; result: unknown }
+  | { state: "uncertain"; effectId: string; error: string }
   | { state: "prepared"; effectId: string; action: "execute" }
   | { state: "prepared"; effectId: string; action: "use_final_answer"; sourceMessageId: string }
   | { state: "prepared"; effectId: string; action: "room_move_prepared"; destinationRoom: string };
@@ -110,6 +111,12 @@ export async function prepareCurrentSupervisedEffect(input: {
   if (result.state === "completed") return { state: "completed", result: result.result };
   const effectId = typeof result.effect_id === "string" ? result.effect_id : "";
   if (!effectId) throw new Error("The supervised effect journal did not return an effect id.");
+  if (result.state === "uncertain") {
+    const error = typeof result.error === "string" && result.error.trim()
+      ? result.error
+      : "The mutating tool outcome is uncertain.";
+    return { state: "uncertain", effectId, error };
+  }
   if (result.action === "use_final_answer" && typeof result.source_message_id === "string") {
     return { state: "prepared", effectId, action: "use_final_answer", sourceMessageId: result.source_message_id };
   }
@@ -126,24 +133,58 @@ export async function completeCurrentSupervisedEffect(input: {
 }, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<void> {
   const coordinates = await requireCurrentSupervisedCoordinates(env, options);
   const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
-  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
-  if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
-  const response = await supervisorRequest(coordinates.socketPath, {
-    version: negotiated.protocolVersion,
-    id: randomUUID(),
-    method: "supervisor.complete_bounded_effect",
-    params: {
-      entry_id: coordinates.entryId,
-      work_attempt_id: coordinates.workAttemptId,
-      execution_generation_id: coordinates.executionGenerationId,
-      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
-      daemon_generation: negotiated.generation,
-      effect_id: input.effectId,
-      result: input.result,
-      error: input.error,
-    },
-  }, timeoutMs);
-  if (!response.ok) throw new Error(response.error || "The supervised effect completion was rejected.");
+  const deadline = Date.now() + timeoutMs;
+  let retryAttempt = 0;
+  while (true) {
+    let response: SupervisorResponse;
+    try {
+      // Completion is idempotent by effect id. A daemon handoff can race the
+      // first socket request after the external callback already succeeded,
+      // so keep renegotiating within one bounded request budget instead of
+      // stranding an executing journal or tempting the caller to repeat the
+      // side effect. The successor's unlink-to-listen gap can span multiple
+      // failed socket attempts during process startup.
+      const negotiated = await negotiateSupervisor(coordinates.socketPath, remainingRequestTimeout(deadline));
+      if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
+      response = await supervisorRequest(coordinates.socketPath, {
+        version: negotiated.protocolVersion,
+        id: randomUUID(),
+        method: "supervisor.complete_bounded_effect",
+        params: {
+          entry_id: coordinates.entryId,
+          work_attempt_id: coordinates.workAttemptId,
+          execution_generation_id: coordinates.executionGenerationId,
+          ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
+          daemon_generation: negotiated.generation,
+          effect_id: input.effectId,
+          result: input.result,
+          error: input.error,
+        },
+      }, remainingRequestTimeout(deadline));
+    } catch (error) {
+      const failure = error instanceof Error ? error : new Error(String(error));
+      if (!completionMayHaveRacedHandoff(failure)
+        || !await waitForCompletionHandoffRetry(deadline, retryAttempt++)) throw error;
+      continue;
+    }
+    if (response.ok) return;
+    const rejection = new Error(response.error || "The supervised effect completion was rejected.");
+    if (!completionMayHaveRacedHandoff(rejection)
+      || !await waitForCompletionHandoffRetry(deadline, retryAttempt++)) throw rejection;
+  }
+}
+
+function completionMayHaveRacedHandoff(error: Error): boolean {
+  return isRetryableSupervisorBridgeError(error)
+    || /stale.*(?:daemon|supervisor).*generation|handoff/i.test(error.message);
+}
+
+async function waitForCompletionHandoffRetry(deadline: number, attempt: number): Promise<boolean> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) return false;
+  const delay = Math.min(25 * (2 ** Math.min(attempt, 4)), 250, remaining);
+  await new Promise((resolve) => setTimeout(resolve, delay));
+  return Date.now() < deadline;
 }
 
 async function requireCurrentSupervisedCoordinates(
@@ -767,17 +808,21 @@ function supervisorRequest(socketPath: string, request: Record<string, unknown>,
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let buffer = "";
+    let finished = false;
     const timer = setTimeout(() => {
       socket.destroy();
-      reject(new Error("Timed out communicating with the supervisor daemon."));
+      finish(() => reject(new Error("Timed out communicating with the supervisor daemon.")));
     }, timeoutMs);
     timer.unref();
     const finish = (operation: () => void) => {
+      if (finished) return;
+      finished = true;
       clearTimeout(timer);
       operation();
     };
     socket.setEncoding("utf8");
     socket.once("error", (error) => finish(() => reject(error)));
+    socket.once("close", () => finish(() => reject(new Error("Supervisor connection closed before a response."))));
     socket.on("data", (chunk: string) => {
       buffer += chunk;
       const newline = buffer.indexOf("\n");

@@ -34,6 +34,7 @@ import {
   type LetAgentsMcpRuntime,
 } from "./letagents-mcp-runtime.js";
 import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
+import { assertSupervisedWorkspaceGenerationSupported } from "./supervised-workspace-generation.js";
 import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "../paths.js";
 
 type ExecResult = {
@@ -61,6 +62,8 @@ export type DesktopCursorPreflightOptions = {
   mcpRuntime?: LetAgentsMcpRuntime;
   /** Test seam for the live, identity-only GetMe attestation. */
   personalIdentityAttestor?: typeof assertCursorPersonalIdentity;
+  /** Lightweight Git/topology check; it must never inventory project files. */
+  workspaceGenerationSupportChecker?: typeof assertSupervisedWorkspaceGenerationSupported;
 };
 
 export async function runDesktopCursorProviderPreflight(
@@ -268,6 +271,23 @@ export async function runDesktopCursorProviderPreflight(
         version,
         mcpStatus,
       };
+    }
+
+    if (supervised && (permissionProfile.id === "sandboxed_write" || permissionProfile.id === "full_access")) {
+      try {
+        await (options.workspaceGenerationSupportChecker ?? assertSupervisedWorkspaceGenerationSupported)(workspaceRoot);
+      } catch (error) {
+        return {
+          providerId: provider.id,
+          status: "error",
+          canStart: false,
+          message: "Cursor writable workspace cannot be supervised exactly.",
+          detail: error instanceof Error ? error.message : String(error),
+          nextAction: null,
+          version,
+          mcpStatus,
+        };
+      }
     }
 
     const resealAuthenticatedSupervisedProfile = async (): Promise<DesktopAgentProviderPreflight | null> => {

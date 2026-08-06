@@ -14,6 +14,7 @@ import test from "node:test";
 import type { DesktopAgentProvider, DesktopAgentProviderPreflightInput } from "../ipc-types.js";
 import { createElectronTestEnv } from "./harness.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+import type { DesktopCursorPreflightOptions } from "../main/agents/cursor-provider-preflight.js";
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -135,7 +136,20 @@ const cursorProvider: DesktopAgentProvider = {
 // fake cursor-agent child can take arbitrarily long under load. Disable the
 // per-command wall-clock timeout: the fake binary always exits on its own, and
 // the timeout itself is not the behavior under test.
-function runPreflight(input: DesktopAgentProviderPreflightInput) {
+function runPreflight(
+  input: DesktopAgentProviderPreflightInput,
+  workspaceGenerationSupportChecker: NonNullable<DesktopCursorPreflightOptions["workspaceGenerationSupportChecker"]> = async (realWorkspace) => ({
+    sourceRoot: realWorkspace,
+    realWorkspace,
+    workspaceRelativePath: "",
+    headOid: "a".repeat(40),
+    headRef: "refs/heads/test",
+    gitDirectory: join(realWorkspace, ".git"),
+    gitCommonDirectory: join(realWorkspace, ".git"),
+    gitIndexPath: join(realWorkspace, ".git", "index"),
+    gitObjectDirectory: join(realWorkspace, ".git", "objects"),
+  }),
+) {
   return runDesktopCursorProviderPreflight(cursorProvider, input, "installed", {
     commandTimeoutMs: 0,
     mcpRuntime: {
@@ -154,6 +168,7 @@ function runPreflight(input: DesktopAgentProviderPreflightInput) {
       }
       return { userId: 12345, email: "personal@example.test" };
     },
+    workspaceGenerationSupportChecker,
   });
 }
 
@@ -209,7 +224,7 @@ test("Cursor supervised preflight requires and accepts its isolated LetAgents br
   assert.equal(result.status, "ready");
   assert.equal(result.canStart, true);
   assert.equal(result.message, "Cursor Agent is ready to start supervised with Workspace writes.");
-  assert.match(result.detail ?? "", /inside the selected workspace/i);
+  assert.match(result.detail ?? "", /private per-turn Git workspace/i);
   assert.match(result.detail ?? "", /per-agent Cursor profile exposes only the daemon-mediated LetAgents bridge/i);
   setFakeCursorMcpMode(null);
 });
@@ -231,6 +246,38 @@ test("Cursor supervised preflight preserves explicit read-only and full-access c
     assert.equal(result.message, `Cursor Agent is ready to start supervised with ${label}.`);
   }
   setFakeCursorMcpMode(null);
+});
+
+test("Cursor supervised preflight gates writable generations without gating read-only", async () => {
+  const workspace = workspaceFixture("supervised-generation-gate");
+  let checks = 0;
+  const unsupported: NonNullable<DesktopCursorPreflightOptions["workspaceGenerationSupportChecker"]> = async () => {
+    checks += 1;
+    throw new Error("Writable generations require a canonical Git worktree.");
+  };
+  setFakeCursorMcpMode("ready");
+  try {
+    const writable = await runPreflight({
+      repoRootPath: workspace,
+      launchMode: "supervised",
+      permissionProfileId: "sandboxed_write",
+    }, unsupported);
+    assert.equal(writable.status, "error");
+    assert.equal(writable.canStart, false);
+    assert.equal(writable.message, "Cursor writable workspace cannot be supervised exactly.");
+    assert.match(writable.detail ?? "", /canonical Git worktree/i);
+
+    const readOnly = await runPreflight({
+      repoRootPath: workspace,
+      launchMode: "supervised",
+      permissionProfileId: "read_only",
+    }, unsupported);
+    assert.equal(readOnly.status, "ready");
+    assert.equal(readOnly.canStart, true);
+    assert.equal(checks, 1, "read-only never needs a writable generation");
+  } finally {
+    setFakeCursorMcpMode(null);
+  }
 });
 
 test("Cursor supervised preflight does not traverse project files before launch", async () => {

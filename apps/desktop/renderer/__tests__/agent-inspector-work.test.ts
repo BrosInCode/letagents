@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import {
   agentInspectorWorkArtifacts,
   defaultAgentInspectorWorkSource,
+  describeAgentInspectorUncertainEffect,
   humanizeAgentInspectorReceiptState,
   humanizeAgentInspectorTimeline,
   isCurrentAgentInspectorWorkResponse,
@@ -32,6 +33,11 @@ test("work response and artifact joins are exact durable identifiers", () => {
 
 test("work labels present human language instead of raw causal enums", () => {
   assert.equal(humanizeAgentInspectorReceiptState("acknowledged"), "Reply published");
+  assert.equal(
+    humanizeAgentInspectorReceiptState("acknowledged_no_reply", "upgrade_authority_unavailable"),
+    "Retired during a safety upgrade",
+  );
+  assert.match(describeAgentInspectorUncertainEffect("send_message"), /may have completed.*verify external state/i);
   assert.equal(humanizeAgentInspectorTimeline({ phase: "turn_started" } as any), "Work started");
 });
 
@@ -50,5 +56,7 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(surface, /ArrowLeft.*ArrowRight.*Home.*End/);
   assert.match(work, /Older detail was removed by local retention/);
   assert.match(work, /did not create retained activated work/);
+  assert.match(work, /mutating tool outcomes need verification/i);
+  assert.match(work, /A safety upgrade retired this legacy turn/);
   assert.match(work, /Open reply in Chat/);
 });

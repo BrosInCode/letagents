@@ -745,12 +745,24 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         "not_applied",
       );
     }
+    const expectedTurnId = options.targetTurnId?.trim() || null;
     if (await handle.client.status(handle.providerContinuationId) !== "busy") {
       handle.activeRoomTurnId = null;
       handle.setState("idle");
       return { capability: "native_interrupt", interrupted: false, resumed: false, state: "idle" };
     }
     const activeTurnId = handle.activeRoomTurnId;
+    if (expectedTurnId && activeTurnId !== expectedTurnId) {
+      // A completed or superseded exact turn is a no-op. Never let retry of A
+      // inherit abort authority over the session's newer active B.
+      return { capability: "native_interrupt", interrupted: false, resumed: false, state: "working" };
+    }
+    if (!activeTurnId) {
+      throw new ProviderTurnControlError(
+        "OpenCode has no exact active-turn identity; refusing session-wide abort authority.",
+        "uncertain",
+      );
+    }
     if (activeTurnId) await options.checkpointTurnStarted?.(activeTurnId);
     await options.markDispatched?.();
     if (await handle.client.status(handle.providerContinuationId) !== "busy"

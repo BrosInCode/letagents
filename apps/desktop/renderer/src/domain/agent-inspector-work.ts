@@ -42,7 +42,8 @@ export function defaultAgentInspectorWorkSource(
   return active || detail?.items[0]?.source_message_id || null;
 }
 
-export function humanizeAgentInspectorReceiptState(state: string): string {
+export function humanizeAgentInspectorReceiptState(state: string, terminalReason: string | null = null): string {
+  if (terminalReason === "upgrade_authority_unavailable") return "Retired during a safety upgrade";
   const labels: Record<string, string> = {
     pending: "Waiting to start", dispatching: "Starting work", awaiting_result: "Working",
     result_recovery: "Recovering the result", publishing: "Publishing reply",
@@ -53,6 +54,10 @@ export function humanizeAgentInspectorReceiptState(state: string): string {
     restoring_conversation: "Restoring conversation",
   };
   return labels[state] || "Recorded work";
+}
+
+export function describeAgentInspectorUncertainEffect(toolName: string): string {
+  return `${toolName} may have completed before its result was saved. Verify external state before repeating it.`;
 }
 
 export function humanizeAgentInspectorTimeline(event: DesktopRoomAgentCausalEvent): string {

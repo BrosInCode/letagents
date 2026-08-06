@@ -615,10 +615,22 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         "not_applied",
       );
     }
+    const expectedTurnId = options.targetTurnId?.trim() || null;
     const activeTurnId = handle.activeRoomTurnId;
+    if (expectedTurnId && activeTurnId !== expectedTurnId) {
+      // The checkpointed A is no longer active. B, if present, is outside the
+      // old action's authority and must never be interrupted by its retry.
+      return {
+        capability: "native_interrupt",
+        interrupted: false,
+        resumed: false,
+        state: activeTurnId ? "working" : "idle",
+      };
+    }
     const active = Boolean(activeTurnId);
     if (active) {
       const resultBoundary = this.waitForNextTurnResult(handle);
+      await options.checkpointTurnStarted?.(activeTurnId!);
       await options.markDispatched?.();
       if (handle.activeRoomTurnId !== activeTurnId) {
         const result = await resultBoundary;

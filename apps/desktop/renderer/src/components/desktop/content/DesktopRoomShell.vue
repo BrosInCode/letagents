@@ -398,6 +398,7 @@ import {
   clearAgentInspectorActionStateIfMatching,
   agentInspectorTurnControlActionId,
   agentInspectorTurnControlActionIdIfCurrent,
+  agentInspectorRetryableTurnControlInput,
   agentInspectorTurnControlFenceMatches,
   projectAgentInspectors,
   type AgentInspectorTurnControlFence,
@@ -682,6 +683,7 @@ const deliveryReceiptsByMessage = computed(() => {
     state: string;
     blockedByMessageId: string | null;
     failureCode: string | null;
+    terminalReason: string | null;
     attemptCount: number;
     providerTurnId: string | null;
   }>> = {};
@@ -692,6 +694,7 @@ const deliveryReceiptsByMessage = computed(() => {
       state: receipt.state,
       blockedByMessageId: receipt.blockedByMessageId,
       failureCode: receipt.failureCode,
+      terminalReason: receipt.terminalReason,
       attemptCount: receipt.attemptCount,
       providerTurnId: receipt.providerTurnId,
     });
@@ -2908,15 +2911,17 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
   if (intent.roomId !== props.room.identifier) return;
   const projection = agentInspectorProjections.value.find((candidate) => candidate.entryId === intent.entryId);
   if (!projection) return;
-  const turnControlIntent = intent.kind === "stop_turn" || intent.kind === "steer_turn" || intent.kind === "resolve_turn_control";
+  const turnControlIntent = intent.kind === "stop_turn" || intent.kind === "steer_turn" || intent.kind === "retry_turn_control" || intent.kind === "resolve_turn_control";
   const actionAvailable = projection.actions.some((action) => action.kind === intent.kind && action.available);
-  const turnControlAvailable = intent.kind === "stop_turn"
+  const turnControlAvailable = projection.resourceFreshness === "fresh" && (intent.kind === "stop_turn"
     ? projection.turnControl?.canStop === true
     : intent.kind === "steer_turn"
       ? projection.turnControl?.canCorrect === true && Boolean(intent.correction?.trim())
+      : intent.kind === "retry_turn_control"
+        ? projection.turnControl?.canRetry === true
       : intent.kind === "resolve_turn_control"
         ? projection.turnControl?.canResolve === true && Boolean(intent.turnControlResolution)
-        : false;
+        : false);
   if (!actionAvailable && (!turnControlIntent || !turnControlAvailable)) return;
 
   if (intent.kind === "mention") {
@@ -2980,60 +2985,94 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       await desktopIpc.supervisor.retireAgent({ entryId: intent.entryId, daemonGeneration: operationDaemonGeneration });
     } else if (intent.kind === "reconnect") {
       updated = await desktopIpc.supervisor.reconnectAgent({ entryId: intent.entryId });
-    } else if (intent.kind === "stop_turn" || intent.kind === "steer_turn" || intent.kind === "resolve_turn_control") {
+    } else if (intent.kind === "stop_turn" || intent.kind === "steer_turn" || intent.kind === "retry_turn_control" || intent.kind === "resolve_turn_control") {
       const entry = projection.entry;
       const control = projection.turnControl;
       const status = await refreshSupervisorStatus();
       if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
-      if (!status || !entry.workAttemptId || !entry.executionGenerationId || !control) {
+      if (!status || !control
+        || (intent.kind !== "resolve_turn_control" && (!entry.workAttemptId || !entry.executionGenerationId))) {
         throw new Error("The active turn changed. Refresh and try again.");
       }
       operationDaemonGeneration = status.generation;
-      const exactTurnControlFence: AgentInspectorTurnControlFence = {
-        entryId: entry.id,
-        roomId: entry.roomId,
-        workAttemptId: entry.workAttemptId,
-        executionGenerationId: entry.executionGenerationId,
-        providerTurnId: control.providerTurnId,
-        inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
-        sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
-        daemonGeneration: status.generation,
-      };
-      turnControlFence = exactTurnControlFence;
-      const currentEntry = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
-      if (!agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntry, supervisorStatus.value?.generation ?? null)) {
-        throw new Error("The active turn changed. Refresh and try again.");
-      }
       if (intent.kind === "resolve_turn_control") {
-        if (!control.actionId || !intent.turnControlResolution) throw new Error("The uncertain turn-control record changed. Refresh and try again.");
+        if (!control.actionId || !control.workAttemptId || !control.executionGenerationId
+          || !intent.turnControlResolution) {
+          throw new Error("The uncertain turn-control record changed. Refresh and try again.");
+        }
+        const latestControl = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.turnControl ?? null;
+        if (latestControl?.status !== "uncertain"
+          || latestControl.actionId !== control.actionId
+          || latestControl.workAttemptId !== control.workAttemptId
+          || latestControl.executionGenerationId !== control.executionGenerationId) {
+          throw new Error("The uncertain turn-control record changed. Refresh and try again.");
+        }
         updated = await desktopIpc.supervisor.resolveTurnControl({
           entryId: entry.id,
-          workAttemptId: entry.workAttemptId,
-          executionGenerationId: entry.executionGenerationId,
+          workAttemptId: control.workAttemptId,
+          executionGenerationId: control.executionGenerationId,
           actionId: control.actionId,
           resolution: intent.turnControlResolution,
         });
+      } else if (intent.kind === "retry_turn_control") {
+        const retryInput = agentInspectorRetryableTurnControlInput(entry, control, status.generation);
+        if (!retryInput) {
+          throw new Error("The retryable turn-control record changed. Refresh and try again.");
+        }
+        const latestControl = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.turnControl ?? null;
+        if (latestControl?.status !== "retryable"
+          || latestControl.actionId !== control.actionId
+          || latestControl.workAttemptId !== control.workAttemptId
+          || latestControl.executionGenerationId !== control.executionGenerationId) {
+          throw new Error("The retryable turn-control record changed. Refresh and try again.");
+        }
+        await desktopIpc.supervisor.controlTurn(retryInput);
       } else {
+        const currentWorkAttemptId = entry.workAttemptId;
+        const currentExecutionGenerationId = entry.executionGenerationId;
+        if (!currentWorkAttemptId || !currentExecutionGenerationId) {
+          throw new Error("The active turn changed. Refresh and try again.");
+        }
+        const exactTurnControlFence: AgentInspectorTurnControlFence = {
+          entryId: entry.id,
+          roomId: entry.roomId,
+          workAttemptId: currentWorkAttemptId,
+          executionGenerationId: currentExecutionGenerationId,
+          providerTurnId: control.providerTurnId,
+          inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
+          sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
+          daemonGeneration: status.generation,
+        };
+        turnControlFence = exactTurnControlFence;
+        if (!entry.providerContinuationId || !exactTurnControlFence.providerTurnId
+          || !exactTurnControlFence.inboxItemId || !exactTurnControlFence.sourceMessageId) {
+          throw new Error("The exact room turn is no longer available. Refresh and try again.");
+        }
+        const currentEntry = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
+        if (!agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntry, supervisorStatus.value?.generation ?? null)) {
+          throw new Error("The active turn changed. Refresh and try again.");
+        }
         const correction = intent.kind === "steer_turn" ? intent.correction?.trim() || null : null;
         if (intent.kind === "steer_turn" && !correction) throw new Error("Write a correction before applying it.");
         const actionId = await agentInspectorTurnControlActionIdIfCurrent(
-          agentInspectorTurnControlActionId({
-            entryId: entry.id,
-            roomId: entry.roomId,
-            workAttemptId: entry.workAttemptId,
-            executionGenerationId: entry.executionGenerationId,
-            providerTurnId: control.providerTurnId,
-            inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
-            sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
-            correction,
-          }),
-          () => {
-            // A supervisor push can arrive while the digest yields. Re-read
-            // the projected entry rather than trusting the pre-digest object.
-            const currentEntryAfterDigest = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
-            return currentAgentInspectorAction(operationId, intent, requestVersion, operationDaemonGeneration)
-              && agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntryAfterDigest, supervisorStatus.value?.generation ?? null);
-          },
+            agentInspectorTurnControlActionId({
+              entryId: entry.id,
+              roomId: entry.roomId,
+              workAttemptId: currentWorkAttemptId,
+              executionGenerationId: currentExecutionGenerationId,
+              actionSequence: entry.lastTurnControlSequence + 1,
+              providerTurnId: control.providerTurnId,
+              inboxItemId: entry.roomAgentState?.turn.inboxItemId ?? null,
+              sourceMessageId: entry.roomAgentState?.turn.sourceMessageId ?? null,
+              correction,
+            }),
+            () => {
+              // A supervisor push can arrive while the digest yields. Re-read
+              // the projected entry rather than trusting the pre-digest object.
+              const currentEntryAfterDigest = agentInspectorProjections.value.find((candidate) => candidate.entryId === entry.id)?.entry ?? null;
+              return currentAgentInspectorAction(operationId, intent, requestVersion, operationDaemonGeneration)
+                && agentInspectorTurnControlFenceMatches(exactTurnControlFence, currentEntryAfterDigest, supervisorStatus.value?.generation ?? null);
+            },
         );
         if (!actionId) {
           // The post-digest fence rejected this operation. Clear only this
@@ -3045,9 +3084,16 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
         }
         await desktopIpc.supervisor.controlTurn({
           entryId: entry.id,
-          workAttemptId: entry.workAttemptId,
-          executionGenerationId: entry.executionGenerationId,
+          daemonGeneration: exactTurnControlFence.daemonGeneration,
+          roomId: exactTurnControlFence.roomId,
+          workAttemptId: currentWorkAttemptId,
+          executionGenerationId: currentExecutionGenerationId,
+          providerContinuationId: entry.providerContinuationId,
+          providerTurnId: exactTurnControlFence.providerTurnId,
+          inboxItemId: exactTurnControlFence.inboxItemId,
+          sourceMessageId: exactTurnControlFence.sourceMessageId,
           actionId,
+          actionSequence: entry.lastTurnControlSequence + 1,
           correction,
         });
       }
@@ -3177,6 +3223,7 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
     recover: "Starting a replacement provider for this agent…",
     stop_turn: "Stopping the current turn…",
     steer_turn: "Applying correction to this session…",
+    retry_turn_control: "Retrying the exact previous turn control…",
     resolve_turn_control: "Recording the verified turn outcome…",
     retry_delivery: "Retrying this delivery…",
     restore_conversation: "Restoring this agent’s conversation…",
@@ -3197,6 +3244,7 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     recover: "Provider recovery started. The agent identity and workspace were preserved.",
     stop_turn: "Current turn stopped.",
     steer_turn: "Correction applied to the same agent session.",
+    retry_turn_control: "Previous turn control completed.",
     resolve_turn_control: "Turn-control outcome recorded.",
     retry_delivery: "Delivery retry started.",
     restore_conversation: "Conversation restoration started.",

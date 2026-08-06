@@ -1,4 +1,4 @@
-import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort, ProviderRoomTurnResult } from "./provider-action-port.js";
+import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
 export type SupervisedIngressAgent = {
@@ -17,7 +17,9 @@ export type SupervisedIngressAgent = {
   handle: ProviderActionHandle | null;
   workAttemptId: string;
   providerContinuationId: string | null;
-  pid: number | null;
+  /** Complete durable provider connection snapshot. A bare PID is not
+   * authority because it loses process-birth and transport identity. */
+  providerConnection: ProviderActionConnectionRef | null;
   /** Exact daemon generation that owns this room worker binding. */
   executionGenerationId: string;
   daemonGeneration: number;
@@ -27,8 +29,18 @@ export type SupervisedIngressAgent = {
 export type SupervisedDeliveryAuthority = Pick<SupervisedIngressAgent,
   "agentId" | "roomId" | "provider" | "apiUrl" | "agentSessionId" | "bearer" |
   "executionGenerationId" | "daemonGeneration" | "workAttemptId" |
-  "providerContinuationId" | "pid" | "handle">;
-export type SupervisedAuthorityRevalidator = (authority: SupervisedDeliveryAuthority) => Promise<boolean> | boolean;
+  "providerContinuationId" | "providerConnection" | "handle">;
+/**
+ * `lane_lease` is the immutable delivery owner. It deliberately excludes a
+ * provider's mutable continuation/process snapshot. `settled_provider_state`
+ * additionally requires the durable entry, delivery snapshot, and live handle
+ * to agree on the complete provider state.
+ */
+export type SupervisedAuthorityScope = "lane_lease" | "settled_provider_state";
+export type SupervisedAuthorityRevalidator = (
+  authority: SupervisedDeliveryAuthority,
+  scope: SupervisedAuthorityScope,
+) => Promise<boolean> | boolean;
 export type SupervisedTurnConfigurationResolver = (
   authority: SupervisedDeliveryAuthority,
 ) => Promise<{ charter?: string }>;
@@ -66,9 +78,41 @@ export type SupervisedContinuationRestorer = (input: {
 }) => Promise<"restored" | "replaced" | "authority_changed" | "failed">;
 export type SupervisedProviderStateCheckpointer = (input: {
   agent: SupervisedIngressAgent;
+  inboxItemId: string;
+  providerTurnId: string;
   providerContinuationId: string;
   providerConnection: ProviderActionConnectionRef;
 }) => Promise<void>;
+export type SupervisedPreparedTurnCheckpointer = (input: {
+  agent: SupervisedIngressAgent;
+  inboxItemId: string;
+  providerTurnId: string;
+  providerContinuationId: string;
+  providerConnection: ProviderActionConnectionRef;
+}) => Promise<void>;
+
+/**
+ * Process-local lease acquired before a native Stop can affect a provider
+ * turn. Its opaque id and action id prevent a stale control continuation from
+ * resolving a later delivery that happens to reuse the same agent and row.
+ */
+export type SupervisedDeliveryInterruptReservation = Readonly<{
+  reservationId: number;
+  invocationId: number;
+  actionId: string;
+  inboxItemId: string;
+  providerTurnId: string | null;
+  agent: SupervisedIngressAgent;
+}>;
+
+type ActiveDeliveryInterruptReservation = {
+  reservation: SupervisedDeliveryInterruptReservation;
+  recoveryContext: string;
+  providerTurnId: string | null;
+  decision: Promise<"cancelled" | "resume" | "freeze">;
+  resolveDecision: (decision: "cancelled" | "resume" | "freeze") => void;
+  disposition: "cancelled" | "resume" | "freeze" | null;
+};
 
 const SUCCESSFUL_POLL_PACE_MS = 25;
 const POLL_ERROR_BACKOFF_BASE_MS = 250;
@@ -98,9 +142,14 @@ export class SupervisedAgentDelivery {
   private readonly inFlight = new Set<Promise<unknown>>();
   private readonly startupRecovered = new Map<string, string>();
   /** Runtime-only proof of one actual provider delivery, never reconstructed from inbox state. */
-  private readonly activeTurns = new Map<string, { recoveryContext: string; inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing"; agent: SupervisedIngressAgent }>();
+  private readonly activeTurns = new Map<string, { invocationId: number; recoveryContext: string; inboxItemId: string; sourceMessageId: string; providerTurnId: string | null; phase: "dispatching" | "responding" | "publishing"; agent: SupervisedIngressAgent }>();
+  private nextDeliveryInvocationId = 1;
   /** Turn-scoped aborts so a Stop/correction can interrupt one turn without retiring the whole pump. */
   private readonly activeTurnAborts = new Map<string, { inboxItemId: string; controller: AbortController }>();
+  /** Exact Stop arbitration leases. A delivery failure must not make the same
+   * FIFO row runnable while its native interrupt is still being settled. */
+  private readonly interruptReservations = new Map<string, ActiveDeliveryInterruptReservation>();
+  private nextInterruptReservationId = 1;
   private readonly handleContextIds = new WeakMap<object, number>();
   private nextHandleContextId = 1;
   private fenced = false;
@@ -117,10 +166,12 @@ export class SupervisedAgentDelivery {
     private readonly resolveTurnConfiguration?: SupervisedTurnConfigurationResolver,
     private readonly restoreMissingContinuation?: SupervisedContinuationRestorer,
     private readonly checkpointProviderState?: SupervisedProviderStateCheckpointer,
+    private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
   ) {}
 
   fence(): void {
     this.fenced = true;
+    this.freezeInterruptReservations();
     for (const controller of this.controllers) controller.abort();
     this.polling.clear();
   }
@@ -139,7 +190,11 @@ export class SupervisedAgentDelivery {
   }
 
   /** Starts the daemon-owned long-poll loop and normalizes persisted work first. */
-  async start(agent: SupervisedIngressAgent, expectedEpoch = this.currentRefreshEpoch(agent.agentId)): Promise<void> {
+  async start(
+    agent: SupervisedIngressAgent,
+    expectedEpoch = this.currentRefreshEpoch(agent.agentId),
+    replaceMismatchedLoop = true,
+  ): Promise<void> {
     for (;;) {
       if (!this.daemonIngressAllowed(agent)
         || this.fenced
@@ -149,6 +204,7 @@ export class SupervisedAgentDelivery {
       const existingLoop = this.loops.get(agent.agentId);
       if (existingLoop && this.loopEpochs.get(agent.agentId) === expectedEpoch) return;
       if (existingLoop) {
+        if (!replaceMismatchedLoop) return;
         // A start that was paused before registration can install a stale loop
         // after a newer refresh already drained. Retire that mismatched epoch,
         // join it, and retry instead of leaving the newest successor asleep.
@@ -168,7 +224,10 @@ export class SupervisedAgentDelivery {
         || this.fenced
         || this.stoppingAgents.has(agent.agentId)
         || expectedEpoch !== this.currentRefreshEpoch(agent.agentId)) return;
-      if (this.loops.has(agent.agentId)) continue;
+      if (this.loops.has(agent.agentId)) {
+        if (!replaceMismatchedLoop) return;
+        continue;
+      }
 
       const controller = new AbortController();
       let resolveStarted!: () => void;
@@ -179,7 +238,19 @@ export class SupervisedAgentDelivery {
       });
       const lifecycle = (async () => {
         try {
-          await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId, state: "starting" });
+          let startupFailures = 0;
+          for (;;) {
+            try {
+              await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId, state: "starting" });
+              break;
+            } catch {
+              startupFailures += 1;
+              if (!await this.waitForNextPoll(controller, pollErrorBackoffMs(startupFailures))) {
+                resolveStarted();
+                return;
+              }
+            }
+          }
           if (!await this.hasIngressAuthority(agent, controller)
             || this.fenced
             || this.stoppingAgents.has(agent.agentId)
@@ -212,6 +283,19 @@ export class SupervisedAgentDelivery {
       await started;
       return;
     }
+  }
+
+  /**
+   * Fill only a genuinely absent loop. This is safe to call from convergence
+   * while its per-entry lock is held because it never joins, aborts, or
+   * replaces an existing/stopping loop; the lifecycle owner finishes that
+   * drain and a later convergence pass fills the resulting absence.
+   */
+  ensureStarted(agent: SupervisedIngressAgent): Promise<void> {
+    if (this.loops.has(agent.agentId) || this.stoppingAgents.has(agent.agentId)) {
+      return Promise.resolve();
+    }
+    return this.start(agent, this.currentRefreshEpoch(agent.agentId), false);
   }
 
   /** Stop one stale binding before a rebind starts its successor loop. */
@@ -250,6 +334,7 @@ export class SupervisedAgentDelivery {
     const prior = this.stoppingOperations.get(agentId);
     if (prior) return prior;
     this.stoppingAgents.add(agentId);
+    this.freezeInterruptReservations(agentId);
     const operation = this.stopOperation(agentId);
     this.stoppingOperations.set(agentId, operation);
     void operation.then(() => {
@@ -285,11 +370,13 @@ export class SupervisedAgentDelivery {
   }
 
   private async pollLoop(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
-    // Recovery must not wait for a potentially hours-long first network poll.
-    await this.pump(agent);
     let consecutivePollErrors = 0;
     while (await this.hasIngressAuthority(agent, controller)) {
       try {
+        // Recovery and FIFO work never wait for a potentially hours-long
+        // network poll. A transient store/normalization failure is supervised
+        // here instead of terminating the only delivery loop.
+        await this.pump(agent);
         await this.pollOnce(agent, controller);
         consecutivePollErrors = 0;
       } catch (error) {
@@ -413,11 +500,143 @@ export class SupervisedAgentDelivery {
    * bearer and dynamic handle getters even if provider cleanup removes the map
    * before controlTurn returns. Callers must not persist or log it.
    */
-  captureActiveDeliveryInterrupt(agent: SupervisedIngressAgent): { inboxItemId: string; agent: SupervisedIngressAgent } | null {
+  captureActiveDeliveryInterrupt(
+    agent: SupervisedIngressAgent,
+    actionId: string,
+  ): SupervisedDeliveryInterruptReservation | null {
+    if (!actionId.trim()) throw new Error("Delivery interrupt reservation requires an exact action id.");
     const active = this.activeTurns.get(agent.agentId);
-    return active?.recoveryContext === this.recoveryContext(agent)
-      ? { inboxItemId: active.inboxItemId, agent: active.agent }
-      : null;
+    if (active?.recoveryContext !== this.recoveryContext(agent)) return null;
+    return this.installInterruptReservation({
+      agent: active.agent,
+      actionId,
+      invocationId: active.invocationId,
+      inboxItemId: active.inboxItemId,
+      providerTurnId: active.providerTurnId,
+      recoveryContext: active.recoveryContext,
+    });
+  }
+
+  private installInterruptReservation(input: {
+    agent: SupervisedIngressAgent;
+    actionId: string;
+    invocationId: number;
+    inboxItemId: string;
+    providerTurnId: string | null;
+    recoveryContext: string;
+  }): SupervisedDeliveryInterruptReservation {
+    const existing = this.interruptReservations.get(input.agent.agentId);
+    if (existing) {
+      if (existing.recoveryContext === input.recoveryContext
+        && existing.reservation.invocationId === input.invocationId
+        && existing.reservation.inboxItemId === input.inboxItemId
+        && existing.reservation.actionId === input.actionId) {
+        return existing.reservation;
+      }
+      throw new Error("A different turn-control action already owns this delivery interrupt boundary.");
+    }
+    let resolveDecision!: ActiveDeliveryInterruptReservation["resolveDecision"];
+    const decision = new Promise<"cancelled" | "resume" | "freeze">((resolve) => {
+      resolveDecision = resolve;
+    });
+    const reservation: SupervisedDeliveryInterruptReservation = {
+      reservationId: this.nextInterruptReservationId++,
+      invocationId: input.invocationId,
+      actionId: input.actionId,
+      inboxItemId: input.inboxItemId,
+      providerTurnId: input.providerTurnId,
+      agent: input.agent,
+    };
+    this.interruptReservations.set(input.agent.agentId, {
+      reservation,
+      recoveryContext: input.recoveryContext,
+      providerTurnId: input.providerTurnId,
+      decision,
+      resolveDecision,
+      disposition: null,
+    });
+    return reservation;
+  }
+
+  /** Resolve an exact native-Stop lease on every provider-control exit. */
+  resolveActiveDeliveryInterrupt(
+    reservation: SupervisedDeliveryInterruptReservation | null,
+    disposition: "cancelled" | "resume" | "freeze",
+  ): void {
+    if (!reservation) return;
+    const active = this.exactInterruptReservation(reservation);
+    if (!active) return;
+    this.resolveInterruptReservation(active, disposition);
+  }
+
+  /** Validate and converge provider runtime before the caller's atomic
+   * manifest+FIFO commit. This method intentionally does not settle or wake. */
+  async prepareActiveDeliveryInterrupt(
+    reservation: SupervisedDeliveryInterruptReservation,
+  ): Promise<"interruptible" | "publication_won"> {
+    const reserved = this.exactInterruptReservation(reservation);
+    if (!reserved) throw new Error("Delivery interrupt reservation is stale or belongs to a different turn.");
+    const agent = reservation.agent;
+    const current = await this.inbox.get(reservation.inboxItemId);
+    if (!current
+      || current.agent_id !== agent.agentId
+      || current.room_id !== agent.roomId
+      || (reserved.providerTurnId && current.provider_turn_id !== reserved.providerTurnId)) {
+      throw new Error("Delivery interrupt reservation no longer owns its durable FIFO invocation.");
+    }
+    if (agent.provider === "cursor"
+      && current.provider_turn_id
+      && ["dispatching", "awaiting_result", "result_recovery"].includes(current.state)
+      && agent.handle?.providerContinuationId
+      && agent.handle.providerConnection
+      && this.checkpointProviderState) {
+      await this.checkpointProviderState({
+        agent,
+        inboxItemId: reservation.inboxItemId,
+        providerTurnId: reserved.providerTurnId ?? current.provider_turn_id,
+        providerContinuationId: agent.handle.providerContinuationId,
+        providerConnection: agent.handle.providerConnection,
+      });
+    }
+    return ["publishing", "acknowledged", "acknowledged_no_reply"].includes(current.state)
+      ? "publication_won"
+      : "interruptible";
+  }
+
+  /** Release the provider-facing half only after the durable transaction won. */
+  finishActiveDeliveryInterrupt(
+    reservation: SupervisedDeliveryInterruptReservation | null,
+    disposition: "cancelled" | "resume" | "freeze",
+  ): void {
+    if (!reservation) return;
+    const active = this.exactInterruptReservation(reservation);
+    if (!active) return;
+    if (disposition === "cancelled") {
+      const abort = this.activeTurnAborts.get(reservation.agent.agentId);
+      if (abort?.inboxItemId === reservation.inboxItemId) abort.controller.abort();
+    }
+    this.resolveInterruptReservation(active, disposition);
+    if (disposition !== "freeze") {
+      const agent = reservation.agent.handle
+        ? {
+          ...reservation.agent,
+          providerContinuationId: reservation.agent.handle.providerContinuationId,
+          providerConnection: reservation.agent.handle.providerConnection ?? null,
+        }
+        : reservation.agent;
+      this.wakePumpAfterSettlement(agent);
+    }
+  }
+
+  finishActiveDeliveryInterruptByAction(
+    agentId: string,
+    actionId: string,
+    disposition: "cancelled" | "resume" | "freeze",
+  ): boolean {
+    const active = this.interruptReservations.get(agentId);
+    if (!active || active.reservation.actionId !== actionId) return false;
+    this.finishActiveDeliveryInterrupt(active.reservation, disposition);
+    return true;
   }
 
   /**
@@ -450,7 +669,11 @@ export class SupervisedAgentDelivery {
    * reservation form is captured from that same gate at native dispatch and is
    * transactionally checked against its agent, room, and current FIFO head.
    */
-  async interruptActiveDelivery(agent: SupervisedIngressAgent, inboxItemId?: string): Promise<"settled" | "published" | "no_active_turn"> {
+  async interruptActiveDelivery(
+    agent: SupervisedIngressAgent,
+    inboxItemId?: string,
+    reservation?: SupervisedDeliveryInterruptReservation,
+  ): Promise<"settled" | "published" | "no_active_turn"> {
     const active = this.activeTurns.get(agent.agentId);
     const exactActive = active?.recoveryContext === this.recoveryContext(agent) ? active : null;
     // Cursor waits for its wrapper/reaper to settle before reporting a native
@@ -459,26 +682,142 @@ export class SupervisedAgentDelivery {
     // inbox id at markDispatched and may settle that same durable head here even
     // after its in-memory consumer has exited. Without an explicit reservation,
     // retain the historical live-map-only behavior.
-    const targetInboxItemId = inboxItemId ?? exactActive?.inboxItemId;
+    const reserved = reservation ? this.exactInterruptReservation(reservation) : null;
+    if (reservation && (!reserved
+      || reservation.agent !== agent
+      || reservation.inboxItemId !== inboxItemId)) {
+      throw new Error("Delivery interrupt reservation is stale or belongs to a different turn.");
+    }
+    const targetInboxItemId = reservation?.inboxItemId ?? inboxItemId ?? exactActive?.inboxItemId;
     if (!targetInboxItemId) return "no_active_turn";
     if (!inboxItemId && !exactActive) return "no_active_turn";
+    const current = await this.inbox.get(targetInboxItemId);
+    if (reserved?.providerTurnId
+      && current?.provider_turn_id !== reserved.providerTurnId) {
+      throw new Error("Delivery interrupt reservation no longer owns the admitted provider turn.");
+    }
+    if (agent.provider === "cursor"
+      && current?.provider_turn_id
+      && ["dispatching", "awaiting_result", "result_recovery"].includes(current.state)
+      && agent.handle?.providerContinuationId
+      && agent.handle.providerConnection
+      && this.checkpointProviderState) {
+      // Native Stop waits for the adapter's prepared-wrapper reaper. Before
+      // cancellation can destroy the exact recovery row, idempotently converge
+      // any committed live wrapper birth to the handle's now-honest idle state.
+      // If this fails, cancellation must not proceed: the caller records an
+      // uncertain Stop and the exact row remains available for recovery.
+      await this.checkpointProviderState({
+        agent,
+        inboxItemId: targetInboxItemId,
+        providerTurnId: reserved?.providerTurnId ?? current.provider_turn_id,
+        providerContinuationId: agent.handle.providerContinuationId,
+        providerConnection: agent.handle.providerConnection,
+      });
+    }
     // Durable cancellation first; a rejection here propagates and never detaches
     // the in-flight consumer.
     const settled = await this.inbox.cancelInterruptedTurn(targetInboxItemId, "Stopped by the user.", {
       agent_id: agent.agentId,
       room_id: agent.roomId,
     });
-    if (settled?.state !== "cancelled_by_user") return "published";
+    if (settled?.state !== "cancelled_by_user") {
+      // Publication already owns a durable normalized result. Release Stop's
+      // arbitration lease so a failed HTTP publish can retry that same payload
+      // and client id; this never reruns the provider turn.
+      if (reserved) this.resolveInterruptReservation(reserved, "resume");
+      return "published";
+    }
     const abort = this.activeTurnAborts.get(agent.agentId);
     if (abort?.inboxItemId === targetInboxItemId) abort.controller.abort();
     // Dynamic Cursor state may have moved from the now-dead wrapper PID back to
     // idle while controlTurn waited for cleanup. Retain the captured secret but
     // refresh public handle facts before authority validation and FIFO wakeup.
     const wakeAgent = agent.handle
-      ? { ...agent, providerContinuationId: agent.handle.providerContinuationId, pid: agent.handle.pid }
+      ? {
+        ...agent,
+        providerContinuationId: agent.handle.providerContinuationId,
+        providerConnection: agent.handle.providerConnection ?? null,
+      }
       : agent;
+    if (reserved) this.resolveInterruptReservation(reserved, "cancelled");
     this.wakePumpAfterSettlement(wakeAgent);
     return "settled";
+  }
+
+  private exactInterruptReservation(
+    reservation: SupervisedDeliveryInterruptReservation,
+  ): ActiveDeliveryInterruptReservation | null {
+    const current = this.interruptReservations.get(reservation.agent.agentId);
+    return current
+      && current.reservation === reservation
+      && current.reservation.reservationId === reservation.reservationId
+      && current.reservation.invocationId === reservation.invocationId
+      && current.reservation.actionId === reservation.actionId
+      && current.reservation.inboxItemId === reservation.inboxItemId
+      && current.recoveryContext === this.recoveryContext(reservation.agent)
+      ? current
+      : null;
+  }
+
+  private resolveInterruptReservation(
+    active: ActiveDeliveryInterruptReservation,
+    disposition: "cancelled" | "resume" | "freeze",
+  ): void {
+    if (active.disposition) return;
+    active.disposition = disposition;
+    active.resolveDecision(disposition);
+    const reservation = active.reservation;
+    const live = this.activeTurns.get(reservation.agent.agentId);
+    if (!live
+      || live.invocationId !== reservation.invocationId
+      || live.recoveryContext !== active.recoveryContext
+      || live.inboxItemId !== reservation.inboxItemId) {
+      if (this.interruptReservations.get(reservation.agent.agentId) === active) {
+        this.interruptReservations.delete(reservation.agent.agentId);
+      }
+      if (disposition === "resume") this.wakePumpAfterSettlement(reservation.agent);
+    }
+  }
+
+  private freezeInterruptReservations(agentId?: string): void {
+    for (const [candidateAgentId, reservation] of this.interruptReservations) {
+      if (agentId !== undefined && candidateAgentId !== agentId) continue;
+      this.resolveInterruptReservation(reservation, "freeze");
+    }
+  }
+
+  private async awaitInterruptReservationDecision(
+    agent: SupervisedIngressAgent,
+    inboxItemId: string,
+  ): Promise<"cancelled" | "resume" | "freeze" | null> {
+    const active = this.interruptReservations.get(agent.agentId);
+    if (!active
+      || active.reservation.invocationId !== this.activeTurns.get(agent.agentId)?.invocationId
+      || active.recoveryContext !== this.recoveryContext(agent)
+      || active.reservation.inboxItemId !== inboxItemId) return null;
+    // Keep the resolved lease installed until deliver()'s finally block has
+    // consulted it. In particular, a frozen pre-checkpoint Cursor invocation
+    // must not fall through final rollback and become pending again.
+    return active.decision;
+  }
+
+  private bindInterruptReservationProviderTurn(
+    agent: SupervisedIngressAgent,
+    invocationId: number,
+    inboxItemId: string,
+    providerTurnId: string,
+  ): void {
+    const active = this.interruptReservations.get(agent.agentId);
+    if (!active
+      || active.recoveryContext !== this.recoveryContext(agent)
+      || active.reservation.invocationId !== invocationId
+      || active.reservation.inboxItemId !== inboxItemId) return;
+    if (active.providerTurnId && active.providerTurnId !== providerTurnId) {
+      throw new Error("Delivery interrupt reservation cannot be rebound to a different provider turn.");
+    }
+    active.providerTurnId = providerTurnId;
+    (active.reservation as { providerTurnId: string | null }).providerTurnId = providerTurnId;
   }
 
   private wakePumpAfterSettlement(agent: SupervisedIngressAgent): void {
@@ -577,6 +916,13 @@ export class SupervisedAgentDelivery {
     return !this.fenced && !this.stoppingAgents.has(agent.agentId);
   }
 
+  /** Install tracked FIFO work without making the control RPC wait for the
+   * provider turn or publication to finish. */
+  wake(agent: SupervisedIngressAgent): boolean {
+    if (!this.daemonIngressAllowed(agent)) return false;
+    return this.schedulePump(agent);
+  }
+
   pump(agent: SupervisedIngressAgent): Promise<void> {
     if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || this.pumping.has(agent.agentId)) return Promise.resolve();
     const controller = new AbortController();
@@ -595,16 +941,21 @@ export class SupervisedAgentDelivery {
 
   private async pumpOperation(agent: SupervisedIngressAgent, controller: AbortController): Promise<void> {
     try {
-      if (!await this.hasExecutionAuthority(agent, controller)) return;
+      if (!agent.handle || !await this.hasLaneAuthority(agent, controller)) return;
       const recoveryContext = this.recoveryContext(agent);
       if (this.startupRecovered.get(agent.agentId) !== recoveryContext) {
-        await this.inbox.normalizeStartupRecovery(agent.agentId);
-        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        await this.inbox.normalizeStartupRecovery(agent.agentId, {
+          resetCheckpointGatedUnstartedDispatch: agent.provider === "cursor",
+        });
+        if (!await this.hasLaneAuthority(agent, controller)) return;
         this.startupRecovered.set(agent.agentId, recoveryContext);
       }
       for (;;) {
-        if (!await this.hasExecutionAuthority(agent, controller)) return;
         const head = await this.inbox.head(agent.agentId);
+        const exactCursorRecovery = agent.provider === "cursor" && Boolean(head?.provider_turn_id);
+        if (!(exactCursorRecovery
+          ? await this.hasCursorTransitionAuthority(agent, controller)
+          : await this.hasExecutionAuthority(agent, controller))) return;
         if (head?.state === "blocked" && head.failure_code === "provider_continuation_missing" && this.restoreMissingContinuation) {
           const restored = await this.restoreMissingContinuation({ agent, item: head, manual: false });
           // A replacement installs a successor handle and starts a successor
@@ -635,20 +986,45 @@ export class SupervisedAgentDelivery {
       providerTurnDurablyStarted = true;
       resolveProviderTurnDurablyStarted();
     };
+    let cursorNativeReleased = false;
+    const invocationId = this.nextDeliveryInvocationId++;
+    let admittedProviderTurnId = item.provider_turn_id ?? null;
+    let interruptDispositionForFinalizer: "cancelled" | "resume" | "freeze" | null = null;
     if (item.provider_turn_id) markProviderTurnDurablyStarted();
-    const restoreCleanlyRetiredCursorIntent = async () => {
-      if (agent.provider !== "cursor" || providerTurnDurablyStarted || !controller.signal.aborted) return;
+    let providerCallEntered = false;
+    const recovering = Boolean(item.provider_turn_id);
+    let providerTurnOriginExecutionGenerationId = agent.executionGenerationId;
+    const hasProviderAuthority = () => recovering && agent.provider === "cursor"
+      ? this.hasCursorTransitionAuthority(agent, turnController)
+      : this.hasExecutionAuthority(agent, turnController);
+    const restoreProvenUndispatchedClaim = async () => {
+      if (providerTurnDurablyStarted) return;
+      if (interruptDispositionForFinalizer === "cancelled"
+        || interruptDispositionForFinalizer === "freeze") return;
+      const interrupt = this.interruptReservations.get(agent.agentId);
+      if (interrupt
+        && interrupt.recoveryContext === this.recoveryContext(agent)
+        && interrupt.reservation.invocationId === invocationId
+        && interrupt.reservation.inboxItemId === item.inbox_item_id
+        && interrupt.disposition !== "resume") return;
       const current = await this.inbox.get(item.inbox_item_id);
       if (!current || !["dispatching", "retryable"].includes(current.state) || current.outcome) return;
       if (current.provider_turn_id) {
-        if (current.state !== "dispatching") return;
-        await this.inbox.resetUndispatchedTurn(item.inbox_item_id, current.provider_turn_id);
-      } else {
+        // Once an exact Cursor turn and wrapper birth have committed they are
+        // one recovery unit, even if retirement lands before the adapter can
+        // flip its in-memory durable marker. Never clear that turn here: the
+        // exact recovery path must first prove `not_dispatched`, checkpoint
+        // live->idle compensation, and only then reset it for redispatch.
+        return;
+      } else if (!providerCallEntered || agent.provider === "cursor") {
+        // Before the provider call there is categorically no native effect.
+        // Once Cursor's call is entered, its deferred-release contract gives
+        // the same proof after the adapter promise has settled/reaped.
         await this.inbox.resetPreNativeHandoff(item.inbox_item_id);
       }
     };
-    if (!agent.handle || !await this.hasExecutionAuthority(agent, controller)) {
-      await restoreCleanlyRetiredCursorIntent();
+    if (!agent.handle || !await this.hasLaneAuthority(agent, controller)) {
+      await restoreProvenUndispatchedClaim();
       return;
     }
     const recoveryContext = this.recoveryContext(agent);
@@ -661,35 +1037,80 @@ export class SupervisedAgentDelivery {
     if (controller.signal.aborted) turnController.abort();
     else controller.signal.addEventListener("abort", relayPumpAbort, { once: true });
     this.activeTurnAborts.set(agent.agentId, { inboxItemId: item.inbox_item_id, controller: turnController });
+    const compensateCursorRuntimeToLiveHandle = async (providerTurnId: string): Promise<void> => {
+      if (agent.provider !== "cursor" || !agent.handle || !this.checkpointProviderState) return;
+      if (admittedProviderTurnId !== providerTurnId) {
+        throw new Error("Cursor runtime compensation belongs to a different delivery invocation.");
+      }
+      const providerContinuationId = agent.handle.providerContinuationId;
+      const providerConnection = agent.handle.providerConnection;
+      if (!providerContinuationId || !providerConnection) {
+        throw new Error("Cursor undispatched compensation has no exact live provider state.");
+      }
+      await this.checkpointProviderState({
+        agent,
+        inboxItemId: item.inbox_item_id,
+        providerTurnId,
+        providerContinuationId,
+        providerConnection,
+      });
+    };
     const setActive = (phase: "dispatching" | "responding" | "publishing") => {
-      this.activeTurns.set(agent.agentId, { recoveryContext, inboxItemId: item.inbox_item_id, sourceMessageId: item.source_message_id, phase, agent });
+      this.activeTurns.set(agent.agentId, {
+        invocationId,
+        recoveryContext,
+        inboxItemId: item.inbox_item_id,
+        sourceMessageId: item.source_message_id,
+        providerTurnId: admittedProviderTurnId,
+        phase,
+        agent,
+      });
     };
     try {
       const persistedReply = persistedReplyText(item.outcome);
       if (persistedReply) {
         setActive("publishing");
-        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: item.outcome });
-        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: item.outcome });
         if (!await this.publish(agent, item, persistedReply, controller)) return;
-        if (!await this.hasExecutionAuthority(agent, controller)) return;
+        if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
-      if (!await this.hasExecutionAuthority(agent, turnController)) return;
-      const recovering = Boolean(item.provider_turn_id);
+      if (!await hasProviderAuthority()) return;
+      if (recovering) {
+        const binding = await this.inbox.providerTurnBinding(item.inbox_item_id);
+        const currentContinuation = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+        if (!binding
+          || binding.agent_id !== agent.agentId
+          || binding.room_id !== agent.roomId
+          || binding.work_attempt_id !== agent.workAttemptId
+          || binding.provider_continuation_id !== currentContinuation
+          || binding.provider_turn_id !== item.provider_turn_id) {
+          await this.inbox.transition(item.inbox_item_id, "blocked", {
+            last_error: "The saved provider turn belongs to a different or unverifiable provider authority and was not recovered.",
+          });
+          return;
+        }
+        providerTurnOriginExecutionGenerationId = binding.origin_execution_generation_id;
+        // Close the read-to-use window: a replacement may have landed while
+        // the durable binding was read. This final current-runtime check is
+        // immediately followed by the provider call without another await.
+        if (!await hasProviderAuthority()) return;
+      }
       if (recovering) setActive("responding");
       else setActive("dispatching");
       const observedContext = recovering
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
-      if (!await this.hasExecutionAuthority(agent, turnController)) return;
+      if (!await hasProviderAuthority()) return;
       const turnConfiguration = recovering
         ? { charter: agent.charter }
         : await this.resolveTurnConfiguration?.(agent) ?? { charter: agent.charter };
-      if (!await this.hasExecutionAuthority(agent, turnController)) return;
+      if (!await hasProviderAuthority()) return;
       // Handoff may abandon observation only after the provider has committed
       // an exact, recoverable native turn boundary. Before then, the provider
       // promise owns preflight/helper cleanup and must settle before drain can
@@ -698,12 +1119,25 @@ export class SupervisedAgentDelivery {
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         // New turns already checkpoint through checkpointTurnStarted. This
         // idempotent edge keeps provider-neutral adapters equally strict.
-        if (item.state !== "result_recovery") await this.inbox.checkpointTurnStarted(item.inbox_item_id, result.turnId);
+        if (admittedProviderTurnId && admittedProviderTurnId !== result.turnId) {
+          throw new Error("Provider terminal result belongs to a different delivery invocation.");
+        }
+        if (item.state !== "result_recovery") {
+          const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+          if (!providerContinuationId) throw new Error("Provider turn terminal checkpoint has no exact continuation authority.");
+          await this.inbox.checkpointTurnStarted(item.inbox_item_id, result.turnId, {
+            work_attempt_id: agent.workAttemptId,
+            origin_execution_generation_id: providerTurnOriginExecutionGenerationId,
+            provider_continuation_id: providerContinuationId,
+          });
+        }
+        admittedProviderTurnId = result.turnId;
+        this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, result.turnId);
         const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
         await this.inbox.checkpointNormalizedTerminal({
           inbox_item_id: item.inbox_item_id,
           agent_id: agent.agentId,
-          execution_generation_id: agent.executionGenerationId,
+          execution_generation_id: providerTurnOriginExecutionGenerationId,
           provider_turn_id: result.turnId,
           outcome: result.outcome,
           text: result.text?.trim() || null,
@@ -715,12 +1149,76 @@ export class SupervisedAgentDelivery {
         providerContinuationId: string;
         providerConnection: ProviderActionConnectionRef;
       }): Promise<void> => {
-        if (this.fenced || turnController.signal.aborted) throw new AuthorityLostError();
+        const expectedCursorConnection = agent.providerConnection?.kind === "cursor_cli"
+          ? agent.providerConnection
+          : null;
+        const sameContinuation = state.providerContinuationId === agent.providerContinuationId;
+        const initializesPendingContinuation = Boolean(agent.providerContinuationId?.startsWith("cursor-pending:"))
+          && !state.providerContinuationId.startsWith("cursor-pending:");
+        const nextCursorConnection = state.providerConnection.kind === "cursor_cli"
+          ? state.providerConnection
+          : null;
+        const completesAdmittedCursorTransition = agent.provider === "cursor"
+          && Boolean(expectedCursorConnection)
+          && Boolean(nextCursorConnection)
+          && agent.providerConnection?.kind === "cursor_cli"
+          && agent.providerConnection.pid !== null
+          && Boolean(agent.providerConnection.processIdentity?.trim())
+          && (sameContinuation || initializesPendingContinuation)
+          && (nextCursorConnection!.pid === null
+            ? (nextCursorConnection!.processIdentity ?? null) === null && sameContinuation
+            : sameProviderActionConnectionSnapshot(expectedCursorConnection, nextCursorConnection));
+        // Handoff fences new work, but it must still drain the exact init or
+        // live->idle completion of a wrapper this generation already admitted.
+        // Main repeats the full lane/turn CAS under the still-held singleton
+        // before allowing this narrow exception.
+        if ((this.fenced || turnController.signal.aborted) && !completesAdmittedCursorTransition) {
+          throw new AuthorityLostError();
+        }
         if (!this.checkpointProviderState) {
           throw new Error("Dynamic provider state checkpointing is unavailable.");
         }
-        await this.checkpointProviderState({ agent, ...state });
+        const exactProviderTurnId = admittedProviderTurnId;
+        if (!exactProviderTurnId) {
+          throw new Error("Dynamic provider state requires an exact durable provider turn.");
+        }
+        const current = await this.inbox.get(item.inbox_item_id);
+        if (current?.provider_turn_id !== exactProviderTurnId) {
+          throw new Error("Dynamic provider state no longer belongs to this delivery invocation.");
+        }
+        await this.checkpointProviderState({
+          agent,
+          inboxItemId: item.inbox_item_id,
+          providerTurnId: exactProviderTurnId,
+          ...state,
+        });
+        if (agent.provider === "cursor" && cursorNativeReleased && state.providerConnection.pid !== null) {
+          // Prepared wrapper+turn is crash-recoverable, but handoff remains
+          // joined until Cursor's init identity is also durable. This prevents
+          // the fenced old callback from killing a released native turn.
+          markProviderTurnDurablyStarted();
+        }
       };
+      const checkpointPreparedTurn = async (state: {
+        providerTurnId: string;
+        providerContinuationId: string;
+        providerConnection: ProviderActionConnectionRef;
+      }): Promise<void> => {
+        if (agent.provider !== "cursor" || this.fenced || turnController.signal.aborted) {
+          throw new AuthorityLostError();
+        }
+        if (!await this.hasCursorTransitionAuthority(agent, turnController)) {
+          throw new AuthorityLostError();
+        }
+        if (!this.checkpointPreparedTurn) {
+          throw new Error("Atomic Cursor prepared-turn checkpointing is unavailable.");
+        }
+        await this.checkpointPreparedTurn({ agent, inboxItemId: item.inbox_item_id, ...state });
+        admittedProviderTurnId = state.providerTurnId;
+        this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, state.providerTurnId);
+        setActive("responding");
+      };
+      providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
@@ -752,21 +1250,40 @@ export class SupervisedAgentDelivery {
         // that recovery key before the successor starts. User Stop aborts only
         // turnController (not the pump controller) and therefore cannot use
         // this retirement-only finalization path.
-        const stillAuthorized = await this.hasExecutionAuthority(agent, turnController);
+        // Cursor prepares a paused wrapper before this callback. Its live
+        // handle therefore carries the candidate wrapper connection while the
+        // manifest and delivery snapshot still carry the old idle connection.
+        // Validate immutable ownership plus that old durable snapshot here;
+        // checkpointProviderState performs the exact old->new CAS next.
+        const stillAuthorized = agent.provider === "cursor"
+          ? await this.hasCursorTransitionAuthority(agent, turnController)
+          : await this.hasExecutionAuthority(agent, turnController);
         // Re-check the pump abort after async authority validation: retirement
         // can land while that validation is awaiting storage. A non-Cursor
         // native turn already admitted by this generation must still persist
         // its exact recovery key before the successor normalizes the row.
         const finalizingAdmittedTurnDuringRetirement = agent.provider !== "cursor" && controller.signal.aborted;
         if (!stillAuthorized && !finalizingAdmittedTurnDuringRetirement) throw new AuthorityLostError();
-        await this.inbox.checkpointTurnStarted(item.inbox_item_id, turnId);
+        const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+        if (!providerContinuationId) throw new Error("Provider turn start has no exact continuation authority.");
+        await this.inbox.checkpointTurnStarted(item.inbox_item_id, turnId, {
+          work_attempt_id: agent.workAttemptId,
+          origin_execution_generation_id: agent.executionGenerationId,
+          provider_continuation_id: providerContinuationId,
+        });
+        admittedProviderTurnId = turnId;
+        this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, turnId);
         // Only an acknowledged exact provider turn is projected responding.
         setActive("responding");
         // Cursor additionally checkpoints its wrapper birth before allowing
         // retirement; every other adapter's exact turn id is its recovery key.
         if (agent.provider !== "cursor") markProviderTurnDurablyStarted();
-      }, checkpointProviderState, markDurableTurnStarted: () => {
-        markProviderTurnDurablyStarted();
+      }, checkpointPreparedTurn, checkpointProviderState, markDurableTurnStarted: () => {
+        if (agent.provider === "cursor" && this.checkpointPreparedTurn) {
+          cursorNativeReleased = true;
+        } else {
+          markProviderTurnDurablyStarted();
+        }
       }, checkpointTerminalResult, detachSignal: turnController.signal });
       // Native provider turns are intentionally not cancelable by the daemon:
       // a handoff must retire our authority, not kill a user's provider process.
@@ -780,7 +1297,7 @@ export class SupervisedAgentDelivery {
         providerTurnDurable,
       );
       if (!result) throw new Error("Provider does not support bounded room turns.");
-      if (!await this.hasExecutionAuthority(agent, turnController)) return;
+      if (!await hasProviderAuthority()) return;
       // Real provider adapters invoke this before releasing their in-memory
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
@@ -819,8 +1336,30 @@ export class SupervisedAgentDelivery {
       // A turn-scoped abort (Stop / stop-then-resend) is a clean interruption,
       // not a delivery failure: the item is settled `cancelled_by_user` by
       // `interruptActiveDelivery`, so never fall through to retry/block it.
-      if (error instanceof AuthorityLostError || this.fenced || controller.signal.aborted || turnController.signal.aborted) return;
-      const message = error instanceof Error ? error.message : "Room delivery failed.";
+      if (this.fenced || controller.signal.aborted || turnController.signal.aborted) return;
+      if (error instanceof AuthorityLostError
+        && !await this.hasLaneAuthority(agent, turnController)) {
+        // A genuinely retired owner must not mutate the FIFO. Its successor
+        // normalizes the durable pre-native state. An exact owner whose
+        // settled provider snapshot drifted continues below into the bounded
+        // retry path instead of silently orphaning `dispatching` forever.
+        return;
+      }
+      const message = error instanceof Error && error.message
+        ? error.message
+        : "Room delivery failed before provider authority could be checkpointed.";
+      // Native Stop arbitration owns this exact invocation before it can
+      // signal the provider. Do not turn any resulting rejection into
+      // retryable/pending/blocked work until the control path decides whether
+      // cancellation won, was not applied, or is uncertain. This is an
+      // ordering barrier, not a timing delay: the same FIFO row cannot be
+      // redispatched behind a Stop that already targeted its old wrapper.
+      const interruptDisposition = await this.awaitInterruptReservationDecision(
+        agent,
+        item.inbox_item_id,
+      );
+      interruptDispositionForFinalizer = interruptDisposition;
+      if (interruptDisposition === "cancelled" || interruptDisposition === "freeze") return;
       const current = await this.inbox.get(item.inbox_item_id);
       if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply" || current.state === "cancelled_by_user" || current.state === "cancelled_by_room_move") return;
       // A turn-scoped abort that landed during the async read above is a user
@@ -852,9 +1391,25 @@ export class SupervisedAgentDelivery {
       }
       if ((error as { roomTurnRecoveryOutcome?: unknown })?.roomTurnRecoveryOutcome === "not_dispatched") {
         if (!current.provider_turn_id) {
-          await this.inbox.transition(item.inbox_item_id, "blocked", {
-            last_error: "Provider reported an undispatched turn without an exact durable turn id.",
+          if (agent.provider !== "cursor") {
+            await this.inbox.transition(item.inbox_item_id, "blocked", {
+              last_error: "Provider reported an undispatched turn without an exact durable turn id.",
+            });
+            return;
+          }
+          await this.inbox.resetPreNativeHandoff(item.inbox_item_id);
+          await this.sleep(this.retryDelayMs);
+          return;
+        }
+        try {
+          await compensateCursorRuntimeToLiveHandle(current.provider_turn_id);
+        } catch (compensationError) {
+          await this.inbox.transition(item.inbox_item_id, "retryable", {
+            last_error: `Prepared Cursor wrapper was reaped, but idle-state compensation must retry: ${compensationError instanceof Error ? compensationError.message : String(compensationError)}`,
           });
+          if (await this.hasLaneAuthority(agent, controller)) {
+            await this.inbox.transition(item.inbox_item_id, "pending");
+          }
           return;
         }
         const receipt = (await this.inbox.receipts(agent.agentId))
@@ -896,20 +1451,39 @@ export class SupervisedAgentDelivery {
       }
       await this.sleep(this.retryDelayMs);
       const retryable = await this.inbox.get(item.inbox_item_id);
-      if (await this.hasExecutionAuthority(agent, controller) && retryable?.state === "retryable") await this.inbox.transition(item.inbox_item_id, "pending");
+      if (await this.hasLaneAuthority(agent, controller) && retryable?.state === "retryable") await this.inbox.transition(item.inbox_item_id, "pending");
     } finally {
       controller.signal.removeEventListener("abort", relayPumpAbort);
       const abort = this.activeTurnAborts.get(agent.agentId);
       if (abort?.inboxItemId === item.inbox_item_id && abort.controller === turnController) this.activeTurnAborts.delete(agent.agentId);
+      const pendingInterrupt = this.interruptReservations.get(agent.agentId);
+      if (interruptDispositionForFinalizer === null
+        && pendingInterrupt?.reservation.invocationId === invocationId
+        && pendingInterrupt.recoveryContext === recoveryContext
+        && pendingInterrupt.reservation.inboxItemId === item.inbox_item_id) {
+        // Even a successful provider/publication path cannot advance to a
+        // successor row until the action journal and FIFO effects commit
+        // together. Fence/refresh resolves this fail-closed as freeze.
+        interruptDispositionForFinalizer = await pendingInterrupt.decision;
+      }
       const active = this.activeTurns.get(agent.agentId);
-      if (active?.recoveryContext === recoveryContext && active.inboxItemId === item.inbox_item_id) this.activeTurns.delete(agent.agentId);
-      await restoreCleanlyRetiredCursorIntent();
+      if (active?.invocationId === invocationId
+        && active.recoveryContext === recoveryContext
+        && active.inboxItemId === item.inbox_item_id) this.activeTurns.delete(agent.agentId);
+      await restoreProvenUndispatchedClaim();
+      const interrupt = this.interruptReservations.get(agent.agentId);
+      if (interrupt?.reservation.invocationId === invocationId
+        && interrupt.recoveryContext === recoveryContext
+        && interrupt.reservation.inboxItemId === item.inbox_item_id
+        && interrupt.disposition) {
+        this.interruptReservations.delete(agent.agentId);
+      }
     }
   }
 
   private readonly publishedIds = new Map<string, string>();
   private async publish(agent: SupervisedIngressAgent, item: SupervisedInboxItem, text: string, parent: AbortController): Promise<boolean> {
-    if (!await this.hasExecutionAuthority(agent, parent)) return false;
+    if (!await this.hasLaneAuthority(agent, parent)) return false;
     const controller = new AbortController();
     const relayAbort = () => controller.abort();
     parent.signal.addEventListener("abort", relayAbort, { once: true });
@@ -917,7 +1491,7 @@ export class SupervisedAgentDelivery {
       const publication = await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
       if (!publication.messageId?.trim() || !publication.roomId?.trim() || publication.roomId !== agent.roomId) throw new Error("Room publication did not return a nonempty canonical message id in the matching room.");
       this.publishedIds.set(item.inbox_item_id, publication.messageId);
-      const current = await this.hasExecutionAuthority(agent, parent);
+      const current = await this.hasLaneAuthority(agent, parent);
       if (!current) this.publishedIds.delete(item.inbox_item_id);
       return current;
     } catch (error) { this.publishedIds.delete(item.inbox_item_id); throw error; }
@@ -981,7 +1555,11 @@ export class SupervisedAgentDelivery {
     });
   }
 
-  private async hasIngressAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
+  private async hasIngressAuthority(
+    agent: SupervisedIngressAgent,
+    controller?: AbortController,
+    scope: SupervisedAuthorityScope = "lane_lease",
+  ): Promise<boolean> {
     if (!this.daemonIngressAllowed(agent) || this.fenced || this.stoppingAgents.has(agent.agentId) || controller?.signal.aborted) return false;
     const allowed = await this.revalidateAuthority({
       agentId: agent.agentId,
@@ -994,14 +1572,25 @@ export class SupervisedAgentDelivery {
       executionGenerationId: agent.executionGenerationId,
       daemonGeneration: agent.daemonGeneration,
       providerContinuationId: agent.providerContinuationId,
-      pid: agent.pid,
+      providerConnection: agent.providerConnection,
       handle: agent.handle,
-    });
+    }, scope);
     return allowed && !this.fenced && !this.stoppingAgents.has(agent.agentId) && !controller?.signal.aborted;
   }
 
   private async hasExecutionAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
-    return Boolean(agent.handle) && await this.hasIngressAuthority(agent, controller);
+    return Boolean(agent.handle)
+      && await this.hasIngressAuthority(agent, controller, "settled_provider_state");
+  }
+
+  private async hasLaneAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
+    return await this.hasIngressAuthority(agent, controller, "lane_lease");
+  }
+
+  private async hasCursorTransitionAuthority(agent: SupervisedIngressAgent, controller?: AbortController): Promise<boolean> {
+    return agent.provider === "cursor"
+      && Boolean(agent.handle)
+      && await this.hasIngressAuthority(agent, controller, "lane_lease");
   }
 
   private recoveryContext(agent: SupervisedIngressAgent): string {
@@ -1058,7 +1647,11 @@ export class SupervisedAgentDelivery {
   }
 }
 
-class AuthorityLostError extends Error {}
+class AuthorityLostError extends Error {
+  constructor() {
+    super("Supervised delivery authority changed before the provider turn became durable.");
+  }
+}
 
 function activatedMessages(messages: readonly Record<string, unknown>[]): IngressMessage[] {
   return messages.flatMap((message) => {
