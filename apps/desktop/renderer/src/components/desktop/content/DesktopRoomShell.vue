@@ -289,6 +289,7 @@
       :reasoning-sessions="reasoningSessions"
       @close="closeAgentDetail"
       @live-selected="openAgentInspectorLive"
+      @live-dismissed="stopAgentInspectorLive"
       @action="runAgentInspectorAction"
       @session-updated="applyAgentInspectorParticipantSessionUpdate"
       @open-reasoning="openReasoningFromAgentDetail"
@@ -549,16 +550,17 @@ const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
 // Cap the retained live-feed tail so a long turn can't grow the renderer
 // buffer without bound; matches the daemon's ephemeral ring buffer intent.
-const AGENT_LIVE_FEED_LIMIT = 500;
+const AGENT_LIVE_FEED_LIMIT = 400;
 // Ephemeral live feed for the inspected agent's "Live" tab. Not persisted;
 // accumulates raw stream events for the focused entry only, reset on focus
 // change and inspector close.
-const agentInspectorLiveFeed = ref<{ events: DesktopAgentStreamEvent[]; ended: boolean }>({ events: [], ended: false });
+const agentInspectorLiveFeed = ref<{ events: DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number }>({ events: [], ended: false, droppedEvents: 0 });
 const agentInspectorWorkResource = ref<AgentInspectorWorkResource>(emptyAgentInspectorWorkResource());
 const agentInspectorWorkSourceMessageId = ref<string | null>(null);
 const agentInspectorConfigurationResource = ref<AgentInspectorConfigurationResource>({ status: "idle", configuration: null, draft: null, error: null });
 const agentInspectorRoomMoveResource = ref<AgentInspectorRoomMoveResource>({ status: "idle", move: null, error: null });
 const agentInspectorProviders = ref<DesktopAgentProvider[]>([]);
+let agentInspectorProvidersRequest: Promise<void> | null = null;
 const agentInspectorSettingsConflict = ref(false);
 let agentInspectorSettingsRequestToken = 0;
 let agentInspectorSettingsDraftVersion = 0;
@@ -1166,10 +1168,18 @@ onMounted(() => {
     // Only accumulate for the agent whose inspector is focused; a batch for a
     // stale focus (raced focus change) is ignored.
     if (batch.entryId !== selectedAgentDetailProjection.value?.entryId) return;
+    const priorEvents = batch.reset ? [] : agentInspectorLiveFeed.value.events;
+    const localOverflow = Math.max(0, priorEvents.length + batch.events.length - AGENT_LIVE_FEED_LIMIT);
     const events = batch.events.length
-      ? [...agentInspectorLiveFeed.value.events, ...batch.events].slice(-AGENT_LIVE_FEED_LIMIT)
-      : agentInspectorLiveFeed.value.events;
-    agentInspectorLiveFeed.value = { events, ended: batch.ended };
+      ? [...priorEvents, ...batch.events].slice(-AGENT_LIVE_FEED_LIMIT)
+      : priorEvents;
+    agentInspectorLiveFeed.value = {
+      events,
+      ended: batch.ended,
+      droppedEvents: (batch.reset ? 0 : agentInspectorLiveFeed.value.droppedEvents)
+        + Math.max(0, batch.droppedEvents)
+        + localOverflow,
+    };
   }) || null;
 });
 
@@ -2334,6 +2344,19 @@ function openAgentDetailRequest(request: AgentInspectorRequest): void {
   // so a stale agent's feed never leaks into the new inspector.
   stopAgentInspectorLive();
   resetAgentInspectorSettings();
+  // Live capability copy is provider-driven and must be ready independently
+  // of the Settings tab, which happens to consume the same catalog.
+  void loadAgentInspectorProviders();
+}
+
+async function loadAgentInspectorProviders(): Promise<void> {
+  if (agentInspectorProviders.value.length > 0) return;
+  if (agentInspectorProvidersRequest) return agentInspectorProvidersRequest;
+  agentInspectorProvidersRequest = desktopIpc.workers.listAgentProviders()
+    .then((providers) => { agentInspectorProviders.value = providers; })
+    .catch(() => undefined)
+    .finally(() => { agentInspectorProvidersRequest = null; });
+  return agentInspectorProvidersRequest;
 }
 
 function closeAgentDetail(): void {
@@ -2351,12 +2374,13 @@ function closeAgentDetail(): void {
 function openAgentInspectorLive(): void {
   const projection = selectedAgentDetailProjection.value;
   if (!projection) return;
-  agentInspectorLiveFeed.value = { events: [], ended: false };
+  agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
+  void loadAgentInspectorProviders();
   void desktopIpc.supervisor?.watchAgentStream?.(projection.entryId);
 }
 
 function stopAgentInspectorLive(): void {
-  agentInspectorLiveFeed.value = { events: [], ended: false };
+  agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
   void desktopIpc.supervisor?.watchAgentStream?.(null);
 }
 

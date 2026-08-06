@@ -104,6 +104,84 @@ test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async
   }
 });
 
+test("Cursor publication and recovery use only the exact-turn structured completion proposal", async () => {
+  const proposal = {
+    state: "completed",
+    request: { outcome: "reply", text: "The actual room answer." },
+  };
+  let proposalRows: Array<typeof proposal> = [proposal];
+  const queries: Array<[string, string, string]> = [];
+  const inbox = {
+    roomTurnCompletionEffects: async (agentId: string, generationId: string, turnId: string) => {
+      queries.push([agentId, generationId, turnId]);
+      return proposalRows;
+    },
+  };
+  const project = (delivery: SupervisedAgentDelivery) => (delivery as unknown as {
+    publicationResult: (
+      candidate: typeof agent,
+      result: { turnId: string; outcome: "reply"; text: string; evidence: "stream"; publicationContract: "structured_room_turn_v1" },
+      originExecutionGenerationId: string,
+    ) => Promise<{ turnId: string; outcome: string; text: string | null; evidence: string }>;
+  }).publicationResult(
+    { ...agent, provider: "cursor" },
+    {
+      turnId: "cursor-turn-1",
+      outcome: "reply",
+      // Cursor joins every assistant delta into this aggregate. It deliberately
+      // contains progress prose that must never become the room answer.
+      text: "I'll investigate. Running a tool. The actual room answer.",
+      evidence: "stream",
+      publicationContract: "structured_room_turn_v1",
+    },
+    "generation-1",
+  );
+  const makeDelivery = () => new SupervisedAgentDelivery(
+    inbox as unknown as SupervisedAgentInboxStore,
+    provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })),
+    { poll: async () => ({}), publish: async () => {} },
+    currentAuthority,
+  );
+
+  const first = await project(makeDelivery());
+  assert.deepEqual(first, {
+    turnId: "cursor-turn-1", outcome: "reply", text: "The actual room answer.", evidence: "stream",
+  });
+  const recovered = await project(makeDelivery());
+  assert.deepEqual(recovered, first, "a replacement delivery reconstructs the same public answer from the journal");
+  assert.deepEqual(queries, [
+    [agent.agentId, "generation-1", "cursor-turn-1"],
+    [agent.agentId, "generation-1", "cursor-turn-1"],
+  ], "publication is namespaced to the exact origin generation and provider turn");
+
+  proposalRows = [];
+  const legacyRecovered = await (makeDelivery() as unknown as {
+    publicationResult: (
+      candidate: typeof agent,
+      result: { turnId: string; outcome: "reply"; text: string; evidence: "stream"; publicationContract: "legacy_cursor_aggregate_v0" },
+      originExecutionGenerationId: string,
+    ) => Promise<unknown>;
+  }).publicationResult(
+    { ...agent, provider: "cursor" },
+    {
+      turnId: "cursor-legacy-turn", outcome: "reply", text: "Legacy recovered aggregate.", evidence: "stream",
+      publicationContract: "legacy_cursor_aggregate_v0",
+    },
+    "generation-1",
+  );
+  assert.deepEqual(legacyRecovered, {
+    turnId: "cursor-legacy-turn", outcome: "reply", text: "Legacy recovered aggregate.", evidence: "stream",
+    publicationContract: "legacy_cursor_aggregate_v0",
+  }, "only explicitly versioned legacy durable evidence may use the old aggregate publication path");
+  assert.deepEqual(await project(makeDelivery()), {
+    turnId: "cursor-turn-1", outcome: "unreadable", text: null, evidence: "none",
+  }, "a missing proposal never falls back to Cursor's aggregate text");
+  proposalRows = [proposal, { ...proposal }];
+  assert.deepEqual(await project(makeDelivery()), {
+    turnId: "cursor-turn-1", outcome: "unreadable", text: null, evidence: "none",
+  }, "conflicting proposals fail closed instead of picking one by row order");
+});
+
 test("ingress keeps observing and queues routed work without a provider handle", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-ingress-only-"));
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
@@ -138,6 +216,49 @@ async function waitForAsync(check: () => Promise<boolean>, timeoutMs = 1_000): P
     if (Date.now() >= deadline) throw new Error("Timed out waiting for asynchronous delivery progress.");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
+}
+
+async function seedCursorRoomTurnCompletion(
+  store: SupervisedAgentInboxStore,
+  input: {
+    agentId: string; roomId: string; executionGenerationId: string; workAttemptId: string;
+    providerContinuationId: string; providerTurnId: string; outcome: "reply" | "no_reply"; text?: string;
+  },
+): Promise<void> {
+  await store.prepareEffect({
+    agent_id: input.agentId,
+    room_id: input.roomId,
+    execution_generation_id: input.executionGenerationId,
+    provider_turn_id: input.providerTurnId,
+    work_attempt_id: input.workAttemptId,
+    current_execution_generation_id: input.executionGenerationId,
+    provider_continuation_id: input.providerContinuationId,
+    mcp_request_id: `test-complete:${input.providerTurnId}`,
+    tool_name: "complete_room_turn",
+    request: input.outcome === "reply"
+      ? { outcome: "reply", text: input.text ?? "" }
+      : { outcome: "no_reply" },
+    mutation: true,
+  });
+}
+
+function installCursorCompletionProjectionFixture(store: SupervisedAgentInboxStore): (
+  providerTurnId: string,
+  completion: { outcome: "reply" | "no_reply"; text?: string },
+) => void {
+  const completions = new Map<string, { outcome: "reply" | "no_reply"; text?: string }>();
+  const original = store.roomTurnCompletionEffects.bind(store);
+  (store as unknown as {
+    roomTurnCompletionEffects: (
+      agentId: string, originExecutionGenerationId: string, providerTurnId: string,
+    ) => Promise<Array<{ state: "completed"; request: { outcome: "reply" | "no_reply"; text?: string } }>>;
+  }).roomTurnCompletionEffects = async (agentId, originExecutionGenerationId, providerTurnId) => {
+    const completion = completions.get(providerTurnId);
+    return completion
+      ? [{ state: "completed", request: completion }]
+      : original(agentId, originExecutionGenerationId, providerTurnId) as never;
+  };
+  return (providerTurnId, completion) => { completions.set(providerTurnId, completion); };
 }
 
 async function daemonRequest(socketPath: string, method: string, params?: unknown): Promise<{ ok: boolean; result?: unknown; error?: string }> {
@@ -424,7 +545,12 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
       if (turn === 1) staleCheckpoint = options?.checkpointProviderState as typeof staleCheckpoint;
       connection = { kind: "cursor_cli", pid: null, processIdentity: null };
       await options?.checkpointProviderState?.({ providerContinuationId: continuation, providerConnection: connection });
-      return { turnId: providerTurnId, outcome: "reply", text: `reply ${turn}` };
+      await seedCursorRoomTurnCompletion(internals.supervisedInbox, {
+        agentId: "cursor-atomic", roomId: "room", executionGenerationId, workAttemptId,
+        providerContinuationId: continuation, providerTurnId, outcome: "reply", text: `reply ${turn}`,
+      });
+      const raw = { turnId: providerTurnId, outcome: "reply" as const, text: `ignored aggregate ${turn}` };
+      return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
     });
     daemon = new SupervisorDaemon(paths, "darwin", port, false, 60_000, undefined, {}, {
       poll: async () => ({ messages: [
@@ -903,6 +1029,143 @@ test("a publish retry reuses the persisted terminal reply without rerunning the 
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 20));
     assert.equal(turns, 1); assert.equal(publishes, 2);
     assert.equal((await store.receipts("stone"))[0]?.state, "acknowledged");
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a normalized no-reply terminal survives partial provider-journal retirement in live delivery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-no-reply-retirement-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    let runs = 0;
+    let recoveries = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async (_handle, request, options) => {
+        runs += 1;
+        const terminal = {
+          turnId: `cursor:${request.inboxItemId}`, outcome: "no_reply" as const, text: null,
+        };
+        await options?.checkpointTurnStarted?.(terminal.turnId);
+        await store.checkpointNormalizedTerminal({
+          inbox_item_id: request.inboxItemId,
+          agent_id: agent.agentId,
+          execution_generation_id: agent.executionGenerationId,
+          provider_turn_id: terminal.turnId,
+          outcome: "no_reply",
+          text: null,
+          evidence: "stream",
+          terminal_evidence: terminal,
+        });
+        throw new Error("provider terminal journal was partially retired after normalized checkpoint");
+      },
+      async () => {
+        recoveries += 1;
+        throw new Error("normalized no-reply must bypass provider recovery");
+      },
+    ), {
+      poll: async () => ({}),
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0);
+    await delivery.pump({ ...agent, provider: "cursor" });
+    const settled = await store.get(item.inbox_item_id);
+    assert.equal(settled?.state, "acknowledged_no_reply");
+    assert.equal(runs, 1);
+    assert.equal(recoveries, 0, "the durable normalized terminal outranks a partially deleted provider journal");
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a normalized no-reply terminal survives partial provider-journal retirement during exact recovery", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-no-reply-recovery-retirement-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "cursor:recover-no-reply", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.transition(item.inbox_item_id, "awaiting_result");
+    await store.transition(item.inbox_item_id, "result_recovery", {
+      outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }),
+    });
+    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior recovery failure one");
+    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior recovery failure two");
+    let recoveries = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async () => { throw new Error("must not start a new turn"); },
+      async (_handle, request, options) => {
+        recoveries += 1;
+        const terminal = {
+          turnId: request.providerTurnId, outcome: "no_reply" as const, text: null,
+        };
+        assert.ok(options?.checkpointTerminalResult, "recovery exposes the same normalized-terminal checkpoint contract");
+        await store.checkpointNormalizedTerminal({
+          inbox_item_id: item.inbox_item_id,
+          agent_id: agent.agentId,
+          execution_generation_id: agent.executionGenerationId,
+          provider_turn_id: terminal.turnId,
+          outcome: "no_reply",
+          text: null,
+          evidence: "stream",
+          terminal_evidence: terminal,
+        });
+        throw new Error("recovery terminal journal was partially retired after normalized checkpoint");
+      },
+    ), {
+      poll: async () => ({}),
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0);
+    await delivery.pump({ ...agent, provider: "cursor" });
+    assert.equal((await store.get(item.inbox_item_id))?.state, "acknowledged_no_reply");
+    assert.equal(recoveries, 1, "the first exact recovery checkpoints once; its partial cleanup failure is not retried");
+    assert.equal((await store.receipts(agent.agentId))[0]?.timeline.filter((event) => event.phase === "retry_scheduled").length, 2,
+      "accepted no-reply does not spend the last recovery retry on provider-journal cleanup");
+    await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a normalized reply in result recovery publishes before consulting a partially retired provider journal", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-reply-recovery-retirement-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "cursor:recover-reply", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.transition(item.inbox_item_id, "awaiting_result");
+    await store.transition(item.inbox_item_id, "result_recovery", {
+      outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }),
+    });
+    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior reply recovery failure one");
+    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior reply recovery failure two");
+    let recoveries = 0;
+    const published: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async () => { throw new Error("must not start a new turn"); },
+      async (_handle, request) => {
+        recoveries += 1;
+        const terminal = { turnId: request.providerTurnId, outcome: "reply" as const, text: "Durable normalized reply." };
+        await store.checkpointNormalizedTerminal({
+          inbox_item_id: item.inbox_item_id,
+          agent_id: agent.agentId,
+          execution_generation_id: agent.executionGenerationId,
+          provider_turn_id: terminal.turnId,
+          outcome: "reply",
+          text: terminal.text,
+          evidence: "stream",
+          terminal_evidence: terminal,
+        });
+        throw new Error("reply recovery journal was partially retired after normalized checkpoint");
+      },
+    ), {
+      poll: async () => ({}),
+      publish: async (input) => {
+        published.push(input.text);
+        return { messageId: "message:normalized-reply", roomId: input.roomId };
+      },
+    }, currentAuthority, 0);
+    await delivery.pump({ ...agent, provider: "cursor" });
+    assert.equal((await store.get(item.inbox_item_id))?.state, "acknowledged");
+    assert.deepEqual(published, ["Durable normalized reply."]);
+    assert.equal(recoveries, 1);
+    assert.equal((await store.receipts(agent.agentId))[0]?.timeline.filter((event) => event.phase === "retry_scheduled").length, 2,
+      "accepted reply publishes without spending the last recovery retry on provider-journal cleanup");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -1741,6 +2004,7 @@ test("Cursor Stop and handoff retain an atomically prepared turn until idle comp
   try {
     for (const retirement of ["stop", "handoff"] as const) {
       const store = new SupervisedAgentInboxStore(join(root, `${retirement}.sqlite`));
+      const recordCompletion = installCursorCompletionProjectionFixture(store);
       let continuation = `cursor-pending:${retirement}`;
       let connection = { kind: "cursor_cli" as const, pid: null as number | null, processIdentity: null as string | null };
       const cursorAgent = {
@@ -1824,7 +2088,10 @@ test("Cursor Stop and handoff retain an atomically prepared turn until idle comp
             await options?.beforeNativeDispatch?.();
             await options?.checkpointTurnStarted?.(`cursor:redispatched:${retirement}`);
             options?.markDurableTurnStarted?.();
-            return { turnId: `cursor:redispatched:${retirement}`, outcome: "no_reply", text: null };
+            const providerTurnId = `cursor:redispatched:${retirement}`;
+            recordCompletion(providerTurnId, { outcome: "no_reply" });
+            const raw = { turnId: providerTurnId, outcome: "no_reply" as const, text: null };
+            return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
           },
           async () => {
             recoveries += 1;
@@ -3000,6 +3267,7 @@ test("Cursor Stop settles its reserved FIFO identity after provider cleanup remo
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-stop-reservation-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const recordCompletion = installCursorCompletionProjectionFixture(store);
     let handlePid = agent.handle!.pid;
     let handleContinuation = agent.handle!.providerContinuationId;
     let handleConnection = { kind: "cursor_cli" as const, pid: null as number | null, processIdentity: null as string | null };
@@ -3042,13 +3310,15 @@ test("Cursor Stop settles its reserved FIFO identity after provider cleanup remo
           roomTurnRecoveryOutcome: "not_dispatched" as const,
         });
       }
+      recordCompletion(providerTurnId, { outcome: "reply", text: "next FIFO reply" });
       handleConnection = { kind: "cursor_cli", pid: null, processIdentity: null };
       handlePid = null;
       await options?.checkpointProviderState?.({
         providerContinuationId: handleContinuation!,
         providerConnection: handleConnection,
       });
-      return { turnId: providerTurnId, outcome: "reply", text: "next FIFO reply" };
+      const raw = { turnId: providerTurnId, outcome: "reply" as const, text: "ignored aggregate" };
+      return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
     }), {
       poll: async () => ({ messages: [
         { id: "1", activation: { for_current_agent: { decision: "activate" } } },
@@ -3242,6 +3512,7 @@ test("a stale Stop reservation cannot settle a successor invocation of the same 
   const releaseSecond = deferred<void>();
   try {
     store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const recordCompletion = installCursorCompletionProjectionFixture(store);
     const firstEntered = deferred<void>();
     const secondEntered = deferred<void>();
     let calls = 0;
@@ -3252,7 +3523,7 @@ test("a stale Stop reservation cannot settle a successor invocation of the same 
       providerConnection: cursorConnection,
       handle: { ...agent.handle!, pid: null, providerConnection: cursorConnection },
     };
-    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
       calls += 1;
       if (calls === 1) {
         firstEntered.resolve();
@@ -3263,7 +3534,10 @@ test("a stale Stop reservation cannot settle a successor invocation of the same 
       }
       secondEntered.resolve();
       await releaseSecond.promise;
-      return { turnId: `successor:${request.inboxItemId}`, outcome: "no_reply", text: null };
+      const providerTurnId = `successor:${request.inboxItemId}`;
+      recordCompletion(providerTurnId, { outcome: "no_reply" });
+      const raw = { turnId: providerTurnId, outcome: "no_reply" as const, text: null };
+      return (await options?.checkpointTerminalResult?.(raw))?.acceptedResult ?? raw;
     }), {
       poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }),
       publish: async () => { throw new Error("must not publish"); },

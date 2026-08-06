@@ -56,6 +56,7 @@ export function profileAwareToolServer(
   server: McpServer,
   profile: LetAgentsExecutionProfile,
   dependencies: SupervisedToolFacadeDependencies = productionDependencies,
+  supervisedProvider: string | null = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
 ): McpServer {
   if (profile !== "supervised_room_turn") return server;
   return new Proxy(server, {
@@ -88,13 +89,17 @@ export function profileAwareToolServer(
             });
           }
           if (prepared.action === "use_final_answer") {
-            return instruction("Do not send the activating room reply with a message tool. Return it as your final answer; the daemon will publish it exactly once.", {
+            return instruction(supervisedProvider === "cursor"
+              ? "Do not send the activating room reply with a message tool. Keep working, then record the one public answer with complete_room_turn; Cursor's aggregate final text is live evidence only."
+              : "Do not send the activating room reply with a message tool. Return it as your final answer; the daemon will publish it exactly once.", {
               code: "USE_FINAL_ANSWER",
               source_message_id: prepared.sourceMessageId,
             });
           }
           if (prepared.action === "room_move_prepared") {
-            return instruction("The room move is prepared. Finish this turn normally; the daemon will publish the activating response and then move the agent.", {
+            return instruction(supervisedProvider === "cursor"
+              ? "The room move is prepared. Finish the work, then call complete_room_turn with the public response; the daemon will publish that proposal and then move the agent."
+              : "The room move is prepared. Finish this turn normally; the daemon will publish the activating response and then move the agent.", {
               code: "ROOM_MOVE_PREPARED",
               destination_room: prepared.destinationRoom,
             });

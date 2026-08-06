@@ -670,7 +670,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   async recoverRoomTurn(
     providerHandle: ProviderHandle,
     request: ProviderRoomTurnRecoveryRequest,
-    options: { detachSignal?: AbortSignal; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void> } = {},
+    options: Pick<ProviderRoomTurnOptions, "detachSignal" | "checkpointTerminalResult"> = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     const turnId = request.providerTurnId.trim();
@@ -1326,7 +1326,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     turnId: string,
     status: string,
     turn: ThreadReadTurn,
-    checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<void>,
+    checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"],
   ): Promise<ProviderRoomTurnResult> {
     if (status !== "completed") {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);

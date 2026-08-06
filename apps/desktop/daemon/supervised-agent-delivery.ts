@@ -1,5 +1,5 @@
-import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnResult } from "./provider-action-port.js";
-import { SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
+import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
+import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 
 export type SupervisedIngressAgent = {
   agentId: string;
@@ -168,6 +168,39 @@ export class SupervisedAgentDelivery {
     private readonly checkpointProviderState?: SupervisedProviderStateCheckpointer,
     private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
   ) {}
+
+  /**
+   * Cursor's terminal result is documented as every assistant delta joined
+   * together, so it is evidence that the provider completed, not a public
+   * answer. Only the separately journaled exact-turn proposal is publishable.
+   */
+  private async publicationResult(
+    agent: SupervisedIngressAgent,
+    result: ProviderRoomTurnResult,
+    originExecutionGenerationId: string,
+  ): Promise<ProviderRoomTurnResult> {
+    if (agent.provider !== "cursor") return result;
+    // One bounded upgrade exception: wrappers admitted before the structured
+    // completion contract existed have terminal evidence with no contract
+    // version. They cannot be rerun, so their already-retired exact aggregate
+    // remains the publication source for that one recovered legacy turn.
+    if (result.publicationContract === "legacy_cursor_aggregate_v0") return result;
+    const proposals = await this.inbox.roomTurnCompletionEffects(
+      agent.agentId,
+      originExecutionGenerationId,
+      result.turnId,
+    );
+    if (proposals.length !== 1 || proposals[0]!.state !== "completed") {
+      return { turnId: result.turnId, outcome: "unreadable", text: null, evidence: "none" };
+    }
+    const completion = structuredRoomTurnCompletion(proposals[0]!.request);
+    if (!completion) {
+      return { turnId: result.turnId, outcome: "unreadable", text: null, evidence: "none" };
+    }
+    return completion.outcome === "no_reply"
+      ? { turnId: result.turnId, outcome: "no_reply", text: null, evidence: "stream" }
+      : { turnId: result.turnId, outcome: "reply", text: completion.text, evidence: "stream" };
+  }
 
   fence(): void {
     this.fenced = true;
@@ -1067,16 +1100,32 @@ export class SupervisedAgentDelivery {
       });
     };
     try {
-      const persistedReply = persistedReplyText(item.outcome);
-      if (persistedReply) {
+      const persistedTerminal = persistedAcceptedTerminal(item.outcome);
+      if (persistedTerminal?.kind === "reply") {
         setActive("publishing");
         if (!await this.hasLaneAuthority(agent, controller)) return;
-        await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: item.outcome });
+        if (item.state === "dispatching") {
+          await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: item.outcome });
+        }
         if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: item.outcome });
-        if (!await this.publish(agent, item, persistedReply, controller)) return;
+        if (!await this.publish(agent, item, persistedTerminal.text, controller)) return;
         if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: agent.roomId, canonical_message_id: await this.publishedMessageId(agent, item) });
+        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+        return;
+      }
+      if (persistedTerminal?.kind === "no_reply") {
+        // The daemon's normalized terminal checkpoint is the publication
+        // authority. Cursor may subsequently throw while retiring either of
+        // its two journal files, including after one unlink already landed;
+        // never make provider recovery depend on that now-partial journal.
+        if (!await this.hasExecutionAuthority(agent, turnController)) return;
+        if (item.state === "dispatching") {
+          await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: item.outcome });
+        }
+        if (!await this.hasExecutionAuthority(agent, turnController)) return;
+        await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: item.outcome });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }
@@ -1115,35 +1164,44 @@ export class SupervisedAgentDelivery {
       // an exact, recoverable native turn boundary. Before then, the provider
       // promise owns preflight/helper cleanup and must settle before drain can
       // release this daemon generation.
-      const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<void> => {
+      const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<ProviderRoomTurnCheckpointDisposition> => {
+        const publicationResult = await this.publicationResult(
+          agent,
+          result,
+          providerTurnOriginExecutionGenerationId,
+        );
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();
         // New turns already checkpoint through checkpointTurnStarted. This
         // idempotent edge keeps provider-neutral adapters equally strict.
-        if (admittedProviderTurnId && admittedProviderTurnId !== result.turnId) {
+        if (admittedProviderTurnId && admittedProviderTurnId !== publicationResult.turnId) {
           throw new Error("Provider terminal result belongs to a different delivery invocation.");
         }
         if (item.state !== "result_recovery") {
           const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
           if (!providerContinuationId) throw new Error("Provider turn terminal checkpoint has no exact continuation authority.");
-          await this.inbox.checkpointTurnStarted(item.inbox_item_id, result.turnId, {
+          await this.inbox.checkpointTurnStarted(item.inbox_item_id, publicationResult.turnId, {
             work_attempt_id: agent.workAttemptId,
             origin_execution_generation_id: providerTurnOriginExecutionGenerationId,
             provider_continuation_id: providerContinuationId,
           });
         }
-        admittedProviderTurnId = result.turnId;
-        this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, result.turnId);
-        const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
+        admittedProviderTurnId = publicationResult.turnId;
+        this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, publicationResult.turnId);
+        const evidence = publicationResult.evidence ?? (publicationResult.outcome === "unreadable" ? "none" : "transcript");
         await this.inbox.checkpointNormalizedTerminal({
           inbox_item_id: item.inbox_item_id,
           agent_id: agent.agentId,
           execution_generation_id: providerTurnOriginExecutionGenerationId,
-          provider_turn_id: result.turnId,
-          outcome: result.outcome,
-          text: result.text?.trim() || null,
+          provider_turn_id: publicationResult.turnId,
+          outcome: publicationResult.outcome,
+          text: publicationResult.text?.trim() || null,
           evidence,
-          terminal_evidence: result,
+          terminal_evidence: publicationResult,
         });
+        return {
+          acceptedResult: publicationResult,
+          cleanupRecoveryEvidence: publicationResult.outcome !== "unreadable",
+        };
       };
       const checkpointProviderState = async (state: {
         providerContinuationId: string;
@@ -1290,14 +1348,19 @@ export class SupervisedAgentDelivery {
       // Once an exact turn is durable, race its result with retirement. Before
       // that boundary, keep the pump in the drain group until the adapter has
       // aborted and reaped any preflight/helper processes.
-      const result = turn && await this.awaitProviderResultOrRetirement(
+      const providerResult = turn && await this.awaitProviderResultOrRetirement(
         turn,
         turnController,
         () => !providerTurnDurablyStarted,
         providerTurnDurable,
       );
-      if (!result) throw new Error("Provider does not support bounded room turns.");
+      if (!providerResult) throw new Error("Provider does not support bounded room turns.");
       if (!await hasProviderAuthority()) return;
+      const result = await this.publicationResult(
+        agent,
+        providerResult,
+        providerTurnOriginExecutionGenerationId,
+      );
       // Real provider adapters invoke this before releasing their in-memory
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
@@ -1366,6 +1429,56 @@ export class SupervisedAgentDelivery {
       // interrupt, not a delivery failure: leave the head for interruptActiveDelivery
       // to settle rather than retrying/blocking (and rerunning) the stopped turn.
       if (turnController.signal.aborted) return;
+      const acceptedTerminal = persistedAcceptedTerminal(current.outcome);
+      if (acceptedTerminal?.kind === "no_reply"
+        && ["dispatching", "awaiting_result", "result_recovery"].includes(current.state)) {
+        // The normalized terminal checkpoint committed before provider-journal
+        // retirement failed. It is already authoritative; consuming another
+        // result-recovery retry here could block the row one instruction before
+        // the normal fast-forward sees it.
+        if (!await this.hasExecutionAuthority(agent, turnController)) return;
+        if (current.state === "dispatching") {
+          await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: current.outcome });
+        }
+        if (!await this.hasExecutionAuthority(agent, turnController)) return;
+        await this.inbox.transition(item.inbox_item_id, "acknowledged_no_reply", { outcome: current.outcome });
+        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+        return;
+      }
+      if (acceptedTerminal?.kind === "reply"
+        && ["dispatching", "awaiting_result", "result_recovery"].includes(current.state)) {
+        // Publication is independent of fallible provider-journal cleanup.
+        // Publish the already-normalized answer now, before classifying the
+        // cleanup exception as a provider recovery failure.
+        setActive("publishing");
+        if (!await this.hasLaneAuthority(agent, controller)) return;
+        if (current.state === "dispatching") {
+          await this.inbox.transition(item.inbox_item_id, "awaiting_result", { outcome: current.outcome });
+        }
+        await this.inbox.transition(item.inbox_item_id, "publishing", { outcome: current.outcome });
+        try {
+          if (!await this.publish(agent, item, acceptedTerminal.text, controller)) return;
+          if (!await this.hasLaneAuthority(agent, controller)) return;
+          await this.inbox.checkpointPublication({
+            inbox_item_id: item.inbox_item_id,
+            room_id: agent.roomId,
+            canonical_message_id: await this.publishedMessageId(agent, item),
+          });
+          await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+        } catch (publicationError) {
+          const publishing = await this.inbox.get(item.inbox_item_id);
+          if (publishing?.state !== "publishing") throw publicationError;
+          await this.inbox.transition(item.inbox_item_id, "retryable", {
+            last_error: publicationError instanceof Error ? publicationError.message : String(publicationError),
+          });
+          await this.sleep(this.retryDelayMs);
+          const retryable = await this.inbox.get(item.inbox_item_id);
+          if (await this.hasLaneAuthority(agent, controller) && retryable?.state === "retryable") {
+            await this.inbox.transition(item.inbox_item_id, "pending");
+          }
+        }
+        return;
+      }
       const failure = error as { providerFailureCode?: unknown; providerContinuationId?: unknown };
       if (failure.providerFailureCode === "provider_continuation_missing"
         && current.attempt_count === 0
@@ -1695,11 +1808,19 @@ function lastMessageId(messages: readonly Record<string, unknown>[]): string | n
   return null;
 }
 
-function persistedReplyText(outcome: string | null): string | null {
+function persistedAcceptedTerminal(outcome: string | null):
+  | { kind: "reply"; text: string }
+  | { kind: "no_reply"; text: null }
+  | null {
   if (!outcome) return null;
   try {
     const parsed = JSON.parse(outcome) as { kind?: unknown; text?: unknown };
-    return parsed.kind === "reply" && typeof parsed.text === "string" && parsed.text.trim() ? parsed.text : null;
+    if (parsed.kind === "reply" && typeof parsed.text === "string" && parsed.text.trim()) {
+      return { kind: "reply", text: parsed.text };
+    }
+    return parsed.kind === "no_reply" && (parsed.text === null || parsed.text === undefined)
+      ? { kind: "no_reply", text: null }
+      : null;
   } catch { return null; }
 }
 

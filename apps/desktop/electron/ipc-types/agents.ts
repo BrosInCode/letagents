@@ -479,6 +479,10 @@ export interface DesktopAgentStreamBatch {
   entryId: string;
   events: DesktopAgentStreamEvent[];
   ended: boolean;
+  /** True when the daemon started a new provider/turn display generation. */
+  reset: boolean;
+  /** Events omitted because the bounded in-memory replay buffer overflowed. */
+  droppedEvents: number;
 }
 
 export type DesktopRoomAgentConnectionState = "connected" | "reconnecting" | "disconnected";

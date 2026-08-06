@@ -250,7 +250,7 @@ test("watch_agent_stream long-polls one agent's ephemeral live feed", async () =
     observed_at: "2026-07-31T00:00:00.000Z", sequence: 0, provider: "open-model", kind, method,
     summary, status: "working", payload: { m: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
   });
-  type StreamResult = { sequence: number; events: Array<{ sequence: number; kind: string; method: string; summary: string | null; payload: unknown }>; ended: boolean };
+  type StreamResult = { sequence: number; stream_generation: number; dropped_events: number; events: Array<{ sequence: number; kind: string; method: string; summary: string | null; payload: unknown }>; ended: boolean };
   try {
     await daemon.start();
     const internals = daemon as unknown as {
@@ -268,6 +268,8 @@ test("watch_agent_stream long-polls one agent's ephemeral live feed", async () =
     const first = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_a", after_sequence: 0, wait_ms: 500 })).result as StreamResult;
     assert.equal(first.events.length, 2);
     assert.equal(first.sequence, 2);
+    assert.equal(first.stream_generation, 1);
+    assert.equal(first.dropped_events, 0);
     assert.equal(first.ended, false);
     assert.equal(first.events[0]!.summary, "thinking");
 
@@ -306,12 +308,16 @@ test("watch_agent_stream drains a backlog larger than one batch without gaps", a
     observed_at: "2026-07-31T00:00:00.000Z", sequence: 0, provider: "open-model", kind: "text_delta", method: "item/agentMessage/delta",
     summary, status: "working", payload: { m: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
   });
-  type StreamResult = { sequence: number; events: Array<{ sequence: number; summary: string | null }>; ended: boolean };
+  type StreamResult = { sequence: number; stream_generation: number; dropped_events: number; events: Array<{ sequence: number; summary: string | null }>; ended: boolean };
   try {
     await daemon.start();
-    const internals = daemon as unknown as { pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void };
+    const internals = daemon as unknown as {
+      pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void;
+      endAgentStream: (entryId: string) => void;
+    };
     // Buffer 100 events — more than a single 64-event batch can carry.
     for (let i = 1; i <= 100; i += 1) internals.pushAgentStreamEvent("agent_backlog", mk(`chunk-${i}`));
+    internals.endAgentStream("agent_backlog");
 
     // The first poll returns one capped batch whose cursor is the LAST event it
     // actually carried, not the producer's newest sequence.
@@ -320,6 +326,9 @@ test("watch_agent_stream drains a backlog larger than one batch without gaps", a
     assert.equal(first.events[0]!.sequence, 1);
     assert.equal(first.events[63]!.sequence, 64);
     assert.equal(first.sequence, 64, "cursor must be the last delivered event, never the producer high-water mark");
+    assert.equal(first.stream_generation, 1);
+    assert.equal(first.dropped_events, 0);
+    assert.equal(first.ended, false, "a capped batch cannot end the viewer before retained backlog is delivered");
 
     // Resuming at that cursor drains the remainder; nothing past the cap is skipped.
     const second = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "agent_backlog", after_sequence: first.sequence, wait_ms: 500 })).result as StreamResult;
@@ -327,10 +336,55 @@ test("watch_agent_stream drains a backlog larger than one batch without gaps", a
     assert.equal(second.events[0]!.sequence, 65);
     assert.equal(second.events[35]!.sequence, 100);
     assert.equal(second.sequence, 100);
+    assert.equal(second.ended, true, "ended is emitted only with the generation high-water mark");
 
     // The two polls together reconstruct the full ordered backlog.
     const drained = [...first.events, ...second.events].map((event) => event.sequence);
     assert.deepEqual(drained, Array.from({ length: 100 }, (_, index) => index + 1));
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("watch_agent_stream reports bounded-history gaps and never replays a prior generation", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  const mk = (summary: string): DaemonActivityEvent => ({
+    observed_at: "2026-08-06T00:00:00.000Z", sequence: 0, provider: "cursor", kind: "text_delta", method: "item/agentMessage/delta",
+    summary, status: "working", payload: { delta: summary }, payload_truncated: false, payload_redacted: false, durable_payload_ref: null,
+  });
+  type StreamResult = { sequence: number; stream_generation: number; dropped_events: number; events: Array<{ sequence: number; summary: string | null }>; ended: boolean };
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as {
+      pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void;
+      resetAgentStream: (entryId: string) => void;
+    };
+    for (let i = 1; i <= 450; i += 1) internals.pushAgentStreamEvent("cursor_live", mk(`old-${i}`));
+
+    const overflowed = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", {
+      entry_id: "cursor_live", after_sequence: 0, wait_ms: 0,
+    })).result as StreamResult;
+    assert.equal(overflowed.stream_generation, 1);
+    assert.equal(overflowed.dropped_events, 50, "the viewer is told exactly how much bounded history was evicted");
+    assert.equal(overflowed.events[0]?.sequence, 51);
+    assert.equal(overflowed.events[0]?.summary, "old-51");
+
+    internals.resetAgentStream("cursor_live");
+    internals.pushAgentStreamEvent("cursor_live", mk("new-turn-only"));
+    const nextGeneration = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", {
+      entry_id: "cursor_live", after_sequence: 0, wait_ms: 0,
+    })).result as StreamResult;
+    assert.equal(nextGeneration.stream_generation, 2);
+    assert.equal(nextGeneration.dropped_events, 0, "a deliberate generation reset is not mislabeled as overflow");
+    assert.deepEqual(nextGeneration.events.map((event) => event.summary), ["new-turn-only"]);
+    assert.equal(nextGeneration.events[0]?.sequence, 451, "sequence remains monotonic across display generations");
   } finally {
     await daemon.stop();
     await env.cleanup();
@@ -1123,6 +1177,29 @@ test("failed room waits remain retryable for one healthy provider execution", as
       "Checking the durable room delivery path.",
       "the daemon preserves the provider-approved display summary instead of replacing it with a protocol method",
     );
+    await internals.handleProviderStream("terminal_stream", handle, {
+      ...base,
+      sequence: 4,
+      kind: "text_delta",
+      method: "item/reasoning/textDelta",
+      summary: "Codex raw reasoning text is streaming.",
+      payload: {
+        threadId: "thread_exact",
+        turnId: "turn_exact",
+        itemId: "reasoning_exact",
+        delta: "private chain of thought must never enter Live",
+      },
+    });
+    const live = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", {
+      entry_id: "terminal_stream", after_sequence: 0, wait_ms: 0,
+    })).result as { events: Array<{ method: string; summary: string | null }> };
+    assert.deepEqual(
+      live.events.map((event) => event.method),
+      ["item/agentMessage/delta", "item/reasoning/summaryTextDelta"],
+      "Codex's verbatim readable-reasoning method survives the Live display filter",
+    );
+    assert.equal(live.events[1]?.summary, "Checking the durable room delivery path.");
+    assert.doesNotMatch(JSON.stringify(live), /private chain of thought/);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
@@ -6744,6 +6821,13 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       action: "execute",
       mutation: false,
     }, "the exact read-only request safely reacquires execution authority");
+    const readCompletion = await daemonRequest(paths.socketPath, "supervisor.complete_bounded_effect", {
+      ...coordinates,
+      provider_turn_id: "cursor-turn-current",
+      effect_id: String((readRetry.result as { effect_id: string }).effect_id),
+      result: { tasks: [] },
+    });
+    assert.equal(readCompletion.ok, true, readCompletion.error);
 
     const inspector = await daemonRequest(paths.socketPath, "supervisor.get_agent_inspector_detail", {
       entry_id: id, room_id: entry.room_id, source_message_id: null,
@@ -6761,6 +6845,33 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       ...coordinates, provider_turn_id: "cursor-turn-current",
     });
     assert.deepEqual(currentBorrow.result, { status: "available", credential: "cursor-cap-bearer" });
+
+    // Completion is deliberately last for this exact provider turn. Once it
+    // commits, production correctly rejects every new effect request.
+    const completionProposal = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "completion-current",
+      tool_name: "complete_room_turn", input: { outcome: "reply", text: "Exact public answer." }, mutation: true,
+    });
+    assert.equal(completionProposal.ok, true, completionProposal.error);
+    assert.equal((completionProposal.result as { state: string }).state, "completed");
+    const deterministicCompletionResult = (completionProposal.result as { result: unknown }).result;
+    assert.deepEqual((deterministicCompletionResult as { structuredContent?: unknown }).structuredContent, {
+      accepted: true,
+      outcome: "reply",
+      instruction: "The daemon recorded this exact turn completion. End the provider turn without sending the activating reply through another tool.",
+    });
+    const completionRetry = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "completion-retry-new-id",
+      tool_name: "complete_room_turn", input: { outcome: "reply", text: "Exact public answer." }, mutation: true,
+    });
+    assert.deepEqual(completionRetry.result, { state: "completed", result: deterministicCompletionResult },
+      "an exact completion retry converges on the one durable proposal even with a new transport request id");
+    const conflictingCompletion = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "completion-conflict",
+      tool_name: "complete_room_turn", input: { outcome: "no_reply" }, mutation: true,
+    });
+    assert.equal(conflictingCompletion.ok, false);
+    assert.match(conflictingCompletion.error ?? "", /different completion proposal/i);
 
     const providerNeutralExecution = await (daemon as unknown as { durability: WorkDurabilityStore }).durability.startGeneration(
       providerNeutralAttempt.work_attempt_id,
@@ -6816,6 +6927,12 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       agent_session_id: "provider-neutral-worker", daemon_generation: generation,
       api_url: "https://letagents.example",
     };
+    const providerNeutralCompletionChannel = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
+      ...providerNeutralCoordinates, provider_turn_id: "", mcp_request_id: "completion-provider-neutral",
+      tool_name: "complete_room_turn", input: { outcome: "no_reply" }, mutation: true,
+    });
+    assert.equal(providerNeutralCompletionChannel.ok, false);
+    assert.match(providerNeutralCompletionChannel.error ?? "", /reserved for supervised Cursor turns/i);
     const providerNeutral = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
       ...providerNeutralCoordinates, provider_turn_id: "", mcp_request_id: "effect-provider-neutral",
       tool_name: "claim_task", input: { task_id: "provider-neutral" }, mutation: true,
