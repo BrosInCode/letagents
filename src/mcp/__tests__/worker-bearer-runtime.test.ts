@@ -24,10 +24,12 @@ const { agentSessionCredentials } = await import("../server/runtime/agent-sessio
 const { registerAgentSessionTools } = await import("../server/tools/agent-sessions.js");
 const {
   getCurrentRoomPayload,
+  registerRoomInspectionTools,
   setRoomInspectionOwnerAuthStoreLoaderForTest,
 } = await import("../server/tools/rooms/inspection-tools.js");
 const roomState = await import("../server/runtime/room-state.js");
-const { rememberRoom, toRoomState } = roomState;
+const { getFallbackProjectId, rememberRoom, runWithCurrentSupervisedRoom, toRoomState } = roomState;
+const { roomScopedApiCall } = await import("../server/runtime/room-api.js");
 const { autoJoinFromContext } = await import("../server/runtime/rooms.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
@@ -53,6 +55,8 @@ function withAuthEnv<T>(
     apiUrl?: string | null;
     boundedTurns?: string | undefined;
     executionProfile?: string | undefined;
+    supervisorRoomId?: string | undefined;
+    supervisorAgentSessionId?: string | undefined;
   },
   callback: () => T | Promise<T>,
 ): Promise<T> | T {
@@ -61,6 +65,16 @@ function withAuthEnv<T>(
   const previousApiUrl = process.env.LETAGENTS_API_URL;
   const previousBoundedTurns = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
   const previousExecutionProfile = process.env.LETAGENTS_EXECUTION_PROFILE;
+  const previousSupervisorCoordinates = Object.fromEntries([
+    "LETAGENTS_SUPERVISOR_ENTRY_ID",
+    "LETAGENTS_SUPERVISOR_DAEMON_SOCKET",
+    "LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID",
+    "LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID",
+    "LETAGENTS_SUPERVISOR_AGENT_SESSION_ID",
+    "LETAGENTS_SUPERVISOR_ROOM_ID",
+    "LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME",
+    "LETAGENTS_SUPERVISOR_PROVIDER",
+  ].map((key) => [key, process.env[key]]));
   if (values.bearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
   else process.env.LETAGENTS_AGENT_SESSION_BEARER = values.bearer;
   if (values.owner === undefined) delete process.env.LETAGENTS_TOKEN;
@@ -72,6 +86,16 @@ function withAuthEnv<T>(
   const executionProfile = values.executionProfile ?? (values.boundedTurns === "1" ? "supervised_room_turn" : undefined);
   if (executionProfile === undefined) delete process.env.LETAGENTS_EXECUTION_PROFILE;
   else process.env.LETAGENTS_EXECUTION_PROFILE = executionProfile;
+  if (values.supervisorRoomId) {
+    process.env.LETAGENTS_SUPERVISOR_ENTRY_ID = "entry_exact";
+    process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET = "/tmp/letagents-test-daemon.sock";
+    process.env.LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID = "attempt_exact";
+    process.env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID = "generation_exact";
+    process.env.LETAGENTS_SUPERVISOR_AGENT_SESSION_ID = values.supervisorAgentSessionId ?? "session_exact";
+    process.env.LETAGENTS_SUPERVISOR_ROOM_ID = values.supervisorRoomId;
+    process.env.LETAGENTS_SUPERVISOR_AGENT_DISPLAY_NAME = "Exact Worker";
+    process.env.LETAGENTS_SUPERVISOR_PROVIDER = "cursor";
+  }
   return Promise.resolve(callback()).finally(() => {
     if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
     else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
@@ -83,6 +107,10 @@ function withAuthEnv<T>(
     else process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS = previousBoundedTurns;
     if (previousExecutionProfile === undefined) delete process.env.LETAGENTS_EXECUTION_PROFILE;
     else process.env.LETAGENTS_EXECUTION_PROFILE = previousExecutionProfile;
+    for (const [key, value] of Object.entries(previousSupervisorCoordinates)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
   });
 }
 
@@ -188,6 +216,71 @@ test("bounded supervised calls fail closed before fetch for deferred, stale, or 
     }
   });
   globalThis.fetch = originalFetch;
+});
+
+test("interleaved supervised API calls keep exact room routes and never use ambient project fallback", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: Array<{ url: string; originRoom: string | null }> = [];
+  try {
+    await withAuthEnv({ bearer: undefined, owner: undefined, boundedTurns: "1" }, async () => {
+      rememberRoom(toRoomState({
+        room_id: "ambient-room",
+        project_id: "ambient-project",
+        joined_via: "join_room",
+      }));
+      assert.equal(getFallbackProjectId(), null);
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "exact-bearer" }));
+      globalThis.fetch = async (url, init) => {
+        requests.push({
+          url: String(url),
+          originRoom: new Headers(init?.headers).get("x-letagents-origin-room-id"),
+        });
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      };
+      const call = (roomId: string) => runWithCurrentSupervisedRoom(roomId, () => roomScopedApiCall({
+        room_id: roomId,
+        project_id: "ambient-project",
+        room_path: (id) => `/rooms/${id}/messages`,
+        project_path: (id) => `/projects/${id}/messages`,
+        options: { headers: { "X-LetAgents-Origin-Room-Id": "ambient-room" } },
+      }));
+      await Promise.all([call("source-room"), call("destination-room")]);
+    });
+    assert.deepEqual(requests.map((request) => request.originRoom).sort(), ["destination-room", "source-room"]);
+    assert.ok(requests.some((request) => request.url.endsWith("/rooms/source-room/messages")));
+    assert.ok(requests.some((request) => request.url.endsWith("/rooms/destination-room/messages")));
+    assert.equal(requests.some((request) => request.url.includes("/projects/ambient-project")), false);
+  } finally {
+    setSupervisedCredentialBorrowerForTest(null);
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a missing supervised room route cannot fall back to an ambient project route", async () => {
+  const originalFetch = globalThis.fetch;
+  let fetchCount = 0;
+  try {
+    await withAuthEnv({ bearer: undefined, owner: undefined, boundedTurns: "1" }, async () => {
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "exact-bearer" }));
+      globalThis.fetch = async () => {
+        fetchCount += 1;
+        return new Response("Not Found", { status: 404 });
+      };
+      await assert.rejects(
+        () => runWithCurrentSupervisedRoom("exact-room", () => roomScopedApiCall({
+          room_id: "exact-room",
+          project_id: "ambient-project",
+          room_path: (id) => `/rooms/${id}/messages`,
+          project_path: (id) => `/projects/${id}/messages`,
+        })),
+        (error: unknown) => error instanceof ApiError && error.status === 404,
+      );
+    });
+    assert.equal(fetchCount, 1);
+  } finally {
+    setSupervisedCredentialBorrowerForTest(null);
+    globalThis.fetch = originalFetch;
+  }
 });
 
 test("bounded supervised turns reject a fixed bearer instead of bypassing daemon rotation", async () => {
@@ -357,25 +450,33 @@ test("supervised registration and message sends use the exact context room befor
     process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
     process.env.LETAGENTS_CHAT_STORAGE = "local";
     await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
-      const register = toolHandler(registerAgentSessionTools, "register_agent_session");
-      const registration = JSON.parse((await register({})).content[0]!.text);
-      assert.equal(registration.success, true);
-      assert.equal(registration.agent_session_id, "session_exact");
-      assert.equal(registration.agent_session.room_id, "room_exact");
-      await assert.rejects(() => register({ room_id: "ambient_local_room" }), /registered for room_exact/);
+      await runWithCurrentSupervisedRoom("room_exact", async () => {
+        const register = toolHandler(registerAgentSessionTools, "register_agent_session");
+        const registration = JSON.parse((await register({})).content[0]!.text);
+        assert.equal(registration.success, true);
+        assert.equal(registration.agent_session_id, "session_exact");
+        assert.equal(registration.agent_session.room_id, "room_exact");
+        await assert.rejects(() => register({ room_id: "ambient_local_room" }), /registered for room_exact/);
 
-      const requests: string[] = [];
-      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "daemon-only" }));
-      globalThis.fetch = async (url, init) => {
-        requests.push(String(url));
-        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer daemon-only");
-        if (String(url).endsWith("/presence")) return new Response(null, { status: 204 });
-        return new Response(JSON.stringify({ id: "msg_exact", text: "sent" }), { status: 200 });
-      };
-      const send = toolHandler(registerSendMessageTool, "send_message");
-      await send({ room_id: "room_exact", text: "cloud only", agent_session_id: "session_exact" });
-      assert.ok(requests.some((url) => url.endsWith("/rooms/room_exact/messages")), "local storage cannot bypass the exact cloud route");
-      setSupervisedCredentialBorrowerForTest(null);
+        const requests: string[] = [];
+        setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "daemon-only" }));
+        globalThis.fetch = async (url, init) => {
+          requests.push(String(url));
+          assert.equal(new Headers(init?.headers).get("authorization"), "Bearer daemon-only");
+          if (String(url).endsWith("/presence")) return new Response(null, { status: 204 });
+          return new Response(JSON.stringify({ id: "msg_exact", text: "sent" }), { status: 200 });
+        };
+        const send = toolHandler(registerSendMessageTool, "send_message");
+        await send({ room_id: "room_exact", text: "cloud only", agent_session_id: "session_exact" });
+        const requestCountBeforeMismatch = requests.length;
+        await assert.rejects(
+          () => send({ room_id: "ambient_local_room", text: "blocked", agent_session_id: "session_exact" }),
+          /authorized for room_exact, not ambient_local_room/,
+        );
+        assert.equal(requests.length, requestCountBeforeMismatch, "an explicit room mismatch must fail before tool network traffic");
+        assert.ok(requests.some((url) => url.endsWith("/rooms/room_exact/messages")), "local storage cannot bypass the exact cloud route");
+        setSupervisedCredentialBorrowerForTest(null);
+      });
     });
   } finally {
     setSupervisedCredentialBorrowerForTest(null);
@@ -389,7 +490,7 @@ test("supervised registration and message sends use the exact context room befor
   }
 });
 
-test("bounded supervised auto-join never replaces the current room from ambient repository context", async () => {
+test("bounded supervised tools bind the exact daemon room without joining ambient repository context", async () => {
   const originalCwd = process.cwd();
   const originalStatePath = process.env.LETAGENTS_STATE_PATH;
   const tempDir = mkdtempSync(join(tmpdir(), "letagents-bounded-autojoin-"));
@@ -397,10 +498,35 @@ test("bounded supervised auto-join never replaces the current room from ambient 
     writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "ambient-room" }));
     process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
     process.chdir(tempDir);
-    rememberRoom(toRoomState({ room_id: "exact-supervisor-room", joined_via: "join_room", is_local: true }));
-    await withAuthEnv({ bearer: undefined, owner: "owner-secret", boundedTurns: "1" }, async () => {
+    rememberRoom(toRoomState({ room_id: "stale-or-ambient-room", joined_via: "join_room", is_local: true }));
+    await withAuthEnv({
+      bearer: undefined,
+      owner: "owner-secret",
+      boundedTurns: "1",
+      supervisorRoomId: "exact-supervisor-room",
+    }, async () => {
       await autoJoinFromContext();
-      assert.equal(roomState.currentRoom?.room_id, "exact-supervisor-room");
+      assert.equal(roomState.currentRoom?.room_id, "stale-or-ambient-room", "startup must not trust ambient or launch-time room state");
+      await runWithCurrentSupervisedRoom("exact-supervisor-room", async () => {
+        assert.equal(roomState.currentRoom?.room_id, "stale-or-ambient-room", "per-call authority must not mutate process-global room state");
+
+        const currentRoom = await getCurrentRoomPayload();
+        assert.equal(currentRoom.connected, true);
+        assert.equal(currentRoom.room_id, "exact-supervisor-room");
+        assert.equal(currentRoom.room_binding, "daemon_supervised");
+        assert.equal(currentRoom.joined_via, null);
+        assert.equal(currentRoom.is_local, null);
+        assert.equal("agent_prompt" in currentRoom, false, "an exact supervised binding must not ask the provider to join");
+
+        const checkRepo = toolHandler(registerRoomInspectionTools, "check_repo");
+        const repo = JSON.parse((await checkRepo({ cwd: tempDir })).content[0]!.text);
+        assert.equal(repo.current_room.room_id, "exact-supervisor-room");
+        assert.equal(repo.current_room.joined_via, null);
+        assert.equal(repo.current_room.is_local, null);
+        assert.equal(repo.current_room_scope, "daemon_supervised_exact_room");
+        assert.equal(repo.warning, null);
+        assert.equal(repo.join_hint, null);
+      });
     });
   } finally {
     process.chdir(originalCwd);

@@ -2,6 +2,7 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
 import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
+import { runWithCurrentSupervisedRoom } from "./runtime/room-state.js";
 import {
   completeCurrentSupervisedEffect,
   prepareCurrentSupervisedEffect,
@@ -45,11 +46,13 @@ export interface SupervisedToolFacadeDependencies {
     mutation: boolean;
   }) => Promise<PreparedSupervisedEffect>;
   completeEffect: (input: { effectId: string; result?: unknown; error?: string }) => Promise<void>;
+  withRoom: <T>(roomId: string, callback: () => T) => T;
 }
 
 const productionDependencies: SupervisedToolFacadeDependencies = {
   prepareEffect: prepareCurrentSupervisedEffect,
   completeEffect: completeCurrentSupervisedEffect,
+  withRoom: runWithCurrentSupervisedRoom,
 };
 
 export function profileAwareToolServer(
@@ -80,46 +83,48 @@ export function profileAwareToolServer(
             mcpRequestId: String(extra.requestId),
             mutation: !READ_TOOLS.has(name),
           });
-          if (prepared.state === "completed") return prepared.result as CallToolResult;
-          if (prepared.state === "uncertain") {
-            return instruction("This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.", {
-              code: "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN",
-              effect_id: prepared.effectId,
-              detail: prepared.error,
-            });
-          }
-          if (prepared.action === "use_final_answer") {
-            return instruction(supervisedProvider === "cursor"
-              ? "Do not send the activating room reply with a message tool. Keep working, then record the one public answer with complete_room_turn; Cursor's aggregate final text is live evidence only."
-              : "Do not send the activating room reply with a message tool. Return it as your final answer; the daemon will publish it exactly once.", {
-              code: "USE_FINAL_ANSWER",
-              source_message_id: prepared.sourceMessageId,
-            });
-          }
-          if (prepared.action === "room_move_prepared") {
-            return instruction(supervisedProvider === "cursor"
-              ? "The room move is prepared. Finish the work, then call complete_room_turn with the public response; the daemon will publish that proposal and then move the agent."
-              : "The room move is prepared. Finish this turn normally; the daemon will publish the activating response and then move the agent.", {
-              code: "ROOM_MOVE_PREPARED",
-              destination_room: prepared.destinationRoom,
-            });
-          }
-          let result: CallToolResult;
-          try {
-            result = await callback(...call) as CallToolResult;
-          } catch (error) {
-            try {
-              await dependencies.completeEffect({ effectId: prepared.effectId, error: error instanceof Error ? error.message : String(error) });
-            } catch {
-              // Preserve the callback error. An unacknowledged journal entry
-              // remains executing, which is safer than repeating the effect.
+          return dependencies.withRoom(prepared.roomId, async () => {
+            if (prepared.state === "completed") return prepared.result as CallToolResult;
+            if (prepared.state === "uncertain") {
+              return instruction("This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.", {
+                code: "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN",
+                effect_id: prepared.effectId,
+                detail: prepared.error,
+              });
             }
-            throw error;
-          }
-          // Completion transport is deliberately outside the callback catch.
-          // A reporting failure must never relabel a successful action failed.
-          await dependencies.completeEffect({ effectId: prepared.effectId, result });
-          return result;
+            if (prepared.action === "use_final_answer") {
+              return instruction(supervisedProvider === "cursor"
+                ? "Do not send the activating room reply with a message tool. Keep working, then record the one public answer with complete_room_turn; Cursor's aggregate final text is live evidence only."
+                : "Do not send the activating room reply with a message tool. Return it as your final answer; the daemon will publish it exactly once.", {
+                code: "USE_FINAL_ANSWER",
+                source_message_id: prepared.sourceMessageId,
+              });
+            }
+            if (prepared.action === "room_move_prepared") {
+              return instruction(supervisedProvider === "cursor"
+                ? "The room move is prepared. Finish the work, then call complete_room_turn with the public response; the daemon will publish that proposal and then move the agent."
+                : "The room move is prepared. Finish this turn normally; the daemon will publish the activating response and then move the agent.", {
+                code: "ROOM_MOVE_PREPARED",
+                destination_room: prepared.destinationRoom,
+              });
+            }
+            let result: CallToolResult;
+            try {
+              result = await callback(...call) as CallToolResult;
+            } catch (error) {
+              try {
+                await dependencies.completeEffect({ effectId: prepared.effectId, error: error instanceof Error ? error.message : String(error) });
+              } catch {
+                // Preserve the callback error. An unacknowledged journal entry
+                // remains executing, which is safer than repeating the effect.
+              }
+              throw error;
+            }
+            // Completion transport is deliberately outside the callback catch.
+            // A reporting failure must never relabel a successful action failed.
+            await dependencies.completeEffect({ effectId: prepared.effectId, result });
+            return result;
+          });
         };
         return (target.tool as (...args: unknown[]) => unknown).call(target, name, ...registration.slice(0, -1), wrapped);
       };
