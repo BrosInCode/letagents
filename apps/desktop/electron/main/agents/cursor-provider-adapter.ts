@@ -880,6 +880,13 @@ async function waitAtTestStartupBarrier(stage) {
   const releasePath = path.join(testStartupBarrierPath, "release");
   while (!finalizing && !authorityRetiring && !existsSync(releasePath)) await wait(5);
 }
+function recordCausalTerminalError(detail) {
+  if (exitEvidence) return;
+  exitEvidence = { type: "error", error: detail };
+  // The wrapper-only IPC fallback keeps live diagnostics deterministic even
+  // if emergency group reaping prevents the durable terminal rename.
+  try { if (process.send) process.send({ type: "terminal_error", error: detail }); } catch {}
+}
 function forwardBoundedStderr(source, label) {
   source.on("data", (value) => {
     const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
@@ -894,7 +901,7 @@ function forwardBoundedStderr(source, label) {
     if (chunk.length <= remaining) return;
     stderrBudgetExceeded = true;
     const detail = label + " exceeded the supervised stderr byte budget.";
-    if (!exitEvidence) exitEvidence = { type: "error", error: detail };
+    recordCausalTerminalError(detail);
     exitCode = 1;
     if (native) void beginFatalReaping();
     else void finishNotStarted(detail);
@@ -927,6 +934,7 @@ function exceedStreamBudget(detail) {
   streamContractComplete = false;
   pendingLine = "";
   emitProtocolError(detail);
+  recordCausalTerminalError(detail);
   void beginFatalReaping();
 }
 function inspectLine(line) {
@@ -1158,9 +1166,7 @@ function armEvidenceDrainDeadline() {
 function failStreamPersistence(error) {
   streamContractComplete = false;
   if (stateFd !== null) { try { closeSync(stateFd); } catch {} stateFd = null; }
-  if (!exitEvidence) {
-    exitEvidence = { type: "error", error: "Cursor durable stream persistence failed: " + (error && error.message ? error.message : String(error)) };
-  }
+  recordCausalTerminalError("Cursor durable stream persistence failed: " + (error && error.message ? error.message : String(error)));
   exitCode = 1;
   void beginFatalReaping();
 }
@@ -1175,12 +1181,10 @@ function failMcpCapabilityAttestation(detail) {
     void beginTurnAuthorityRetirement();
     return;
   }
-  if (!exitEvidence) exitEvidence = { type: "error", error: detail };
-  // The private durable terminal remains authoritative for recovery. Also
-  // report the causal failure over the wrapper-only IPC channel so the live
-  // caller can explain it even if emergency group reaping prevents the
-  // terminal rename from completing.
-  try { if (process.send) process.send({ type: "terminal_error", error: detail }); } catch {}
+  // The private durable terminal remains authoritative for recovery. The
+  // wrapper-only IPC fallback remains live-only and cannot be forged by native
+  // Cursor or the MCP runtime because neither inherits the IPC descriptor.
+  recordCausalTerminalError(detail);
   exitCode = 1;
   if (!native) {
     void finishNotStarted(detail, true);
@@ -2404,8 +2408,15 @@ async function start() {
     // A containment or protocol failure that initiated reaping is the causal
     // terminal evidence. The resulting native exit must not erase that exact,
     // actionable reason with a generic exit code.
-    if (!exitEvidence) exitEvidence = { type: "exit", code, signal };
-    exitCode = code === 0 ? 0 : (typeof code === "number" ? code : 1);
+    if (!exitEvidence) {
+      exitEvidence = { type: "exit", code, signal };
+      exitCode = code === 0 ? 0 : (typeof code === "number" ? code : 1);
+    } else if (exitEvidence.type === "error") {
+      // A provider that handles our fatal TERM and exits zero must not convert
+      // the wrapper's already-recorded protocol/containment failure into a
+      // successful or user-stopped attempt lifecycle.
+      exitCode = 1;
+    }
     // Descendants may hold stdout open. Reaping starts at native exit, while
     // terminal publication waits for close so the final result bytes drain.
     void beginFatalReaping();
@@ -4884,10 +4895,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
         }
         throw retirementError;
       }
-      throw new Error(handle.protocolError
-        ? "cursor-agent init violated the session contract; the turn was fenced."
-        : liveFailureDetail
-          ? `Cursor supervised startup failed: ${liveFailureDetail}`
+      throw new Error(liveFailureDetail
+        ? `Cursor supervised startup failed: ${liveFailureDetail}`
+        : handle.protocolError
+          ? "cursor-agent init violated the session contract; the turn was fenced."
           : "cursor-agent exited before reporting its stream-json init; the turn never became observable.");
     }
     if (handle.protocolError) {

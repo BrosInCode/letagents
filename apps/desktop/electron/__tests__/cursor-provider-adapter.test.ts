@@ -5100,18 +5100,22 @@ test("the production Cursor wrapper fences aggregate byte and event floods", asy
   const floods = [
     {
       name: "aggregate-bytes",
+      error: /bounded aggregate stream-json byte budget/,
       source: `const line = "x".repeat(64 * 1024) + "\\n";
 for (let index = 0; index < 130; index += 1) process.stdout.write(line);
 setInterval(() => {}, 1_000);`,
     },
     {
       name: "event-count",
+      error: /bounded stream-json event budget/,
       source: `for (let index = 0; index < 4_100; index += 1) process.stdout.write("x\\n");
 setInterval(() => {}, 1_000);`,
     },
     {
       name: "stderr-bytes",
-      source: `process.stderr.write("e".repeat(300 * 1024));
+      error: /native process exceeded the supervised stderr byte budget/,
+      source: `process.on("SIGTERM", () => process.exit(0));
+process.stderr.write("e".repeat(300 * 1024));
 setInterval(() => {}, 1_000);`,
     },
   ];
@@ -5149,7 +5153,7 @@ ${flood.source}
           checkpointTurnStarted: async () => {},
           checkpointProviderState: async () => {},
         })),
-        /session contract|exited before reporting its stream-json init/,
+        flood.error,
         flood.name,
       );
       assert.equal(handle.observedState(), "failed", flood.name);
