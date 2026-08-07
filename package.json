@@ -31,7 +31,7 @@
     "prepublishOnly": "npm run build",
     "dev:api": "tsx src/api/server.ts",
     "dev:mcp": "tsx src/mcp/server.ts",
-    "dev:desktop": "npm ci --prefix apps/desktop && npm --prefix apps/desktop run dev"
+    "dev:desktop": "node scripts/ensure-desktop-dependencies.mjs && npm --prefix apps/desktop run dev"
   },
   "keywords": [
     "mcp",
