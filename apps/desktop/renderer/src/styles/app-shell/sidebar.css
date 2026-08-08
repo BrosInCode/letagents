@@ -50,6 +50,12 @@
   justify-content: space-between;
 }
 
+.sidebar-topbar-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
 .sidebar-collapse-button {
   display: inline-grid;
   place-items: center;
@@ -66,7 +72,8 @@
     color var(--duration-fast) var(--ease-out);
 }
 
-.sidebar-search-button {
+.sidebar-search-button,
+.sidebar-topbar-action {
   display: inline-grid;
   place-items: center;
   width: 32px;
@@ -83,9 +90,15 @@
     transform var(--duration-fast) var(--ease-out);
 }
 
-.sidebar-search-button svg {
+.sidebar-search-button svg,
+.sidebar-topbar-action svg {
   width: 17px;
   height: 17px;
+}
+
+.sidebar-topbar-action:disabled {
+  opacity: 0.45;
+  cursor: default;
 }
 
 .sidebar-search-button[data-active="true"] {
@@ -94,15 +107,39 @@
 }
 
 .sidebar-collapse-button:active,
-.sidebar-search-button:active {
+.sidebar-search-button:active,
+.sidebar-topbar-action:not(:disabled):active {
   transform: scale(0.94);
 }
 
 .sidebar-collapse-button:focus-visible,
 .sidebar-search-button:focus-visible,
+.sidebar-topbar-action:focus-visible,
 .sidebar-cta:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--text) 44%, transparent);
   outline-offset: 2px;
+}
+
+.sidebar-selection-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  padding-left: 6px;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.sidebar-selection-summary svg {
+  width: 16px;
+  height: 16px;
+  color: color-mix(in srgb, var(--sidebar-selection) 78%, white);
+}
+
+.sidebar-selection-summary strong {
+  color: var(--text);
+  font-variant-numeric: tabular-nums;
+  font-weight: 760;
 }
 
 .sidebar-room-search {
@@ -284,6 +321,75 @@
 
 .sidebar-actions {
   display: grid;
+}
+
+.sidebar-selection-scope {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 38px;
+  padding: 0 11px;
+  border: 1px solid rgba(255, 255, 255, 0.055);
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.028);
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+  font-weight: 650;
+  text-align: left;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.sidebar-selection-scope:not(:disabled):active {
+  transform: scale(0.985);
+}
+
+.sidebar-selection-scope:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 44%, transparent);
+  outline-offset: 2px;
+}
+
+.sidebar-selection-scope:disabled {
+  opacity: 0.45;
+}
+
+.sidebar-selection-scope small {
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-selection-scope-icon,
+.sidebar-selection-indicator,
+.sidebar-child-selection-indicator {
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.23);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.025);
+  color: white;
+  transition:
+    background-color 140ms var(--ease-out),
+    border-color 140ms var(--ease-out),
+    transform 140ms var(--ease-out);
+}
+
+.sidebar-selection-scope-icon {
+  width: 17px;
+  height: 17px;
+}
+
+:is(.sidebar-selection-scope-icon, .sidebar-selection-indicator, .sidebar-child-selection-indicator)[data-selected="true"] {
+  border-color: var(--sidebar-selection);
+  background: var(--sidebar-selection);
+  transform: scale(1.03);
+}
+
+:is(.sidebar-selection-scope-icon, .sidebar-selection-indicator, .sidebar-child-selection-indicator) svg {
+  width: 11px;
+  height: 11px;
+  stroke-width: 3;
 }
 
 .sidebar-room-sections {
@@ -519,6 +625,76 @@
   border-top: 1px solid rgba(255, 255, 255, 0.055);
 }
 
+.sidebar-selection-footer {
+  padding-top: 8px;
+}
+
+.sidebar-selection-toolbar {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid rgba(255, 255, 255, 0.075);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.035);
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.2);
+}
+
+.sidebar-selection-toolbar button {
+  position: relative;
+  display: grid;
+  place-items: center;
+  gap: 3px;
+  min-width: 0;
+  min-height: 48px;
+  padding: 6px 2px 5px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary);
+  font-size: 0.61rem;
+  font-weight: 680;
+  transition:
+    background-color var(--duration-fast) var(--ease-out),
+    color var(--duration-fast) var(--ease-out),
+    transform var(--duration-fast) var(--ease-out);
+}
+
+.sidebar-selection-toolbar button > svg {
+  width: 16px;
+  height: 16px;
+}
+
+.sidebar-selection-toolbar button small {
+  position: absolute;
+  top: 3px;
+  right: 4px;
+  display: inline-grid;
+  place-items: center;
+  min-width: 15px;
+  height: 15px;
+  padding: 0 3px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-secondary);
+  font-size: 0.55rem;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+
+.sidebar-selection-toolbar button:disabled {
+  opacity: 0.33;
+}
+
+.sidebar-selection-toolbar button:not(:disabled):active {
+  transform: scale(0.94);
+}
+
+.sidebar-selection-toolbar button:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--sidebar-selection) 65%, white);
+  outline-offset: -2px;
+}
+
 .sidebar-settings-row {
   min-height: 48px;
   margin-top: 6px;
@@ -569,6 +745,7 @@
 @media (hover: hover) and (pointer: fine) {
   .sidebar-collapse-button:hover,
   .sidebar-search-button:hover,
+  .sidebar-topbar-action:hover,
   .project-toggle:hover {
     background: var(--sidebar-hover);
     color: var(--text);
@@ -579,10 +756,17 @@
   }
 
   .sidebar-cta:hover,
+  .sidebar-selection-scope:hover,
   .sidebar-settings-row:hover,
   .sidebar-section-header:hover {
     transform: none;
     border-color: transparent;
+    background: var(--sidebar-hover);
+    color: var(--text);
+  }
+
+
+  .sidebar-selection-toolbar button:not(:disabled):hover {
     background: var(--sidebar-hover);
     color: var(--text);
   }
@@ -615,7 +799,13 @@
 
   .sidebar-collapse-button,
   .sidebar-search-button,
+  .sidebar-topbar-action,
   .sidebar-cta,
+  .sidebar-selection-scope,
+  .sidebar-selection-scope-icon,
+  .sidebar-selection-indicator,
+  .sidebar-child-selection-indicator,
+  .sidebar-selection-toolbar button,
   .pinned-room,
   .project-row,
   .room-row,

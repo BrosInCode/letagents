@@ -4,6 +4,7 @@ import { buildRoomPinMutation } from "./sidebar-rooms";
 
 export type SidebarRoomMenuActionId =
   | "open-room"
+  | "select-room"
   | "mark-room-read"
   | "pin-room"
   | "rename-room"
@@ -23,6 +24,7 @@ export type SidebarRoomMenuItem = {
 
 export type SidebarBackgroundMenuActionId =
   | "new-room"
+  | "select-rooms"
   | "set-projects-collapsed";
 
 export type SidebarBackgroundMenuItem = {
@@ -43,6 +45,9 @@ export function buildSidebarRoomContextMenuItems(input: {
   const navigation: SidebarRoomMenuItem[] = [];
   if (selectable) {
     navigation.push({ id: "open-room", label: "Open room" });
+  }
+  if (selectable || buildRoomPinMutation(entry)) {
+    navigation.push({ id: "select-room", label: "Select room" });
   }
   if (entry.hasUnread && selectable) {
     navigation.push({ id: "mark-room-read", label: "Mark as read" });
@@ -105,7 +110,10 @@ export function buildSidebarBackgroundMenuItems(input: {
   hasProjects: boolean;
   allProjectsCollapsed: boolean;
 }): SidebarBackgroundMenuItem[][] {
-  const groups: SidebarBackgroundMenuItem[][] = [[{ id: "new-room", label: "New room..." }]];
+  const groups: SidebarBackgroundMenuItem[][] = [[
+    { id: "new-room", label: "New room..." },
+    { id: "select-rooms", label: "Select rooms" },
+  ]];
   if (input.hasProjects) {
     groups.push([{
       id: "set-projects-collapsed",

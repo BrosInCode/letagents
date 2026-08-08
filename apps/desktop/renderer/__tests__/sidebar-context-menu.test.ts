@@ -75,6 +75,7 @@ describe("sidebar room context menu items", () => {
     });
     assert.deepEqual(menuIds(groups), [
       "open-room",
+      "select-room",
       "pin-room",
       "rename-room",
       "copy-room-url",
@@ -141,6 +142,7 @@ describe("sidebar room context menu items", () => {
     assert.ok(!menuIds(synthetic).includes("pin-room"));
     assert.ok(!menuIds(synthetic).includes("open-room"));
     assert.ok(!menuIds(synthetic).includes("copy-room-url"));
+    assert.ok(!menuIds(synthetic).includes("select-room"));
   });
 
   it("offers pinning when a pin target exists even if the merged source is not account", () => {
@@ -151,6 +153,7 @@ describe("sidebar room context menu items", () => {
       projectCollapsed: false,
     });
     assert.ok(menuIds(current).includes("pin-room"));
+    assert.ok(menuIds(current).includes("select-room"));
   });
 
   it("offers unpin on a synthetic git parent whose pin state is aggregated from branches", () => {
@@ -245,10 +248,10 @@ describe("sidebar background context menu items", () => {
     const expanded = buildSidebarBackgroundMenuItems({ hasProjects: true, allProjectsCollapsed: false });
     const collapsed = buildSidebarBackgroundMenuItems({ hasProjects: true, allProjectsCollapsed: true });
     const empty = buildSidebarBackgroundMenuItems({ hasProjects: false, allProjectsCollapsed: true });
-    assert.deepEqual(expanded.flat().map((item) => item.id), ["new-room", "set-projects-collapsed"]);
+    assert.deepEqual(expanded.flat().map((item) => item.id), ["new-room", "select-rooms", "set-projects-collapsed"]);
     assert.equal(expanded.flat().at(-1)?.label, "Collapse all rooms");
     assert.equal(collapsed.flat().at(-1)?.label, "Expand all rooms");
-    assert.deepEqual(empty.flat().map((item) => item.id), ["new-room"]);
+    assert.deepEqual(empty.flat().map((item) => item.id), ["new-room", "select-rooms"]);
   });
 });
 
