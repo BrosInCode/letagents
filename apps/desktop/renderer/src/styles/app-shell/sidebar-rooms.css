@@ -158,6 +158,43 @@
   background: rgba(255, 255, 255, 0.085);
 }
 
+.project-room-overflow-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid transparent;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+  font-weight: 620;
+  text-align: left;
+  transition:
+    background-color var(--duration-fast) ease,
+    color var(--duration-fast) ease;
+}
+
+.project-room-overflow-toggle svg {
+  width: 13px;
+  height: 13px;
+  flex: 0 0 auto;
+  transform: rotate(0deg);
+  transition: transform var(--duration-fast) var(--ease-out);
+}
+
+.project-room-overflow-toggle[data-expanded="true"] svg {
+  transform: rotate(90deg);
+}
+
+.project-room-overflow-toggle:focus-visible {
+  border-color: color-mix(in srgb, var(--text) 28%, transparent);
+  outline: 2px solid color-mix(in srgb, var(--text) 10%, transparent);
+  outline-offset: -2px;
+  color: var(--text-secondary);
+}
+
 .sidebar-pinned-section {
   display: grid;
   flex: 0 1 auto;
@@ -346,5 +383,17 @@
   .project-row[data-active="true"]:hover,
   .room-focus[data-active="true"]:hover {
     background: color-mix(in srgb, var(--sidebar-selected) 78%, white 3%);
+  }
+
+  .project-room-overflow-toggle:hover {
+    background: var(--sidebar-hover);
+    color: var(--text-secondary);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .project-room-overflow-toggle,
+  .project-room-overflow-toggle svg {
+    transition: none;
   }
 }

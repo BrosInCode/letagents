@@ -244,8 +244,10 @@
         :repo-status="repoStatus"
         :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
         :tasks="tasks"
+        :on-focus-room-concluded="onFocusRoomConcluded"
         @open-focus-room="emit('open-focus-room', $event)"
         @refresh-room="emit('refresh-room')"
+        @request-focus-room-conclusion="emit('request-focus-room-conclusion', $event)"
       />
 
       <RentAnAgentView
@@ -357,6 +359,7 @@ import type {
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
+import type { FocusRoomConcludedEvent } from "../../../domain/focus-room-conclusion";
 import {
   isLocalGitRoom,
   roomSupportsGitHubIntegration,
@@ -515,6 +518,7 @@ const props = defineProps<{
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
+  onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
 const { pushActionToast } = useDesktopActionToasts();
 const notifiedManagedAgentFailures = new Set<string>();
@@ -526,6 +530,7 @@ const emit = defineEmits<{
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [snapshot?: DesktopRoomSnapshot];
   "open-focus-room": [roomIdentifier: string];
+  "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
   "choose-worktree": [rootPath: string];

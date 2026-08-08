@@ -80,7 +80,7 @@
       </form>
 
       <form
-        v-if="room.focusStatus !== 'concluded'"
+        v-if="room.focusStatus !== 'concluded' && !resultSubmitted"
         class="focus-room-form"
         data-testid="focus-room-closeout-form"
         @submit.prevent="shareFocusRoomResult"
@@ -131,7 +131,7 @@
 
       <section v-else class="focus-room-outcome" data-testid="focus-room-conclusion">
         <h4>Shared result</h4>
-        <p>{{ room.conclusionSummary || "No result summary was recorded." }}</p>
+        <p>{{ sharedResultSummary }}</p>
       </section>
     </section>
 
@@ -340,11 +340,10 @@
                   v-if="selectedFocusRoom.focusStatus !== 'concluded'"
                   class="focus-room-secondary"
                   type="button"
-                  :disabled="closingFocusKey === focusKeyFor(selectedFocusRoom)"
                   @click="closeFocusRoom(selectedFocusRoom)"
                 >
                   <CheckCircle2 :size="15" aria-hidden="true" />
-                  {{ closingFocusKey === focusKeyFor(selectedFocusRoom) ? "Completing..." : "Mark complete" }}
+                  Mark complete
                 </button>
                 <button
                   v-if="canArchiveFocusRooms"
@@ -470,6 +469,15 @@
 import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
+import {
+  buildFocusRoomConclusionInput,
+  canSubmitFocusRoomConclusion,
+  createDefaultFocusRoomConclusionDetails,
+  focusRoomBlockerStateOptions as blockerStateOptions,
+  focusRoomParentTaskNextOptions as parentTaskNextOptions,
+  focusRoomReviewStateOptions as reviewStateOptions,
+  type FocusRoomConcludedEvent,
+} from "../../../domain/focus-room-conclusion";
 import { shouldShowRepoEnvironmentForRoom } from "../../../domain/repo-environment";
 import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import { formatShortDateTime } from "../../../domain/time";
@@ -480,13 +488,9 @@ import { desktopIpc } from "../../../ipc/index.js";
 import type {
   DesktopFocusActivityScope,
   DesktopGitRoomInfo,
-  DesktopFocusRoomBlockerState,
   DesktopFocusGitHubEventRouting,
   DesktopFocusParentVisibility,
-  DesktopFocusRoomConclusionDetails,
   DesktopFocusRoomInfo,
-  DesktopFocusRoomParentTaskNextAction,
-  DesktopFocusRoomReviewState,
   DesktopFocusRoomSettings,
   DesktopRoomInfo,
   DesktopTaskSummary,
@@ -533,37 +537,19 @@ const githubRoutingOptions: Array<Option<DesktopFocusGitHubEventRouting>> = [
   { value: "off", label: "Off" },
 ];
 
-const reviewStateOptions: Array<Option<DesktopFocusRoomReviewState>> = [
-  { value: "reviewed", label: "Reviewed" },
-  { value: "needs_review", label: "Needs review" },
-  { value: "not_required", label: "Not required" },
-];
-
-const blockerStateOptions: Array<Option<DesktopFocusRoomBlockerState>> = [
-  { value: "none", label: "None" },
-  { value: "resolved", label: "Resolved" },
-  { value: "blocked", label: "Blocked" },
-];
-
-const parentTaskNextOptions: Array<Option<DesktopFocusRoomParentTaskNextAction>> = [
-  { value: "keep_open", label: "Keep open" },
-  { value: "move_to_review", label: "Move to review" },
-  { value: "mark_blocked", label: "Mark blocked" },
-  { value: "mark_done", label: "Mark done" },
-  { value: "follow_up", label: "Follow-up" },
-];
-
 const props = defineProps<{
   room: DesktopRoomInfo;
   focusRooms: DesktopFocusRoomInfo[];
   repoStatus: RepoStatus;
   gitRoomMatchesActiveRepo: boolean;
   tasks: DesktopTaskSummary[];
+  onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
   "open-focus-room": [roomIdentifier: string];
   "refresh-room": [];
+  "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
 }>();
 
 const activeTab = ref<FocusRoomTab>("open");
@@ -575,21 +561,15 @@ const creatingAdHoc = ref(false);
 const creatingTaskFocus = ref(false);
 const savingSettings = ref(false);
 const sharingResult = ref(false);
+const resultSubmitted = ref(false);
 const archivingFocusKey = ref<string | null>(null);
-const closingFocusKey = ref<string | null>(null);
 const actionFeedback = ref<string | null>(null);
 const actionFeedbackState = ref<FeedbackState>("info");
 const focusRoomContextMenu = ref<FocusRoomContextMenu | null>(null);
 let feedbackTimer: number | null = null;
 const resultSummary = ref("");
 const settingsDraft = reactive<DesktopFocusRoomSettings>({ ...DEFAULT_SETTINGS });
-const closeoutDetails = reactive<DesktopFocusRoomConclusionDetails>({
-  artifact: "",
-  review_state: "needs_review",
-  blocker_state: "none",
-  parent_task_next: "keep_open",
-  next_owner: "",
-});
+const closeoutDetails = reactive(createDefaultFocusRoomConclusionDetails());
 
 const showRepoStatusDetails = computed(() =>
   shouldShowRepoEnvironmentForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
@@ -664,11 +644,18 @@ const settingsChanged = computed(() => {
 });
 
 const canShareResult = computed(() => {
-  if (props.room.kind !== "focus" || props.room.focusStatus === "concluded") return false;
-  if (!resultSummary.value.trim()) return false;
-  if (!props.room.sourceTaskId) return true;
-  return Boolean(closeoutDetails.artifact.trim() && closeoutDetails.next_owner.trim());
+  if (
+    props.room.kind !== "focus"
+    || props.room.focusStatus === "concluded"
+    || resultSubmitted.value
+  ) return false;
+  return canSubmitFocusRoomConclusion(resultSummary.value, props.room.sourceTaskId, closeoutDetails);
 });
+
+const sharedResultSummary = computed(() =>
+  props.room.conclusionSummary || (resultSubmitted.value ? resultSummary.value.trim() : "")
+  || "No result summary was recorded."
+);
 
 const canArchiveFocusRooms = computed(() => props.room.role === "admin");
 
@@ -776,6 +763,13 @@ watch(
     resultSummary.value = summary || "";
   },
   { immediate: true },
+);
+
+watch(
+  () => props.room.identifier,
+  () => {
+    resultSubmitted.value = false;
+  },
 );
 
 watch(
@@ -900,10 +894,10 @@ async function copyContextFocusRoomUrl(): Promise<void> {
   if (focusRoom) await copyFocusRoomUrl(focusRoom);
 }
 
-async function closeContextFocusRoom(): Promise<void> {
+function closeContextFocusRoom(): void {
   const focusRoom = focusRoomContextMenu.value?.room;
   closeFocusRoomContextMenu();
-  if (focusRoom) await closeFocusRoom(focusRoom);
+  if (focusRoom) closeFocusRoom(focusRoom);
 }
 
 async function archiveContextFocusRoom(): Promise<void> {
@@ -973,49 +967,11 @@ async function saveSettings(): Promise<void> {
   }
 }
 
-async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
+function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): void {
   const focusKey = focusKeyFor(focusRoom);
   const parentRoomId = focusRoom.parentRoomId || props.room.identifier;
-  if (!focusKey || !parentRoomId || closingFocusKey.value) return;
-
-  if (focusRoom.sourceTaskId && props.room.kind !== "focus") {
-    openFocusRoom(focusRoom.identifier);
-    setFeedback("Open the focus room to add artifact, review, blocker, and owner details before marking it complete.", "info");
-    return;
-  }
-
-  const summary = window.prompt(
-    `Mark ${focusRoom.displayName} complete with a short result summary:`,
-    focusRoom.conclusionSummary || "Closed manually.",
-  )?.trim();
-  if (!summary) return;
-
-  closingFocusKey.value = focusKey;
-  setFeedback(null);
-  try {
-    await desktopIpc.room.concludeFocusRoom(
-      parentRoomId,
-      focusKey,
-      summary,
-      focusRoom.sourceTaskId
-        ? {
-            artifact: "Manual close",
-            review_state: "not_required",
-            blocker_state: "none",
-            parent_task_next: "keep_open",
-            next_owner: "Unassigned",
-          }
-        : null,
-    );
-    activeTab.value = "concluded";
-    selectedFocusRoomId.value = focusRoom.roomId;
-    emit("refresh-room");
-    setFeedback("Focus room marked complete.", "success");
-  } catch (error) {
-    setFeedback(errorMessage(error, "Focus room could not be marked complete."), "error");
-  } finally {
-    closingFocusKey.value = null;
-  }
+  if (!focusKey || !parentRoomId) return;
+  emit("request-focus-room-conclusion", focusRoom);
 }
 
 async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
@@ -1054,23 +1010,36 @@ async function shareFocusRoomResult(): Promise<void> {
   }
   sharingResult.value = true;
   setFeedback(null);
+  const input = buildFocusRoomConclusionInput(
+    resultSummary.value,
+    props.room.sourceTaskId,
+    closeoutDetails,
+  );
   try {
     await desktopIpc.room.concludeFocusRoom(
       parentRoomId,
       focusKey,
-      resultSummary.value.trim(),
-      props.room.sourceTaskId
-        ? {
-            ...closeoutDetails,
-            artifact: closeoutDetails.artifact.trim(),
-            next_owner: closeoutDetails.next_owner.trim(),
-          }
-        : null,
+      input.summary,
+      input.details,
     );
-    emit("refresh-room");
-    setFeedback("Result shared.", "success");
   } catch (error) {
+    sharingResult.value = false;
     setFeedback(errorMessage(error, "Result could not be shared."), "error");
+    return;
+  }
+
+  resultSubmitted.value = true;
+  try {
+    await props.onFocusRoomConcluded?.({
+      focusRoomIdentifier: props.room.identifier,
+      parentRoomIdentifier: parentRoomId,
+      displayName: props.room.displayName,
+    });
+  } catch (error) {
+    setFeedback(
+      errorMessage(error, "Result was shared, but the room list could not be refreshed."),
+      "error",
+    );
   } finally {
     sharingResult.value = false;
   }

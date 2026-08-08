@@ -182,9 +182,9 @@ export function buildSidebarProjectGroups(input: {
     roomName: input.currentParentRoom.title,
     parent: input.currentParentRoom,
     branchRooms: gitRoomBranchChildFromCurrentEntry(input.currentParentRoom),
-    focusRooms: input.focusRooms.map((focusRoom) =>
-      desktopFocusRoomToEntry(focusRoom, input.currentParentRoom.roomIdentifier)
-    ),
+    focusRooms: input.focusRooms
+      .filter(isOpenFocusRoom)
+      .map((focusRoom) => desktopFocusRoomToEntry(focusRoom, input.currentParentRoom.roomIdentifier)),
   });
 
   const groupedGitRooms = groupAccountGitRoomsByRepository(input.accountRooms);
@@ -206,6 +206,20 @@ export function buildSidebarProjectGroups(input: {
   }
 
   return sortSidebarProjectGroups(groups);
+}
+
+export function findSidebarRoomEntryByIdentifier(
+  projectEntries: readonly ProjectGroup[],
+  roomIdentifier: string | null | undefined,
+): RoomEntry | null {
+  const identifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!identifier) return null;
+  for (const project of projectEntries) {
+    const entry = [project.parent, ...project.branchRooms, ...project.focusRooms]
+      .find((candidate) => normalizeRoomIdentifier(candidate.roomIdentifier) === identifier);
+    if (entry) return entry;
+  }
+  return null;
 }
 
 function mergeRoomEntries(current: RoomEntry[], incoming: RoomEntry[]): RoomEntry[] {
@@ -250,6 +264,8 @@ function mergeRoomEntry(current: RoomEntry, incoming: RoomEntry): RoomEntry {
     description: preferIncomingDisplay ? incoming.description : current.description,
     gitRoom: incoming.gitRoom ?? current.gitRoom ?? null,
     focusKey: incoming.focusKey ?? current.focusKey ?? null,
+    focusStatus: incoming.focusStatus ?? current.focusStatus ?? null,
+    sourceTaskId: incoming.sourceTaskId ?? current.sourceTaskId ?? null,
     parentRoomIdentifier: incoming.parentRoomIdentifier ?? current.parentRoomIdentifier ?? null,
     suggestedAction: incoming.suggestedAction ?? current.suggestedAction ?? null,
     currentWorkspace: sameRoom
@@ -368,9 +384,9 @@ function accountRoomToGroup(room: DesktopAccountRoomEntry): ProjectGroup {
     roomName: parent.title,
     parent,
     branchRooms: [],
-    focusRooms: room.focusRooms.map((focusRoom) =>
-      accountFocusRoomToEntry(focusRoom, null, room.roomIdentifier)
-    ),
+    focusRooms: room.focusRooms
+      .filter(isOpenFocusRoom)
+      .map((focusRoom) => accountFocusRoomToEntry(focusRoom, null, room.roomIdentifier)),
   };
 }
 
@@ -400,9 +416,11 @@ function accountGitRoomToGroup(input: {
     .filter((room) => !defaultRoom || room.roomIdentifier !== defaultRoom.roomIdentifier)
     .map((room) => accountGitRoomToBranchEntry(room, input.currentRoomIdentifier));
   const focusRooms = sortedRooms.flatMap((room) =>
-    room.focusRooms.map((focusRoom) =>
-      accountFocusRoomToEntry(focusRoom, input.currentRoomIdentifier, room.roomIdentifier)
-    )
+    room.focusRooms
+      .filter(isOpenFocusRoom)
+      .map((focusRoom) =>
+        accountFocusRoomToEntry(focusRoom, input.currentRoomIdentifier, room.roomIdentifier)
+      )
   );
 
   return {
@@ -447,13 +465,24 @@ function accountFocusRoomToEntry(
 }
 
 function focusRoomLineage(
-  room: { focusKey: string | null; sourceTaskId: string | null; parentRoomId: string | null },
+  room: {
+    focusKey: string | null;
+    focusStatus: "active" | "concluded" | null;
+    sourceTaskId: string | null;
+    parentRoomId: string | null;
+  },
   parentRoomIdentifier: string | null,
-): Pick<RoomEntry, "focusKey" | "parentRoomIdentifier"> {
+): Pick<RoomEntry, "focusKey" | "focusStatus" | "sourceTaskId" | "parentRoomIdentifier"> {
   return {
     focusKey: room.focusKey || room.sourceTaskId,
+    focusStatus: room.focusStatus,
+    sourceTaskId: room.sourceTaskId,
     parentRoomIdentifier: room.parentRoomId || parentRoomIdentifier,
   };
+}
+
+export function isOpenFocusRoom(room: { focusStatus: "active" | "concluded" | null }): boolean {
+  return room.focusStatus !== "concluded";
 }
 
 function accountRoomToEntry(room: DesktopAccountRoomEntry): RoomEntry {
