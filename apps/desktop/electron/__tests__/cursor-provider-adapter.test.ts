@@ -4002,6 +4002,381 @@ function request(path, contentType, body, authorization = "Bearer " + value("--a
   }
 });
 
+test("the supervised agent proxy holds an HTTP/2 Run that races ahead of MCP attestation, then admits it", async () => {
+  // Cursor opens its model connection at startup, before its MCP handshake has
+  // finished. The proxy must HOLD that first Run until live attestation
+  // completes and then admit it -- not reject it, which is what made Cursor
+  // retry to death (the StoneForge incident). The fake fires the Run before
+  // attesting, so a regression to immediate rejection surfaces as a 503.
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-hold-admit-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const executable = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  let upstreamAuthorization = "";
+  let upstreamBody = "";
+  const upstream = createHttp2Server();
+  upstream.on("stream", (stream, headers) => {
+    upstreamAuthorization = String(headers.authorization ?? "");
+    stream.on("data", (chunk) => { upstreamBody += chunk.toString("utf8"); });
+    stream.once("end", () => {
+      stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+      stream.end("held-upstream-ok");
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", () => { upstream.removeListener("error", rejectListen); resolveListen(); });
+  });
+  const upstreamAddress = upstream.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+  const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
+  try {
+    writeFileSync(executable, `#!/usr/bin/env node
+const http2 = require("node:http2");
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+const client = http2.connect(value("--agent-endpoint"));
+function request(body) {
+  return new Promise((resolve, reject) => {
+    const stream = client.request({ ":method": "POST", ":path": "/agent.v1.AgentService/Run", "content-type": "application/connect+proto", authorization: "Bearer " + value("--auth-token") });
+    const chunks = [];
+    let status = 0;
+    stream.once("response", (headers) => { status = Number(headers[":status"] || 0); });
+    stream.on("data", (chunk) => chunks.push(chunk));
+    stream.once("error", reject);
+    stream.once("end", () => resolve({ status, body: Buffer.concat(chunks).toString("utf8") }));
+    stream.end(body);
+  });
+}
+(async () => {
+  // Fire the Run first; only then complete attestation. The Run must stay
+  // pending (held) across that gap and resolve 200 only AFTER attestation --
+  // resolving before it would mean it was admitted without attestation.
+  let attested = false;
+  let resolvedBeforeAttest = false;
+  const held = request("held-request-body");
+  held.then(() => { if (!attested) resolvedBeforeAttest = true; }).catch(() => {});
+  const connector = await attestFixtureMcp();
+  attested = true;
+  const admitted = await held;
+  const replay = await request("replay");
+  client.close();
+  if (resolvedBeforeAttest) process.exit(90);
+  if (admitted.status !== 200 || admitted.body !== "held-upstream-ok" || replay.status !== 503) process.exit(88);
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-hold-admit" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "hold-admit-ok", session_id: "sess-hold-admit" }) + "\\n");
+  detachFixtureMcp(connector);
+})().catch(() => process.exit(89));
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) { return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint }); },
+      },
+      supervisedProfileFactory: (input) => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ workAttemptId: "wa-cursor-hold-admit", cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "hold-admit" })));
+    assert.equal(result.text, "hold-admit-ok");
+    assert.equal(upstreamAuthorization, "Bearer test-provider-authorization");
+    assert.equal(upstreamBody, "held-request-body");
+  } finally {
+    await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a held Run whose MCP attestation never completes fails with the exact causal reason and is never forwarded upstream", async () => {
+  // With the model Run held rather than rejected, Cursor no longer dies in a
+  // retry storm; the turn instead fails when the capability deadline elapses,
+  // recording that exact attestation reason (not the generic connector-ended
+  // message). Critically, a held Run whose attestation FAILS must never reach
+  // the model backend: the recording upstream must see zero requests. A
+  // regression that fail-opens the held release path would forward it here and
+  // trip that assertion (the code-only mutation this test is designed to kill).
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-held-timeout-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const executable = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  let upstreamHits = 0;
+  const upstream = createHttp2Server();
+  upstream.on("stream", (stream) => {
+    upstreamHits += 1;
+    stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+    stream.end("must-never-be-reached");
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", () => { upstream.removeListener("error", rejectListen); resolveListen(); });
+  });
+  const upstreamAddress = upstream.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+  const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
+  try {
+    writeFileSync(executable, `#!/usr/bin/env node
+const http = require("node:http");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+const body = "never-attested";
+const req = http.request(new URL("/agent.v1.AgentService/Run", value("--agent-endpoint")), {
+  method: "POST",
+  headers: { "content-type": "application/connect+proto", authorization: "Bearer " + value("--auth-token"), "content-length": Buffer.byteLength(body) },
+}, () => {});
+req.on("error", () => {});
+req.end(body);
+setInterval(() => {}, 1000);
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({
+            ...input,
+            testAgentUpstreamEndpoint,
+            testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+            testMcpCapabilityTimeoutMs: 400,
+          });
+        },
+      },
+      supervisedProfileFactory: (input) => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ workAttemptId: "wa-cursor-held-timeout", cwd: root }));
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "held-timeout" }))),
+      (error: unknown) => {
+        const message = String((error as Error)?.message ?? error);
+        assert.match(message, /did not attest complete_room_turn before model authority/);
+        assert.doesNotMatch(message, /connector ended/);
+        return true;
+      },
+    );
+    assert.equal(upstreamHits, 0, "a held Run whose attestation failed must never be forwarded to the model backend");
+  } finally {
+    await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("two concurrent supervised agents each hold and admit their own Run independently", async () => {
+  // The hold state is per-wrapper-process, so concurrent turns must not
+  // interfere: each holds its own first Run and admits it on its own
+  // attestation, with no shared admission slot or cross-turn deadlock.
+  const buildAgent = async (label: string) => {
+    const root = mkdtempSync(join(tmpdir(), `letagents-cursor-concurrent-${label}-`));
+    const homeDir = join(root, "home");
+    const configDir = join(root, "config");
+    const executable = join(root, "fake-cursor-agent");
+    mkdirSync(configDir, { recursive: true });
+    mkdirSync(homeDir, { recursive: true });
+    let upstreamBody = "";
+    const upstream = createHttp2Server();
+    upstream.on("stream", (stream) => {
+      stream.on("data", (chunk) => { upstreamBody += chunk.toString("utf8"); });
+      stream.once("end", () => {
+        stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+        stream.end(`concurrent-upstream-${label}`);
+      });
+    });
+    await new Promise<void>((resolveListen, rejectListen) => {
+      upstream.once("error", rejectListen);
+      upstream.listen(0, "127.0.0.1", () => { upstream.removeListener("error", rejectListen); resolveListen(); });
+    });
+    const upstreamAddress = upstream.address();
+    assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+    const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
+    writeFileSync(executable, `#!/usr/bin/env node
+const http = require("node:http");
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+function request(body) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(new URL("/agent.v1.AgentService/Run", value("--agent-endpoint")), {
+      method: "POST",
+      headers: { "content-type": "application/connect+proto", authorization: "Bearer " + value("--auth-token"), "content-length": Buffer.byteLength(body) },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.once("end", () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.once("error", reject);
+    req.end(body);
+  });
+}
+(async () => {
+  const held = request("concurrent-body-${label}");
+  const connector = await attestFixtureMcp();
+  const admitted = await held;
+  if (admitted.status !== 200 || admitted.body !== "concurrent-upstream-${label}") process.exit(70);
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-concurrent-${label}" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "concurrent-${label}-ok", session_id: "sess-concurrent-${label}" }) + "\\n");
+  detachFixtureMcp(connector);
+})().catch(() => process.exit(71));
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) { return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint }); },
+      },
+      supervisedProfileFactory: (input) => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ workAttemptId: `wa-cursor-concurrent-${label}`, cwd: root }));
+    return {
+      root,
+      upstream,
+      run: () => withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: `concurrent-${label}` }))),
+    };
+  };
+  const agentA = await buildAgent("a");
+  const agentB = await buildAgent("b");
+  try {
+    const [resultA, resultB] = await Promise.all([agentA.run(), agentB.run()]);
+    assert.equal(resultA.text, "concurrent-a-ok");
+    assert.equal(resultB.text, "concurrent-b-ok");
+  } finally {
+    await new Promise<void>((resolveClose) => agentA.upstream.close(() => resolveClose()));
+    await new Promise<void>((resolveClose) => agentB.upstream.close(() => resolveClose()));
+    rmSync(agentA.root, { recursive: true, force: true });
+    rmSync(agentB.root, { recursive: true, force: true });
+  }
+});
+
+test("the supervised agent proxy rejects a boundary-violating request immediately, never holding it for attestation", async () => {
+  // The attestation hold is only for the one exact, authorized Run. A request
+  // outside that boundary -- wrong path or a bearer that is not the wrapper's
+  // placeholder -- must be rejected at once, never granted the grace window.
+  // The fake awaits those rejections BEFORE attesting: if such a request were
+  // held, the await would block until the deadline and the turn would fail, so
+  // reaching attestation and a 200 proves the immediate, hold-free rejection.
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-boundary-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const executable = join(root, "fake-cursor-agent");
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  let upstreamBody = "";
+  const upstream = createHttp2Server();
+  upstream.on("stream", (stream) => {
+    stream.on("data", (chunk) => { upstreamBody += chunk.toString("utf8"); });
+    stream.once("end", () => {
+      stream.respond({ ":status": 200, "content-type": "application/connect+proto" });
+      stream.end("boundary-upstream-ok");
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    upstream.once("error", rejectListen);
+    upstream.listen(0, "127.0.0.1", () => { upstream.removeListener("error", rejectListen); resolveListen(); });
+  });
+  const upstreamAddress = upstream.address();
+  assert.ok(upstreamAddress && typeof upstreamAddress !== "string");
+  const testAgentUpstreamEndpoint = `http://127.0.0.1:${upstreamAddress.port}`;
+  try {
+    writeFileSync(executable, `#!/usr/bin/env node
+const http = require("node:http");
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function value(flag) { const index = args.indexOf(flag); return index >= 0 ? args[index + 1] : null; }
+function request(path, body, authorization = "Bearer " + value("--auth-token")) {
+  return new Promise((resolve, reject) => {
+    const req = http.request(new URL(path, value("--agent-endpoint")), {
+      method: "POST",
+      headers: { "content-type": "application/connect+proto", authorization, "content-length": Buffer.byteLength(body) },
+    }, (response) => {
+      const chunks = [];
+      response.on("data", (chunk) => chunks.push(chunk));
+      response.once("end", () => resolve({ status: response.statusCode, body: Buffer.concat(chunks).toString("utf8") }));
+    });
+    req.once("error", reject);
+    req.end(body);
+  });
+}
+(async () => {
+  // These resolve only if rejected immediately; if held, the awaits would hang.
+  const wrongPath = await request("/agent.v1.AgentService/Other", "x");
+  const badBearer = await request("/agent.v1.AgentService/Run", "x", "Bearer not-the-placeholder");
+  if (wrongPath.status !== 503 || badBearer.status !== 503) process.exit(74);
+  const connector = await attestFixtureMcp();
+  const accepted = await request("/agent.v1.AgentService/Run", "boundary-request-body");
+  if (accepted.status !== 200 || accepted.body !== "boundary-upstream-ok") process.exit(75);
+  process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-boundary" }) + "\\n");
+  process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "boundary-ok", session_id: "sess-boundary" }) + "\\n");
+  detachFixtureMcp(connector);
+})().catch(() => process.exit(76));
+`);
+    chmodSync(executable, 0o700);
+    const adapter = new CursorProviderAdapter({
+      cursorBin: executable,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) { return defaultLaunchTurn({ ...input, testAgentUpstreamEndpoint }); },
+      },
+      supervisedProfileFactory: (input) => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ workAttemptId: "wa-cursor-boundary", cwd: root }));
+    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "boundary" })));
+    assert.equal(result.text, "boundary-ok");
+    assert.equal(upstreamBody, "boundary-request-body");
+  } finally {
+    await new Promise<void>((resolveClose) => upstream.close(() => resolveClose()));
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("the supervised native Cursor sandbox blocks late hook reads", {
   skip: process.platform !== "darwin",
 }, async () => {
