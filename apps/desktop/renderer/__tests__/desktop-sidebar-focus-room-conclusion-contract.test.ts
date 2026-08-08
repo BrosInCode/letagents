@@ -10,6 +10,8 @@ function source(relativePath: string): string {
 const appSource = source("../src/App.vue");
 const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.vue");
 const dialogSource = source("../src/components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue");
+const roomDetailsSource = source("../src/components/desktop/content/RoomDetailsView.vue");
+const roomShellSource = source("../src/components/desktop/content/DesktopRoomShell.vue");
 const settingsSource = source("../src/composables/useDesktopAccountRoomSettings.ts");
 const mainFocusRoomsSource = source("../../electron/main/rooms/focus-rooms.ts");
 
@@ -42,6 +44,32 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(settingsSource, /return \{ ok: false, error \}/);
     assert.match(appSource, /sidebarFocusRoomConclusionError\.value = result\.error/);
     assert.match(appSource, /sidebarFocusRoomConclusionReturnFocusId\.value = parent\?\.id \|\| null/);
+  });
+
+  it("routes every Room Details closeout through shared input and a full sidebar refresh", () => {
+    assert.doesNotMatch(roomDetailsSource, /window\.prompt/);
+    assert.doesNotMatch(roomDetailsSource, /artifact: "Manual close"/);
+    assert.match(roomDetailsSource, /emit\("request-focus-room-conclusion", focusRoom\)/);
+    assert.match(roomDetailsSource, /emit\("focus-room-concluded", \{/);
+    assert.match(roomShellSource, /@request-focus-room-conclusion="emit\('request-focus-room-conclusion', \$event\)"/);
+    assert.match(roomShellSource, /@focus-room-concluded="emit\('focus-room-concluded', \$event\)"/);
+    assert.match(appSource, /@focus-room-concluded="handleRoomDetailsFocusRoomConcluded"/);
+    assert.match(
+      appSource,
+      /async function handleRoomDetailsFocusRoomConcluded[\s\S]*?await refresh\(\)[\s\S]*?handleSidebarEntrySelected\(parentAfterRefresh\)/,
+    );
+  });
+
+  it("announces a dialog result once and only after its exit animation", () => {
+    const concludeAction = settingsSource.match(
+      /async function concludeSidebarFocusRoom[\s\S]*?(?=\n  async function togglePinSidebarRoom)/,
+    )?.[0] || "";
+    assert.ok(concludeAction);
+    assert.doesNotMatch(concludeAction, /reportSidebarRoomAction/);
+    assert.match(dialogSource, /@after-leave="handleAfterLeave"/);
+    assert.match(dialogSource, /emit\("after-leave"\)/);
+    assert.match(appSource, /@after-leave="handleSidebarFocusRoomConclusionAfterLeave"/);
+    assert.match(appSource, /if \(message\) pushActionToast\(message, "success"\)/);
   });
 
   it("identifies the IPC mutation as an authenticated desktop-human write", () => {

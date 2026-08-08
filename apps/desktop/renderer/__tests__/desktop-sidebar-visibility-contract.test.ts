@@ -30,6 +30,15 @@ describe("desktop sidebar visibility contract", () => {
     assert.match(sidebarSource, /aria-label="Hide sidebar"/);
   });
 
+  it("moves focus to the reveal control when the sidebar becomes inert", () => {
+    assert.match(appSource, /const hidingSidebar = sidebarMode\.value !== "hidden"/);
+    assert.match(appSource, /await nextTick\(\)/);
+    assert.match(
+      appSource,
+      /\[data-testid="room-sidebar-reveal-button"\][\s\S]*?\[data-testid="sidebar-reveal-button"\][\s\S]*?\.focus\(\{ preventScroll: true \}\)/,
+    );
+  });
+
   it("animates the sidebar and its layout as one interruptible transition", () => {
     assert.match(appSource, /<Transition name="desktop-sidebar">/);
     assert.match(appSource, /v-show="!isSettingsSurface && sidebarMode !== 'hidden'"/);

@@ -246,6 +246,8 @@
         :tasks="tasks"
         @open-focus-room="emit('open-focus-room', $event)"
         @refresh-room="emit('refresh-room')"
+        @request-focus-room-conclusion="emit('request-focus-room-conclusion', $event)"
+        @focus-room-concluded="emit('focus-room-concluded', $event)"
       />
 
       <RentAnAgentView
@@ -357,6 +359,7 @@ import type {
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
+import type { FocusRoomConcludedEvent } from "../../../domain/focus-room-conclusion";
 import {
   isLocalGitRoom,
   roomSupportsGitHubIntegration,
@@ -526,6 +529,8 @@ const emit = defineEmits<{
   "task-updated": [task: DesktopTaskSummary];
   "refresh-room": [snapshot?: DesktopRoomSnapshot];
   "open-focus-room": [roomIdentifier: string];
+  "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
+  "focus-room-concluded": [event: FocusRoomConcludedEvent];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
   "choose-worktree": [rootPath: string];

@@ -15,6 +15,12 @@ export type FocusRoomConclusionInput = {
   details: DesktopFocusRoomConclusionDetails | null;
 };
 
+export type FocusRoomConcludedEvent = {
+  focusRoomIdentifier: string;
+  parentRoomIdentifier: string;
+  displayName: string;
+};
+
 export const focusRoomReviewStateOptions: ReadonlyArray<ConclusionOption<DesktopFocusRoomReviewState>> = [
   { value: "reviewed", label: "Reviewed" },
   { value: "needs_review", label: "Needs review" },

@@ -150,6 +150,8 @@
           @refresh-room="handleRoomShellRefresh"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           @open-focus-room="openFocusRoomFromRoomsTab"
+          @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
+          @focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
           @choose-worktree="openWorktreeForAgent"
@@ -262,6 +264,7 @@
       :fallback-focus-entry-id="sidebarFocusRoomConclusionReturnFocusId"
       @close="closeSidebarFocusRoomConclusion"
       @submit="submitSidebarFocusRoomConclusion"
+      @after-leave="handleSidebarFocusRoomConclusionAfterLeave"
     />
 
     <div
@@ -296,6 +299,7 @@ import type {
   DesktopAppInfo,
   DesktopAuthStatus,
   DesktopChatStorageSettings,
+  DesktopFocusRoomInfo,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   DesktopRoomLatestMessage,
@@ -318,7 +322,10 @@ import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardin
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
 import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
-import type { FocusRoomConclusionInput } from "./domain/focus-room-conclusion";
+import type {
+  FocusRoomConcludedEvent,
+  FocusRoomConclusionInput,
+} from "./domain/focus-room-conclusion";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -410,7 +417,7 @@ const {
   activeEntry,
   collapsedProjects,
   currentParentRoom,
-  cycleSidebar,
+  cycleSidebar: toggleSidebarMode,
   focusRooms,
   getAuthRoomIdentifier,
   openRoomSnapshot,
@@ -459,6 +466,7 @@ const sidebarFocusRoomConclusionTarget = ref<RoomEntry | null>(null);
 const sidebarFocusRoomConclusionParent = ref<RoomEntry | null>(null);
 const sidebarFocusRoomConclusionReturnFocusId = ref<string | null>(null);
 const sidebarFocusRoomConclusionError = ref<string | null>(null);
+const sidebarFocusRoomConclusionPendingSuccess = ref<string | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
@@ -467,6 +475,17 @@ const desktopShellStyle = computed(() => ({
   "--sidebar-min-width": `${sidebarMinWidth}px`,
   "--sidebar-max-width": `${sidebarMaxWidth}px`,
 }));
+
+async function cycleSidebar(): Promise<void> {
+  const hidingSidebar = sidebarMode.value !== "hidden";
+  toggleSidebarMode();
+  if (!hidingSidebar) return;
+
+  await nextTick();
+  document.querySelector<HTMLElement>(
+    '[data-testid="room-sidebar-reveal-button"], [data-testid="sidebar-reveal-button"]',
+  )?.focus({ preventScroll: true });
+}
 
 const selectedRoomWithProjectContext = computed(() => {
   const room = selectedRoomInfo.value;
@@ -887,6 +906,41 @@ function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
   handleSidebarEntrySelected(fallbackEntry);
 }
 
+async function handleRoomDetailsFocusRoomConcluded(event: FocusRoomConcludedEvent): Promise<void> {
+  const focusRoomIdentifier = normalizeRoomIdentifier(event.focusRoomIdentifier);
+  const parentRoomIdentifier = normalizeRoomIdentifier(event.parentRoomIdentifier);
+  const targetWasActive = activeEntry.value.type === "room"
+    && normalizeRoomIdentifier(activeEntry.value.roomIdentifier) === focusRoomIdentifier;
+  const parentBeforeRefresh = projectEntries.value
+    .map((project) => project.parent)
+    .find((parent) => normalizeRoomIdentifier(parent.roomIdentifier) === parentRoomIdentifier)
+    || null;
+
+  let refreshError: unknown = null;
+  try {
+    await refresh();
+  } catch (error) {
+    refreshError = error;
+  }
+
+  if (targetWasActive) {
+    const parentAfterRefresh = projectEntries.value
+      .map((project) => project.parent)
+      .find((parent) => normalizeRoomIdentifier(parent.roomIdentifier) === parentRoomIdentifier)
+      || parentBeforeRefresh;
+    if (parentAfterRefresh) handleSidebarEntrySelected(parentAfterRefresh);
+  }
+
+  if (refreshError) {
+    pushActionToast(
+      `${event.displayName} concluded, but the room list could not be refreshed.`,
+      "error",
+    );
+    return;
+  }
+  pushActionToast(`${event.displayName} concluded.`, "success");
+}
+
 function seedReadMarkersForKnownRooms(): void {
   let nextMarkers = readRoomMessageIds.value;
   let changed = false;
@@ -1109,12 +1163,37 @@ function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
   )?.parent || null;
   sidebarFocusRoomConclusionReturnFocusId.value = entry.id;
   sidebarFocusRoomConclusionError.value = null;
+  sidebarFocusRoomConclusionPendingSuccess.value = null;
+}
+
+function openRoomDetailsFocusRoomConclusion(focusRoom: DesktopFocusRoomInfo): void {
+  const focusRoomIdentifier = normalizeRoomIdentifier(focusRoom.identifier || focusRoom.roomId);
+  const parentRoomIdentifier = normalizeRoomIdentifier(focusRoom.parentRoomId);
+  const entry = projectEntries.value
+    .flatMap((project) => project.focusRooms)
+    .find((candidate) => {
+      if (
+        focusRoomIdentifier
+        && normalizeRoomIdentifier(candidate.roomIdentifier) === focusRoomIdentifier
+      ) return true;
+      return Boolean(
+        focusRoom.focusKey
+        && candidate.focusKey === focusRoom.focusKey
+        && normalizeRoomIdentifier(candidate.parentRoomIdentifier) === parentRoomIdentifier
+      );
+    });
+  if (!entry) {
+    pushActionToast("This focus room is no longer available to conclude.", "error");
+    return;
+  }
+  openSidebarFocusRoomConclusion(entry);
 }
 
 function closeSidebarFocusRoomConclusion(): void {
   if (sidebarFocusRoomConclusionBusy.value) return;
   sidebarFocusRoomConclusionTarget.value = null;
   sidebarFocusRoomConclusionError.value = null;
+  sidebarFocusRoomConclusionPendingSuccess.value = null;
 }
 
 async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput): Promise<void> {
@@ -1131,10 +1210,17 @@ async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput)
   }
 
   sidebarFocusRoomConclusionReturnFocusId.value = parent?.id || null;
+  sidebarFocusRoomConclusionPendingSuccess.value = `${target.title || "Focus room"} concluded.`;
   sidebarFocusRoomConclusionTarget.value = null;
   if (targetWasActive && parent) {
     handleSidebarEntrySelected(parent);
   }
+}
+
+function handleSidebarFocusRoomConclusionAfterLeave(): void {
+  const message = sidebarFocusRoomConclusionPendingSuccess.value;
+  sidebarFocusRoomConclusionPendingSuccess.value = null;
+  if (message) pushActionToast(message, "success");
 }
 
 const {

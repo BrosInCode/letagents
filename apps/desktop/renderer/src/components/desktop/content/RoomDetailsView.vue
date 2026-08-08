@@ -340,11 +340,10 @@
                   v-if="selectedFocusRoom.focusStatus !== 'concluded'"
                   class="focus-room-secondary"
                   type="button"
-                  :disabled="closingFocusKey === focusKeyFor(selectedFocusRoom)"
                   @click="closeFocusRoom(selectedFocusRoom)"
                 >
                   <CheckCircle2 :size="15" aria-hidden="true" />
-                  {{ closingFocusKey === focusKeyFor(selectedFocusRoom) ? "Completing..." : "Mark complete" }}
+                  Mark complete
                 </button>
                 <button
                   v-if="canArchiveFocusRooms"
@@ -477,6 +476,7 @@ import {
   focusRoomBlockerStateOptions as blockerStateOptions,
   focusRoomParentTaskNextOptions as parentTaskNextOptions,
   focusRoomReviewStateOptions as reviewStateOptions,
+  type FocusRoomConcludedEvent,
 } from "../../../domain/focus-room-conclusion";
 import { shouldShowRepoEnvironmentForRoom } from "../../../domain/repo-environment";
 import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
@@ -548,6 +548,8 @@ const props = defineProps<{
 const emit = defineEmits<{
   "open-focus-room": [roomIdentifier: string];
   "refresh-room": [];
+  "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
+  "focus-room-concluded": [event: FocusRoomConcludedEvent];
 }>();
 
 const activeTab = ref<FocusRoomTab>("open");
@@ -560,7 +562,6 @@ const creatingTaskFocus = ref(false);
 const savingSettings = ref(false);
 const sharingResult = ref(false);
 const archivingFocusKey = ref<string | null>(null);
-const closingFocusKey = ref<string | null>(null);
 const actionFeedback = ref<string | null>(null);
 const actionFeedbackState = ref<FeedbackState>("info");
 const focusRoomContextMenu = ref<FocusRoomContextMenu | null>(null);
@@ -876,10 +877,10 @@ async function copyContextFocusRoomUrl(): Promise<void> {
   if (focusRoom) await copyFocusRoomUrl(focusRoom);
 }
 
-async function closeContextFocusRoom(): Promise<void> {
+function closeContextFocusRoom(): void {
   const focusRoom = focusRoomContextMenu.value?.room;
   closeFocusRoomContextMenu();
-  if (focusRoom) await closeFocusRoom(focusRoom);
+  if (focusRoom) closeFocusRoom(focusRoom);
 }
 
 async function archiveContextFocusRoom(): Promise<void> {
@@ -949,49 +950,11 @@ async function saveSettings(): Promise<void> {
   }
 }
 
-async function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
+function closeFocusRoom(focusRoom: DesktopFocusRoomInfo): void {
   const focusKey = focusKeyFor(focusRoom);
   const parentRoomId = focusRoom.parentRoomId || props.room.identifier;
-  if (!focusKey || !parentRoomId || closingFocusKey.value) return;
-
-  if (focusRoom.sourceTaskId && props.room.kind !== "focus") {
-    openFocusRoom(focusRoom.identifier);
-    setFeedback("Open the focus room to add artifact, review, blocker, and owner details before marking it complete.", "info");
-    return;
-  }
-
-  const summary = window.prompt(
-    `Mark ${focusRoom.displayName} complete with a short result summary:`,
-    focusRoom.conclusionSummary || "Closed manually.",
-  )?.trim();
-  if (!summary) return;
-
-  closingFocusKey.value = focusKey;
-  setFeedback(null);
-  try {
-    await desktopIpc.room.concludeFocusRoom(
-      parentRoomId,
-      focusKey,
-      summary,
-      focusRoom.sourceTaskId
-        ? {
-            artifact: "Manual close",
-            review_state: "not_required",
-            blocker_state: "none",
-            parent_task_next: "keep_open",
-            next_owner: "Unassigned",
-          }
-        : null,
-    );
-    activeTab.value = "concluded";
-    selectedFocusRoomId.value = focusRoom.roomId;
-    emit("refresh-room");
-    setFeedback("Focus room marked complete.", "success");
-  } catch (error) {
-    setFeedback(errorMessage(error, "Focus room could not be marked complete."), "error");
-  } finally {
-    closingFocusKey.value = null;
-  }
+  if (!focusKey || !parentRoomId) return;
+  emit("request-focus-room-conclusion", focusRoom);
 }
 
 async function archiveFocusRoom(focusRoom: DesktopFocusRoomInfo): Promise<void> {
@@ -1042,8 +1005,11 @@ async function shareFocusRoomResult(): Promise<void> {
       input.summary,
       input.details,
     );
-    emit("refresh-room");
-    setFeedback("Result shared.", "success");
+    emit("focus-room-concluded", {
+      focusRoomIdentifier: props.room.identifier,
+      parentRoomIdentifier: parentRoomId,
+      displayName: props.room.displayName,
+    });
   } catch (error) {
     setFeedback(errorMessage(error, "Result could not be shared."), "error");
   } finally {

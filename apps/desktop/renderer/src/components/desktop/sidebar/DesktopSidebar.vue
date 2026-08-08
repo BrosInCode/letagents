@@ -230,6 +230,7 @@
                   class="project-room-overflow-toggle"
                   :data-expanded="projectRoomListExpanded(project.id)"
                   :aria-expanded="projectRoomListExpanded(project.id)"
+                  :aria-controls="projectChildListId(project.id)"
                   type="button"
                   @click="toggleProjectRoomOverflow(project.id)"
                 >
@@ -363,6 +364,7 @@
                   class="project-room-overflow-toggle"
                   :data-expanded="projectRoomListExpanded(project.id)"
                   :aria-expanded="projectRoomListExpanded(project.id)"
+                  :aria-controls="projectChildListId(project.id)"
                   type="button"
                   @click="toggleProjectRoomOverflow(project.id)"
                 >

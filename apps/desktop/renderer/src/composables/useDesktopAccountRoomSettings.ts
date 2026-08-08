@@ -192,7 +192,6 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   ): Promise<{ ok: true } | { ok: false; error: string }> {
     if (!entry.focusKey || !entry.parentRoomIdentifier || entry.focusStatus === "concluded") {
       const error = "This focus room is no longer available to conclude.";
-      reportSidebarRoomAction(error, "error");
       return { ok: false, error };
     }
 
@@ -206,11 +205,9 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         input.details,
       );
       await options.refresh();
-      reportSidebarRoomAction(`${displayName} concluded.`, "success");
       return { ok: true };
     } catch (caught) {
       const error = caught instanceof Error ? caught.message : `Could not conclude ${displayName}.`;
-      reportSidebarRoomAction(error, "error");
       return { ok: false, error };
     } finally {
       settingsRoomActionBusyKey.value = null;

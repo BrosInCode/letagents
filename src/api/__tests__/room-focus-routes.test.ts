@@ -1,16 +1,9 @@
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomFocusRoutes, toFocusRoomListResponse } = await import("../routes/rooms/focus.js");
-import type { GitRoomBinding, Project } from "../db.js";
-
-const focusRouteSource = readFileSync(
-  fileURLToPath(new URL("../routes/rooms/focus.ts", import.meta.url)),
-  "utf8",
-);
+import type { GitRoomBinding, Project, Task } from "../db.js";
 
 function createDeps() {
   const unused = async () => {
@@ -18,6 +11,10 @@ function createDeps() {
   };
 
   return {
+    getFocusRoomByKey: unused,
+    getTaskById: unused,
+    getTaskOwnershipState: unused,
+    concludeFocusRoom: unused,
     resolveCanonicalRoomRequestId: unused,
     resolveRoomOrReply: unused,
     requireParticipant: unused,
@@ -78,6 +75,125 @@ function gitRoomBinding(roomId: string): GitRoomBinding {
     created_at: "2026-06-28T10:00:00.000Z",
     updated_at: "2026-06-28T10:00:00.000Z",
   };
+}
+
+function task(): Task {
+  return {
+    id: "task_1",
+    room_id: "room_1",
+    title: "Conclude the focus room",
+    description: null,
+    status: "in_progress",
+    assignee: "Worker | Owner's agent | Agent",
+    assignee_agent_key: "owner/worker",
+    created_by: "Owner",
+    source_message_id: null,
+    pr_url: null,
+    workflow_artifacts: [],
+    workflow_refs: [],
+    created_at: "2026-08-08T10:00:00.000Z",
+    updated_at: "2026-08-08T10:00:00.000Z",
+  };
+}
+
+const conclusionDetails = {
+  artifact: "PR #886",
+  review_state: "reviewed" as const,
+  blocker_state: "none" as const,
+  parent_task_next: "mark_done" as const,
+  next_owner: "Owner",
+};
+
+function responseRecorder() {
+  return {
+    statusCode: 200,
+    body: null as unknown,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(payload: unknown) {
+      this.body = payload;
+      return this;
+    },
+  };
+}
+
+function workerPrincipal() {
+  return {
+    bearer_id: "agent_bearer_1",
+    bearer_generation: 1,
+    capabilities: ["coordination.self_write"],
+    room_id: "room_1",
+    agent_session_id: "agent_session_1",
+    actor_label: "Worker | Owner's agent | Agent",
+    agent_key: "owner/worker",
+    agent_instance_id: "instance_1",
+    session_kind: "worker" as const,
+    runtime: "codex",
+    display_name: "Worker",
+    owner_label: "Owner",
+    ide_label: "Agent",
+    repo_branch: null,
+    expires_at: "2026-08-08T12:00:00.000Z",
+  };
+}
+
+type ConclusionHandler = (req: unknown, res: unknown) => Promise<void>;
+
+function registerConclusionHandler(overrides: Record<string, unknown> = {}): ConclusionHandler {
+  let concludeHandler: ConclusionHandler | null = null;
+  const app = {
+    get() {},
+    patch() {},
+    delete() {},
+    post(path: RegExp, handler: ConclusionHandler) {
+      if (path.toString().includes("conclude")) concludeHandler = handler;
+    },
+  };
+  const focusRoom = project({
+    id: "focus_1",
+    kind: "focus",
+    parent_room_id: "room_1",
+    focus_key: "task_1",
+    source_task_id: "task_1",
+    focus_status: "active",
+  });
+  const taskRecord = task();
+  const deps = {
+    ...createDeps(),
+    getFocusRoomByKey: async () => focusRoom,
+    getTaskById: async () => taskRecord,
+    getTaskOwnershipState: async () => ({
+      status: taskRecord.status,
+      assignee: taskRecord.assignee,
+      assignee_agent_key: taskRecord.assignee_agent_key,
+    }),
+    concludeFocusRoom: async () => ({
+      room: project({
+        ...focusRoom,
+        focus_status: "concluded",
+        conclusion_summary: "Done",
+        conclusion_details: conclusionDetails,
+      }),
+      task: taskRecord,
+      updated: false,
+    }),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => project({ id: "room_1" }),
+    requireParticipant: async () => true,
+    resolveProjectRole: async () => "participant" as const,
+    toRoomResponse: (room: Project) => ({ room_id: room.id, focus_status: room.focus_status }),
+    normalizeOptionalString: (value: unknown) => typeof value === "string" && value.trim() ? value.trim() : null,
+    enforceFocusRoomConclusion: async () => ({ kind: "allow" as const }),
+    emitProjectMessage: async () => null,
+    formatFocusRoomConclusionMessage: () => "Focus room concluded.",
+    ...overrides,
+  };
+
+  registerRoomFocusRoutes(app as never, deps as never);
+  assert.ok(concludeHandler);
+  return concludeHandler;
 }
 
 test("registerRoomFocusRoutes preserves canonical Focus Room route order", () => {
@@ -195,54 +311,118 @@ test("focus room archive route requires an admin guard", async () => {
   assert.equal(requireParticipantCalled, false);
 });
 
-test("desktop human focus room conclusions bypass worker identity and lease enforcement", async () => {
-  let concludeHandler: ((req: unknown, res: unknown) => Promise<void>) | null = null;
+test("marked desktop-human focus room conclusions skip agent coordination", async () => {
   let coordinationCalled = false;
-  const app = {
-    get() {},
-    patch() {},
-    delete() {},
-    post(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
-      if (path.toString().includes("conclude")) concludeHandler = handler;
-    },
-  };
-  const deps = {
-    ...createDeps(),
-    resolveCanonicalRoomRequestId: async () => "room_1",
-    resolveRoomOrReply: async () => ({ id: "room_1" }),
-    requireParticipant: async () => true,
+  let concludeCalled = false;
+  const concludeHandler = registerConclusionHandler({
     enforceFocusRoomConclusion: async () => {
       coordinationCalled = true;
       return { kind: "allow" as const };
     },
-  };
+    concludeFocusRoom: async () => {
+      concludeCalled = true;
+      return {
+        room: project({
+          id: "focus_1",
+          kind: "focus",
+          parent_room_id: "room_1",
+          focus_key: "task_1",
+          source_task_id: "task_1",
+          focus_status: "concluded",
+          conclusion_summary: "Done",
+          conclusion_details: conclusionDetails,
+        }),
+        task: task(),
+        updated: false,
+      };
+    },
+  });
+  const res = responseRecorder();
 
-  registerRoomFocusRoutes(app as never, deps as never);
-  assert.ok(concludeHandler);
-
-  let statusCode = 200;
-  let body: unknown = null;
   await concludeHandler(
     {
       authKind: "owner_token",
       headers: { "x-letagents-desktop-client": "1" },
       params: { 0: "room_1", 1: "focus_1" },
-      body: {},
+      body: { summary: "Done", conclusion_details: conclusionDetails },
     },
-    {
-      status(code: number) {
-        statusCode = code;
-        return this;
-      },
-      json(payload: unknown) {
-        body = payload;
-      },
-    },
+    res,
   );
 
-  assert.equal(statusCode, 400);
-  assert.deepEqual(body, { error: "summary is required" });
+  assert.equal(res.statusCode, 200);
   assert.equal(coordinationCalled, false);
-  assert.match(focusRouteSource, /const desktopHumanWrite = isDesktopHumanWrite\(req, requestBody\);/);
-  assert.match(focusRouteSource, /task && taskOwnership && !desktopHumanWrite/);
+  assert.equal(concludeCalled, true);
+});
+
+test("unmarked owner-token focus room conclusions still require worker identity", async () => {
+  let coordinationCalled = false;
+  let concludeCalled = false;
+  const concludeHandler = registerConclusionHandler({
+    enforceFocusRoomConclusion: async () => {
+      coordinationCalled = true;
+      return { kind: "allow" as const };
+    },
+    concludeFocusRoom: async () => {
+      concludeCalled = true;
+      return null;
+    },
+  });
+  const res = responseRecorder();
+
+  await concludeHandler(
+    {
+      authKind: "owner_token",
+      headers: {},
+      params: { 0: "room_1", 1: "focus_1" },
+      body: { summary: "Done", conclusion_details: conclusionDetails },
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 403);
+  assert.deepEqual(res.body, {
+    error: "Registered worker session is required for agent write actions.",
+  });
+  assert.equal(coordinationCalled, false);
+  assert.equal(concludeCalled, false);
+});
+
+test("agent-session focus room conclusions still enforce task coordination", async () => {
+  let enforcementInput: Record<string, unknown> | null = null;
+  let concludeCalled = false;
+  const concludeHandler = registerConclusionHandler({
+    enforceFocusRoomConclusion: async (input: Record<string, unknown>) => {
+      enforcementInput = input;
+      return {
+        kind: "deny" as const,
+        code: "coordination_lease_required",
+        error: "An active work lease is required.",
+      };
+    },
+    concludeFocusRoom: async () => {
+      concludeCalled = true;
+      return null;
+    },
+  });
+  const res = responseRecorder();
+
+  await concludeHandler(
+    {
+      authKind: "agent_session",
+      headers: { "x-letagents-desktop-client": "1" },
+      agentSession: workerPrincipal(),
+      params: { 0: "room_1", 1: "focus_1" },
+      body: { summary: "Done", conclusion_details: conclusionDetails },
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 409);
+  assert.deepEqual(res.body, {
+    error: "An active work lease is required.",
+    code: "coordination_lease_required",
+  });
+  assert.equal(enforcementInput?.actorSessionId, "agent_session_1");
+  assert.equal(enforcementInput?.actorKey, "owner/worker");
+  assert.equal(concludeCalled, false);
 });

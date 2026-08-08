@@ -47,6 +47,10 @@ type FocusConclusionGuardDecision =
   | { kind: "deny"; code: string; error: string };
 
 export interface RoomFocusRouteDeps {
+  getFocusRoomByKey: typeof getFocusRoomByKey;
+  getTaskById: typeof getTaskById;
+  getTaskOwnershipState: typeof getTaskOwnershipState;
+  concludeFocusRoom: typeof concludeFocusRoom;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,
@@ -159,7 +163,7 @@ export function registerRoomFocusRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const focusRoom = await getFocusRoomByKey(project.id, focusKey);
+    const focusRoom = await deps.getFocusRoomByKey(project.id, focusKey);
     if (!focusRoom) {
       res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
       return;
@@ -348,7 +352,7 @@ export function registerRoomFocusRoutes(
     }
 
     try {
-      const focusRoom = await getFocusRoomByKey(project.id, focusKey);
+      const focusRoom = await deps.getFocusRoomByKey(project.id, focusKey);
       if (!focusRoom) {
         res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
         return;
@@ -361,8 +365,8 @@ export function registerRoomFocusRoutes(
 
       let conclusionLeaseFence: LeaseFence | null = null;
       if (focusRoom.source_task_id) {
-        const task = await getTaskById(project.id, focusRoom.source_task_id);
-        const taskOwnership = await getTaskOwnershipState(project.id, focusRoom.source_task_id);
+        const task = await deps.getTaskById(project.id, focusRoom.source_task_id);
+        const taskOwnership = await deps.getTaskOwnershipState(project.id, focusRoom.source_task_id);
         if (task && taskOwnership && !desktopHumanWrite) {
           const coordination = await deps.enforceFocusRoomConclusion({
             req,
@@ -382,7 +386,13 @@ export function registerRoomFocusRoutes(
         }
       }
 
-      const result = await concludeFocusRoom(project.id, focusKey, summary, conclusionDetails, conclusionLeaseFence);
+      const result = await deps.concludeFocusRoom(
+        project.id,
+        focusKey,
+        summary,
+        conclusionDetails,
+        conclusionLeaseFence,
+      );
       if (!result) {
         res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
         return;

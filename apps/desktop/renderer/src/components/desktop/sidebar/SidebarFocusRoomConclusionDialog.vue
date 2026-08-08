@@ -1,6 +1,6 @@
 <template>
   <Teleport to="body">
-    <Transition name="focus-room-conclusion-dialog" @after-leave="restoreDialogFocus">
+    <Transition name="focus-room-conclusion-dialog" @after-leave="handleAfterLeave">
       <div
         v-if="open && entry"
         class="desktop-modal-backdrop"
@@ -174,6 +174,7 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   close: [];
   submit: [input: FocusRoomConclusionInput];
+  "after-leave": [];
 }>();
 
 const dialogElement = ref<HTMLElement | null>(null);
@@ -251,6 +252,11 @@ function restoreDialogFocus(): void {
   const escapedEntryId = globalThis.CSS?.escape ? globalThis.CSS.escape(entryId) : entryId;
   document.querySelector<HTMLElement>(`[data-sidebar-entry-id="${escapedEntryId}"]`)
     ?.focus({ preventScroll: true });
+}
+
+function handleAfterLeave(): void {
+  restoreDialogFocus();
+  emit("after-leave");
 }
 </script>
 
