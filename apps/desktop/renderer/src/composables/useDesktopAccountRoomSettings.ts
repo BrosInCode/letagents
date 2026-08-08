@@ -43,6 +43,7 @@ export type SidebarRoomBatchMutationFailure = {
 
 export type SidebarRoomBatchMutationResult = {
   succeededEntryIds: string[];
+  partiallySucceededEntryIds: string[];
   failures: SidebarRoomBatchMutationFailure[];
   refreshError: string | null;
 };
@@ -317,6 +318,8 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     pinned: boolean,
   ): Promise<SidebarRoomBatchMutationResult> {
     settingsRoomActionBusyKey.value = "batch:pin";
+    const partiallySucceededEntryIds: string[] = [];
+    let anyMutationSucceeded = false;
     const results = await Promise.allSettled(entries.map(async (entry) => {
       const mutation = buildRoomPinMutation(entry);
       if (!mutation) throw new Error(`${entry.title} cannot be pinned.`);
@@ -326,13 +329,23 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       const mutations = await Promise.allSettled(identifiers.map((roomIdentifier) =>
         desktopIpc.room.updateAccountRoom(roomIdentifier, { pinned })
       ));
+      const fulfilledCount = mutations.filter((result) => result.status === "fulfilled").length;
+      anyMutationSucceeded = anyMutationSucceeded || fulfilledCount > 0;
       const rejected = mutations.find(
         (result): result is PromiseRejectedResult => result.status === "rejected",
       );
-      if (rejected) throw rejected.reason;
+      if (rejected) {
+        if (fulfilledCount > 0) partiallySucceededEntryIds.push(entry.id);
+        throw rejected.reason;
+      }
       return entry.id;
     }));
-    const result = await finishSidebarRoomBatch(entries, results, options.refreshAccountRooms);
+    const result = await finishSidebarRoomBatch(
+      entries,
+      results,
+      options.refreshAccountRooms,
+      { forceRefresh: anyMutationSucceeded, partiallySucceededEntryIds },
+    );
     settingsRoomActionBusyKey.value = null;
     return result;
   }
@@ -393,6 +406,10 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     entries: readonly RoomEntry[],
     results: readonly PromiseSettledResult<string>[],
     refreshRooms: () => Promise<void>,
+    batchOptions: {
+      forceRefresh?: boolean;
+      partiallySucceededEntryIds?: string[];
+    } = {},
   ): Promise<SidebarRoomBatchMutationResult> {
     const succeededEntryIds: string[] = [];
     const failures: SidebarRoomBatchMutationFailure[] = [];
@@ -412,7 +429,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     });
 
     let refreshError: string | null = null;
-    if (succeededEntryIds.length) {
+    if (succeededEntryIds.length || batchOptions.forceRefresh) {
       try {
         await refreshRooms();
       } catch (caught) {
@@ -421,7 +438,12 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
           : "The room list could not be refreshed.";
       }
     }
-    return { succeededEntryIds, failures, refreshError };
+    return {
+      succeededEntryIds,
+      partiallySucceededEntryIds: batchOptions.partiallySucceededEntryIds || [],
+      failures,
+      refreshError,
+    };
   }
 
   async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {

@@ -1364,6 +1364,7 @@ function reportSidebarBatchMutation(
   deferUntilDialogLeaves = false,
 ): void {
   const completed = result.succeededEntryIds.length;
+  const partiallyCompleted = result.partiallySucceededEntryIds.length;
   const roomNoun = targetCount === 1 ? "room" : "rooms";
   if (!result.failures.length && !result.refreshError) {
     deliverSidebarBatchToast(
@@ -1375,6 +1376,11 @@ function reportSidebarBatchMutation(
   }
 
   const parts = [`${completed} of ${targetCount} ${roomNoun} ${completedVerb}.`];
+  if (partiallyCompleted) {
+    parts.push(
+      `${partiallyCompleted} ${partiallyCompleted === 1 ? "room was" : "rooms were"} partially updated.`,
+    );
+  }
   if (result.failures.length) {
     parts.push(`${result.failures.length} failed: ${result.failures[0]?.message || "Unknown error"}`);
   }

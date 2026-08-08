@@ -88,6 +88,7 @@ test("batch conclude uses human quick close, refreshes once, and reports partial
   ]);
   assert.deepEqual(result, {
     succeededEntryIds: ["focus-one"],
+    partiallySucceededEntryIds: [],
     failures: [{ entryId: "focus-two", message: "Focus room is already closed" }],
     refreshError: null,
   });
@@ -126,8 +127,60 @@ test("batch hide performs all focus mutations before one refresh", async (t) => 
   assert.deepEqual(calls, [["parent-room", "one"], ["parent-room", "two"]]);
   assert.deepEqual(result, {
     succeededEntryIds: ["focus-one", "focus-two"],
+    partiallySucceededEntryIds: [],
     failures: [],
     refreshError: null,
   });
   assert.equal(refreshCalls, 1);
+});
+
+test("a partial grouped unpin refreshes and reports the selected room as partially updated", async (t) => {
+  const runtime = globalThis as typeof globalThis & { window?: { letagentsDesktop?: unknown } };
+  const previousWindow = runtime.window;
+  const calls: unknown[][] = [];
+  let refreshCalls = 0;
+  runtime.window = {
+    letagentsDesktop: {
+      room: {
+        updateAccountRoom: async (...args: unknown[]) => {
+          calls.push(args);
+          if (args[0] === "branch-two") throw new Error("Could not unpin branch two");
+          return {};
+        },
+      },
+    },
+  };
+  t.after(() => {
+    if (previousWindow) runtime.window = previousWindow;
+    else delete runtime.window;
+  });
+
+  const groupedParent: RoomEntry = {
+    ...focusRoom("grouped-parent"),
+    kind: "parent",
+    focusKey: null,
+    focusStatus: null,
+    parentRoomIdentifier: null,
+    pinned: true,
+    pinTargetRoomIdentifier: "branch-one",
+    pinnedAccountRoomIdentifiers: ["branch-one", "branch-two"],
+  };
+  const { batchSetSidebarRoomsPinned, settingsRoomActionBusyKey } = useDesktopAccountRoomSettings(
+    settingsOptions(groupedParent, async () => { refreshCalls += 1; }),
+  );
+
+  const result = await batchSetSidebarRoomsPinned([groupedParent], false);
+
+  assert.deepEqual(calls, [
+    ["branch-one", { pinned: false }],
+    ["branch-two", { pinned: false }],
+  ]);
+  assert.deepEqual(result, {
+    succeededEntryIds: [],
+    partiallySucceededEntryIds: ["grouped-parent"],
+    failures: [{ entryId: "grouped-parent", message: "Could not unpin branch two" }],
+    refreshError: null,
+  });
+  assert.equal(refreshCalls, 1);
+  assert.equal(settingsRoomActionBusyKey.value, null);
 });
