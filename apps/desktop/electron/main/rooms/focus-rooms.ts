@@ -109,12 +109,13 @@ export async function concludeDesktopFocusRoom(
   focusKey: string,
   summary: string,
   conclusionDetails: DesktopFocusRoomConclusionDetails | null,
+  quickClose: boolean,
 ): Promise<DesktopFocusRoomMutationResult> {
   const trimmedRoomIdentifier = requireRoomIdentifier(roomIdentifier, "sharing a Focus Room result");
   const trimmedFocusKey = focusKey.trim();
   const trimmedSummary = summary.trim();
   if (!trimmedFocusKey) throw new Error("Focus key is required.");
-  if (!trimmedSummary) throw new Error("Result summary is required.");
+  if (!quickClose && !trimmedSummary) throw new Error("Result summary is required.");
 
   const data = await apiFetch<FocusRoomResponse>(
     `/rooms/${encodeURIComponent(trimmedRoomIdentifier)}/focus/${encodeURIComponent(trimmedFocusKey)}/conclude`,
@@ -127,6 +128,7 @@ export async function concludeDesktopFocusRoom(
       body: JSON.stringify({
         summary: trimmedSummary,
         conclusion_details: conclusionDetails,
+        quick_close: quickClose,
         desktop_human_client: true,
       }),
     },

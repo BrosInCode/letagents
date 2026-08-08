@@ -13,6 +13,7 @@ type ConclusionOption<T extends string> = {
 export type FocusRoomConclusionInput = {
   summary: string;
   details: DesktopFocusRoomConclusionDetails | null;
+  quickClose: boolean;
 };
 
 export type FocusRoomConcludedEvent = {
@@ -55,7 +56,9 @@ export function canSubmitFocusRoomConclusion(
   summary: string,
   sourceTaskId: string | null | undefined,
   details: DesktopFocusRoomConclusionDetails,
+  quickClose = false,
 ): boolean {
+  if (quickClose) return true;
   if (!summary.trim()) return false;
   if (!sourceTaskId) return true;
   return Boolean(details.artifact.trim() && details.next_owner.trim());
@@ -65,7 +68,16 @@ export function buildFocusRoomConclusionInput(
   summary: string,
   sourceTaskId: string | null | undefined,
   details: DesktopFocusRoomConclusionDetails,
+  quickClose = false,
 ): FocusRoomConclusionInput {
+  if (quickClose) {
+    return {
+      summary: "",
+      details: null,
+      quickClose: true,
+    };
+  }
+
   return {
     summary: summary.trim(),
     details: sourceTaskId
@@ -75,5 +87,6 @@ export function buildFocusRoomConclusionInput(
           next_owner: details.next_owner.trim(),
         }
       : null,
+    quickClose: false,
   };
 }

@@ -226,7 +226,8 @@ export interface DesktopApi {
       roomIdentifier: string,
       focusKey: string,
       summary: string,
-      details: DesktopFocusRoomConclusionDetails | null
+      details: DesktopFocusRoomConclusionDetails | null,
+      quickClose: boolean,
     ) => Promise<DesktopFocusRoomMutationResult>;
     archiveFocusRoom: (
       roomIdentifier: string,

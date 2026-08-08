@@ -86,16 +86,25 @@
         @submit.prevent="shareFocusRoomResult"
       >
         <div class="focus-room-section-heading">
-          <h4>Send result to parent room</h4>
+          <h4>{{ quickClose ? "Close focus room" : "Send result to parent room" }}</h4>
         </div>
+
+        <FocusRoomQuickCloseOption
+          v-model="quickClose"
+          :task-linked="Boolean(room.sourceTaskId)"
+          :disabled="sharingResult"
+          test-id="focus-room-quick-close"
+        />
+
         <textarea
+          v-if="!quickClose"
           v-model="resultSummary"
           rows="4"
           placeholder="Outcome summary"
           :disabled="sharingResult"
         ></textarea>
 
-        <div v-if="room.sourceTaskId" class="focus-room-closeout-grid">
+        <div v-if="room.sourceTaskId && !quickClose" class="focus-room-closeout-grid">
           <label>
             <span>Artifact</span>
             <input v-model="closeoutDetails.artifact" type="text" placeholder="PR, branch, doc, or decision" :disabled="sharingResult" />
@@ -125,7 +134,7 @@
         </div>
 
         <button class="focus-room-primary" type="submit" :disabled="!canShareResult || sharingResult">
-          {{ sharingResult ? "Sharing..." : "Send result to parent room" }}
+          {{ closeoutSubmitLabel }}
         </button>
       </form>
 
@@ -483,6 +492,7 @@ import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import { formatShortDateTime } from "../../../domain/time";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
+import FocusRoomQuickCloseOption from "../controls/FocusRoomQuickCloseOption.vue";
 import RepoStatusView from "./RepoStatusView.vue";
 import { desktopIpc } from "../../../ipc/index.js";
 import type {
@@ -568,6 +578,7 @@ const actionFeedbackState = ref<FeedbackState>("info");
 const focusRoomContextMenu = ref<FocusRoomContextMenu | null>(null);
 let feedbackTimer: number | null = null;
 const resultSummary = ref("");
+const quickClose = ref(false);
 const settingsDraft = reactive<DesktopFocusRoomSettings>({ ...DEFAULT_SETTINGS });
 const closeoutDetails = reactive(createDefaultFocusRoomConclusionDetails());
 
@@ -649,7 +660,17 @@ const canShareResult = computed(() => {
     || props.room.focusStatus === "concluded"
     || resultSubmitted.value
   ) return false;
-  return canSubmitFocusRoomConclusion(resultSummary.value, props.room.sourceTaskId, closeoutDetails);
+  return canSubmitFocusRoomConclusion(
+    resultSummary.value,
+    props.room.sourceTaskId,
+    closeoutDetails,
+    quickClose.value,
+  );
+});
+
+const closeoutSubmitLabel = computed(() => {
+  if (sharingResult.value) return quickClose.value ? "Closing..." : "Sharing...";
+  return quickClose.value ? "Close room" : "Send result to parent room";
 });
 
 const sharedResultSummary = computed(() =>
@@ -769,6 +790,7 @@ watch(
   () => props.room.identifier,
   () => {
     resultSubmitted.value = false;
+    quickClose.value = false;
   },
 );
 
@@ -1014,6 +1036,7 @@ async function shareFocusRoomResult(): Promise<void> {
     resultSummary.value,
     props.room.sourceTaskId,
     closeoutDetails,
+    quickClose.value,
   );
   try {
     await desktopIpc.room.concludeFocusRoom(
@@ -1021,6 +1044,7 @@ async function shareFocusRoomResult(): Promise<void> {
       focusKey,
       input.summary,
       input.details,
+      input.quickClose,
     );
   } catch (error) {
     sharingResult.value = false;

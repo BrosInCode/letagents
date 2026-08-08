@@ -27,6 +27,7 @@ import {
 } from "../../focus-rooms/settings.js";
 import {
   normalizeFocusRoomConclusionDetails,
+  QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY,
   type FocusRoomConclusionDetails,
 } from "../../focus-rooms/conclusion.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
@@ -345,11 +346,15 @@ export function registerRoomFocusRoutes(
     });
     if (workerWriteIdentity.kind === "responded") return;
     const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
+    const quickClose = desktopHumanWrite && requestBody.quick_close === true;
     const { summary } = requestBody as { summary?: unknown };
-    if (typeof summary !== "string" || !summary.trim()) {
+    if (!quickClose && (typeof summary !== "string" || !summary.trim())) {
       res.status(400).json({ error: "summary is required" });
       return;
     }
+    const conclusionSummary = quickClose
+      ? QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY
+      : (summary as string).trim();
 
     try {
       const focusRoom = await deps.getFocusRoomByKey(project.id, focusKey);
@@ -358,10 +363,12 @@ export function registerRoomFocusRoutes(
         return;
       }
 
-      const conclusionDetails = normalizeFocusRoomConclusionDetails(
-        requestBody.conclusion_details,
-        { required: Boolean(focusRoom.source_task_id && focusRoom.focus_status !== "concluded") }
-      );
+      const conclusionDetails = quickClose
+        ? null
+        : normalizeFocusRoomConclusionDetails(
+            requestBody.conclusion_details,
+            { required: Boolean(focusRoom.source_task_id && focusRoom.focus_status !== "concluded") }
+          );
 
       let conclusionLeaseFence: LeaseFence | null = null;
       if (focusRoom.source_task_id) {
@@ -389,7 +396,7 @@ export function registerRoomFocusRoutes(
       const result = await deps.concludeFocusRoom(
         project.id,
         focusKey,
-        summary,
+        conclusionSummary,
         conclusionDetails,
         conclusionLeaseFence,
       );
@@ -413,7 +420,7 @@ export function registerRoomFocusRoutes(
             deps.formatFocusRoomConclusionMessage({
               focusRoom: result.room,
               task: result.task,
-              summary: result.room.conclusion_summary || summary.trim(),
+              summary: result.room.conclusion_summary || conclusionSummary,
               details: result.room.conclusion_details,
             })
           )

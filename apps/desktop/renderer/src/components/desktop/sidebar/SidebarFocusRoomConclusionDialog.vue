@@ -39,7 +39,14 @@
           </header>
 
           <form class="focus-room-conclusion-form" @submit.prevent="submit">
-            <label class="focus-room-conclusion-field">
+            <FocusRoomQuickCloseOption
+              v-model="quickClose"
+              :task-linked="taskLinked"
+              :disabled="busy"
+              test-id="sidebar-focus-room-quick-close"
+            />
+
+            <label v-if="!quickClose" class="focus-room-conclusion-field">
               <span>Outcome summary</span>
               <textarea
                 ref="summaryElement"
@@ -51,7 +58,7 @@
               ></textarea>
             </label>
 
-            <fieldset v-if="taskLinked" class="focus-room-conclusion-details">
+            <fieldset v-if="taskLinked && !quickClose" class="focus-room-conclusion-details">
               <legend>Task closeout</legend>
               <p>Task-linked rooms need enough context to update the parent task safely.</p>
 
@@ -130,7 +137,7 @@
                 :disabled="busy || !canSubmit"
                 data-testid="sidebar-focus-room-conclusion-submit"
               >
-                {{ busy ? "Concluding..." : "Conclude room" }}
+                {{ submitLabel }}
               </button>
             </footer>
           </form>
@@ -152,6 +159,7 @@ import {
   focusRoomReviewStateOptions,
   type FocusRoomConclusionInput,
 } from "../../../domain/focus-room-conclusion";
+import FocusRoomQuickCloseOption from "../controls/FocusRoomQuickCloseOption.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
 import type { RoomEntry } from "../types";
 import {
@@ -181,13 +189,18 @@ const dialogElement = ref<HTMLElement | null>(null);
 const summaryElement = ref<HTMLTextAreaElement | null>(null);
 const errorElement = ref<HTMLElement | null>(null);
 const summary = ref("");
+const quickClose = ref(false);
 const details = reactive(createDefaultFocusRoomConclusionDetails());
 let previousFocusElement: HTMLElement | null = null;
 
 const taskLinked = computed(() => Boolean(props.entry?.sourceTaskId));
 const canSubmit = computed(() =>
-  canSubmitFocusRoomConclusion(summary.value, props.entry?.sourceTaskId, details)
+  canSubmitFocusRoomConclusion(summary.value, props.entry?.sourceTaskId, details, quickClose.value)
 );
+const submitLabel = computed(() => {
+  if (props.busy) return quickClose.value ? "Closing..." : "Concluding...";
+  return quickClose.value ? "Close room" : "Conclude room";
+});
 
 watch(
   () => props.open,
@@ -223,6 +236,7 @@ onBeforeUnmount(() => restoreDialogFocus());
 
 function resetForm(): void {
   summary.value = "";
+  quickClose.value = false;
   Object.assign(details, createDefaultFocusRoomConclusionDetails());
 }
 
@@ -233,7 +247,15 @@ function requestClose(): void {
 
 function submit(): void {
   if (!canSubmit.value || !props.entry) return;
-  emit("submit", buildFocusRoomConclusionInput(summary.value, props.entry.sourceTaskId, details));
+  emit(
+    "submit",
+    buildFocusRoomConclusionInput(
+      summary.value,
+      props.entry.sourceTaskId,
+      details,
+      quickClose.value,
+    ),
+  );
 }
 
 function handleDialogTab(event: KeyboardEvent): void {

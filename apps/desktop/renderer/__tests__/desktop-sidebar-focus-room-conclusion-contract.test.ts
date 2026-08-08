@@ -10,6 +10,7 @@ function source(relativePath: string): string {
 const appSource = source("../src/App.vue");
 const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.vue");
 const dialogSource = source("../src/components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue");
+const quickCloseSource = source("../src/components/desktop/controls/FocusRoomQuickCloseOption.vue");
 const roomDetailsSource = source("../src/components/desktop/content/RoomDetailsView.vue");
 const roomShellSource = source("../src/components/desktop/content/DesktopRoomShell.vue");
 const settingsSource = source("../src/composables/useDesktopAccountRoomSettings.ts");
@@ -29,13 +30,23 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(dialogSource, /aria-modal="true"/);
     assert.match(dialogSource, /@keydown\.esc\.stop\.prevent="requestClose"/);
     assert.match(dialogSource, /trapFocusInDialog\(event, dialogElement\.value\)/);
-    assert.match(dialogSource, /v-if="taskLinked"/);
+    assert.match(dialogSource, /v-if="taskLinked && !quickClose"/);
     assert.match(dialogSource, /details\.artifact/);
     assert.match(dialogSource, /details\.next_owner/);
     assert.match(dialogSource, /details\.review_state/);
     assert.match(dialogSource, /details\.blocker_state/);
     assert.match(dialogSource, /details\.parent_task_next/);
     assert.match(dialogSource, /role="alert"/);
+  });
+
+  it("offers the same explicit quick-close option in both conclusion surfaces", () => {
+    assert.match(quickCloseSource, />Quick close</);
+    assert.match(quickCloseSource, /linked parent task will remain unchanged/);
+    assert.match(dialogSource, /test-id="sidebar-focus-room-quick-close"/);
+    assert.match(dialogSource, /v-if="!quickClose" class="focus-room-conclusion-field"/);
+    assert.match(roomDetailsSource, /test-id="focus-room-quick-close"/);
+    assert.match(roomDetailsSource, /input\.quickClose/);
+    assert.match(settingsSource, /input\.quickClose/);
   });
 
   it("uses the existing conclusion IPC, refreshes state, and preserves retryable errors", () => {
@@ -77,7 +88,7 @@ describe("desktop sidebar focus room conclusion contract", () => {
   it("identifies the IPC mutation as an authenticated desktop-human write", () => {
     assert.match(
       mainFocusRoomsSource,
-      /conclusion_details: conclusionDetails,[\s\S]*?desktop_human_client: true/,
+      /conclusion_details: conclusionDetails,[\s\S]*?quick_close: quickClose,[\s\S]*?desktop_human_client: true/,
     );
     assert.match(mainFocusRoomsSource, /"X-LetAgents-Desktop-Client": "1"/);
   });
