@@ -31,13 +31,13 @@ import {
 } from "../../focus-rooms/conclusion.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import {
-  requireWorkerRequestAgentIdentity,
-  type ResolvedRequestAgentIdentity,
-} from "../../request/agent-identity.js";
-import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
 } from "../../tasks/ownership.js";
+import {
+  isDesktopHumanWrite,
+  resolveOwnerTokenWorkerWriteIdentity,
+} from "./tasks/request-identity.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
@@ -45,11 +45,6 @@ type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnership
 type FocusConclusionGuardDecision =
   | { kind: "allow"; leaseFence?: LeaseFence | null }
   | { kind: "deny"; code: string; error: string };
-
-type OwnerTokenWorkerWriteIdentity =
-  | { kind: "not_owner_token" }
-  | { kind: "worker"; identity: ResolvedRequestAgentIdentity }
-  | { kind: "responded" };
 
 export interface RoomFocusRouteDeps {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
@@ -100,29 +95,6 @@ export interface RoomFocusRouteDeps {
     summary: string;
     details?: FocusRoomConclusionDetails | null;
   }): string;
-}
-
-async function resolveOwnerTokenWorkerWriteIdentity(input: {
-  req: AuthenticatedRequest;
-  res: Response;
-  room_id: string;
-  body: Record<string, unknown>;
-}): Promise<OwnerTokenWorkerWriteIdentity> {
-  if (input.req.authKind !== "owner_token") {
-    return { kind: "not_owner_token" };
-  }
-
-  const result = await requireWorkerRequestAgentIdentity({
-    req: input.req,
-    body: input.body,
-    room_id: input.room_id,
-  });
-  if (!result.ok) {
-    input.res.status(result.status).json({ error: result.error });
-    return { kind: "responded" };
-  }
-
-  return { kind: "worker", identity: result.identity };
 }
 
 function toFocusRoomResponseOptions(input: {
@@ -360,6 +332,7 @@ export function registerRoomFocusRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody);
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -390,7 +363,7 @@ export function registerRoomFocusRoutes(
       if (focusRoom.source_task_id) {
         const task = await getTaskById(project.id, focusRoom.source_task_id);
         const taskOwnership = await getTaskOwnershipState(project.id, focusRoom.source_task_id);
-        if (task && taskOwnership) {
+        if (task && taskOwnership && !desktopHumanWrite) {
           const coordination = await deps.enforceFocusRoomConclusion({
             req,
             projectId: project.id,

@@ -11,6 +11,7 @@ const appSource = source("../src/App.vue");
 const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.vue");
 const dialogSource = source("../src/components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue");
 const settingsSource = source("../src/composables/useDesktopAccountRoomSettings.ts");
+const mainFocusRoomsSource = source("../../electron/main/rooms/focus-rooms.ts");
 
 describe("desktop sidebar focus room conclusion contract", () => {
   it("wires the context action through the sidebar and app-owned dialog", () => {
@@ -41,6 +42,14 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(settingsSource, /return \{ ok: false, error \}/);
     assert.match(appSource, /sidebarFocusRoomConclusionError\.value = result\.error/);
     assert.match(appSource, /sidebarFocusRoomConclusionReturnFocusId\.value = parent\?\.id \|\| null/);
+  });
+
+  it("identifies the IPC mutation as an authenticated desktop-human write", () => {
+    assert.match(
+      mainFocusRoomsSource,
+      /conclusion_details: conclusionDetails,[\s\S]*?desktop_human_client: true/,
+    );
+    assert.match(mainFocusRoomsSource, /"X-LetAgents-Desktop-Client": "1"/);
   });
 
   it("removes displacement for reduced-motion users", () => {

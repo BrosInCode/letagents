@@ -127,6 +127,7 @@ export async function concludeDesktopFocusRoom(
       body: JSON.stringify({
         summary: trimmedSummary,
         conclusion_details: conclusionDetails,
+        desktop_human_client: true,
       }),
     },
   );

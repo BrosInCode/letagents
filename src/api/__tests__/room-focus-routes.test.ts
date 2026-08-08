@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomFocusRoutes, toFocusRoomListResponse } = await import("../routes/rooms/focus.js");
 import type { GitRoomBinding, Project } from "../db.js";
+
+const focusRouteSource = readFileSync(
+  fileURLToPath(new URL("../routes/rooms/focus.ts", import.meta.url)),
+  "utf8",
+);
 
 function createDeps() {
   const unused = async () => {
@@ -186,4 +193,56 @@ test("focus room archive route requires an admin guard", async () => {
 
   assert.equal(requireAdminCalled, true);
   assert.equal(requireParticipantCalled, false);
+});
+
+test("desktop human focus room conclusions bypass worker identity and lease enforcement", async () => {
+  let concludeHandler: ((req: unknown, res: unknown) => Promise<void>) | null = null;
+  let coordinationCalled = false;
+  const app = {
+    get() {},
+    patch() {},
+    delete() {},
+    post(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      if (path.toString().includes("conclude")) concludeHandler = handler;
+    },
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    enforceFocusRoomConclusion: async () => {
+      coordinationCalled = true;
+      return { kind: "allow" as const };
+    },
+  };
+
+  registerRoomFocusRoutes(app as never, deps as never);
+  assert.ok(concludeHandler);
+
+  let statusCode = 200;
+  let body: unknown = null;
+  await concludeHandler(
+    {
+      authKind: "owner_token",
+      headers: { "x-letagents-desktop-client": "1" },
+      params: { 0: "room_1", 1: "focus_1" },
+      body: {},
+    },
+    {
+      status(code: number) {
+        statusCode = code;
+        return this;
+      },
+      json(payload: unknown) {
+        body = payload;
+      },
+    },
+  );
+
+  assert.equal(statusCode, 400);
+  assert.deepEqual(body, { error: "summary is required" });
+  assert.equal(coordinationCalled, false);
+  assert.match(focusRouteSource, /const desktopHumanWrite = isDesktopHumanWrite\(req, requestBody\);/);
+  assert.match(focusRouteSource, /task && taskOwnership && !desktopHumanWrite/);
 });
