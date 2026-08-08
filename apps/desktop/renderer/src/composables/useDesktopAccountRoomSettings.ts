@@ -206,6 +206,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         entry.focusKey,
         input.summary,
         input.details,
+        input.quickClose,
       );
     } catch (caught) {
       const error = caught instanceof Error ? caught.message : `Could not conclude ${displayName}.`;

@@ -657,8 +657,9 @@ export function registerDesktopIpcHandlers(
       focusKey: string,
       summary: string,
       details: DesktopFocusRoomConclusionDetails | null,
+      quickClose: boolean,
     ): Promise<DesktopFocusRoomMutationResult> =>
-      concludeDesktopFocusRoom(roomIdentifier, focusKey, summary, details),
+      concludeDesktopFocusRoom(roomIdentifier, focusKey, summary, details, quickClose),
   );
   targetIpcMain.handle(
     "desktop:room:archive-focus-room",

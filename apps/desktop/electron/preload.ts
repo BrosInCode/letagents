@@ -110,8 +110,15 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:create-ad-hoc-focus-room", roomIdentifier, title),
     updateFocusRoomSettings: (roomIdentifier: string, focusKey: string, settings) =>
       ipcRenderer.invoke("desktop:room:update-focus-room-settings", roomIdentifier, focusKey, settings),
-    concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details) =>
-      ipcRenderer.invoke("desktop:room:conclude-focus-room", roomIdentifier, focusKey, summary, details),
+    concludeFocusRoom: (roomIdentifier: string, focusKey: string, summary: string, details, quickClose) =>
+      ipcRenderer.invoke(
+        "desktop:room:conclude-focus-room",
+        roomIdentifier,
+        focusKey,
+        summary,
+        details,
+        quickClose,
+      ),
     archiveFocusRoom: (roomIdentifier: string, focusKey: string) =>
       ipcRenderer.invoke("desktop:room:archive-focus-room", roomIdentifier, focusKey),
     rename: (roomIdentifier: string, displayName: string) =>

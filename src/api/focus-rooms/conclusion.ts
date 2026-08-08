@@ -30,6 +30,8 @@ export interface FocusRoomConclusionDetails {
   next_owner: string;
 }
 
+export const QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY = "Closed without an outcome summary.";
+
 const MAX_DETAIL_LENGTH = 500;
 
 function normalizeRequiredString(value: unknown, field: string): string {

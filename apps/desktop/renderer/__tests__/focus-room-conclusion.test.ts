@@ -14,7 +14,7 @@ describe("focus room conclusion input", () => {
     assert.equal(canSubmitFocusRoomConclusion("Finished the investigation.", null, details), true);
     assert.deepEqual(
       buildFocusRoomConclusionInput("  Finished the investigation.  ", null, details),
-      { summary: "Finished the investigation.", details: null },
+      { summary: "Finished the investigation.", details: null, quickClose: false },
     );
   });
 
@@ -35,6 +35,21 @@ describe("focus room conclusion input", () => {
           parent_task_next: "keep_open",
           next_owner: "Reviewer",
         },
+        quickClose: false,
+      },
+    );
+  });
+
+  it("allows a quick close without collecting a summary or task details", () => {
+    const details = createDefaultFocusRoomConclusionDetails();
+
+    assert.equal(canSubmitFocusRoomConclusion("", "task_12", details, true), true);
+    assert.deepEqual(
+      buildFocusRoomConclusionInput("Ignored summary", "task_12", details, true),
+      {
+        summary: "",
+        details: null,
+        quickClose: true,
       },
     );
   });
