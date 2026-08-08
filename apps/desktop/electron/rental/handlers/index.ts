@@ -17,9 +17,14 @@ export type {
 } from "./types.js";
 
 export function isRentEnabled(): boolean {
-  return /^(1|true|yes)$/i.test(
-    process.env.LETAGENTS_RENT_ENABLED?.trim() ?? "",
-  );
+  const configured = process.env.LETAGENTS_RENT_ENABLED?.trim();
+
+  // Rent an Agent ships as a first-class desktop surface. Packaged apps do not
+  // inherit the production server's environment, so requiring an opt-in here
+  // left the built UI permanently disabled for normal desktop launches.
+  // Keep an explicit false value as an emergency/local kill switch.
+  if (!configured) return true;
+  return /^(1|true|yes|on)$/i.test(configured);
 }
 
 export function registerDesktopRentalIpcHandlers(

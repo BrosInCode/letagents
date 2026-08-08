@@ -1,7 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { isRentEnabled } from "../rental-handlers.js";
 import { captureHandlers, invoke } from "./rental-handlers-live-client/harness.js";
+
+test("desktop rental is enabled by default with an explicit kill switch", () => {
+  const original = process.env.LETAGENTS_RENT_ENABLED;
+  try {
+    delete process.env.LETAGENTS_RENT_ENABLED;
+    assert.equal(isRentEnabled(), true);
+
+    for (const value of ["0", "false", "no", "off", "unexpected"]) {
+      process.env.LETAGENTS_RENT_ENABLED = value;
+      assert.equal(isRentEnabled(), false, `${value} should disable desktop rental`);
+    }
+
+    for (const value of ["1", "true", "yes", "on"]) {
+      process.env.LETAGENTS_RENT_ENABLED = value;
+      assert.equal(isRentEnabled(), true, `${value} should enable desktop rental`);
+    }
+  } finally {
+    if (original === undefined) delete process.env.LETAGENTS_RENT_ENABLED;
+    else process.env.LETAGENTS_RENT_ENABLED = original;
+  }
+});
 
 test("rental IPC handlers return disabled marker when feature flag is off", async () => {
   const handlers = captureHandlers(false);
