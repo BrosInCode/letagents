@@ -3,6 +3,7 @@ import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomFocusRoutes, toFocusRoomListResponse } = await import("../routes/rooms/focus.js");
+const { QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY } = await import("../focus-rooms/conclusion.js");
 import type { GitRoomBinding, Project, Task } from "../db.js";
 
 function createDeps() {
@@ -352,6 +353,70 @@ test("marked desktop-human focus room conclusions skip agent coordination", asyn
   assert.equal(res.statusCode, 200);
   assert.equal(coordinationCalled, false);
   assert.equal(concludeCalled, true);
+});
+
+test("marked desktop humans can quick-close without a summary or structured details", async () => {
+  let conclusionInput: unknown[] | null = null;
+  const concludeHandler = registerConclusionHandler({
+    concludeFocusRoom: async (...input: unknown[]) => {
+      conclusionInput = input;
+      return {
+        room: project({
+          id: "focus_1",
+          kind: "focus",
+          parent_room_id: "room_1",
+          focus_key: "task_1",
+          source_task_id: "task_1",
+          focus_status: "concluded",
+          conclusion_summary: QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY,
+          conclusion_details: null,
+        }),
+        task: task(),
+        updated: false,
+      };
+    },
+  });
+  const res = responseRecorder();
+
+  await concludeHandler(
+    {
+      authKind: "owner_token",
+      headers: { "x-letagents-desktop-client": "1" },
+      params: { 0: "room_1", 1: "focus_1" },
+      body: { quick_close: true },
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.equal(conclusionInput?.[2], QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY);
+  assert.equal(conclusionInput?.[3], null);
+});
+
+test("quick-close does not bypass summary requirements for agent sessions", async () => {
+  let concludeCalled = false;
+  const concludeHandler = registerConclusionHandler({
+    concludeFocusRoom: async () => {
+      concludeCalled = true;
+      return null;
+    },
+  });
+  const res = responseRecorder();
+
+  await concludeHandler(
+    {
+      authKind: "agent_session",
+      headers: { "x-letagents-desktop-client": "1" },
+      agentSession: workerPrincipal(),
+      params: { 0: "room_1", 1: "focus_1" },
+      body: { quick_close: true },
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, { error: "summary is required" });
+  assert.equal(concludeCalled, false);
 });
 
 test("unmarked owner-token focus room conclusions still require worker identity", async () => {
