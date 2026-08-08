@@ -47,7 +47,6 @@
   >
     <DesktopSidebar
       v-if="!isSettingsSurface && sidebarMode !== 'hidden'"
-      :sidebar-mode="sidebarMode"
       :active-entry="activeEntry"
       :primary-room="currentParentRoom"
       :project-entries="sidebarProjectEntries"
@@ -82,45 +81,6 @@
       @pointerdown="startSidebarResize"
       @keydown="handleSidebarResizeKeydown"
     ></div>
-    <div
-      v-if="showSidebarPeek"
-      class="sidebar-peek-zone"
-      data-testid="sidebar-peek-zone"
-      @pointerenter="openSidebarPeek"
-    ></div>
-    <Transition name="sidebar-peek">
-      <div
-        v-if="sidebarPeekOpen"
-        class="sidebar-peek-panel"
-        data-testid="sidebar-peek-panel"
-        @pointerleave="closeSidebarPeek"
-      >
-        <DesktopSidebar
-          sidebar-mode="expanded"
-          :active-entry="activeEntry"
-          :primary-room="currentParentRoom"
-          :project-entries="sidebarProjectEntries"
-          :settings-entry="settingsEntry"
-          :pinned-collapsed="pinnedCollapsed"
-          :rooms-collapsed="roomsCollapsed"
-          :collapsed-projects="collapsedProjects"
-          @context-menu-open="handleSidebarPeekMenuOpen"
-          @cycle-sidebar="closeSidebarPeek"
-          @new-room="selectNewRoomEntry"
-          @archive-room="archiveSidebarRoom"
-          @archive-focus-room="archiveSidebarFocusRoom"
-          @mark-room-read="markRoomEntryRead"
-          @pin-room="togglePinSidebarRoom"
-          @rename-room="renameSidebarRoom"
-          @select-entry="handleSidebarEntrySelected"
-          @set-projects-collapsed="setAllProjectsCollapsed"
-          @toggle-project="toggleProject"
-          @toggle-pinned-collapsed="togglePinnedCollapsed"
-          @toggle-rooms-collapsed="toggleRoomsCollapsed"
-        />
-      </div>
-    </Transition>
-
     <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
       <DesktopTopbar
         v-if="activeEntry.type !== 'room' && !isSettingsSurface"
@@ -476,10 +436,6 @@ let repoStatusWatchRequestId = 0;
 const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
-const sidebarPeekOpen = ref(false);
-const sidebarPeekMenuOpen = ref(false);
-const sidebarPeekCloseSuppressed = ref(false);
-const showSidebarPeek = computed(() => !isSettingsSurface.value && sidebarMode.value === "hidden");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
 const desktopShellStyle = computed(() => ({
   "--sidebar-width": `${sidebarWidth.value}px`,
@@ -563,31 +519,6 @@ const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
 
 function openSettingsSurface(): void {
   activeEntry.value = settingsEntry;
-}
-
-function openSidebarPeek(): void {
-  if (!showSidebarPeek.value) return;
-  sidebarPeekMenuOpen.value = false;
-  sidebarPeekCloseSuppressed.value = false;
-  sidebarPeekOpen.value = true;
-}
-
-function closeSidebarPeek(): void {
-  // A context menu teleports outside the peek panel; leaving the panel to use
-  // it must not unmount the menu. Defer the close until the menu settles.
-  if (sidebarPeekMenuOpen.value) {
-    sidebarPeekCloseSuppressed.value = true;
-    return;
-  }
-  sidebarPeekOpen.value = false;
-}
-
-function handleSidebarPeekMenuOpen(open: boolean): void {
-  sidebarPeekMenuOpen.value = open;
-  if (!open && sidebarPeekCloseSuppressed.value) {
-    sidebarPeekCloseSuppressed.value = false;
-    sidebarPeekOpen.value = false;
-  }
 }
 
 function readStoredSidebarWidth(): number {
@@ -1702,12 +1633,6 @@ watch(
   },
   { deep: true, immediate: true }
 );
-
-watch(showSidebarPeek, (enabled) => {
-  if (!enabled) {
-    closeSidebarPeek();
-  }
-});
 
 watch(
   () => selectedRootRoomIdentifier.value,

@@ -72,7 +72,6 @@
     display: none;
   }
 
-  .desktop-shell[data-sidebar-mode="rail"],
   .desktop-shell[data-sidebar-mode="hidden"] {
     grid-template-columns: 1fr;
   }

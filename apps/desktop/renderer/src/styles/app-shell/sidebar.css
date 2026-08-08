@@ -29,11 +29,6 @@
   align-content: stretch;
 }
 
-.desktop-shell[data-sidebar-mode="rail"] .app-sidebar {
-  grid-template-rows: auto minmax(0, 1fr);
-  align-content: stretch;
-}
-
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .app-sidebar {
   border-right-color: rgba(255, 255, 255, 0.105);
   background: rgba(9, 9, 10, 0.96);
@@ -105,8 +100,7 @@
 
 .sidebar-collapse-button:focus-visible,
 .sidebar-search-button:focus-visible,
-.sidebar-cta:focus-visible,
-.sidebar-icon-button:focus-visible {
+.sidebar-cta:focus-visible {
   outline: 2px solid color-mix(in srgb, var(--text) 44%, transparent);
   outline-offset: 2px;
 }
@@ -322,8 +316,7 @@
   color: var(--text);
 }
 
-.sidebar-cta:active,
-.sidebar-icon-button:active {
+.sidebar-cta:active {
   transform: scale(0.975);
 }
 
@@ -462,7 +455,6 @@
 .project-icon svg,
 .pin-mark svg,
 .system-icon svg,
-.sidebar-icon-button svg,
 .project-toggle svg,
 .sidebar-section-arrow svg {
   width: 16px;
@@ -472,7 +464,6 @@
 .project-icon path,
 .pin-mark path,
 .system-icon path,
-.sidebar-icon-button path,
 .project-toggle path,
 .sidebar-section-arrow path {
   fill: none;
@@ -521,13 +512,6 @@
   color: rgba(250, 250, 250, 0.72);
 }
 
-.sidebar-collapsed-actions {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-  gap: 10px;
-  min-height: 0;
-}
-
 .sidebar-footer {
   grid-row: 3;
   align-self: end;
@@ -544,31 +528,10 @@
   background: transparent;
 }
 
-.sidebar-collapsed-actions .sidebar-icon-button:last-child {
-  align-self: end;
-}
-
-.sidebar-icon-button {
-  display: grid;
-  place-items: center;
-  min-height: 44px;
-  padding: 0;
-  border-color: transparent;
-  border-radius: 10px;
-  background: transparent;
-  color: var(--text-secondary);
-  font-size: 1rem;
-  transition:
-    transform var(--duration-fast) var(--ease-out),
-    background-color var(--duration-fast) var(--ease-out),
-    color var(--duration-fast) var(--ease-out);
-}
-
 .pinned-room[data-active="true"],
 .project-row[data-active="true"],
 .room-row[data-active="true"],
-.sidebar-row[data-active="true"],
-.sidebar-icon-button[data-active="true"] {
+.sidebar-row[data-active="true"] {
   border-color: transparent;
   background: var(--sidebar-selected);
   box-shadow:
@@ -587,8 +550,7 @@
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pinned-room,
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .project-row,
 .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-row,
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row,
-.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-icon-button {
+.desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row {
   border-color: transparent;
   box-shadow: none;
   backdrop-filter: none;
@@ -598,8 +560,7 @@
   .pinned-room,
   .project-row,
   .room-row,
-  .sidebar-row,
-  .sidebar-icon-button
+  .sidebar-row
 )[data-active="true"] {
   background: rgba(255, 255, 255, 0.085);
   box-shadow: inset 2px 0 0 var(--sidebar-selection);
@@ -618,7 +579,6 @@
   }
 
   .sidebar-cta:hover,
-  .sidebar-icon-button:hover,
   .sidebar-settings-row:hover,
   .sidebar-section-header:hover {
     transform: none;
@@ -639,8 +599,7 @@
     .pinned-room,
     .project-row,
     .room-row,
-    .sidebar-row,
-    .sidebar-icon-button
+    .sidebar-row
   ):not([data-active="true"]):hover {
     transform: none;
     border-color: transparent;
@@ -661,7 +620,6 @@
   .project-row,
   .room-row,
   .sidebar-row,
-  .sidebar-icon-button,
   .project-toggle,
   .sidebar-section-arrow {
     transition-property: background-color, border-color, color, opacity, box-shadow;
@@ -677,8 +635,7 @@
   .pinned-room:active,
   .project-row:active,
   .room-row:active,
-  .sidebar-row:active,
-  .sidebar-icon-button:active {
+  .sidebar-row:active {
     transform: none;
   }
 }
@@ -700,8 +657,7 @@
   .pinned-room[data-active="true"],
   .project-row[data-active="true"],
   .room-row[data-active="true"],
-  .sidebar-row[data-active="true"],
-  .sidebar-icon-button[data-active="true"] {
+  .sidebar-row[data-active="true"] {
     outline: 1px solid rgba(255, 255, 255, 0.28);
     outline-offset: -1px;
   }

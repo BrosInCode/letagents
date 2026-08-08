@@ -1,11 +1,11 @@
 <template>
-  <aside v-if="sidebarMode !== 'hidden'" class="app-sidebar" data-testid="desktop-sidebar">
+  <aside class="app-sidebar" data-testid="desktop-sidebar">
     <div class="sidebar-topbar">
       <button
         class="sidebar-collapse-button"
         type="button"
-        :aria-label="sidebarMode === 'expanded' ? 'Collapse sidebar' : 'Hide sidebar'"
-        :title="sidebarMode === 'expanded' ? 'Collapse sidebar' : 'Hide sidebar'"
+        aria-label="Hide sidebar"
+        title="Hide sidebar"
         data-testid="sidebar-cycle-button"
         @click="$emit('cycle-sidebar')"
       >
@@ -16,7 +16,6 @@
         </svg>
       </button>
       <button
-        v-if="sidebarMode === 'expanded'"
         ref="searchButton"
         class="sidebar-search-button"
         type="button"
@@ -34,7 +33,7 @@
     </div>
 
     <section
-      v-if="sidebarMode === 'expanded' && searchOpen"
+      v-if="searchOpen"
       id="sidebar-room-search"
       class="sidebar-room-search"
       data-testid="sidebar-room-search"
@@ -102,7 +101,7 @@
         <p v-else class="sidebar-search-empty">Search by room, branch, or task.</p>
     </section>
 
-    <div v-else-if="sidebarMode === 'expanded'" class="sidebar-navigation" @contextmenu.prevent="openBackgroundContextMenu">
+    <div v-else class="sidebar-navigation" @contextmenu.prevent="openBackgroundContextMenu">
       <div class="sidebar-actions">
       <button
         class="sidebar-cta"
@@ -194,7 +193,7 @@
                 class="project-room-list"
               >
                 <button
-                  v-for="childRoom in projectChildRooms(project)"
+                  v-for="childRoom in visibleProjectChildRooms(project)"
                   :key="childRoom.id"
                   class="room-row room-focus"
                   :data-kind="childRoom.kind"
@@ -223,6 +222,17 @@
                   >
                     {{ childRoom.suggestedAction }}
                   </small>
+                </button>
+                <button
+                  v-if="hasProjectRoomOverflow(project)"
+                  class="project-room-overflow-toggle"
+                  :data-expanded="projectRoomListExpanded(project.id)"
+                  :aria-expanded="projectRoomListExpanded(project.id)"
+                  type="button"
+                  @click="toggleProjectRoomOverflow(project.id)"
+                >
+                  <ChevronRight aria-hidden="true" />
+                  <span>{{ projectRoomOverflowLabel(project) }}</span>
                 </button>
               </div>
             </Transition>
@@ -314,7 +324,7 @@
                 class="project-room-list"
               >
                 <button
-                  v-for="childRoom in projectChildRooms(project)"
+                  v-for="childRoom in visibleProjectChildRooms(project)"
                   :key="childRoom.id"
                   class="room-row room-focus"
                   :data-kind="childRoom.kind"
@@ -344,6 +354,17 @@
                     {{ childRoom.suggestedAction }}
                   </small>
                 </button>
+                <button
+                  v-if="hasProjectRoomOverflow(project)"
+                  class="project-room-overflow-toggle"
+                  :data-expanded="projectRoomListExpanded(project.id)"
+                  :aria-expanded="projectRoomListExpanded(project.id)"
+                  type="button"
+                  @click="toggleProjectRoomOverflow(project.id)"
+                >
+                  <ChevronRight aria-hidden="true" />
+                  <span>{{ projectRoomOverflowLabel(project) }}</span>
+                </button>
               </div>
             </Transition>
           </article>
@@ -354,7 +375,7 @@
       </div>
     </div>
 
-    <div v-if="sidebarMode === 'expanded'" class="sidebar-footer">
+    <div class="sidebar-footer">
       <button
         class="sidebar-row sidebar-settings-row"
         :data-active="activeEntry.id === settingsEntry.id || activeEntry.type === 'system'"
@@ -370,31 +391,6 @@
           <span>Settings</span>
           <small>Account, storage, setup</small>
         </span>
-      </button>
-    </div>
-
-    <div v-else class="sidebar-collapsed-actions" data-testid="sidebar-rail">
-      <button
-        class="sidebar-icon-button"
-        type="button"
-        data-testid="rail-new-room"
-        aria-label="New room"
-        title="New room"
-        @click="$emit('new-room')"
-      >
-        <Plus aria-hidden="true" />
-      </button>
-      <button
-        class="sidebar-icon-button"
-        :data-active="activeEntry.id === settingsEntry.id || activeEntry.type === 'system'"
-        :aria-current="activeEntry.id === settingsEntry.id || activeEntry.type === 'system' ? 'page' : undefined"
-        type="button"
-        data-testid="rail-settings"
-        aria-label="Settings"
-        title="Settings"
-        @click="$emit('select-entry', settingsEntry)"
-      >
-        <Settings aria-hidden="true" />
       </button>
     </div>
 
@@ -439,6 +435,10 @@ import {
 import { computed, nextTick, ref, watch, type Component } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import {
+  SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT,
+  previewSidebarProjectRooms,
+} from "../../../domain/sidebar-project-room-preview";
 import { searchSidebarRooms } from "../../../domain/sidebar-room-search";
 import {
   buildGitRoomWebUrl,
@@ -448,11 +448,10 @@ import {
   type SidebarRoomMenuActionId,
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
-import type { ProjectGroup, SidebarEntry, SidebarMode, SystemEntry, RoomEntry } from "../types";
+import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
 
 const props = defineProps<{
-  sidebarMode: SidebarMode;
   activeEntry: SidebarEntry;
   primaryRoom: RoomEntry;
   projectEntries: ProjectGroup[];
@@ -463,7 +462,6 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  "context-menu-open": [open: boolean];
   "cycle-sidebar": [];
   "new-room": [];
   "archive-room": [entry: RoomEntry];
@@ -492,13 +490,7 @@ const searchInput = ref<HTMLInputElement | null>(null);
 const searchOpen = ref(false);
 const searchQuery = ref("");
 const activeSearchIndex = ref(0);
-
-// The sidebar peek panel closes on pointerleave; it needs to know a menu is
-// active (teleported outside the panel) so it can stay open underneath it.
-watch(
-  () => Boolean(roomContextMenu.value || backgroundContextMenu.value),
-  (open) => emit("context-menu-open", open),
-);
+const expandedProjectRoomLists = ref<Record<string, boolean>>({});
 
 const pinnedProjectEntries = computed(() => props.projectEntries.filter((project) => project.parent.pinned));
 const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
@@ -514,10 +506,6 @@ watch(searchResults, (results) => {
 
 watch(searchQuery, () => {
   activeSearchIndex.value = 0;
-});
-
-watch(() => props.sidebarMode, (mode) => {
-  if (mode !== "expanded") resetSearch();
 });
 
 const totalRoomCount = computed(() =>
@@ -653,6 +641,35 @@ function projectChildRooms(project: ProjectGroup | null | undefined): RoomEntry[
   return [...project.branchRooms, ...project.focusRooms];
 }
 
+function visibleProjectChildRooms(project: ProjectGroup): RoomEntry[] {
+  return previewSidebarProjectRooms({
+    rooms: projectChildRooms(project),
+    activeEntryId: props.activeEntry.id,
+    expanded: projectRoomListExpanded(project.id),
+  });
+}
+
+function hasProjectRoomOverflow(project: ProjectGroup): boolean {
+  return projectChildRooms(project).length > SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT;
+}
+
+function projectRoomListExpanded(projectId: string): boolean {
+  return Boolean(expandedProjectRoomLists.value[projectId]);
+}
+
+function toggleProjectRoomOverflow(projectId: string): void {
+  expandedProjectRoomLists.value = {
+    ...expandedProjectRoomLists.value,
+    [projectId]: !expandedProjectRoomLists.value[projectId],
+  };
+}
+
+function projectRoomOverflowLabel(project: ProjectGroup): string {
+  if (projectRoomListExpanded(project.id)) return "Show fewer rooms";
+  const hiddenCount = projectChildRooms(project).length - visibleProjectChildRooms(project).length;
+  return `Show ${hiddenCount} more`;
+}
+
 function projectChildListId(projectId: string): string {
   return `sidebar-project-children-${encodeURIComponent(projectId)}`;
 }
@@ -720,8 +737,20 @@ function handleSearchKeydown(event: KeyboardEvent): void {
 }
 
 function selectSearchResult(entry: RoomEntry): void {
+  revealSearchResult(entry);
   emit("select-entry", entry);
   closeSearch();
+}
+
+function revealSearchResult(entry: RoomEntry): void {
+  const project = props.projectEntries.find((candidate) =>
+    candidate.parent.id === entry.id
+    || projectChildRooms(candidate).some((room) => room.id === entry.id)
+  );
+  if (!project) return;
+  if (project.parent.pinned && props.pinnedCollapsed) emit("toggle-pinned-collapsed");
+  if (!project.parent.pinned && props.roomsCollapsed) emit("toggle-rooms-collapsed");
+  if (props.collapsedProjects[project.id]) emit("toggle-project", project.id);
 }
 
 function searchResultId(entryId: string): string {

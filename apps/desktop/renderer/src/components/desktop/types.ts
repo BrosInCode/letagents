@@ -48,4 +48,4 @@ export type ProjectGroup = {
   focusRooms: RoomEntry[];
 };
 
-export type SidebarMode = "expanded" | "rail" | "hidden";
+export type SidebarMode = "expanded" | "hidden";
