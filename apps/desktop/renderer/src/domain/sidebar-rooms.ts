@@ -208,6 +208,20 @@ export function buildSidebarProjectGroups(input: {
   return sortSidebarProjectGroups(groups);
 }
 
+export function findSidebarRoomEntryByIdentifier(
+  projectEntries: readonly ProjectGroup[],
+  roomIdentifier: string | null | undefined,
+): RoomEntry | null {
+  const identifier = normalizeRoomIdentifier(roomIdentifier);
+  if (!identifier) return null;
+  for (const project of projectEntries) {
+    const entry = [project.parent, ...project.branchRooms, ...project.focusRooms]
+      .find((candidate) => normalizeRoomIdentifier(candidate.roomIdentifier) === identifier);
+    if (entry) return entry;
+  }
+  return null;
+}
+
 function mergeRoomEntries(current: RoomEntry[], incoming: RoomEntry[]): RoomEntry[] {
   const entries = [...current];
   const entryIndexes = new Map(entries.map((entry, index) => [roomEntryKey(entry), index]));

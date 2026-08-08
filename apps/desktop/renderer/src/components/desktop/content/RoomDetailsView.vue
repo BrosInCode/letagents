@@ -80,7 +80,7 @@
       </form>
 
       <form
-        v-if="room.focusStatus !== 'concluded'"
+        v-if="room.focusStatus !== 'concluded' && !resultSubmitted"
         class="focus-room-form"
         data-testid="focus-room-closeout-form"
         @submit.prevent="shareFocusRoomResult"
@@ -131,7 +131,7 @@
 
       <section v-else class="focus-room-outcome" data-testid="focus-room-conclusion">
         <h4>Shared result</h4>
-        <p>{{ room.conclusionSummary || "No result summary was recorded." }}</p>
+        <p>{{ sharedResultSummary }}</p>
       </section>
     </section>
 
@@ -543,13 +543,13 @@ const props = defineProps<{
   repoStatus: RepoStatus;
   gitRoomMatchesActiveRepo: boolean;
   tasks: DesktopTaskSummary[];
+  onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
   "open-focus-room": [roomIdentifier: string];
   "refresh-room": [];
   "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
-  "focus-room-concluded": [event: FocusRoomConcludedEvent];
 }>();
 
 const activeTab = ref<FocusRoomTab>("open");
@@ -561,6 +561,7 @@ const creatingAdHoc = ref(false);
 const creatingTaskFocus = ref(false);
 const savingSettings = ref(false);
 const sharingResult = ref(false);
+const resultSubmitted = ref(false);
 const archivingFocusKey = ref<string | null>(null);
 const actionFeedback = ref<string | null>(null);
 const actionFeedbackState = ref<FeedbackState>("info");
@@ -643,9 +644,18 @@ const settingsChanged = computed(() => {
 });
 
 const canShareResult = computed(() => {
-  if (props.room.kind !== "focus" || props.room.focusStatus === "concluded") return false;
+  if (
+    props.room.kind !== "focus"
+    || props.room.focusStatus === "concluded"
+    || resultSubmitted.value
+  ) return false;
   return canSubmitFocusRoomConclusion(resultSummary.value, props.room.sourceTaskId, closeoutDetails);
 });
+
+const sharedResultSummary = computed(() =>
+  props.room.conclusionSummary || (resultSubmitted.value ? resultSummary.value.trim() : "")
+  || "No result summary was recorded."
+);
 
 const canArchiveFocusRooms = computed(() => props.room.role === "admin");
 
@@ -753,6 +763,13 @@ watch(
     resultSummary.value = summary || "";
   },
   { immediate: true },
+);
+
+watch(
+  () => props.room.identifier,
+  () => {
+    resultSubmitted.value = false;
+  },
 );
 
 watch(
@@ -993,25 +1010,37 @@ async function shareFocusRoomResult(): Promise<void> {
   }
   sharingResult.value = true;
   setFeedback(null);
+  const input = buildFocusRoomConclusionInput(
+    resultSummary.value,
+    props.room.sourceTaskId,
+    closeoutDetails,
+  );
   try {
-    const input = buildFocusRoomConclusionInput(
-      resultSummary.value,
-      props.room.sourceTaskId,
-      closeoutDetails,
-    );
     await desktopIpc.room.concludeFocusRoom(
       parentRoomId,
       focusKey,
       input.summary,
       input.details,
     );
-    emit("focus-room-concluded", {
+  } catch (error) {
+    sharingResult.value = false;
+    setFeedback(errorMessage(error, "Result could not be shared."), "error");
+    return;
+  }
+
+  resultSubmitted.value = true;
+  setFeedback("Result shared.", "success");
+  try {
+    await props.onFocusRoomConcluded?.({
       focusRoomIdentifier: props.room.identifier,
       parentRoomIdentifier: parentRoomId,
       displayName: props.room.displayName,
     });
   } catch (error) {
-    setFeedback(errorMessage(error, "Result could not be shared."), "error");
+    setFeedback(
+      errorMessage(error, "Result was shared, but the room list could not be refreshed."),
+      "error",
+    );
   } finally {
     sharingResult.value = false;
   }

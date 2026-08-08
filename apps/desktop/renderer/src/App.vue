@@ -103,6 +103,7 @@
 
       <AuthOnboardingView
         v-if="activeEntry.type === 'room' && selectedNeedsAccess"
+        :sidebar-mode="sidebarMode"
         :access="selectedAccess"
         :auth-status="authStatus"
         :busy="authBusy || loading"
@@ -114,6 +115,7 @@
         @poll-auth="pollAuthFlow"
         @refresh-room="refresh"
         @sign-out="signOut"
+        @cycle-sidebar="cycleSidebar"
       />
 
       <KeepAlive :max="1">
@@ -143,6 +145,7 @@
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
+          :on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @chat-scroll-position="rememberChatScrollPosition"
           @message-sent="handleOwnMessageSent"
           @room-renamed="handleRoomRenamed"
@@ -151,7 +154,6 @@
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
-          @focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
           @choose-worktree="openWorktreeForAgent"
@@ -349,6 +351,7 @@ import {
 } from "./domain/desktop-room-read-state";
 import {
   normalizeRoomIdentifier,
+  findSidebarRoomEntryByIdentifier,
   readStoredRecentRootRooms,
   rememberRecentRootRooms,
 } from "./domain/sidebar-rooms";
@@ -466,7 +469,10 @@ const sidebarFocusRoomConclusionTarget = ref<RoomEntry | null>(null);
 const sidebarFocusRoomConclusionParent = ref<RoomEntry | null>(null);
 const sidebarFocusRoomConclusionReturnFocusId = ref<string | null>(null);
 const sidebarFocusRoomConclusionError = ref<string | null>(null);
-const sidebarFocusRoomConclusionPendingSuccess = ref<string | null>(null);
+const sidebarFocusRoomConclusionPendingToast = ref<{
+  message: string;
+  state: "error" | "success";
+} | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
@@ -483,7 +489,7 @@ async function cycleSidebar(): Promise<void> {
 
   await nextTick();
   document.querySelector<HTMLElement>(
-    '[data-testid="room-sidebar-reveal-button"], [data-testid="sidebar-reveal-button"]',
+    '[data-testid="room-sidebar-reveal-button"], [data-testid="auth-sidebar-reveal-button"], [data-testid="sidebar-reveal-button"]',
   )?.focus({ preventScroll: true });
 }
 
@@ -911,10 +917,10 @@ async function handleRoomDetailsFocusRoomConcluded(event: FocusRoomConcludedEven
   const parentRoomIdentifier = normalizeRoomIdentifier(event.parentRoomIdentifier);
   const targetWasActive = activeEntry.value.type === "room"
     && normalizeRoomIdentifier(activeEntry.value.roomIdentifier) === focusRoomIdentifier;
-  const parentBeforeRefresh = projectEntries.value
-    .map((project) => project.parent)
-    .find((parent) => normalizeRoomIdentifier(parent.roomIdentifier) === parentRoomIdentifier)
-    || null;
+  const parentBeforeRefresh = findSidebarRoomEntryByIdentifier(
+    projectEntries.value,
+    parentRoomIdentifier,
+  );
 
   let refreshError: unknown = null;
   try {
@@ -924,10 +930,10 @@ async function handleRoomDetailsFocusRoomConcluded(event: FocusRoomConcludedEven
   }
 
   if (targetWasActive) {
-    const parentAfterRefresh = projectEntries.value
-      .map((project) => project.parent)
-      .find((parent) => normalizeRoomIdentifier(parent.roomIdentifier) === parentRoomIdentifier)
-      || parentBeforeRefresh;
+    const parentAfterRefresh = findSidebarRoomEntryByIdentifier(
+      projectEntries.value,
+      parentRoomIdentifier,
+    ) || parentBeforeRefresh;
     if (parentAfterRefresh) handleSidebarEntrySelected(parentAfterRefresh);
   }
 
@@ -1158,12 +1164,13 @@ function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
   ) return;
 
   sidebarFocusRoomConclusionTarget.value = entry;
-  sidebarFocusRoomConclusionParent.value = projectEntries.value.find((project) =>
-    project.focusRooms.some((focusRoom) => focusRoom.id === entry.id)
-  )?.parent || null;
+  sidebarFocusRoomConclusionParent.value = findSidebarRoomEntryByIdentifier(
+    projectEntries.value,
+    entry.parentRoomIdentifier,
+  );
   sidebarFocusRoomConclusionReturnFocusId.value = entry.id;
   sidebarFocusRoomConclusionError.value = null;
-  sidebarFocusRoomConclusionPendingSuccess.value = null;
+  sidebarFocusRoomConclusionPendingToast.value = null;
 }
 
 function openRoomDetailsFocusRoomConclusion(focusRoom: DesktopFocusRoomInfo): void {
@@ -1193,7 +1200,7 @@ function closeSidebarFocusRoomConclusion(): void {
   if (sidebarFocusRoomConclusionBusy.value) return;
   sidebarFocusRoomConclusionTarget.value = null;
   sidebarFocusRoomConclusionError.value = null;
-  sidebarFocusRoomConclusionPendingSuccess.value = null;
+  sidebarFocusRoomConclusionPendingToast.value = null;
 }
 
 async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput): Promise<void> {
@@ -1210,7 +1217,13 @@ async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput)
   }
 
   sidebarFocusRoomConclusionReturnFocusId.value = parent?.id || null;
-  sidebarFocusRoomConclusionPendingSuccess.value = `${target.title || "Focus room"} concluded.`;
+  const displayName = target.title || "Focus room";
+  sidebarFocusRoomConclusionPendingToast.value = result.refreshError
+    ? {
+        message: `${displayName} concluded, but the room list could not be refreshed: ${result.refreshError}`,
+        state: "error",
+      }
+    : { message: `${displayName} concluded.`, state: "success" };
   sidebarFocusRoomConclusionTarget.value = null;
   if (targetWasActive && parent) {
     handleSidebarEntrySelected(parent);
@@ -1218,9 +1231,9 @@ async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput)
 }
 
 function handleSidebarFocusRoomConclusionAfterLeave(): void {
-  const message = sidebarFocusRoomConclusionPendingSuccess.value;
-  sidebarFocusRoomConclusionPendingSuccess.value = null;
-  if (message) pushActionToast(message, "success");
+  const toast = sidebarFocusRoomConclusionPendingToast.value;
+  sidebarFocusRoomConclusionPendingToast.value = null;
+  if (toast) pushActionToast(toast.message, toast.state);
 }
 
 const {

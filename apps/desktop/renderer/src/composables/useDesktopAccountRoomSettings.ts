@@ -189,7 +189,10 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   async function concludeSidebarFocusRoom(
     entry: RoomEntry,
     input: FocusRoomConclusionInput,
-  ): Promise<{ ok: true } | { ok: false; error: string }> {
+  ): Promise<
+    | { ok: true; refreshError: string | null }
+    | { ok: false; error: string }
+  > {
     if (!entry.focusKey || !entry.parentRoomIdentifier || entry.focusStatus === "concluded") {
       const error = "This focus room is no longer available to conclude.";
       return { ok: false, error };
@@ -204,11 +207,20 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         input.summary,
         input.details,
       );
-      await options.refresh();
-      return { ok: true };
     } catch (caught) {
       const error = caught instanceof Error ? caught.message : `Could not conclude ${displayName}.`;
+      settingsRoomActionBusyKey.value = null;
       return { ok: false, error };
+    }
+
+    try {
+      await options.refresh();
+      return { ok: true, refreshError: null };
+    } catch (caught) {
+      const refreshError = caught instanceof Error
+        ? caught.message
+        : "The room list could not be refreshed.";
+      return { ok: true, refreshError };
     } finally {
       settingsRoomActionBusyKey.value = null;
     }

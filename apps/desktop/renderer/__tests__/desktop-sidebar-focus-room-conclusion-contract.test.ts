@@ -50,10 +50,11 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.doesNotMatch(roomDetailsSource, /window\.prompt/);
     assert.doesNotMatch(roomDetailsSource, /artifact: "Manual close"/);
     assert.match(roomDetailsSource, /emit\("request-focus-room-conclusion", focusRoom\)/);
-    assert.match(roomDetailsSource, /emit\("focus-room-concluded", \{/);
+    assert.match(roomDetailsSource, /await props\.onFocusRoomConcluded\?\.\(\{/);
+    assert.match(roomDetailsSource, /resultSubmitted\.value = true/);
     assert.match(roomShellSource, /@request-focus-room-conclusion="emit\('request-focus-room-conclusion', \$event\)"/);
-    assert.match(roomShellSource, /@focus-room-concluded="emit\('focus-room-concluded', \$event\)"/);
-    assert.match(appSource, /@focus-room-concluded="handleRoomDetailsFocusRoomConcluded"/);
+    assert.match(roomShellSource, /:on-focus-room-concluded="onFocusRoomConcluded"/);
+    assert.match(appSource, /:on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"/);
     assert.match(
       appSource,
       /async function handleRoomDetailsFocusRoomConcluded[\s\S]*?await refresh\(\)[\s\S]*?handleSidebarEntrySelected\(parentAfterRefresh\)/,
@@ -69,7 +70,7 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(dialogSource, /@after-leave="handleAfterLeave"/);
     assert.match(dialogSource, /emit\("after-leave"\)/);
     assert.match(appSource, /@after-leave="handleSidebarFocusRoomConclusionAfterLeave"/);
-    assert.match(appSource, /if \(message\) pushActionToast\(message, "success"\)/);
+    assert.match(appSource, /if \(toast\) pushActionToast\(toast\.message, toast\.state\)/);
   });
 
   it("identifies the IPC mutation as an authenticated desktop-human write", () => {

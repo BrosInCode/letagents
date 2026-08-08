@@ -8,6 +8,7 @@ function source(relativePath: string): string {
 }
 
 const appSource = source("../src/App.vue");
+const authOnboardingSource = source("../src/components/desktop/content/AuthOnboardingView.vue");
 const navigationSource = source("../src/composables/useDesktopNavigationState.ts");
 const sidebarSource = source("../src/components/desktop/sidebar/DesktopSidebar.vue");
 const typesSource = source("../src/components/desktop/types.ts");
@@ -35,8 +36,10 @@ describe("desktop sidebar visibility contract", () => {
     assert.match(appSource, /await nextTick\(\)/);
     assert.match(
       appSource,
-      /\[data-testid="room-sidebar-reveal-button"\][\s\S]*?\[data-testid="sidebar-reveal-button"\][\s\S]*?\.focus\(\{ preventScroll: true \}\)/,
+      /\[data-testid="room-sidebar-reveal-button"\][\s\S]*?\[data-testid="auth-sidebar-reveal-button"\][\s\S]*?\[data-testid="sidebar-reveal-button"\][\s\S]*?\.focus\(\{ preventScroll: true \}\)/,
     );
+    assert.match(appSource, /<AuthOnboardingView[\s\S]*?:sidebar-mode="sidebarMode"[\s\S]*?@cycle-sidebar="cycleSidebar"/);
+    assert.match(authOnboardingSource, /data-testid="auth-sidebar-reveal-button"/);
   });
 
   it("animates the sidebar and its layout as one interruptible transition", () => {

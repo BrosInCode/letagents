@@ -244,10 +244,10 @@
         :repo-status="repoStatus"
         :git-room-matches-active-repo="gitRoomMatchesActiveRepo"
         :tasks="tasks"
+        :on-focus-room-concluded="onFocusRoomConcluded"
         @open-focus-room="emit('open-focus-room', $event)"
         @refresh-room="emit('refresh-room')"
         @request-focus-room-conclusion="emit('request-focus-room-conclusion', $event)"
-        @focus-room-concluded="emit('focus-room-concluded', $event)"
       />
 
       <RentAnAgentView
@@ -518,6 +518,7 @@ const props = defineProps<{
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
   initialChatScrollTop?: number | null;
+  onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
 const { pushActionToast } = useDesktopActionToasts();
 const notifiedManagedAgentFailures = new Set<string>();
@@ -530,7 +531,6 @@ const emit = defineEmits<{
   "refresh-room": [snapshot?: DesktopRoomSnapshot];
   "open-focus-room": [roomIdentifier: string];
   "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
-  "focus-room-concluded": [event: FocusRoomConcludedEvent];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
   "choose-worktree": [rootPath: string];

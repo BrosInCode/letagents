@@ -2,8 +2,11 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { DesktopRoomSnapshot } from "../../electron/ipc-types";
-import type { RoomEntry } from "../src/components/desktop/types";
-import { buildSidebarProjectGroups } from "../src/domain/sidebar-rooms";
+import type { ProjectGroup, RoomEntry } from "../src/components/desktop/types";
+import {
+  buildSidebarProjectGroups,
+  findSidebarRoomEntryByIdentifier,
+} from "../src/domain/sidebar-rooms";
 
 function parentEntry(): RoomEntry {
   return {
@@ -55,5 +58,34 @@ describe("sidebar focus room lifecycle", () => {
     assert.equal(groups[0]?.focusRooms[0]?.sourceTaskId, "task_12");
     assert.equal(groups[0]?.focusRooms[0]?.focusKey, "key_focus_active");
     assert.equal(groups[0]?.focusRooms[0]?.parentRoomIdentifier, "ABCD-1234");
+  });
+
+  it("resolves a branch focus room to its actual branch parent", () => {
+    const repoParent = parentEntry();
+    const branchParent: RoomEntry = {
+      ...repoParent,
+      id: "room:branch:feature",
+      kind: "branch",
+      roomIdentifier: "git-room:feature",
+      title: "feature/sidebar",
+    };
+    const group: ProjectGroup = {
+      id: "project:git:repo",
+      roomName: "Repo",
+      parent: repoParent,
+      branchRooms: [branchParent],
+      focusRooms: [{
+        ...repoParent,
+        id: "room:focus:branch-task",
+        kind: "focus",
+        roomIdentifier: "focus:branch-task",
+        parentRoomIdentifier: branchParent.roomIdentifier,
+      }],
+    };
+
+    assert.equal(
+      findSidebarRoomEntryByIdentifier([group], "git-room:feature")?.id,
+      branchParent.id,
+    );
   });
 });
