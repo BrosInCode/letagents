@@ -1029,7 +1029,6 @@ async function shareFocusRoomResult(): Promise<void> {
   }
 
   resultSubmitted.value = true;
-  setFeedback("Result shared.", "success");
   try {
     await props.onFocusRoomConcluded?.({
       focusRoomIdentifier: props.room.identifier,

@@ -52,6 +52,7 @@ describe("desktop sidebar focus room conclusion contract", () => {
     assert.match(roomDetailsSource, /emit\("request-focus-room-conclusion", focusRoom\)/);
     assert.match(roomDetailsSource, /await props\.onFocusRoomConcluded\?\.\(\{/);
     assert.match(roomDetailsSource, /resultSubmitted\.value = true/);
+    assert.doesNotMatch(roomDetailsSource, /setFeedback\("Result shared\.", "success"\)/);
     assert.match(roomShellSource, /@request-focus-room-conclusion="emit\('request-focus-room-conclusion', \$event\)"/);
     assert.match(roomShellSource, /:on-focus-room-concluded="onFocusRoomConcluded"/);
     assert.match(appSource, /:on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"/);
