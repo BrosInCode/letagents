@@ -2,6 +2,7 @@ import { ref, type Ref } from "vue";
 import type { DesktopAccountRoomEntry, DesktopRoomInfo, DesktopRoomSnapshot } from "../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { desktopIpc } from "../ipc/index.js";
+import type { FocusRoomConclusionInput } from "../domain/focus-room-conclusion";
 import {
   buildRoomPinMutation,
   normalizeRoomIdentifier,
@@ -185,6 +186,37 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     }
   }
 
+  async function concludeSidebarFocusRoom(
+    entry: RoomEntry,
+    input: FocusRoomConclusionInput,
+  ): Promise<{ ok: true } | { ok: false; error: string }> {
+    if (!entry.focusKey || !entry.parentRoomIdentifier || entry.focusStatus === "concluded") {
+      const error = "This focus room is no longer available to conclude.";
+      reportSidebarRoomAction(error, "error");
+      return { ok: false, error };
+    }
+
+    const displayName = entry.title || entry.roomIdentifier || "Focus room";
+    settingsRoomActionBusyKey.value = `conclude-focus:${entry.roomIdentifier || entry.focusKey}`;
+    try {
+      await desktopIpc.room.concludeFocusRoom(
+        entry.parentRoomIdentifier,
+        entry.focusKey,
+        input.summary,
+        input.details,
+      );
+      await options.refresh();
+      reportSidebarRoomAction(`${displayName} concluded.`, "success");
+      return { ok: true };
+    } catch (caught) {
+      const error = caught instanceof Error ? caught.message : `Could not conclude ${displayName}.`;
+      reportSidebarRoomAction(error, "error");
+      return { ok: false, error };
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
   async function togglePinSidebarRoom(entry: RoomEntry): Promise<void> {
     const mutation = buildRoomPinMutation(entry);
     if (!mutation) return;
@@ -325,6 +357,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   return {
     archiveSidebarFocusRoom,
     archiveSidebarRoom,
+    concludeSidebarFocusRoom,
     deleteAccountRoom,
     leaveAccountRoom,
     renameSidebarRoom,

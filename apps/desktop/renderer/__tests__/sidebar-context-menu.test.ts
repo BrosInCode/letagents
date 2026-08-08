@@ -183,11 +183,12 @@ describe("sidebar room context menu items", () => {
     assert.ok(!ids.includes("rename-room"));
   });
 
-  it("offers focus rooms archive only when lineage is known", () => {
+  it("offers active focus rooms conclude and hide actions only when lineage is known", () => {
     const withLineage = buildSidebarRoomContextMenuItems({
       entry: roomEntry({
         kind: "focus",
         focusKey: "task_12",
+        focusStatus: "active",
         parentRoomIdentifier: "ABCD-1234",
         roomIdentifier: "focus_9",
       }),
@@ -201,10 +202,31 @@ describe("sidebar room context menu items", () => {
       hasProjectChildren: false,
       projectCollapsed: false,
     });
+    const concludeItem = withLineage.flat().find((item) => item.id === "conclude-focus-room");
     const archiveItem = withLineage.flat().find((item) => item.id === "archive-focus-room");
+    assert.ok(concludeItem);
+    assert.equal(concludeItem.danger, undefined);
     assert.ok(archiveItem);
     assert.equal(archiveItem.danger, true);
+    assert.ok(!menuIds(withoutLineage).includes("conclude-focus-room"));
     assert.ok(!menuIds(withoutLineage).includes("archive-focus-room"));
+  });
+
+  it("does not offer conclude for an already concluded focus room", () => {
+    const groups = buildSidebarRoomContextMenuItems({
+      entry: roomEntry({
+        kind: "focus",
+        focusKey: "task_12",
+        focusStatus: "concluded",
+        parentRoomIdentifier: "ABCD-1234",
+        roomIdentifier: "focus_9",
+      }),
+      isPrimaryRoom: false,
+      hasProjectChildren: false,
+      projectCollapsed: false,
+    });
+    assert.ok(!menuIds(groups).includes("conclude-focus-room"));
+    assert.ok(menuIds(groups).includes("archive-focus-room"));
   });
 
   it("labels the project toggle from the collapsed state", () => {

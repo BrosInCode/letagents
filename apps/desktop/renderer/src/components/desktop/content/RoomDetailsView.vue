@@ -470,6 +470,14 @@
 import { Archive, ArrowRight, CheckCircle2, Copy, ExternalLink, Plus, RefreshCw, Search } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
+import {
+  buildFocusRoomConclusionInput,
+  canSubmitFocusRoomConclusion,
+  createDefaultFocusRoomConclusionDetails,
+  focusRoomBlockerStateOptions as blockerStateOptions,
+  focusRoomParentTaskNextOptions as parentTaskNextOptions,
+  focusRoomReviewStateOptions as reviewStateOptions,
+} from "../../../domain/focus-room-conclusion";
 import { shouldShowRepoEnvironmentForRoom } from "../../../domain/repo-environment";
 import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import { formatShortDateTime } from "../../../domain/time";
@@ -480,13 +488,9 @@ import { desktopIpc } from "../../../ipc/index.js";
 import type {
   DesktopFocusActivityScope,
   DesktopGitRoomInfo,
-  DesktopFocusRoomBlockerState,
   DesktopFocusGitHubEventRouting,
   DesktopFocusParentVisibility,
-  DesktopFocusRoomConclusionDetails,
   DesktopFocusRoomInfo,
-  DesktopFocusRoomParentTaskNextAction,
-  DesktopFocusRoomReviewState,
   DesktopFocusRoomSettings,
   DesktopRoomInfo,
   DesktopTaskSummary,
@@ -533,26 +537,6 @@ const githubRoutingOptions: Array<Option<DesktopFocusGitHubEventRouting>> = [
   { value: "off", label: "Off" },
 ];
 
-const reviewStateOptions: Array<Option<DesktopFocusRoomReviewState>> = [
-  { value: "reviewed", label: "Reviewed" },
-  { value: "needs_review", label: "Needs review" },
-  { value: "not_required", label: "Not required" },
-];
-
-const blockerStateOptions: Array<Option<DesktopFocusRoomBlockerState>> = [
-  { value: "none", label: "None" },
-  { value: "resolved", label: "Resolved" },
-  { value: "blocked", label: "Blocked" },
-];
-
-const parentTaskNextOptions: Array<Option<DesktopFocusRoomParentTaskNextAction>> = [
-  { value: "keep_open", label: "Keep open" },
-  { value: "move_to_review", label: "Move to review" },
-  { value: "mark_blocked", label: "Mark blocked" },
-  { value: "mark_done", label: "Mark done" },
-  { value: "follow_up", label: "Follow-up" },
-];
-
 const props = defineProps<{
   room: DesktopRoomInfo;
   focusRooms: DesktopFocusRoomInfo[];
@@ -583,13 +567,7 @@ const focusRoomContextMenu = ref<FocusRoomContextMenu | null>(null);
 let feedbackTimer: number | null = null;
 const resultSummary = ref("");
 const settingsDraft = reactive<DesktopFocusRoomSettings>({ ...DEFAULT_SETTINGS });
-const closeoutDetails = reactive<DesktopFocusRoomConclusionDetails>({
-  artifact: "",
-  review_state: "needs_review",
-  blocker_state: "none",
-  parent_task_next: "keep_open",
-  next_owner: "",
-});
+const closeoutDetails = reactive(createDefaultFocusRoomConclusionDetails());
 
 const showRepoStatusDetails = computed(() =>
   shouldShowRepoEnvironmentForRoom(props.room, props.repoStatus, props.gitRoomMatchesActiveRepo)
@@ -665,9 +643,7 @@ const settingsChanged = computed(() => {
 
 const canShareResult = computed(() => {
   if (props.room.kind !== "focus" || props.room.focusStatus === "concluded") return false;
-  if (!resultSummary.value.trim()) return false;
-  if (!props.room.sourceTaskId) return true;
-  return Boolean(closeoutDetails.artifact.trim() && closeoutDetails.next_owner.trim());
+  return canSubmitFocusRoomConclusion(resultSummary.value, props.room.sourceTaskId, closeoutDetails);
 });
 
 const canArchiveFocusRooms = computed(() => props.room.role === "admin");
@@ -1055,17 +1031,16 @@ async function shareFocusRoomResult(): Promise<void> {
   sharingResult.value = true;
   setFeedback(null);
   try {
+    const input = buildFocusRoomConclusionInput(
+      resultSummary.value,
+      props.room.sourceTaskId,
+      closeoutDetails,
+    );
     await desktopIpc.room.concludeFocusRoom(
       parentRoomId,
       focusKey,
-      resultSummary.value.trim(),
-      props.room.sourceTaskId
-        ? {
-            ...closeoutDetails,
-            artifact: closeoutDetails.artifact.trim(),
-            next_owner: closeoutDetails.next_owner.trim(),
-          }
-        : null,
+      input.summary,
+      input.details,
     );
     emit("refresh-room");
     setFeedback("Result shared.", "success");

@@ -64,6 +64,7 @@
           @new-room="selectNewRoomEntry"
           @archive-room="archiveSidebarRoom"
           @archive-focus-room="archiveSidebarFocusRoom"
+          @conclude-focus-room="openSidebarFocusRoomConclusion"
           @mark-room-read="markRoomEntryRead"
           @pin-room="togglePinSidebarRoom"
           @rename-room="renameSidebarRoom"
@@ -253,6 +254,16 @@
       />
     </Transition>
 
+    <SidebarFocusRoomConclusionDialog
+      :open="Boolean(sidebarFocusRoomConclusionTarget)"
+      :entry="sidebarFocusRoomConclusionTarget"
+      :busy="sidebarFocusRoomConclusionBusy"
+      :error="sidebarFocusRoomConclusionError"
+      :fallback-focus-entry-id="sidebarFocusRoomConclusionReturnFocusId"
+      @close="closeSidebarFocusRoomConclusion"
+      @submit="submitSidebarFocusRoomConclusion"
+    />
+
     <div
       class="desktop-action-toasts"
       role="status"
@@ -295,6 +306,7 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
+import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
@@ -306,6 +318,7 @@ import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardin
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
 import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import type { FocusRoomConclusionInput } from "./domain/focus-room-conclusion";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -442,6 +455,10 @@ let repoStatusWatchRootPath: string | null = null;
 let repoStatusWatchRequestId = 0;
 
 const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
+const sidebarFocusRoomConclusionTarget = ref<RoomEntry | null>(null);
+const sidebarFocusRoomConclusionParent = ref<RoomEntry | null>(null);
+const sidebarFocusRoomConclusionReturnFocusId = ref<string | null>(null);
+const sidebarFocusRoomConclusionError = ref<string | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
@@ -1035,6 +1052,7 @@ const {
 const {
   archiveSidebarFocusRoom,
   archiveSidebarRoom,
+  concludeSidebarFocusRoom,
   deleteAccountRoom,
   leaveAccountRoom,
   openAccountRoomFromSettings,
@@ -1069,6 +1087,55 @@ const {
   },
   notify: (message, state) => pushActionToast(message, state),
 });
+
+const sidebarFocusRoomConclusionBusy = computed(() => {
+  const target = sidebarFocusRoomConclusionTarget.value;
+  if (!target) return false;
+  return settingsRoomActionBusyKey.value
+    === `conclude-focus:${target.roomIdentifier || target.focusKey}`;
+});
+
+function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
+  if (
+    entry.kind !== "focus"
+    || entry.focusStatus === "concluded"
+    || !entry.focusKey
+    || !entry.parentRoomIdentifier
+  ) return;
+
+  sidebarFocusRoomConclusionTarget.value = entry;
+  sidebarFocusRoomConclusionParent.value = projectEntries.value.find((project) =>
+    project.focusRooms.some((focusRoom) => focusRoom.id === entry.id)
+  )?.parent || null;
+  sidebarFocusRoomConclusionReturnFocusId.value = entry.id;
+  sidebarFocusRoomConclusionError.value = null;
+}
+
+function closeSidebarFocusRoomConclusion(): void {
+  if (sidebarFocusRoomConclusionBusy.value) return;
+  sidebarFocusRoomConclusionTarget.value = null;
+  sidebarFocusRoomConclusionError.value = null;
+}
+
+async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput): Promise<void> {
+  const target = sidebarFocusRoomConclusionTarget.value;
+  if (!target || sidebarFocusRoomConclusionBusy.value) return;
+
+  const parent = sidebarFocusRoomConclusionParent.value;
+  const targetWasActive = activeEntry.value.id === target.id;
+  sidebarFocusRoomConclusionError.value = null;
+  const result = await concludeSidebarFocusRoom(target, input);
+  if (!result.ok) {
+    sidebarFocusRoomConclusionError.value = result.error;
+    return;
+  }
+
+  sidebarFocusRoomConclusionReturnFocusId.value = parent?.id || null;
+  sidebarFocusRoomConclusionTarget.value = null;
+  if (targetWasActive && parent) {
+    handleSidebarEntrySelected(parent);
+  }
+}
 
 const {
   clearMcpTargetSelection,

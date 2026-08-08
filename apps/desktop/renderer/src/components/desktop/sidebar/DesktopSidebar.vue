@@ -149,6 +149,7 @@
                 :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
                 :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
                 :data-unread="project.parent.hasUnread"
+                :data-sidebar-entry-id="project.parent.id"
                 type="button"
                 :data-testid="`pinned-room-${project.parent.id}`"
                 @click="selectOrToggleProject(project)"
@@ -199,6 +200,7 @@
                   :data-kind="childRoom.kind"
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
+                  :data-sidebar-entry-id="childRoom.id"
                   :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
                   type="button"
                   :data-testid="`pinned-child-room-${childRoom.id}`"
@@ -276,6 +278,7 @@
                 :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
                 :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
                 :data-unread="project.parent.hasUnread"
+                :data-sidebar-entry-id="project.parent.id"
                 type="button"
                 :data-testid="`room-parent-${project.parent.id}`"
                 @click="selectOrToggleProject(project)"
@@ -330,6 +333,7 @@
                   :data-kind="childRoom.kind"
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
+                  :data-sidebar-entry-id="childRoom.id"
                   :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
                   type="button"
                   :data-testid="`child-room-${childRoom.id}`"
@@ -418,6 +422,7 @@
 import {
   Archive,
   Check,
+  CheckCircle2,
   ChevronRight,
   Copy,
   ExternalLink,
@@ -466,6 +471,7 @@ const emit = defineEmits<{
   "new-room": [];
   "archive-room": [entry: RoomEntry];
   "archive-focus-room": [entry: RoomEntry];
+  "conclude-focus-room": [entry: RoomEntry];
   "mark-room-read": [entry: RoomEntry];
   "pin-room": [entry: RoomEntry];
   "rename-room": [entry: RoomEntry];
@@ -521,6 +527,7 @@ const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
   "copy-branch-name": GitBranch,
   "open-on-github": ExternalLink,
   "toggle-project": ChevronRight,
+  "conclude-focus-room": CheckCircle2,
   "archive-focus-room": Archive,
   "archive-room": Archive,
 };
@@ -601,6 +608,7 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
     "toggle-project": () => {
       if (menu.projectId) emit("toggle-project", menu.projectId);
     },
+    "conclude-focus-room": () => emit("conclude-focus-room", menu.entry),
     "archive-focus-room": () => emit("archive-focus-room", menu.entry),
     "archive-room": () => emit("archive-room", menu.entry),
   };
