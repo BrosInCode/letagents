@@ -1,6 +1,30 @@
 <template>
-  <aside class="app-sidebar" data-testid="desktop-sidebar">
-    <div class="sidebar-topbar">
+  <aside
+    class="app-sidebar"
+    :data-selection-active="selectionActive"
+    data-testid="desktop-sidebar"
+    @keydown.esc="handleSidebarEscape"
+  >
+    <div class="sidebar-topbar" :data-selection-active="selectionActive">
+      <template v-if="selectionActive">
+        <div class="sidebar-selection-summary" aria-live="polite">
+          <ListChecks aria-hidden="true" />
+          <strong>{{ selectedEntryIds.length }}</strong>
+          <span>{{ selectedEntryIds.length === 1 ? "room selected" : "rooms selected" }}</span>
+        </div>
+        <button
+          class="sidebar-topbar-action"
+          type="button"
+          aria-label="Finish selecting rooms"
+          title="Finish selecting rooms"
+          data-testid="sidebar-selection-close"
+          :disabled="Boolean(batchActionBusy)"
+          @click="$emit('cancel-selection')"
+        >
+          <X aria-hidden="true" />
+        </button>
+      </template>
+      <template v-else>
       <button
         class="sidebar-collapse-button"
         type="button"
@@ -15,21 +39,34 @@
           <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
         </svg>
       </button>
-      <button
-        ref="searchButton"
-        class="sidebar-search-button"
-        type="button"
-        :data-active="searchOpen"
-        :aria-expanded="searchOpen"
-        aria-controls="sidebar-room-search"
-        :aria-label="searchOpen ? 'Close room search' : 'Search rooms'"
-        :title="searchOpen ? 'Close room search' : 'Search rooms'"
-        data-testid="sidebar-search-button"
-        @click="toggleSearch"
-      >
-        <X v-if="searchOpen" aria-hidden="true" />
-        <Search v-else aria-hidden="true" />
-      </button>
+      <div class="sidebar-topbar-actions">
+        <button
+          class="sidebar-topbar-action"
+          type="button"
+          aria-label="Select rooms"
+          title="Select rooms"
+          data-testid="sidebar-select-rooms-button"
+          @click="startSelection()"
+        >
+          <ListChecks aria-hidden="true" />
+        </button>
+        <button
+          ref="searchButton"
+          class="sidebar-search-button"
+          type="button"
+          :data-active="searchOpen"
+          :aria-expanded="searchOpen"
+          aria-controls="sidebar-room-search"
+          :aria-label="searchOpen ? 'Close room search' : 'Search rooms'"
+          :title="searchOpen ? 'Close room search' : 'Search rooms'"
+          data-testid="sidebar-search-button"
+          @click="toggleSearch"
+        >
+          <X v-if="searchOpen" aria-hidden="true" />
+          <Search v-else aria-hidden="true" />
+        </button>
+      </div>
+      </template>
     </div>
 
     <section
@@ -103,17 +140,32 @@
 
     <div v-else class="sidebar-navigation" @contextmenu.prevent="openBackgroundContextMenu">
       <div class="sidebar-actions">
-      <button
-        class="sidebar-cta"
-        type="button"
-        data-testid="sidebar-new-room"
-        @click="$emit('new-room')"
-      >
-        <span class="cta-plus" aria-hidden="true">
-          <Plus />
-        </span>
-        <span>New room</span>
-      </button>
+        <button
+          v-if="selectionActive"
+          class="sidebar-selection-scope"
+          type="button"
+          :disabled="!visibleSelectableEntries.length || Boolean(batchActionBusy)"
+          data-testid="sidebar-select-visible"
+          @click="toggleVisibleSelection"
+        >
+          <span class="sidebar-selection-scope-icon" :data-selected="allVisibleSelected" aria-hidden="true">
+            <Check v-if="allVisibleSelected" />
+          </span>
+          <span>{{ allVisibleSelected ? "Clear visible" : "Select visible" }}</span>
+          <small>{{ visibleSelectableEntries.length }}</small>
+        </button>
+        <button
+          v-else
+          class="sidebar-cta"
+          type="button"
+          data-testid="sidebar-new-room"
+          @click="$emit('new-room')"
+        >
+          <span class="cta-plus" aria-hidden="true">
+            <Plus />
+          </span>
+          <span>New room</span>
+        </button>
       </div>
 
       <div class="sidebar-room-sections">
@@ -149,13 +201,23 @@
                 :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
                 :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
                 :data-unread="project.parent.hasUnread"
+                :data-selected="isEntrySelected(project.parent)"
                 :data-sidebar-entry-id="project.parent.id"
+                :aria-pressed="selectionActive && isSidebarRoomSelectable(project.parent) ? isEntrySelected(project.parent) : undefined"
                 type="button"
                 :data-testid="`pinned-room-${project.parent.id}`"
-                @click="selectOrToggleProject(project)"
+                @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
               >
-                <span class="pin-mark" aria-hidden="true">
+                <span
+                  v-if="selectionActive && isSidebarRoomSelectable(project.parent)"
+                  class="sidebar-selection-indicator"
+                  :data-selected="isEntrySelected(project.parent)"
+                  aria-hidden="true"
+                >
+                  <Check v-if="isEntrySelected(project.parent)" />
+                </span>
+                <span v-else class="pin-mark" aria-hidden="true">
                   <Pin />
                 </span>
                 <span class="pinned-main">
@@ -200,13 +262,23 @@
                   :data-kind="childRoom.kind"
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
+                  :data-selected="isEntrySelected(childRoom)"
                   :data-sidebar-entry-id="childRoom.id"
                   :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
+                  :aria-pressed="selectionActive && isSidebarRoomSelectable(childRoom) ? isEntrySelected(childRoom) : undefined"
                   type="button"
                   :data-testid="`pinned-child-room-${childRoom.id}`"
-                  @click="$emit('select-entry', childRoom)"
+                  @click="handleEntryActivation($event, childRoom)"
                   @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
                 >
+                  <span
+                    v-if="selectionActive && isSidebarRoomSelectable(childRoom)"
+                    class="sidebar-child-selection-indicator"
+                    :data-selected="isEntrySelected(childRoom)"
+                    aria-hidden="true"
+                  >
+                    <Check v-if="isEntrySelected(childRoom)" />
+                  </span>
                   <span class="room-title-line">
                     <span class="room-title">{{ childRoom.title }}</span>
                     <span v-if="childRoom.currentWorkspace" class="room-workspace-pill">Current</span>
@@ -279,14 +351,24 @@
                 :aria-current="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id ? 'page' : undefined"
                 :data-active="isSelectableRoom(project.parent) && activeEntry.id === project.parent.id"
                 :data-unread="project.parent.hasUnread"
+                :data-selected="isEntrySelected(project.parent)"
                 :data-sidebar-entry-id="project.parent.id"
+                :aria-pressed="selectionActive && isSidebarRoomSelectable(project.parent) ? isEntrySelected(project.parent) : undefined"
                 type="button"
                 :data-testid="`room-parent-${project.parent.id}`"
-                @click="selectOrToggleProject(project)"
+                @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
               >
                 <span class="project-row-main">
-                  <span class="project-icon" aria-hidden="true">
+                  <span
+                    v-if="selectionActive && isSidebarRoomSelectable(project.parent)"
+                    class="sidebar-selection-indicator"
+                    :data-selected="isEntrySelected(project.parent)"
+                    aria-hidden="true"
+                  >
+                    <Check v-if="isEntrySelected(project.parent)" />
+                  </span>
+                  <span v-else class="project-icon" aria-hidden="true">
                     <House />
                   </span>
                   <span class="project-copy">
@@ -334,13 +416,23 @@
                   :data-kind="childRoom.kind"
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
+                  :data-selected="isEntrySelected(childRoom)"
                   :data-sidebar-entry-id="childRoom.id"
                   :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
+                  :aria-pressed="selectionActive && isSidebarRoomSelectable(childRoom) ? isEntrySelected(childRoom) : undefined"
                   type="button"
                   :data-testid="`child-room-${childRoom.id}`"
-                  @click="$emit('select-entry', childRoom)"
+                  @click="handleEntryActivation($event, childRoom)"
                   @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
                 >
+                  <span
+                    v-if="selectionActive && isSidebarRoomSelectable(childRoom)"
+                    class="sidebar-child-selection-indicator"
+                    :data-selected="isEntrySelected(childRoom)"
+                    aria-hidden="true"
+                  >
+                    <Check v-if="isEntrySelected(childRoom)" />
+                  </span>
                   <span class="room-title-line">
                     <span class="room-title">{{ childRoom.title }}</span>
                     <span v-if="childRoom.currentWorkspace" class="room-workspace-pill">Current</span>
@@ -381,7 +473,56 @@
       </div>
     </div>
 
-    <div class="sidebar-footer">
+    <div v-if="selectionActive" class="sidebar-footer sidebar-selection-footer">
+      <div class="sidebar-selection-toolbar" role="toolbar" aria-label="Selected room actions">
+        <button
+          type="button"
+          :disabled="Boolean(batchActionBusy) || !readResolution.targets.length"
+          :aria-label="batchActionLabel(readResolution.label, readResolution.targets.length)"
+          data-testid="sidebar-batch-mark-read"
+          @click="$emit('batch-action', 'mark-read')"
+        >
+          <Check aria-hidden="true" />
+          <span>{{ readResolution.label }}</span>
+          <small>{{ readResolution.targets.length }}</small>
+        </button>
+        <button
+          type="button"
+          :disabled="Boolean(batchActionBusy) || !pinResolution.targets.length"
+          :aria-label="batchActionLabel(pinResolution.label, pinResolution.targets.length)"
+          data-testid="sidebar-batch-pin"
+          @click="$emit('batch-action', 'pin')"
+        >
+          <PinOff v-if="pinResolution.pinned === false" aria-hidden="true" />
+          <Pin v-else aria-hidden="true" />
+          <span>{{ pinResolution.label }}</span>
+          <small>{{ pinResolution.targets.length }}</small>
+        </button>
+        <button
+          type="button"
+          :disabled="Boolean(batchActionBusy) || !concludeResolution.targets.length"
+          :aria-label="batchActionLabel(concludeResolution.label, concludeResolution.targets.length)"
+          data-testid="sidebar-batch-conclude"
+          @click="$emit('batch-action', 'conclude')"
+        >
+          <CheckCircle2 aria-hidden="true" />
+          <span>{{ concludeResolution.label }}</span>
+          <small>{{ concludeResolution.targets.length }}</small>
+        </button>
+        <button
+          type="button"
+          :disabled="Boolean(batchActionBusy) || !hideResolution.targets.length"
+          :aria-label="batchActionLabel(hideResolution.label, hideResolution.targets.length)"
+          data-testid="sidebar-batch-hide"
+          @click="$emit('batch-action', 'hide')"
+        >
+          <Archive aria-hidden="true" />
+          <span>{{ hideResolution.label }}</span>
+          <small>{{ hideResolution.targets.length }}</small>
+        </button>
+      </div>
+    </div>
+    <div v-else class="sidebar-footer">
       <button
         class="sidebar-row sidebar-settings-row"
         :data-active="activeEntry.id === settingsEntry.id || activeEntry.type === 'system'"
@@ -430,6 +571,7 @@ import {
   ExternalLink,
   GitBranch,
   House,
+  ListChecks,
   MessageSquare,
   Pencil,
   Pin,
@@ -447,6 +589,11 @@ import {
   previewSidebarProjectRooms,
 } from "../../../domain/sidebar-project-room-preview";
 import { searchSidebarRooms } from "../../../domain/sidebar-room-search";
+import {
+  isSidebarRoomSelectable,
+  resolveSidebarRoomBatchAction,
+  type SidebarRoomBatchActionId,
+} from "../../../domain/sidebar-room-selection";
 import {
   buildGitRoomWebUrl,
   buildSidebarBackgroundMenuItems,
@@ -466,6 +613,9 @@ const props = defineProps<{
   pinnedCollapsed: boolean;
   roomsCollapsed: boolean;
   collapsedProjects: Record<string, boolean>;
+  selectionActive: boolean;
+  selectedEntryIds: string[];
+  batchActionBusy: SidebarRoomBatchActionId | null;
 }>();
 
 const emit = defineEmits<{
@@ -477,6 +627,11 @@ const emit = defineEmits<{
   "mark-room-read": [entry: RoomEntry];
   "pin-room": [entry: RoomEntry];
   "rename-room": [entry: RoomEntry];
+  "start-selection": [entry?: RoomEntry];
+  "cancel-selection": [];
+  "toggle-entry-selection": [entryId: string];
+  "set-entry-selection": [entryIds: string[], selected: boolean];
+  "batch-action": [action: SidebarRoomBatchActionId];
   "select-entry": [entry: SidebarEntry];
   "set-projects-collapsed": [collapsed: boolean];
   "toggle-project": [projectId: string];
@@ -499,6 +654,7 @@ const searchOpen = ref(false);
 const searchQuery = ref("");
 const activeSearchIndex = ref(0);
 const expandedProjectRoomLists = ref<Record<string, boolean>>({});
+const lastSelectionAnchorId = ref<string | null>(null);
 
 const pinnedProjectEntries = computed(() => props.projectEntries.filter((project) => project.parent.pinned));
 const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
@@ -507,6 +663,42 @@ const activeSearchResultId = computed(() => {
   const entry = searchResults.value[activeSearchIndex.value]?.entry;
   return entry ? searchResultId(entry.id) : undefined;
 });
+const selectedEntryIdSet = computed(() => new Set(props.selectedEntryIds));
+const selectedEntries = computed(() => props.projectEntries
+  .flatMap((project) => [project.parent, ...projectChildRooms(project)])
+  .filter((entry, index, entries) =>
+    selectedEntryIdSet.value.has(entry.id)
+    && entries.findIndex((candidate) => candidate.id === entry.id) === index
+  ));
+const visibleSelectableEntries = computed(() => {
+  const visible: RoomEntry[] = [];
+  if (!props.pinnedCollapsed) {
+    for (const project of pinnedProjectEntries.value) {
+      visible.push(project.parent);
+      if (!props.collapsedProjects[project.id]) visible.push(...visibleProjectChildRooms(project));
+    }
+  }
+  if (!props.roomsCollapsed) {
+    for (const project of roomProjectEntries.value) {
+      visible.push(project.parent);
+      if (!props.collapsedProjects[project.id]) visible.push(...visibleProjectChildRooms(project));
+    }
+  }
+  const seen = new Set<string>();
+  return visible.filter((entry) => {
+    if (!isSidebarRoomSelectable(entry) || seen.has(entry.id)) return false;
+    seen.add(entry.id);
+    return true;
+  });
+});
+const allVisibleSelected = computed(() =>
+  Boolean(visibleSelectableEntries.value.length)
+  && visibleSelectableEntries.value.every((entry) => selectedEntryIdSet.value.has(entry.id))
+);
+const readResolution = computed(() => batchResolution("mark-read"));
+const pinResolution = computed(() => batchResolution("pin"));
+const concludeResolution = computed(() => batchResolution("conclude"));
+const hideResolution = computed(() => batchResolution("hide"));
 
 watch(searchResults, (results) => {
   activeSearchIndex.value = Math.min(activeSearchIndex.value, Math.max(0, results.length - 1));
@@ -516,12 +708,18 @@ watch(searchQuery, () => {
   activeSearchIndex.value = 0;
 });
 
+watch(() => props.selectionActive, (selectionActive) => {
+  if (selectionActive) resetSearch();
+  else lastSelectionAnchorId.value = null;
+});
+
 const totalRoomCount = computed(() =>
   roomProjectEntries.value.reduce((total, project) => total + 1 + projectChildRooms(project).length, 0)
 );
 
 const roomMenuIcons: Record<SidebarRoomMenuActionId, Component> = {
   "open-room": House,
+  "select-room": ListChecks,
   "mark-room-read": Check,
   "pin-room": Pin,
   "rename-room": Pencil,
@@ -556,6 +754,7 @@ const roomContextMenuItemGroups = computed<DesktopContextMenuItem[][]>(() => {
 
 const backgroundMenuIcons: Record<SidebarBackgroundMenuActionId, Component> = {
   "new-room": Plus,
+  "select-rooms": ListChecks,
   "set-projects-collapsed": ChevronRight,
 };
 
@@ -597,6 +796,7 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
   if (!menu) return;
   const actions: Record<SidebarRoomMenuActionId, () => void> = {
     "open-room": () => emit("select-entry", menu.entry),
+    "select-room": () => startSelection(menu.entry),
     "mark-room-read": () => emit("mark-room-read", menu.entry),
     "pin-room": () => emit("pin-room", menu.entry),
     "rename-room": () => emit("rename-room", menu.entry),
@@ -620,6 +820,10 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
 function handleBackgroundContextMenuSelect(item: DesktopContextMenuItem): void {
   if (item.id === "new-room") {
     emit("new-room");
+    return;
+  }
+  if (item.id === "select-rooms") {
+    startSelection();
     return;
   }
   if (item.id === "set-projects-collapsed") {
@@ -696,6 +900,85 @@ function selectOrToggleProject(project: ProjectGroup): void {
   if (projectChildRooms(project).length) {
     emit("toggle-project", project.id);
   }
+}
+
+function batchResolution(action: SidebarRoomBatchActionId) {
+  return resolveSidebarRoomBatchAction({
+    action,
+    entries: selectedEntries.value,
+    primaryRoomId: props.primaryRoom.id,
+  });
+}
+
+function batchActionLabel(label: string, targetCount: number): string {
+  const selectedCount = props.selectedEntryIds.length;
+  if (!targetCount) return `${label}: unavailable for the selected rooms`;
+  return `${label} ${targetCount} of ${selectedCount} selected ${selectedCount === 1 ? "room" : "rooms"}`;
+}
+
+function startSelection(entry?: RoomEntry): void {
+  resetSearch();
+  if (entry && !isSidebarRoomSelectable(entry)) return;
+  lastSelectionAnchorId.value = entry?.id || null;
+  emit("start-selection", entry);
+}
+
+function isEntrySelected(entry: RoomEntry): boolean {
+  return selectedEntryIdSet.value.has(entry.id);
+}
+
+function handleProjectActivation(event: MouseEvent, project: ProjectGroup): void {
+  if (handleSelectionActivation(event, project.parent)) return;
+  selectOrToggleProject(project);
+}
+
+function handleEntryActivation(event: MouseEvent, entry: RoomEntry): void {
+  if (handleSelectionActivation(event, entry)) return;
+  emit("select-entry", entry);
+}
+
+function handleSelectionActivation(event: MouseEvent, entry: RoomEntry): boolean {
+  const selectionGesture = props.selectionActive || event.metaKey || event.ctrlKey;
+  if (!selectionGesture) return false;
+  if (!isSidebarRoomSelectable(entry)) return false;
+
+  if (!props.selectionActive) {
+    startSelection(entry);
+    return true;
+  }
+
+  if (event.shiftKey && lastSelectionAnchorId.value) {
+    const anchorIndex = visibleSelectableEntries.value.findIndex(
+      (candidate) => candidate.id === lastSelectionAnchorId.value,
+    );
+    const entryIndex = visibleSelectableEntries.value.findIndex((candidate) => candidate.id === entry.id);
+    if (anchorIndex >= 0 && entryIndex >= 0) {
+      const start = Math.min(anchorIndex, entryIndex);
+      const end = Math.max(anchorIndex, entryIndex);
+      emit(
+        "set-entry-selection",
+        visibleSelectableEntries.value.slice(start, end + 1).map((candidate) => candidate.id),
+        true,
+      );
+      return true;
+    }
+  }
+
+  emit("toggle-entry-selection", entry.id);
+  lastSelectionAnchorId.value = entry.id;
+  return true;
+}
+
+function toggleVisibleSelection(): void {
+  emit(
+    "set-entry-selection",
+    visibleSelectableEntries.value.map((entry) => entry.id),
+    !allVisibleSelected.value,
+  );
+}
+
+function handleSidebarEscape(): void {
+  if (props.selectionActive && !props.batchActionBusy) emit("cancel-selection");
 }
 
 function toggleSearch(): void {

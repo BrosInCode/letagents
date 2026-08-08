@@ -60,6 +60,9 @@
           :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
+          :selection-active="sidebarSelectionActive"
+          :selected-entry-ids="sidebarSelectedEntryIds"
+          :batch-action-busy="sidebarBatchActionBusy"
           @cycle-sidebar="cycleSidebar"
           @new-room="selectNewRoomEntry"
           @archive-room="archiveSidebarRoom"
@@ -68,6 +71,11 @@
           @mark-room-read="markRoomEntryRead"
           @pin-room="togglePinSidebarRoom"
           @rename-room="renameSidebarRoom"
+          @start-selection="startSidebarRoomSelection"
+          @cancel-selection="cancelSidebarRoomSelection"
+          @toggle-entry-selection="toggleSidebarRoomSelection"
+          @set-entry-selection="setSidebarRoomSelection"
+          @batch-action="handleSidebarBatchAction"
           @select-entry="handleSidebarEntrySelected"
           @set-projects-collapsed="setAllProjectsCollapsed"
           @toggle-project="toggleProject"
@@ -269,6 +277,17 @@
       @after-leave="handleSidebarFocusRoomConclusionAfterLeave"
     />
 
+    <SidebarRoomBatchActionDialog
+      :open="Boolean(sidebarBatchDialogAction)"
+      :action="sidebarBatchDialogAction"
+      :entries="sidebarBatchDialogTargets"
+      :busy="Boolean(sidebarBatchActionBusy)"
+      :error="sidebarBatchDialogError"
+      @close="closeSidebarBatchDialog"
+      @confirm="confirmSidebarBatchAction"
+      @after-leave="handleSidebarBatchDialogAfterLeave"
+    />
+
     <div
       class="desktop-action-toasts"
       role="status"
@@ -313,6 +332,7 @@ import type {
 } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
 import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
+import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
@@ -330,7 +350,10 @@ import type {
 } from "./domain/focus-room-conclusion";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
-import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
+import {
+  useDesktopAccountRoomSettings,
+  type SidebarRoomBatchMutationResult,
+} from "./composables/useDesktopAccountRoomSettings";
 import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
@@ -355,6 +378,12 @@ import {
   readStoredRecentRootRooms,
   rememberRecentRootRooms,
 } from "./domain/sidebar-rooms";
+import {
+  flattenSidebarRoomEntries,
+  isSidebarRoomSelectable,
+  resolveSidebarRoomBatchAction,
+  type SidebarRoomBatchActionId,
+} from "./domain/sidebar-room-selection";
 import {
   appAgentArchivedRoomIdentifiers,
   appAgentRefreshTargets,
@@ -473,6 +502,16 @@ const sidebarFocusRoomConclusionPendingToast = ref<{
   message: string;
   state: "error" | "success";
 } | null>(null);
+const sidebarSelectionActive = ref(false);
+const sidebarSelectedEntryIds = ref<string[]>([]);
+const sidebarBatchActionBusy = ref<SidebarRoomBatchActionId | null>(null);
+const sidebarBatchDialogAction = ref<"conclude" | "hide" | null>(null);
+const sidebarBatchDialogTargets = ref<RoomEntry[]>([]);
+const sidebarBatchDialogError = ref<string | null>(null);
+const sidebarBatchPendingToast = ref<{
+  message: string;
+  state: "error" | "success";
+} | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
@@ -484,6 +523,8 @@ const desktopShellStyle = computed(() => ({
 
 async function cycleSidebar(): Promise<void> {
   const hidingSidebar = sidebarMode.value !== "hidden";
+  if (hidingSidebar && sidebarBatchActionBusy.value) return;
+  if (hidingSidebar && sidebarSelectionActive.value) cancelSidebarRoomSelection();
   toggleSidebarMode();
   if (!hidingSidebar) return;
 
@@ -537,6 +578,22 @@ const sidebarProjectEntries = computed(() =>
     focusRooms: project.focusRooms.map(withRoomUnreadState),
   }))
 );
+const sidebarSelectedEntries = computed(() => {
+  const selectedIds = new Set(sidebarSelectedEntryIds.value);
+  return flattenSidebarRoomEntries(sidebarProjectEntries.value)
+    .filter((entry, index, entries) =>
+      selectedIds.has(entry.id)
+      && entries.findIndex((candidate) => candidate.id === entry.id) === index
+    );
+});
+watch(sidebarProjectEntries, (projects) => {
+  if (!sidebarSelectionActive.value || !sidebarSelectedEntryIds.value.length) return;
+  const availableIds = new Set(flattenSidebarRoomEntries(projects).map((entry) => entry.id));
+  const nextSelection = sidebarSelectedEntryIds.value.filter((entryId) => availableIds.has(entryId));
+  if (nextSelection.length !== sidebarSelectedEntryIds.value.length) {
+    sidebarSelectedEntryIds.value = nextSelection;
+  }
+});
 const selectedRoomRenderKey = computed(() =>
   selectedRoomIdentifier.value
   || selectedSnapshot.value?.room?.identifier
@@ -876,10 +933,43 @@ function selectedSnapshotMatchesEntry(entry: RoomEntry): boolean {
 }
 
 function handleSidebarEntrySelected(entry: SidebarEntry): void {
+  if (sidebarSelectionActive.value) cancelSidebarRoomSelection();
   if (entry.type === "room") {
     markRoomEntryRead(entry);
   }
   selectSidebarEntry(entry);
+}
+
+function startSidebarRoomSelection(entry?: RoomEntry): void {
+  sidebarSelectionActive.value = true;
+  sidebarBatchDialogError.value = null;
+  if (!entry || !isSidebarRoomSelectable(entry)) return;
+  if (!sidebarSelectedEntryIds.value.includes(entry.id)) {
+    sidebarSelectedEntryIds.value = [...sidebarSelectedEntryIds.value, entry.id];
+  }
+}
+
+function cancelSidebarRoomSelection(): void {
+  if (sidebarBatchActionBusy.value) return;
+  sidebarSelectionActive.value = false;
+  sidebarSelectedEntryIds.value = [];
+  closeSidebarBatchDialog();
+}
+
+function toggleSidebarRoomSelection(entryId: string): void {
+  const selected = new Set(sidebarSelectedEntryIds.value);
+  if (selected.has(entryId)) selected.delete(entryId);
+  else selected.add(entryId);
+  sidebarSelectedEntryIds.value = [...selected];
+}
+
+function setSidebarRoomSelection(entryIds: string[], selected: boolean): void {
+  const next = new Set(sidebarSelectedEntryIds.value);
+  for (const entryId of entryIds) {
+    if (selected) next.add(entryId);
+    else next.delete(entryId);
+  }
+  sidebarSelectedEntryIds.value = [...next];
 }
 
 function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
@@ -1110,6 +1200,9 @@ const {
       : "cloud",
 });
 const {
+  batchConcludeSidebarFocusRooms,
+  batchHideSidebarRooms,
+  batchSetSidebarRoomsPinned,
   archiveSidebarFocusRoom,
   archiveSidebarRoom,
   concludeSidebarFocusRoom,
@@ -1147,6 +1240,167 @@ const {
   },
   notify: (message, state) => pushActionToast(message, state),
 });
+
+async function handleSidebarBatchAction(action: SidebarRoomBatchActionId): Promise<void> {
+  if (sidebarBatchActionBusy.value) return;
+  const resolution = resolveSidebarRoomBatchAction({
+    action,
+    entries: sidebarSelectedEntries.value,
+    primaryRoomId: currentParentRoom.value.id,
+  });
+  if (!resolution.targets.length) return;
+
+  if (action === "mark-read") {
+    resolution.targets.forEach(markRoomEntryRead);
+    pushActionToast(
+      `${resolution.targets.length} ${resolution.targets.length === 1 ? "room" : "rooms"} marked as read.`,
+      "success",
+    );
+    return;
+  }
+
+  if (action === "pin") {
+    sidebarBatchActionBusy.value = action;
+    const result = await batchSetSidebarRoomsPinned(
+      resolution.targets,
+      resolution.pinned === true,
+    );
+    sidebarBatchActionBusy.value = null;
+    if (result.refreshError) {
+      const succeededIds = new Set(result.succeededEntryIds);
+      sidebarSelectedEntryIds.value = sidebarSelectedEntryIds.value.filter(
+        (entryId) => !succeededIds.has(entryId),
+      );
+      if (!sidebarSelectedEntryIds.value.length) sidebarSelectionActive.value = false;
+    }
+    reportSidebarBatchMutation(
+      result,
+      resolution.targets.length,
+      resolution.pinned ? "pinned" : "unpinned",
+    );
+    return;
+  }
+
+  sidebarBatchDialogAction.value = action;
+  sidebarBatchDialogTargets.value = resolution.targets;
+  sidebarBatchDialogError.value = null;
+}
+
+function closeSidebarBatchDialog(): void {
+  if (sidebarBatchActionBusy.value) return;
+  sidebarBatchDialogAction.value = null;
+  sidebarBatchDialogTargets.value = [];
+  sidebarBatchDialogError.value = null;
+  sidebarBatchPendingToast.value = null;
+}
+
+async function confirmSidebarBatchAction(): Promise<void> {
+  const action = sidebarBatchDialogAction.value;
+  const targets = [...sidebarBatchDialogTargets.value];
+  if (!action || sidebarBatchActionBusy.value || !targets.length) return;
+
+  const activeTarget = targets.find((entry) =>
+    activeEntry.value.id === entry.id
+    || (
+      activeEntry.value.type === "room"
+      && normalizeRoomIdentifier(activeEntry.value.roomIdentifier)
+        === normalizeRoomIdentifier(entry.roomIdentifier)
+    )
+  ) || null;
+  const parentBeforeRefresh = activeTarget?.parentRoomIdentifier
+    ? findSidebarRoomEntryByIdentifier(projectEntries.value, activeTarget.parentRoomIdentifier)
+    : null;
+
+  sidebarBatchActionBusy.value = action;
+  sidebarBatchDialogError.value = null;
+  let result: SidebarRoomBatchMutationResult;
+  try {
+    result = action === "conclude"
+      ? await batchConcludeSidebarFocusRooms(targets)
+      : await batchHideSidebarRooms(targets);
+  } catch (caught) {
+    sidebarBatchActionBusy.value = null;
+    sidebarBatchDialogError.value = caught instanceof Error
+      ? caught.message
+      : `The selected rooms could not be ${action === "conclude" ? "concluded" : "hidden"}.`;
+    return;
+  }
+  sidebarBatchActionBusy.value = null;
+  sidebarBatchDialogAction.value = null;
+  sidebarBatchDialogTargets.value = [];
+
+  const succeededIds = new Set(result.succeededEntryIds);
+  if (activeTarget && succeededIds.has(activeTarget.id)) {
+    if (activeTarget.kind === "focus") {
+      const parent = activeTarget.parentRoomIdentifier
+        ? findSidebarRoomEntryByIdentifier(projectEntries.value, activeTarget.parentRoomIdentifier)
+          || parentBeforeRefresh
+        : parentBeforeRefresh;
+      if (parent) {
+        markRoomEntryRead(parent);
+        selectSidebarEntry(parent);
+      }
+    } else if (action === "hide" && activeTarget.roomIdentifier) {
+      await leaveArchivedRoomIfActive(activeTarget.roomIdentifier, activeTarget.title);
+    }
+  }
+
+  sidebarSelectedEntryIds.value = sidebarSelectedEntryIds.value.filter(
+    (entryId) => !succeededIds.has(entryId),
+  );
+  if (!sidebarSelectedEntryIds.value.length) sidebarSelectionActive.value = false;
+  reportSidebarBatchMutation(
+    result,
+    targets.length,
+    action === "conclude" ? "concluded" : "hidden",
+    true,
+  );
+}
+
+function reportSidebarBatchMutation(
+  result: SidebarRoomBatchMutationResult,
+  targetCount: number,
+  completedVerb: string,
+  deferUntilDialogLeaves = false,
+): void {
+  const completed = result.succeededEntryIds.length;
+  const roomNoun = targetCount === 1 ? "room" : "rooms";
+  if (!result.failures.length && !result.refreshError) {
+    deliverSidebarBatchToast(
+      `${completed} ${completed === 1 ? "room" : "rooms"} ${completedVerb}.`,
+      "success",
+      deferUntilDialogLeaves,
+    );
+    return;
+  }
+
+  const parts = [`${completed} of ${targetCount} ${roomNoun} ${completedVerb}.`];
+  if (result.failures.length) {
+    parts.push(`${result.failures.length} failed: ${result.failures[0]?.message || "Unknown error"}`);
+  }
+  if (result.refreshError) {
+    parts.push(`The sidebar could not refresh: ${result.refreshError}`);
+  }
+  deliverSidebarBatchToast(parts.join(" "), "error", deferUntilDialogLeaves);
+}
+
+function deliverSidebarBatchToast(
+  message: string,
+  state: "error" | "success",
+  deferUntilDialogLeaves: boolean,
+): void {
+  if (deferUntilDialogLeaves) {
+    sidebarBatchPendingToast.value = { message, state };
+    return;
+  }
+  pushActionToast(message, state);
+}
+
+function handleSidebarBatchDialogAfterLeave(): void {
+  const toast = sidebarBatchPendingToast.value;
+  sidebarBatchPendingToast.value = null;
+  if (toast) pushActionToast(toast.message, toast.state);
+}
 
 const sidebarFocusRoomConclusionBusy = computed(() => {
   const target = sidebarFocusRoomConclusionTarget.value;

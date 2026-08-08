@@ -36,6 +36,17 @@ interface DesktopAccountRoomSettingsOptions {
   notify?: (message: string, state: "error" | "info" | "success") => void;
 }
 
+export type SidebarRoomBatchMutationFailure = {
+  entryId: string;
+  message: string;
+};
+
+export type SidebarRoomBatchMutationResult = {
+  succeededEntryIds: string[];
+  failures: SidebarRoomBatchMutationFailure[];
+  refreshError: string | null;
+};
+
 export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSettingsOptions) {
   const settingsFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
   const settingsRoomActionBusyKey = ref<string | null>(null);
@@ -301,6 +312,118 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     }
   }
 
+  async function batchSetSidebarRoomsPinned(
+    entries: readonly RoomEntry[],
+    pinned: boolean,
+  ): Promise<SidebarRoomBatchMutationResult> {
+    settingsRoomActionBusyKey.value = "batch:pin";
+    const results = await Promise.allSettled(entries.map(async (entry) => {
+      const mutation = buildRoomPinMutation(entry);
+      if (!mutation) throw new Error(`${entry.title} cannot be pinned.`);
+      const identifiers = pinned
+        ? mutation.roomIdentifiers.slice(0, 1)
+        : mutation.roomIdentifiers;
+      const mutations = await Promise.allSettled(identifiers.map((roomIdentifier) =>
+        desktopIpc.room.updateAccountRoom(roomIdentifier, { pinned })
+      ));
+      const rejected = mutations.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (rejected) throw rejected.reason;
+      return entry.id;
+    }));
+    const result = await finishSidebarRoomBatch(entries, results, options.refreshAccountRooms);
+    settingsRoomActionBusyKey.value = null;
+    return result;
+  }
+
+  async function batchConcludeSidebarFocusRooms(
+    entries: readonly RoomEntry[],
+  ): Promise<SidebarRoomBatchMutationResult> {
+    settingsRoomActionBusyKey.value = "batch:conclude";
+    const results = await Promise.allSettled(entries.map(async (entry) => {
+      if (!entry.focusKey || !entry.parentRoomIdentifier || entry.focusStatus === "concluded") {
+        throw new Error(`${entry.title} is no longer available to conclude.`);
+      }
+      await desktopIpc.room.concludeFocusRoom(
+        entry.parentRoomIdentifier,
+        entry.focusKey,
+        "",
+        null,
+        true,
+      );
+      return entry.id;
+    }));
+    const result = await finishSidebarRoomBatch(entries, results, options.refresh);
+    settingsRoomActionBusyKey.value = null;
+    return result;
+  }
+
+  async function batchHideSidebarRooms(
+    entries: readonly RoomEntry[],
+  ): Promise<SidebarRoomBatchMutationResult> {
+    settingsRoomActionBusyKey.value = "batch:hide";
+    const results = await Promise.allSettled(entries.map(async (entry) => {
+      if (entry.kind === "focus") {
+        if (!entry.focusKey || !entry.parentRoomIdentifier) {
+          throw new Error(`${entry.title} is no longer available to hide.`);
+        }
+        await desktopIpc.room.archiveFocusRoom(entry.parentRoomIdentifier, entry.focusKey);
+        return entry.id;
+      }
+      if (entry.kind !== "parent" || !entry.roomIdentifier) {
+        throw new Error(`${entry.title} cannot be hidden.`);
+      }
+      const normalizedRoomIdentifier = normalizeRoomIdentifier(entry.roomIdentifier);
+      const isAccountRoom = [...options.accountRooms.value, ...options.settingsAccountRooms.value].some(
+        (room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedRoomIdentifier,
+      );
+      if (isAccountRoom) {
+        await desktopIpc.room.updateAccountRoom(entry.roomIdentifier, { archived: true });
+      }
+      forgetRecentRootRoom(entry.roomIdentifier, entry.title);
+      return entry.id;
+    }));
+    const result = await finishSidebarRoomBatch(entries, results, options.refresh);
+    settingsRoomActionBusyKey.value = null;
+    return result;
+  }
+
+  async function finishSidebarRoomBatch(
+    entries: readonly RoomEntry[],
+    results: readonly PromiseSettledResult<string>[],
+    refreshRooms: () => Promise<void>,
+  ): Promise<SidebarRoomBatchMutationResult> {
+    const succeededEntryIds: string[] = [];
+    const failures: SidebarRoomBatchMutationFailure[] = [];
+    results.forEach((result, index) => {
+      const entry = entries[index];
+      if (!entry) return;
+      if (result.status === "fulfilled") {
+        succeededEntryIds.push(entry.id);
+        return;
+      }
+      failures.push({
+        entryId: entry.id,
+        message: result.reason instanceof Error
+          ? result.reason.message
+          : `Could not update ${entry.title}.`,
+      });
+    });
+
+    let refreshError: string | null = null;
+    if (succeededEntryIds.length) {
+      try {
+        await refreshRooms();
+      } catch (caught) {
+        refreshError = caught instanceof Error
+          ? caught.message
+          : "The room list could not be refreshed.";
+      }
+    }
+    return { succeededEntryIds, failures, refreshError };
+  }
+
   async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
     const confirmation = window.prompt(
       `Delete ${room.displayName}? This removes the room and its focus rooms for everyone.\n\nType the room identifier to confirm:`,
@@ -365,6 +488,9 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   }
 
   return {
+    batchConcludeSidebarFocusRooms,
+    batchHideSidebarRooms,
+    batchSetSidebarRoomsPinned,
     archiveSidebarFocusRoom,
     archiveSidebarRoom,
     concludeSidebarFocusRoom,
