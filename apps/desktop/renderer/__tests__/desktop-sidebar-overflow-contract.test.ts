@@ -50,4 +50,11 @@ describe("desktop sidebar overflow contract", () => {
       /@media \(prefers-reduced-motion: reduce\)\s*\{\s*\.project-list,\s*\.pinned-list\s*\{\s*transition: none;/,
     );
   });
+
+  it("associates each overflow disclosure with the controlled room list", () => {
+    const overflowToggles = sidebarSource.match(
+      /class="project-room-overflow-toggle"[\s\S]*?:aria-controls="projectChildListId\(project\.id\)"/g,
+    ) || [];
+    assert.equal(overflowToggles.length, 2);
+  });
 });

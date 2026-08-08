@@ -12,6 +12,8 @@ export type RoomEntry = {
   description: string;
   gitRoom?: DesktopGitRoomInfo | null;
   focusKey?: string | null;
+  focusStatus?: "active" | "concluded" | null;
+  sourceTaskId?: string | null;
   parentRoomIdentifier?: string | null;
   pinTargetRoomIdentifier?: string | null;
   pinnedAccountRoomIdentifiers?: string[];
@@ -48,4 +50,4 @@ export type ProjectGroup = {
   focusRooms: RoomEntry[];
 };
 
-export type SidebarMode = "expanded" | "rail" | "hidden";
+export type SidebarMode = "expanded" | "hidden";

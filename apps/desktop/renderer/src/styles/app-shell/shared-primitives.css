@@ -41,7 +41,6 @@
 .project-row,
 .room-row,
 .sidebar-row,
-.sidebar-icon-button,
 .hero-panel,
 .stat-card,
 .action-card,
@@ -64,8 +63,7 @@
 .pinned-room,
 .project-row,
 .room-row,
-.sidebar-row,
-.sidebar-icon-button {
+.sidebar-row {
   width: 100%;
   cursor: pointer;
   text-align: left;
@@ -89,7 +87,6 @@
 .project-row:hover,
 .room-row:hover,
 .sidebar-row:hover,
-.sidebar-icon-button:hover,
 .action-card:hover,
 .ghost-button:hover,
 .primary-button:hover,
@@ -103,7 +100,6 @@
 .project-row:active,
 .room-row:active,
 .sidebar-row:active,
-.sidebar-icon-button:active,
 .action-card:active,
 .ghost-button:active,
 .primary-button:active,
@@ -115,8 +111,7 @@
 .pinned-room[data-active="true"],
 .project-row[data-active="true"],
 .room-row[data-active="true"],
-.sidebar-row[data-active="true"],
-.sidebar-icon-button[data-active="true"] {
+.sidebar-row[data-active="true"] {
   box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.03), 0 10px 28px rgba(0, 0, 0, 0.16);
 }
 

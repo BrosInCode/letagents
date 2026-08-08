@@ -296,12 +296,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   }
 
   function cycleSidebar() {
-    sidebarMode.value =
-      sidebarMode.value === "expanded"
-        ? "rail"
-        : sidebarMode.value === "rail"
-          ? "hidden"
-          : "expanded";
+    sidebarMode.value = sidebarMode.value === "expanded" ? "hidden" : "expanded";
   }
 
   function toggleProject(projectId: string) {

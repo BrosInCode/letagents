@@ -45,29 +45,37 @@
     :style="desktopShellStyle"
     data-testid="desktop-shell"
   >
-    <DesktopSidebar
-      v-if="!isSettingsSurface && sidebarMode !== 'hidden'"
-      :sidebar-mode="sidebarMode"
-      :active-entry="activeEntry"
-      :primary-room="currentParentRoom"
-      :project-entries="sidebarProjectEntries"
-      :settings-entry="settingsEntry"
-      :pinned-collapsed="pinnedCollapsed"
-      :rooms-collapsed="roomsCollapsed"
-      :collapsed-projects="collapsedProjects"
-      @cycle-sidebar="cycleSidebar"
-      @new-room="selectNewRoomEntry"
-      @archive-room="archiveSidebarRoom"
-      @archive-focus-room="archiveSidebarFocusRoom"
-      @mark-room-read="markRoomEntryRead"
-      @pin-room="togglePinSidebarRoom"
-      @rename-room="renameSidebarRoom"
-      @select-entry="handleSidebarEntrySelected"
-      @set-projects-collapsed="setAllProjectsCollapsed"
-      @toggle-project="toggleProject"
-      @toggle-pinned-collapsed="togglePinnedCollapsed"
-      @toggle-rooms-collapsed="toggleRoomsCollapsed"
-    />
+    <Transition name="desktop-sidebar">
+      <div
+        v-show="!isSettingsSurface && sidebarMode !== 'hidden'"
+        class="desktop-sidebar-frame"
+        :aria-hidden="isSettingsSurface || sidebarMode === 'hidden'"
+        :inert="isSettingsSurface || sidebarMode === 'hidden'"
+      >
+        <DesktopSidebar
+          :active-entry="activeEntry"
+          :primary-room="currentParentRoom"
+          :project-entries="sidebarProjectEntries"
+          :settings-entry="settingsEntry"
+          :pinned-collapsed="pinnedCollapsed"
+          :rooms-collapsed="roomsCollapsed"
+          :collapsed-projects="collapsedProjects"
+          @cycle-sidebar="cycleSidebar"
+          @new-room="selectNewRoomEntry"
+          @archive-room="archiveSidebarRoom"
+          @archive-focus-room="archiveSidebarFocusRoom"
+          @conclude-focus-room="openSidebarFocusRoomConclusion"
+          @mark-room-read="markRoomEntryRead"
+          @pin-room="togglePinSidebarRoom"
+          @rename-room="renameSidebarRoom"
+          @select-entry="handleSidebarEntrySelected"
+          @set-projects-collapsed="setAllProjectsCollapsed"
+          @toggle-project="toggleProject"
+          @toggle-pinned-collapsed="togglePinnedCollapsed"
+          @toggle-rooms-collapsed="toggleRoomsCollapsed"
+        />
+      </div>
+    </Transition>
     <div
       v-if="showSidebarResizeHandle"
       class="sidebar-resize-handle"
@@ -82,45 +90,6 @@
       @pointerdown="startSidebarResize"
       @keydown="handleSidebarResizeKeydown"
     ></div>
-    <div
-      v-if="showSidebarPeek"
-      class="sidebar-peek-zone"
-      data-testid="sidebar-peek-zone"
-      @pointerenter="openSidebarPeek"
-    ></div>
-    <Transition name="sidebar-peek">
-      <div
-        v-if="sidebarPeekOpen"
-        class="sidebar-peek-panel"
-        data-testid="sidebar-peek-panel"
-        @pointerleave="closeSidebarPeek"
-      >
-        <DesktopSidebar
-          sidebar-mode="expanded"
-          :active-entry="activeEntry"
-          :primary-room="currentParentRoom"
-          :project-entries="sidebarProjectEntries"
-          :settings-entry="settingsEntry"
-          :pinned-collapsed="pinnedCollapsed"
-          :rooms-collapsed="roomsCollapsed"
-          :collapsed-projects="collapsedProjects"
-          @context-menu-open="handleSidebarPeekMenuOpen"
-          @cycle-sidebar="closeSidebarPeek"
-          @new-room="selectNewRoomEntry"
-          @archive-room="archiveSidebarRoom"
-          @archive-focus-room="archiveSidebarFocusRoom"
-          @mark-room-read="markRoomEntryRead"
-          @pin-room="togglePinSidebarRoom"
-          @rename-room="renameSidebarRoom"
-          @select-entry="handleSidebarEntrySelected"
-          @set-projects-collapsed="setAllProjectsCollapsed"
-          @toggle-project="toggleProject"
-          @toggle-pinned-collapsed="togglePinnedCollapsed"
-          @toggle-rooms-collapsed="toggleRoomsCollapsed"
-        />
-      </div>
-    </Transition>
-
     <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
       <DesktopTopbar
         v-if="activeEntry.type !== 'room' && !isSettingsSurface"
@@ -134,6 +103,7 @@
 
       <AuthOnboardingView
         v-if="activeEntry.type === 'room' && selectedNeedsAccess"
+        :sidebar-mode="sidebarMode"
         :access="selectedAccess"
         :auth-status="authStatus"
         :busy="authBusy || loading"
@@ -145,6 +115,7 @@
         @poll-auth="pollAuthFlow"
         @refresh-room="refresh"
         @sign-out="signOut"
+        @cycle-sidebar="cycleSidebar"
       />
 
       <KeepAlive :max="1">
@@ -174,6 +145,7 @@
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
+          :on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @chat-scroll-position="rememberChatScrollPosition"
           @message-sent="handleOwnMessageSent"
           @room-renamed="handleRoomRenamed"
@@ -181,6 +153,7 @@
           @refresh-room="handleRoomShellRefresh"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
           @open-focus-room="openFocusRoomFromRoomsTab"
+          @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
           @choose-worktree="openWorktreeForAgent"
@@ -285,6 +258,17 @@
       />
     </Transition>
 
+    <SidebarFocusRoomConclusionDialog
+      :open="Boolean(sidebarFocusRoomConclusionTarget)"
+      :entry="sidebarFocusRoomConclusionTarget"
+      :busy="sidebarFocusRoomConclusionBusy"
+      :error="sidebarFocusRoomConclusionError"
+      :fallback-focus-entry-id="sidebarFocusRoomConclusionReturnFocusId"
+      @close="closeSidebarFocusRoomConclusion"
+      @submit="submitSidebarFocusRoomConclusion"
+      @after-leave="handleSidebarFocusRoomConclusionAfterLeave"
+    />
+
     <div
       class="desktop-action-toasts"
       role="status"
@@ -317,6 +301,7 @@ import type {
   DesktopAppInfo,
   DesktopAuthStatus,
   DesktopChatStorageSettings,
+  DesktopFocusRoomInfo,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   DesktopRoomLatestMessage,
@@ -327,6 +312,7 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
+import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
@@ -338,6 +324,10 @@ import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardin
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
 import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import type {
+  FocusRoomConcludedEvent,
+  FocusRoomConclusionInput,
+} from "./domain/focus-room-conclusion";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
 import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
@@ -361,6 +351,7 @@ import {
 } from "./domain/desktop-room-read-state";
 import {
   normalizeRoomIdentifier,
+  findSidebarRoomEntryByIdentifier,
   readStoredRecentRootRooms,
   rememberRecentRootRooms,
 } from "./domain/sidebar-rooms";
@@ -429,7 +420,7 @@ const {
   activeEntry,
   collapsedProjects,
   currentParentRoom,
-  cycleSidebar,
+  cycleSidebar: toggleSidebarMode,
   focusRooms,
   getAuthRoomIdentifier,
   openRoomSnapshot,
@@ -474,18 +465,33 @@ let repoStatusWatchRootPath: string | null = null;
 let repoStatusWatchRequestId = 0;
 
 const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
+const sidebarFocusRoomConclusionTarget = ref<RoomEntry | null>(null);
+const sidebarFocusRoomConclusionParent = ref<RoomEntry | null>(null);
+const sidebarFocusRoomConclusionReturnFocusId = ref<string | null>(null);
+const sidebarFocusRoomConclusionError = ref<string | null>(null);
+const sidebarFocusRoomConclusionPendingToast = ref<{
+  message: string;
+  state: "error" | "success";
+} | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
-const sidebarPeekOpen = ref(false);
-const sidebarPeekMenuOpen = ref(false);
-const sidebarPeekCloseSuppressed = ref(false);
-const showSidebarPeek = computed(() => !isSettingsSurface.value && sidebarMode.value === "hidden");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
 const desktopShellStyle = computed(() => ({
   "--sidebar-width": `${sidebarWidth.value}px`,
   "--sidebar-min-width": `${sidebarMinWidth}px`,
   "--sidebar-max-width": `${sidebarMaxWidth}px`,
 }));
+
+async function cycleSidebar(): Promise<void> {
+  const hidingSidebar = sidebarMode.value !== "hidden";
+  toggleSidebarMode();
+  if (!hidingSidebar) return;
+
+  await nextTick();
+  document.querySelector<HTMLElement>(
+    '[data-testid="room-sidebar-reveal-button"], [data-testid="auth-sidebar-reveal-button"], [data-testid="sidebar-reveal-button"]',
+  )?.focus({ preventScroll: true });
+}
 
 const selectedRoomWithProjectContext = computed(() => {
   const room = selectedRoomInfo.value;
@@ -563,31 +569,6 @@ const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
 
 function openSettingsSurface(): void {
   activeEntry.value = settingsEntry;
-}
-
-function openSidebarPeek(): void {
-  if (!showSidebarPeek.value) return;
-  sidebarPeekMenuOpen.value = false;
-  sidebarPeekCloseSuppressed.value = false;
-  sidebarPeekOpen.value = true;
-}
-
-function closeSidebarPeek(): void {
-  // A context menu teleports outside the peek panel; leaving the panel to use
-  // it must not unmount the menu. Defer the close until the menu settles.
-  if (sidebarPeekMenuOpen.value) {
-    sidebarPeekCloseSuppressed.value = true;
-    return;
-  }
-  sidebarPeekOpen.value = false;
-}
-
-function handleSidebarPeekMenuOpen(open: boolean): void {
-  sidebarPeekMenuOpen.value = open;
-  if (!open && sidebarPeekCloseSuppressed.value) {
-    sidebarPeekCloseSuppressed.value = false;
-    sidebarPeekOpen.value = false;
-  }
 }
 
 function readStoredSidebarWidth(): number {
@@ -931,6 +912,41 @@ function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
   handleSidebarEntrySelected(fallbackEntry);
 }
 
+async function handleRoomDetailsFocusRoomConcluded(event: FocusRoomConcludedEvent): Promise<void> {
+  const focusRoomIdentifier = normalizeRoomIdentifier(event.focusRoomIdentifier);
+  const parentRoomIdentifier = normalizeRoomIdentifier(event.parentRoomIdentifier);
+  const targetWasActive = activeEntry.value.type === "room"
+    && normalizeRoomIdentifier(activeEntry.value.roomIdentifier) === focusRoomIdentifier;
+  const parentBeforeRefresh = findSidebarRoomEntryByIdentifier(
+    projectEntries.value,
+    parentRoomIdentifier,
+  );
+
+  let refreshError: unknown = null;
+  try {
+    await refresh();
+  } catch (error) {
+    refreshError = error;
+  }
+
+  if (targetWasActive) {
+    const parentAfterRefresh = findSidebarRoomEntryByIdentifier(
+      projectEntries.value,
+      parentRoomIdentifier,
+    ) || parentBeforeRefresh;
+    if (parentAfterRefresh) handleSidebarEntrySelected(parentAfterRefresh);
+  }
+
+  if (refreshError) {
+    pushActionToast(
+      `${event.displayName} concluded, but the room list could not be refreshed.`,
+      "error",
+    );
+    return;
+  }
+  pushActionToast(`${event.displayName} concluded.`, "success");
+}
+
 function seedReadMarkersForKnownRooms(): void {
   let nextMarkers = readRoomMessageIds.value;
   let changed = false;
@@ -1096,6 +1112,7 @@ const {
 const {
   archiveSidebarFocusRoom,
   archiveSidebarRoom,
+  concludeSidebarFocusRoom,
   deleteAccountRoom,
   leaveAccountRoom,
   openAccountRoomFromSettings,
@@ -1130,6 +1147,94 @@ const {
   },
   notify: (message, state) => pushActionToast(message, state),
 });
+
+const sidebarFocusRoomConclusionBusy = computed(() => {
+  const target = sidebarFocusRoomConclusionTarget.value;
+  if (!target) return false;
+  return settingsRoomActionBusyKey.value
+    === `conclude-focus:${target.roomIdentifier || target.focusKey}`;
+});
+
+function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
+  if (
+    entry.kind !== "focus"
+    || entry.focusStatus === "concluded"
+    || !entry.focusKey
+    || !entry.parentRoomIdentifier
+  ) return;
+
+  sidebarFocusRoomConclusionTarget.value = entry;
+  sidebarFocusRoomConclusionParent.value = findSidebarRoomEntryByIdentifier(
+    projectEntries.value,
+    entry.parentRoomIdentifier,
+  );
+  sidebarFocusRoomConclusionReturnFocusId.value = entry.id;
+  sidebarFocusRoomConclusionError.value = null;
+  sidebarFocusRoomConclusionPendingToast.value = null;
+}
+
+function openRoomDetailsFocusRoomConclusion(focusRoom: DesktopFocusRoomInfo): void {
+  const focusRoomIdentifier = normalizeRoomIdentifier(focusRoom.identifier || focusRoom.roomId);
+  const parentRoomIdentifier = normalizeRoomIdentifier(focusRoom.parentRoomId);
+  const entry = projectEntries.value
+    .flatMap((project) => project.focusRooms)
+    .find((candidate) => {
+      if (
+        focusRoomIdentifier
+        && normalizeRoomIdentifier(candidate.roomIdentifier) === focusRoomIdentifier
+      ) return true;
+      return Boolean(
+        focusRoom.focusKey
+        && candidate.focusKey === focusRoom.focusKey
+        && normalizeRoomIdentifier(candidate.parentRoomIdentifier) === parentRoomIdentifier
+      );
+    });
+  if (!entry) {
+    pushActionToast("This focus room is no longer available to conclude.", "error");
+    return;
+  }
+  openSidebarFocusRoomConclusion(entry);
+}
+
+function closeSidebarFocusRoomConclusion(): void {
+  if (sidebarFocusRoomConclusionBusy.value) return;
+  sidebarFocusRoomConclusionTarget.value = null;
+  sidebarFocusRoomConclusionError.value = null;
+  sidebarFocusRoomConclusionPendingToast.value = null;
+}
+
+async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput): Promise<void> {
+  const target = sidebarFocusRoomConclusionTarget.value;
+  if (!target || sidebarFocusRoomConclusionBusy.value) return;
+
+  const parent = sidebarFocusRoomConclusionParent.value;
+  const targetWasActive = activeEntry.value.id === target.id;
+  sidebarFocusRoomConclusionError.value = null;
+  const result = await concludeSidebarFocusRoom(target, input);
+  if (!result.ok) {
+    sidebarFocusRoomConclusionError.value = result.error;
+    return;
+  }
+
+  sidebarFocusRoomConclusionReturnFocusId.value = parent?.id || null;
+  const displayName = target.title || "Focus room";
+  sidebarFocusRoomConclusionPendingToast.value = result.refreshError
+    ? {
+        message: `${displayName} concluded, but the room list could not be refreshed: ${result.refreshError}`,
+        state: "error",
+      }
+    : { message: `${displayName} concluded.`, state: "success" };
+  sidebarFocusRoomConclusionTarget.value = null;
+  if (targetWasActive && parent) {
+    handleSidebarEntrySelected(parent);
+  }
+}
+
+function handleSidebarFocusRoomConclusionAfterLeave(): void {
+  const toast = sidebarFocusRoomConclusionPendingToast.value;
+  sidebarFocusRoomConclusionPendingToast.value = null;
+  if (toast) pushActionToast(toast.message, toast.state);
+}
 
 const {
   clearMcpTargetSelection,
@@ -1702,12 +1807,6 @@ watch(
   },
   { deep: true, immediate: true }
 );
-
-watch(showSidebarPeek, (enabled) => {
-  if (!enabled) {
-    closeSidebarPeek();
-  }
-});
 
 watch(
   () => selectedRootRoomIdentifier.value,

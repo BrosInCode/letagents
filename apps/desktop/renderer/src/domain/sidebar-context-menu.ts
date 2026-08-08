@@ -11,6 +11,7 @@ export type SidebarRoomMenuActionId =
   | "copy-branch-name"
   | "open-on-github"
   | "toggle-project"
+  | "conclude-focus-room"
   | "archive-focus-room"
   | "archive-room";
 
@@ -54,6 +55,14 @@ export function buildSidebarRoomContextMenuItems(input: {
   }
   if (entry.kind === "parent" && selectable && entry.source !== "recent") {
     management.push({ id: "rename-room", label: "Rename room..." });
+  }
+  if (
+    entry.kind === "focus"
+    && entry.focusStatus !== "concluded"
+    && entry.focusKey
+    && entry.parentRoomIdentifier
+  ) {
+    management.push({ id: "conclude-focus-room", label: "Conclude focus room..." });
   }
   if (management.length) groups.push(management);
 

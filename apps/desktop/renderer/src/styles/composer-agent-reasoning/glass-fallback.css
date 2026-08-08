@@ -32,8 +32,7 @@
   .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-cta,
   .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .pinned-room,
   .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .room-row,
-  .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row,
-  .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-icon-button {
+  .desktop-shell:has(.desktop-room-shell[data-liquid-glass="true"]) .sidebar-row {
     background: rgba(18, 18, 18, 0.94);
     backdrop-filter: none;
   }

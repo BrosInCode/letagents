@@ -16,7 +16,10 @@ import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
 } from "../../../tasks/ownership.js";
-import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
+import {
+  isDesktopHumanWrite,
+  resolveOwnerTokenWorkerWriteIdentity,
+} from "./request-identity.js";
 import type { RoomTaskRouteDeps } from "./types.js";
 
 export function registerTaskFocusRoomRoute(
@@ -43,6 +46,7 @@ export function registerTaskFocusRoomRoute(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody);
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -60,18 +64,20 @@ export function registerTaskFocusRoomRoute(
         return;
       }
 
-      const coordination = await deps.enforceTaskCoordinationMutation({
-        req,
-        projectId: project.id,
-        task,
-        taskOwnership,
-        updates: {},
-        forcedMutation: { mutation: "focus_room_open", leaseKind: "work" },
-        actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
-        actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
-        actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
-        actorSessionId: workerIdentity?.agent_session_id ?? null,
-      });
+      const coordination = desktopHumanWrite
+        ? { kind: "allow" as const, leaseFence: null }
+        : await deps.enforceTaskCoordinationMutation({
+            req,
+            projectId: project.id,
+            task,
+            taskOwnership,
+            updates: {},
+            forcedMutation: { mutation: "focus_room_open", leaseKind: "work" },
+            actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
+            actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
+            actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
+            actorSessionId: workerIdentity?.agent_session_id ?? null,
+          });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;

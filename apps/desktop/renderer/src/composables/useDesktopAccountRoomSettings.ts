@@ -2,6 +2,7 @@ import { ref, type Ref } from "vue";
 import type { DesktopAccountRoomEntry, DesktopRoomInfo, DesktopRoomSnapshot } from "../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { desktopIpc } from "../ipc/index.js";
+import type { FocusRoomConclusionInput } from "../domain/focus-room-conclusion";
 import {
   buildRoomPinMutation,
   normalizeRoomIdentifier,
@@ -185,6 +186,46 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     }
   }
 
+  async function concludeSidebarFocusRoom(
+    entry: RoomEntry,
+    input: FocusRoomConclusionInput,
+  ): Promise<
+    | { ok: true; refreshError: string | null }
+    | { ok: false; error: string }
+  > {
+    if (!entry.focusKey || !entry.parentRoomIdentifier || entry.focusStatus === "concluded") {
+      const error = "This focus room is no longer available to conclude.";
+      return { ok: false, error };
+    }
+
+    const displayName = entry.title || entry.roomIdentifier || "Focus room";
+    settingsRoomActionBusyKey.value = `conclude-focus:${entry.roomIdentifier || entry.focusKey}`;
+    try {
+      await desktopIpc.room.concludeFocusRoom(
+        entry.parentRoomIdentifier,
+        entry.focusKey,
+        input.summary,
+        input.details,
+      );
+    } catch (caught) {
+      const error = caught instanceof Error ? caught.message : `Could not conclude ${displayName}.`;
+      settingsRoomActionBusyKey.value = null;
+      return { ok: false, error };
+    }
+
+    try {
+      await options.refresh();
+      return { ok: true, refreshError: null };
+    } catch (caught) {
+      const refreshError = caught instanceof Error
+        ? caught.message
+        : "The room list could not be refreshed.";
+      return { ok: true, refreshError };
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
   async function togglePinSidebarRoom(entry: RoomEntry): Promise<void> {
     const mutation = buildRoomPinMutation(entry);
     if (!mutation) return;
@@ -325,6 +366,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   return {
     archiveSidebarFocusRoom,
     archiveSidebarRoom,
+    concludeSidebarFocusRoom,
     deleteAccountRoom,
     leaveAccountRoom,
     renameSidebarRoom,

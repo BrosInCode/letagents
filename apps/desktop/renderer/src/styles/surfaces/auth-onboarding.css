@@ -3,10 +3,17 @@
    blocked — and stays anchored while content transitions beneath it. */
 
 .auth-onboarding {
+  position: relative;
   display: grid;
   align-content: center;
   justify-items: center;
   min-height: 100%;
+}
+
+.auth-sidebar-reveal {
+  position: absolute;
+  top: 18px;
+  left: 18px;
 }
 
 .auth-access-card {

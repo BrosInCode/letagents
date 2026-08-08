@@ -2,25 +2,34 @@
   --sidebar-width: 296px;
   --sidebar-min-width: 260px;
   --sidebar-max-width: 440px;
+  --sidebar-track-width: clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width));
 
   position: relative;
   display: grid;
-  grid-template-columns: clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width)) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-track-width) minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
-  transition: grid-template-columns var(--duration-slow) var(--ease-spring);
-}
-
-.desktop-shell[data-sidebar-mode="rail"] {
-  grid-template-columns: 88px minmax(0, 1fr);
+  transition: grid-template-columns 220ms var(--ease-out);
 }
 
 .desktop-shell[data-sidebar-mode="hidden"] {
-  grid-template-columns: minmax(0, 1fr);
+  --sidebar-track-width: 0px;
+  transition-duration: 160ms;
 }
 
 .desktop-shell[data-sidebar-resizing="true"] {
   transition: none;
+}
+
+.desktop-sidebar-frame {
+  grid-column: 1;
+  min-width: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.desktop-sidebar-frame > .app-sidebar {
+  width: clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width));
 }
 
 .sidebar-resize-handle {
@@ -44,43 +53,6 @@
 .sidebar-resize-handle:hover::after,
 .sidebar-resize-handle:focus-visible::after {
   background: var(--border-strong);
-}
-
-.sidebar-peek-zone {
-  position: absolute;
-  inset: 0 auto 0 0;
-  z-index: 80;
-  width: 12px;
-  cursor: default;
-}
-
-.sidebar-peek-panel {
-  position: absolute;
-  inset: 0 auto 0 0;
-  z-index: 90;
-  width: clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width));
-  max-width: min(clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width)), calc(100vw - 24px));
-  overflow: hidden;
-  box-shadow: 20px 0 44px rgba(0, 0, 0, 0.28);
-}
-
-.sidebar-peek-panel .app-sidebar {
-  width: 100%;
-  height: 100%;
-  animation: none;
-}
-
-.sidebar-peek-enter-active,
-.sidebar-peek-leave-active {
-  transition:
-    opacity var(--duration-normal) var(--ease-out),
-    transform var(--duration-slow) var(--ease-spring);
-}
-
-.sidebar-peek-enter-from,
-.sidebar-peek-leave-to {
-  opacity: 0.78;
-  transform: translateX(-100%);
 }
 
 .desktop-launch-splash,
@@ -161,6 +133,10 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .desktop-shell {
+    transition: none;
+  }
+
   .desktop-launch-logo {
     animation: none;
   }

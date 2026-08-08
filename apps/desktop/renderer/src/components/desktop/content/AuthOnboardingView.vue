@@ -1,5 +1,19 @@
 <template>
   <section class="auth-onboarding surface-page" data-testid="auth-onboarding-view">
+    <button
+      v-if="sidebarMode === 'hidden'"
+      class="ghost-button sidebar-reveal-button auth-sidebar-reveal"
+      type="button"
+      aria-label="Show sidebar"
+      data-testid="auth-sidebar-reveal-button"
+      @click="$emit('cycle-sidebar')"
+    >
+      <svg class="sidebar-toggle-icon" viewBox="0 0 20 20" aria-hidden="true">
+        <path d="M4.5 3.5h11a1 1 0 0 1 1 1v11a1 1 0 0 1-1 1h-11a1 1 0 0 1-1-1v-11a1 1 0 0 1 1-1Z" />
+        <path d="M12.5 3.5v13" />
+        <path d="m7.5 7.5 2.5 2.5-2.5 2.5" />
+      </svg>
+    </button>
     <div class="auth-access-card" :data-access-state="cardState" data-testid="auth-access-panel">
       <p class="auth-room-line">
         <span class="auth-dot" aria-hidden="true"></span>
@@ -189,6 +203,7 @@ import type {
 import { friendlyRoomLabel } from "../../../domain/git-rooms";
 import { loginInitials } from "../../../domain/initials";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import type { SidebarMode } from "../types";
 import {
   nextRetryStep,
   resolveAuthCardState,
@@ -203,6 +218,7 @@ const props = defineProps<{
   feedback: string | null;
   snapshotPending?: boolean;
   roomLabel?: string | null;
+  sidebarMode: SidebarMode;
 }>();
 
 const emit = defineEmits<{
@@ -211,6 +227,7 @@ const emit = defineEmits<{
   "poll-auth": [];
   "refresh-room": [];
   "sign-out": [];
+  "cycle-sidebar": [];
 }>();
 
 const pendingAuth = computed<DesktopPendingDeviceAuth | null>(() => {

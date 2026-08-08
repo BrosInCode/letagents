@@ -3,11 +3,13 @@ import type { Express } from "express";
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
 import {
   assignProjectAdminIfRoomHasNoAdmins,
+  concludeFocusRoom,
   getGitHubAppInstallationById,
   getGitHubAppRepositoryByRoomId,
   getGitHubRoomEvents,
   getGitRoomBindingForRoom,
   getGitRoomBindingsForRooms,
+  getFocusRoomByKey,
   getProjectById,
   getActiveTaskLeases,
   getRoomSharedArtifactByIdentityKey,
@@ -281,6 +283,10 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomReasoningRouteDeps;
 
   const roomFocusRouteDeps = {
+    getFocusRoomByKey,
+    getTaskById,
+    getTaskOwnershipState,
+    concludeFocusRoom,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,

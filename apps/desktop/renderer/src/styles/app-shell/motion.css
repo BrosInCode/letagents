@@ -1,3 +1,23 @@
+.desktop-sidebar-enter-active {
+  will-change: opacity, transform;
+  transition:
+    opacity 180ms var(--ease-out),
+    transform 220ms var(--ease-out);
+}
+
+.desktop-sidebar-leave-active {
+  will-change: opacity, transform;
+  transition:
+    opacity 120ms var(--ease-out),
+    transform 160ms var(--ease-out);
+}
+
+.desktop-sidebar-enter-from,
+.desktop-sidebar-leave-to {
+  opacity: 0;
+  transform: translateX(-12px);
+}
+
 .sidebar-reveal-enter-active,
 .sidebar-reveal-leave-active {
   transition:
@@ -53,6 +73,8 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .desktop-sidebar-enter-active,
+  .desktop-sidebar-leave-active,
   .sidebar-reveal-enter-active,
   .sidebar-reveal-leave-active,
   .sidebar-pinned-reveal-enter-active,
@@ -60,6 +82,8 @@
     transition: opacity 120ms linear;
   }
 
+  .desktop-sidebar-enter-from,
+  .desktop-sidebar-leave-to,
   .sidebar-reveal-enter-from,
   .sidebar-reveal-leave-to,
   .sidebar-pinned-reveal-enter-from,
