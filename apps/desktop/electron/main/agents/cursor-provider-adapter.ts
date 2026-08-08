@@ -831,6 +831,18 @@ let mcpRuntimeEnv = null;
 let mcpConnectorAdmitted = false;
 let mcpCapabilityAttested = !restrictRemoteAuthority;
 let mcpCapabilityDeadline = null;
+// Model-authority requests that reached the agent proxy before live MCP
+// attestation resolved. Cursor opens its model connection at startup in
+// parallel with the MCP handshake that attestation validates, so a request can
+// legitimately arrive first. Such requests are held here -- never rejected
+// mid-startup -- and released the instant attestation settles. The set drains
+// exactly once per outcome, so no held request can outlive attestation.
+const mcpCapabilityWaiters = new Set();
+function settleMcpCapabilityWaiters(attested) {
+  const pending = [...mcpCapabilityWaiters];
+  mcpCapabilityWaiters.clear();
+  for (const release of pending) release(attested);
+}
 const agentProxySessions = new Set();
 const agentProxySockets = new Set();
 const agentProxyInternalServers = new Set();
@@ -1175,6 +1187,11 @@ function failMcpCapabilityAttestation(detail) {
   if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
   mcpCapabilityDeadline = null;
   mcpCapabilityAttested = false;
+  // Release any held model request as rejected. recordCausalTerminalError below
+  // captures detail as the durable terminal reason, so the displayed failure is
+  // this exact cause -- not the generic connector-ended message a later socket
+  // close would otherwise record first.
+  settleMcpCapabilityWaiters(false);
   if (resultSnapshot) {
     // The native provider has already emitted its terminal turn result. No
     // further model authority is legitimate; retire the lease normally.
@@ -1568,6 +1585,8 @@ function startMcpConnector() {
             mcpCapabilityAttested = true;
             if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
             mcpCapabilityDeadline = null;
+            // Release every request held for attestation: now admissible.
+            settleMcpCapabilityWaiters(true);
           }
           if (!socket.destroyed) socket.write(framedLine);
           if (mcpCapabilityAttested && runtimeInspectionBuffer.length > 0) {
@@ -1676,6 +1695,9 @@ async function closeAuthorityProxy() {
 }
 function beginTurnAuthorityRetirement() {
   authorityRetiring = true;
+  // Any request still held for attestation can never be admitted once authority
+  // is retiring; release them all as rejected so none outlives the turn.
+  settleMcpCapabilityWaiters(false);
   if (!authorityRetirementPromise) {
     authorityRetirementPromise = (async () => {
       // Invoke both closures before the first await. This synchronously closes
@@ -1808,18 +1830,50 @@ function startAgentProxy() {
         try { upstreamSession.close(); } catch {}
       });
     }
-    function requestAllowed(method, path, contentType, authorization) {
-      if (finalizing
+    // Genuine, non-timing violations: a bad proxy token, wrong method/path/
+    // content-type, or a second request after one was already admitted. These
+    // never wait -- they are rejected immediately, independent of attestation.
+    function requestViolation(method, path, contentType, authorization) {
+      return finalizing
         || authorityRetiring
-        || !mcpCapabilityAttested
         || admitted
         || authorization !== expectedProxyAuthorization
         || method !== "POST"
         || path !== "/agent.v1.AgentService/Run"
         || typeof contentType !== "string"
-        || !/^application\/connect[+]proto(?:\s*;|$)/i.test(contentType.trim())) return false;
-      admitted = true;
-      return true;
+        || !/^application\/connect[+]proto(?:\s*;|$)/i.test(contentType.trim());
+    }
+    // Decide whether one model request may be forwarded. When the only unmet
+    // condition is live MCP attestation, the request is HELD on the real
+    // attestation signal rather than rejected: rejecting mid-handshake makes
+    // Cursor treat the turn as a dropped connection and retry to death. The hold
+    // is bounded by the capability deadline armed when the connector began
+    // listening -- attestation success admits, failure or timeout rejects -- and
+    // cancel() frees the single admission slot if the caller's stream dies while
+    // held. Fail-closed: every path resolves to a definite allow or deny. A deny
+    // reached during teardown may surface to the client as a connection reset
+    // rather than the 503 body; the durable failure reason is the recorded
+    // terminal evidence, not the wire response.
+    function admitRequest(method, path, contentType, authorization) {
+      if (requestViolation(method, path, contentType, authorization)) {
+        return { promise: Promise.resolve(false), cancel() {} };
+      }
+      if (mcpCapabilityAttested) {
+        admitted = true;
+        return { promise: Promise.resolve(true), cancel() {} };
+      }
+      let resolveAdmit;
+      const promise = new Promise((resolve) => { resolveAdmit = resolve; });
+      const release = (attested) => {
+        if (!attested || requestViolation(method, path, contentType, authorization)) { resolveAdmit(false); return; }
+        admitted = true;
+        resolveAdmit(true);
+      };
+      mcpCapabilityWaiters.add(release);
+      return {
+        promise,
+        cancel() { if (mcpCapabilityWaiters.delete(release)) resolveAdmit(false); },
+      };
     }
     const h2Server = http2.createServer({ settings: { maxHeaderListSize: 64 * 1024 } });
     agentProxyInternalServers.add(h2Server);
@@ -1838,52 +1892,70 @@ function startAgentProxy() {
       session.once("close", () => agentProxySessions.delete(session));
     });
     h2Server.on("stream", (stream, headers) => {
-      const method = headers[":method"];
-      const path = headers[":path"];
-      const contentType = headers["content-type"];
-      if (!requestAllowed(method, path, contentType, headers.authorization)) {
-        try { stream.respond({ ":status": 503, "cache-control": "no-store" }); } catch {}
-        stream.end("Cursor agent proxy rejected the request.");
-        return;
-      }
-      forward(stream, headers, {
-        respond: (value) => stream.respond(value),
-        fail: (status) => {
-          try { if (!stream.headersSent) stream.respond({ ":status": status }); } catch {}
-          try { stream.close(http2.constants.NGHTTP2_CANCEL); } catch {}
-        },
-        write: (chunk) => stream.write(chunk),
-        end: () => stream.end(),
-        onceDrain: (listener) => stream.once("drain", listener),
-        onceClose: (listener) => stream.once("close", listener),
+      const admission = admitRequest(headers[":method"], headers[":path"], headers["content-type"], headers.authorization);
+      const onClosed = () => admission.cancel();
+      stream.once("close", onClosed);
+      void admission.promise.then((allowed) => {
+        stream.removeListener("close", onClosed);
+        if (!allowed) {
+          try { stream.respond({ ":status": 503, "cache-control": "no-store" }); } catch {}
+          try { stream.end("Cursor agent proxy rejected the request."); } catch {}
+          return;
+        }
+        // The admitted stream died before we could forward (nothing was sent
+        // upstream). Free the single admission slot so a legitimate retry is
+        // not rejected as a replay -- otherwise this reintroduces the
+        // retry-to-death this fix removes.
+        if (stream.destroyed || stream.closed) { admitted = false; return; }
+        forward(stream, headers, {
+          respond: (value) => stream.respond(value),
+          fail: (status) => {
+            try { if (!stream.headersSent) stream.respond({ ":status": status }); } catch {}
+            try { stream.close(http2.constants.NGHTTP2_CANCEL); } catch {}
+          },
+          write: (chunk) => stream.write(chunk),
+          end: () => stream.end(),
+          onceDrain: (listener) => stream.once("drain", listener),
+          onceClose: (listener) => stream.once("close", listener),
+        });
       });
     });
     h2Server.on("sessionError", () => {});
     const h1Server = http.createServer((request, response) => {
-      const contentType = request.headers["content-type"];
-      if (!requestAllowed(request.method, request.url, contentType, request.headers.authorization)) {
-        request.resume();
-        response.writeHead(503, { "cache-control": "no-store", "connection": "close" });
-        response.end("Cursor agent proxy rejected the request.");
-        return;
-      }
-      forward(request, request.headers, {
-        respond: (value) => {
-          const status = Number(value[":status"] || 502);
-          const headers = {};
-          for (const [key, entry] of Object.entries(value)) {
-            if (!key.startsWith(":") && key !== "connection" && key !== "transfer-encoding") headers[key] = entry;
-          }
-          response.writeHead(status, headers);
-        },
-        fail: (status) => {
-          try { if (!response.headersSent) response.writeHead(status, { "connection": "close" }); } catch {}
-          response.destroy();
-        },
-        write: (chunk) => response.write(chunk),
-        end: () => response.end(),
-        onceDrain: (listener) => response.once("drain", listener),
-        onceClose: (listener) => response.once("close", listener),
+      const admission = admitRequest(request.method, request.url, request.headers["content-type"], request.headers.authorization);
+      const onClosed = () => admission.cancel();
+      response.once("close", onClosed);
+      void admission.promise.then((allowed) => {
+        response.removeListener("close", onClosed);
+        if (!allowed) {
+          request.resume();
+          try {
+            response.writeHead(503, { "cache-control": "no-store", "connection": "close" });
+            response.end("Cursor agent proxy rejected the request.");
+          } catch {}
+          return;
+        }
+        // The admitted response died before we could forward. Free the single
+        // admission slot (see the HTTP/2 path) so a legitimate retry is admitted.
+        if (response.writableEnded || response.destroyed) { admitted = false; request.resume(); return; }
+        forward(request, request.headers, {
+          respond: (value) => {
+            const status = Number(value[":status"] || 502);
+            const headers = {};
+            for (const [key, entry] of Object.entries(value)) {
+              if (!key.startsWith(":") && key !== "connection" && key !== "transfer-encoding") headers[key] = entry;
+            }
+            response.writeHead(status, headers);
+          },
+          fail: (status) => {
+            try { if (!response.headersSent) response.writeHead(status, { "connection": "close" }); } catch {}
+            response.destroy();
+          },
+          write: (chunk) => response.write(chunk),
+          end: () => response.end(),
+          onceDrain: (listener) => response.once("drain", listener),
+          onceClose: (listener) => response.once("close", listener),
+        });
       });
     });
     agentProxyInternalServers.add(h1Server);
@@ -2428,6 +2500,8 @@ async function finishNotStarted(error, calledFromStart = false) {
   if (finalizing) return;
   finalizing = true;
   authorityRetiring = true;
+  // A wrapper that never crossed native release still rejects any held request.
+  settleMcpCapabilityWaiters(false);
   // First revoke anything already published. Then wait for the in-progress
   // startup continuation to observe the cancellation fence and close again,
   // so a late listen callback cannot outlive not_started evidence.
