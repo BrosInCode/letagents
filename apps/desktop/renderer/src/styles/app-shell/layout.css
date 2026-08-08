@@ -2,21 +2,34 @@
   --sidebar-width: 296px;
   --sidebar-min-width: 260px;
   --sidebar-max-width: 440px;
+  --sidebar-track-width: clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width));
 
   position: relative;
   display: grid;
-  grid-template-columns: clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width)) minmax(0, 1fr);
+  grid-template-columns: var(--sidebar-track-width) minmax(0, 1fr);
   height: 100vh;
   overflow: hidden;
-  transition: grid-template-columns var(--duration-slow) var(--ease-spring);
+  transition: grid-template-columns 220ms var(--ease-out);
 }
 
 .desktop-shell[data-sidebar-mode="hidden"] {
-  grid-template-columns: minmax(0, 1fr);
+  --sidebar-track-width: 0px;
+  transition-duration: 160ms;
 }
 
 .desktop-shell[data-sidebar-resizing="true"] {
   transition: none;
+}
+
+.desktop-sidebar-frame {
+  grid-column: 1;
+  min-width: 0;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.desktop-sidebar-frame > .app-sidebar {
+  width: clamp(var(--sidebar-min-width), var(--sidebar-width), var(--sidebar-max-width));
 }
 
 .sidebar-resize-handle {

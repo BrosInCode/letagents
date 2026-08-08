@@ -45,28 +45,36 @@
     :style="desktopShellStyle"
     data-testid="desktop-shell"
   >
-    <DesktopSidebar
-      v-if="!isSettingsSurface && sidebarMode !== 'hidden'"
-      :active-entry="activeEntry"
-      :primary-room="currentParentRoom"
-      :project-entries="sidebarProjectEntries"
-      :settings-entry="settingsEntry"
-      :pinned-collapsed="pinnedCollapsed"
-      :rooms-collapsed="roomsCollapsed"
-      :collapsed-projects="collapsedProjects"
-      @cycle-sidebar="cycleSidebar"
-      @new-room="selectNewRoomEntry"
-      @archive-room="archiveSidebarRoom"
-      @archive-focus-room="archiveSidebarFocusRoom"
-      @mark-room-read="markRoomEntryRead"
-      @pin-room="togglePinSidebarRoom"
-      @rename-room="renameSidebarRoom"
-      @select-entry="handleSidebarEntrySelected"
-      @set-projects-collapsed="setAllProjectsCollapsed"
-      @toggle-project="toggleProject"
-      @toggle-pinned-collapsed="togglePinnedCollapsed"
-      @toggle-rooms-collapsed="toggleRoomsCollapsed"
-    />
+    <Transition name="desktop-sidebar">
+      <div
+        v-show="!isSettingsSurface && sidebarMode !== 'hidden'"
+        class="desktop-sidebar-frame"
+        :aria-hidden="isSettingsSurface || sidebarMode === 'hidden'"
+        :inert="isSettingsSurface || sidebarMode === 'hidden'"
+      >
+        <DesktopSidebar
+          :active-entry="activeEntry"
+          :primary-room="currentParentRoom"
+          :project-entries="sidebarProjectEntries"
+          :settings-entry="settingsEntry"
+          :pinned-collapsed="pinnedCollapsed"
+          :rooms-collapsed="roomsCollapsed"
+          :collapsed-projects="collapsedProjects"
+          @cycle-sidebar="cycleSidebar"
+          @new-room="selectNewRoomEntry"
+          @archive-room="archiveSidebarRoom"
+          @archive-focus-room="archiveSidebarFocusRoom"
+          @mark-room-read="markRoomEntryRead"
+          @pin-room="togglePinSidebarRoom"
+          @rename-room="renameSidebarRoom"
+          @select-entry="handleSidebarEntrySelected"
+          @set-projects-collapsed="setAllProjectsCollapsed"
+          @toggle-project="toggleProject"
+          @toggle-pinned-collapsed="togglePinnedCollapsed"
+          @toggle-rooms-collapsed="toggleRoomsCollapsed"
+        />
+      </div>
+    </Transition>
     <div
       v-if="showSidebarResizeHandle"
       class="sidebar-resize-handle"

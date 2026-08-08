@@ -66,6 +66,7 @@
 @media (max-width: 980px) {
   .desktop-shell {
     grid-template-columns: 1fr;
+    transition: none;
   }
 
   .sidebar-resize-handle {
@@ -74,6 +75,20 @@
 
   .desktop-shell[data-sidebar-mode="hidden"] {
     grid-template-columns: 1fr;
+  }
+
+  .desktop-sidebar-frame,
+  .app-main {
+    grid-column: 1;
+  }
+
+  .desktop-sidebar-frame > .app-sidebar {
+    width: 100%;
+  }
+
+  .desktop-sidebar-enter-active,
+  .desktop-sidebar-leave-active {
+    transition: none;
   }
 
   .app-sidebar {
