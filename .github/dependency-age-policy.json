@@ -32,6 +32,11 @@
       "reason": "Exact patched release required to remediate GHSA-rgw5-rvv9-x895 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-06 when the cooldown is naturally satisfied."
     },
     {
+      "name": "nanoid",
+      "version": "3.3.17",
+      "reason": "Exact patched release required to remediate GHSA-2v37-7h3g-55p8 (pinned via src/web overrides over vite/postcss) before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-10 when the cooldown is naturally satisfied."
+    },
+    {
       "name": "@typescript-eslint/parser",
       "version": "8.63.0",
       "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
