@@ -533,8 +533,20 @@ export function prepareCursorSupervisedProfile(
     resolve(cursorRuntimeConfigDir, "statsig-cache.json"),
     canonicalizeAuthorityPath(join(cursorRuntimeConfigDir, "statsig-cache.json")),
   ])];
-  const nativeDeniedReadWriteRegexes = statsigCachePaths.map((statsigCachePath) =>
-    `^${escapeSandboxRegex(statsigCachePath)}[.][0-9]+[.][0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}[.]tmp$`);
+  const nativeDeniedReadWriteRegexes = [
+    ...statsigCachePaths.map((statsigCachePath) =>
+      `^${escapeSandboxRegex(statsigCachePath)}[.][0-9]+[.][0-9A-Fa-f]{8}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{4}-[0-9A-Fa-f]{12}[.]tmp$`),
+    // Defense in depth for --approve-mcps (which auto-approves every MCP
+    // cursor-agent can read): projectDirectories only spans git-root..workspace,
+    // so the per-directory literal deny above does NOT cover a .cursor/mcp.json
+    // nested strictly BELOW --workspace, and the workspace tree is read-allowed.
+    // Deny reading any such nested MCP config so a repo-planted server can never
+    // be discovered, let alone approved -- independent of the CLI's (version-
+    // specific) MCP discovery scope. Verified: cursor-agent 2026.07.09 does not
+    // descend below --workspace, but this keeps the guarantee if that changes.
+    ...[...new Set(sandboxPathVariants(workspaceRoot))].map((root) =>
+      `^${escapeSandboxRegex(root)}/.*/[.]cursor/mcp[.]json$`),
+  ];
   const gitMetadataReadRoots = cursorGitMetadataReadRoots(workspaceRoot);
   const gitAuthorityRoots = [...new Set(gitMetadataReadRoots.flatMap(sandboxPathVariants))];
   const gitMarkerPath = cursorGitMarkerPath(workspaceRoot);
