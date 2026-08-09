@@ -14,6 +14,7 @@ export type BoardEmptyStateAction =
   | "add-task";
 
 export interface BoardEmptyState {
+  variant: "first-task" | "filtered";
   title: string;
   description: string;
   actionLabel: string;
@@ -23,6 +24,12 @@ export interface BoardEmptyState {
 
 export const ACTIVE_BOARD_STATUSES = TASK_STATUS_ORDER.slice(0, 6);
 export const CLOSEOUT_BOARD_STATUSES = TASK_STATUS_ORDER.slice(6);
+export const BOARD_HANDOFF_STAGE_LABELS: ReadonlyArray<string> = [
+  ...ACTIVE_BOARD_STATUSES
+    .filter((status) => status !== "blocked")
+    .map((status) => status === "in_review" ? "Review" : readableStatus(status)),
+  "Closeout",
+];
 
 export const BOARD_FILTERS: ReadonlyArray<{ id: BoardFilter; label: string }> = [
   { id: "open", label: "Open" },
@@ -115,15 +122,17 @@ export function boardEmptyState(input: {
 }): BoardEmptyState {
   if (input.taskCount === 0) {
     return {
-      title: "No tasks yet",
-      description: "Create the first task here so a teammate or agent can pick it up.",
-      actionLabel: "Add first task",
+      variant: "first-task",
+      title: "Start the first handoff",
+      description: "Create a task, then route it to a teammate or agent when it is ready.",
+      actionLabel: "Create first task",
       action: "add-task",
       testId: "room-board-empty",
     };
   }
   if (input.hasSearchQuery) {
     return {
+      variant: "filtered",
       title: "No tasks match this search",
       description: "Try another title, task id, owner, or external link.",
       actionLabel: "Clear search",
@@ -132,6 +141,7 @@ export function boardEmptyState(input: {
   }
   if (input.filter === "mine") {
     return {
+      variant: "filtered",
       title: "No tasks for the local agent",
       description: "Tasks assigned to the agent running from this desktop will appear here.",
       actionLabel: "Show open tasks",
@@ -140,6 +150,7 @@ export function boardEmptyState(input: {
   }
   if (input.filter === "unclaimed") {
     return {
+      variant: "filtered",
       title: "No unclaimed tasks",
       description: "Proposed or accepted tasks without an owner will appear here.",
       actionLabel: "Show open tasks",
@@ -148,6 +159,7 @@ export function boardEmptyState(input: {
   }
   if (input.filter === "needs-review") {
     return {
+      variant: "filtered",
       title: "Nothing needs review",
       description: "Tasks waiting for review or blocked follow-up will appear here.",
       actionLabel: "Show open tasks",
@@ -156,6 +168,7 @@ export function boardEmptyState(input: {
   }
   if (input.filter === "closeout") {
     return {
+      variant: "filtered",
       title: "No closeout tasks",
       description: "Merged, done, and cancelled tasks will appear here for final closeout.",
       actionLabel: "Show open tasks",
@@ -164,12 +177,14 @@ export function boardEmptyState(input: {
   }
   return input.closeoutTaskCount > 0
     ? {
+      variant: "filtered",
       title: "No open tasks",
       description: "All tasks in this room are in closeout right now. Switch to Closeout to finish or audit them.",
       actionLabel: "Show closeout",
       action: "show-closeout",
     }
     : {
+      variant: "filtered",
       title: "No open tasks",
       description: "Create a task when there is new work to hand off to a teammate or agent.",
       actionLabel: "Add task",

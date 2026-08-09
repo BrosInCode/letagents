@@ -8,6 +8,7 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import {
+  BOARD_HANDOFF_STAGE_LABELS,
   boardEmptyState,
   boardFilterCount,
   deriveTaskTitle,
@@ -126,6 +127,14 @@ describe("room board helpers", () => {
       }).map((group) => group.status),
       TASK_STATUS_ORDER.slice(0, 6)
     );
+    assert.deepEqual(BOARD_HANDOFF_STAGE_LABELS, [
+      "Proposed",
+      "Accepted",
+      "Assigned",
+      "In Progress",
+      "Review",
+      "Closeout",
+    ]);
   });
 
   it("keeps board empty-state copy and actions deterministic", () => {
@@ -135,9 +144,10 @@ describe("room board helpers", () => {
       filter: "open",
       closeoutTaskCount: 0,
     }), {
-      title: "No tasks yet",
-      description: "Create the first task here so a teammate or agent can pick it up.",
-      actionLabel: "Add first task",
+      variant: "first-task",
+      title: "Start the first handoff",
+      description: "Create a task, then route it to a teammate or agent when it is ready.",
+      actionLabel: "Create first task",
       action: "add-task",
       testId: "room-board-empty",
     });

@@ -6,6 +6,7 @@ import type {
 import type {
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
+  TaskStatusUpdatePayload,
 } from './types'
 
 interface RoomTaskHandlerDeps {
@@ -31,13 +32,15 @@ export function useRoomTaskHandlers(deps: RoomTaskHandlerDeps) {
     await deps.addTask(title)
   }
 
-  async function handleUpdateTask(
-    taskId: string,
-    updates: Pick<RoomTask, 'status'>,
-  ) {
-    const updated = await deps.updateTask(taskId, updates)
-    if (!updated) {
-      deps.toast.error('Task status could not be updated.')
+  async function handleUpdateTask(payload: TaskStatusUpdatePayload) {
+    let updated = false
+    try {
+      updated = await deps.updateTask(payload.taskId, { status: payload.status })
+      if (!updated) {
+        deps.toast.error('Task status could not be updated.')
+      }
+    } finally {
+      payload.onSettled?.(updated)
     }
   }
 

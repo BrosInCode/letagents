@@ -1,23 +1,21 @@
 .review-authority {
-  --review-accent: #94a3b8;
+  --review-accent: var(--text-tertiary);
   display: grid;
   gap: 12px;
   margin: 12px 0;
   padding: 14px;
-  border: 1px solid rgba(148, 163, 184, 0.18);
-  border-radius: 14px;
-  background: linear-gradient(135deg, rgba(255, 255, 255, 0.045), rgba(255, 255, 255, 0.018));
+  border: 1px solid color-mix(in srgb, var(--review-accent) 26%, var(--border));
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
 }
 
 .review-authority[data-state="assigned"] {
-  --review-accent: #38bdf8;
-  border-color: rgba(56, 189, 248, 0.22);
+  --review-accent: var(--task-in-review);
 }
 
 .review-authority[data-state="missing"],
 .review-authority[data-state="invalid"] {
-  --review-accent: #f59e0b;
-  border-color: rgba(245, 158, 11, 0.28);
+  --review-accent: var(--task-in-progress);
 }
 
 .review-authority__header,
@@ -35,7 +33,7 @@
 .review-authority__kicker {
   display: block;
   margin-bottom: 3px;
-  color: var(--text-tertiary, #a1a1aa);
+  color: var(--text-tertiary);
   font-size: 0.66rem;
   font-weight: 800;
   letter-spacing: 0.07em;
@@ -44,7 +42,7 @@
 
 .review-authority h5 {
   margin: 0;
-  color: var(--text-primary, #fff);
+  color: var(--text);
   font-size: 0.88rem;
 }
 
@@ -57,9 +55,9 @@
 .review-authority__tile {
   min-width: 0;
   padding: 9px 10px;
-  border: 1px solid rgba(255, 255, 255, 0.065);
+  border: 1px solid var(--border);
   border-radius: 10px;
-  background: rgba(0, 0, 0, 0.14);
+  background: var(--accent-dim);
 }
 
 .review-authority__tile span,
@@ -71,7 +69,7 @@
 }
 
 .review-authority__tile span {
-  color: var(--text-tertiary, #a1a1aa);
+  color: var(--text-tertiary);
   font-size: 0.65rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -80,14 +78,14 @@
 
 .review-authority__tile strong {
   margin-top: 3px;
-  color: var(--text-primary, #fff);
+  color: var(--text);
   font-size: 0.78rem;
 }
 
 .review-authority__detail,
 .review-authority__note {
   margin: 0;
-  color: var(--text-secondary, #d4d4d8);
+  color: var(--text-secondary);
   font-size: 0.75rem;
   line-height: 1.45;
 }
@@ -104,22 +102,22 @@
   gap: 7px;
   min-height: 30px;
   padding: 4px 6px 4px 9px;
-  border: 1px solid rgba(56, 189, 248, 0.22);
+  border: 1px solid color-mix(in srgb, var(--task-in-review) 30%, var(--border));
   border-radius: 999px;
-  background: rgba(56, 189, 248, 0.08);
-  color: #bae6fd;
+  background: color-mix(in srgb, var(--task-in-review) 9%, transparent);
+  color: color-mix(in srgb, var(--task-in-review) 76%, var(--text));
   font-size: 0.7rem;
   font-weight: 700;
 }
 
 .reviewer-chip[data-invalid="true"] {
-  border-color: rgba(248, 113, 113, 0.3);
-  background: rgba(248, 113, 113, 0.09);
-  color: #fecaca;
+  border-color: color-mix(in srgb, var(--task-blocked) 34%, var(--border));
+  background: color-mix(in srgb, var(--task-blocked) 9%, transparent);
+  color: color-mix(in srgb, var(--task-blocked) 76%, var(--text));
 }
 
 .reviewer-chip small {
-  color: var(--text-tertiary, #a1a1aa);
+  color: var(--text-tertiary);
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
   font-size: 0.62rem;
 }
@@ -129,10 +127,10 @@
   align-items: center;
   min-height: 22px;
   padding: 2px 7px;
-  border: 1px solid rgba(255, 255, 255, 0.09);
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.055);
-  color: var(--text-secondary, #d4d4d8);
+  background: var(--accent-dim);
+  color: var(--text-secondary);
   cursor: pointer;
   font: inherit;
   font-size: 0.65rem;
@@ -140,8 +138,13 @@
 }
 
 .reviewer-chip button:hover:not(:disabled) {
-  border-color: rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.1);
+  border-color: var(--border-accent);
+  background: var(--accent-hover);
+}
+
+.reviewer-chip button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .reviewer-chip button:disabled {
@@ -158,6 +161,15 @@
   min-width: 0;
 }
 
+.review-authority__actions :deep(.btn) {
+  --btn-secondary-bg: var(--accent-dim);
+  --btn-secondary-hover-bg: var(--accent-hover);
+  --btn-secondary-border: var(--border-strong);
+  --btn-secondary-color: var(--text-secondary);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
 @media (max-width: 768px) {
   .review-authority__header,
   .review-authority__actions {
@@ -167,5 +179,15 @@
 
   .review-authority__grid {
     grid-template-columns: 1fr;
+  }
+
+  .review-authority__actions :deep(.app-select),
+  .review-authority__actions :deep(.btn),
+  .reviewer-chip button {
+    min-height: 44px;
+  }
+
+  .review-authority__actions :deep(.app-select) {
+    --app-select-height: 44px;
   }
 }

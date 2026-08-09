@@ -6,34 +6,34 @@
     :data-draggable="draggableTask"
     :data-testid="`room-board-task-${task.id}`"
     :draggable="draggableTask"
-    role="button"
-    tabindex="0"
-    @click="$emit('select')"
+    @click="onCardClick"
     @dragstart="onDragStart"
     @dragend="$emit('drag-end')"
-    @keydown.enter.prevent="$emit('select')"
-    @keydown.space.prevent="$emit('select')"
   >
-    <header class="desktop-task-card-header">
-      <div class="desktop-task-title-block">
+    <button
+      type="button"
+      class="desktop-task-card-open"
+      :aria-label="`Open ${task.title}`"
+      @click="$emit('select')"
+    >
+      <span class="desktop-task-card-header">
         <span class="desktop-task-id" :title="task.id">{{ shortTaskId(task.id) }}</span>
-        <h4>{{ task.title }}</h4>
-      </div>
-      <span class="desktop-task-status-badge" :data-status="task.status">
-        {{ readableStatus(task.status) }}
       </span>
-    </header>
-
-    <div class="desktop-task-card-meta">
-      <span>
-        <small>Owner</small>
-        <strong>{{ compactPerson(task.assignee) || "Unassigned" }}</strong>
+      <span class="desktop-task-card-title">{{ task.title }}</span>
+      <span class="desktop-task-card-meta">
+        <span class="desktop-task-owner">
+          <i aria-hidden="true">{{ ownerInitial }}</i>
+          <span>
+            <small>Owner</small>
+            <strong>{{ ownerName }}</strong>
+          </span>
+        </span>
+        <span class="desktop-task-updated">
+          <small>Updated</small>
+          <strong>{{ relativeTime(task.updatedAt || task.createdAt) }}</strong>
+        </span>
       </span>
-      <span>
-        <small>Updated</small>
-        <strong>{{ relativeTime(task.updatedAt || task.createdAt) }}</strong>
-      </span>
-    </div>
+    </button>
 
     <div v-if="taskWorkLease || taskSecondaryLeases.length || task.activeLocks.length || task.stalePromptState?.isStale || task.stalePromptState?.muted || taskWorkflowRefs.length" class="desktop-task-coordination">
       <span v-if="taskWorkLease" class="desktop-task-chip" data-kind="work">
@@ -113,11 +113,21 @@ const taskWorkflowRefs = computed(() => workflowRefs(props.task));
 const visibleWorkflowRefs = computed(() => taskWorkflowRefs.value.slice(0, 2));
 const extraWorkflowRefCount = computed(() => Math.max(0, taskWorkflowRefs.value.length - visibleWorkflowRefs.value.length));
 const primaryAction = computed(() => props.actions.find((action) => action.tone === "primary") || props.actions[0] || null);
+const ownerName = computed(() => compactPerson(props.task.assignee) || "Unassigned");
+const ownerInitial = computed(() => ownerName.value === "Unassigned"
+  ? "—"
+  : ownerName.value.charAt(0).toUpperCase()
+);
 
 function onDragStart(event: DragEvent): void {
   if (!props.draggableTask || !event.dataTransfer) return;
   event.dataTransfer.effectAllowed = "move";
   event.dataTransfer.setData("text/plain", props.task.id);
   emit("drag-start", props.task.id);
+}
+
+function onCardClick(event: MouseEvent): void {
+  if ((event.target as HTMLElement).closest("button, a")) return;
+  emit("select");
 }
 </script>

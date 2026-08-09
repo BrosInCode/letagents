@@ -46,7 +46,7 @@ withDefaults(defineProps<{
 }
 
 .btn:focus-visible {
-  box-shadow: 0 0 0 2px rgba(255, 255, 255, 0.2);
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--blue);
 }
 
 .btn:disabled {

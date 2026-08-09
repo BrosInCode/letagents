@@ -4,11 +4,11 @@ import test from 'node:test'
 import type { FocusRoomInfo } from '../src/composables/useRoom'
 import {
   createEmptyCloseoutDetails,
+  focusStatusLabel,
   focusRoomOpenKey,
   formatAuditTime,
   githubRoutingLabel,
   parentVisibilityLabel,
-  taskStatusLabel,
 } from '../src/components/room/focus-rooms/options'
 
 test('focus room labels use product copy for persisted values', () => {
@@ -42,8 +42,8 @@ test('createEmptyCloseoutDetails returns a task closeout draft', () => {
   })
 })
 
-test('taskStatusLabel and formatAuditTime keep display fallbacks simple', () => {
-  assert.equal(taskStatusLabel('in_review'), 'in review')
+test('focusStatusLabel and formatAuditTime keep display fallbacks simple', () => {
+  assert.equal(focusStatusLabel('waiting_on_parent'), 'waiting on parent')
   assert.equal(formatAuditTime(null), 'Unknown')
   assert.equal(formatAuditTime('not-a-date'), 'not-a-date')
 })

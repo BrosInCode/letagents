@@ -94,6 +94,14 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
   }
 
   const agentDetailScreenshotPath = process.env.LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT?.trim() || null;
+  const boardScreenshotPath = process.env.LETAGENTS_DESKTOP_BOARD_SCREENSHOT?.trim() || null;
+  const boardScreenshotSurface = process.env.LETAGENTS_DESKTOP_BOARD_SURFACE?.trim() || "board";
+  const requestedBoardTheme = process.env.LETAGENTS_DESKTOP_BOARD_THEME?.trim();
+  const boardScreenshotTheme = requestedBoardTheme === "light" || requestedBoardTheme === "dark"
+    ? requestedBoardTheme
+    : null;
+  const boardScreenshotWidth = Math.max(480, Math.min(1800, Number(process.env.LETAGENTS_DESKTOP_BOARD_WIDTH) || 1600));
+  const boardScreenshotHeight = Math.max(640, Math.min(1200, Number(process.env.LETAGENTS_DESKTOP_BOARD_HEIGHT) || 1000));
   window.setMinimumSize(360, 480);
 
   if (process.env.LETAGENTS_DESKTOP_SMOKE_DEBUG === "1") {
@@ -108,6 +116,9 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
   });
 
   window.webContents.once("did-finish-load", () => {
+    if (boardScreenshotPath) {
+      window.setSize(boardScreenshotWidth, boardScreenshotHeight);
+    }
     void window.webContents.executeJavaScript(
       `(async () => {
         const api = window.letagentsDesktop;
@@ -196,8 +207,86 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           return left.right <= right.left || right.right <= left.left || left.bottom <= right.top || right.bottom <= left.top;
         };
 
+        if (${JSON.stringify(boardScreenshotTheme)}) {
+          document.documentElement.dataset.theme = ${JSON.stringify(boardScreenshotTheme)};
+        }
+
         await waitFor("desktop shell", () => document.querySelector('[data-testid="desktop-shell"]'));
         result.desktopShell = true;
+
+        if (${Boolean(boardScreenshotPath)}) {
+          await waitFor(
+            "board screenshot viewport",
+            () => Math.abs(window.innerWidth - ${boardScreenshotWidth}) <= 100
+          );
+          const desktopShell = document.querySelector('[data-testid="desktop-shell"]');
+          if (window.innerWidth <= 980 && desktopShell?.getAttribute("data-sidebar-mode") !== "hidden") {
+            document.querySelector('[data-testid="sidebar-cycle-button"]')?.click();
+            await waitFor(
+              "compact board sidebar hidden",
+              () => desktopShell?.getAttribute("data-sidebar-mode") === "hidden"
+            );
+          }
+          result.boardViewportNarrow = window.matchMedia("(max-width: 980px)").matches;
+          result.boardSidebarHidden = desktopShell?.getAttribute("data-sidebar-mode") === "hidden";
+          const boardTab = await waitFor(
+            "board tab",
+            () => document.querySelector('[data-testid="desktop-room-tab-board"]')
+          );
+          boardTab.click();
+          await waitFor("board tab active", () => boardTab.getAttribute("data-active") === "true");
+          const roomBoard = await waitFor(
+            "room board",
+            () => document.querySelector('[data-testid="room-board-view"]')
+          );
+          const boardControls = await waitFor(
+            "board controls",
+            () => document.querySelector(".desktop-board-controls")
+          );
+          const boardManager = await waitFor(
+            "board manager control",
+            () => document.querySelector(".desktop-board-manager-pill")
+          );
+          const boardAddTask = await waitFor(
+            "board add task control",
+            () => document.querySelector(".desktop-board-add-button")
+          );
+          const isVisibleInsideViewport = (element) => {
+            const rect = element?.getBoundingClientRect();
+            return Boolean(
+              rect
+              && rect.width > 0
+              && rect.height > 0
+              && rect.left >= 0
+              && rect.right <= window.innerWidth
+            );
+          };
+          result.boardRootVisible = isVisibleInsideViewport(roomBoard);
+          result.boardControlsVisible = isVisibleInsideViewport(boardControls);
+          result.boardManagerVisible = isVisibleInsideViewport(boardManager);
+          result.boardAddTaskVisible = isVisibleInsideViewport(boardAddTask);
+          result.boardScreenshotLayoutValid = [
+            result.boardRootVisible,
+            result.boardControlsVisible,
+            result.boardManagerVisible,
+            result.boardAddTaskVisible,
+          ].every(Boolean);
+          const requestedSurface = ${JSON.stringify(boardScreenshotSurface)};
+          if (requestedSurface === "manager") {
+            document.querySelector(".desktop-board-manager-pill")?.click();
+            await waitFor("board manager panel", () => document.querySelector('[data-testid="room-board-governance-panel"]'));
+          }
+          if (requestedSurface === "create") {
+            document.querySelector(".desktop-board-add-button")?.click();
+            await waitFor("create task dialog", () => document.querySelector(".desktop-task-create-modal"));
+          }
+          if (requestedSurface === "task") {
+            document.querySelector(".desktop-task-card-open")?.click();
+            await waitFor("task detail dialog", () => document.querySelector(".desktop-task-modal .desktop-task-detail-panel"));
+          }
+          await new Promise((resolve) => setTimeout(resolve, 300));
+          return { ...result, boardScreenshotReady: true };
+        }
 
         const addAgentButton = await waitFor("composer add-agent button", () => document.querySelector('[data-testid="desktop-composer-add-agent"]'));
         result.addAgentButton = true;
@@ -510,6 +599,13 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
       })()`,
       true,
     ).then(async (result: Record<string, boolean>) => {
+      if (boardScreenshotPath && result.boardScreenshotReady) {
+        const image = await window.webContents.capturePage();
+        await writeFile(boardScreenshotPath, image.toPNG());
+        console.log(`LETAGENTS_DESKTOP_BOARD_SCREENSHOT ${boardScreenshotPath} ${JSON.stringify(result)}`);
+        app.exit(result.boardScreenshotLayoutValid ? 0 : 1);
+        return;
+      }
       if (agentDetailScreenshotPath && result.agentDetailScreenshotReady) {
         const image = await window.webContents.capturePage();
         await writeFile(agentDetailScreenshotPath, image.toPNG());
