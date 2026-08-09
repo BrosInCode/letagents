@@ -1,4 +1,5 @@
 import type { ProjectGroup, RoomEntry } from "../components/desktop/types";
+import { orderedSidebarChildRooms } from "./sidebar-room-order";
 
 export type SidebarRoomSearchResult = {
   entry: RoomEntry;
@@ -17,7 +18,7 @@ export function searchSidebarRooms(
   const seen = new Set<string>();
 
   for (const project of projects) {
-    const entries = [project.parent, ...project.branchRooms, ...project.focusRooms];
+    const entries = [project.parent, ...orderedSidebarChildRooms(project)];
     for (const entry of entries) {
       if (!entry.roomIdentifier || seen.has(entry.id)) continue;
       const searchable = [

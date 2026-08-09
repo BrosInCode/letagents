@@ -78,6 +78,8 @@
           @batch-action="handleSidebarBatchAction"
           @select-entry="handleSidebarEntrySelected"
           @set-projects-collapsed="setAllProjectsCollapsed"
+          @reorder-parent-room="handleSidebarParentRoomReorder"
+          @reorder-child-room="handleSidebarChildRoomReorder"
           @toggle-project="toggleProject"
           @toggle-pinned-collapsed="togglePinnedCollapsed"
           @toggle-rooms-collapsed="toggleRoomsCollapsed"
@@ -385,6 +387,16 @@ import {
   type SidebarRoomBatchActionId,
 } from "./domain/sidebar-room-selection";
 import {
+  applySidebarRoomOrder,
+  orderedSidebarChildRooms,
+  readStoredSidebarRoomOrder,
+  rememberSidebarRoomOrder,
+  reorderSidebarChildRooms,
+  reorderSidebarParentRooms,
+  type SidebarChildRoomReorder,
+  type SidebarParentRoomReorder,
+} from "./domain/sidebar-room-order";
+import {
   appAgentArchivedRoomIdentifiers,
   appAgentRefreshTargets,
 } from "./domain/app-agent";
@@ -409,6 +421,7 @@ const activeEntryStorageKey = "letagents-desktop:active-entry";
 const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
 const readRoomMessagesStorageKey = "letagents-desktop:read-room-message-ids";
 const sidebarWidthStorageKey = "letagents-desktop:sidebar-width";
+const sidebarRoomOrderStorageKey = "letagents-desktop:sidebar-room-order";
 const sidebarMinWidth = 260;
 const sidebarMaxWidth = 440;
 const sidebarDefaultWidth = 296;
@@ -421,6 +434,7 @@ const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedR
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
 const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, readRoomMessagesStorageKey));
 const sidebarWidth = ref(readStoredSidebarWidth());
+const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
 const isSidebarResizing = ref(false);
 const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
 const chatScrollTopByRoom = ref<Record<string, number>>({});
@@ -571,12 +585,12 @@ function gitRoomsShareRepo(
   return left.provider === right.provider && left.host === right.host && leftRepo === rightRepo;
 }
 const sidebarProjectEntries = computed(() =>
-  projectEntries.value.map((project) => ({
+  applySidebarRoomOrder(projectEntries.value.map((project) => ({
     ...project,
     parent: withRoomUnreadState(project.parent),
     branchRooms: project.branchRooms.map(withRoomUnreadState),
     focusRooms: project.focusRooms.map(withRoomUnreadState),
-  }))
+  })), sidebarRoomOrder.value)
 );
 const sidebarSelectedEntries = computed(() => {
   const selectedIds = new Set(sidebarSelectedEntryIds.value);
@@ -1054,7 +1068,7 @@ function seedReadMarkersForKnownRooms(): void {
 }
 
 function projectChildRooms(project: ProjectGroup): RoomEntry[] {
-  return [...project.branchRooms, ...project.focusRooms];
+  return orderedSidebarChildRooms(project);
 }
 
 function markActiveRoomRead(): void {
@@ -1073,6 +1087,20 @@ function setAllProjectsCollapsed(collapsed: boolean): void {
   collapsedProjects.value = Object.fromEntries(
     projectEntries.value.map((project) => [project.id, collapsed]),
   );
+}
+
+function handleSidebarParentRoomReorder(input: SidebarParentRoomReorder): void {
+  const next = reorderSidebarParentRooms(sidebarProjectEntries.value, input);
+  if (!next) return;
+  sidebarRoomOrder.value = next;
+  rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, next);
+}
+
+function handleSidebarChildRoomReorder(input: SidebarChildRoomReorder): void {
+  const next = reorderSidebarChildRooms(sidebarProjectEntries.value, input);
+  if (!next) return;
+  sidebarRoomOrder.value = next;
+  rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, next);
 }
 
 function rememberRoomMessageIds(): void {
