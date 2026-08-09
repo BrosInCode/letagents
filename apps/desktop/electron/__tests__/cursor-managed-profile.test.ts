@@ -384,6 +384,24 @@ test("supervised Cursor isolates inherited Claude settings without rejecting the
   assert.ok(profile.nativeDeniedReadPaths?.includes(join(canonicalRepository, ".claude", "settings.json")));
   assert.ok(profile.nativeDeniedReadPaths?.includes(join(canonicalRepository, ".claude", "settings.local.json")));
   assert.ok(profile.nativeDeniedReadMetadataPaths?.includes(join(canonicalRepository, ".claude")));
+  // The supervised turn runs cursor-agent with --approve-mcps (the only headless
+  // way to load an MCP). That is safe only because a workspace .cursor/mcp.json
+  // is denied-read here, so a checked-in or concurrently-added project MCP can
+  // never be read, let alone approved -- only the sealed HOME letagents server is.
+  assert.ok(
+    profile.nativeDeniedReadPaths?.includes(join(canonicalRepository, ".cursor", "mcp.json")),
+    "workspace .cursor/mcp.json must be denied-read so --approve-mcps stays scoped to the sealed HOME server",
+  );
+  // A .cursor/mcp.json nested strictly BELOW --workspace is outside
+  // projectDirectories (git-root..workspace), so it is caught by the read-deny
+  // regex rather than the literal list. Without this, --approve-mcps could
+  // auto-approve a repo-planted MCP that cursor-agent discovered below the
+  // workspace and spawn its command inside the sandbox.
+  const nestedWorkspaceMcp = join(realpathSync(workspace), "deep", "nested", ".cursor", "mcp.json");
+  assert.ok(
+    profile.nativeDeniedReadWriteRegexes?.some((pattern) => new RegExp(pattern).test(nestedWorkspaceMcp)),
+    "a .cursor/mcp.json nested below --workspace must be denied-read",
+  );
   assert.deepEqual(JSON.parse(readFileSync(join(repository, ".claude", "settings.local.json"), "utf8")), {
     permissions: { allow: ["Bash(*)"] },
   }, "preparing Cursor leaves Claude's local settings untouched");

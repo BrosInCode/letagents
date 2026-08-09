@@ -599,6 +599,7 @@ test("spawn runs one per-turn child with verbatim policy flags and the prompt as
   assert.ok(args.join(" ").includes("--output-format stream-json"));
   assert.ok(args.includes("--trust"), "headless workspace-trust suppression is adapter-owned");
   assert.equal(args.includes("--disable-project-configs"), false, "legacy Cursor keeps project config enabled");
+  assert.equal(args.includes("--approve-mcps"), false, "legacy Cursor has no sealed profile to scope approval, so it never blanket-approves MCPs");
   assert.ok(args.join(" ").includes("--workspace /tmp/wa-cursor-1"));
   assert.ok(args.join(" ").includes("--mode ask"), "native policy flag passed verbatim");
   assert.ok(args.join(" ").includes("--sandbox enabled"));
@@ -881,7 +882,7 @@ test("daemon-owned Cursor starts idle without inference and gives only the first
     });
     assert.equal(launch.mcpConnectorSocketPath, finalPreparation.mcpConnectorSocketPath);
     assert.deepEqual(launch.allowedNetworkUnixSockets, [finalPreparation.mcpConnectorSocketPath]);
-    assert.equal(launch.args.includes("--approve-mcps"), false, "project MCPs are never blanket-approved");
+    assert.equal(launch.args.includes("--approve-mcps"), true, "the sealed HOME letagents MCP is approved so complete_room_turn loads and the turn can attest; cursor-agent has no headless per-server approval, and the native sandbox denies every workspace .cursor/mcp.json read, so this approves exactly that one server");
     assert.equal(launch.args.includes("--disable-project-configs"), true, "native project permissions stay disabled");
     assert.equal(launch.args.includes("--disable-auto-update"), true, "native background updater stays disabled");
     assert.equal(argValue(launch.args, "--sandbox"), "enabled", "supervised read-only turns keep Cursor's native sandbox enabled");
@@ -1810,7 +1811,12 @@ test("a project MCP added after the final reseal gains no blanket approval or pe
         insertedAtLaunch = true;
         assert.notEqual(input.cwd, workspace, "native launch does not inherit an ambient repository cwd");
         assert.equal(argValue(input.args, "--workspace"), workspace, "repo access still uses Cursor's explicit workspace");
-        assert.equal(input.args.includes("--approve-mcps"), false, "no blanket project-server approval exists");
+        // --approve-mcps is required to load the sealed HOME letagents MCP at
+        // all (cursor-agent has no headless per-server approval). This adversarial
+        // project mcp.json still gains nothing: the native sandbox denies reading
+        // any workspace .cursor/mcp.json, so it can never be read, let alone
+        // approved (that deny-read is asserted in cursor-managed-profile.test.ts).
+        assert.equal(input.args.includes("--approve-mcps"), true, "the sealed HOME letagents MCP is approved so complete_room_turn loads");
         assert.equal(input.args.includes("--disable-project-configs"), true, "late project permissions stay disabled");
       },
     });
