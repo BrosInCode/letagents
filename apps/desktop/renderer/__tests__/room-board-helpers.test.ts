@@ -1,13 +1,32 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { DesktopAgentPresence, DesktopTaskSummary } from "../../electron/ipc-types";
+import type {
+  DesktopAgentPresence,
+  DesktopBoardIntentSummary,
+  DesktopTaskSummary,
+  WorkerSnapshot,
+} from "../../electron/ipc-types";
+import {
+  boardEmptyState,
+  boardFilterCount,
+  deriveTaskTitle,
+  visibleBoardGroups,
+} from "../src/components/desktop/content/room-board/board-presentation";
+import { findLocalRoomWorker } from "../src/components/desktop/content/room-board/board-workers";
+import {
+  activeBoardManagerAgents,
+  managerCandidateName,
+  managerCandidateRuntime,
+  readableIntentBody,
+} from "../src/components/desktop/content/room-board/governance-presentation";
 import { reviewAssignmentCandidates } from "../src/components/desktop/content/room-board/review-candidates";
 import {
   executionAuthorityState,
   reviewPanelState,
   workflowRefs,
 } from "../src/components/desktop/content/room-board/task-state";
+import { TASK_STATUS_ORDER, sortTasks } from "../src/domain/tasks";
 
 describe("room board helpers", () => {
   it("falls back to the legacy pull request URL when workflow refs are absent", () => {
@@ -65,6 +84,109 @@ describe("room board helpers", () => {
     );
 
     assert.deepEqual(candidates.map((candidate) => candidate.displayName), ["Blake"]);
+  });
+
+  it("shares local-worker matching across board filters and grouping", () => {
+    const localWorker = findLocalRoomWorker([
+      worker({ roomId: "other-room", agentSessionId: "wrong-session" }),
+      worker(),
+    ], "ROOM_1");
+    const tasks = [
+      task({ id: "task_mine", assigneeAgentKey: "codex/blake" }),
+      task({ id: "task_other", assigneeAgentKey: "codex/casey" }),
+      task({ id: "task_done", status: "done" }),
+    ];
+
+    assert.equal(localWorker?.agentSessionId, "session_blake");
+    assert.equal(boardFilterCount(tasks, "mine", localWorker), 1);
+    assert.deepEqual(
+      visibleBoardGroups({
+        tasks,
+        filter: "mine",
+        searchQuery: "task_mine",
+        localWorker,
+      }).flatMap((group) => group.tasks.map((entry) => entry.id)),
+      ["task_mine"]
+    );
+  });
+
+  it("uses one canonical task lifecycle for board grouping and sorting", () => {
+    const tasks = TASK_STATUS_ORDER.map((status, index) => task({
+      id: `task_${index}`,
+      status,
+    })).reverse();
+
+    assert.deepEqual(sortTasks(tasks).map((entry) => entry.status), TASK_STATUS_ORDER);
+    assert.deepEqual(
+      visibleBoardGroups({
+        tasks,
+        filter: "open",
+        searchQuery: "",
+        localWorker: null,
+      }).map((group) => group.status),
+      TASK_STATUS_ORDER.slice(0, 6)
+    );
+  });
+
+  it("keeps board empty-state copy and actions deterministic", () => {
+    assert.deepEqual(boardEmptyState({
+      taskCount: 0,
+      hasSearchQuery: false,
+      filter: "open",
+      closeoutTaskCount: 0,
+    }), {
+      title: "No tasks yet",
+      description: "Create the first task here so a teammate or agent can pick it up.",
+      actionLabel: "Add first task",
+      action: "add-task",
+      testId: "room-board-empty",
+    });
+    assert.equal(boardEmptyState({
+      taskCount: 2,
+      hasSearchQuery: true,
+      filter: "open",
+      closeoutTaskCount: 0,
+    }).action, "clear-search");
+    assert.equal(boardEmptyState({
+      taskCount: 2,
+      hasSearchQuery: false,
+      filter: "open",
+      closeoutTaskCount: 2,
+    }).action, "show-closeout");
+  });
+
+  it("derives stable task titles without duplicating form logic", () => {
+    assert.equal(deriveTaskTitle(" Explicit title ", "ignored"), "Explicit title");
+    assert.equal(deriveTaskTitle("", "\n First useful line\nSecond"), "First useful line");
+    assert.equal(deriveTaskTitle("", "x".repeat(120)), `${"x".repeat(93)}...`);
+  });
+
+  it("deduplicates active board-manager candidates by worker session", () => {
+    const active = presence();
+    assert.deepEqual(activeBoardManagerAgents([
+      active,
+      { ...active, displayName: "Duplicate" },
+      presence({ agentSessionId: "session_stale", freshness: "stale" }),
+      presence({ agentSessionId: "session_offline", activityState: "offline" }),
+    ]).map((entry) => entry.agentSessionId), ["session_blake"]);
+  });
+
+  it("keeps governance candidate and intent copy in shared presenters", () => {
+    const candidate = {
+      agentSessionId: "session_blake",
+      actorLabel: "Blake | Emmy's agent | Agent",
+      displayName: "Blake | Emmy's agent | Agent",
+      runtime: "codex:room-1",
+      runtimeSource: "desktop_managed" as const,
+      isActiveManager: false,
+    };
+    assert.equal(managerCandidateName(candidate), "Blake");
+    assert.equal(managerCandidateRuntime(candidate), "Codex");
+    assert.equal(readableIntentBody(intent({
+      actionType: "task_override",
+      taskId: "task_9",
+      payload: { action: "handoff", target_actor_key: "codex/casey" },
+    })), "Hand off task_9 to codex/casey");
   });
 });
 
@@ -124,6 +246,36 @@ function presence(overrides: Partial<DesktopAgentPresence> = {}): DesktopAgentPr
     activityState: "active",
     sourceFlags: ["presence"],
     livenessObservation: null,
+    ...overrides,
+  };
+}
+
+function worker(overrides: Partial<WorkerSnapshot> = {}): WorkerSnapshot {
+  return {
+    id: "worker_blake",
+    runtime: "codex",
+    state: "connected",
+    roomId: "room_1",
+    actorLabel: "Blake | Codex",
+    agentKey: "codex/blake",
+    agentSessionId: "session_blake",
+    detail: "Blake",
+    ...overrides,
+  };
+}
+
+function intent(
+  overrides: Partial<DesktopBoardIntentSummary> = {}
+): DesktopBoardIntentSummary {
+  return {
+    id: "intent_1",
+    taskId: null,
+    actionType: "task_create",
+    status: "pending",
+    proposerActorLabel: "Blake",
+    payload: {},
+    createdAt: "2026-05-28T00:00:00.000Z",
+    expiresAt: null,
     ...overrides,
   };
 }

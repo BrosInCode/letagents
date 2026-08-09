@@ -5,11 +5,10 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../../electron/ipc-types";
-import { sortTasks } from "../../../../domain/tasks";
-import { normalizeRoom, readableStatus } from "./formatters";
+import { findLocalRoomWorker } from "./board-workers";
 import { parseReviewCandidateValue, reviewAssignmentCandidates as getReviewAssignmentCandidates } from "./review-candidates";
 import { reviewLeases, shouldShowReviewPanel, workLease } from "./task-state";
-import type { TaskAction, TaskGroup } from "./types";
+import type { TaskAction } from "./types";
 import { desktopIpc } from "../../../../ipc/index.js";
 
 interface RoomBoardControllerProps {
@@ -24,8 +23,6 @@ type RoomBoardEmit = {
   (event: "refresh-room"): void;
 };
 
-const STATUS_ORDER = ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review", "merged", "done", "cancelled"];
-
 export function useRoomBoardController(
   props: RoomBoardControllerProps,
   emit: RoomBoardEmit
@@ -33,31 +30,10 @@ export function useRoomBoardController(
   const busyAction = ref<string | null>(null);
   const errorMessage = ref<string | null>(null);
   const selectedReviewerByTask = ref<Record<string, string>>({});
-  const collapsedGroups = ref(new Set<string>());
 
   const localWorker = computed(() =>
-    props.workers.find((worker) =>
-      worker.agentSessionId
-      && normalizeRoom(worker.roomId) === normalizeRoom(props.roomIdentifier)
-      && ["connected", "away"].includes(worker.state)
-    ) || null
+    findLocalRoomWorker(props.workers, props.roomIdentifier)
   );
-
-  const groupedTasks = computed<TaskGroup[]>(() => {
-    const groups = new Map<string, DesktopTaskSummary[]>();
-    for (const task of sortTasks(props.tasks)) {
-      const status = task.status || "proposed";
-      if (!groups.has(status)) groups.set(status, []);
-      groups.get(status)?.push(task);
-    }
-    return STATUS_ORDER
-      .filter((status) => groups.has(status))
-      .map((status) => ({
-        status,
-        label: readableStatus(status),
-        tasks: groups.get(status) || [],
-      }));
-  });
 
   async function addTask(input: DesktopTaskCreateInput): Promise<boolean> {
     const title = input.title.trim();
@@ -69,16 +45,6 @@ export function useRoomBoardController(
       });
       return result.task;
     });
-  }
-
-  function toggleGroup(status: string): void {
-    const next = new Set(collapsedGroups.value);
-    if (next.has(status)) {
-      next.delete(status);
-    } else {
-      next.add(status);
-    }
-    collapsedGroups.value = next;
   }
 
   function actionsFor(task: DesktopTaskSummary): TaskAction[] {
@@ -282,13 +248,10 @@ export function useRoomBoardController(
     addTask,
     assignReview,
     busyAction,
-    collapsedGroups,
     errorMessage,
-    groupedTasks,
     reviewAssignmentCandidates,
     runTaskAction,
     selectedReviewerByTask,
     setSelectedReviewer,
-    toggleGroup,
   };
 }
