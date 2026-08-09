@@ -4581,6 +4581,18 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // suppression in addition to the per-turn filesystem revalidation.
       ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-project-configs"] : []),
       ...(handle.deliveryMode === "daemon_inbox" ? ["--disable-auto-update"] : []),
+      // cursor-agent has no headless per-server MCP approval (Cursor confirms
+      // it is unimplemented); --approve-mcps is the ONLY non-interactive way to
+      // load an MCP server. Without it the sealed HOME letagents MCP never
+      // loads, so complete_room_turn is never exposed and the turn can never
+      // attest (its "did not attest ... before model authority" timeout). This
+      // is scoped, not blanket: the sealed profile is the sole MCP surface --
+      // the HOME profile mcp.json holds only the letagents server, and every
+      // workspace .cursor/mcp.json is denied-read by the native sandbox (see
+      // SUPERVISED_CURSOR_PROJECT_HIDDEN_AUTHORITY_FILES -> nativeDeniedReadPaths),
+      // so a checked-in or concurrently-added project server cannot be read,
+      // let alone approved. --approve-mcps therefore approves exactly one MCP.
+      ...(handle.deliveryMode === "daemon_inbox" ? ["--approve-mcps"] : []),
       "--trust",
       // Read-only has no native sandbox field in its durable policy, so add
       // the supervised outer boundary explicitly. Write profiles carry their
@@ -4612,7 +4624,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // contribute config before Cursor resolves --workspace. Cursor later
       // changes into that workspace and can discover a concurrently-added
       // project MCP; the unpredictable bridge alias, approval-state purge, and
-      // absence of --approve-mcps keep such a late server unapproved.
+      // the native sandbox denying every workspace .cursor/mcp.json read keep
+      // such a late server unreadable, so --approve-mcps (above) can only ever
+      // approve the sealed HOME letagents server.
       cwd: handle.deliveryMode === "daemon_inbox" && handle.supervisedProfile
         ? dirname(handle.supervisedProfile.homeDir)
         : handle.cwd,
