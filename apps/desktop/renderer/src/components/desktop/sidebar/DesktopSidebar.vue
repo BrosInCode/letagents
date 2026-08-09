@@ -4,7 +4,13 @@
     :data-selection-active="selectionActive"
     data-testid="desktop-sidebar"
     @keydown.esc="handleSidebarEscape"
+    @dragover="clearSidebarDropTarget"
+    @drop.prevent="cancelSidebarDrag"
   >
+    <p id="sidebar-room-reorder-instructions" class="sr-only">
+      Drag rooms to reorder them. Press Option plus Up or Down Arrow to move the focused room.
+    </p>
+    <p class="sr-only" role="status" aria-live="polite">{{ reorderAnnouncement }}</p>
     <div class="sidebar-topbar" :data-selection-active="selectionActive">
       <template v-if="selectionActive">
         <div class="sidebar-selection-summary" aria-live="polite">
@@ -188,11 +194,19 @@
           </span>
         </button>
         <Transition name="sidebar-pinned-reveal">
-          <div v-if="!pinnedCollapsed" id="sidebar-pinned-rooms" class="pinned-list">
+          <TransitionGroup
+            v-if="!pinnedCollapsed"
+            id="sidebar-pinned-rooms"
+            name="sidebar-room-order"
+            tag="div"
+            class="pinned-list"
+          >
           <article
             v-for="project in pinnedProjectEntries"
             :key="project.id"
             class="project-group pinned-project-group"
+            :data-dragging="isParentDragging(project.id)"
+            :data-drop-position="parentDropPosition(project.id)"
             :data-testid="`pinned-room-group-${project.id}`"
           >
             <div class="sidebar-project-row-shell">
@@ -204,10 +218,18 @@
                 :data-selected="isEntrySelected(project.parent)"
                 :data-sidebar-entry-id="project.parent.id"
                 :aria-pressed="selectionActive && isSidebarRoomSelectable(project.parent) ? isEntrySelected(project.parent) : undefined"
+                :aria-describedby="roomReorderEnabled ? 'sidebar-room-reorder-instructions' : undefined"
+                :aria-keyshortcuts="roomReorderEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined"
+                :draggable="roomReorderEnabled"
                 type="button"
                 :data-testid="`pinned-room-${project.parent.id}`"
                 @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
+                @dragstart="startParentDrag($event, project)"
+                @dragover.stop="handleParentDragOver($event, project)"
+                @drop.stop="dropParentRoom($event, project)"
+                @dragend="finishSidebarDrag"
+                @keydown="handleParentReorderKeydown($event, project)"
               >
                 <span
                   v-if="selectionActive && isSidebarRoomSelectable(project.parent)"
@@ -232,6 +254,14 @@
                   </span>
                   <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
                 </span>
+                <span
+                  v-if="roomReorderEnabled"
+                  class="sidebar-room-drag-grip"
+                  draggable="true"
+                  aria-hidden="true"
+                >
+                  <GripVertical />
+                </span>
               </button>
               <button
                 v-if="projectChildRooms(project).length"
@@ -250,9 +280,11 @@
             </div>
 
             <Transition name="sidebar-reveal">
-              <div
+              <TransitionGroup
                 v-if="!collapsedProjects[project.id] && projectChildRooms(project).length"
                 :id="projectChildListId(project.id)"
+                name="sidebar-room-order"
+                tag="div"
                 class="project-room-list"
               >
                 <button
@@ -263,13 +295,23 @@
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
                   :data-selected="isEntrySelected(childRoom)"
+                  :data-dragging="isChildDragging(project.id, childRoom.id)"
+                  :data-drop-position="childDropPosition(project.id, childRoom.id)"
                   :data-sidebar-entry-id="childRoom.id"
                   :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
                   :aria-pressed="selectionActive && isSidebarRoomSelectable(childRoom) ? isEntrySelected(childRoom) : undefined"
+                  :aria-describedby="roomReorderEnabled ? 'sidebar-room-reorder-instructions' : undefined"
+                  :aria-keyshortcuts="roomReorderEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined"
+                  :draggable="roomReorderEnabled"
                   type="button"
                   :data-testid="`pinned-child-room-${childRoom.id}`"
                   @click="handleEntryActivation($event, childRoom)"
                   @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
+                  @dragstart="startChildDrag($event, project, childRoom)"
+                  @dragover.stop="handleChildDragOver($event, project, childRoom)"
+                  @drop.stop="dropChildRoom($event, project, childRoom)"
+                  @dragend="finishSidebarDrag"
+                  @keydown="handleChildReorderKeydown($event, project, childRoom)"
                 >
                   <span
                     v-if="selectionActive && isSidebarRoomSelectable(childRoom)"
@@ -278,6 +320,14 @@
                     aria-hidden="true"
                   >
                     <Check v-if="isEntrySelected(childRoom)" />
+                  </span>
+                  <span
+                    v-else-if="roomReorderEnabled"
+                    class="sidebar-child-drag-grip"
+                    draggable="true"
+                    aria-hidden="true"
+                  >
+                    <GripVertical />
                   </span>
                   <span class="room-title-line">
                     <span class="room-title">{{ childRoom.title }}</span>
@@ -299,6 +349,7 @@
                 </button>
                 <button
                   v-if="hasProjectRoomOverflow(project)"
+                  :key="`overflow:${project.id}`"
                   class="project-room-overflow-toggle"
                   :data-expanded="projectRoomListExpanded(project.id)"
                   :aria-expanded="projectRoomListExpanded(project.id)"
@@ -309,10 +360,10 @@
                   <ChevronRight aria-hidden="true" />
                   <span>{{ projectRoomOverflowLabel(project) }}</span>
                 </button>
-              </div>
+              </TransitionGroup>
             </Transition>
           </article>
-          </div>
+          </TransitionGroup>
         </Transition>
       </section>
 
@@ -338,11 +389,18 @@
         </span>
       </button>
       <Transition name="sidebar-reveal">
-        <div v-if="!roomsCollapsed" class="project-list">
+        <TransitionGroup
+          v-if="!roomsCollapsed"
+          name="sidebar-room-order"
+          tag="div"
+          class="project-list"
+        >
           <article
             v-for="project in roomProjectEntries"
             :key="project.id"
             class="project-group"
+            :data-dragging="isParentDragging(project.id)"
+            :data-drop-position="parentDropPosition(project.id)"
             :data-testid="`room-group-${project.id}`"
           >
             <div class="sidebar-project-row-shell">
@@ -354,10 +412,18 @@
                 :data-selected="isEntrySelected(project.parent)"
                 :data-sidebar-entry-id="project.parent.id"
                 :aria-pressed="selectionActive && isSidebarRoomSelectable(project.parent) ? isEntrySelected(project.parent) : undefined"
+                :aria-describedby="roomReorderEnabled ? 'sidebar-room-reorder-instructions' : undefined"
+                :aria-keyshortcuts="roomReorderEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined"
+                :draggable="roomReorderEnabled"
                 type="button"
                 :data-testid="`room-parent-${project.parent.id}`"
                 @click="handleProjectActivation($event, project)"
                 @contextmenu.prevent.stop="openRoomContextMenu($event, project.parent, project.id)"
+                @dragstart="startParentDrag($event, project)"
+                @dragover.stop="handleParentDragOver($event, project)"
+                @drop.stop="dropParentRoom($event, project)"
+                @dragend="finishSidebarDrag"
+                @keydown="handleParentReorderKeydown($event, project)"
               >
                 <span class="project-row-main">
                   <span
@@ -386,6 +452,14 @@
                     </small>
                   </span>
                 </span>
+                <span
+                  v-if="roomReorderEnabled"
+                  class="sidebar-room-drag-grip"
+                  draggable="true"
+                  aria-hidden="true"
+                >
+                  <GripVertical />
+                </span>
               </button>
               <button
                 v-if="projectChildRooms(project).length"
@@ -404,9 +478,11 @@
             </div>
 
             <Transition name="sidebar-reveal">
-              <div
+              <TransitionGroup
                 v-if="!collapsedProjects[project.id] && projectChildRooms(project).length"
                 :id="projectChildListId(project.id)"
+                name="sidebar-room-order"
+                tag="div"
                 class="project-room-list"
               >
                 <button
@@ -417,13 +493,23 @@
                   :data-active="activeEntry.id === childRoom.id"
                   :data-unread="childRoom.hasUnread"
                   :data-selected="isEntrySelected(childRoom)"
+                  :data-dragging="isChildDragging(project.id, childRoom.id)"
+                  :data-drop-position="childDropPosition(project.id, childRoom.id)"
                   :data-sidebar-entry-id="childRoom.id"
                   :aria-current="activeEntry.id === childRoom.id ? 'page' : undefined"
                   :aria-pressed="selectionActive && isSidebarRoomSelectable(childRoom) ? isEntrySelected(childRoom) : undefined"
+                  :aria-describedby="roomReorderEnabled ? 'sidebar-room-reorder-instructions' : undefined"
+                  :aria-keyshortcuts="roomReorderEnabled ? 'Alt+ArrowUp Alt+ArrowDown' : undefined"
+                  :draggable="roomReorderEnabled"
                   type="button"
                   :data-testid="`child-room-${childRoom.id}`"
                   @click="handleEntryActivation($event, childRoom)"
                   @contextmenu.prevent.stop="openRoomContextMenu($event, childRoom)"
+                  @dragstart="startChildDrag($event, project, childRoom)"
+                  @dragover.stop="handleChildDragOver($event, project, childRoom)"
+                  @drop.stop="dropChildRoom($event, project, childRoom)"
+                  @dragend="finishSidebarDrag"
+                  @keydown="handleChildReorderKeydown($event, project, childRoom)"
                 >
                   <span
                     v-if="selectionActive && isSidebarRoomSelectable(childRoom)"
@@ -432,6 +518,14 @@
                     aria-hidden="true"
                   >
                     <Check v-if="isEntrySelected(childRoom)" />
+                  </span>
+                  <span
+                    v-else-if="roomReorderEnabled"
+                    class="sidebar-child-drag-grip"
+                    draggable="true"
+                    aria-hidden="true"
+                  >
+                    <GripVertical />
                   </span>
                   <span class="room-title-line">
                     <span class="room-title">{{ childRoom.title }}</span>
@@ -453,6 +547,7 @@
                 </button>
                 <button
                   v-if="hasProjectRoomOverflow(project)"
+                  :key="`overflow:${project.id}`"
                   class="project-room-overflow-toggle"
                   :data-expanded="projectRoomListExpanded(project.id)"
                   :aria-expanded="projectRoomListExpanded(project.id)"
@@ -463,11 +558,11 @@
                   <ChevronRight aria-hidden="true" />
                   <span>{{ projectRoomOverflowLabel(project) }}</span>
                 </button>
-              </div>
+              </TransitionGroup>
             </Transition>
           </article>
           <p v-if="!roomProjectEntries.length" class="room-empty">No other rooms</p>
-        </div>
+        </TransitionGroup>
       </Transition>
         </section>
       </div>
@@ -570,6 +665,7 @@ import {
   Copy,
   ExternalLink,
   GitBranch,
+  GripVertical,
   House,
   ListChecks,
   MessageSquare,
@@ -589,6 +685,14 @@ import {
   previewSidebarProjectRooms,
 } from "../../../domain/sidebar-project-room-preview";
 import { searchSidebarRooms } from "../../../domain/sidebar-room-search";
+import {
+  isSidebarRoomReorderEnabled,
+  orderedSidebarChildRooms,
+  resolveSidebarKeyboardRoomReorder,
+  type SidebarChildRoomReorder,
+  type SidebarParentRoomReorder,
+  type SidebarRoomDropPlacement,
+} from "../../../domain/sidebar-room-order";
 import {
   isSidebarRoomSelectable,
   resolveSidebarRoomBatchAction,
@@ -634,6 +738,8 @@ const emit = defineEmits<{
   "batch-action": [action: SidebarRoomBatchActionId];
   "select-entry": [entry: SidebarEntry];
   "set-projects-collapsed": [collapsed: boolean];
+  "reorder-parent-room": [input: SidebarParentRoomReorder];
+  "reorder-child-room": [input: SidebarChildRoomReorder];
   "toggle-project": [projectId: string];
   "toggle-pinned-collapsed": [];
   "toggle-rooms-collapsed": [];
@@ -646,6 +752,14 @@ type RoomContextMenu = {
   y: number;
 };
 
+type SidebarDragState =
+  | { kind: "parent"; projectId: string; pinned: boolean }
+  | { kind: "child"; projectId: string; entryId: string };
+
+type SidebarDropTarget =
+  | { kind: "parent"; projectId: string; placement: SidebarRoomDropPlacement }
+  | { kind: "child"; projectId: string; entryId: string; placement: SidebarRoomDropPlacement };
+
 const roomContextMenu = ref<RoomContextMenu | null>(null);
 const backgroundContextMenu = ref<{ x: number; y: number } | null>(null);
 const searchButton = ref<HTMLButtonElement | null>(null);
@@ -655,7 +769,15 @@ const searchQuery = ref("");
 const activeSearchIndex = ref(0);
 const expandedProjectRoomLists = ref<Record<string, boolean>>({});
 const lastSelectionAnchorId = ref<string | null>(null);
+const dragState = ref<SidebarDragState | null>(null);
+const dropTarget = ref<SidebarDropTarget | null>(null);
+const reorderAnnouncement = ref("");
+const suppressedActivationEntryId = ref<string | null>(null);
 
+const roomReorderEnabled = computed(() => isSidebarRoomReorderEnabled(
+  props.selectionActive,
+  Boolean(props.batchActionBusy),
+));
 const pinnedProjectEntries = computed(() => props.projectEntries.filter((project) => project.parent.pinned));
 const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
 const searchResults = computed(() => searchSidebarRooms(props.projectEntries, searchQuery.value));
@@ -709,7 +831,10 @@ watch(searchQuery, () => {
 });
 
 watch(() => props.selectionActive, (selectionActive) => {
-  if (selectionActive) resetSearch();
+  if (selectionActive) {
+    resetSearch();
+    cancelSidebarDrag();
+  }
   else lastSelectionAnchorId.value = null;
 });
 
@@ -851,8 +976,7 @@ function projectSubtitle(project: ProjectGroup): string {
 }
 
 function projectChildRooms(project: ProjectGroup | null | undefined): RoomEntry[] {
-  if (!project) return [];
-  return [...project.branchRooms, ...project.focusRooms];
+  return orderedSidebarChildRooms(project);
 }
 
 function visibleProjectChildRooms(project: ProjectGroup): RoomEntry[] {
@@ -886,6 +1010,276 @@ function projectRoomOverflowLabel(project: ProjectGroup): string {
 
 function projectChildListId(projectId: string): string {
   return `sidebar-project-children-${encodeURIComponent(projectId)}`;
+}
+
+function startParentDrag(event: DragEvent, project: ProjectGroup): void {
+  if (!roomReorderEnabled.value) {
+    event.preventDefault();
+    return;
+  }
+  closeRoomContextMenu();
+  closeBackgroundContextMenu();
+  dragState.value = { kind: "parent", projectId: project.id, pinned: project.parent.pinned };
+  setDragTransfer(event, "parent");
+}
+
+function startChildDrag(event: DragEvent, project: ProjectGroup, entry: RoomEntry): void {
+  if (!roomReorderEnabled.value) {
+    event.preventDefault();
+    return;
+  }
+  closeRoomContextMenu();
+  closeBackgroundContextMenu();
+  dragState.value = { kind: "child", projectId: project.id, entryId: entry.id };
+  setDragTransfer(event, "child");
+}
+
+function setDragTransfer(event: DragEvent, kind: SidebarDragState["kind"]): void {
+  if (!event.dataTransfer) return;
+  event.dataTransfer.effectAllowed = "move";
+  event.dataTransfer.setData("application/x-letagents-sidebar-room", kind);
+}
+
+function handleParentDragOver(event: DragEvent, project: ProjectGroup): void {
+  const drag = dragState.value;
+  if (
+    !drag
+    || drag.kind !== "parent"
+    || drag.projectId === project.id
+    || drag.pinned !== project.parent.pinned
+  ) {
+    dropTarget.value = null;
+    return;
+  }
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  dropTarget.value = {
+    kind: "parent",
+    projectId: project.id,
+    placement: placementFromPointer(event),
+  };
+}
+
+function handleChildDragOver(event: DragEvent, project: ProjectGroup, entry: RoomEntry): void {
+  const drag = dragState.value;
+  if (
+    !drag
+    || drag.kind !== "child"
+    || drag.projectId !== project.id
+    || drag.entryId === entry.id
+  ) {
+    dropTarget.value = null;
+    return;
+  }
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = "move";
+  dropTarget.value = {
+    kind: "child",
+    projectId: project.id,
+    entryId: entry.id,
+    placement: placementFromPointer(event),
+  };
+}
+
+function dropParentRoom(event: DragEvent, targetProject: ProjectGroup): void {
+  const drag = dragState.value;
+  const target = dropTarget.value;
+  if (
+    !drag
+    || drag.kind !== "parent"
+    || drag.pinned !== targetProject.parent.pinned
+    || !target
+    || target.kind !== "parent"
+    || target.projectId !== targetProject.id
+  ) {
+    cancelSidebarDrag();
+    return;
+  }
+  event.preventDefault();
+  const sourceProject = props.projectEntries.find((project) => project.id === drag.projectId);
+  if (!sourceProject) {
+    cancelSidebarDrag();
+    return;
+  }
+  emit("reorder-parent-room", {
+    sourceProjectId: drag.projectId,
+    targetProjectId: targetProject.id,
+    placement: target.placement,
+  });
+  suppressActivation(sourceProject.parent.id);
+  announceReorder(sourceProject.roomName, targetProject.roomName, target.placement);
+  cancelSidebarDrag();
+}
+
+function dropChildRoom(
+  event: DragEvent,
+  project: ProjectGroup,
+  targetEntry: RoomEntry,
+): void {
+  const drag = dragState.value;
+  const target = dropTarget.value;
+  if (
+    !drag
+    || drag.kind !== "child"
+    || drag.projectId !== project.id
+    || !target
+    || target.kind !== "child"
+    || target.projectId !== project.id
+    || target.entryId !== targetEntry.id
+  ) {
+    cancelSidebarDrag();
+    return;
+  }
+  event.preventDefault();
+  const sourceEntry = projectChildRooms(project).find((entry) => entry.id === drag.entryId);
+  if (!sourceEntry) {
+    cancelSidebarDrag();
+    return;
+  }
+  emit("reorder-child-room", {
+    projectId: project.id,
+    sourceEntryId: drag.entryId,
+    targetEntryId: targetEntry.id,
+    placement: target.placement,
+  });
+  suppressActivation(sourceEntry.id);
+  announceReorder(sourceEntry.title, targetEntry.title, target.placement);
+  cancelSidebarDrag();
+}
+
+function handleParentReorderKeydown(event: KeyboardEvent, project: ProjectGroup): void {
+  const direction = keyboardReorderDirection(event);
+  if (!direction) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const siblings = project.parent.pinned ? pinnedProjectEntries.value : roomProjectEntries.value;
+  const reorder = resolveSidebarKeyboardRoomReorder(siblings, project.id, direction);
+  if (!reorder) {
+    announceReorderBoundary(project.roomName, direction);
+    return;
+  }
+  emit("reorder-parent-room", {
+    sourceProjectId: project.id,
+    targetProjectId: reorder.target.id,
+    placement: reorder.placement,
+  });
+  announceReorder(project.roomName, reorder.target.roomName, reorder.placement);
+}
+
+function handleChildReorderKeydown(
+  event: KeyboardEvent,
+  project: ProjectGroup,
+  entry: RoomEntry,
+): void {
+  const direction = keyboardReorderDirection(event);
+  if (!direction) return;
+  event.preventDefault();
+  event.stopPropagation();
+  const visibleSiblings = visibleProjectChildRooms(project);
+  const reorder = resolveSidebarKeyboardRoomReorder(visibleSiblings, entry.id, direction);
+  if (!reorder) {
+    announceReorderBoundary(entry.title, direction);
+    return;
+  }
+  emit("reorder-child-room", {
+    projectId: project.id,
+    sourceEntryId: entry.id,
+    targetEntryId: reorder.target.id,
+    placement: reorder.placement,
+  });
+  announceReorder(entry.title, reorder.target.title, reorder.placement);
+}
+
+function keyboardReorderDirection(event: KeyboardEvent): -1 | 1 | null {
+  if (
+    !roomReorderEnabled.value
+    || !event.altKey
+    || event.ctrlKey
+    || event.metaKey
+    || event.shiftKey
+  ) return null;
+  if (event.key === "ArrowUp") return -1;
+  if (event.key === "ArrowDown") return 1;
+  return null;
+}
+
+function placementFromPointer(event: DragEvent): SidebarRoomDropPlacement {
+  const target = event.currentTarget;
+  if (!(target instanceof HTMLElement)) return "after";
+  const bounds = target.getBoundingClientRect();
+  return event.clientY < bounds.top + bounds.height / 2 ? "before" : "after";
+}
+
+function parentDropPosition(projectId: string): SidebarRoomDropPlacement | undefined {
+  const target = dropTarget.value;
+  return target?.kind === "parent" && target.projectId === projectId ? target.placement : undefined;
+}
+
+function childDropPosition(
+  projectId: string,
+  entryId: string,
+): SidebarRoomDropPlacement | undefined {
+  const target = dropTarget.value;
+  return target?.kind === "child"
+    && target.projectId === projectId
+    && target.entryId === entryId
+    ? target.placement
+    : undefined;
+}
+
+function isParentDragging(projectId: string): boolean {
+  return dragState.value?.kind === "parent" && dragState.value.projectId === projectId;
+}
+
+function isChildDragging(projectId: string, entryId: string): boolean {
+  return dragState.value?.kind === "child"
+    && dragState.value.projectId === projectId
+    && dragState.value.entryId === entryId;
+}
+
+function clearSidebarDropTarget(): void {
+  if (dragState.value) dropTarget.value = null;
+}
+
+function finishSidebarDrag(): void {
+  dragState.value = null;
+  dropTarget.value = null;
+}
+
+function cancelSidebarDrag(): void {
+  finishSidebarDrag();
+}
+
+function announceReorder(
+  sourceLabel: string,
+  targetLabel: string,
+  placement: SidebarRoomDropPlacement,
+): void {
+  announceReorderStatus(`${sourceLabel} moved ${placement} ${targetLabel}.`);
+}
+
+function announceReorderBoundary(label: string, direction: -1 | 1): void {
+  announceReorderStatus(`${label} is already ${direction < 0 ? "first" : "last"} in this group.`);
+}
+
+function announceReorderStatus(message: string): void {
+  reorderAnnouncement.value = "";
+  void nextTick(() => {
+    reorderAnnouncement.value = message;
+  });
+}
+
+function suppressActivation(entryId: string): void {
+  suppressedActivationEntryId.value = entryId;
+  window.setTimeout(() => {
+    if (suppressedActivationEntryId.value === entryId) suppressedActivationEntryId.value = null;
+  }, 0);
+}
+
+function consumeSuppressedActivation(entryId: string): boolean {
+  if (suppressedActivationEntryId.value !== entryId) return false;
+  suppressedActivationEntryId.value = null;
+  return true;
 }
 
 function isSelectableRoom(entry: RoomEntry): boolean {
@@ -928,11 +1322,13 @@ function isEntrySelected(entry: RoomEntry): boolean {
 }
 
 function handleProjectActivation(event: MouseEvent, project: ProjectGroup): void {
+  if (consumeSuppressedActivation(project.parent.id)) return;
   if (handleSelectionActivation(event, project.parent)) return;
   selectOrToggleProject(project);
 }
 
 function handleEntryActivation(event: MouseEvent, entry: RoomEntry): void {
+  if (consumeSuppressedActivation(entry.id)) return;
   if (handleSelectionActivation(event, entry)) return;
   emit("select-entry", entry);
 }
