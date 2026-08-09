@@ -48,6 +48,7 @@ export type ProjectGroup = {
   parent: RoomEntry;
   branchRooms: RoomEntry[];
   focusRooms: RoomEntry[];
+  childRoomOrder?: string[];
 };
 
 export type SidebarMode = "expanded" | "hidden";

@@ -1,5 +1,6 @@
 import type { ProjectGroup, RoomEntry } from "../components/desktop/types";
 import { buildRoomPinMutation } from "./sidebar-rooms";
+import { orderedSidebarChildRooms } from "./sidebar-room-order";
 
 export type SidebarRoomBatchActionId = "mark-read" | "pin" | "conclude" | "hide";
 
@@ -13,8 +14,7 @@ export type SidebarRoomBatchActionResolution = {
 export function flattenSidebarRoomEntries(projects: readonly ProjectGroup[]): RoomEntry[] {
   return projects.flatMap((project) => [
     project.parent,
-    ...project.branchRooms,
-    ...project.focusRooms,
+    ...orderedSidebarChildRooms(project),
   ]);
 }
 
