@@ -2,13 +2,16 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { ProjectGroup, RoomEntry } from "../src/components/desktop/types";
+import { previewSidebarProjectRooms } from "../src/domain/sidebar-project-room-preview";
 import {
   applySidebarRoomOrder,
+  isSidebarRoomReorderEnabled,
   orderedSidebarChildRooms,
   readStoredSidebarRoomOrder,
   rememberSidebarRoomOrder,
   reorderSidebarChildRooms,
   reorderSidebarParentRooms,
+  resolveSidebarKeyboardRoomReorder,
   type SidebarRoomOrder,
 } from "../src/domain/sidebar-room-order";
 
@@ -150,5 +153,37 @@ describe("sidebar room order", () => {
       targetEntryId: "focus-c",
       placement: "after",
     }), null);
+  });
+
+  it("keeps keyboard focus in the rendered preview at the overflow boundary", () => {
+    const allChildren = Array.from({ length: 12 }, (_, index) => room(`child-${index + 1}`, "focus"));
+    const visibleChildren = previewSidebarProjectRooms({
+      rooms: allChildren,
+      activeEntryId: "parent-room",
+      expanded: false,
+    });
+    assert.equal(visibleChildren.length, 8);
+    const lastVisible = visibleChildren.at(-1);
+    assert.ok(lastVisible);
+
+    assert.equal(resolveSidebarKeyboardRoomReorder(
+      visibleChildren,
+      lastVisible.id,
+      1,
+    ), null);
+    assert.deepEqual(resolveSidebarKeyboardRoomReorder(
+      visibleChildren,
+      lastVisible.id,
+      -1,
+    ), {
+      target: visibleChildren[6],
+      placement: "before",
+    });
+  });
+
+  it("disables every reorder gesture while selection or a batch action is active", () => {
+    assert.equal(isSidebarRoomReorderEnabled(false, false), true);
+    assert.equal(isSidebarRoomReorderEnabled(true, false), false);
+    assert.equal(isSidebarRoomReorderEnabled(false, true), false);
   });
 });

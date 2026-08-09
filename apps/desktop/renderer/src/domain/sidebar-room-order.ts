@@ -23,6 +23,11 @@ export type SidebarChildRoomReorder = {
   placement: SidebarRoomDropPlacement;
 };
 
+export type SidebarKeyboardRoomReorder<T> = {
+  target: T;
+  placement: SidebarRoomDropPlacement;
+};
+
 export const emptySidebarRoomOrder: SidebarRoomOrder = {
   pinnedParentIds: [],
   roomParentIds: [],
@@ -81,6 +86,28 @@ export function orderedSidebarChildRooms(project: ProjectGroup | null | undefine
     [...project.branchRooms, ...project.focusRooms],
     project.childRoomOrder || [],
   );
+}
+
+export function isSidebarRoomReorderEnabled(
+  selectionActive: boolean,
+  batchActionBusy: boolean,
+): boolean {
+  return !selectionActive && !batchActionBusy;
+}
+
+export function resolveSidebarKeyboardRoomReorder<T extends { id: string }>(
+  visibleEntries: readonly T[],
+  sourceId: string,
+  direction: -1 | 1,
+): SidebarKeyboardRoomReorder<T> | null {
+  const sourceIndex = visibleEntries.findIndex((entry) => entry.id === sourceId);
+  if (sourceIndex < 0) return null;
+  const target = visibleEntries[sourceIndex + direction];
+  if (!target) return null;
+  return {
+    target,
+    placement: direction < 0 ? "before" : "after",
+  };
 }
 
 export function reorderSidebarParentRooms(

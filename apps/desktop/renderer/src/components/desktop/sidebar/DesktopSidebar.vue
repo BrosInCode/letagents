@@ -686,7 +686,9 @@ import {
 } from "../../../domain/sidebar-project-room-preview";
 import { searchSidebarRooms } from "../../../domain/sidebar-room-search";
 import {
+  isSidebarRoomReorderEnabled,
   orderedSidebarChildRooms,
+  resolveSidebarKeyboardRoomReorder,
   type SidebarChildRoomReorder,
   type SidebarParentRoomReorder,
   type SidebarRoomDropPlacement,
@@ -772,7 +774,10 @@ const dropTarget = ref<SidebarDropTarget | null>(null);
 const reorderAnnouncement = ref("");
 const suppressedActivationEntryId = ref<string | null>(null);
 
-const roomReorderEnabled = computed(() => !props.selectionActive && !props.batchActionBusy);
+const roomReorderEnabled = computed(() => isSidebarRoomReorderEnabled(
+  props.selectionActive,
+  Boolean(props.batchActionBusy),
+));
 const pinnedProjectEntries = computed(() => props.projectEntries.filter((project) => project.parent.pinned));
 const roomProjectEntries = computed(() => props.projectEntries.filter((project) => !project.parent.pinned));
 const searchResults = computed(() => searchSidebarRooms(props.projectEntries, searchQuery.value));
@@ -1148,19 +1153,17 @@ function handleParentReorderKeydown(event: KeyboardEvent, project: ProjectGroup)
   event.preventDefault();
   event.stopPropagation();
   const siblings = project.parent.pinned ? pinnedProjectEntries.value : roomProjectEntries.value;
-  const sourceIndex = siblings.findIndex((candidate) => candidate.id === project.id);
-  const target = siblings[sourceIndex + direction];
-  if (!target) {
+  const reorder = resolveSidebarKeyboardRoomReorder(siblings, project.id, direction);
+  if (!reorder) {
     announceReorderBoundary(project.roomName, direction);
     return;
   }
-  const placement: SidebarRoomDropPlacement = direction < 0 ? "before" : "after";
   emit("reorder-parent-room", {
     sourceProjectId: project.id,
-    targetProjectId: target.id,
-    placement,
+    targetProjectId: reorder.target.id,
+    placement: reorder.placement,
   });
-  announceReorder(project.roomName, target.roomName, placement);
+  announceReorder(project.roomName, reorder.target.roomName, reorder.placement);
 }
 
 function handleChildReorderKeydown(
@@ -1172,21 +1175,19 @@ function handleChildReorderKeydown(
   if (!direction) return;
   event.preventDefault();
   event.stopPropagation();
-  const siblings = projectChildRooms(project);
-  const sourceIndex = siblings.findIndex((candidate) => candidate.id === entry.id);
-  const target = siblings[sourceIndex + direction];
-  if (!target) {
+  const visibleSiblings = visibleProjectChildRooms(project);
+  const reorder = resolveSidebarKeyboardRoomReorder(visibleSiblings, entry.id, direction);
+  if (!reorder) {
     announceReorderBoundary(entry.title, direction);
     return;
   }
-  const placement: SidebarRoomDropPlacement = direction < 0 ? "before" : "after";
   emit("reorder-child-room", {
     projectId: project.id,
     sourceEntryId: entry.id,
-    targetEntryId: target.id,
-    placement,
+    targetEntryId: reorder.target.id,
+    placement: reorder.placement,
   });
-  announceReorder(entry.title, target.title, placement);
+  announceReorder(entry.title, reorder.target.title, reorder.placement);
 }
 
 function keyboardReorderDirection(event: KeyboardEvent): -1 | 1 | null {
