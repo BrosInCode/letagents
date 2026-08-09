@@ -38,6 +38,8 @@
       />
     </label>
 
+    <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
+
     <footer class="desktop-task-create-actions">
       <button
         type="button"
@@ -67,6 +69,7 @@ import { deriveTaskTitle } from "./board-presentation";
 const props = defineProps<{
   open: boolean;
   busyAction: string | null;
+  error: string | null;
 }>();
 
 const emit = defineEmits<{

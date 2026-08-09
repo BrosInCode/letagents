@@ -3,6 +3,8 @@
     :open="Boolean(task)"
     :focus-key="task?.id"
     :aria-label="task ? `Task details for ${task.title}` : undefined"
+    backdrop-class="desktop-task-modal-backdrop desktop-task-inspector-backdrop"
+    panel-class="desktop-task-modal desktop-task-inspector-modal"
     close-label="Close task details"
     @close="emit('close')"
   >
@@ -11,6 +13,7 @@
       :task="task"
       :actions="actions"
       :busy-action="busyAction"
+      :error="error"
       :review-assignment-candidates="reviewAssignmentCandidates"
       :selected-reviewer="selectedReviewer"
       @assign-review="emit('assign-review')"
@@ -35,6 +38,7 @@ defineProps<{
   task: DesktopTaskSummary | null;
   actions: TaskAction[];
   busyAction: string | null;
+  error: string | null;
   reviewAssignmentCandidates: DesktopAgentPresence[];
   selectedReviewer: string;
 }>();

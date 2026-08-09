@@ -15,6 +15,12 @@
   --app-agent-orb-smoke: rgba(124, 141, 169, 0.2);
 }
 
+/* The App Agent is still a dark-only surface. Keep it internally coherent while
+ * the Board opts into the scoped light theme. */
+.desktop-shell:has(.desktop-board-panel) .app-agent {
+  color-scheme: dark;
+}
+
 .desktop-shell:has(.desktop-room-control-rail) .app-agent[data-open="false"][data-state="idle"] {
   pointer-events: none;
   opacity: 0;
@@ -69,6 +75,11 @@
 .app-agent-orb:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.app-agent-orb:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 4px;
 }
 
 .app-agent-orb-atmosphere,
@@ -264,6 +275,23 @@
   -webkit-backdrop-filter: var(--app-agent-glass-filter) blur(0.18px) saturate(1.36) contrast(1.2) brightness(1.05);
   backdrop-filter: var(--app-agent-glass-filter) blur(0.18px) saturate(1.36) contrast(1.2) brightness(1.05);
   will-change: backdrop-filter, transform;
+}
+
+.desktop-shell:has(.desktop-board-panel) .app-agent-orb--launcher .app-agent-orb-lens {
+  border-color: color-mix(in srgb, var(--text) 62%, transparent);
+  background-color: var(--bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--text) 24%, transparent),
+    var(--shadow-lg);
+}
+
+@media (max-width: 640px) {
+  .desktop-shell:has(.desktop-board-panel) .app-agent-orb--launcher {
+    --app-agent-orb-size: 44px;
+    --app-agent-orb-lens-size: 42px;
+    width: 44px;
+    height: 44px;
+  }
 }
 
 .app-agent-liquid-orb .app-agent-orb-atmosphere,
@@ -1313,7 +1341,7 @@
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .app-agent-launcher,
   .app-agent-panel {
-    background: rgba(18, 18, 21, 0.98);
+    background: var(--bg-elevated);
     backdrop-filter: none;
   }
 }

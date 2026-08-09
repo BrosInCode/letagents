@@ -1,16 +1,16 @@
 .desktop-task-review-panel {
   display: grid;
-  gap: 8px;
-  padding: 10px;
-  border: 1px solid rgba(56, 189, 248, 0.16);
-  border-radius: 12px;
-  background: rgba(56, 189, 248, 0.055);
+  gap: 9px;
+  padding: 11px;
+  border: 1px solid color-mix(in srgb, var(--task-in-review) 28%, var(--border));
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--task-in-review) 7%, var(--bg-elevated));
 }
 
 .desktop-task-review-panel[data-state="missing"],
 .desktop-task-review-panel[data-state="conflict"] {
-  border-color: rgba(251, 191, 36, 0.22);
-  background: rgba(251, 191, 36, 0.06);
+  border-color: color-mix(in srgb, var(--amber) 34%, var(--border));
+  background: var(--amber-dim);
 }
 
 .desktop-task-review-panel header {
@@ -20,69 +20,77 @@
   gap: 10px;
 }
 
-.desktop-task-review-panel header div {
+.desktop-task-review-panel header > div {
   display: grid;
-  gap: 2px;
+  gap: 3px;
   min-width: 0;
 }
 
 .desktop-task-review-panel small {
   color: var(--text-tertiary);
-  font-size: 0.64rem;
-  font-weight: 850;
+  font-size: 0.62rem;
+  font-weight: 650;
   text-transform: uppercase;
 }
 
 .desktop-task-review-panel strong {
   overflow: hidden;
   color: var(--text);
-  font-size: 0.8rem;
+  font-size: 0.78rem;
+  font-weight: 680;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.desktop-task-review-panel header span {
-  flex-shrink: 0;
+.desktop-task-review-panel header > span {
+  flex: 0 0 auto;
   padding: 3px 7px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 999px;
+  border: 1px solid var(--border);
+  border-radius: 6px;
   color: var(--text-secondary);
-  font-size: 0.68rem;
-  font-weight: 850;
+  font-size: 0.62rem;
+  font-weight: 680;
 }
 
 .desktop-task-review-panel p {
   margin: 0;
   color: var(--text-secondary);
-  font-size: 0.76rem;
-  line-height: 1.42;
+  font-size: 0.74rem;
+  line-height: 1.48;
 }
 
 .desktop-task-review-assign select {
-  min-width: min(100%, 180px);
-  min-height: 32px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
-  border-radius: 9px;
-  background: rgba(10, 10, 10, 0.54);
+  min-width: min(100%, 190px);
+  min-height: 34px;
+  padding: 0 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  outline: none;
+  background: var(--bg-subtle);
   color: var(--text-secondary);
   font: inherit;
-  font-size: 0.76rem;
-  font-weight: 750;
+  font-size: 0.72rem;
+  font-weight: 620;
+}
+
+.desktop-task-review-assign select:focus-visible {
+  border-color: var(--blue);
+  box-shadow: 0 0 0 3px var(--blue-dim);
 }
 
 .desktop-task-action {
-  min-height: 32px;
-  padding: 0 10px;
+  min-height: 34px;
+  padding: 0 11px;
 }
 
 .desktop-task-action[data-tone="primary"] {
-  border-color: rgba(147, 197, 253, 0.25);
-  background: rgba(147, 197, 253, 0.12);
-  color: #bfdbfe;
+  border-color: color-mix(in srgb, var(--blue) 40%, var(--border));
+  background: var(--blue-dim);
+  color: var(--blue);
 }
 
 .desktop-task-action[data-tone="danger"] {
-  border-color: rgba(248, 113, 113, 0.25);
-  background: rgba(248, 113, 113, 0.1);
-  color: #fecaca;
+  border-color: color-mix(in srgb, var(--red) 36%, var(--border));
+  background: var(--red-dim);
+  color: color-mix(in srgb, var(--red) 74%, var(--text));
 }

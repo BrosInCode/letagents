@@ -3,7 +3,9 @@
     class="task-card"
     :class="{ selected }"
     :data-board-task-id="task.id"
+    :style="{ '--task-accent': taskStatusAccent(task.status) }"
     :aria-current="selected ? 'true' : undefined"
+    :aria-label="`${formatTaskShortId(task.id)}: ${task.title}. ${taskStatusLabel(task.status)}.`"
     tabindex="-1"
   >
     <div class="task-card-header">
@@ -17,9 +19,6 @@
         </span>
         <h4 class="task-card-title">{{ task.title }}</h4>
       </div>
-      <span class="task-status-badge" :data-status="task.status">
-        {{ STATUS_LABELS[task.status] || task.status }}
-      </span>
     </div>
 
     <div class="task-meta">
@@ -64,7 +63,7 @@
       :key="workflowRef.url"
       class="task-pr-link"
     >
-      <a :href="workflowRef.url" target="_blank">
+      <a :href="workflowRef.url" target="_blank" rel="noopener noreferrer">
         <svg viewBox="0 0 24 24" width="12" height="12" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6" /><polyline points="15 3 21 3 21 9" /><line x1="10" y1="14" x2="21" y2="3" /></svg>
         View {{ workflowRef.label }}
       </a>
@@ -117,8 +116,8 @@ import {
   getTaskWorkflowRefs,
   shouldShowAuthority,
   shouldShowReviewAuthority,
-  STATUS_LABELS,
 } from './model'
+import { taskStatusAccent, taskStatusLabel } from '../../../domain/taskStatus'
 import type { TaskLeaseActionPayload, TaskReviewLeaseActionPayload } from './model'
 
 const props = defineProps<{
@@ -149,34 +148,38 @@ const focusable = computed(() => canFocusTask(props.task))
 
 <style scoped>
 .task-card {
-  margin-bottom: 6px;
-  padding: var(--space-md) var(--space-lg);
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  --task-accent: var(--text-tertiary);
+  padding: 11px;
+  border: 1px solid var(--border-strong);
+  border-left: 3px solid var(--task-accent);
   border-radius: 10px;
-  background: var(--bg-card, #131316);
-  transition: border-color 150ms;
+  background: var(--bg-elevated);
+  transition: border-color var(--duration-fast) ease, background-color var(--duration-fast) ease;
 }
 
-.task-card:hover {
-  border-color: rgba(255, 255, 255, 0.12);
+@media (hover: hover) and (pointer: fine) {
+  .task-card:hover {
+    border-top-color: var(--border-accent);
+    border-right-color: var(--border-accent);
+    border-bottom-color: var(--border-accent);
+  }
 }
 
 .task-card.selected {
-  border-color: color-mix(in srgb, var(--blue, #60a5fa) 62%, transparent);
-  box-shadow: 0 0 0 3px color-mix(in srgb, var(--blue, #60a5fa) 12%, transparent);
+  border-color: var(--blue);
+  box-shadow: 0 0 0 2px var(--blue-dim);
 }
 
 .task-card:focus-visible {
-  outline: 2px solid color-mix(in srgb, var(--blue, #60a5fa) 72%, transparent);
+  outline: 2px solid var(--blue);
   outline-offset: 2px;
 }
 
 .task-card-header {
   display: flex;
   align-items: flex-start;
-  justify-content: space-between;
   gap: 8px;
-  margin-bottom: 4px;
+  margin-bottom: 7px;
 }
 
 .task-heading {
@@ -185,69 +188,43 @@ const focusable = computed(() => canFocusTask(props.task))
   flex-wrap: wrap;
   align-items: flex-start;
   min-width: 0;
-  gap: 6px 8px;
+  gap: 6px;
 }
 
 .task-id-badge {
   flex-shrink: 0;
-  padding: 1px 6px;
-  border: 1px solid rgba(147, 197, 253, 0.42);
-  border-radius: 4px;
-  background: rgba(147, 197, 253, 0.08);
-  color: #93c5fd;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
-  font-size: 0.68rem;
-  font-weight: 700;
-  line-height: 1.45;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: 0.65rem;
+  font-weight: 600;
+  line-height: 1.3;
 }
 
 .task-card-title {
   flex: 1;
-  min-width: min(100%, 12rem);
+  min-width: 0;
   margin: 0;
-  color: var(--text-primary, #ffffff);
-  font-size: 0.82rem;
-  font-weight: 600;
+  color: var(--text);
+  font-size: 0.84rem;
+  font-weight: 650;
+  letter-spacing: -0.008em;
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
-
-.task-status-badge {
-  flex-shrink: 0;
-  padding: 1px 6px;
-  border: 1px solid currentColor;
-  border-radius: 4px;
-  background: transparent;
-  font-size: 0.6rem;
-  font-weight: 700;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-  white-space: nowrap;
-}
-
-.task-status-badge[data-status="proposed"] { color: #71717a; border-color: rgba(113, 113, 122, 0.4); }
-.task-status-badge[data-status="accepted"] { color: #60a5fa; border-color: rgba(96, 165, 250, 0.4); }
-.task-status-badge[data-status="assigned"] { color: #a855f7; border-color: rgba(168, 85, 247, 0.4); }
-.task-status-badge[data-status="in_progress"] { color: #fbbf24; border-color: rgba(251, 191, 36, 0.4); }
-.task-status-badge[data-status="blocked"] { color: #f87171; border-color: rgba(248, 113, 113, 0.4); }
-.task-status-badge[data-status="in_review"] { color: #38bdf8; border-color: rgba(56, 189, 248, 0.4); }
-.task-status-badge[data-status="merged"] { color: #34d399; border-color: rgba(52, 211, 153, 0.4); }
-.task-status-badge[data-status="done"] { color: #22c55e; border-color: rgba(34, 197, 94, 0.4); }
-.task-status-badge[data-status="cancelled"] { color: #64748b; border-color: rgba(100, 116, 139, 0.4); }
 
 .task-meta {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  margin-bottom: 6px;
-  color: var(--text-tertiary, #a1a1aa);
+  margin-bottom: 8px;
+  color: var(--text-tertiary);
   font-size: 0.72rem;
 }
 
 .task-description {
-  margin: 0 0 10px;
-  color: var(--text-secondary, #d4d4d8);
+  margin: 0 0 9px;
+  color: var(--text-secondary);
   font-size: 0.82rem;
   line-height: 1.5;
 }
@@ -264,22 +241,22 @@ const focusable = computed(() => canFocusTask(props.task))
   align-items: center;
   gap: 6px;
   padding: 4px 8px;
-  border: 1px solid var(--line, #27272a);
+  border: 1px solid var(--border);
   border-radius: 6px;
   font-size: 0.68rem;
   font-weight: 600;
 }
 
 .coordination-badge.lease {
-  border-color: rgba(168, 85, 247, 0.2);
-  background: rgba(168, 85, 247, 0.08);
-  color: #c084fc;
+  border-color: color-mix(in srgb, var(--task-assigned) 30%, var(--border));
+  background: color-mix(in srgb, var(--task-assigned) 7%, var(--bg-elevated));
+  color: color-mix(in srgb, var(--task-assigned) 70%, var(--text));
 }
 
 .coordination-badge.lock {
-  border-color: rgba(239, 68, 68, 0.2);
-  background: rgba(239, 68, 68, 0.08);
-  color: #f87171;
+  border-color: color-mix(in srgb, var(--red) 30%, var(--border));
+  background: var(--red-dim);
+  color: color-mix(in srgb, var(--red) 76%, var(--text));
 }
 
 .task-pr-link {
@@ -290,7 +267,7 @@ const focusable = computed(() => canFocusTask(props.task))
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  color: var(--text-secondary, #d4d4d8);
+  color: var(--text-secondary);
   font-size: 0.72rem;
   font-weight: 600;
   text-decoration: none;
@@ -298,7 +275,7 @@ const focusable = computed(() => canFocusTask(props.task))
 }
 
 .task-pr-link a:hover {
-  color: var(--text-primary, #ffffff);
+  color: var(--text);
 }
 
 .task-focus-row {
@@ -310,21 +287,28 @@ const focusable = computed(() => canFocusTask(props.task))
   align-items: center;
   justify-content: center;
   padding: 5px 9px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
   background: transparent;
-  color: var(--text-tertiary, #a1a1aa);
+  color: var(--text-secondary);
   cursor: pointer;
   font-family: inherit;
   font-size: 0.7rem;
   font-weight: 600;
-  transition: background 150ms, border-color 150ms, color 150ms;
+  transition: background var(--duration-fast) ease, border-color var(--duration-fast) ease, color var(--duration-fast) ease;
 }
 
 .task-focus-btn:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-secondary, #d4d4d8);
+  border-color: var(--border-accent);
+  background: var(--accent-hover);
+  color: var(--text);
+}
+
+.task-focus-btn:focus-visible,
+.task-action-btn:focus-visible,
+.task-pr-link a:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .task-actions {
@@ -335,21 +319,21 @@ const focusable = computed(() => canFocusTask(props.task))
 
 .task-action-btn {
   padding: 3px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  border: 1px solid var(--border-strong);
   border-radius: 6px;
   background: transparent;
-  color: var(--text-tertiary, #a1a1aa);
+  color: var(--text-secondary);
   cursor: pointer;
   font-family: inherit;
   font-size: 0.7rem;
   font-weight: 600;
-  transition: background 150ms, color 150ms, border-color 150ms;
+  transition: background var(--duration-fast) ease, color var(--duration-fast) ease, border-color var(--duration-fast) ease;
 }
 
 .task-action-btn:hover {
-  border-color: rgba(255, 255, 255, 0.2);
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-secondary, #d4d4d8);
+  border-color: var(--border-accent);
+  background: var(--accent-hover);
+  color: var(--text);
 }
 
 .task-action-btn:disabled {
@@ -357,18 +341,13 @@ const focusable = computed(() => canFocusTask(props.task))
   opacity: 0.4;
 }
 
-.task-action-btn.accept { color: #60a5fa; border-color: rgba(96, 165, 250, 0.3); }
-.task-action-btn.cancel { color: #f87171; border-color: rgba(248, 113, 113, 0.3); }
-.task-action-btn.merge { color: #34d399; border-color: rgba(52, 211, 153, 0.3); }
+.task-action-btn.accept { color: var(--task-accepted); border-color: color-mix(in srgb, var(--task-accepted) 38%, var(--border)); }
+.task-action-btn.cancel { color: var(--task-blocked); border-color: color-mix(in srgb, var(--task-blocked) 38%, var(--border)); }
+.task-action-btn.merge { color: var(--task-merged); border-color: color-mix(in srgb, var(--task-merged) 38%, var(--border)); }
 
 @media (max-width: 768px) {
   .task-card {
     padding: 10px;
-  }
-
-  .task-card-header {
-    flex-direction: column;
-    gap: 4px;
   }
 
   .task-heading {
@@ -394,8 +373,18 @@ const focusable = computed(() => canFocusTask(props.task))
 
   .task-action-btn {
     flex: 1;
+    min-height: 44px;
     min-width: 60px;
     text-align: center;
+  }
+
+  .task-focus-btn {
+    min-height: 44px;
+  }
+
+  .task-pr-link a {
+    min-height: 44px;
+    padding-block: 8px;
   }
 }
 </style>

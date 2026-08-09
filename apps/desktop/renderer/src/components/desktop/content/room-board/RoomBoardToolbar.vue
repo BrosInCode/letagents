@@ -1,13 +1,13 @@
 <template>
   <div class="desktop-board-toolbar">
-    <div class="desktop-board-header">
+    <header class="desktop-board-header">
       <div class="desktop-board-heading">
-        <span>Board</span>
-        <strong>Team tasks and agent handoffs</strong>
+        <h2>Tasks</h2>
+        <p>{{ summaryText }}</p>
       </div>
       <div class="desktop-board-header-actions">
         <button
-          class="desktop-board-primary-action desktop-board-manager-pill"
+          class="desktop-board-manager-pill"
           type="button"
           :data-mode="managerMode"
           :data-has-pending="pendingIntentCount > 0"
@@ -18,7 +18,10 @@
           @click="emit('open-governance')"
         >
           <span class="desktop-board-manager-dot" aria-hidden="true"></span>
-          <strong>Manager</strong>
+          <span class="desktop-board-manager-copy">
+            <strong>Board manager</strong>
+            <small>{{ managerModeLabel }}</small>
+          </span>
           <span
             v-if="pendingIntentCount > 0"
             class="desktop-board-manager-pending-count"
@@ -36,10 +39,10 @@
           <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
             <path d="M12 5v14M5 12h14" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
           </svg>
-          Add task
+          New task
         </button>
       </div>
-    </div>
+    </header>
     <div class="desktop-board-controls">
       <label class="desktop-board-search" for="room-board-search">
         <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
@@ -50,7 +53,7 @@
           id="room-board-search"
           :value="searchQuery"
           type="search"
-          placeholder="Search tasks by title, id, owner"
+          placeholder="Search tasks, owners, or links"
           @input="onSearchInput"
         />
       </label>
@@ -68,9 +71,10 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import DesktopSegmentedControl from "../../controls/DesktopSegmentedControl.vue";
 
-defineProps<{
+const props = defineProps<{
   searchQuery: string;
   activeFilter: string;
   filterOptions: Array<{ id: string; label: string; count?: number }>;
@@ -80,6 +84,26 @@ defineProps<{
   pendingIntentCount: number;
   governanceOpen: boolean;
 }>();
+
+const managerModeLabel = computed(() => {
+  if (props.managerMode === "intent_required") return "Approval required";
+  if (props.managerMode === "off") return "Off";
+  return "Optional";
+});
+
+const countFor = (id: string): number => Number(
+  props.filterOptions.find((option) => option.id === id)?.count || 0
+);
+const summaryText = computed(() => {
+  const open = countFor("open");
+  const review = countFor("needs-review");
+  const closeout = countFor("closeout");
+  if (open === 0 && closeout === 0) return "Track ownership and move work through review.";
+  const openText = `${open} active ${open === 1 ? "task" : "tasks"}`;
+  if (review > 0) return `${openText} · ${review} ${review === 1 ? "needs" : "need"} review`;
+  if (open === 0) return `${closeout} ${closeout === 1 ? "task" : "tasks"} in closeout`;
+  return openText;
+});
 
 const emit = defineEmits<{
   "update:search-query": [value: string];

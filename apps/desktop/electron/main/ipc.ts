@@ -171,6 +171,7 @@ import {
   supervisedLaunchEverReady,
 } from "./launch-events.js";
 import {
+  desktopSmokeBoardGovernance,
   desktopSmokeControlTurn,
   desktopSmokeSupervisorEntries,
   isDesktopSmokeCheck,
@@ -595,7 +596,9 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle(
     "desktop:room:get-board-governance",
-    async (_event, roomIdentifier: string) => getDesktopBoardGovernance(roomIdentifier),
+    async (_event, roomIdentifier: string) => isDesktopSmokeCheck()
+      ? desktopSmokeBoardGovernance()
+      : getDesktopBoardGovernance(roomIdentifier),
   );
   targetIpcMain.handle(
     "desktop:room:assign-board-manager",

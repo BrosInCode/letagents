@@ -42,8 +42,9 @@
         :canManageLeases="room?.role === 'admin'"
         :taskGithubStatus="taskGithubStatus"
         :selectedTaskId="selectedBoardTaskId"
+        :roomIdentifier="room?.identifier || null"
         @addTask="emit('addTask', $event)"
-        @updateTask="emitUpdateTask"
+        @updateTask="emit('updateTask', $event)"
         @leaseAction="emit('leaseAction', $event)"
         @reviewLeaseAction="emit('reviewLeaseAction', $event)"
         @focusTask="emit('focusTask', $event)"
@@ -135,6 +136,7 @@ import type {
   RoomTab,
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
+  TaskStatusUpdatePayload,
 } from './types'
 
 const props = defineProps<{
@@ -191,7 +193,7 @@ const emit = defineEmits<{
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   addTask: [title: string]
-  updateTask: [taskId: string, updates: { status: string }]
+  updateTask: [payload: TaskStatusUpdatePayload]
   leaseAction: [payload: TaskLeaseActionPayload]
   reviewLeaseAction: [payload: TaskReviewLeaseActionPayload]
   focusTask: [taskId: string]
@@ -209,10 +211,6 @@ const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
 const taskReferenceIds = computed<ReadonlySet<string>>(() =>
   new Set(props.tasks.map(task => task.id))
 )
-
-function emitUpdateTask(taskId: string, updates: { status: string }) {
-  emit('updateTask', taskId, updates)
-}
 
 function emitShareResults(summary: string, details: FocusRoomConclusionDetails | null) {
   emit('shareResults', summary, details)
