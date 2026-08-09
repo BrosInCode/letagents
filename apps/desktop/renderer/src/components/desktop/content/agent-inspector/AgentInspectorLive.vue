@@ -9,30 +9,41 @@
       Ephemeral — opening this tab replays the bounded current feed, then follows new activity. It is not a saved transcript.
     </p>
 
-    <ol v-if="transcript.items.length" class="agent-inspector-live-items">
+    <ol v-if="presented.length" class="agent-inspector-live-items">
       <li
-        v-for="item in transcript.items"
-        :key="`${item.kind}:${item.id}`"
+        v-for="entry in presented"
+        :key="`${entry.item.kind}:${entry.item.id}`"
         class="agent-inspector-live-item"
-        :data-kind="item.kind"
+        :data-kind="entry.item.kind"
       >
-        <template v-if="item.kind === 'reasoning'">
+        <template v-if="entry.item.kind === 'reasoning'">
           <span class="agent-inspector-live-label">Thinking</span>
-          <p class="agent-inspector-live-reasoning">{{ item.text }}</p>
+          <p class="agent-inspector-live-reasoning">{{ entry.item.text }}</p>
         </template>
-        <template v-else-if="item.kind === 'message'">
-          <span class="agent-inspector-live-label">Response</span>
-          <p class="agent-inspector-live-message">{{ item.text }}</p>
+        <template v-else-if="entry.item.kind === 'message'">
+          <span
+            class="agent-inspector-live-label"
+            title="Live narration from the model while it works. It is never published; the room reply is only what the agent records with complete_room_turn."
+          >Working aloud</span>
+          <p class="agent-inspector-live-message">{{ entry.item.text }}</p>
         </template>
-        <template v-else>
+        <template v-else-if="entry.tool">
           <div class="agent-inspector-live-tool-head">
-            <span class="agent-inspector-live-label">Tool</span>
-            <strong>{{ item.tool }}</strong>
-            <span class="agent-inspector-live-tool-status" :data-status="item.status">{{ item.status }}</span>
+            <span class="agent-inspector-live-label">{{ entry.tool.kind === "reply" ? "Room reply" : "Action" }}</span>
+            <strong>{{ entry.tool.headline }}</strong>
+            <span class="agent-inspector-live-tool-status" :data-status="entry.item.status">{{ entry.item.status }}</span>
           </div>
-          <pre v-if="formatInput(item.input)" class="agent-inspector-live-tool-io">{{ formatInput(item.input) }}</pre>
-          <pre v-if="formatValue(item.output)" class="agent-inspector-live-tool-io">{{ formatValue(item.output) }}</pre>
-          <p v-if="item.error" class="agent-inspector-live-tool-error">{{ item.error }}</p>
+          <blockquote v-if="entry.tool.replyText" class="agent-inspector-live-reply">{{ entry.tool.replyText }}</blockquote>
+          <p v-else-if="entry.tool.detail" class="agent-inspector-live-tool-detail">{{ entry.tool.detail }}</p>
+          <p v-if="entry.item.error" class="agent-inspector-live-tool-error">{{ entry.item.error }}</p>
+          <details
+            v-if="formatValue(entry.item.input) || formatValue(entry.item.output)"
+            class="agent-inspector-live-tool-raw"
+          >
+            <summary>Raw {{ entry.tool.toolName }} call</summary>
+            <pre v-if="formatValue(entry.item.input)" class="agent-inspector-live-tool-io">{{ formatValue(entry.item.input) }}</pre>
+            <pre v-if="formatValue(entry.item.output)" class="agent-inspector-live-tool-io">{{ formatValue(entry.item.output) }}</pre>
+          </details>
         </template>
       </li>
     </ol>
@@ -41,7 +52,7 @@
       {{ feed.droppedEvents }} earlier live {{ feed.droppedEvents === 1 ? "event was" : "events were" }} omitted because this turn exceeded the replay limit.
     </p>
 
-    <p v-if="!transcript.items.length" class="agent-inspector-live-empty">
+    <p v-if="!presented.length" class="agent-inspector-live-empty">
       {{ transcript.ended ? "The agent's runtime is not currently streaming." : "Waiting for the agent's next activity…" }}
     </p>
 
@@ -53,7 +64,8 @@
 
 <script setup lang="ts">
 import { computed } from "vue";
-import { foldAgentStreamEvents } from "../../../../domain/agent-inspector-live";
+import { describeLiveToolCall, foldAgentStreamEvents } from "../../../../domain/agent-inspector-live";
+import type { LiveToolPresentation, LiveTranscriptItem } from "../../../../domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../../../../../electron/ipc-types";
 
 const props = defineProps<{
@@ -62,6 +74,12 @@ const props = defineProps<{
 }>();
 
 const transcript = computed(() => foldAgentStreamEvents(props.feed.events, props.feed.ended));
+
+const presented = computed((): { item: LiveTranscriptItem; tool: LiveToolPresentation | null }[] =>
+  transcript.value.items.map((item) => ({
+    item,
+    tool: item.kind === "tool" ? describeLiveToolCall(item.tool, item.input) : null,
+  })));
 
 function formatValue(input: unknown): string {
   if (input === null || input === undefined) return "";
@@ -73,6 +91,4 @@ function formatValue(input: unknown): string {
     return "";
   }
 }
-
-const formatInput = formatValue;
 </script>

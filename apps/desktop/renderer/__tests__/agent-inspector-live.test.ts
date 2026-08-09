@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { foldAgentStreamEvents } from "../src/domain/agent-inspector-live";
+import { describeLiveToolCall, foldAgentStreamEvents } from "../src/domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../electron/ipc-types";
 
 function source(relative: string): string {
@@ -149,4 +149,73 @@ test("the inspector wires a lazily-subscribed Live tab that starts and stops wit
   assert.match(shell, /onAgentStream\?\.\(\(batch\)/);
   assert.match(shell, /priorEvents\.length \+ batch\.events\.length - AGENT_LIVE_FEED_LIMIT/,
     "continuous local buffer eviction is counted as a visible gap");
+});
+
+test("describeLiveToolCall unwraps Cursor's mcpToolCall and strips the per-turn server alias", () => {
+  const reply = describeLiveToolCall("mcpToolCall", {
+    name: "letagents_supervised_c0a7e4ba0ff9289147837706-complete_room_turn",
+    args: { outcome: "reply", text: "Today is Sunday, August 9, 2026." },
+  });
+  assert.equal(reply.kind, "reply");
+  assert.equal(reply.headline, "Replied to the room");
+  assert.equal(reply.replyText, "Today is Sunday, August 9, 2026.");
+  assert.equal(reply.toolName, "complete_room_turn");
+});
+
+test("describeLiveToolCall reads no_reply as a closed turn with no message content", () => {
+  const closed = describeLiveToolCall("mcpToolCall", {
+    name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
+    args: { outcome: "no_reply" },
+  });
+  assert.equal(closed.kind, "reply");
+  assert.equal(closed.headline, "Closed the turn without a reply");
+  assert.equal(closed.replyText, null);
+});
+
+test("describeLiveToolCall gives room tools domain sentences with a salient detail", () => {
+  const status = describeLiveToolCall("mcpToolCall", {
+    name: "letagents_supervised_ab12cd34ef56-post_status",
+    args: { status: "Reviewing PR #901 now" },
+  });
+  assert.equal(status.kind, "action");
+  assert.equal(status.headline, "Posted a status update");
+  assert.equal(status.detail, "Reviewing PR #901 now");
+});
+
+test("describeLiveToolCall degrades unknown tools to their bare name, never the transport alias", () => {
+  const unknown = describeLiveToolCall("mcpToolCall", {
+    name: "letagents_supervised_ab12cd34ef56-register_board_intent",
+    args: { description: "claim task_9" },
+  });
+  assert.equal(unknown.kind, "action");
+  assert.equal(unknown.headline, "register_board_intent");
+  assert.equal(unknown.detail, "claim task_9");
+  const native = describeLiveToolCall("shellToolCall", { command: "npm test" });
+  assert.equal(native.headline, "Ran a shell command");
+  assert.equal(native.detail, "npm test");
+  const opaque = describeLiveToolCall("somethingNew", { widget: 4 });
+  assert.equal(opaque.headline, "somethingNew");
+  assert.equal(opaque.detail, null);
+});
+
+test("describeLiveToolCall truncates long details but never truncates the room reply", () => {
+  const longText = "x".repeat(400);
+  const detail = describeLiveToolCall("shellToolCall", { command: longText });
+  assert.equal(detail.detail?.length, 140);
+  assert.ok(detail.detail?.endsWith("…"));
+  const reply = describeLiveToolCall("mcpToolCall", {
+    name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
+    args: { outcome: "reply", text: longText },
+  });
+  assert.equal(reply.replyText, longText);
+});
+
+test("the live surface renders replies as message content and keeps raw payloads behind disclosure", () => {
+  const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorLive.vue");
+  assert.match(surface, /Working aloud/);
+  assert.doesNotMatch(surface, />Response</);
+  assert.match(surface, /agent-inspector-live-reply/);
+  assert.match(surface, /<details/);
+  assert.match(surface, /Raw \{\{ entry\.tool\.toolName \}\} call/);
+  assert.match(surface, /describeLiveToolCall/);
 });
