@@ -1,30 +1,10 @@
 import { computed, type Ref } from 'vue'
 
-import type { RoomTask } from '@/composables/useRoom'
-
-export const STATUS_ORDER = [
-  'proposed',
-  'accepted',
-  'assigned',
-  'in_progress',
-  'blocked',
-  'in_review',
-  'merged',
-  'done',
-  'cancelled',
-]
-
-export const STATUS_LABELS: Record<string, string> = {
-  proposed: 'Proposed',
-  accepted: 'Accepted',
-  assigned: 'Assigned',
-  in_progress: 'In Progress',
-  blocked: 'Blocked',
-  in_review: 'In Review',
-  merged: 'Merged',
-  done: 'Done',
-  cancelled: 'Cancelled',
-}
+import type { RoomTask } from '../../../composables/useRoom'
+import {
+  TASK_STATUS_ORDER,
+  taskStatusLabel,
+} from '../../../domain/taskStatus'
 
 const LEASE_AUTHORITY_STATUSES = new Set(['assigned', 'in_progress', 'blocked', 'in_review'])
 
@@ -51,13 +31,17 @@ export function useTaskGroups(tasks: Ref<readonly RoomTask[]>) {
       if (!groups.has(status)) groups.set(status, [])
       groups.get(status)!.push(task as RoomTask)
     }
-    return STATUS_ORDER
+    const canonicalGroups = TASK_STATUS_ORDER
       .filter(status => groups.has(status))
       .map(status => ({
         status,
-        label: STATUS_LABELS[status] || status,
+        label: taskStatusLabel(status),
         tasks: groups.get(status)!,
       }))
+    const additionalGroups = [...groups.entries()]
+      .filter(([status]) => !TASK_STATUS_ORDER.includes(status as typeof TASK_STATUS_ORDER[number]))
+      .map(([status, groupTasks]) => ({ status, label: taskStatusLabel(status), tasks: groupTasks }))
+    return [...canonicalGroups, ...additionalGroups]
   })
 }
 

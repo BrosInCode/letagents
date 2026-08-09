@@ -11,6 +11,7 @@
 }
 
 .desktop-action-toast {
+  color-scheme: dark;
   pointer-events: auto;
   padding: 10px 14px;
   border: 1px solid rgba(255, 255, 255, 0.12);

@@ -1,5 +1,10 @@
 <template>
-  <section class="room-tab-page desktop-board-panel" data-testid="room-board-view">
+  <section
+    class="room-tab-page desktop-board-panel"
+    :data-empty="visibleTaskCount === 0"
+    :data-filter="activeFilter"
+    data-testid="room-board-view"
+  >
     <RoomBoardToolbar
       :search-query="searchQuery"
       :active-filter="activeFilter"
@@ -15,33 +20,42 @@
       @add-task="openCreateTaskDialog"
     />
 
-    <p v-if="errorMessage" class="desktop-board-error" role="alert">{{ errorMessage }}</p>
+    <div class="desktop-board-workspace">
+      <p
+        v-if="errorMessage && !modalTask && !isCreateTaskDialogOpen"
+        class="desktop-board-error"
+        role="alert"
+      >
+        {{ errorMessage }}
+      </p>
 
-    <RoomBoardEmptyState
-      v-if="visibleTaskCount === 0"
-      :state="emptyState"
-      :busy="busyAction !== null"
-      @action="handleEmptyStateAction"
-    />
+      <RoomBoardEmptyState
+        v-if="visibleTaskCount === 0"
+        :state="emptyState"
+        :busy="busyAction !== null"
+        @action="handleEmptyStateAction"
+      />
 
-    <RoomBoardKanban
-      v-else
-      :groups="visibleGroups"
-      :active-filter="activeFilter"
-      :selected-task-id="localSelectedTaskId"
-      :busy-action="busyAction"
-      :collapsed-groups="collapsedGroups"
-      :actions-for="actionsFor"
-      @select="selectTask"
-      @drag-start="clearTaskSelection"
-      @run-action="handleRunTaskAction"
-      @toggle-group="toggleGroup"
-    />
+      <RoomBoardKanban
+        v-else
+        :groups="visibleGroups"
+        :active-filter="activeFilter"
+        :selected-task-id="localSelectedTaskId"
+        :busy-action="busyAction"
+        :collapsed-groups="collapsedGroups"
+        :actions-for="actionsFor"
+        @select="handleSelectTask"
+        @drag-start="clearTaskSelection"
+        @run-action="handleRunTaskAction"
+        @toggle-group="toggleGroup"
+      />
+    </div>
 
     <RoomBoardTaskDialog
       :task="modalTask"
       :actions="modalTaskActions"
       :busy-action="busyAction"
+      :error="errorMessage"
       :review-assignment-candidates="modalReviewAssignmentCandidates"
       :selected-reviewer="modalSelectedReviewer"
       @close="clearTaskSelection"
@@ -55,6 +69,7 @@
     <RoomBoardCreateTaskDialog
       :open="isCreateTaskDialogOpen"
       :busy-action="busyAction"
+      :error="errorMessage"
       @close="closeCreateTaskDialog"
       @create="submitCreateTask"
     />
@@ -64,6 +79,7 @@
       :loading="governanceLoading"
       :busy="governanceBusy"
       :error="governanceError"
+      :error-retryable="governanceErrorRetryable"
       :governance="governance"
       :sections="governanceSections"
       :active-section="activeGovernanceSection"
@@ -77,6 +93,7 @@
       @set-manager-mode="handleSetManagerMode"
       @approve-intent="handleApproveIntent"
       @deny-intent="handleDenyIntent"
+      @retry="loadGovernance"
     />
   </section>
 </template>
@@ -127,6 +144,7 @@ const {
   addTask,
   assignReview,
   busyAction,
+  clearError,
   errorMessage,
   reviewAssignmentCandidates,
   runTaskAction,
@@ -165,6 +183,7 @@ const {
   governanceLoading,
   governanceBusy,
   governanceError,
+  governanceErrorRetryable,
   governance,
   activeSection: activeGovernanceSection,
   selectedCandidateId,
@@ -175,6 +194,7 @@ const {
   releaseManager,
   setManagerMode,
   decideIntent,
+  loadGovernance,
 } = useBoardGovernance(props.roomIdentifier);
 
 const liveBoardManagerAgents = computed(() => activeBoardManagerAgents(props.presence));
@@ -205,6 +225,7 @@ const boardManagerTitle = computed(() => {
 
 function openCreateTaskDialog(): void {
   if (localSelectedTaskId.value) clearTaskSelection();
+  clearError();
   isCreateTaskDialogOpen.value = true;
 }
 
@@ -224,6 +245,11 @@ function handleRunTaskAction(task: DesktopTaskSummary, action: TaskAction): void
   void runTaskAction(task, action);
 }
 
+function handleSelectTask(taskId: string): void {
+  clearError();
+  selectTask(taskId);
+}
+
 function assignModalReview(): void {
   if (modalTask.value) void assignReview(modalTask.value);
 }
@@ -237,27 +263,22 @@ function setModalReviewer(value: string): void {
 }
 
 async function handleAssignManager(agentSessionId: string): Promise<void> {
-  await assignManager(agentSessionId);
-  emit("refresh-room");
+  if (await assignManager(agentSessionId)) emit("refresh-room");
 }
 
 async function handleReleaseManager(): Promise<void> {
-  await releaseManager();
-  emit("refresh-room");
+  if (await releaseManager()) emit("refresh-room");
 }
 
 async function handleSetManagerMode(mode: "off" | "manager_optional" | "intent_required"): Promise<void> {
-  await setManagerMode(mode);
-  emit("refresh-room");
+  if (await setManagerMode(mode)) emit("refresh-room");
 }
 
 async function handleApproveIntent(intentId: string): Promise<void> {
-  await decideIntent(intentId, "approve");
-  emit("refresh-room");
+  if (await decideIntent(intentId, "approve")) emit("refresh-room");
 }
 
 async function handleDenyIntent(intentId: string): Promise<void> {
-  await decideIntent(intentId, "deny");
-  emit("refresh-room");
+  if (await decideIntent(intentId, "deny")) emit("refresh-room");
 }
 </script>

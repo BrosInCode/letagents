@@ -267,23 +267,26 @@
   }
 
   .desktop-board-panel {
-    padding: 12px;
+    padding: 16px 14px 18px;
   }
 
-  .desktop-board-header,
-  .desktop-board-controls {
+  .desktop-board-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .desktop-board-controls {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .desktop-board-header-actions {
     align-items: stretch;
-    flex-direction: column;
+    justify-content: flex-start;
   }
 
   .desktop-board-manager-pill {
+    flex: 1 1 auto;
     max-width: none;
-    justify-content: center;
   }
 
   .desktop-board-search {
@@ -292,7 +295,8 @@
   }
 
   .desktop-board-filter-groups {
-    justify-content: stretch;
+    padding-left: 0;
+    border-left: 0;
   }
 
   .desktop-board-segmented {
@@ -300,16 +304,11 @@
   }
 
   .desktop-board-primary-action {
-    width: 100%;
+    width: auto;
   }
 
   .desktop-board-add-button {
-    justify-self: stretch;
-  }
-
-  .desktop-task-card-header {
-    flex-direction: column;
-    align-items: stretch;
+    flex: 0 0 auto;
   }
 
   .desktop-task-detail-grid {
@@ -330,15 +329,15 @@
     grid-auto-columns: minmax(252px, 86vw);
   }
 
-  .desktop-task-modal-backdrop {
+  .desktop-task-modal-backdrop:not(.desktop-task-inspector-backdrop) {
     padding: 16px;
   }
 
-  .desktop-task-modal {
+  .desktop-task-create-modal {
     width: calc(100vw - 32px);
     max-height: calc(100vh - 32px);
     padding: 16px;
-    border-radius: 18px;
+    border-radius: var(--radius-xl);
   }
 
   .desktop-task-create-actions {
@@ -368,6 +367,23 @@
 
   .settings-focus-list {
     padding-left: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .desktop-board-header-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+  }
+
+  .desktop-board-manager-pill {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .desktop-task-board {
+    grid-auto-columns: minmax(244px, calc(100vw - 42px));
   }
 }
 

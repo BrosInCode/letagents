@@ -151,6 +151,10 @@ export function useRoomBoardController(
     };
   }
 
+  function clearError(): void {
+    errorMessage.value = null;
+  }
+
   function reviewAssignmentCandidates(task: DesktopTaskSummary): DesktopAgentPresence[] {
     return getReviewAssignmentCandidates(task, props.presence);
   }
@@ -248,6 +252,7 @@ export function useRoomBoardController(
     addTask,
     assignReview,
     busyAction,
+    clearError,
     errorMessage,
     reviewAssignmentCandidates,
     runTaskAction,

@@ -5,7 +5,8 @@
       class="input"
       type="text"
       name="task-title"
-      placeholder="New task title..."
+      aria-label="New task title"
+      placeholder="New task title"
       @keydown.enter="handleAdd"
     />
     <AppButton
@@ -15,7 +16,7 @@
       type="button"
       @click="handleAdd"
     >
-      Add
+      Add task
     </AppButton>
   </div>
 </template>
@@ -44,56 +45,63 @@ function handleAdd() {
   display: flex;
   align-items: center;
   gap: 8px;
-  margin-bottom: var(--space-lg);
-  padding: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 12px;
-  background: rgba(255, 255, 255, 0.03);
+  flex: 0 1 400px;
+  min-width: min(100%, 260px);
 }
 
 .add-task-form .input {
   flex: 1;
+  min-height: 36px;
   min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
-  border-radius: 9px;
-  background: rgba(255, 255, 255, 0.05);
-  color: var(--text-primary, #ffffff);
+  padding: 0 10px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-md);
+  background: var(--bg-subtle);
+  color: var(--text);
   font-family: inherit;
-  font-size: 0.85rem;
+  font-size: 0.78rem;
   outline: none;
-  transition: border-color 150ms;
+  transition: border-color var(--duration-fast) ease, background-color var(--duration-fast) ease;
 }
 
-.add-task-form .input:focus {
-  border-color: rgba(255, 255, 255, 0.2);
+.add-task-form .input:focus-visible {
+  border-color: var(--blue);
+  background: var(--bg-elevated);
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .add-task-form .input::placeholder {
-  color: var(--text-tertiary, #a1a1aa);
+  color: var(--text-tertiary);
+  opacity: 1;
 }
 
 .add-task-button {
-  min-height: 40px;
-  --btn-secondary-bg: rgba(255, 255, 255, 0.07);
-  --btn-secondary-hover-bg: rgba(255, 255, 255, 0.12);
-  --btn-secondary-border: rgba(255, 255, 255, 0.1);
-  --btn-secondary-color: var(--text-secondary, #d4d4d8);
+  min-height: 36px;
+  --btn-secondary-bg: var(--text);
+  --btn-secondary-hover-bg: color-mix(in srgb, var(--text) 88%, var(--bg));
+  --btn-secondary-border: var(--text);
+  --btn-secondary-color: var(--bg);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.add-task-button:focus-visible {
+  box-shadow: 0 0 0 2px var(--bg), 0 0 0 4px var(--blue);
 }
 
 @media (max-width: 768px) {
   .add-task-form {
-    flex-direction: column;
-    gap: 8px;
-    padding: 8px;
+    width: 100%;
+    flex-basis: auto;
   }
 
+  .add-task-form .input,
   .add-task-button {
-    width: 100%;
+    min-height: 44px;
   }
 
   .add-task-form .input {
-    padding: 10px;
     font-size: 0.82rem;
   }
 }

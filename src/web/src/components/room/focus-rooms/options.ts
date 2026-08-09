@@ -113,7 +113,7 @@ export function parentTaskNextLabel(value: FocusRoomParentTaskNextAction): strin
   return parentTaskNextLabels.get(value) ?? value
 }
 
-export function taskStatusLabel(status: string): string {
+export function focusStatusLabel(status: string): string {
   return status.replace(/_/g, ' ')
 }
 

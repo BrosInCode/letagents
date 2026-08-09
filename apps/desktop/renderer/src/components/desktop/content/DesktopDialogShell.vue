@@ -1,39 +1,41 @@
 <template>
-  <div
-    v-if="open"
-    :class="backdropClass"
-    :data-testid="testId"
-    @click.self="requestClose"
-  >
-    <component
-      :is="panelTag"
-      ref="panelElement"
-      :class="panelClass"
-      :id="panelId"
-      role="dialog"
-      aria-modal="true"
-      :aria-label="ariaLabel"
-      :aria-labelledby="ariaLabelledby"
-      tabindex="-1"
-      @keydown.esc.stop.prevent="requestClose"
-      @keydown.tab="handleTab"
-      @submit="handleSubmit"
+  <Transition name="desktop-dialog" appear>
+    <div
+      v-if="open"
+      :class="backdropClass"
+      :data-testid="testId"
+      @click.self="requestClose"
     >
-      <button
-        v-if="showClose"
-        type="button"
-        :class="closeClass"
-        :aria-label="closeLabel"
-        :disabled="closeDisabled"
-        @click="requestClose"
+      <component
+        :is="panelTag"
+        ref="panelElement"
+        :class="panelClass"
+        :id="panelId"
+        role="dialog"
+        aria-modal="true"
+        :aria-label="ariaLabel"
+        :aria-labelledby="ariaLabelledby"
+        tabindex="-1"
+        @keydown.esc.stop.prevent="requestClose"
+        @keydown.tab="handleTab"
+        @submit="handleSubmit"
       >
-        <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
-          <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
-        </svg>
-      </button>
-      <slot :request-close="requestClose" />
-    </component>
-  </div>
+        <button
+          v-if="showClose"
+          type="button"
+          :class="closeClass"
+          :aria-label="closeLabel"
+          :disabled="closeDisabled"
+          @click="requestClose"
+        >
+          <svg viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M18 6 6 18M6 6l12 12" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"/>
+          </svg>
+        </button>
+        <slot :request-close="requestClose" />
+      </component>
+    </div>
+  </Transition>
 </template>
 
 <script setup lang="ts">

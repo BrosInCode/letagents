@@ -1,5 +1,5 @@
 <template>
-  <div class="desktop-board-kanban-scroll">
+  <div class="desktop-board-kanban-scroll" tabindex="0" aria-label="Task lifecycle board">
     <div class="desktop-task-board" :data-filter="activeFilter">
       <section
         v-for="group in groups"
@@ -20,6 +20,9 @@
           @click="emit('toggle-group', group.status)"
         >
           <span class="desktop-task-column-title">
+            <svg class="desktop-task-column-chevron" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+              <path d="m5.5 6.5 2.5 2.5 2.5-2.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/>
+            </svg>
             <span class="desktop-task-column-dot" aria-hidden="true"></span>
             <span>{{ group.label }}</span>
           </span>
@@ -40,8 +43,13 @@
             @select="emit('select', task.id)"
             @run-action="(action) => emit('run-action', task, action)"
           />
+          <div
+            v-if="group.tasks.length === 0 && draggedTaskId !== null"
+            class="desktop-task-column-empty"
+          >
+            {{ canDropOnStatus(group.status) ? "Drop task here" : "No valid transition" }}
+          </div>
         </div>
-        <div v-else class="desktop-task-column-empty">Drop tasks here</div>
       </section>
     </div>
   </div>

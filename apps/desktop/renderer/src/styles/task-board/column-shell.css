@@ -1,66 +1,39 @@
 .desktop-task-column {
+  --task-accent: var(--text-tertiary);
   display: grid;
   align-content: start;
-  gap: 10px;
-  min-height: 420px;
+  gap: 8px;
+  min-height: 360px;
   height: max-content;
-  padding: 12px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 16px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.03), transparent 42%),
-    rgba(255, 255, 255, 0.018);
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
   transition:
-    border-color 150ms var(--ease-out),
-    background 150ms var(--ease-out),
-    opacity 150ms var(--ease-out);
+    border-color var(--duration-fast) ease,
+    background-color var(--duration-fast) ease,
+    opacity var(--duration-fast) ease;
 }
 
 .desktop-task-column[data-drop-active="true"] {
-  border-color: rgba(147, 197, 253, 0.44);
-  background:
-    linear-gradient(180deg, rgba(147, 197, 253, 0.09), transparent 46%),
-    rgba(147, 197, 253, 0.04);
+  border-color: var(--task-accent);
+  background: color-mix(in srgb, var(--task-accent) 6%, var(--bg-subtle));
 }
 
 .desktop-task-column[data-drop-disabled="true"] {
-  opacity: 0.48;
-}
-
-.desktop-room-shell[data-liquid-glass="true"] .desktop-task-column,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-task-card,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-task-empty,
-.desktop-room-shell[data-liquid-glass="true"] .desktop-task-detail-panel,
-.desktop-room-shell[data-liquid-glass="true"] .stat-card,
-.desktop-room-shell[data-liquid-glass="true"] .surface-intro,
-.desktop-room-shell[data-liquid-glass="true"] .surface-row,
-.desktop-room-shell[data-liquid-glass="true"] .room-empty-card {
-  border-color: rgba(255, 255, 255, 0.115);
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.09), rgba(255, 255, 255, 0.028) 54%, rgba(255, 255, 255, 0.014)),
-    rgba(12, 12, 12, 0.58);
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.105),
-    0 14px 34px rgba(0, 0, 0, 0.18);
-  backdrop-filter: blur(18px) saturate(1.14);
-}
-
-.desktop-room-shell[data-liquid-glass="true"] .desktop-task-card,
-.desktop-room-shell[data-liquid-glass="true"] .surface-row,
-.desktop-room-shell[data-liquid-glass="true"] .stat-card {
-  background:
-    linear-gradient(145deg, rgba(255, 255, 255, 0.105), rgba(255, 255, 255, 0.034) 54%, rgba(255, 255, 255, 0.014)),
-    rgba(14, 14, 14, 0.52);
+  opacity: 0.52;
 }
 
 .desktop-task-column-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
   width: 100%;
-  padding: 2px 2px 6px;
+  min-height: 32px;
+  padding: 0 2px 6px;
   border: 0;
+  border-bottom: 1px solid var(--border);
   background: transparent;
   color: inherit;
   font: inherit;
@@ -73,69 +46,85 @@
   align-items: center;
   gap: 7px;
   min-width: 0;
-  color: var(--text-tertiary);
-  font-size: 0.78rem;
-  font-weight: 900;
-  letter-spacing: 0.08em;
-  line-height: 1.35;
+  color: var(--text-secondary);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  line-height: 1.3;
   text-transform: uppercase;
 }
 
-.desktop-task-column-dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.7);
-  box-shadow: 0 0 0 3px rgba(148, 163, 184, 0.08);
+.desktop-task-column-chevron {
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  color: var(--text-tertiary);
+  transition: transform var(--duration-fast) ease;
 }
 
-.desktop-task-column-header strong {
+.desktop-task-column-header[aria-expanded="false"] .desktop-task-column-chevron {
+  transform: rotate(-90deg);
+}
+
+.desktop-task-column-dot {
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--task-accent);
+}
+
+.desktop-task-column-header > strong {
   display: inline-grid;
   place-items: center;
-  min-width: 34px;
-  height: 28px;
-  border: 1px solid rgba(255, 255, 255, 0.1);
+  min-width: 24px;
+  height: 22px;
+  padding: 0 6px;
   border-radius: 999px;
+  background: var(--accent-dim);
   color: var(--text-secondary);
-  font-size: 0.8rem;
+  font-size: 0.7rem;
+  font-weight: 650;
+  font-variant-numeric: tabular-nums;
 }
-
-.desktop-task-column[data-status="accepted"] .desktop-task-column-dot { background: #60a5fa; box-shadow: 0 0 0 3px rgba(96, 165, 250, 0.1); }
-.desktop-task-column[data-status="assigned"] .desktop-task-column-dot { background: #c084fc; box-shadow: 0 0 0 3px rgba(192, 132, 252, 0.1); }
-.desktop-task-column[data-status="in_progress"] .desktop-task-column-dot { background: #fbbf24; box-shadow: 0 0 0 3px rgba(251, 191, 36, 0.1); }
-.desktop-task-column[data-status="blocked"] .desktop-task-column-dot { background: #f87171; box-shadow: 0 0 0 3px rgba(248, 113, 113, 0.1); }
-.desktop-task-column[data-status="in_review"] .desktop-task-column-dot { background: #38bdf8; box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.1); }
-.desktop-task-column[data-status="merged"] .desktop-task-column-dot,
-.desktop-task-column[data-status="done"] .desktop-task-column-dot { background: #34d399; box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.1); }
-.desktop-task-column[data-status="cancelled"] .desktop-task-column-dot { background: #64748b; box-shadow: 0 0 0 3px rgba(100, 116, 139, 0.1); }
 
 .desktop-task-column-list {
   display: grid;
-  gap: 9px;
+  gap: 8px;
 }
 
 .desktop-task-column-empty {
   display: grid;
   place-items: center;
-  min-height: 104px;
-  border: 1px dashed rgba(255, 255, 255, 0.11);
-  border-radius: 12px;
-  color: var(--text-tertiary);
-  font-size: 0.76rem;
-  font-weight: 800;
+  min-height: 96px;
+  border: 1px dashed color-mix(in srgb, var(--task-accent) 52%, var(--border));
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  font-size: 0.73rem;
+  font-weight: 600;
 }
 
 .desktop-task-card,
 .desktop-task-empty {
-  border: 1px solid rgba(255, 255, 255, 0.08);
-  border-radius: 14px;
-  background: rgba(10, 10, 10, 0.52);
+  border: 1px solid var(--border-strong);
+  border-radius: 10px;
+  background: var(--bg-elevated);
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .desktop-task-column-header strong,
-.desktop-room-shell[data-liquid-glass="true"] .state-pill,
-.desktop-room-shell[data-liquid-glass="true"] code {
-  border-color: rgba(255, 255, 255, 0.115);
-  background: rgba(255, 255, 255, 0.052);
-  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.08);
+@media (hover: hover) and (pointer: fine) {
+  .desktop-task-column-header:hover .desktop-task-column-title {
+    color: var(--text);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .desktop-task-column-chevron {
+    transition: none;
+  }
+}
+
+@media (max-width: 640px) {
+  .desktop-task-column-header {
+    min-height: 44px;
+  }
 }

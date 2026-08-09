@@ -14,6 +14,7 @@
 
     <p v-if="task.description" class="desktop-task-detail-description">{{ task.description }}</p>
     <p v-else class="desktop-task-detail-muted">No task description yet.</p>
+    <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
 
     <section class="desktop-task-detail-grid" aria-label="Task ownership">
       <span>
@@ -188,6 +189,7 @@ const props = defineProps<{
   task: DesktopTaskSummary;
   actions: TaskAction[];
   busyAction: string | null;
+  error: string | null;
   reviewAssignmentCandidates: DesktopAgentPresence[];
   selectedReviewer: string;
 }>();

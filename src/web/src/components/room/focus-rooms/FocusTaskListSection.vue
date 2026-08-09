@@ -36,7 +36,7 @@
 
 <script setup lang="ts">
 import type { RoomTask } from '@/composables/useRoom'
-import { taskStatusLabel } from './options'
+import { taskStatusLabel } from '@/domain/taskStatus'
 
 defineProps<{
   tasks: readonly RoomTask[]

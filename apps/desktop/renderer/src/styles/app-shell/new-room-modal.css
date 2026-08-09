@@ -12,6 +12,7 @@
 }
 
 .desktop-new-room-modal {
+  color-scheme: dark;
   width: min(560px, 100%);
   max-height: min(760px, calc(100vh - 48px));
   display: grid;

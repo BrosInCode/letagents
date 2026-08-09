@@ -59,10 +59,8 @@ import type {
   FocusRoomSettings,
   RoomTask,
 } from '@/composables/useRoom'
-import {
-  parentVisibilityLabel,
-  taskStatusLabel,
-} from './options'
+import { taskStatusLabel } from '@/domain/taskStatus'
+import { parentVisibilityLabel } from './options'
 import FocusSettingsForm from './FocusSettingsForm.vue'
 
 defineProps<{

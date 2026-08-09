@@ -7,10 +7,12 @@ import { dirname, join } from "node:path";
 import type {
   DesktopAccountRoomEntry,
   DesktopAuthStatus,
+  DesktopBoardGovernanceSnapshot,
   DesktopRoomSnapshot,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorTurnControlInput,
   DesktopSupervisorTurnControlResult,
+  DesktopTaskSummary,
 } from "../ipc-types.js";
 import {
   localChatDatabasePath,
@@ -22,6 +24,7 @@ const smokeRoomIdentifier = "smoke-room";
 const smokeCodexWorkerSessionId = "worker_smoke_codex";
 const smokeCodexLiveSessionId = "local_smoke_codex";
 const smokeCodexReasoningSessionId = "reasoning_smoke_codex";
+const smokePendingBoardIntentCount = 1;
 let smokeUserDataPath: string | null = null;
 let smokeTurnControl: DesktopSupervisorManifestEntry["turnControl"] = null;
 
@@ -222,7 +225,9 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
       localFilesPath,
     },
     focusRooms: [],
-    tasks: [],
+    tasks: process.env.LETAGENTS_DESKTOP_BOARD_FIXTURE === "tasks"
+      ? desktopSmokeBoardTasks(now)
+      : [],
     participants: [],
     participantHiddenCount: 0,
     presence: [
@@ -296,7 +301,7 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
     boardSettings: {
       managerMode: "manager_optional",
       activeManager: null,
-      pendingIntentCount: 0,
+      pendingIntentCount: smokePendingBoardIntentCount,
     },
     messages: [
       {
@@ -341,6 +346,143 @@ export function desktopSmokeRoomSnapshot(): DesktopRoomSnapshot {
     ],
     githubEvents: null,
     sourceStates: readySourceStates(),
+  };
+}
+
+function desktopSmokeBoardTasks(now: string): DesktopTaskSummary[] {
+  const task = (
+    id: string,
+    title: string,
+    status: string,
+    overrides: Partial<DesktopTaskSummary> = {}
+  ): DesktopTaskSummary => ({
+    id,
+    title,
+    description: `Coordinate ${title.toLowerCase()} across the room and leave the next owner a clear handoff.`,
+    status,
+    assignee: null,
+    assigneeAgentKey: null,
+    createdBy: "Desktop Smoke",
+    prUrl: null,
+    workflowArtifacts: [],
+    workflowRefs: [],
+    activeLeases: [],
+    activeLocks: [],
+    stalePromptState: null,
+    createdAt: now,
+    updatedAt: now,
+    ...overrides,
+  });
+
+  return [
+    task("task_scope", "Define the manager escalation rules", "proposed"),
+    task("task_links", "Wire task links into room chat", "accepted"),
+    task("task_keyboard", "Polish the board keyboard flow", "assigned", {
+      assignee: "MapleRidge",
+      assigneeAgentKey: "codex",
+      activeLeases: [{
+        id: "lease_keyboard",
+        kind: "work",
+        holderLabel: "MapleRidge",
+        agentKey: "codex",
+        agentSessionId: smokeCodexWorkerSessionId,
+        status: "active",
+        updatedAt: now,
+      }],
+    }),
+    task("task_metrics", "Ship room handoff analytics", "in_progress", {
+      assignee: "RiverStone",
+      assigneeAgentKey: "codex/riverstone",
+      activeLeases: [{
+        id: "lease_metrics",
+        kind: "work",
+        holderLabel: "RiverStone",
+        agentKey: "codex/riverstone",
+        agentSessionId: "worker_riverstone",
+        status: "active",
+        updatedAt: now,
+      }],
+      workflowRefs: [{
+        provider: "github",
+        kind: "pull_request",
+        label: "PR #891",
+        url: "https://github.com/BrosInCode/letagents/pull/891",
+      }],
+    }),
+    task("task_audit", "Review the governance audit trail", "in_review", {
+      assignee: "MapleRidge",
+      assigneeAgentKey: "codex",
+      activeLeases: [
+        {
+          id: "lease_audit_work",
+          kind: "work",
+          holderLabel: "MapleRidge",
+          agentKey: "codex",
+          agentSessionId: smokeCodexWorkerSessionId,
+          status: "active",
+          updatedAt: now,
+        },
+        {
+          id: "lease_audit_review",
+          kind: "review",
+          holderLabel: "RiverStone",
+          agentKey: "codex/riverstone",
+          agentSessionId: "worker_riverstone",
+          status: "active",
+          updatedAt: now,
+        },
+      ],
+    }),
+  ];
+}
+
+export function desktopSmokeBoardGovernance(): DesktopBoardGovernanceSnapshot {
+  const now = new Date().toISOString();
+  return {
+    roomId: smokeRoomIdentifier,
+    managerMode: "manager_optional",
+    activeManager: null,
+    candidates: [{
+      agentSessionId: smokeCodexWorkerSessionId,
+      agentKey: "codex",
+      actorLabel: "MapleRidge | Local desktop's agent | Codex",
+      displayName: "MapleRidge",
+      runtime: "codex:smoke-room",
+      runtimeSource: "desktop_managed",
+      lastSeenAt: now,
+      isActiveManager: false,
+    }],
+    pendingIntents: [{
+      id: "intent_smoke_create",
+      taskId: null,
+      actionType: "task_create",
+      status: "pending",
+      proposerActorLabel: "MapleRidge",
+      payload: {
+        title: "Document the handoff contract",
+        description: "Capture the owner, reviewer, and done condition.",
+      },
+      createdAt: now,
+      expiresAt: null,
+    }],
+    pendingIntentCount: smokePendingBoardIntentCount,
+    audit: [{
+      id: "audit_smoke_manager",
+      kind: "manager_assignment",
+      eventType: "board_manager_released",
+      actorLabel: "Desktop Smoke",
+      reason: "Ready for a new manager",
+      createdAt: now,
+      metadata: null,
+    }],
+    warnings: [],
+    capabilities: {
+      canViewGovernance: true,
+      canAssignManager: true,
+      canReleaseManager: true,
+      canSetManagerMode: true,
+      canDecideIntents: true,
+    },
   };
 }
 

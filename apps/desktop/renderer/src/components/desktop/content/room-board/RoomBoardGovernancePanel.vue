@@ -7,7 +7,7 @@
     panel-tag="section"
     aria-labelledby="desktop-board-governance-title"
     :show-close="false"
-    data-testid="room-board-governance-panel"
+    test-id="room-board-governance-panel"
     @close="emit('close')"
     v-slot="{ requestClose }"
   >
@@ -34,13 +34,28 @@
       :options="sections"
       label="Board governance sections"
       mode="tabs"
+      tab-panel-id-prefix="desktop-board-governance-section"
       @update:model-value="emit('update:active-section', $event as DesktopBoardGovernanceSection)"
     />
 
-    <p v-if="error" class="desktop-board-governance-error" role="alert">{{ error }}</p>
-    <p v-else-if="loading" class="desktop-board-governance-loading">Loading governance…</p>
+    <div v-if="error" class="desktop-board-governance-error">
+      <p role="alert">{{ error }}</p>
+      <button
+        v-if="errorRetryable"
+        type="button"
+        class="desktop-board-secondary-action"
+        :disabled="loading"
+        @click="emit('retry')"
+      >
+        Refresh state
+      </button>
+    </div>
+    <p v-if="loading" class="desktop-board-governance-loading">Loading governance…</p>
 
-    <div v-else-if="governance" class="desktop-board-governance-body">
+    <div
+      v-if="governance && !loading"
+      class="desktop-board-governance-body"
+    >
       <div
         v-if="governance.warnings.length"
         class="desktop-board-governance-warnings"
@@ -51,32 +66,55 @@
           :key="warning.code"
           :data-severity="warning.severity"
         >
+          <strong>{{ warningSeverityLabel(warning.severity) }}:</strong>
           {{ warning.message }}
         </p>
       </div>
 
-      <RoomBoardGovernanceManagerSection
-        v-if="activeSection === 'manager'"
-        :governance="governance"
-        :busy="busy"
-        :selected-candidate-id="selectedCandidateId"
-        :live-agents="liveAgents"
-        @update:selected-candidate-id="emit('update:selected-candidate-id', $event)"
-        @assign-manager="emit('assign-manager', $event)"
-        @release-manager="emit('release-manager')"
-        @set-manager-mode="emit('set-manager-mode', $event)"
-      />
-      <RoomBoardGovernanceIntentSection
-        v-else-if="activeSection === 'pending'"
-        :governance="governance"
-        :busy="busy"
-        @approve-intent="emit('approve-intent', $event)"
-        @deny-intent="emit('deny-intent', $event)"
-      />
-      <RoomBoardGovernanceAuditSection
-        v-else
-        :governance="governance"
-      />
+      <div
+        id="desktop-board-governance-section-panel-manager"
+        v-show="activeSection === 'manager'"
+        class="desktop-board-governance-section-panel"
+        role="tabpanel"
+        aria-labelledby="desktop-board-governance-section-tab-manager"
+        tabindex="0"
+      >
+        <RoomBoardGovernanceManagerSection
+          :governance="governance"
+          :busy="busy"
+          :selected-candidate-id="selectedCandidateId"
+          :live-agents="liveAgents"
+          @update:selected-candidate-id="emit('update:selected-candidate-id', $event)"
+          @assign-manager="emit('assign-manager', $event)"
+          @release-manager="emit('release-manager')"
+          @set-manager-mode="emit('set-manager-mode', $event)"
+        />
+      </div>
+      <div
+        id="desktop-board-governance-section-panel-pending"
+        v-show="activeSection === 'pending'"
+        class="desktop-board-governance-section-panel"
+        role="tabpanel"
+        aria-labelledby="desktop-board-governance-section-tab-pending"
+        tabindex="0"
+      >
+        <RoomBoardGovernanceIntentSection
+          :governance="governance"
+          :busy="busy"
+          @approve-intent="emit('approve-intent', $event)"
+          @deny-intent="emit('deny-intent', $event)"
+        />
+      </div>
+      <div
+        id="desktop-board-governance-section-panel-audit"
+        v-show="activeSection === 'audit'"
+        class="desktop-board-governance-section-panel"
+        role="tabpanel"
+        aria-labelledby="desktop-board-governance-section-tab-audit"
+        tabindex="0"
+      >
+        <RoomBoardGovernanceAuditSection :governance="governance" />
+      </div>
     </div>
   </DesktopDialogShell>
 </template>
@@ -101,6 +139,7 @@ const props = defineProps<{
   loading: boolean;
   busy: boolean;
   error: string | null;
+  errorRetryable: boolean;
   governance: DesktopBoardGovernanceSnapshot | null;
   sections: Array<{ id: DesktopBoardGovernanceSection; label: string; count?: number }>;
   activeSection: DesktopBoardGovernanceSection;
@@ -117,7 +156,14 @@ const emit = defineEmits<{
   "set-manager-mode": [mode: DesktopBoardManagerMode];
   "approve-intent": [intentId: string];
   "deny-intent": [intentId: string];
+  retry: [];
 }>();
 
 const managerLabel = computed(() => activeManagerLabel(props.governance));
+
+function warningSeverityLabel(severity: string): string {
+  if (severity === "error") return "Error";
+  if (severity === "info") return "Info";
+  return "Warning";
+}
 </script>
