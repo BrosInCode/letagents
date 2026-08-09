@@ -55,7 +55,6 @@
 }
 
 .desktop-task-detail-grid span,
-.desktop-task-detail-row,
 .desktop-task-detail-link {
   min-width: 0;
   padding: 9px;
@@ -64,14 +63,12 @@
   background: rgba(255, 255, 255, 0.035);
 }
 
-.desktop-task-detail-grid span,
-.desktop-task-detail-row {
+.desktop-task-detail-grid span {
   display: grid;
   gap: 4px;
 }
 
 .desktop-task-detail-grid small,
-.desktop-task-detail-row small,
 .desktop-task-detail-link small {
   color: var(--text-tertiary);
   font-size: 0.68rem;
@@ -80,7 +77,6 @@
 }
 
 .desktop-task-detail-grid strong,
-.desktop-task-detail-row strong,
 .desktop-task-detail-link span {
   min-width: 0;
   overflow: hidden;

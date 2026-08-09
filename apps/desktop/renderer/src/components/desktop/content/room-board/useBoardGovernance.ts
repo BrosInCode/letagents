@@ -6,26 +6,6 @@ import type {
   DesktopBoardManagerMode,
 } from "../../../../../../electron/ipc-types";
 
-export function readableManagerRuntime(
-  runtimeSource: string | null | undefined,
-): string {
-  if (runtimeSource === "open_model") return "Open model";
-  if (runtimeSource === "desktop_managed") return "Desktop managed";
-  if (runtimeSource === "external") return "External";
-  if (runtimeSource === "unknown") return "Unknown";
-  return "Worker";
-}
-
-export function readableManagerMode(mode: DesktopBoardManagerMode): string {
-  if (mode === "intent_required") return "Approval required";
-  if (mode === "manager_optional") return "Manager optional";
-  return "Off";
-}
-
-export function readableIntentAction(actionType: string): string {
-  return actionType.replace(/^task_/, "").replaceAll("_", " ");
-}
-
 export function useBoardGovernance(roomIdentifier: string) {
   const governanceOpen = ref(false);
   const governanceLoading = ref(false);
@@ -37,7 +17,11 @@ export function useBoardGovernance(roomIdentifier: string) {
 
   const sections = computed(() => [
     { id: "manager" as const, label: "Manager" },
-    { id: "pending" as const, label: "Intents", count: governance.value?.pendingIntentCount ?? 0 },
+    {
+      id: "pending" as const,
+      label: "Intents",
+      count: governance.value?.pendingIntentCount || undefined,
+    },
     { id: "audit" as const, label: "Audit" },
   ]);
 

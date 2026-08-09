@@ -141,21 +141,6 @@
   background: var(--amber-dim);
 }
 
-.desktop-board-governance-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 12px;
-}
-
-.desktop-board-governance-grid div {
-  display: grid;
-  gap: 10px;
-  padding: 16px 18px;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-md);
-  background: var(--bg-card);
-}
-
 .desktop-board-governance-mode {
   display: grid;
   justify-self: start;
@@ -163,7 +148,6 @@
   padding: 0 2px;
 }
 
-.desktop-board-governance-grid span,
 .desktop-board-governance-mode > span {
   font-size: 0.72rem;
   font-weight: 800;

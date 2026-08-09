@@ -132,7 +132,6 @@
   background: rgba(10, 10, 10, 0.52);
 }
 
-.desktop-room-shell[data-liquid-glass="true"] .desktop-task-meta-grid span,
 .desktop-room-shell[data-liquid-glass="true"] .desktop-task-column-header strong,
 .desktop-room-shell[data-liquid-glass="true"] .state-pill,
 .desktop-room-shell[data-liquid-glass="true"] code {
