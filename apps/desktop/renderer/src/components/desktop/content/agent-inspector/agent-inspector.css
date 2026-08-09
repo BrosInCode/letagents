@@ -587,6 +587,15 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
 .agent-inspector-live-tool-status[data-status="error"] { background: rgba(251, 113, 133, 0.16); color: #fecaca; }
 .agent-inspector-live-tool-io { margin: 2px 0 0; padding: 8px 10px; border-radius: 9px; background: rgba(0, 0, 0, 0.28); color: var(--text-secondary, #cbd5e1); font-size: 0.72rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
 .agent-inspector-live-tool-error { margin: 2px 0 0; color: #fecaca; font-size: 0.74rem; line-height: 1.45; }
+/* The turn's published room reply is the product of the whole turn: render it
+   as message content, the loudest element in the feed. */
+.agent-inspector-live-reply { margin: 4px 0 0; padding: 6px 0 6px 12px; border-left: 2px solid rgba(52, 211, 153, 0.55); color: var(--text, #fafafa); font-size: 0.86rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
+.agent-inspector-live-tool-detail { margin: 2px 0 0; color: var(--text-secondary, #cbd5e1); font-size: 0.76rem; line-height: 1.5; overflow-wrap: anywhere; }
+/* Raw transport payloads stay one disclosure away for debugging; the summary
+   sentence above is the default reading. */
+.agent-inspector-live-tool-raw { margin: 4px 0 0; }
+.agent-inspector-live-tool-raw summary { cursor: pointer; font-size: 0.66rem; font-weight: 650; letter-spacing: 0.04em; color: var(--text-secondary, #a1a1aa); user-select: none; }
+.agent-inspector-live-tool-raw summary:hover { color: var(--text, #fafafa); }
 .agent-inspector-live-empty { margin: 8px 0; color: var(--text-secondary, #a1a1aa); font-size: 0.76rem; }
 .agent-inspector-live-footer { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; color: var(--text-secondary, #a1a1aa); font-size: 0.68rem; }
 .agent-inspector-live-footer span[aria-hidden="true"] { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18); }

@@ -155,7 +155,11 @@ function wrapperHostedMcpFixture(
   root: string,
   mcpConnectorSocketPath?: string,
   completionContract: "valid" | "missing" | "wrong_type" | "enum_superset" | "required_text" | "frame_flood" | "byte_flood" = "valid",
-  materializeRuntime = false,
+  // The wrapper now proves the completion contract against its hosted runtime
+  // before Cursor launches, so every wrapper-spawning fixture needs a runtime
+  // that answers the handshake; only shape-only fixtures (nonexistent roots)
+  // skip materialization.
+  materializeRuntime = true,
 ): Pick<
   CursorManagedProfile,
   "mcpRuntimeEntryPath" | "mcpRuntimeEnv" | "nativeAllowedWriteSubpaths" | "nativeAllowedReadSubpaths"
@@ -198,8 +202,13 @@ function wrapperHostedMcpFixture(
           required: completionContract === "required_text" ? ["outcome", "text"] : ["outcome"],
       },
     }];
+  let runtimeMaterialized = false;
   if (materializeRuntime) {
-    mkdirSync(dirname(runtimeEntry), { recursive: true });
+    // Shape-only fixtures pass unwritable roots (e.g. under /private/cursor);
+    // they never spawn the wrapper, so a failed materialization is harmless.
+    try { mkdirSync(dirname(runtimeEntry), { recursive: true }); runtimeMaterialized = true; } catch {}
+  }
+  if (runtimeMaterialized) {
     writeFileSync(runtimeEntry, `
 const readline = require("node:readline");
 require("node:fs").writeFileSync(${JSON.stringify(join(bridgeRoot, "runtime.pid"))}, String(process.pid));
@@ -225,7 +234,7 @@ lines.on("line", (line) => {
 });
 `);
   }
-  if (materializeRuntime && mcpConnectorSocketPath) {
+  if (runtimeMaterialized && mcpConnectorSocketPath) {
     const cursorHome = join(root, "home", ".cursor");
     mkdirSync(cursorHome, { recursive: true });
     const connectorSource = `
@@ -247,6 +256,8 @@ socket.once("close", () => process.exit(0));
   }
   return {
     mcpRuntimeEntryPath: materializeRuntime ? runtimeEntry : "/usr/bin/true",
+    // runtimeMaterialized only affects whether the entry exists on disk; the
+    // returned path stays stable for shape-only assertions.
     mcpRuntimeEnv: {
       ELECTRON_RUN_AS_NODE: "1",
       LETAGENTS_API_URL: "https://letagents.chat",
@@ -266,7 +277,7 @@ socket.once("close", () => process.exit(0));
 }
 
 const cursorMcpAttestationFixtureSource = `
-function attestFixtureMcp(mode = "normal") {
+function attestFixtureMcp() {
   return new Promise((resolve, reject) => {
     const fixtureFs = require("node:fs");
     const fixtureReadline = require("node:readline");
@@ -291,15 +302,7 @@ function attestFixtureMcp(mode = "normal") {
     connector.once("error", reject);
     connector.once("close", (code) => reject(new Error("fixture MCP connector closed before attestation: " + code)));
     connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: {} }) + "\\n");
-    if (mode === "request_flood") {
-      let flood = "";
-      for (let index = 0; index < 64; index += 1) {
-        flood += JSON.stringify({ jsonrpc: "2.0", id: 100 + index, method: "tools/list", params: {} }) + "\\n";
-      }
-      connector.stdin.write(flood);
-    } else {
-      connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\\n");
-    }
+    connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\\n");
   });
 }
 function detachFixtureMcp(connector) {
@@ -308,6 +311,41 @@ function detachFixtureMcp(connector) {
   if (typeof connector.stdout.unref === "function") connector.stdout.unref();
 }
 `;
+
+// The wrapper proves the complete_room_turn contract against its hosted
+// runtime before Cursor launches, so any test that reaches the wrapper needs a
+// runtime that answers the initialize/tools/list handshake and stays alive.
+function materializeAttestableMcpRuntime(dir: string): string {
+  const entry = join(dir, "attestable-mcp-runtime.cjs");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(entry, `
+const readline = require("node:readline");
+const lines = readline.createInterface({ input: process.stdin });
+lines.on("line", (line) => {
+  let request;
+  try { request = JSON.parse(line); } catch { return; }
+  if (!request || request.id === undefined) return;
+  const result = request.method === "initialize"
+    ? { protocolVersion: "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "attestable-fixture", version: "1" } }
+    : request.method === "tools/list"
+      ? { tools: [{
+          name: "complete_room_turn",
+          description: "complete the room turn",
+          inputSchema: {
+            type: "object",
+            properties: {
+              outcome: { type: "string", enum: ["reply", "no_reply"] },
+              text: { type: "string" },
+            },
+            required: ["outcome"],
+          },
+        }] }
+      : {};
+  process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: request.id, result }) + "\\n");
+});
+`);
+  return entry;
+}
 
 function wrapperMcpRuntimeEnv(connectorRoot: string, turnId: string): Record<string, string> {
   return {
@@ -577,6 +615,12 @@ async function waitForPath(path: string, timeoutMs = 5_000): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
   while (!existsSync(path) && Date.now() < deadline) await flush();
   return existsSync(path);
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate() && Date.now() < deadline) await flush();
+  assert.equal(predicate(), true, "condition did not become true before the wait deadline");
 }
 
 async function withLoopAlive<T>(work: Promise<T>): Promise<T> {
@@ -1570,7 +1614,11 @@ attestFixtureMcp().then(() => {
 });
 
 test("the exact live Cursor connector rejects bounded capability-attestation floods", async () => {
-  for (const floodMode of ["request_ids", "runtime_frames", "runtime_bytes"] as const) {
+  // Client-side floods no longer exist as an attestation concern: the wrapper
+  // proves the contract against its hosted runtime before Cursor launches, and
+  // client traffic is piped only after attestation settles. A runtime that
+  // floods the wrapper's own bounded handshake still fails before launch.
+  for (const floodMode of ["runtime_frames", "runtime_bytes"] as const) {
     const root = mkdtempSync(join(tmpdir(), `letagents-cursor-live-flood-${floodMode}-`));
     const configDir = join(root, "config");
     const homeDir = join(root, "home");
@@ -1585,7 +1633,7 @@ if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === 
   process.stdout.write("letagents: ready\\n");
   process.exit(0);
 }
-attestFixtureMcp(${JSON.stringify(floodMode === "request_ids" ? "request_flood" : "normal")}).then(() => {
+attestFixtureMcp().then(() => {
   process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "unexpected" }) + "\\n");
   process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "unexpected", session_id: "unexpected" }) + "\\n");
 }).catch(() => process.exit(82));
@@ -1627,11 +1675,7 @@ attestFixtureMcp(${JSON.stringify(floodMode === "request_ids" ? "request_flood" 
         withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({
           inboxItemId: `live-flood-${floodMode}`,
         }))),
-        floodMode === "request_ids"
-          ? /bounded outstanding tools\/list requests/
-          : floodMode === "runtime_frames"
-            ? /lifetime frame limit/
-            : /lifetime byte limit/,
+        /bounded capability-attestation exchange/,
       );
       assert.equal(connectorRoots.length, 1);
       assert.equal(existsSync(connectorRoots[0]!), false, "the flooded connector capability is revoked");
@@ -1709,6 +1753,146 @@ setTimeout(() => {
   }
 });
 
+// Cursor's headless worker spawns a helper that binds a private stdio socket
+// under its per-turn CURSOR_DATA_DIR. A unix-socket listen() is network-inbound;
+// an absolute inbound deny EPERMs that bind and the worker dies before the MCP
+// client ever connects. These launch a real sandboxed wrapper whose fake
+// cursor-agent binds a socket inside its data dir (must succeed) and inside a
+// path that is file-writable but outside the socket namespace (must stay
+// denied), so the guard fails if the inbound exception is removed or widened.
+async function runSupervisedWorkerSocketProbe(options: {
+  label: string;
+  dataRoot: string;
+  outsideRoot: string;
+  probeBeforeBindMs?: number;
+}): Promise<{ inside: string; outside: string; stderrTail: string }> {
+  const root = mkdtempSync(join(tmpdir(), `letagents-cursor-worker-sock-${options.label}-`));
+  const statePath = join(root, "turn.jsonl");
+  const cursorBin = join(root, "fake-cursor-agent");
+  const connectorRoot = join("/tmp", `letagents-cursor-mcp-${randomUUID()}`);
+  const connectorSocketPath = join(connectorRoot, "stdio.sock");
+  const sockprobePath = join(root, "sockprobe.json");
+  writeFileSync(statePath, "");
+  const hostedMcp = wrapperHostedMcpFixture(root, connectorSocketPath, "valid", true);
+  const runtimeEntryPath = hostedMcp.mcpRuntimeEntryPath!;
+  writeFileSync(cursorBin, `#!/usr/bin/env node
+const args = process.argv.slice(2);
+${cursorMcpAttestationFixtureSource}
+const net = require("node:net");
+const fs = require("node:fs");
+const path = require("node:path");
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+function tryBind(socketPath) {
+  return new Promise((resolve) => {
+    try { fs.mkdirSync(path.dirname(socketPath), { recursive: true }); } catch {}
+    try { fs.unlinkSync(socketPath); } catch {}
+    const server = net.createServer();
+    server.once("error", (error) => resolve(error.code || String(error.errno) || "ERR"));
+    try { server.listen(socketPath, () => server.close(() => resolve("OK"))); }
+    catch (error) { resolve(error.code || "THROW"); }
+  });
+}
+(async () => {
+  await new Promise((resolve) => setTimeout(resolve, ${Number(options.probeBeforeBindMs ?? 0)}));
+  const inside = await tryBind(path.join(process.env.CURSOR_DATA_DIR, "projects", "sandboxed-worktree", "worker.sock"));
+  const outside = await tryBind(path.join(${JSON.stringify(options.outsideRoot)}, "projects", "sandboxed-worktree", "worker.sock"));
+  fs.writeFileSync(${JSON.stringify(sockprobePath)}, JSON.stringify({ inside, outside }));
+  attestFixtureMcp().then((connector) => {
+    detachFixtureMcp(connector);
+    process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-${options.label}" }) + "\\n");
+    process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: "sockprobe-ok", session_id: "sess-${options.label}" }) + "\\n");
+  }).catch(() => process.exit(83));
+})();
+`);
+  chmodSync(cursorBin, 0o700);
+  let child: CursorCliChild | null = null;
+  try {
+    child = defaultLaunchTurn({
+      cursorBin,
+      args: ["-p", "--output-format", "stream-json", `worker socket probe ${options.label}`],
+      cwd: root,
+      env: { HOME: join(root, "home"), CURSOR_DATA_DIR: options.dataRoot, PATH: process.env.PATH },
+      deferStart: true,
+      statePath,
+      mcpConnectorSocketPath: connectorSocketPath,
+      mcpRuntimeEntryPath: runtimeEntryPath,
+      mcpRuntimeCwd: root,
+      mcpRuntimeEnv: wrapperMcpRuntimeEnv(connectorRoot, `cursor:worker-socket-${options.label}`),
+      providerAuthorization: "Bearer worker-socket-probe-proof",
+      restrictRemoteAuthority: true,
+      // The outside root is file-writable but is NOT a permitted socket root,
+      // so any bind failure there is the network boundary, not a write denial.
+      allowedWriteSubpaths: [
+        root, realpathSync(root),
+        options.dataRoot, realpathSync(options.dataRoot),
+        options.outsideRoot, realpathSync(options.outsideRoot),
+      ],
+      allowedReadSubpaths: [root, realpathSync(root)],
+      allowedNetworkUnixSockets: [connectorSocketPath],
+      allowedInternalUnixSocketRoots: [options.dataRoot, realpathSync(options.dataRoot)],
+      testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+      testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+      testMcpCapabilityTimeoutMs: 5000,
+    });
+    await child.prepared;
+    child.release();
+    await withLoopAlive(child.exited).catch(() => {});
+    const probe = JSON.parse(readFileSync(sockprobePath, "utf8"));
+    return { inside: probe.inside, outside: probe.outside, stderrTail: child.stderrTail() };
+  } finally {
+    if (child?.pid) { try { process.kill(child.pid, "SIGKILL"); } catch {} }
+    rmSync(connectorRoot, { recursive: true, force: true });
+    rmSync(root, { recursive: true, force: true });
+  }
+}
+
+test("supervised Cursor binds its private worker socket only inside its per-turn data dir", {
+  // The network sandbox that admits this bind is macOS seatbelt only (see the
+  // `sandboxed = process.platform === "darwin"` gate in the adapter).
+  skip: process.platform !== "darwin",
+}, async () => {
+  const dataRoot = mkdtempSync("/tmp/letagents-cursor-data-");
+  const outsideRoot = mkdtempSync("/tmp/letagents-cursor-outside-");
+  try {
+    const result = await runSupervisedWorkerSocketProbe({ label: "solo", dataRoot, outsideRoot });
+    assert.equal(result.inside, "OK",
+      `Cursor's headless worker binds its private stdio socket under CURSOR_DATA_DIR (stderr: ${result.stderrTail})`);
+    assert.equal(result.outside, "EPERM",
+      "a unix-socket listen() outside the per-turn data dir stays denied even where file writes are permitted");
+  } finally {
+    rmSync(dataRoot, { recursive: true, force: true });
+    rmSync(outsideRoot, { recursive: true, force: true });
+  }
+});
+
+test("concurrent supervised Cursor turns keep isolated worker-socket namespaces and a slow worker still binds", {
+  // macOS seatbelt only — the network-inbound boundary does not exist off darwin.
+  skip: process.platform !== "darwin",
+}, async () => {
+  // Random per-turn data dirs (different paths). Each turn's "outside" root is
+  // the OTHER turn's data root, so a pass proves one supervised turn can never
+  // bind inside a peer's private namespace. One worker starts late to show the
+  // static rule does not depend on startup timing.
+  const dataRootA = mkdtempSync("/tmp/letagents-cursor-data-");
+  const dataRootB = mkdtempSync("/tmp/letagents-cursor-data-");
+  try {
+    const [a, b] = await Promise.all([
+      runSupervisedWorkerSocketProbe({ label: "concurrent-a", dataRoot: dataRootA, outsideRoot: dataRootB, probeBeforeBindMs: 300 }),
+      runSupervisedWorkerSocketProbe({ label: "concurrent-b", dataRoot: dataRootB, outsideRoot: dataRootA }),
+    ]);
+    assert.equal(a.inside, "OK", `slow-starting turn A still binds its own worker socket (stderr: ${a.stderrTail})`);
+    assert.equal(a.outside, "EPERM", "turn A cannot bind inside turn B's per-turn namespace");
+    assert.equal(b.inside, "OK", `turn B binds its own worker socket (stderr: ${b.stderrTail})`);
+    assert.equal(b.outside, "EPERM", "turn B cannot bind inside turn A's per-turn namespace");
+  } finally {
+    rmSync(dataRootA, { recursive: true, force: true });
+    rmSync(dataRootB, { recursive: true, force: true });
+  }
+});
+
 test("the exact live Cursor connector times out and reaps native work when Cursor never connects", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-contract-no-connector-"));
   const configDir = join(root, "config");
@@ -1741,7 +1925,10 @@ setInterval(() => {}, 1000);
             ...input,
             testAgentUpstreamEndpoint: "http://127.0.0.1:9",
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
-            testMcpCapabilityTimeoutMs: 100,
+            // Budgets BOTH the wrapper's verify handshake and the connect
+            // wait; too tight and a slow node cold-start times verify out
+            // first, changing the expected failure message.
+            testMcpCapabilityTimeoutMs: 500,
           });
         },
       },
@@ -1760,7 +1947,7 @@ setInterval(() => {}, 1000);
     }));
     await assert.rejects(
       withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-contract-no-connector" }))),
-      /live MCP runtime did not attest complete_room_turn before model authority/,
+      /never connected the attested MCP runtime before model authority/,
     );
     assert.equal(await waitForPath(nativePidPath), true);
     const nativePid = Number(readFileSync(nativePidPath, "utf8"));
@@ -1771,6 +1958,84 @@ setInterval(() => {}, 1000);
     );
     assert.equal(connectorRoots.length, 1);
     assert.equal(existsSync(connectorRoots[0]!), false, "the unclaimed connector capability is removed");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a wedged hosted runtime fails the verify deadline before any native launch and is reaped", async () => {
+  // The verify-phase timeout is the only bound between wrapper start and
+  // connector listen; this pins it so a mutation that drops the deadline
+  // (reintroducing an unbounded startup wait) fails loudly.
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-live-wedged-runtime-"));
+  const configDir = join(root, "config");
+  const homeDir = join(root, "home");
+  const cursorBin = join(root, "fake-cursor-agent");
+  const nativePidPath = join(root, "tmp", "native.pid");
+  const wedgedRuntime = join(root, "wedged-runtime.cjs");
+  const wedgedPidPath = join(root, "wedged-runtime.pid");
+  const connectorRoots: string[] = [];
+  mkdirSync(configDir, { recursive: true });
+  mkdirSync(homeDir, { recursive: true });
+  mkdirSync(dirname(nativePidPath), { recursive: true });
+  writeFileSync(wedgedRuntime, `
+require("node:fs").writeFileSync(${JSON.stringify(wedgedPidPath)}, String(process.pid));
+process.stdin.on("data", () => {});
+setInterval(() => {}, 1000);
+`);
+  writeFileSync(cursorBin, `#!/usr/bin/env node
+const fs = require("node:fs");
+const args = process.argv.slice(2);
+if (args[0] === "--disable-project-configs" && args[1] === "mcp" && args[2] === "list") {
+  process.stdout.write("letagents: ready\\n");
+  process.exit(0);
+}
+fs.writeFileSync(${JSON.stringify(nativePidPath)}, String(process.pid));
+setInterval(() => {}, 1000);
+`);
+  chmodSync(cursorBin, 0o700);
+  try {
+    const adapter = new CursorProviderAdapter({
+      cursorBin,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          connectorRoots.push(dirname(input.mcpConnectorSocketPath!));
+          return defaultLaunchTurn({
+            ...input,
+            mcpRuntimeEntryPath: wedgedRuntime,
+            testAgentUpstreamEndpoint: "http://127.0.0.1:9",
+            testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
+            testMcpCapabilityTimeoutMs: 300,
+          });
+        },
+      },
+      supervisedProfileFactory: (input) => ({
+        homeDir,
+        configDir,
+        dataDir: join(root, "data"),
+        cacheDir: join(root, "cache"),
+        env: { HOME: homeDir },
+        ...wrapperHostedMcpFixture(root, input.mcpConnectorSocketPath, "valid", true),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({
+      workAttemptId: "wa-cursor-live-wedged-runtime",
+      cwd: root,
+    }));
+    await assert.rejects(
+      withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "live-wedged-runtime" }))),
+      /did not prove the complete_room_turn contract before launch/,
+    );
+    assert.equal(existsSync(nativePidPath), false, "native Cursor must never launch after a wedged verify phase");
+    assert.equal(await waitForPath(wedgedPidPath), true);
+    const wedgedPid = Number(readFileSync(wedgedPidPath, "utf8"));
+    await waitFor(() => {
+      try { process.kill(wedgedPid, 0); return false; }
+      catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+    });
+    assert.equal(connectorRoots.length, 1);
+    await waitFor(() => !existsSync(connectorRoots[0]!));
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -3078,7 +3343,7 @@ test("SIGTERM at every async wrapper startup boundary cannot publish not_started
         deferStart: true,
         statePath,
         mcpConnectorSocketPath: join(connectorRoot, "stdio.sock"),
-        mcpRuntimeEntryPath: "/usr/bin/true",
+        mcpRuntimeEntryPath: materializeAttestableMcpRuntime(join(root, "attestable-mcp-runtime")),
         mcpRuntimeCwd: root,
         mcpRuntimeEnv,
         providerAuthorization: "Bearer startup-race-provider-proof",
@@ -3149,7 +3414,7 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       deferStart: true,
       statePath,
       mcpConnectorSocketPath: join(connectorRoot, "stdio.sock"),
-      mcpRuntimeEntryPath: "/usr/bin/true",
+      mcpRuntimeEntryPath: materializeAttestableMcpRuntime(join(root, "attestable-mcp-runtime")),
       mcpRuntimeCwd: root,
       mcpRuntimeEnv: wrapperMcpRuntimeEnv(connectorRoot, "cursor:evidence-deadline"),
       providerAuthorization: "Bearer evidence-deadline-provider-proof",
@@ -4164,7 +4429,7 @@ setInterval(() => {}, 1000);
             ...input,
             testAgentUpstreamEndpoint,
             testControlPlaneUpstreamEndpoint: "http://127.0.0.1:9",
-            testMcpCapabilityTimeoutMs: 400,
+            testMcpCapabilityTimeoutMs: 800,
           });
         },
       },
@@ -4182,7 +4447,7 @@ setInterval(() => {}, 1000);
       withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "held-timeout" }))),
       (error: unknown) => {
         const message = String((error as Error)?.message ?? error);
-        assert.match(message, /did not attest complete_room_turn before model authority/);
+        assert.match(message, /never connected the attested MCP runtime before model authority/);
         assert.doesNotMatch(message, /connector ended/);
         return true;
       },
@@ -4479,7 +4744,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         sourceHomeDir,
         profileRoot: input.profileRoot ?? stableProfileRoot,
         ...(input.inspectionOnly ? {} : {
-          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+          mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
         }),
       }),
     });
@@ -4568,7 +4836,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
           sourceHomeDir,
           profileRoot: input.profileRoot ?? stableProfileRoot,
           ...(input.inspectionOnly ? {} : {
-            mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+            mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
           }),
         }),
       });
@@ -4724,7 +4995,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         sourceHomeDir,
         profileRoot: input.profileRoot ?? stableProfileRoot,
         ...(input.inspectionOnly ? {} : {
-          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+          mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
         }),
       }),
     });
@@ -4928,7 +5202,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         sourceHomeDir,
         profileRoot: input.profileRoot ?? stableProfileRoot,
         ...(input.inspectionOnly ? {} : {
-          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+          mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
         }),
       }),
     });
@@ -5044,7 +5321,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         sourceHomeDir,
         profileRoot: input.profileRoot ?? stableProfileRoot,
         ...(input.inspectionOnly ? {} : {
-          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+          mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
         }),
       }),
     });
@@ -5131,7 +5411,10 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
         sourceHomeDir,
         profileRoot: input.profileRoot ?? stableProfileRoot,
         ...(input.inspectionOnly ? {} : {
-          mcpRuntime: { entryPath: "/usr/bin/true", readRoots: ["/usr/bin"] },
+          mcpRuntime: {
+            entryPath: materializeAttestableMcpRuntime(join(dirname(sourceHomeDir), "attestable-mcp-runtime")),
+            readRoots: [join(dirname(sourceHomeDir), "attestable-mcp-runtime")],
+          },
         }),
       }),
     });

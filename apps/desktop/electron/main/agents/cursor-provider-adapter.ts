@@ -148,7 +148,7 @@ export interface CursorCliChild {
 }
 
 export interface CursorProviderAdapterDependencies {
-  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
+  launchTurn(input: { cursorBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv; deferStart?: boolean; statePath?: string; workspaceGenerationManifestPath?: string; deniedReadPaths?: string[]; deniedReadSubpaths?: string[]; deniedReadMetadataPaths?: string[]; deniedReadWriteRegexes?: string[]; deniedWriteRegexes?: string[]; deniedWritePaths?: string[]; deniedWriteStructuralPaths?: string[]; deniedWriteSubpaths?: string[]; deniedExecSubpaths?: string[]; allowedWriteSubpaths?: string[]; allowedReadSubpaths?: string[]; allowedNetworkUnixSockets?: string[]; allowedInternalUnixSocketRoots?: string[]; mcpConnectorSocketPath?: string; mcpRuntimeEntryPath?: string; mcpRuntimeCwd?: string; mcpRuntimeEnv?: Readonly<Record<string, string>>; providerAuthorization?: string; restrictRemoteAuthority?: boolean; testAgentUpstreamEndpoint?: string; testControlPlaneUpstreamEndpoint?: string; testMcpCapabilityTimeoutMs?: number; testStartupBarrier?: { path: string; stage: "mcp_listen" | "authority_listen" | "agent_listen" } }): CursorCliChild;
   attestSupervisedMcp(input: {
     cursorBin: string;
     cwd: string;
@@ -647,6 +647,13 @@ export function defaultLaunchTurn(input: {
   allowedWriteSubpaths?: string[];
   allowedReadSubpaths?: string[];
   allowedNetworkUnixSockets?: string[];
+  /**
+   * Directory roots under which the sandboxed agent may bind AND connect its
+   * own private unix sockets (Cursor's headless worker IPC). Scoped to the
+   * per-turn CURSOR_DATA_DIR so the inbound-bind allowance can never reach a
+   * shared or ambient socket path.
+   */
+  allowedInternalUnixSocketRoots?: string[];
   mcpConnectorSocketPath?: string;
   mcpRuntimeEntryPath?: string;
   mcpRuntimeCwd?: string;
@@ -684,6 +691,9 @@ export function defaultLaunchTurn(input: {
     : [];
   const allowedNetworkUnixSockets = validateCursorSandboxPaths(
     (input.allowedNetworkUnixSockets ?? []).flatMap(cursorSandboxPathVariants),
+  );
+  const allowedInternalUnixSocketRoots = validateCursorSandboxPaths(
+    (input.allowedInternalUnixSocketRoots ?? []).flatMap(cursorSandboxPathVariants),
   );
   if (input.statePath) {
     const streamPaths = validateCursorSandboxPaths(
@@ -777,7 +787,7 @@ const https = require("node:https");
 const net = require("node:net");
 const path = require("node:path");
 const { StringDecoder } = require("node:string_decoder");
-const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, mcpCapabilityTimeoutMsValue, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
+const [bin, statePath, workspaceGenerationManifestPath, deniedReadPathsJson, deniedReadSubpathsJson, deniedReadMetadataPathsJson, deniedReadWriteRegexesJson, deniedWriteRegexesJson, deniedWritePathsJson, deniedWriteStructuralPathsJson, deniedWriteSubpathsJson, deniedExecSubpathsJson, allowedWriteSubpathsJson, allowedReadSubpathsJson, allowedNetworkUnixSocketsJson, allowedInternalUnixSocketRootsJson, mcpConnectorSocketPath, mcpRuntimeEntryPath, mcpRuntimeCwd, testStartupBarrierPath, testStartupBarrierStage, mcpCapabilityTimeoutMsValue, restrictRemoteAuthorityValue, ...args] = process.argv.slice(1);
 const deniedReadPaths = JSON.parse(deniedReadPathsJson || "[]");
 const deniedReadSubpaths = JSON.parse(deniedReadSubpathsJson || "[]");
 const deniedReadMetadataPaths = JSON.parse(deniedReadMetadataPathsJson || "[]");
@@ -790,6 +800,7 @@ const deniedExecSubpaths = JSON.parse(deniedExecSubpathsJson || "[]");
 const allowedWriteSubpaths = JSON.parse(allowedWriteSubpathsJson || "[]");
 const allowedReadSubpaths = JSON.parse(allowedReadSubpathsJson || "[]");
 const allowedNetworkUnixSockets = JSON.parse(allowedNetworkUnixSocketsJson || "[]");
+const allowedInternalUnixSocketRoots = JSON.parse(allowedInternalUnixSocketRootsJson || "[]");
 const restrictRemoteAuthority = restrictRemoteAuthorityValue === "1";
 const mcpCapabilityTimeoutMs = Number(mcpCapabilityTimeoutMsValue);
 if (!Number.isSafeInteger(mcpCapabilityTimeoutMs)
@@ -1395,6 +1406,131 @@ function validatedMcpRuntimeEnv(value) {
   }
   return result;
 }
+function hasRequiredCompletionContract(response) {
+  const tools = response && response.result && response.result.tools;
+  if (!Array.isArray(tools)) return false;
+  const matches = tools.filter((tool) => tool && tool.name === "complete_room_turn");
+  if (matches.length !== 1) return false;
+  const schema = matches[0].inputSchema;
+  const properties = schema && schema.properties;
+  const outcome = properties && properties.outcome;
+  const text = properties && properties.text;
+  return schema && typeof schema === "object" && !Array.isArray(schema)
+    && schema.type === "object"
+    && properties && typeof properties === "object" && !Array.isArray(properties)
+    && outcome && typeof outcome === "object" && !Array.isArray(outcome)
+    && outcome.type === "string"
+    && Array.isArray(outcome.enum)
+    && outcome.enum.length === 2
+    && new Set(outcome.enum).size === 2
+    && outcome.enum.includes("reply")
+    && outcome.enum.includes("no_reply")
+    && text && typeof text === "object" && !Array.isArray(text)
+    && text.type === "string"
+    && Array.isArray(schema.required)
+    && schema.required.length === 1
+    && schema.required[0] === "outcome";
+}
+// The wrapper hosts the MCP runtime itself, so it proves the complete_room_turn
+// contract with its own bounded initialize/tools/list handshake before Cursor
+// is launched. Attestation must never wait for the client's tools/list: Cursor
+// defers tool listing until its agent bootstrap succeeds, and that bootstrap is
+// exactly what the authority hold suspends, so gating model authority on client
+// traffic deadlocks every supervised turn against its own hold.
+function verifyHostedMcpRuntimeContract(runtime) {
+  return new Promise((resolve, reject) => {
+    const initializeId = "letagents-attest-init-" + randomUUID();
+    const listId = "letagents-attest-tools-" + randomUUID();
+    let inspectionBuffer = Buffer.alloc(0);
+    let inspectionBytes = 0;
+    let inspectionFrames = 0;
+    const maxInspectionBytes = 1024 * 1024;
+    const maxInspectionFrames = 256;
+    let settled = false;
+    let deadline = null;
+    const finish = (error, leftover) => {
+      if (settled) return;
+      settled = true;
+      if (deadline) clearTimeout(deadline);
+      deadline = null;
+      runtime.stdout.removeListener("data", onData);
+      runtime.removeListener("error", onRuntimeError);
+      runtime.removeListener("close", onRuntimeClose);
+      // Any bytes the runtime pipelined after the attested tools/list response
+      // belong to the client stream; return them unconsumed for the connector.
+      if (!error && leftover && leftover.length > 0) runtime.stdout.unshift(leftover);
+      if (error) reject(error); else resolve();
+    };
+    const onRuntimeError = () => finish(new Error("Cursor's live MCP runtime failed before capability attestation."));
+    const onRuntimeClose = () => finish(new Error("Cursor's live MCP runtime ended before capability attestation."));
+    const onData = (chunk) => {
+      if (settled) return;
+      inspectionBytes += chunk.length;
+      if (inspectionBytes > maxInspectionBytes) {
+        finish(new Error("Cursor's live MCP runtime exceeded the bounded capability-attestation exchange."));
+        return;
+      }
+      inspectionBuffer = Buffer.concat([inspectionBuffer, chunk]);
+      for (;;) {
+        const newline = inspectionBuffer.indexOf(10);
+        if (newline < 0) break;
+        inspectionFrames += 1;
+        if (inspectionFrames > maxInspectionFrames) {
+          finish(new Error("Cursor's live MCP runtime exceeded the bounded capability-attestation exchange."));
+          return;
+        }
+        const line = inspectionBuffer.subarray(0, newline).toString("utf8").trim();
+        inspectionBuffer = inspectionBuffer.subarray(newline + 1);
+        if (!line) continue;
+        let response;
+        try { response = JSON.parse(line); }
+        catch {
+          finish(new Error("Cursor's live MCP runtime emitted invalid capability-attestation protocol."));
+          return;
+        }
+        // Startup notifications from the runtime are legitimate protocol; only
+        // the wrapper's own request ids participate in attestation.
+        if (!response || (response.id !== initializeId && response.id !== listId)) continue;
+        if (response.id === initializeId) {
+          try {
+            runtime.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
+            runtime.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: listId, method: "tools/list", params: {} }) + "\n");
+          } catch (error) {
+            finish(error instanceof Error ? error : new Error(String(error)));
+            return;
+          }
+          continue;
+        }
+        if (!hasRequiredCompletionContract(response)) {
+          finish(new Error("Cursor's live MCP runtime does not expose the required complete_room_turn contract."));
+          return;
+        }
+        finish(null, inspectionBuffer);
+        return;
+      }
+    };
+    deadline = setTimeout(() => {
+      finish(new Error("Cursor's hosted MCP runtime did not prove the complete_room_turn contract before launch."));
+    }, mcpCapabilityTimeoutMs);
+    runtime.stdout.on("data", onData);
+    runtime.once("error", onRuntimeError);
+    runtime.once("close", onRuntimeClose);
+    try {
+      runtime.stdin.write(JSON.stringify({
+        jsonrpc: "2.0",
+        id: initializeId,
+        method: "initialize",
+        params: {
+          protocolVersion: "2024-11-05",
+          capabilities: {},
+          clientInfo: { name: "letagents-cursor-turn-wrapper", version: "1.0.0" },
+        },
+      }) + "\n");
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
 function startMcpConnector() {
   if (!restrictRemoteAuthority) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -1443,214 +1579,102 @@ function startMcpConnector() {
       failStart(error);
       return;
     }
-    const server = net.createServer({ allowHalfOpen: false }, (socket) => {
-      if (finalizing || authorityRetiring || mcpConnectorAdmitted) { socket.destroy(); return; }
-      mcpConnectorAdmitted = true;
-      mcpConnectorSocket = socket;
-      // Cursor initializes MCP before it can execute model-directed code. One
-      // accepted stdio connection prevents a later native/escaped process from
-      // replaying this otherwise-readable connector path.
-      server.close();
-      const runtime = spawn(process.execPath, [mcpRuntimeEntryPath], {
-        cwd: mcpRuntimeCwd,
-        env: mcpRuntimeEnv,
-        stdio: ["pipe", "pipe", "pipe"],
-        detached: process.platform !== "win32",
-      });
-      mcpRuntime = runtime;
-      mcpRuntimeProcessIdentity = exactProcessGroupLeaderIdentity(runtime.pid, process.pid);
-      if (process.platform !== "win32" && typeof mcpRuntimeProcessIdentity !== "string") {
-        failMcpCapabilityAttestation("Cursor's hosted MCP runtime did not expose an exact process-group birth identity.");
-        try { runtime.kill("SIGTERM"); } catch {}
+    const runtime = spawn(process.execPath, [mcpRuntimeEntryPath], {
+      cwd: mcpRuntimeCwd,
+      env: mcpRuntimeEnv,
+      stdio: ["pipe", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
+    mcpRuntime = runtime;
+    mcpRuntimeProcessIdentity = exactProcessGroupLeaderIdentity(runtime.pid, process.pid);
+    if (process.platform !== "win32" && typeof mcpRuntimeProcessIdentity !== "string") {
+      const detail = "Cursor's hosted MCP runtime did not expose an exact process-group birth identity.";
+      try { runtime.kill("SIGTERM"); } catch {}
+      failMcpCapabilityAttestation(detail);
+      failStart(new Error(detail));
+      return;
+    }
+    forwardBoundedStderr(runtime.stderr, "Cursor's hosted MCP runtime");
+    verifyHostedMcpRuntimeContract(runtime).then(() => {
+      if (finalizing || authorityRetiring) {
+        failStart(new Error("Cursor MCP connector startup was cancelled."));
         return;
       }
-      const listedRequestIds = new Set();
-      let clientInspectionBuffer = Buffer.alloc(0);
-      let runtimeInspectionBuffer = Buffer.alloc(0);
-      let inspectionBytes = 0;
-      let inspectionFrames = 0;
-      const maxInspectionBytes = 1024 * 1024;
-      const maxInspectionFrames = 256;
-      const maxOutstandingListRequests = 32;
-      const accountInspectionChunk = (chunk) => {
-        inspectionBytes += chunk.length;
-        if (inspectionBytes <= maxInspectionBytes) return true;
-        failMcpCapabilityAttestation("Cursor's live MCP capability-attestation exchange exceeded its lifetime byte limit.");
-        return false;
-      };
-      const accountInspectionFrame = () => {
-        inspectionFrames += 1;
-        if (inspectionFrames <= maxInspectionFrames) return true;
-        failMcpCapabilityAttestation("Cursor's live MCP capability-attestation exchange exceeded its lifetime frame limit.");
-        return false;
-      };
-      const requestIdKey = (value) => {
-        if (typeof value === "string") return "s:" + value;
-        if (typeof value === "number" && Number.isFinite(value)) return "n:" + String(value);
-        return null;
-      };
-      const hasRequiredCompletionContract = (response) => {
-        const tools = response && response.result && response.result.tools;
-        if (!Array.isArray(tools)) return false;
-        const matches = tools.filter((tool) => tool && tool.name === "complete_room_turn");
-        if (matches.length !== 1) return false;
-        const schema = matches[0].inputSchema;
-        const properties = schema && schema.properties;
-        const outcome = properties && properties.outcome;
-        const text = properties && properties.text;
-        return schema && typeof schema === "object" && !Array.isArray(schema)
-          && schema.type === "object"
-          && properties && typeof properties === "object" && !Array.isArray(properties)
-          && outcome && typeof outcome === "object" && !Array.isArray(outcome)
-          && outcome.type === "string"
-          && Array.isArray(outcome.enum)
-          && outcome.enum.length === 2
-          && new Set(outcome.enum).size === 2
-          && outcome.enum.includes("reply")
-          && outcome.enum.includes("no_reply")
-          && text && typeof text === "object" && !Array.isArray(text)
-          && text.type === "string"
-          && Array.isArray(schema.required)
-          && schema.required.length === 1
-          && schema.required[0] === "outcome";
-      };
-      socket.on("data", (chunk) => {
-        if (mcpCapabilityAttested || finalizing || authorityRetiring) return;
-        if (!accountInspectionChunk(chunk)) return;
-        clientInspectionBuffer = Buffer.concat([clientInspectionBuffer, chunk]);
-        if (clientInspectionBuffer.length > maxInspectionBytes) {
-          failMcpCapabilityAttestation("Cursor's live MCP client exceeded the bounded capability-attestation exchange.");
-          return;
-        }
-        for (;;) {
-          const newline = clientInspectionBuffer.indexOf(10);
-          if (newline < 0) break;
-          if (!accountInspectionFrame()) return;
-          const line = clientInspectionBuffer.subarray(0, newline).toString("utf8").trim();
-          clientInspectionBuffer = clientInspectionBuffer.subarray(newline + 1);
-          if (!line) continue;
-          let request;
-          try { request = JSON.parse(line); }
-          catch {
-            failMcpCapabilityAttestation("Cursor's live MCP client emitted invalid capability-attestation protocol.");
-            return;
-          }
-          if (request && request.method === "tools/list") {
-            const key = requestIdKey(request.id);
-            if (!key) {
-              failMcpCapabilityAttestation("Cursor's live MCP client did not issue an attributable tools/list request.");
-              return;
-            }
-            listedRequestIds.add(key);
-            if (listedRequestIds.size > maxOutstandingListRequests) {
-              failMcpCapabilityAttestation("Cursor's live MCP client exceeded the bounded outstanding tools/list requests.");
-              return;
-            }
-          }
-        }
-      });
-      socket.pipe(runtime.stdin);
-      const inspectRuntimeCapability = (chunk) => {
-        if (finalizing || authorityRetiring) return;
-        if (!accountInspectionChunk(chunk)) return;
-        runtimeInspectionBuffer = Buffer.concat([runtimeInspectionBuffer, chunk]);
-        if (runtimeInspectionBuffer.length > maxInspectionBytes) {
-          failMcpCapabilityAttestation("Cursor's live MCP runtime exceeded the bounded capability-attestation exchange.");
-          return;
-        }
-        for (;;) {
-          const newline = runtimeInspectionBuffer.indexOf(10);
-          if (newline < 0) break;
-          if (!accountInspectionFrame()) return;
-          const framedLine = runtimeInspectionBuffer.subarray(0, newline + 1);
-          const line = runtimeInspectionBuffer.subarray(0, newline).toString("utf8").trim();
-          runtimeInspectionBuffer = runtimeInspectionBuffer.subarray(newline + 1);
-          if (!line) {
-            if (!socket.destroyed) socket.write(framedLine);
-            continue;
-          }
-          let response;
-          try { response = JSON.parse(line); }
-          catch {
-            failMcpCapabilityAttestation("Cursor's live MCP runtime emitted invalid capability-attestation protocol.");
-            return;
-          }
-          const key = requestIdKey(response && response.id);
-          if (key && listedRequestIds.has(key)) {
-            listedRequestIds.delete(key);
-            if (!hasRequiredCompletionContract(response)) {
-              failMcpCapabilityAttestation("Cursor's live MCP runtime does not expose the required complete_room_turn contract.");
-              return;
-            }
-            mcpCapabilityAttested = true;
-            if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
-            mcpCapabilityDeadline = null;
-            // Release every request held for attestation: now admissible.
-            settleMcpCapabilityWaiters(true);
-          }
-          if (!socket.destroyed) socket.write(framedLine);
-          if (mcpCapabilityAttested && runtimeInspectionBuffer.length > 0) {
-            if (!socket.destroyed) socket.write(runtimeInspectionBuffer);
-            runtimeInspectionBuffer = Buffer.alloc(0);
-            break;
-          }
-        }
-        if (mcpCapabilityAttested && !socket.destroyed) {
-          // The bounded inspection phase has flushed every byte in original
-          // order. Restore Node's native pipe backpressure for the unbounded
-          // lifetime of normal tool traffic.
-          runtime.stdout.removeListener("data", inspectRuntimeCapability);
-          runtime.stdout.pipe(socket);
-        }
-      };
-      runtime.stdout.on("data", inspectRuntimeCapability);
-      forwardBoundedStderr(runtime.stderr, "Cursor's hosted MCP runtime");
-      socket.once("error", () => {
-        failMcpCapabilityAttestation("Cursor's live MCP connector failed before the turn became terminal.");
-        try { runtime.kill("SIGTERM"); } catch {}
-      });
-      socket.once("close", () => {
-        failMcpCapabilityAttestation("Cursor's live MCP connector ended before the turn became terminal.");
-        try { runtime.stdin.end(); } catch {}
-      });
       runtime.once("error", () => {
         failMcpCapabilityAttestation("Cursor's live MCP runtime failed before the turn became terminal.");
-        socket.destroy();
+        if (mcpConnectorSocket) { try { mcpConnectorSocket.destroy(); } catch {} }
       });
       runtime.once("close", () => {
         failMcpCapabilityAttestation("Cursor's live MCP runtime ended before the turn became terminal.");
-        socket.destroy();
+        if (mcpConnectorSocket) { try { mcpConnectorSocket.destroy(); } catch {} }
       });
-    });
-    mcpConnectorServer = server;
-    server.once("error", failStart);
-    server.once("close", () => {
-      if (!settled && (finalizing || authorityRetiring)) {
-        failStart(new Error("Cursor MCP connector startup was cancelled."));
-      }
-    });
-    server.listen(mcpConnectorSocketPath, async () => {
-      await waitAtTestStartupBarrier("mcp_listen");
-      if (finalizing || authorityRetiring) {
-        try { server.close(); } catch {}
-        failStart(new Error("Cursor MCP connector startup was cancelled."));
-        return;
-      }
-      server.removeListener("error", failStart);
-      try { chmodSync(mcpConnectorSocketPath, 0o600); }
-      catch (error) { void closeMcpConnector(); failStart(error); return; }
-      mcpCapabilityDeadline = setTimeout(() => {
-        failMcpCapabilityAttestation("Cursor's live MCP runtime did not attest complete_room_turn before model authority.");
-      }, mcpCapabilityTimeoutMs);
-      settled = true;
-      server.on("error", (error) => {
-        const detail = "Cursor MCP connector failed: " + (error && error.message ? error.message : String(error));
-        if (!native) { finishNotStarted(detail); return; }
-        if (!exitEvidence) exitEvidence = { type: "error", error: detail };
-        exitCode = 1;
-        void beginFatalReaping();
+      const server = net.createServer({ allowHalfOpen: false }, (socket) => {
+        if (finalizing || authorityRetiring || mcpConnectorAdmitted) { socket.destroy(); return; }
+        mcpConnectorAdmitted = true;
+        mcpConnectorSocket = socket;
+        // Cursor initializes MCP before it can execute model-directed code. One
+        // accepted stdio connection prevents a later native/escaped process from
+        // replaying this otherwise-readable connector path.
+        server.close();
+        if (runtime.exitCode !== null || runtime.signalCode !== null) {
+          failMcpCapabilityAttestation("Cursor's live MCP runtime ended before the turn became terminal.");
+          socket.destroy();
+          return;
+        }
+        // The hosted runtime proved the completion contract before this
+        // listener opened, so Cursor reaching the connector is the remaining
+        // live evidence. Admit held model authority on the channel itself --
+        // never on later client traffic, which the hold would deadlock.
+        mcpCapabilityAttested = true;
+        if (mcpCapabilityDeadline) clearTimeout(mcpCapabilityDeadline);
+        mcpCapabilityDeadline = null;
+        settleMcpCapabilityWaiters(true);
+        socket.pipe(runtime.stdin);
+        runtime.stdout.pipe(socket);
+        socket.once("error", () => {
+          failMcpCapabilityAttestation("Cursor's live MCP connector failed before the turn became terminal.");
+          try { runtime.kill("SIGTERM"); } catch {}
+        });
+        socket.once("close", () => {
+          failMcpCapabilityAttestation("Cursor's live MCP connector ended before the turn became terminal.");
+          try { runtime.stdin.end(); } catch {}
+        });
       });
-      resolve();
+      mcpConnectorServer = server;
+      server.once("error", failStart);
+      server.once("close", () => {
+        if (!settled && (finalizing || authorityRetiring)) {
+          failStart(new Error("Cursor MCP connector startup was cancelled."));
+        }
+      });
+      server.listen(mcpConnectorSocketPath, async () => {
+        await waitAtTestStartupBarrier("mcp_listen");
+        if (finalizing || authorityRetiring) {
+          try { server.close(); } catch {}
+          failStart(new Error("Cursor MCP connector startup was cancelled."));
+          return;
+        }
+        server.removeListener("error", failStart);
+        try { chmodSync(mcpConnectorSocketPath, 0o600); }
+        catch (error) { void closeMcpConnector(); failStart(error); return; }
+        mcpCapabilityDeadline = setTimeout(() => {
+          failMcpCapabilityAttestation("Cursor never connected the attested MCP runtime before model authority.");
+        }, mcpCapabilityTimeoutMs);
+        settled = true;
+        server.on("error", (error) => {
+          const detail = "Cursor MCP connector failed: " + (error && error.message ? error.message : String(error));
+          if (!native) { finishNotStarted(detail); return; }
+          if (!exitEvidence) exitEvidence = { type: "error", error: detail };
+          exitCode = 1;
+          void beginFatalReaping();
+        });
+        resolve();
+      });
+    }, (error) => {
+      const detail = error && error.message ? error.message : String(error);
+      try { runtime.kill("SIGTERM"); } catch {}
+      failMcpCapabilityAttestation(detail);
+      failStart(error instanceof Error ? error : new Error(detail));
     });
   });
 }
@@ -2372,13 +2396,31 @@ async function start() {
           "(deny mach-lookup (global-name \"com.apple.windowserver\"))",
           "(deny mach-lookup (global-name \"com.apple.metadata.mds\"))",
           "(deny mach-lookup (global-name \"com.apple.DiskArbitration.diskarbitrationd\"))",
-          "(deny network-inbound)",
+          // Cursor's headless worker spawns a helper that binds a private
+          // stdio socket under its per-turn CURSOR_DATA_DIR (we relocate it
+          // there so no ambient /tmp/.cursor worker is reused). A unix-socket
+          // listen() is network-inbound, so an absolute inbound deny EPERMs
+          // that bind and the worker dies before the MCP client ever connects.
+          // Admit inbound binds only for unix sockets under that exact per-turn
+          // root; every other inbound (and TCP) stays denied.
+          allowedInternalUnixSocketRoots.length > 0
+            ? "(deny network-inbound (require-not (require-any "
+              + allowedInternalUnixSocketRoots.map((root) =>
+                "(local unix-socket (subpath " + JSON.stringify(root) + "))"
+              ).join(" ")
+              + ")))"
+            : "(deny network-inbound)",
           "(deny network-outbound (require-not (require-any "
             + "(remote ip \"localhost:" + authorityProxyPort + "\") "
             + "(remote ip \"localhost:" + agentProxyPort + "\") "
             + allowedNetworkUnixSockets.map((path) =>
               "(remote unix-socket (literal " + JSON.stringify(path) + "))"
             ).join(" ")
+            // The worker's own client half connects back to that private
+            // socket; permit outbound only to the same per-turn root.
+            + allowedInternalUnixSocketRoots.map((root) =>
+              " (remote unix-socket (subpath " + JSON.stringify(root) + "))"
+            ).join("")
             + ")))",
           ...deniedDelegatingExecutables.map((path) =>
             "(deny process-exec (literal " + JSON.stringify(path) + "))"
@@ -2582,6 +2624,7 @@ if (process.send) process.send({ type: "prepared" });
     JSON.stringify(allowedWriteSubpaths),
     JSON.stringify(allowedReadSubpaths),
     JSON.stringify(allowedNetworkUnixSockets),
+    JSON.stringify(allowedInternalUnixSocketRoots),
     input.mcpConnectorSocketPath ?? "",
     input.mcpRuntimeEntryPath ?? "",
     input.mcpRuntimeCwd ?? "",
@@ -4643,7 +4686,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
       ...(allowedWriteSubpaths?.length ? { allowedWriteSubpaths } : {}),
       ...(allowedReadSubpaths?.length ? { allowedReadSubpaths } : {}),
       ...(handle.deliveryMode === "daemon_inbox"
-        ? { allowedNetworkUnixSockets: [mcpConnectorSocketPath!] }
+        ? {
+          allowedNetworkUnixSockets: [mcpConnectorSocketPath!],
+          // Cursor's headless worker binds a private stdio socket under this
+          // per-turn data dir; the sandbox must admit that one bind+connect.
+          allowedInternalUnixSocketRoots: [supervisedRuntimeDataDir!],
+        }
         : {}),
       ...(mcpConnectorSocketPath ? { mcpConnectorSocketPath } : {}),
       ...(mcpRuntimeEntryPath ? { mcpRuntimeEntryPath } : {}),
