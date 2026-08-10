@@ -284,6 +284,8 @@ export class SupervisorDaemonClient {
   readonly socketPath: string;
   readonly daemonScriptPath: string;
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
+  private applicationUpdateHandoff: Promise<void> | null = null;
+  private applicationUpdatePrepared = false;
   private lastReadyGeneration: number | null = null;
   private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
   private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
@@ -339,12 +341,43 @@ export class SupervisorDaemonClient {
     if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
       return Promise.reject(new Error("Supervised agents currently require macOS."));
     }
+    if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
+      return Promise.reject(new Error("Supervisor startup is paused while LetAgents installs an application update."));
+    }
     if (!this.ensureOperation) {
       this.ensureOperation = this.ensureRunningOnce()
         .then((status) => this.rememberReadyStatus(status))
         .finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
+  }
+
+  /**
+   * Retire the serving daemon without touching provider processes. The next
+   * desktop version will start its bundled daemon and recover exact provider
+   * generations during normal startup reconciliation.
+   */
+  prepareForApplicationUpdate(): Promise<void> {
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return Promise.reject(new Error("Application update handoff currently requires macOS."));
+    }
+    if (this.applicationUpdatePrepared) return Promise.resolve();
+    if (!this.applicationUpdateHandoff) {
+      this.applicationUpdateHandoff = this.prepareForApplicationUpdateOnce()
+        .then(() => {
+          this.applicationUpdatePrepared = true;
+        })
+        .finally(() => {
+          this.applicationUpdateHandoff = null;
+        });
+    }
+    return this.applicationUpdateHandoff;
+  }
+
+  /** Restore the current app's daemon only when Squirrel failed to take over. */
+  resumeAfterApplicationUpdateFailure(): Promise<DesktopSupervisorDaemonStatus> {
+    this.applicationUpdatePrepared = false;
+    return this.ensureRunning();
   }
 
   /**
@@ -998,6 +1031,34 @@ export class SupervisorDaemonClient {
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory);
     child.once("error", () => undefined);
     return this.waitForHealthy(retiredGeneration);
+  }
+
+  private async prepareForApplicationUpdateOnce(): Promise<void> {
+    if (this.ensureOperation) await this.ensureOperation;
+    let negotiated: Record<string, unknown>;
+    try {
+      negotiated = await this.request<Record<string, unknown>>(
+        "daemon.negotiate",
+        undefined,
+        SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      );
+    } catch (error) {
+      // A failed or never-started supervisor has no owner-only socket to
+      // relinquish. Keep the update fence active, but do not prevent Squirrel
+      // from replacing the app that may contain the daemon recovery fix.
+      if (isConnectionUnavailable(error)) return;
+      throw error;
+    }
+    const daemonVersion = Number(negotiated.protocol_version ?? 0);
+    const implementationVersion = String(negotiated.implementation_version ?? "unknown");
+    const retired = this.captureRetiredDaemon(negotiated);
+    await this.request(
+      "daemon.prepare_handoff",
+      undefined,
+      daemonVersion,
+      RECOVERY_REQUEST_TIMEOUT_MS,
+    );
+    await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
   }
 
   private async waitForHealthy(retiredGeneration?: number): Promise<DesktopSupervisorDaemonStatus> {

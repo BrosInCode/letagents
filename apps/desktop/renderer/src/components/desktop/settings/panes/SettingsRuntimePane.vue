@@ -65,6 +65,8 @@ const apiEndpointLabel = computed(() => props.authStatus?.apiUrl || props.appInf
 
 const versionLabel = computed(() => {
   if (!props.appInfo) return "version unavailable";
-  return `Electron ${props.appInfo.versions.electron}`;
+  return props.appInfo.appVersion
+    ? `LetAgents ${props.appInfo.appVersion}`
+    : `Electron ${props.appInfo.versions.electron}`;
 });
 </script>

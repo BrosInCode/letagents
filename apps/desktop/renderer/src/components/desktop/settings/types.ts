@@ -13,6 +13,7 @@ export type SettingsPaneId =
   | "system:app-agent"
   | "system:supervisor"
   | "system:runtime"
+  | "system:updates"
   | "system:mcp"
   | "system:agents"
   | "system:diagnostics";

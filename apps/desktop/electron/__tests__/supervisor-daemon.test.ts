@@ -1146,6 +1146,89 @@ test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async
   }
 });
 
+test("application update handoff retires only the serving daemon and prevents resurrection", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let replacementServer: Server | null = null;
+  let retiredAlive = true;
+  let spawns = 0;
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    31,
+    () => {
+      retiredAlive = false;
+      void closeServer(server, env.socketPath);
+    },
+  );
+  server = wire.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 50,
+      spawnDaemon: () => {
+        spawns += 1;
+        return fakeChild();
+      },
+    });
+    await client.prepareForApplicationUpdate();
+    assert.equal(spawns, 0, "application update handoff must not start a replacement from the old app");
+    assert.deepEqual(wire.requests.slice(0, 2).map((request) => request.method), [
+      "daemon.negotiate",
+      "daemon.prepare_handoff",
+    ]);
+    await assert.rejects(
+      client.ensureRunning(),
+      /startup is paused while LetAgents installs an application update/,
+    );
+    const replacement = await startWireDaemon(
+      env.socketPath,
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      32,
+    );
+    replacementServer = replacement.server;
+    assert.equal((await client.resumeAfterApplicationUpdateFailure()).generation, 32);
+    assert.equal(spawns, 0);
+  } finally {
+    await closeServer(replacementServer, env.socketPath);
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("application update proceeds when no supervisor daemon owns the socket", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let spawns = 0;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      spawnDaemon: () => {
+        spawns += 1;
+        return fakeChild();
+      },
+    });
+    await client.prepareForApplicationUpdate();
+    assert.equal(spawns, 0, "an absent daemon leaves nothing for the old app to hand off or restart");
+    await assert.rejects(
+      client.ensureRunning(),
+      /startup is paused while LetAgents installs an application update/,
+    );
+  } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("desktop replaces the prior implementation and accepts only the new exact implementation", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
