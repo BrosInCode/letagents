@@ -268,14 +268,6 @@
                   </span>
                   <span class="pinned-meta">{{ projectSubtitle(project) }}</span>
                 </span>
-                <span
-                  v-if="roomReorderEnabled"
-                  class="sidebar-room-drag-grip"
-                  draggable="true"
-                  aria-hidden="true"
-                >
-                  <GripVertical />
-                </span>
               </button>
               <button
                 v-if="projectChildRooms(project).length"
@@ -334,14 +326,6 @@
                     aria-hidden="true"
                   >
                     <Check v-if="isEntrySelected(childRoom)" />
-                  </span>
-                  <span
-                    v-else-if="roomReorderEnabled"
-                    class="sidebar-child-drag-grip"
-                    draggable="true"
-                    aria-hidden="true"
-                  >
-                    <GripVertical />
                   </span>
                   <span class="room-title-line">
                     <span class="room-title">{{ childRoom.title }}</span>
@@ -466,14 +450,6 @@
                     </small>
                   </span>
                 </span>
-                <span
-                  v-if="roomReorderEnabled"
-                  class="sidebar-room-drag-grip"
-                  draggable="true"
-                  aria-hidden="true"
-                >
-                  <GripVertical />
-                </span>
               </button>
               <button
                 v-if="projectChildRooms(project).length"
@@ -532,14 +508,6 @@
                     aria-hidden="true"
                   >
                     <Check v-if="isEntrySelected(childRoom)" />
-                  </span>
-                  <span
-                    v-else-if="roomReorderEnabled"
-                    class="sidebar-child-drag-grip"
-                    draggable="true"
-                    aria-hidden="true"
-                  >
-                    <GripVertical />
                   </span>
                   <span class="room-title-line">
                     <span class="room-title">{{ childRoom.title }}</span>
@@ -679,7 +647,6 @@ import {
   Copy,
   ExternalLink,
   GitBranch,
-  GripVertical,
   Handshake,
   House,
   ListChecks,
