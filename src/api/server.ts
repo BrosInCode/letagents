@@ -1,6 +1,7 @@
 import { createApiApp } from "./server/app.js";
 import { startRoomEventBridge } from "./server/event-bridge.js";
 import { startLivenessSweep } from "./server/liveness.js";
+import { startDesktopPushWorker } from "./notifications/worker.js";
 
 const app = createApiApp();
 
@@ -11,6 +12,7 @@ startRoomEventBridge();
 // Announces worker-agent deaths and recoveries into rooms. Started from the
 // server entry point only, so tests and embedders opt in explicitly.
 startLivenessSweep();
+startDesktopPushWorker();
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST;

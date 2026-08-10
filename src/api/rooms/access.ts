@@ -19,7 +19,12 @@ import {
   type AuthenticatedRequest,
 } from "../http/helpers.js";
 
-type RequestAccount = SessionAccount | OwnerTokenAccount | null | undefined;
+export type RoomAccessAccount = Pick<
+  SessionAccount | OwnerTokenAccount,
+  "account_id" | "provider" | "login" | "provider_access_token"
+>;
+
+type RequestAccount = RoomAccessAccount | null | undefined;
 
 export type RoomRole = "admin" | "participant" | "anonymous";
 

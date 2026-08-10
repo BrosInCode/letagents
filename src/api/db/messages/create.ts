@@ -26,6 +26,7 @@ import {
   messageAttachmentUploadSelection,
 } from "./selections.js";
 import { hydrateMessageReplies } from "./history.js";
+import { enqueueDesktopPushNotifications } from "../../notifications/enqueue.js";
 
 function normalizeClientMessageId(value?: string | null): string | null {
   if (typeof value !== "string") return null;
@@ -251,6 +252,13 @@ export async function addMessageWithCreateStatus(
         );
     }
 
+    let notificationEnqueueDurationMs = 0;
+    if (!isPromptOnlyAgentMessage(createdMessage.text, promptKind)) {
+      const notificationEnqueueStartedAtMs = Date.now();
+      await enqueueDesktopPushNotifications(tx, createdMessage);
+      notificationEnqueueDurationMs = Date.now() - notificationEnqueueStartedAtMs;
+    }
+
     if (options?.with_created_message_in_transaction) {
       await options.with_created_message_in_transaction(tx);
     }
@@ -269,6 +277,8 @@ export async function addMessageWithCreateStatus(
       )
       // Deterministic representative when several sessions share an agent_key.
       .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id));
+
+    let receiptCount = 0;
 
     if (activeSessions.length > 0) {
       const leases = await tx
@@ -364,19 +374,23 @@ export async function addMessageWithCreateStatus(
       }
 
       const receiptRowsToInsert = [...receiptsByAgentKey.values()];
+      receiptCount = receiptRowsToInsert.length;
       if (receiptRowsToInsert.length > 0) {
         await tx.insert(message_agent_receipts).values(receiptRowsToInsert).onConflictDoNothing();
       }
+    }
 
-      // Routing stays synchronous and atomic with the message. Watch its cost
-      // by room shape before considering any structural change.
-      const routingDurationMs = Date.now() - routingStartedAtMs;
-      if (routingDurationMs > 250) {
-        console.warn(
-          `[message routing snapshot] slow send-time routing for ${roomId}: ${routingDurationMs}ms`
-          + ` (${activeSessions.length} active sessions, ${receiptRowsToInsert.length} receipts)`,
-        );
-      }
+    // Notification fan-out and worker routing both stay synchronous and atomic
+    // with the message. Account for their combined hot-path cost so rooms with
+    // no live worker sessions do not hide a slow notification enqueue.
+    const routingDurationMs = Date.now() - routingStartedAtMs;
+    const sendTimeFanoutDurationMs = notificationEnqueueDurationMs + routingDurationMs;
+    if (sendTimeFanoutDurationMs > 250) {
+      console.warn(
+        `[message send-time fan-out] slow fan-out for ${roomId}: ${sendTimeFanoutDurationMs}ms`
+        + ` (${notificationEnqueueDurationMs}ms notifications, ${routingDurationMs}ms routing,`
+        + ` ${activeSessions.length} active sessions, ${receiptCount} receipts)`,
+      );
     }
 
     // The canonical reply transition is server-owned and atomic with the

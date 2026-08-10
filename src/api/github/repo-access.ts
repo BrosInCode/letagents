@@ -25,7 +25,11 @@ interface RepoRoomAccessIdentity {
 }
 
 interface RepoRoomAccessDecisionDeps {
-  getVisibility: (roomName: string, accessToken?: string) => Promise<GitHubRepoVisibility>;
+  getVisibility: (
+    roomName: string,
+    accessToken?: string,
+    options?: { bypassCache?: boolean },
+  ) => Promise<GitHubRepoVisibility>;
   isCollaborator: (input: {
     roomName: string;
     login: string;
@@ -215,8 +219,18 @@ async function fetchGitHubRepo(
 
 export async function getGitHubRepoVisibility(
   roomName: string,
-  accessToken?: string
+  accessToken?: string,
+  options: { bypassCache?: boolean } = {},
 ): Promise<GitHubRepoVisibility> {
+  if (options.bypassCache) {
+    const anonymousVisibility = await loadGitHubRepoVisibility(roomName, undefined, "fresh-anonymous");
+    if (anonymousVisibility !== "unknown") return anonymousVisibility;
+    if (accessToken) {
+      return loadGitHubRepoVisibility(roomName, accessToken, "fresh-authenticated");
+    }
+    return "unknown";
+  }
+
   // A definitive visibility value is safe to share across every account. An
   // authenticated caller may bypass only a cached "unknown" to refine a
   // private repository after the anonymous GitHub endpoint returned 404.
@@ -240,7 +254,7 @@ export async function getGitHubRepoVisibility(
 async function loadGitHubRepoVisibility(
   roomName: string,
   accessToken: string | undefined,
-  mode: "anonymous" | "authenticated",
+  mode: "anonymous" | "authenticated" | "fresh-anonymous" | "fresh-authenticated",
 ): Promise<GitHubRepoVisibility> {
   const roomKey = normalizeCacheKey(roomName);
   // The authenticated flight is intentionally room-scoped because visibility
@@ -398,7 +412,9 @@ export async function resolveGitHubRepoRoomAccessDecision(input: {
   }
 
   const accessToken = input.sessionAccount?.provider_access_token ?? undefined;
-  const visibility = await deps.getVisibility(input.roomName, accessToken);
+  const visibility = await deps.getVisibility(input.roomName, accessToken, {
+    bypassCache: input.freshCollaboratorCheck,
+  });
   if (visibility === "public") {
     return { kind: "allow" };
   }

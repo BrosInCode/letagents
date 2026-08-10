@@ -13,3 +13,4 @@ export * from "./schema/tasks.js";
 export * from "./schema/coordination.js";
 export * from "./schema/board.js";
 export * from "./schema/effects.js";
+export * from "./schema/desktop-push.js";

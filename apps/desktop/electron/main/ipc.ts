@@ -165,6 +165,13 @@ import {
 } from "./supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
 import { emitToMainWindow } from "./window.js";
+import {
+  getDesktopNotificationStatus,
+  refreshDesktopNotificationRegistration,
+  setDesktopNotificationsEnabled,
+  takePendingDesktopNotificationActivation,
+  unregisterDesktopNotificationAccount,
+} from "./notifications.js";
 import { transferSupervisorOwnership } from "./supervisor-ownership.js";
 import {
   classifyLaunchFailure,
@@ -284,10 +291,12 @@ export function registerDesktopIpcHandlers(
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
+    void refreshDesktopNotificationRegistration().catch(() => {});
   });
   setAuthInvalidatedHandler(() => {
     clearJoinedRoomInfoCache();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
+    void unregisterDesktopNotificationAccount().catch(() => {});
   });
   const renterTriggerRuntime = new RenterTriggerRuntime({
     getRoomIdentifier: getActiveRoomIdentifier,
@@ -308,6 +317,15 @@ export function registerDesktopIpcHandlers(
       homePath: homedir(),
       apiUrl,
     }),
+  );
+  targetIpcMain.handle("desktop:notifications:get-status", async () => getDesktopNotificationStatus());
+  targetIpcMain.handle(
+    "desktop:notifications:set-enabled",
+    async (_event, enabled: boolean) => setDesktopNotificationsEnabled(enabled === true),
+  );
+  targetIpcMain.handle(
+    "desktop:notifications:take-pending-activation",
+    async () => takePendingDesktopNotificationActivation(),
   );
   targetIpcMain.handle("desktop:supervisor-grant:revoke", async (): Promise<void> => revokeDesktopSupervisorGrant());
   targetIpcMain.handle(
@@ -856,6 +874,7 @@ export function registerDesktopIpcHandlers(
     "desktop:auth:sign-out",
     async (): Promise<DesktopAuthStatus> => {
       clearJoinedRoomInfoCache();
+      await unregisterDesktopNotificationAccount();
       await clearStoredAuth();
       await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
       return getDesktopAuthStatus();

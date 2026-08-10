@@ -24,6 +24,7 @@
     "test:orchestrator": "node --import tsx --test src/orchestrator/__tests__/*.test.ts",
     "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
     "test:dependency-age": "node --test scripts/verify-dependency-age.test.mjs",
+    "test:notifications": "node --import tsx --test src/api/notifications/__tests__/*.test.ts",
     "verify:dependency-age": "node scripts/verify-dependency-age.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/api/migrate.ts",
