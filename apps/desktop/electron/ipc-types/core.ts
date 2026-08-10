@@ -56,6 +56,8 @@ export interface RepoStatus {
   branch: string | null;
   detached?: boolean;
   defaultBranch?: string | null;
+  /** Remote default used for root-vs-branch room routing; distinct from local fallback. */
+  routingDefaultBranch?: string | null;
   upstream?: string | null;
   ahead?: number;
   behind?: number;

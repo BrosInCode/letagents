@@ -525,7 +525,6 @@ let unsubscribeRepoStatusChanged: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
 let sidebarMetadataRefreshInFlight = false;
 let repoStatusRefreshInFlight = false;
-let repoStatusRefreshTimer: number | null = null;
 let repoStatusWatchRootPath: string | null = null;
 let repoStatusWatchRequestId = 0;
 
@@ -800,24 +799,22 @@ async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
 }
 
 function handleRepoStatusChanged(nextStatus: RepoStatus): void {
+  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
+  if (workspaceRoot && nextStatus.rootPath === workspaceRoot) {
+    workspaceRepoStatusRootPath = workspaceRoot;
+    workspaceRepoStatus.value = nextStatus;
+  }
   const rootPath = activeProjectRootPath();
   if (rootPath && nextStatus.rootPath !== rootPath) return;
   repoStatus.value = nextStatus;
 }
 
-function scheduleFocusedRepoStatusRefresh(delayMs = 150): void {
-  if (repoStatusRefreshTimer !== null) {
-    window.clearTimeout(repoStatusRefreshTimer);
-  }
-  repoStatusRefreshTimer = window.setTimeout(() => {
-    repoStatusRefreshTimer = null;
-    void refreshActiveRepoStatus();
-  }, delayMs);
-}
-
 function refreshForegroundData(): void {
-  scheduleFocusedRepoStatusRefresh();
-  void refreshWorkspaceRepoStatus(true);
+  // The main-process Git watcher retains invalidations while hidden and drains
+  // them on BrowserWindow focus/show. Avoid racing it with a second full status
+  // reconstruction from the renderer.
+  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
+  void refreshWorkspaceRepoStatus(repoStatusWatchRootPath !== workspaceRoot);
   void refreshSidebarRoomMetadata();
   // Poll-only metadata catch-up: the periodic tick early-returns while hidden,
   // so refresh once on foreground return. Metadata-only, NOT the full snapshot —
@@ -2250,10 +2247,6 @@ onBeforeUnmount(() => {
   if (accountRoomsRefreshInterval) {
     window.clearInterval(accountRoomsRefreshInterval);
     accountRoomsRefreshInterval = null;
-  }
-  if (repoStatusRefreshTimer !== null) {
-    window.clearTimeout(repoStatusRefreshTimer);
-    repoStatusRefreshTimer = null;
   }
   window.removeEventListener("focus", handleWindowFocus);
   window.removeEventListener("blur", handleWindowBlur);

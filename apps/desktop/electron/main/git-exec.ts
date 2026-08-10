@@ -14,6 +14,7 @@ export type RunGitOptions = {
   timeout?: number;
   maxBuffer?: number;
   windowsHide?: boolean;
+  signal?: AbortSignal;
 };
 
 /**
@@ -30,6 +31,7 @@ export async function runGit(
       cwd,
       encoding: "utf8",
       windowsHide: options.windowsHide ?? true,
+      ...(options.signal ? { signal: options.signal } : {}),
       ...(options.timeout !== undefined ? { timeout: options.timeout } : {}),
       ...(options.maxBuffer !== undefined ? { maxBuffer: options.maxBuffer } : {}),
     });
