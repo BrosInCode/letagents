@@ -52,6 +52,9 @@ jobs:
       - name: Type check (server)
         run: npx tsc --noEmit
 
+      - name: Test desktop notification server helpers
+        run: npm run test:notifications
+
       - name: Test MCP helpers
         run: npm run test:mcp
 
@@ -170,6 +173,13 @@ jobs:
           --import ./node_modules/tsx/dist/loader.mjs
           --test
           src/api/__tests__/thread-inbox-parity-db.test.ts
+
+      - name: Run desktop push worker database tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/desktop-push-worker-db.test.ts
 
       - name: Run webhook integration tests
         run: >-

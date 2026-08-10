@@ -11,6 +11,21 @@ const api: DesktopApi = {
       };
     },
   },
+  notifications: {
+    getStatus: () => ipcRenderer.invoke("desktop:notifications:get-status"),
+    setEnabled: (enabled) => ipcRenderer.invoke("desktop:notifications:set-enabled", enabled),
+    takePendingActivation: () => ipcRenderer.invoke("desktop:notifications:take-pending-activation"),
+    onActivated: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, target: Parameters<typeof callback>[0]) => callback(target);
+      ipcRenderer.on("desktop:notifications:activated", listener);
+      return () => ipcRenderer.off("desktop:notifications:activated", listener);
+    },
+    onStatusChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: Parameters<typeof callback>[0]) => callback(status);
+      ipcRenderer.on("desktop:notifications:status-changed", listener);
+      return () => ipcRenderer.off("desktop:notifications:status-changed", listener);
+    },
+  },
   app: {
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
     openGitHubUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-github-url", url),

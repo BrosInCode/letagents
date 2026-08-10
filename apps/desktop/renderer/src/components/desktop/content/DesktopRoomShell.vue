@@ -514,6 +514,8 @@ const props = defineProps<{
   homePath?: string | null;
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
+  notificationRevealMessageId?: string | null;
+  notificationRevealNonce?: number;
   initialChatScrollTop?: number | null;
   onFocusRoomConcluded?: (event: FocusRoomConcludedEvent) => Promise<void>;
 }>();
@@ -1098,6 +1100,16 @@ watch(() => props.messages.at(-1)?.id || null, () => {
   ingestComposerGitHubEvent(latestMessage);
   scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
 });
+
+watch(
+  () => [props.notificationRevealMessageId, props.notificationRevealNonce, props.roomLoading] as const,
+  ([messageId, _nonce, roomLoading]) => {
+    if (!messageId || roomLoading) return;
+    activeTab.value = "chat";
+    void revealRoomMessage(messageId);
+  },
+  { immediate: true },
+);
 
 onBeforeUnmount(() => {
   managedAgentSessionsRefreshOwnerActive = false;

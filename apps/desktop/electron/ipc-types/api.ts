@@ -1,4 +1,5 @@
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
+import type { DesktopNotificationStatus, DesktopNotificationTarget } from "./notifications.js";
 import type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "./supervisor-grant.js";
 import type {
   DesktopAppInfo,
@@ -110,6 +111,13 @@ import type {
 export interface DesktopApi {
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
+  };
+  notifications: {
+    getStatus: () => Promise<DesktopNotificationStatus>;
+    setEnabled: (enabled: boolean) => Promise<DesktopNotificationStatus>;
+    takePendingActivation: () => Promise<DesktopNotificationTarget | null>;
+    onActivated: (callback: (target: DesktopNotificationTarget) => void) => () => void;
+    onStatusChanged: (callback: (status: DesktopNotificationStatus) => void) => () => void;
   };
   app: {
     getInfo: () => Promise<DesktopAppInfo>;
