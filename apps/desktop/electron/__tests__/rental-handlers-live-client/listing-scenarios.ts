@@ -32,16 +32,15 @@ test("create-listing forwards to apiClient.createListing and maps the response",
   assert.equal(sentBody.ideKind, "antigravity");
 });
 
-test("create-listing falls back to stub on api failure", async () => {
+test("create-listing surfaces API failure", async () => {
   const { client } = makeFakeClient({
     createListing: { ok: false, status: 500, error: "boom", body: null },
   });
   const handlers = captureHandlersWithClient(client);
-  const result = (await invoke(handlers, "desktop:rental:create-listing", {
+  await assert.rejects(() => invoke(handlers, "desktop:rental:create-listing", {
     displayName: "Stub",
     ideKind: "antigravity",
-  })) as { id: string };
-  assert.equal(result.id, "listing_stub");
+  }), { code: "request_failed" });
 });
 
 test("update-listing forwards to apiClient.updateListing", async () => {
@@ -92,16 +91,14 @@ test("pause-listing forwards to apiClient.pauseListing", async () => {
   assert.equal(calls[0]?.args[0], "listing_42");
 });
 
-test("resume-listing falls back to stub on api failure", async () => {
+test("resume-listing surfaces API failure", async () => {
   const { client } = makeFakeClient({
     resumeListing: { ok: false, status: 404, error: "missing", body: null },
   });
   const handlers = captureHandlersWithClient(client);
-  const result = (await invoke(
+  await assert.rejects(() => invoke(
     handlers,
     "desktop:rental:resume-listing",
     "listing_404",
-  )) as { id: string; status: string };
-  assert.equal(result.id, "listing_404");
-  assert.equal(result.status, "active");
+  ), { code: "request_failed" });
 });

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { listingRow, readinessRow, requestRow } from "./fixtures.js";
+import { listingRow, readinessRow, requestRow, sessionRow } from "./fixtures.js";
 import { captureHandlersWithClient, invoke, makeFakeClient } from "./harness.js";
 
 test("list-listings forwards to publicListings and maps the response", async () => {
@@ -21,19 +21,17 @@ test("list-listings forwards to publicListings and maps the response", async () 
   assert.equal(out[0]?.id, "listing_1");
 });
 
-test("list-listings falls back to [] when the API call fails", async () => {
+test("list-listings surfaces API failure instead of fabricating an empty marketplace", async () => {
   const { client } = makeFakeClient({
     publicListings: { ok: false, status: 502, error: "bad_gateway", body: null },
   });
   const handlers = captureHandlersWithClient(client);
-  const out = await invoke(handlers, "desktop:rental:list-listings");
-  assert.deepEqual(out, []);
+  await assert.rejects(() => invoke(handlers, "desktop:rental:list-listings"), { code: "request_failed" });
 });
 
-test("list-listings returns the stub when no apiClient is provided", async () => {
+test("list-listings surfaces unavailable when no apiClient is provided", async () => {
   const handlers = captureHandlersWithClient(null);
-  const out = await invoke(handlers, "desktop:rental:list-listings");
-  assert.deepEqual(out, []);
+  await assert.rejects(() => invoke(handlers, "desktop:rental:list-listings"), { code: "unavailable" });
 });
 
 test("list-provider-requests forwards to listProviderRequests and maps the response", async () => {
@@ -54,19 +52,17 @@ test("list-provider-requests forwards to listProviderRequests and maps the respo
   assert.equal(out[0]?.status, "pending");
 });
 
-test("list-provider-requests falls back to [] on API failure", async () => {
+test("list-provider-requests surfaces API failure", async () => {
   const { client } = makeFakeClient({
     listProviderRequests: { ok: false, status: 0, error: "network", body: null },
   });
   const handlers = captureHandlersWithClient(client);
-  const out = await invoke(handlers, "desktop:rental:list-provider-requests");
-  assert.deepEqual(out, []);
+  await assert.rejects(() => invoke(handlers, "desktop:rental:list-provider-requests"), { code: "request_failed" });
 });
 
-test("list-provider-requests returns the stub when no apiClient is provided", async () => {
+test("list-provider-requests surfaces unavailable when no apiClient is provided", async () => {
   const handlers = captureHandlersWithClient(null);
-  const out = await invoke(handlers, "desktop:rental:list-provider-requests");
-  assert.deepEqual(out, []);
+  await assert.rejects(() => invoke(handlers, "desktop:rental:list-provider-requests"), { code: "unavailable" });
 });
 
 test("get-provider-dashboard composes live listings + pending requests + readiness", async () => {
@@ -81,6 +77,11 @@ test("get-provider-dashboard composes live listings + pending requests + readine
       status: 200,
       body: [requestRow({ task_title: "Fix bug", task_prompt: "..." })],
     },
+    listProviderSessions: {
+      ok: true,
+      status: 200,
+      body: { sessions: [sessionRow({ id: "rsess_active", status: "active" })] },
+    },
     getProviderReadiness: {
       ok: true,
       status: 200,
@@ -94,7 +95,7 @@ test("get-provider-dashboard composes live listings + pending requests + readine
   )) as {
     listings: Array<{ id: string }>;
     pendingRequests: Array<{ sessionId: string; status: string }>;
-    activeSessions: unknown[];
+    capacitySessions: unknown[];
     readiness: {
       status: string;
       summary: string | null;
@@ -108,13 +109,17 @@ test("get-provider-dashboard composes live listings + pending requests + readine
     "getProviderReadiness",
     "listProviderListings",
     "listProviderRequests",
+    "listProviderSessions",
   ]);
+  const sessionsCall = calls.find((call) => call.method === "listProviderSessions");
+  assert.equal(typeof sessionsCall?.args[0], "string");
+  assert.match(String(sessionsCall?.args[0]), /^host_/);
   assert.equal(dashboard.listings.length, 1);
   assert.equal(dashboard.listings[0]?.id, "listing_1");
   assert.equal(dashboard.pendingRequests.length, 1);
   assert.equal(dashboard.pendingRequests[0]?.sessionId, "rsess_1");
   assert.equal(dashboard.pendingRequests[0]?.status, "pending");
-  assert.deepEqual(dashboard.activeSessions, []);
+  assert.equal(dashboard.capacitySessions.length, 1);
   assert.equal(dashboard.readiness.status, "ready");
   assert.equal(dashboard.readiness.summary, "1 listing: 1 active.");
   assert.deepEqual(dashboard.readiness.badges, ["verified"]);
@@ -122,7 +127,7 @@ test("get-provider-dashboard composes live listings + pending requests + readine
   assert.equal(dashboard.readiness.lastCheckedAt, "2026-05-12T11:00:00.000Z");
 });
 
-test("get-provider-dashboard tolerates one side failing without nuking the other", async () => {
+test("get-provider-dashboard surfaces a constituent API failure", async () => {
   const { client } = makeFakeClient({
     listProviderListings: {
       ok: false,
@@ -137,32 +142,15 @@ test("get-provider-dashboard tolerates one side failing without nuking the other
     },
   });
   const handlers = captureHandlersWithClient(client);
-  const dashboard = (await invoke(
-    handlers,
-    "desktop:rental:get-provider-dashboard",
-  )) as {
-    listings: unknown[];
-    pendingRequests: Array<{ sessionId: string }>;
-    readiness: { status: string };
-  };
-  assert.deepEqual(dashboard.listings, []);
-  assert.equal(dashboard.pendingRequests.length, 1);
-  assert.equal(dashboard.pendingRequests[0]?.sessionId, "rsess_x");
-  assert.equal(dashboard.readiness.status, "unknown");
+  await assert.rejects(() => invoke(handlers, "desktop:rental:get-provider-dashboard"), { code: "request_failed" });
 });
 
-test("get-provider-dashboard falls back to the empty stub when no apiClient", async () => {
+test("get-provider-dashboard surfaces unavailable when no apiClient", async () => {
   const handlers = captureHandlersWithClient(null);
-  const dashboard = (await invoke(
-    handlers,
-    "desktop:rental:get-provider-dashboard",
-  )) as { listings: unknown[]; pendingRequests: unknown[]; readiness: { status: string } };
-  assert.deepEqual(dashboard.listings, []);
-  assert.deepEqual(dashboard.pendingRequests, []);
-  assert.equal(dashboard.readiness.status, "unknown");
+  await assert.rejects(() => invoke(handlers, "desktop:rental:get-provider-dashboard"), { code: "unavailable" });
 });
 
-test("get-provider-dashboard surfaces live readiness even when listings/requests fail", async () => {
+test("get-provider-dashboard does not disguise failed listings/requests as an empty dashboard", async () => {
   const { client } = makeFakeClient({
     listProviderListings: {
       ok: false,
@@ -190,16 +178,5 @@ test("get-provider-dashboard surfaces live readiness even when listings/requests
     },
   });
   const handlers = captureHandlersWithClient(client);
-  const dashboard = (await invoke(
-    handlers,
-    "desktop:rental:get-provider-dashboard",
-  )) as {
-    listings: unknown[];
-    pendingRequests: unknown[];
-    readiness: { status: string; blockers: string[] };
-  };
-  assert.deepEqual(dashboard.listings, []);
-  assert.deepEqual(dashboard.pendingRequests, []);
-  assert.equal(dashboard.readiness.status, "blocked");
-  assert.equal(dashboard.readiness.blockers.length, 1);
+  await assert.rejects(() => invoke(handlers, "desktop:rental:get-provider-dashboard"), { code: "request_failed" });
 });

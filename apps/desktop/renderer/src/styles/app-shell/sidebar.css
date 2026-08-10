@@ -319,6 +319,7 @@
 
 .sidebar-actions {
   display: grid;
+  gap: 8px;
 }
 
 .sidebar-selection-scope {
@@ -423,6 +424,40 @@
 
 .sidebar-cta:active {
   transform: scale(0.975);
+}
+
+.sidebar-rent-cta {
+  margin-top: 4px;
+}
+
+.sidebar-rent-cta[data-active="true"] {
+  border-color: color-mix(in srgb, var(--text) 18%, transparent);
+  background: linear-gradient(
+    100deg,
+    color-mix(in srgb, var(--text) 8%, transparent),
+    color-mix(in srgb, var(--text) 4%, transparent)
+  );
+  color: var(--text);
+}
+
+.sidebar-rent-icon {
+  color: var(--text-secondary);
+}
+
+.sidebar-rent-count {
+  display: inline-grid;
+  min-width: 18px;
+  min-height: 18px;
+  place-items: center;
+  margin-left: auto;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 11%, transparent);
+  color: var(--text);
+  font-size: 0.66rem;
+  font-variant-numeric: tabular-nums;
+  font-weight: 820;
+  line-height: 1;
 }
 
 .cta-plus {

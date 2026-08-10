@@ -488,7 +488,12 @@ export function createDefaultContextRequestsDeps(): ContextRequestsDeps {
         .select()
         .from(rental_sessions)
         .where(eq(rental_sessions.id, sessionId));
-      if (!session || session.repo_provider !== "github") {
+      if (
+        !session
+        || session.repo_provider !== "github"
+        || !session.repo_owner
+        || !session.repo_name
+      ) {
         return { materialized: false, reason: "repo_unavailable" };
       }
 

@@ -7,6 +7,7 @@ import { AuditLog } from "./audit-log.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { WorkDurabilityStore } from "./durability-store.js";
+import { EphemeralWorkspaceProvisioner, isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
@@ -22,7 +23,11 @@ import {
   providerSupportsConcurrentSupervisedAgents,
   type ProviderReasoningEffort,
 } from "./provider-configuration.js";
-import { assertSupervisedPermissionProfileAvailable, supervisedPermissionProfilesForProvider } from "./supervised-permission-profiles.js";
+import {
+  assertSupervisedPermissionProfileAvailable,
+  assertSupervisedRentalPermissionProfileAvailable,
+  supervisedPermissionProfilesForProvider,
+} from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
@@ -713,6 +718,7 @@ export class SupervisorDaemon {
   private readonly audit: AuditLog;
   private readonly durability: WorkDurabilityStore;
   private readonly provisioner: WorkspaceProvisioner;
+  private readonly ephemeralProvisioner: EphemeralWorkspaceProvisioner;
   private readonly gitCommand: GitCommand;
   private readonly workerBindings: WorkerBindingStore;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
@@ -847,6 +853,7 @@ export class SupervisorDaemon {
       paths.manifestPath,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
+    this.ephemeralProvisioner = new EphemeralWorkspaceProvisioner(root);
     this.workerBindings = new WorkerBindingStore(
       paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
       (commit) => this.fenceDaemonCommit(commit),
@@ -1295,9 +1302,10 @@ export class SupervisorDaemon {
     await this.quarantineDuplicateSupervisedLaneOwners();
     await this.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
-    await this.socket.start();
     await this.reconcilePreparedRoomMoves();
     await this.recoverPreparedPurges();
+    await this.recoverEphemeralWorkspaces();
+    await this.socket.start();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
     }
@@ -3991,6 +3999,9 @@ export class SupervisorDaemon {
       }
       if (purge.phase !== "local_commit") return { outcome: "invalid" as const, error: purge.error ?? "Purge journal is not committable." };
       try {
+        if (purge.attached_work_attempt_id) {
+          await this.removeEphemeralWorkAttempt(purge.attached_work_attempt_id);
+        }
         const committed = await this.store.commitPurge(this.manifestGeneration, { operationId, agentId: entryId, daemonGeneration }, (commit) => this.fenceDaemonCommit(commit));
         this.manifestGeneration = committed.generation;
       } catch (error) {
@@ -4018,6 +4029,45 @@ export class SupervisorDaemon {
       if (purge.phase !== "local_commit") continue; // Electron must finish external revocation.
       await this.purgeAgent(purge.agent_id, this.singleton.currentGeneration, null, false).catch(() => undefined);
     }
+  }
+
+  private async removeEphemeralWorkAttempt(workAttemptId: string): Promise<boolean> {
+    let attempt = await this.durability.getAttempt(workAttemptId);
+    if (!isEphemeralWorkspaceMarker(attempt.workspace_identity)) return false;
+    if (!attempt.concluded_at && !["gc_pending", "garbage_collected"].includes(attempt.state)) {
+      attempt = await this.durability.concludeAttempt(workAttemptId, {
+        state: "cleanly_concluded",
+        cause: "room_only_agent_purged",
+      });
+    }
+    if (attempt.state !== "garbage_collected") {
+      await this.durability.garbageCollectEphemeralAttempt(workAttemptId);
+    }
+    return true;
+  }
+
+  private async recoverEphemeralWorkspaces(): Promise<void> {
+    const manifest = await this.store.load();
+    const attached = new Set<string>();
+    for (const entry of manifest.entries) {
+      if (entry.work_attempt_id) attached.add(entry.work_attempt_id);
+      if (entry.provider_ref?.work_attempt_id) attached.add(entry.provider_ref.work_attempt_id);
+    }
+    for (const purge of await this.store.pendingPurges()) {
+      if (purge.attached_work_attempt_id) attached.add(purge.attached_work_attempt_id);
+    }
+    for (const attempt of await this.durability.listAttempts()) {
+      if (!isEphemeralWorkspaceMarker(attempt.workspace_identity) || attached.has(attempt.work_attempt_id)) continue;
+      if (attempt.execution_generations.some((generation) => generation.terminal === null)) {
+        console.error(`Refusing to collect orphaned room-only attempt ${attempt.work_attempt_id}: live execution evidence remains.`);
+        continue;
+      }
+      await this.removeEphemeralWorkAttempt(attempt.work_attempt_id).catch((error) => {
+        console.error(`Refusing to collect orphaned room-only attempt ${attempt.work_attempt_id}:`, error);
+      });
+    }
+    const retained = new Set((await this.durability.listAttempts()).map((attempt) => attempt.work_attempt_id));
+    await this.ephemeralProvisioner.garbageCollectOrphans(retained);
   }
 
   private async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
@@ -5807,6 +5857,31 @@ export class SupervisorDaemon {
 
     if (entry.desired_state === "running") {
       if (entry.condition === "quarantined") return;
+      // A restart may load a manifest written by an older Desktop build. Fence
+      // rental authority before attach, worker-bearer minting, or room delivery;
+      // the later launch assertion alone cannot protect a still-live provider.
+      if (entry.id.startsWith("supervised_rental_")) {
+        const rentalConfiguration = await this.store.getAgentConfiguration(entry.id);
+        try {
+          if (!rentalConfiguration) {
+            throw new Error("Rental agent configuration is unavailable.");
+          }
+          assertSupervisedRentalPermissionProfileAvailable(
+            rentalConfiguration.provider,
+            rentalConfiguration.permission_profile_id,
+          );
+        } catch (error) {
+          await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
+          await this.transition(
+            entry.id,
+            "failed",
+            "quarantined",
+            error instanceof Error ? error.message : "Unsafe rental permission profile.",
+            "daemon-convergence",
+          );
+          return;
+        }
+      }
       // A daemon-inbox provider has no ambient room credential. Do not create
       // it (or even a new work execution) until Electron installs the exact
       // host grant over the local daemon socket.
@@ -5993,10 +6068,15 @@ export class SupervisorDaemon {
       // Stored rows can predate the supervised Inspector contract. Re-check
       // admission at the last possible boundary so a stale generic default
       // cannot reach the native provider launch path.
-      const permissionProfileId = assertSupervisedPermissionProfileAvailable(
-        launchConfiguration.provider,
-        launchConfiguration.permission_profile_id,
-      );
+      const permissionProfileId = entry.id.startsWith("supervised_rental_")
+        ? assertSupervisedRentalPermissionProfileAvailable(
+            launchConfiguration.provider,
+            launchConfiguration.permission_profile_id,
+          )
+        : assertSupervisedPermissionProfileAvailable(
+            launchConfiguration.provider,
+            launchConfiguration.permission_profile_id,
+          );
       const launchSnapshot = deriveProviderConfigurationSnapshot({
         provider: launchConfiguration.provider,
         model: launchConfiguration.model,
@@ -6442,7 +6522,26 @@ export class SupervisorDaemon {
       return entry;
     }
     const sourcePath = entry.source_repo_path?.trim() || entry.workspace_path?.trim();
-    if (!sourcePath) throw new Error("A source repository is required to provision a supervised work attempt.");
+    if (!sourcePath) {
+      const workAttemptId = randomUUID();
+      const provisioned = await this.ephemeralProvisioner.provision({
+        workAttemptId,
+        taskId: entry.id,
+      });
+      const attempt = await this.durability.createAttempt({
+        taskId: entry.id,
+        leaseId: entry.id,
+        leaseEpoch: 0,
+        workspacePath: provisioned.path,
+        workAttemptId,
+      });
+      return this.updateManifestEntry(entry.id, (current) => ({
+        ...current,
+        source_repo_path: null,
+        workspace_path: attempt.workspace_path,
+        work_attempt_id: attempt.work_attempt_id,
+      }));
+    }
     const remote = String(await this.gitCommand(["-C", sourcePath, "remote", "get-url", "origin"])).trim();
     const revision = String(await this.gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])).trim();
     const repo = repositoryStorageKey(remote);

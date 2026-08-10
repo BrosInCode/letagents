@@ -1,4 +1,4 @@
-import { eq } from "drizzle-orm";
+import { and, eq } from "drizzle-orm";
 
 import { db } from "../../../db/client.js";
 import { rental_sessions } from "../../../db/schema.js";
@@ -33,6 +33,7 @@ import {
   listContextRequests,
 } from "../../../rental/context-requests.js";
 import { listExposures, type ExposureLedgerDeps } from "../../../rental/exposure-ledger.js";
+import { revokeRentalLaunchAuthorityForSession } from "../../../rental/session-launch.js";
 import type { RentalInternalRouteDeps } from "./types.js";
 
 let cachedHeartbeatDeps: HeartbeatDeps | null = null;
@@ -90,7 +91,10 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
         ended_at: update.endedAt,
         updated_at: new Date(),
       })
-      .where(eq(rental_sessions.id, sessionId))
+      .where(and(
+        eq(rental_sessions.id, sessionId),
+        eq(rental_sessions.status, update.expectedStatus),
+      ))
       .returning();
     return updated ?? null;
   },
@@ -101,6 +105,7 @@ export const defaultRentalInternalDeps: RentalInternalRouteDeps = {
   async releaseSessionLease(input) {
     return releaseSessionLease(input, defaultQuotaLeaseOrchestratorDeps);
   },
+  revokeSessionLaunchAuthority: revokeRentalLaunchAuthorityForSession,
   async readContextFile(sessionId, input) {
     return readContextFile(createDefaultContextBrokerDeps(), {
       sessionId,

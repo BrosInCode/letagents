@@ -12,25 +12,18 @@
 import { describe, it, beforeEach, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import http from "node:http";
+import { isRentalParticipantProvisionableStatus } from "../rental/room-provisioning-policy.js";
 
 // ===== Provisioning Logic Tests (unit, no DB) =====
 
 describe("rental room provisioning (p1.4)", () => {
-  it("rejects provisioning for non-accepted session", async () => {
-    // Unit test: the service should reject provisioning unless status is "accepted"
-    const invalidStatuses = [
-      "requested",
-      "provisioning",
-      "active",
-      "cancelled",
-      "completed",
-    ];
-    for (const status of invalidStatuses) {
-      // We verify that the check works by testing the condition directly
-      assert.notStrictEqual(status, "accepted");
+  it("does not create a participant before the provider has accepted", () => {
+    for (const status of ["requested", "cancelled", "completed", "failed"]) {
+      assert.equal(isRentalParticipantProvisionableStatus(status), false, status);
     }
-    // Only "accepted" should pass the check
-    assert.strictEqual("accepted", "accepted");
+    for (const status of ["accepted", "provisioning", "active"]) {
+      assert.equal(isRentalParticipantProvisionableStatus(status), true, status);
+    }
   });
 
   it("generates unique room IDs with rroom_ prefix", () => {

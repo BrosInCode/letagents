@@ -4,20 +4,15 @@ import test from "node:test";
 import { isRentEnabled } from "../rental-handlers.js";
 import { captureHandlers, invoke } from "./rental-handlers-live-client/harness.js";
 
-test("desktop rental is enabled by default with an explicit kill switch", () => {
+test("desktop rental does not depend on a packaged-app environment variable", () => {
   const original = process.env.LETAGENTS_RENT_ENABLED;
   try {
     delete process.env.LETAGENTS_RENT_ENABLED;
     assert.equal(isRentEnabled(), true);
 
-    for (const value of ["0", "false", "no", "off", "unexpected"]) {
+    for (const value of ["0", "false", "no", "off", "unexpected", "1", "true", "yes", "on"]) {
       process.env.LETAGENTS_RENT_ENABLED = value;
-      assert.equal(isRentEnabled(), false, `${value} should disable desktop rental`);
-    }
-
-    for (const value of ["1", "true", "yes", "on"]) {
-      process.env.LETAGENTS_RENT_ENABLED = value;
-      assert.equal(isRentEnabled(), true, `${value} should enable desktop rental`);
+      assert.equal(isRentEnabled(), true, `${value} must not split desktop UI state from the server rollout`);
     }
   } finally {
     if (original === undefined) delete process.env.LETAGENTS_RENT_ENABLED;
@@ -36,6 +31,8 @@ test("rental IPC registers the preload channel surface", () => {
   const expectedChannels = [
     "desktop:rental:list-listings",
     "desktop:rental:get-provider-dashboard",
+    "desktop:rental:get-marketplace",
+    "desktop:rental:get-provider-settings",
     "desktop:rental:create-listing",
     "desktop:rental:update-listing",
     "desktop:rental:pause-listing",
@@ -59,38 +56,42 @@ test("rental IPC registers the preload channel surface", () => {
     "desktop:rental:request-patch-changes",
     "desktop:rental:approve-context-request",
     "desktop:rental:deny-context-request",
+    "desktop:rental:update-provider-settings",
   ];
   assert.deepEqual([...handlers.keys()].sort(), expectedChannels.sort());
 });
 
-test("enabled rental IPC returns empty listing and dashboard stubs", async () => {
+test("enabled rental IPC fails visibly when its service is not connected", async () => {
   const handlers = captureHandlers(true);
-  assert.deepEqual(await invoke(handlers, "desktop:rental:list-listings"), []);
-
-  const dashboard = await invoke(handlers, "desktop:rental:get-provider-dashboard");
-  assert.equal((dashboard as { readiness: { status: string } }).readiness.status, "unknown");
-  assert.deepEqual((dashboard as { listings: unknown[] }).listings, []);
-  assert.deepEqual((dashboard as { pendingRequests: unknown[] }).pendingRequests, []);
+  await assert.rejects(
+    invoke(handlers, "desktop:rental:list-listings"),
+    { name: "RentalServiceError", code: "unavailable" },
+  );
+  await assert.rejects(
+    invoke(handlers, "desktop:rental:get-provider-dashboard"),
+    { name: "RentalServiceError", code: "unavailable" },
+  );
 });
 
-test("enabled rental IPC creates typed session and patch stubs", async () => {
+test("enabled rental IPC never fabricates session or patch success", async () => {
   const handlers = captureHandlers(true);
-  const session = await invoke(handlers, "desktop:rental:create-session", {
-    listingId: "listing_1",
-    roomIdentifier: "room_1",
-    taskTitle: "Fix failing tests",
-    taskPrompt: "Run the suite and patch failures.",
-    mode: "scoped",
-    continuityMode: "smart_handoff",
-    approvedScope: { includePaths: ["src"], excludePaths: [], protectedPaths: [], notes: null },
-    policy: { maxLrt: 10_000, maxDurationMinutes: 30, maxPatchBytes: null, allowCommands: false, allowNetwork: false, requirePatchGate: true },
-  });
-  assert.equal((session as { listingId: string }).listingId, "listing_1");
-  assert.equal((session as { status: string }).status, "requested");
-
-  const patch = await invoke(handlers, "desktop:rental:approve-patch", "session_1", "patch_1");
-  assert.equal((patch as { sessionId: string }).sessionId, "session_1");
-  assert.equal((patch as { gateStatus: string }).gateStatus, "passed");
+  await assert.rejects(
+    invoke(handlers, "desktop:rental:create-session", {
+      listingId: "listing_1",
+      roomIdentifier: "room_1",
+      taskTitle: "Fix failing tests",
+      taskPrompt: "Run the suite and patch failures.",
+      mode: "scoped",
+      continuityMode: "smart_handoff",
+      approvedScope: { includePaths: ["src"], excludePaths: [], protectedPaths: [], notes: null },
+      policy: { maxLrt: 10_000, maxDurationMinutes: 30, maxPatchBytes: null, allowCommands: false, allowNetwork: false, requirePatchGate: true },
+    }),
+    { name: "RentalServiceError", code: "unavailable" },
+  );
+  await assert.rejects(
+    invoke(handlers, "desktop:rental:approve-patch", "session_1", "patch_1"),
+    { name: "RentalServiceError", code: "unavailable" },
+  );
 });
 
 test("enabled rental IPC exposes renter-side quota trigger status and manual declaration", async () => {

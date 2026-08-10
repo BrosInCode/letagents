@@ -1,6 +1,7 @@
 export type DesktopRentalMode = "scoped" | "trusted_open";
 export type DesktopRentalContinuityMode = "smart_handoff" | "full_transcript";
 export type DesktopRentalContinuityIngestDepth = "tier_1" | "tier_2";
+export type DesktopRentalRoomHistoryAccess = "full" | "filtered";
 /** Launch IDEs plus future adapter keys once a provider proves quota reporting. */
 export type DesktopRentalIdeKind = "claude_code" | "codex" | "antigravity" | "cursor" | (string & {});
 export type DesktopRentalListingStatus = "active" | "paused" | "disabled" | "setup_required";
@@ -36,6 +37,7 @@ export type DesktopRentalSessionStatus =
   | "cancelled"
   | "expired"
   | "failed";
+export type DesktopRentalLaunchState = "pending" | "provisioning" | "active" | "launch_failed";
 export type DesktopRentalStartTrigger = "quota_exhausted" | "user_initiated" | "scheduled" | "task_handoff";
 export type DesktopRentalTriggerConfidence = "exact" | "inferred" | "manual";
 export type DesktopRentalTriggerReason =
@@ -189,6 +191,61 @@ export interface DesktopRentalListing {
   updatedAt: string;
 }
 
+export interface DesktopRentalMarketplaceProvider {
+  accountId: string;
+  displayName: string;
+  login: string | null;
+  avatarUrl: string | null;
+  availability: "available" | "busy" | "offline" | "setup_required";
+  availableSlots: number;
+  supportsRepository: boolean;
+  maxDurationMinutes: number | null;
+  offers: DesktopRentalListing[];
+}
+
+export interface DesktopRentalMarketplace {
+  providers: DesktopRentalMarketplaceProvider[];
+  updatedAt: string | null;
+}
+
+export type DesktopRentalRuntimeId = "codex" | "claude-code" | "cursor" | "open-model";
+
+export interface DesktopRentalLaunchConfiguration {
+  providerId: DesktopRentalRuntimeId;
+  model?: string | null;
+  permissionProfileId?: string | null;
+}
+
+export interface DesktopRentalProviderRuntime {
+  providerId: DesktopRentalRuntimeId;
+  label: string;
+  enabled: boolean;
+  authenticated: boolean;
+  status: "ready" | "blocked" | "offline" | "checking";
+  detail: string;
+  permissionProfileIds: string[];
+}
+
+export interface DesktopRentalProviderSettings {
+  enabled: boolean;
+  maxConcurrentSessions: number;
+  defaultTimeLimitMinutes: number;
+  defaultLrtLimit: number;
+  runtimes: DesktopRentalProviderRuntime[];
+  hostId: string;
+  daemonState: "online" | "offline" | "starting" | "error";
+  blockers: string[];
+  updatedAt: string | null;
+}
+
+export interface DesktopRentalProviderSettingsInput {
+  enabled?: boolean;
+  maxConcurrentSessions?: number;
+  defaultTimeLimitMinutes?: number;
+  defaultLrtLimit?: number;
+  runtimes?: Array<Pick<DesktopRentalProviderRuntime, "providerId" | "enabled">>;
+}
+
 export interface DesktopRentalListingQuery {
   roomIdentifier?: string | null;
   ideKind?: DesktopRentalIdeKind | null;
@@ -303,9 +360,13 @@ export interface DesktopRentalSession {
   taskPrompt: string;
   mode: DesktopRentalMode;
   continuityMode: DesktopRentalContinuityMode;
+  roomHistoryAccess: DesktopRentalRoomHistoryAccess | null;
   continuityIngestDepth: DesktopRentalContinuityIngestDepth;
   continuityPackId: string | null;
   status: DesktopRentalSessionStatus;
+  launchState: DesktopRentalLaunchState | null;
+  launchErrorCode: string | null;
+  launchErrorMessage: string | null;
   approvedScope: DesktopRentalScope;
   policy: DesktopRentalPolicy;
   quotaLease: DesktopRentalQuotaLease | null;
@@ -353,7 +414,8 @@ export interface DesktopRentalRequest {
 
 export interface DesktopRentalProviderDashboard {
   listings: DesktopRentalListing[];
-  activeSessions: DesktopRentalSession[];
+  /** Every nonterminal session that consumes provider capacity. */
+  capacitySessions: DesktopRentalSession[];
   pendingRequests: DesktopRentalRequest[];
   readiness: DesktopRentalProviderReadiness;
   quotaSnapshots: DesktopRentalQuotaSnapshot[];
@@ -451,7 +513,16 @@ export interface DesktopRentalContinuityReceipt {
   approvedBy: string | null;
 }
 
+export type DesktopRentalProviderEvent = {
+  kind: "request.created" | "request.cancelled" | "session.accepted" | "launch.updated";
+  sessionId: string | null;
+};
+
 export interface DesktopRentalApi {
+  getMarketplace: () => Promise<DesktopRentalMarketplace>;
+  getProviderSettings: () => Promise<DesktopRentalProviderSettings>;
+  updateProviderSettings: (input: DesktopRentalProviderSettingsInput) => Promise<DesktopRentalProviderSettings>;
+  onProviderEvent: (callback: (event: DesktopRentalProviderEvent) => void) => () => void;
   listListings: (input?: DesktopRentalListingQuery) => Promise<DesktopRentalListing[]>;
   getProviderDashboard: () => Promise<DesktopRentalProviderDashboard>;
   createListing: (input: DesktopRentalListingInput) => Promise<DesktopRentalListing>;
@@ -464,7 +535,7 @@ export interface DesktopRentalApi {
   getSession: (id: string) => Promise<DesktopRentalSession>;
   cancelSession: (id: string) => Promise<DesktopRentalSession>;
   listProviderRequests: () => Promise<DesktopRentalRequest[]>;
-  acceptRequest: (id: string) => Promise<DesktopRentalSession>;
+  acceptRequest: (id: string, configuration?: DesktopRentalLaunchConfiguration) => Promise<DesktopRentalSession>;
   declineRequest: (id: string, reason?: string) => Promise<DesktopRentalRequest>;
   getActivity: (sessionId: string) => Promise<DesktopRentalActivityEvent[]>;
   getExposures: (sessionId: string) => Promise<DesktopRentalExposure[]>;

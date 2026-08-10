@@ -2,6 +2,7 @@ import type { Component } from "vue";
 
 export type SettingsPaneId =
   | "account:profile"
+  | "account:renting"
   | "rooms:defaults"
   | "rooms:left"
   | "rooms:danger"

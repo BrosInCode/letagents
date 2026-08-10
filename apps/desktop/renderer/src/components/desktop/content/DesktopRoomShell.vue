@@ -167,6 +167,7 @@
         @open-task="openBoardTask"
         @open-github-event="openInboxGitHubEvent"
         @open-reasoning="openReasoningInspector"
+        @open-rental-request="emit('open-rental-request')"
       />
 
       <RoomBoardView
@@ -250,11 +251,6 @@
         @request-focus-room-conclusion="emit('request-focus-room-conclusion', $event)"
       />
 
-      <RentAnAgentView
-        v-else-if="activeTab === 'rent'"
-        key="rent"
-        :room-identifier="room.identifier"
-      />
     </Transition>
 
     <DesktopRoomRulesModal
@@ -346,6 +342,7 @@ import type {
   DesktopRoomMessage,
   DesktopRoomThreadInboxPage,
   DesktopReasoningSession,
+  DesktopRentalRequest,
   DesktopSnapshotSourceStates,
   DesktopSupervisorManifestEntry,
   DesktopAgentStreamEvent,
@@ -358,6 +355,7 @@ import type {
 } from "../../../../../electron/ipc-types";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
+import { loadRentalProviderDashboard, useRentalProviderEvents } from "../../../composables/useRentalProviderEvents";
 import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
 import type { FocusRoomConcludedEvent } from "../../../domain/focus-room-conclusion";
 import {
@@ -443,7 +441,6 @@ import AgentInspectorHost from "./agent-inspector/AgentInspectorHost.vue";
 import DesktopReasoningInspector from "./DesktopReasoningInspector.vue";
 import DesktopFloatingWidget from "../controls/DesktopFloatingWidget.vue";
 import DesktopRoomRulesModal from "./DesktopRoomRulesModal.vue";
-import RentAnAgentView from "./RentAnAgentView.vue";
 import RoomActivityTabView from "./RoomActivityTabView.vue";
 import RoomBoardView from "./RoomBoardView.vue";
 import RoomChatView from "./RoomChatView.vue";
@@ -539,6 +536,7 @@ const emit = defineEmits<{
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
   "retry-room-agent-delivery": [input: { agentId: string; sourceMessageId: string }];
   "message-reveal-unavailable": [messageId: string];
+  "open-rental-request": [];
 }>();
 
 const roomRef = toRef(props, "room");
@@ -594,6 +592,8 @@ const lastClearedInboxItem = ref<DesktopInboxItem | null>(null);
 const inboxSeenFingerprints = ref<string[]>([]);
 const inboxUnseenCount = ref(0);
 const inboxSeenInitialized = ref(false);
+const rentalRequests = ref<DesktopRentalRequest[]>([]);
+const rentalRequestsUnavailable = ref(false);
 const eventsPage = ref<DesktopGitHubEventsPage | null>(props.githubEvents);
 const eventsLoading = ref(false);
 const eventsLoadingOlder = ref(false);
@@ -928,6 +928,7 @@ const rawInboxItems = computed(() =>
     githubEvents: eventsPage.value?.events || [],
     reasoningSessions: props.reasoningSessions,
     presence: roomPresence.value,
+    rentalRequests: rentalRequests.value,
     fallbackRepository: githubRepository.value,
   })
 );
@@ -943,9 +944,12 @@ const inboxActionableFingerprints = computed(() =>
     .map(desktopInboxItemFingerprint)
 );
 const inboxHasMore = computed(() => Boolean(threadInboxPage.value?.hasMore));
-const inboxDegradation = computed(() =>
-  deriveInboxDegradation(props.sourceStates ?? null)
-);
+const inboxDegradation = computed(() => {
+  const snapshotDegradation = deriveInboxDegradation(props.sourceStates ?? null);
+  return rentalRequestsUnavailable.value
+    ? { ...snapshotDegradation, sources: [...snapshotDegradation.sources, "Rental requests"] }
+    : snapshotDegradation;
+});
 
 watch(() => props.githubEvents, (nextPage) => {
   if (!nextPage) {
@@ -1039,7 +1043,7 @@ watch(() => [showEventsTab.value, props.roomLoading] as const, ([visible, loadin
 
 watch(isLocalRoom, (local) => {
   if (!local) return;
-  if (["rooms", "rent"].includes(activeTab.value)) {
+  if (activeTab.value === "rooms") {
     activeTab.value = "chat";
   }
 }, { immediate: true });
@@ -1056,6 +1060,7 @@ watch(activeTab, (tab) => {
     void loadInboxThreads().catch(() => undefined);
   }
   if (tab === "inbox") {
+    void loadRentalRequests();
     acknowledgeInboxItems();
   }
 }, { flush: "sync" });
@@ -1140,6 +1145,7 @@ onBeforeUnmount(() => {
 
 onMounted(() => {
   void refreshSupervisorStatus();
+  void loadRentalRequests();
   document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
     if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
@@ -1285,10 +1291,7 @@ const tabs = computed<RoomTab[]>(() => {
     { id: "activity", label: "Activity", count: null },
   );
   if (!isLocalRoom.value) {
-    nextTabs.push(
-      { id: "rooms", label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length },
-      { id: "rent", label: "Rent an Agent", count: null },
-    );
+    nextTabs.push({ id: "rooms", label: "Rooms", count: props.roomLoading ? null : props.focusRooms.length });
   }
   return nextTabs;
 });
@@ -1296,7 +1299,7 @@ const tabs = computed<RoomTab[]>(() => {
 function selectTab(tabId: RoomTabId): void {
   if (activeTab.value === tabId) return;
   if (tabId === "events" && !showEventsTab.value) return;
-  if (isLocalRoom.value && ["rooms", "rent"].includes(tabId)) return;
+  if (isLocalRoom.value && tabId === "rooms") return;
   activeTab.value = tabId;
 }
 
@@ -1312,7 +1315,6 @@ function isRoomTabId(value: string | null): value is RoomTabId {
     || value === "board"
     || value === "activity"
     || value === "rooms"
-    || value === "rent"
   );
 }
 
@@ -1498,10 +1500,27 @@ function handleInboxRefresh(): void {
   // GitHub events, agent sessions, presence) are degraded, also ask the app to
   // re-fetch the room snapshot so a retry can recover them, not just the threads.
   void loadInboxThreads().catch(() => undefined);
+  void loadRentalRequests();
   if (inboxDegradation.value.degraded) {
     emit("refresh-room");
   }
 }
+
+async function loadRentalRequests(): Promise<void> {
+  if (!desktopIpc.rental?.getProviderDashboard) return;
+  try {
+    const dashboard = await loadRentalProviderDashboard();
+    rentalRequests.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests : [];
+    rentalRequestsUnavailable.value = false;
+  } catch {
+    rentalRequests.value = [];
+    rentalRequestsUnavailable.value = true;
+  }
+}
+
+useRentalProviderEvents(() => {
+  void loadRentalRequests();
+});
 
 function mergeThreadInboxPages(
   current: DesktopRoomThreadInboxPage,

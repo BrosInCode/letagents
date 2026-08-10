@@ -639,7 +639,8 @@ export interface DesktopSupervisorCreateInput {
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   /** Opaque, provider-native CLI/app-server options. The daemon forwards this unchanged. */
   launchPolicy?: unknown;
-  repoRootPath: string;
+  /** Null creates an isolated, non-Git room-only work attempt. */
+  repoRootPath: string | null;
 }
 
 export interface DesktopSupervisorTurnControlInput {

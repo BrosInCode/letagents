@@ -150,6 +150,14 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:chat-storage:sync-local-room", roomIdentifier),
   },
   rental: {
+    getMarketplace: () => ipcRenderer.invoke("desktop:rental:get-marketplace"),
+    getProviderSettings: () => ipcRenderer.invoke("desktop:rental:get-provider-settings"),
+    updateProviderSettings: (input) => ipcRenderer.invoke("desktop:rental:update-provider-settings", input),
+    onProviderEvent: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:rental:provider-event", listener);
+      return () => ipcRenderer.off("desktop:rental:provider-event", listener);
+    },
     listListings: (input) => ipcRenderer.invoke("desktop:rental:list-listings", input ?? {}),
     getProviderDashboard: () => ipcRenderer.invoke("desktop:rental:get-provider-dashboard"),
     createListing: (input) => ipcRenderer.invoke("desktop:rental:create-listing", input),
@@ -162,7 +170,7 @@ const api: DesktopApi = {
     getSession: (id) => ipcRenderer.invoke("desktop:rental:get-session", id),
     cancelSession: (id) => ipcRenderer.invoke("desktop:rental:cancel-session", id),
     listProviderRequests: () => ipcRenderer.invoke("desktop:rental:list-provider-requests"),
-    acceptRequest: (id) => ipcRenderer.invoke("desktop:rental:accept-request", id),
+    acceptRequest: (id, configuration) => ipcRenderer.invoke("desktop:rental:accept-request", id, configuration ?? null),
     declineRequest: (id, reason?: string) => ipcRenderer.invoke("desktop:rental:decline-request", id, reason ?? null),
     getActivity: (sessionId) => ipcRenderer.invoke("desktop:rental:get-activity", sessionId),
     getExposures: (sessionId) => ipcRenderer.invoke("desktop:rental:get-exposures", sessionId),

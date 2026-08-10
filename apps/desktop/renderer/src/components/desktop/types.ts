@@ -40,7 +40,15 @@ export type SystemEntry = {
   sectionLabel: string;
 };
 
-export type SidebarEntry = RoomEntry | SystemEntry;
+export type MarketplaceEntry = {
+  id: "marketplace:rent";
+  type: "marketplace";
+  title: "Rent";
+  description: string;
+  sectionLabel: "LetAgents";
+};
+
+export type SidebarEntry = RoomEntry | SystemEntry | MarketplaceEntry;
 
 export type ProjectGroup = {
   id: string;

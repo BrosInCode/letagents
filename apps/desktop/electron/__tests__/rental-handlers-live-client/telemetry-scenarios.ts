@@ -39,32 +39,22 @@ test("get-usage forwards to getSessionUsage and maps the response", async () => 
   assert.equal(calls[0]?.args[0], "rsess_42");
 });
 
-test("get-usage falls back to the empty snapshot when the api returns an error", async () => {
+test("get-usage surfaces API errors", async () => {
   const { client } = makeFakeClient({
     getSessionUsage: { ok: false, status: 500, error: "boom", body: null },
   });
   const handlers = captureHandlersWithClient(client);
-  const result = (await invoke(
+  await assert.rejects(() => invoke(
     handlers,
     "desktop:rental:get-usage",
     "rsess_42",
-  )) as {
-    sessionId: string;
-    lrtUsed: number;
-    lrtReserved: number;
-  };
-  assert.equal(result.sessionId, "rsess_42");
-  assert.equal(result.lrtUsed, 0);
-  assert.equal(result.lrtReserved, 0);
+  ), { code: "request_failed" });
 });
 
-test("get-usage falls back to the empty snapshot when sessionId is missing", async () => {
+test("get-usage surfaces unavailable when sessionId is missing", async () => {
   const { client, calls } = makeFakeClient({});
   const handlers = captureHandlersWithClient(client);
-  const result = (await invoke(handlers, "desktop:rental:get-usage", "")) as {
-    sessionId: string;
-  };
-  assert.equal(result.sessionId, "");
+  await assert.rejects(() => invoke(handlers, "desktop:rental:get-usage", ""), { code: "unavailable" });
   assert.equal(calls.length, 0);
 });
 
@@ -147,19 +137,17 @@ test("get-activity forwards to getSessionActivity and maps the response", async 
   assert.equal(calls[0]?.args[0], "rsess_42");
 });
 
-test("get-activity returns [] when the api returns an error", async () => {
+test("get-activity surfaces API errors", async () => {
   const { client } = makeFakeClient({
     getSessionActivity: { ok: false, status: 500, error: "boom", body: null },
   });
   const handlers = captureHandlersWithClient(client);
-  const result = await invoke(handlers, "desktop:rental:get-activity", "rsess_42");
-  assert.deepEqual(result, []);
+  await assert.rejects(() => invoke(handlers, "desktop:rental:get-activity", "rsess_42"), { code: "request_failed" });
 });
 
-test("get-activity returns [] when sessionId is missing", async () => {
+test("get-activity surfaces unavailable when sessionId is missing", async () => {
   const { client, calls } = makeFakeClient({});
   const handlers = captureHandlersWithClient(client);
-  const result = await invoke(handlers, "desktop:rental:get-activity", "");
-  assert.deepEqual(result, []);
+  await assert.rejects(() => invoke(handlers, "desktop:rental:get-activity", ""), { code: "unavailable" });
   assert.equal(calls.length, 0);
 });

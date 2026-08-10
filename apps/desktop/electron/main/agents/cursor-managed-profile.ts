@@ -81,6 +81,8 @@ export interface CursorSupervisedProfileOptions {
   workAttemptId: string;
   apiBaseUrl: string;
   workspaceRoot: string;
+  /** Room-only rentals must never inherit an ancestor repository boundary. */
+  roomOnlyRental?: boolean;
   /** Attested native authority; write profiles remain confined to this workspace. */
   permissionProfileId?: DesktopManagedAgentPermissionProfileId;
   sourceHomeDir?: string | null;
@@ -322,7 +324,9 @@ export function prepareCursorSupervisedProfile(
   // Cursor resolves the Git root and merges project authority from every
   // directory down to --workspace. Validate that complete effective chain,
   // not merely the selected subdirectory, before creating any private state.
-  const projectDirectories = cursorEffectiveProjectDirectories(workspaceRoot);
+  const projectDirectories = options.roomOnlyRental
+    ? [cursorExactWorkspaceDirectory(workspaceRoot)]
+    : cursorEffectiveProjectDirectories(workspaceRoot);
   assertWorkspaceDoesNotConfigureSupervisedCursorAuthority(workspaceRoot, projectDirectories);
   assertCursorPlatformEnterpriseHooksAbsent();
   const supervisorMcpEnv = supervisedCursorMcpEnvironment(options.supervisorMcpEnv);
@@ -547,9 +551,13 @@ export function prepareCursorSupervisedProfile(
     ...[...new Set(sandboxPathVariants(workspaceRoot))].map((root) =>
       `^${escapeSandboxRegex(root)}/.*/[.]cursor/mcp[.]json$`),
   ];
-  const gitMetadataReadRoots = cursorGitMetadataReadRoots(workspaceRoot);
+  const gitMetadataReadRoots = options.roomOnlyRental
+    ? []
+    : cursorGitMetadataReadRoots(workspaceRoot);
   const gitAuthorityRoots = [...new Set(gitMetadataReadRoots.flatMap(sandboxPathVariants))];
-  const gitMarkerPath = cursorGitMarkerPath(workspaceRoot);
+  const gitMarkerPath = options.roomOnlyRental
+    ? null
+    : cursorGitMarkerPath(workspaceRoot);
   const nativeDeniedWritePaths = [...new Set([
     join(cursorHomeDir, "mcp.json"),
     join(configDir, "letagents-cursor-identity.json"),
@@ -641,6 +649,15 @@ export function prepareCursorSupervisedProfile(
   };
 }
 
+function cursorExactWorkspaceDirectory(workspaceRoot: string): string {
+  const logicalWorkspace = resolve(workspaceRoot);
+  const workspaceStat = lstatSync(logicalWorkspace);
+  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink()) {
+    throw new Error(`Cursor supervised workspace must be a real directory: ${logicalWorkspace}`);
+  }
+  return realpathSync(logicalWorkspace);
+}
+
 /**
  * Reject every Cursor-owned project file that can widen its effective
  * execution or extension policy. Cursor's hidden --disable-project-configs
@@ -698,12 +715,7 @@ function sandboxPathVariants(path: string): string[] {
 
 /** Cursor uses Git's resolved top-level, then walks root -> selected workspace. */
 function cursorEffectiveProjectDirectories(workspaceRoot: string): string[] {
-  const logicalWorkspace = resolve(workspaceRoot);
-  const workspaceStat = lstatSync(logicalWorkspace);
-  if (!workspaceStat.isDirectory() || workspaceStat.isSymbolicLink()) {
-    throw new Error(`Cursor supervised workspace must be a real directory: ${logicalWorkspace}`);
-  }
-  const workspace = realpathSync(logicalWorkspace);
+  const workspace = cursorExactWorkspaceDirectory(workspaceRoot);
   let hasGitMarker = false;
   for (let cursor = workspace;; cursor = dirname(cursor)) {
     if (pathEntryExists(join(cursor, ".git"))) {

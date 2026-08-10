@@ -34,6 +34,11 @@
         @start-auth="$emit('start-auth')"
       />
 
+      <SettingsRentingPane
+        v-else-if="activePane === 'account:renting'"
+        :auth-status="authStatus"
+      />
+
       <SettingsStoragePane
         v-else-if="isStoragePane"
         :account-rooms="accountRooms"
@@ -124,6 +129,7 @@ import {
   Database,
   GitBranch,
   KeyRound,
+  Handshake,
   RefreshCw,
   ServerCog,
   SlidersHorizontal,
@@ -149,6 +155,7 @@ import SettingsAppAgentPane from "../settings/panes/SettingsAppAgentPane.vue";
 import SettingsDiagnosticsPane from "../settings/panes/SettingsDiagnosticsPane.vue";
 import SettingsMcpPane from "../settings/panes/SettingsMcpPane.vue";
 import SettingsProfilePane from "../settings/panes/SettingsProfilePane.vue";
+import SettingsRentingPane from "../settings/panes/SettingsRentingPane.vue";
 import SettingsRoomsPane from "../settings/panes/SettingsRoomsPane.vue";
 import SettingsRuntimePane from "../settings/panes/SettingsRuntimePane.vue";
 import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
@@ -215,6 +222,7 @@ const settingsNavGroups: SettingsNavGroup[] = [
     label: "Account",
     items: [
       { id: "account:profile", title: "Profile", description: "Identity and sign-in", icon: CircleUser },
+      { id: "account:renting", title: "Renting", description: "Availability and local runtimes", icon: Handshake },
     ],
   },
   {

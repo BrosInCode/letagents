@@ -12,6 +12,8 @@ import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/
 import { createWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./main/supervisor-grant-coordinator.js";
+import { stopActiveRentalProviderHostManager } from "./rental/provider-host-manager.js";
+import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-poller.js";
 
 configureDesktopSmokeEnvironment();
 
@@ -67,6 +69,8 @@ app.whenReady().then(async () => {
 
 app.on("before-quit", () => {
   void stopDesktopRoomStream();
+  void stopActiveRentalProviderHostManager();
+  void stopActiveRentalProviderEventPoller();
 });
 
 app.on("window-all-closed", () => {

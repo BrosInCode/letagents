@@ -329,6 +329,8 @@ function toSupervisorHostGrant(row: typeof supervisor_host_grants.$inferSelect):
     owner_account_id: row.owner_account_id,
     host_id: row.host_id,
     installation_id: row.installation_id,
+    scope_key: row.scope_key,
+    rental_session_id: row.rental_session_id,
     token_version: row.token_version,
     allowed_room_ids: row.allowed_room_ids,
     allowed_agent_keys: row.allowed_agent_keys,
@@ -800,14 +802,18 @@ export async function createSupervisorHostGrant(input: {
   allowed_room_ids: string[];
   allowed_agent_keys: string[];
   expires_at: string;
+  scope_key?: string;
+  rental_session_id?: string | null;
 }): Promise<{ grant: SupervisorHostGrant; token: string }> {
   return db.transaction(async (tx) => {
-    const installationFence = `supervisor_grant_installation:${input.owner_account_id}:${input.host_id}:${input.installation_id}`;
+    const scopeKey = input.scope_key ?? "owner";
+    const installationFence = `supervisor_grant_installation:${input.owner_account_id}:${input.host_id}:${input.installation_id}:${scopeKey}`;
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${installationFence}, 0))`);
     const activeGrants = await tx.select().from(supervisor_host_grants).where(and(
       eq(supervisor_host_grants.owner_account_id, input.owner_account_id),
       eq(supervisor_host_grants.host_id, input.host_id),
       eq(supervisor_host_grants.installation_id, input.installation_id),
+      eq(supervisor_host_grants.scope_key, scopeKey),
       isNull(supervisor_host_grants.revoked_at),
     ));
     // Pre-upgrade concurrent creates may have left multiple live rows. Never
@@ -845,6 +851,8 @@ export async function createSupervisorHostGrant(input: {
       owner_account_id: input.owner_account_id,
       host_id: input.host_id,
       installation_id: input.installation_id,
+      scope_key: scopeKey,
+      rental_session_id: input.rental_session_id ?? null,
       token_hash: hashToken(token),
       token_version: 1,
       allowed_room_ids: input.allowed_room_ids,

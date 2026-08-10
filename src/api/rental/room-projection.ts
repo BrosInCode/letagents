@@ -33,6 +33,7 @@ import {
   rental_sessions,
   rental_activity_events,
 } from "../db/schema.js";
+import { isRentalParticipantProvisionableStatus } from "./room-provisioning-policy.js";
 
 // ===== ID helpers =====
 
@@ -160,18 +161,18 @@ export async function provisionRentalRoom(
       throw new Error("session_not_found");
     }
 
+    if (!isRentalParticipantProvisionableStatus(session.status)) {
+      throw new Error(
+        `invalid_status: session must be accepted to provision, got ${session.status}`
+      );
+    }
+
     if (session.room_id) {
       return {
         roomId: session.room_id,
         participantId: await ensureParticipant(session.room_id),
         session,
       };
-    }
-
-    if (session.status !== "accepted") {
-      throw new Error(
-        `invalid_status: session must be accepted to provision, got ${session.status}`
-      );
     }
 
     const focusKey = `rental:${sessionId}`;

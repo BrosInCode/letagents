@@ -15,6 +15,7 @@ import {
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
+import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -937,6 +938,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
           ...(req.deliveryMode === "daemon_inbox" ? {
             LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
             LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+            ...(req.supervisorEntryId.startsWith("supervised_rental_") ? {
+              [rentalCredentialIsolationMarker]: "1",
+            } : {}),
           } : { LETAGENTS_EXECUTION_PROFILE: "interactive_desktop" }),
         },
       } : {}),

@@ -10,12 +10,13 @@
 import crypto from "node:crypto";
 import { and, desc, eq, sql } from "drizzle-orm";
 import { db } from "../db/client.js";
-import { rental_listings } from "../db/schema.js";
+import { rental_listings, rental_provider_hosts } from "../db/schema.js";
 
 // ===== Types =====
 
 export interface CreateListingInput {
   providerAccountId: string;
+  providerHostId?: string | null;
   displayName: string;
   ideKind: string;
   modelLabel?: string | null;
@@ -29,6 +30,7 @@ export interface CreateListingInput {
 }
 
 export interface UpdateListingInput {
+  providerHostId?: string | null;
   displayName?: string;
   modelLabel?: string | null;
   quotaLaneId?: string | null;
@@ -51,6 +53,14 @@ function generateListingId(): string {
 export async function createListing(
   input: CreateListingInput
 ): Promise<RentalListing> {
+  if (input.providerHostId) {
+    const [ownedHost] = await db.select({ id: rental_provider_hosts.id })
+      .from(rental_provider_hosts).where(and(
+        eq(rental_provider_hosts.id, input.providerHostId),
+        eq(rental_provider_hosts.provider_account_id, input.providerAccountId),
+      )).limit(1);
+    if (!ownedHost) throw new Error("provider_host_not_owned");
+  }
   const id = generateListingId();
   const now = new Date();
 
@@ -59,6 +69,7 @@ export async function createListing(
     .values({
       id,
       provider_account_id: input.providerAccountId,
+      provider_host_id: input.providerHostId ?? null,
       display_name: input.displayName,
       status: "setup_required",
       verification_status: "experimental",
@@ -84,11 +95,20 @@ export async function updateListing(
   providerAccountId: string,
   input: UpdateListingInput
 ): Promise<RentalListing | null> {
+  if (input.providerHostId) {
+    const [ownedHost] = await db.select({ id: rental_provider_hosts.id })
+      .from(rental_provider_hosts).where(and(
+        eq(rental_provider_hosts.id, input.providerHostId),
+        eq(rental_provider_hosts.provider_account_id, providerAccountId),
+      )).limit(1);
+    if (!ownedHost) throw new Error("provider_host_not_owned");
+  }
   const updates: Record<string, unknown> = {
     updated_at: new Date(),
   };
 
   if (input.displayName !== undefined) updates.display_name = input.displayName;
+  if (input.providerHostId !== undefined) updates.provider_host_id = input.providerHostId;
   if (input.modelLabel !== undefined) updates.model_label = input.modelLabel;
   if (input.quotaLaneId !== undefined) updates.quota_lane_id = input.quotaLaneId;
   if (input.quotaLaneLabel !== undefined) updates.quota_lane_label = input.quotaLaneLabel;

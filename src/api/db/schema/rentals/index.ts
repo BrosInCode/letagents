@@ -6,3 +6,4 @@ export * from "./patch-proposals.js";
 export * from "./usage-meters.js";
 export * from "./workspace.js";
 export * from "./context-requests.js";
+export * from "./provider-hosts.js";

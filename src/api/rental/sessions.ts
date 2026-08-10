@@ -17,5 +17,6 @@ export {
   countCapacityConsumingSessions,
   getSessionById,
   listProviderRequests,
+  listProviderSessions,
   listRenterSessions,
 } from "./sessions/queries.js";

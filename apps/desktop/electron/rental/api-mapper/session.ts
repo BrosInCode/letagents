@@ -1,5 +1,6 @@
 import type {
   DesktopRentalIdeKind,
+  DesktopRentalLaunchState,
   DesktopRentalPolicy,
   DesktopRentalQuotaLease,
   DesktopRentalScope,
@@ -29,6 +30,13 @@ import {
   readString,
   readStringArray,
 } from "./primitives.js";
+
+const LAUNCH_STATES: readonly DesktopRentalLaunchState[] = [
+  "pending",
+  "provisioning",
+  "active",
+  "launch_failed",
+];
 
 // ---------------------------------------------------------------------------
 // Session
@@ -112,6 +120,10 @@ export function mapApiSession(raw: unknown): DesktopRentalSession | null {
       CONTINUITY_MODES,
       "smart_handoff",
     ),
+    roomHistoryAccess: coerceFromListOrNull(
+      raw.room_history_access ?? raw.roomHistoryAccess,
+      ["full", "filtered"] as const,
+    ),
     continuityIngestDepth: coerceFromList(
       raw.continuity_ingest_depth ?? raw.continuityIngestDepth,
       CONTINUITY_INGEST_DEPTHS,
@@ -123,6 +135,9 @@ export function mapApiSession(raw: unknown): DesktopRentalSession | null {
         ? readString(raw.continuity_pack, "packId", "pack_id", "id")
         : null),
     status: coerceFromList(raw.status, SESSION_STATUSES, "requested"),
+    launchState: coerceFromListOrNull(raw.launch_state ?? raw.launchState, LAUNCH_STATES),
+    launchErrorCode: readString(raw, "launch_error_code", "launchErrorCode"),
+    launchErrorMessage: readString(raw, "launch_error_message", "launchErrorMessage"),
     approvedScope: mapApiScope(raw.approved_scope ?? raw.approvedScope),
     policy: mapApiPolicy(raw.policy),
     quotaLease: mapApiQuotaLease(raw.quota_lease ?? raw.quotaLease),
