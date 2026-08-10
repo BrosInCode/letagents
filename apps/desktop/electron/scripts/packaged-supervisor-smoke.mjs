@@ -8,7 +8,7 @@ import { randomUUID } from "node:crypto";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const bundle = join(root, "release", "LetAgents-darwin", "LetAgents.app");
-const executable = join(bundle, "Contents", "MacOS", "Electron");
+const executable = join(bundle, "Contents", "MacOS", "LetAgents");
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 const socketPath = join(home, ".letagents", "daemon.sock");
 const protocolVersion = 2;

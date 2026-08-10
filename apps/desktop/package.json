@@ -1,7 +1,14 @@
 {
   "name": "letagents-desktop",
+  "productName": "LetAgents",
   "private": true,
-  "version": "0.0.1",
+  "version": "0.1.0",
+  "description": "A desktop control plane for collaborating AI agents.",
+  "license": "BUSL-1.1",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/BrosInCode/letagents.git"
+  },
   "type": "module",
   "letagentsRuntime": {
     "openCodeVersion": "1.18.9",
@@ -23,6 +30,7 @@
     "build:daemon": "tsc -p tsconfig.daemon.json",
     "package:artifact": "npm run build && node electron/scripts/package-artifact.mjs",
     "package:mac": "npm run package:artifact && node electron/scripts/package-macos.mjs",
+    "package:mac:local": "cross-env MACOS_SKIP_SIGNING=1 npm run package:mac",
     "smoke:electron": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 electron .",
     "screenshot:agent-detail": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT=/tmp/letagents-agent-detail-responsive.png electron .",
     "screenshot:board": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_BOARD_SCREENSHOT=/tmp/letagents-room-board.png electron .",
@@ -31,10 +39,11 @@
     "smoke:cursor-managed": "node --import tsx electron/scripts/cursor-managed-isolation-smoke.ts",
     "smoke:opencode-contract": "npm run build:electron && node electron/scripts/opencode-runtime-contract-smoke.mjs",
     "smoke:claude-daemon-inbox": "node --import tsx electron/scripts/claude-daemon-inbox-spike.ts",
-    "test": "npm run test:renderer && npm run test:electron && npm run test:daemon",
+    "test": "npm run test:renderer && npm run test:electron && npm run test:daemon && npm run test:packaging",
     "test:renderer": "node --import tsx --test renderer/__tests__/*.test.ts",
     "test:electron": "node --import tsx --test --test-concurrency=1 --experimental-test-module-mocks electron/__tests__/*.test.ts",
     "test:daemon": "node --import tsx --test daemon/__tests__/*.test.ts",
+    "test:packaging": "node --test electron/scripts/*.test.mjs",
     "lint:vue-components": "eslint \"renderer/src/**/*.vue\"",
     "typecheck": "vue-tsc --noEmit && tsc -p tsconfig.electron.json --noEmit && tsc -p tsconfig.daemon.json --noEmit"
   },
