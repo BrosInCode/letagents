@@ -17,6 +17,7 @@ import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/
 import { createWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./main/supervisor-grant-coordinator.js";
+import { initializeDesktopUpdates, stopDesktopUpdates } from "./main/updates.js";
 import { stopActiveRentalProviderHostManager } from "./rental/provider-host-manager.js";
 import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-poller.js";
 
@@ -66,6 +67,7 @@ app.once("ready", async (_event, launchInfo) => {
   app.setName("LetAgents");
   configureApplicationMenu();
   createWindow();
+  initializeDesktopUpdates();
   await initializeDesktopNotifications().catch((error) => {
     console.warn(`Desktop notification setup unavailable: ${error instanceof Error ? error.message : String(error)}`);
   });
@@ -78,6 +80,7 @@ app.once("ready", async (_event, launchInfo) => {
 });
 
 app.on("before-quit", () => {
+  stopDesktopUpdates();
   void stopDesktopRoomStream();
   void stopActiveRentalProviderHostManager();
   void stopActiveRentalProviderEventPoller();

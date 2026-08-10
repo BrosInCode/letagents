@@ -10,6 +10,13 @@ const api: DesktopApi = {
         ipcRenderer.off("desktop:ui:open-settings", listener);
       };
     },
+    onOpenUpdates: (callback) => {
+      const listener = () => callback();
+      ipcRenderer.on("desktop:ui:open-updates", listener);
+      return () => {
+        ipcRenderer.off("desktop:ui:open-updates", listener);
+      };
+    },
   },
   notifications: {
     getStatus: () => ipcRenderer.invoke("desktop:notifications:get-status"),
@@ -32,6 +39,18 @@ const api: DesktopApi = {
     openExternalUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-external-url", url),
     getGitHubPullRequestStats: (url: string) =>
       ipcRenderer.invoke("desktop:app:get-github-pull-request-stats", url),
+  },
+  updates: {
+    getStatus: () => ipcRenderer.invoke("desktop:updates:get-status"),
+    check: () => ipcRenderer.invoke("desktop:updates:check"),
+    install: () => ipcRenderer.invoke("desktop:updates:install"),
+    onStatusChanged: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, status: Parameters<typeof callback>[0]) => callback(status);
+      ipcRenderer.on("desktop:updates:status-changed", listener);
+      return () => {
+        ipcRenderer.off("desktop:updates:status-changed", listener);
+      };
+    },
   },
   appAgent: {
     getSettingsStatus: () =>

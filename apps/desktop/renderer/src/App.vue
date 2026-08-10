@@ -204,6 +204,7 @@
         :selected-room-identifier="selectedRoomIdentifier"
         :setup-api-available="setupApiAvailable"
         :workers="workers"
+        :update-status="updateStatus"
         @back-mcp="goBackMcpOnboarding"
         @back-to-app="activeEntry = currentParentRoom"
         @clear-mcp-target-selection="clearMcpTargetSelection"
@@ -211,6 +212,8 @@
         @delete-room="deleteAccountRoom"
         @finish-mcp="completeMcpOnboarding"
         @install-mcp-targets="installSelectedMcpTargets"
+        @check-update="checkDesktopUpdate"
+        @install-update="installDesktopUpdate"
         @leave-room="leaveAccountRoom"
         @open-room="openAccountRoomFromSettings"
         @restore-room="restoreAccountRoom"
@@ -336,6 +339,7 @@ import type {
   DesktopFocusRoomInfo,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopUpdateStatus,
   DesktopNotificationTarget,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
@@ -424,6 +428,7 @@ const RentMarketplaceView = defineAsyncComponent(
 
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
+const updateStatus = ref<DesktopUpdateStatus | null>(null);
 const repoStatus = ref<RepoStatus | null>(null);
 // Canonical status of the launched desktop workspace, used only to identity-match
 // a repo-backed room's self-heal target so it never inherits an unrelated repo.
@@ -520,6 +525,8 @@ const {
 
 let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
+let unsubscribeOpenUpdates: (() => void) | null = null;
+let unsubscribeUpdateStatus: (() => void) | null = null;
 let unsubscribeNotificationActivation: (() => void) | null = null;
 let unsubscribeRepoStatusChanged: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
@@ -649,7 +656,10 @@ const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
   }
 );
 
+const requestedSettingsPane = ref<SettingsPaneId | null>(null);
+
 const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
+  if (requestedSettingsPane.value) return requestedSettingsPane.value;
   if (activeEntry.value.type !== "system") return "storage:chat";
   if (activeEntry.value.id === "system:setup") return "system:setup";
   if (activeEntry.value.id === "system:app-agent") return "system:app-agent";
@@ -660,6 +670,12 @@ const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
 });
 
 function openSettingsSurface(): void {
+  requestedSettingsPane.value = null;
+  activeEntry.value = settingsEntry;
+}
+
+function openUpdatesSurface(): void {
+  requestedSettingsPane.value = "system:updates";
   activeEntry.value = settingsEntry;
 }
 
@@ -1717,7 +1733,23 @@ async function refreshSettingsSurface(): Promise<void> {
     refreshSettings(),
     loadAppAgentSettingsStatus(),
     loadAppAgentActions(),
+    refreshDesktopUpdateStatus(),
   ]);
+}
+
+async function refreshDesktopUpdateStatus(): Promise<void> {
+  if (!desktopIpc.updates?.getStatus) return;
+  updateStatus.value = await desktopIpc.updates.getStatus();
+}
+
+async function checkDesktopUpdate(): Promise<void> {
+  if (!desktopIpc.updates?.check) return;
+  updateStatus.value = await desktopIpc.updates.check();
+}
+
+async function installDesktopUpdate(): Promise<void> {
+  if (!desktopIpc.updates?.install) return;
+  updateStatus.value = await desktopIpc.updates.install();
 }
 
 function openAppAgentSettings(): void {
@@ -2218,6 +2250,10 @@ watch(
 onMounted(() => {
   unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
   unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
+  unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
+  unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {
+    updateStatus.value = status;
+  }) || null;
   unsubscribeNotificationActivation = desktopIpc.notifications?.onActivated?.((target) => {
     void handleNotificationActivation(target);
   }) || null;
@@ -2238,6 +2274,7 @@ onMounted(() => {
   void loadAppAgentActions();
   void loadFirstRunSetup();
   void refreshRentalRequestCount();
+  void refreshDesktopUpdateStatus();
 });
 
 onBeforeUnmount(() => {
@@ -2256,6 +2293,10 @@ onBeforeUnmount(() => {
   unsubscribeRoomStream = null;
   unsubscribeOpenSettings?.();
   unsubscribeOpenSettings = null;
+  unsubscribeOpenUpdates?.();
+  unsubscribeOpenUpdates = null;
+  unsubscribeUpdateStatus?.();
+  unsubscribeUpdateStatus = null;
   unsubscribeNotificationActivation?.();
   unsubscribeNotificationActivation = null;
   unsubscribeRepoStatusChanged?.();

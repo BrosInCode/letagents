@@ -100,6 +100,14 @@
         :repo-status="repoStatus"
       />
 
+      <SettingsUpdatesPane
+        v-else-if="activePane === 'system:updates'"
+        :app-info="appInfo"
+        :update-status="updateStatus"
+        @check="$emit('check-update')"
+        @install="$emit('install-update')"
+      />
+
       <SettingsMcpPane
         v-else-if="activePane === 'system:mcp'"
         :mcp-install-state="mcpInstallState"
@@ -132,6 +140,7 @@ import {
   Handshake,
   RefreshCw,
   ServerCog,
+  Sparkles,
   SlidersHorizontal,
   Trash2,
   Wrench,
@@ -147,6 +156,7 @@ import type {
   DesktopChatStorageSettings,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopUpdateStatus,
   RepoStatus,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
@@ -158,6 +168,7 @@ import SettingsProfilePane from "../settings/panes/SettingsProfilePane.vue";
 import SettingsRentingPane from "../settings/panes/SettingsRentingPane.vue";
 import SettingsRoomsPane from "../settings/panes/SettingsRoomsPane.vue";
 import SettingsRuntimePane from "../settings/panes/SettingsRuntimePane.vue";
+import SettingsUpdatesPane from "../settings/panes/SettingsUpdatesPane.vue";
 import SettingsSetupPane from "../settings/panes/SettingsSetupPane.vue";
 import SettingsStoragePane from "../settings/panes/SettingsStoragePane.vue";
 import SettingsSupervisorGrantPane from "../settings/panes/SettingsSupervisorGrantPane.vue";
@@ -191,6 +202,7 @@ const props = defineProps<{
   selectedRoomIdentifier: string | null;
   setupApiAvailable: boolean;
   workers: WorkerSnapshot[];
+  updateStatus: DesktopUpdateStatus | null;
 }>();
 
 defineEmits<{
@@ -201,6 +213,8 @@ defineEmits<{
   "delete-room": [room: DesktopAccountRoomEntry];
   "finish-mcp": [];
   "install-mcp-targets": [];
+  "check-update": [];
+  "install-update": [];
   "leave-room": [room: DesktopAccountRoomEntry];
   "open-room": [room: DesktopAccountRoomEntry];
   "restore-room": [room: DesktopAccountRoomEntry];
@@ -248,6 +262,7 @@ const settingsNavGroups: SettingsNavGroup[] = [
       { id: "system:app-agent", title: "App Agent", description: "App control", icon: KeyRound },
       { id: "system:supervisor", title: "Supervisor", description: "Host grants and scope", icon: KeyRound },
       { id: "system:runtime", title: "Runtime", description: "Repo and desktop state", icon: GitBranch },
+      { id: "system:updates", title: "Updates", description: "Versions and safe restarts", icon: Sparkles },
       { id: "system:mcp", title: "Agent app connections", description: "Connected apps", icon: ServerCog },
       { id: "system:agents", title: "Agents", description: "Status and availability", icon: Bot },
       { id: "system:diagnostics", title: "Troubleshooting", description: "Local truth and recovery", icon: Activity },

@@ -91,6 +91,7 @@ import type { DesktopMcpInstallManyResult, DesktopMcpInstallResult, DesktopMcpIn
 import type {
   DesktopReasoningSessionDetail,
 } from "./activity.js";
+import type { DesktopUpdateStatus } from "./updates.js";
 import type {
   DesktopTaskCreateInput,
   DesktopTaskLeaseActionInput,
@@ -111,6 +112,7 @@ import type {
 export interface DesktopApi {
   ui: {
     onOpenSettings: (callback: () => void) => () => void;
+    onOpenUpdates?: (callback: () => void) => () => void;
   };
   notifications: {
     getStatus: () => Promise<DesktopNotificationStatus>;
@@ -124,6 +126,12 @@ export interface DesktopApi {
     openGitHubUrl: (url: string) => Promise<void>;
     openExternalUrl: (url: string) => Promise<void>;
     getGitHubPullRequestStats: (url: string) => Promise<DesktopGitHubPullRequestStats | null>;
+  };
+  updates?: {
+    getStatus: () => Promise<DesktopUpdateStatus>;
+    check: () => Promise<DesktopUpdateStatus>;
+    install: () => Promise<DesktopUpdateStatus>;
+    onStatusChanged: (callback: (status: DesktopUpdateStatus) => void) => () => void;
   };
   appAgent: {
     getSettingsStatus: () => Promise<DesktopAppAgentSettingsStatus>;

@@ -460,6 +460,120 @@ img.settings-profile-avatar {
     rgba(255, 255, 255, 0.025);
 }
 
+.settings-updates-panel {
+  max-width: 980px;
+}
+
+.settings-update-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 20px;
+  min-height: 168px;
+  padding: 24px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background:
+    radial-gradient(circle at top left, rgba(125, 211, 252, 0.1), transparent 42%),
+    rgba(255, 255, 255, 0.035);
+}
+
+.settings-update-card[data-tone="success"] {
+  border-color: rgba(34, 197, 94, 0.24);
+  background:
+    radial-gradient(circle at top left, rgba(34, 197, 94, 0.11), transparent 42%),
+    rgba(255, 255, 255, 0.035);
+}
+
+.settings-update-card[data-tone="warning"] {
+  border-color: rgba(251, 191, 36, 0.24);
+}
+
+.settings-update-card[data-tone="error"] {
+  border-color: rgba(248, 113, 113, 0.28);
+}
+
+.settings-update-icon {
+  display: inline-grid;
+  place-items: center;
+  width: 54px;
+  height: 54px;
+  border-radius: 12px;
+  background: rgba(125, 211, 252, 0.12);
+  color: #bae6fd;
+}
+
+.settings-update-card[data-tone="success"] .settings-update-icon {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.settings-update-card[data-tone="warning"] .settings-update-icon {
+  background: rgba(251, 191, 36, 0.12);
+  color: #fbbf24;
+}
+
+.settings-update-card[data-tone="error"] .settings-update-icon {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.settings-update-icon svg {
+  width: 25px;
+  height: 25px;
+}
+
+.settings-update-copy {
+  display: grid;
+  gap: 7px;
+  min-width: 0;
+}
+
+.settings-update-copy p,
+.settings-update-copy h2,
+.settings-update-copy span {
+  margin: 0;
+}
+
+.settings-update-copy p {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  font-weight: 900;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+.settings-update-copy h2 {
+  font-size: 1.32rem;
+  letter-spacing: 0;
+}
+
+.settings-update-copy span {
+  max-width: 590px;
+  color: var(--text-secondary);
+  font-size: 0.9rem;
+  line-height: 1.5;
+}
+
+.settings-update-actions {
+  display: grid;
+  justify-items: stretch;
+  gap: 8px;
+  min-width: 154px;
+}
+
+@media (max-width: 1040px) {
+  .settings-update-card {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+
+  .settings-update-actions {
+    grid-column: 1 / -1;
+    grid-auto-flow: column;
+    justify-content: start;
+  }
+}
+
 .settings-status-header {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr);

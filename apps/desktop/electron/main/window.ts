@@ -95,6 +95,7 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
 
   const agentDetailScreenshotPath = process.env.LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT?.trim() || null;
   const boardScreenshotPath = process.env.LETAGENTS_DESKTOP_BOARD_SCREENSHOT?.trim() || null;
+  const updatesScreenshotPath = process.env.LETAGENTS_DESKTOP_UPDATES_SCREENSHOT?.trim() || null;
   const boardScreenshotSurface = process.env.LETAGENTS_DESKTOP_BOARD_SURFACE?.trim() || "board";
   const requestedBoardTheme = process.env.LETAGENTS_DESKTOP_BOARD_THEME?.trim();
   const boardScreenshotTheme = requestedBoardTheme === "light" || requestedBoardTheme === "dark"
@@ -116,6 +117,37 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
   });
 
   window.webContents.once("did-finish-load", () => {
+    if (updatesScreenshotPath) {
+      window.setSize(1440, 920);
+      setTimeout(() => {
+        window.webContents.send("desktop:ui:open-updates", null);
+        void window.webContents.executeJavaScript(
+          `new Promise((resolve, reject) => {
+            const startedAt = Date.now();
+            const tick = () => {
+              const panel = document.querySelector('[data-testid="settings-updates-panel"]');
+              if (panel) { resolve(true); return; }
+              if (Date.now() - startedAt > 12000) {
+                reject(new Error('Timed out waiting for the desktop Updates settings pane.'));
+                return;
+              }
+              setTimeout(tick, 100);
+            };
+            tick();
+          })`,
+        ).then(async () => {
+          await new Promise((resolve) => setTimeout(resolve, 750));
+          const image = await window.capturePage();
+          await writeFile(updatesScreenshotPath, image.toPNG());
+          console.log(`LETAGENTS_DESKTOP_UPDATES_SCREENSHOT ${updatesScreenshotPath}`);
+          app.exit(0);
+        }).catch((error) => {
+          console.error(`LETAGENTS_DESKTOP_UPDATES_SCREENSHOT_FAILED ${error instanceof Error ? error.message : String(error)}`);
+          app.exit(1);
+        });
+      }, 500);
+      return;
+    }
     if (boardScreenshotPath) {
       window.setSize(boardScreenshotWidth, boardScreenshotHeight);
     }
