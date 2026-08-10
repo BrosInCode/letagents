@@ -14,6 +14,7 @@ import {
   parseGitStatusPorcelainV2,
   parseGitShortStat,
   parseGitWorktreePorcelain,
+  refreshRepoStatus,
   resolveRoomIdentifierFromPath,
   resolveWorkspaceRoom,
 } from "../repo-status.js";
@@ -407,6 +408,105 @@ test("buildRepoStatus limits branch deltas to open worktree branches", async () 
     assert.ok(deltaBranches.includes("main"));
     assert.ok(deltaBranches.includes("feature/current"));
     assert.equal(deltaBranches.includes("feature/dormant"), false);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("refreshRepoStatus reuses static metadata and branch deltas for working-tree changes", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-cheap-git-status-"));
+  try {
+    execFileSync("git", ["init", "-b", "main"], { cwd: tempDir, stdio: "ignore" });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\n");
+    commitAll(tempDir, "Initial commit");
+    const initial = await buildRepoStatus(tempDir);
+
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\nchanged\n");
+    const refreshed = await refreshRepoStatus(tempDir, initial, { status: true });
+
+    assert.equal(refreshed.dirty, true);
+    assert.equal(refreshed.changes?.unstaged, 1);
+    assert.strictEqual(
+      refreshed.worktrees,
+      initial.worktrees,
+      "working-tree refreshes reuse cached worktree discovery",
+    );
+    assert.strictEqual(
+      refreshed.branchDeltas,
+      initial.branchDeltas,
+      "working-tree refreshes do not recalculate branch shortstats",
+    );
+    assert.equal(refreshed.roomIdentifier, initial.roomIdentifier);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("refreshRepoStatus promotes a cheap refresh when Git identity changed", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-promoted-git-status-"));
+  try {
+    execFileSync("git", ["init", "-b", "main"], { cwd: tempDir, stdio: "ignore" });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\n");
+    commitAll(tempDir, "Initial commit");
+    const initial = await buildRepoStatus(tempDir);
+
+    execFileSync("git", ["checkout", "-b", "feature/watcher-race"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    const refreshed = await refreshRepoStatus(tempDir, initial, { status: true });
+
+    assert.equal(refreshed.branch, "feature/watcher-race");
+    assert.notStrictEqual(refreshed.worktrees, initial.worktrees);
+    assert.notStrictEqual(refreshed.branchDeltas, initial.branchDeltas);
+    assert.match(refreshed.roomIdentifier || "", /branch:ZmVhdHVyZS93YXRjaGVyLXJhY2U$/);
+  } finally {
+    rmSync(tempDir, { recursive: true, force: true });
+  }
+});
+
+test("refreshRepoStatus reroutes when origin HEAD changes without changing the fallback name", async () => {
+  const tempDir = mkdtempSync(join(tmpdir(), "letagents-routing-default-refresh-"));
+  try {
+    execFileSync("git", ["init", "-b", "develop"], { cwd: tempDir, stdio: "ignore" });
+    writeFileSync(join(tempDir, "tracked.txt"), "hello\n");
+    commitAll(tempDir, "Initial commit");
+    execFileSync("git", ["remote", "add", "origin", "https://github.com/example/repo.git"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync("git", ["update-ref", "refs/remotes/origin/develop", "HEAD"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    execFileSync(
+      "git",
+      ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"],
+      { cwd: tempDir, stdio: "ignore" },
+    );
+
+    const rooted = await buildRepoStatus(tempDir);
+    assert.equal(rooted.defaultBranch, "develop");
+    assert.equal(rooted.routingDefaultBranch, "develop");
+    assert.equal(rooted.roomIdentifier, "github.com/example/repo");
+
+    execFileSync("git", ["symbolic-ref", "--delete", "refs/remotes/origin/HEAD"], {
+      cwd: tempDir,
+      stdio: "ignore",
+    });
+    const branched = await refreshRepoStatus(tempDir, rooted, { refs: true });
+    assert.equal(branched.defaultBranch, "develop", "local fallback remains unchanged");
+    assert.equal(branched.routingDefaultBranch, null);
+    assert.match(branched.roomIdentifier || "", /branch:ZGV2ZWxvcA$/);
+
+    execFileSync(
+      "git",
+      ["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/develop"],
+      { cwd: tempDir, stdio: "ignore" },
+    );
+    const rerooted = await refreshRepoStatus(tempDir, branched, { refs: true });
+    assert.equal(rerooted.routingDefaultBranch, "develop");
+    assert.equal(rerooted.roomIdentifier, "github.com/example/repo");
   } finally {
     rmSync(tempDir, { recursive: true, force: true });
   }

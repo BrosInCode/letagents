@@ -3,6 +3,8 @@ import type { RepoStatus } from "../ipc-types.js";
 export interface RepoStatusWatchWindowState {
   isDestroyed(): boolean;
   isVisible(): boolean;
+  on?(event: "show" | "focus", listener: () => void): unknown;
+  off?(event: "show" | "focus", listener: () => void): unknown;
 }
 
 export function repoStatusWatchFingerprint(status: RepoStatus): string {
@@ -15,6 +17,7 @@ export function repoStatusWatchFingerprint(status: RepoStatus): string {
     branch: status.branch || null,
     detached: Boolean(status.detached),
     defaultBranch: status.defaultBranch || null,
+    routingDefaultBranch: status.routingDefaultBranch || null,
     upstream: status.upstream || null,
     ahead: status.ahead || 0,
     behind: status.behind || 0,

@@ -16,6 +16,9 @@ test("repoStatusChanged suppresses unchanged status emits", () => {
   assert.equal(repoStatusChanged(fingerprint, status), false);
   assert.equal(repoStatusChanged(fingerprint, repoStatus({ ahead: 1 })), true);
   assert.equal(repoStatusChanged(fingerprint, repoStatus({
+    routingDefaultBranch: "main",
+  })), true);
+  assert.equal(repoStatusChanged(fingerprint, repoStatus({
     worktrees: [{
       path: "/repo-feature",
       branch: "feature/git-rooms",
