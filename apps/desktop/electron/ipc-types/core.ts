@@ -1,5 +1,6 @@
 export interface DesktopAppInfo {
   appName: string;
+  appVersion?: string;
   platform: string;
   versions: {
     electron: string;

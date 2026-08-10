@@ -97,6 +97,7 @@ import type {
   DesktopTaskReviewWorkerActionInput,
   DesktopTaskWorkerActionInput,
   DesktopTaskSummary,
+  DesktopUpdateStatus,
   DesktopSupervisorGrantMetadata,
   RepoStatus,
   WorkerSnapshot,
@@ -165,6 +166,7 @@ import {
 } from "./supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
 import { emitToMainWindow } from "./window.js";
+import { assertDesktopUpdateMutationAllowed, desktopUpdater } from "./updates.js";
 import {
   getDesktopNotificationStatus,
   refreshDesktopNotificationRegistration,
@@ -268,7 +270,7 @@ import {
   saveOpenModelSettings,
 } from "./agents/open-model-settings.js";
 
-const { ipcMain } = electron as typeof import("electron");
+const { app, ipcMain } = electron as typeof import("electron");
 let supervisorActivityBridgeRegistered = false;
 let supervisorStateBridgeRegistered = false;
 let supervisorLaunchBridgeRegistered = false;
@@ -307,6 +309,7 @@ export function registerDesktopIpcHandlers(
     "desktop:app:get-info",
     async (): Promise<DesktopAppInfo> => ({
       appName: "LetAgents Desktop",
+      appVersion: app.getVersion(),
       platform: process.platform,
       versions: {
         electron: process.versions.electron,
@@ -317,6 +320,18 @@ export function registerDesktopIpcHandlers(
       homePath: homedir(),
       apiUrl,
     }),
+  );
+  targetIpcMain.handle(
+    "desktop:updates:get-status",
+    async (): Promise<DesktopUpdateStatus> => desktopUpdater.getStatus(),
+  );
+  targetIpcMain.handle(
+    "desktop:updates:check",
+    async (): Promise<DesktopUpdateStatus> => desktopUpdater.check(),
+  );
+  targetIpcMain.handle(
+    "desktop:updates:install",
+    async (): Promise<DesktopUpdateStatus> => desktopUpdater.install(),
   );
   targetIpcMain.handle("desktop:notifications:get-status", async () => getDesktopNotificationStatus());
   targetIpcMain.handle(
@@ -968,6 +983,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:create-agent",
     async (_event, rawInput: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> => {
+      assertDesktopUpdateMutationAllowed();
       // Pin the launch id up front so every launch fact — and the durable entry
       // id (`supervised_<launchId>`) — shares one stable key across retries and
       // reopen. The renderer normally supplies it; fall back defensively.
@@ -1051,6 +1067,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:resume-ownership-transfer",
     async (_event, id: string): Promise<DesktopSupervisorManifestEntry> => {
+      assertDesktopUpdateMutationAllowed();
       const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
       if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
       if (entry.desiredState !== "paused") return entry;
@@ -1107,6 +1124,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:set-desired-state",
     async (_event, id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> => {
+      assertDesktopUpdateMutationAllowed();
       if (desiredState === "running") {
         const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === id);
         if (!entry) throw new Error(`Unknown supervised agent: ${id}`);
@@ -1142,6 +1160,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:retry-room-delivery",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomDeliveryRetryInput): Promise<void> => {
+      assertDesktopUpdateMutationAllowed();
       if (isDesktopSmokeCheck()) throw new Error("Room delivery retry is unavailable in the desktop smoke environment.");
       await supervisorDaemonClient.retryRoomDelivery(input);
     },
@@ -1149,6 +1168,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:restore-agent-conversation",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorConversationRestoreInput): Promise<void> => {
+      assertDesktopUpdateMutationAllowed();
       if (isDesktopSmokeCheck()) throw new Error("Conversation restoration is unavailable in the desktop smoke environment.");
       await supervisorDaemonClient.restoreAgentConversation(input);
     },
@@ -1156,6 +1176,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:skip-room-delivery",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomDeliverySkipInput): Promise<void> => {
+      assertDesktopUpdateMutationAllowed();
       if (isDesktopSmokeCheck()) throw new Error("Room delivery skipping is unavailable in the desktop smoke environment.");
       await supervisorDaemonClient.skipRoomDelivery(input);
     },
@@ -1163,6 +1184,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:reconnect-agent",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorReconnectInput): Promise<DesktopSupervisorManifestEntry> => {
+      assertDesktopUpdateMutationAllowed();
       if (isDesktopSmokeCheck()) throw new Error("Agent reconnection is unavailable in the desktop smoke environment.");
       const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
       if (!entry) throw new Error(`Unknown supervised agent: ${input.entryId}`);
@@ -1173,6 +1195,7 @@ export function registerDesktopIpcHandlers(
   targetIpcMain.handle(
     "desktop:supervisor:recover-agent-runtime",
     async (_event, input: import("../ipc-types.js").DesktopSupervisorRuntimeRecoveryInput): Promise<DesktopSupervisorManifestEntry> => {
+      assertDesktopUpdateMutationAllowed();
       if (isDesktopSmokeCheck()) throw new Error("Agent runtime recovery is unavailable in the desktop smoke environment.");
       const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
       if (!entry) throw new Error(`Unknown supervised agent: ${input.entryId}`);
@@ -1185,13 +1208,17 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle(
     "desktop:supervisor:control-turn",
-    async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlInput) =>
-      isDesktopSmokeCheck() ? desktopSmokeControlTurn(input) : supervisorDaemonClient.controlTurn(input),
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlInput) => {
+      assertDesktopUpdateMutationAllowed();
+      return isDesktopSmokeCheck() ? desktopSmokeControlTurn(input) : supervisorDaemonClient.controlTurn(input);
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor:resolve-turn-control",
-    async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlResolutionInput) =>
-      supervisorDaemonClient.resolveTurnControl(input),
+    async (_event, input: import("../ipc-types.js").DesktopSupervisorTurnControlResolutionInput) => {
+      assertDesktopUpdateMutationAllowed();
+      return supervisorDaemonClient.resolveTurnControl(input);
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor:read-attempt",
@@ -1206,11 +1233,16 @@ export function registerDesktopIpcHandlers(
   );
   targetIpcMain.handle("desktop:supervisor:get-agent-configuration", async (_event, input: { entryId: string; daemonGeneration: number }) =>
     supervisorDaemonClient.getAgentConfiguration(input.entryId, input.daemonGeneration));
-  targetIpcMain.handle("desktop:supervisor:update-agent-configuration", async (_event, input: import("../ipc-types.js").DesktopSupervisorAgentConfigurationUpdateInput) =>
-    supervisorDaemonClient.updateAgentConfiguration(input));
-  targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) =>
-    supervisorDaemonClient.prepareRoomMove(input));
+  targetIpcMain.handle("desktop:supervisor:update-agent-configuration", async (_event, input: import("../ipc-types.js").DesktopSupervisorAgentConfigurationUpdateInput) => {
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.updateAgentConfiguration(input);
+  });
+  targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) => {
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.prepareRoomMove(input);
+  });
   targetIpcMain.handle("desktop:supervisor:commit-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorRoomMoveOperationInput) => {
+    assertDesktopUpdateMutationAllowed();
     let move = await supervisorDaemonClient.commitRoomMove(input);
     for (let step = 0; step < 4; step += 1) {
       if (move.phase === "rotating_credentials") {
@@ -1245,9 +1277,12 @@ export function registerDesktopIpcHandlers(
     supervisorDaemonClient.getRoomMove(input));
   targetIpcMain.handle("desktop:supervisor:get-current-room-move", async (_event, input: import("../ipc-types.js").DesktopSupervisorCurrentRoomMoveInput) =>
     supervisorDaemonClient.getCurrentRoomMove(input));
-  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) =>
-    supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration));
+  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration);
+  });
   targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
+    assertDesktopUpdateMutationAllowed();
     const finishPurge = <T extends { outcome: string; purgedWorkAttemptId?: string }>(result: T): T => {
       // Cursor profiles are keyed only by the exact attempt id. Applying this
       // cleanup to another provider is a harmless no-op, while keeping the
@@ -1310,22 +1345,30 @@ export function registerDesktopIpcHandlers(
     async (
       _event,
       input: DesktopManagedAgentStartInput,
-    ): Promise<DesktopManagedAgentStartResult> => startDesktopManagedAgent(input),
+    ): Promise<DesktopManagedAgentStartResult> => {
+      assertDesktopUpdateMutationAllowed();
+      return startDesktopManagedAgent(input);
+    },
   );
   targetIpcMain.handle(
     "desktop:workers:stop-managed-agent",
     async (
       _event,
       input?: DesktopManagedAgentStopInput,
-    ): Promise<DesktopManagedAgentSession | null> =>
-      stopDesktopManagedAgent(input ?? {}),
+    ): Promise<DesktopManagedAgentSession | null> => {
+      assertDesktopUpdateMutationAllowed();
+      return stopDesktopManagedAgent(input ?? {});
+    },
   );
   targetIpcMain.handle(
     "desktop:workers:retry-managed-agent",
     async (
       _event,
       input: DesktopManagedAgentRetryInput,
-    ): Promise<DesktopManagedAgentSession | null> => retryDesktopManagedAgent(input),
+    ): Promise<DesktopManagedAgentSession | null> => {
+      assertDesktopUpdateMutationAllowed();
+      return retryDesktopManagedAgent(input);
+    },
   );
   targetIpcMain.handle(
     "desktop:workers:inspect-managed-agent",
@@ -1350,8 +1393,10 @@ export function registerDesktopIpcHandlers(
     async (
       _event,
       input: DesktopManagedAgentPermissionDecisionInput,
-    ): Promise<DesktopManagedAgentPermissionDecisionResult> =>
-      resolveDesktopManagedAgentPermissionRequest(input),
+    ): Promise<DesktopManagedAgentPermissionDecisionResult> => {
+      assertDesktopUpdateMutationAllowed();
+      return resolveDesktopManagedAgentPermissionRequest(input);
+    },
   );
   targetIpcMain.handle(
     "desktop:workers:list-agent-providers",
@@ -1381,8 +1426,10 @@ export function registerDesktopIpcHandlers(
       _event,
       providerId: DesktopAgentProviderId,
       input: DesktopAgentProviderSetupInput,
-    ): Promise<DesktopAgentProviderSetupResult> =>
-      runDesktopAgentProviderSetup(providerId, input),
+    ): Promise<DesktopAgentProviderSetupResult> => {
+      assertDesktopUpdateMutationAllowed();
+      return runDesktopAgentProviderSetup(providerId, input);
+    },
   );
   targetIpcMain.handle(
     "desktop:diagnostics:get-snapshot",
