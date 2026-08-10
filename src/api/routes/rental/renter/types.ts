@@ -21,6 +21,9 @@ import type {
   RentalPatchReviewProjection,
 } from "../../../rental/patch-review.js";
 import type { ListingsRateLimiter } from "./rate-limiter.js";
+import type { AuthenticatedRequest } from "../../../http/helpers.js";
+import type { Response } from "express";
+import type { PublicRentalProvider } from "../../../rental/provider-hosts.js";
 
 export type Session = typeof rental_sessions.$inferSelect;
 
@@ -28,6 +31,7 @@ export type Session = typeof rental_sessions.$inferSelect;
 
 export interface RentalRenterRouteDeps {
   publicListings: PublicListingsQuery;
+  publicProviders?: (viewerAccountId?: string) => Promise<PublicRentalProvider[]>;
   /**
    * Rate-limit gate. Returns `true` if the call should proceed,
    * `false` if the renter is currently throttled. Default uses
@@ -38,9 +42,12 @@ export interface RentalRenterRouteDeps {
   createSession(input: {
     listingId: string;
     renterAccountId: string;
-    repoOwner: string;
-    repoName: string;
-    baseBranch: string;
+    targetRoomId?: string;
+    roomHistoryAccess?: "full" | "filtered";
+    capabilityEnvelope?: Record<string, unknown> | null;
+    repoOwner?: string;
+    repoName?: string;
+    baseBranch?: string;
     taskTitle: string;
     taskPrompt: string;
     mode?: "scoped" | "trusted_open";
@@ -57,6 +64,11 @@ export interface RentalRenterRouteDeps {
     lrtLimit?: number;
     timeLimitMinutes?: number;
   }): Promise<Session>;
+  resolveAuthorizedTargetRoom?: (
+    req: AuthenticatedRequest,
+    res: Response,
+    roomId: string,
+  ) => Promise<string | null>;
   getSessionById(sessionId: string, accountId: string): Promise<Session | null>;
   cancelSession(
     sessionId: string,

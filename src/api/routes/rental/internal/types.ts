@@ -101,6 +101,7 @@ export interface RentalInternalRouteDeps {
     sessionId: string,
     update: {
       status: "completed" | "cancelled";
+      expectedStatus: typeof rental_sessions.$inferSelect["status"];
       endedAt: Date;
     },
   ) => Promise<typeof rental_sessions.$inferSelect | null>;
@@ -108,6 +109,8 @@ export interface RentalInternalRouteDeps {
   releaseSessionLease?: (
     input: ReleaseLeaseInput,
   ) => Promise<ReleaseSessionLeaseResult>;
+  /** Stop the supervised worker and revoke its rental-scoped authority. */
+  revokeSessionLaunchAuthority?: (sessionId: string) => Promise<void>;
   readContextFile: (
     sessionId: string,
     input: Omit<ContextReadFileInput, "sessionId">,

@@ -211,4 +211,36 @@ describe("quota lease lifecycle helpers", () => {
     assert.equal(deps.persisted[0]!.lease.releaseReason, "completed");
     assert.equal(deps.emitted[0]?.eventType, SESSION_TEARDOWN_COMPLETED);
   });
+
+  it("makes a provider lane reusable after a post-accept decline", async () => {
+    const acceptedLease = createLease({
+      sessionId: "rsess_declined",
+      lane: makeLane(),
+      snapshot: makeSnapshot(),
+      nowIso: "2026-05-11T11:00:00.000Z",
+    });
+    const releaseDeps = makeDeps({
+      sessionLease: acceptedLease,
+      nowIso: "2026-05-11T12:05:00.000Z",
+    });
+
+    await releaseQuotaLeaseForSession(
+      makeSession({ id: "rsess_declined" }) as never,
+      "declined",
+      releaseDeps,
+    );
+
+    const releasedLease = releaseDeps.persisted[0]!.lease;
+    assert.equal(releasedLease.releaseReason, "declined");
+    assert.equal(releasedLease.releasedAt, "2026-05-11T12:05:00.000Z");
+
+    const acquireDeps = makeDeps({ activeLeases: [] });
+    const nextLease = await acquireQuotaLeaseForSession(
+      makeSession({ id: "rsess_next" }) as never,
+      makeListing() as never,
+      acquireDeps,
+    );
+
+    assert.equal(nextLease.sessionId, "rsess_next");
+  });
 });

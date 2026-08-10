@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
 
+import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
+
 const DEFAULT_SERVER_HOST = "127.0.0.1";
 const DEFAULT_TIMEOUT_MS = 15_000;
 const MAX_CAPTURED_OUTPUT_CHARS = 12_000;
@@ -443,9 +445,11 @@ export function launchCodexAppServer(
   const configuredEnv = options.env && Object.keys(options.env).length
     ? { ...process.env, ...options.env }
     : process.env;
-  const env = configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"
-    ? { ...configuredEnv }
-    : configuredEnv;
+  const env = isRentalCredentialIsolationRequested(configuredEnv)
+    ? rentalIsolatedChildEnvironment(configuredEnv)
+    : configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"
+      ? { ...configuredEnv }
+      : configuredEnv;
   if (env !== configuredEnv) {
     // A bounded supervised worker borrows exact-generation authority from the
     // daemon. Ambient desktop owner or fixed worker credentials would bypass

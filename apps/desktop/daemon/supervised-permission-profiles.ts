@@ -144,3 +144,22 @@ export function assertSupervisedPermissionProfileAvailable(providerId: string, r
   }
   return profile.id;
 }
+
+/**
+ * Internet rentals are narrower than trusted local supervised agents. Keep
+ * this final daemon-side admission fence independent of renderer/Electron
+ * policy so recovery cannot restart an older unsafe rental manifest.
+ */
+export function assertSupervisedRentalPermissionProfileAvailable(
+  providerId: string,
+  requestedId: string | null,
+): string {
+  const provider = providerId.trim().toLowerCase();
+  const requested = requestedId?.trim() || null;
+  if (provider !== "cursor" || requested !== "sandboxed_write") {
+    throw new Error(
+      "Rented agents require an explicit verified workspace-rooted permission profile.",
+    );
+  }
+  return assertSupervisedPermissionProfileAvailable(provider, requested);
+}

@@ -298,6 +298,7 @@ const emit = defineEmits<{
   "open-task": [taskId: string];
   "open-github-event": [eventId: string];
   "open-reasoning": [sessionId: string];
+  "open-rental-request": [];
 }>();
 
 const selectedItemId = ref<string | null>(null);
@@ -336,7 +337,9 @@ function openItem(item: DesktopInboxItem): void {
   }
   if (item.kind === "agent_blocked") {
     emit("open-reasoning", item.session.id);
+    return;
   }
+  if (item.kind === "rental_request") emit("open-rental-request");
 }
 
 function initials(value: string): string {
@@ -360,6 +363,7 @@ function itemKindLabel(item: DesktopInboxItem): string {
   if (item.kind === "task_blocked") return "Blocked task";
   if (item.kind === "github_failure") return "Failed check";
   if (item.kind === "agent_offline") return "Agent offline";
+  if (item.kind === "rental_request") return "Rental request";
   return "Blocked agent";
 }
 
@@ -368,6 +372,7 @@ function itemSourceLabel(item: DesktopInboxItem): string {
   if (item.kind === "task_review") return "Review";
   if (item.kind === "task_blocked") return "Task";
   if (item.kind === "github_failure") return "GitHub";
+  if (item.kind === "rental_request") return "Renting";
   return "Agent";
 }
 
@@ -380,6 +385,7 @@ function openActionLabel(item: DesktopInboxItem): string {
   if (item.kind === "thread") return "Open thread";
   if (item.kind === "github_failure") return "Open check";
   if (item.kind === "agent_blocked") return "Open agent";
+  if (item.kind === "rental_request") return "Review request";
   return "Open task";
 }
 
@@ -425,6 +431,11 @@ function itemDetailRows(item: DesktopInboxItem): DetailRow[] {
       { label: "Agent", value: item.presence.actorLabel || item.presence.agentKey || "Unknown" },
       { label: "Last seen", value: formatTimestamp(item.presence.lastHeartbeatAt) },
     );
+  } else if (item.kind === "rental_request") {
+    rows.push(
+      { label: "Renter", value: item.request.renterDisplayName || "Unknown" },
+      { label: "Expires", value: item.request.expiresAt ? formatTimestamp(item.request.expiresAt) : "—" },
+    );
   }
 
   return rows;
@@ -452,6 +463,7 @@ function whyText(item: DesktopInboxItem): string {
   if (item.kind === "agent_offline") {
     return "A worker agent stopped responding and its in-flight work may be stalled until it recovers or someone takes over.";
   }
+  if (item.kind === "rental_request") return "A renter is waiting for you to choose a local runtime and approve or decline this request.";
   return "An agent session is blocked and needs human attention.";
 }
 

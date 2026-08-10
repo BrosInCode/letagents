@@ -1,0 +1,219 @@
+.settings-renting-panel {
+  max-width: 960px;
+}
+
+.settings-renting-profile,
+.settings-renting-status {
+  display: flex;
+  align-items: center;
+  gap: 13px;
+  padding: 17px;
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  background: color-mix(in srgb, var(--text) 3.5%, transparent);
+}
+
+.settings-renting-profile img,
+.settings-renting-avatar {
+  display: grid;
+  width: 42px;
+  height: 42px;
+  place-items: center;
+  overflow: hidden;
+  border-radius: 50%;
+  background: color-mix(in srgb, var(--text) 9%, transparent);
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 850;
+  object-fit: cover;
+}
+
+.settings-renting-profile div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.settings-renting-profile p,
+.settings-renting-profile strong,
+.settings-renting-profile small {
+  margin: 0;
+}
+
+.settings-renting-profile p,
+.settings-renting-profile small,
+.settings-renting-status small {
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+}
+
+.settings-renting-profile .state-pill {
+  margin-left: auto;
+}
+
+.settings-renting-switch {
+  position: relative;
+  width: 44px;
+  height: 25px;
+  padding: 3px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--text) 13%, transparent);
+  cursor: pointer;
+  transition: background-color 150ms ease;
+}
+
+.settings-renting-switch span {
+  display: block;
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  background: var(--text);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.22);
+  transition: transform 150ms var(--ease-out);
+}
+
+.settings-renting-switch[data-on="true"] {
+  background: var(--green);
+}
+
+.settings-renting-switch[data-on="true"] span {
+  transform: translateX(19px);
+}
+
+.settings-renting-switch:disabled {
+  cursor: default;
+  opacity: 0.45;
+}
+
+.settings-renting-switch:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--text) 44%, transparent);
+  outline-offset: 2px;
+}
+
+.settings-renting-status {
+  justify-content: space-between;
+}
+
+.settings-renting-status div {
+  display: grid;
+  grid-template-columns: auto auto;
+  align-items: center;
+  column-gap: 8px;
+}
+
+.settings-renting-status small {
+  grid-column: 2;
+}
+
+.settings-renting-status > span {
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+}
+
+.settings-renting-live-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.settings-renting-live-dot[data-state="offline"],
+.settings-renting-live-dot[data-state="error"] {
+  background: var(--red);
+}
+
+.settings-renting-live-dot[data-state="starting"] {
+  background: var(--amber);
+}
+
+.settings-renting-section {
+  display: grid;
+  gap: 10px;
+}
+
+.settings-renting-section header > div {
+  display: grid;
+  gap: 4px;
+}
+
+.settings-renting-section header span {
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+}
+
+.settings-renting-limits {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--text) 2.5%, transparent);
+}
+
+.settings-renting-limit-select {
+  --desktop-select-height: 36px;
+  --desktop-select-radius: 8px;
+  --desktop-select-padding-x: 9px;
+  --desktop-select-background: var(--bg);
+  --desktop-select-border: var(--border-strong);
+}
+
+.settings-renting-limits .primary-button {
+  border-color: color-mix(in srgb, var(--text) 24%, transparent);
+  background: var(--text);
+  color: var(--bg);
+}
+
+.settings-renting-capabilities {
+  padding: 16px;
+  border-left: 2px solid color-mix(in srgb, var(--text) 35%, transparent);
+  background: color-mix(in srgb, var(--text) 4%, transparent);
+}
+
+.settings-renting-capabilities strong,
+.settings-renting-capabilities p {
+  margin: 0;
+}
+
+.settings-renting-capabilities p {
+  margin-top: 6px;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.45;
+}
+
+.settings-renting-loading {
+  color: var(--text-tertiary);
+  font-size: 0.82rem;
+}
+
+@media (max-width: 720px) {
+  .settings-renting-limits {
+    grid-template-columns: 1fr;
+  }
+
+  .settings-renting-limits .primary-button {
+    width: 100%;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-renting-switch,
+  .settings-renting-switch span {
+    transition:
+      background-color 1ms ease,
+      transform 1ms ease;
+  }
+}
+
+@media (prefers-contrast: more) {
+  .settings-renting-profile,
+  .settings-renting-status,
+  .settings-renting-limits,
+  .settings-renting-switch {
+    border-color: var(--border-accent);
+  }
+}

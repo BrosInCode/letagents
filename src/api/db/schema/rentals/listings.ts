@@ -1,4 +1,4 @@
-import { boolean, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, integer, jsonb, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 import {
   rentalListingStatusEnum,
@@ -6,10 +6,14 @@ import {
   rentalNativeQuotaUnitEnum,
   rentalVerificationStatusEnum,
 } from "./enums.js";
+import { rental_provider_hosts } from "./provider-hosts.js";
 
 export const rental_listings = pgTable("rental_listings", {
   id: text("id").primaryKey(),
   provider_account_id: text("provider_account_id").notNull(),
+  provider_host_id: text("provider_host_id").references(() => rental_provider_hosts.id, {
+    onDelete: "set null",
+  }),
   display_name: text("display_name").notNull(),
   status: rentalListingStatusEnum("status").notNull().default("setup_required"),
   verification_status: rentalVerificationStatusEnum("verification_status")
@@ -44,4 +48,6 @@ export const rental_listings = pgTable("rental_listings", {
   updated_at: timestamp("updated_at", { withTimezone: true })
     .notNull()
     .defaultNow(),
-});
+}, (table) => [
+  index("rental_listings_provider_host_idx").on(table.provider_host_id),
+]);

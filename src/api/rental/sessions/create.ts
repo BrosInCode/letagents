@@ -1,10 +1,10 @@
 import { eq } from "drizzle-orm";
 
 import { db } from "../../db/client.js";
-import { rental_listings, rental_sessions } from "../../db/schema.js";
-import { emitActivityEvent } from "../activity-emitter.js";
-import { SESSION_STARTED } from "../activity-event-types.js";
+import { rental_listings, rental_provider_hosts, rental_sessions } from "../../db/schema.js";
+import { emitRentalProviderEvent } from "../provider-events.js";
 import type { CreateSessionInput } from "./types.js";
+import { isRentalHostFresh } from "../provider-hosts.js";
 
 function generateSessionId(): string {
   const timestamp = Date.now().toString(36);
@@ -34,9 +34,40 @@ export function resolveSessionLrtLimit(
   return lrtLimit;
 }
 
+export function deriveRentalCapabilityEnvelope(input: CreateSessionInput): Record<string, unknown> {
+  const repository = input.repoOwner && input.repoName && input.baseBranch
+    ? {
+        provider: "github",
+        owner: input.repoOwner,
+        name: input.repoName,
+        baseBranch: input.baseBranch,
+        access: "scoped",
+      }
+    : null;
+  return {
+    room: {
+      id: input.targetRoomId ?? null,
+      history: resolveRentalRoomHistoryAccess(input),
+    },
+    repository,
+    commands: false,
+    network: false,
+    externalActions: false,
+  };
+}
+
+export function resolveRentalRoomHistoryAccess(
+  input: Pick<CreateSessionInput, "targetRoomId" | "roomHistoryAccess">,
+): "full" | "filtered" {
+  return input.targetRoomId ? "full" : input.roomHistoryAccess ?? "filtered";
+}
+
 export async function createSession(
   input: CreateSessionInput,
 ): Promise<typeof rental_sessions.$inferSelect> {
+  if (input.targetRoomId && (input.repoOwner || input.repoName || input.baseBranch)) {
+    throw new Error("repository_rentals_not_available");
+  }
   const [listing] = await db
     .select()
     .from(rental_listings)
@@ -47,6 +78,13 @@ export async function createSession(
   }
   if (listing.status !== "active") {
     throw new Error("listing_not_active");
+  }
+  if (listing.provider_host_id) {
+    const [host] = await db.select().from(rental_provider_hosts)
+      .where(eq(rental_provider_hosts.id, listing.provider_host_id)).limit(1);
+    if (!host || !host.enabled || !isRentalHostFresh(host.last_heartbeat_at)) {
+      throw new Error("provider_offline");
+    }
   }
 
   const requestedMode = input.mode ?? "scoped";
@@ -61,6 +99,7 @@ export async function createSession(
   );
 
   const id = generateSessionId();
+  const directMember = Boolean(input.targetRoomId);
 
   const [session] = await db
     .insert(rental_sessions)
@@ -69,16 +108,24 @@ export async function createSession(
       listing_id: input.listingId,
       renter_account_id: input.renterAccountId,
       provider_account_id: listing.provider_account_id,
-      repo_provider: "github",
-      repo_owner: input.repoOwner,
-      repo_name: input.repoName,
-      base_branch: input.baseBranch,
+      target_room_id: input.targetRoomId ?? null,
+      room_id: input.targetRoomId ?? null,
+      room_placement: directMember ? "direct_member" : "legacy_child",
+      room_history_access: resolveRentalRoomHistoryAccess(input),
+      // Authority is derived from validated inputs. Never persist a renter's
+      // arbitrary JSON as an executable capability grant.
+      capability_envelope: deriveRentalCapabilityEnvelope(input),
+      repo_provider: input.repoOwner && input.repoName ? "github" : null,
+      repo_owner: input.repoOwner ?? null,
+      repo_name: input.repoName ?? null,
+      base_branch: input.baseBranch ?? null,
       task_title: input.taskTitle,
       task_prompt: input.taskPrompt,
       mode: requestedMode,
       continuity_mode: input.continuityMode ?? "smart_handoff",
       approved_scope: input.approvedScope ?? null,
       policy: input.policy ?? null,
+      provider_host_id: listing.provider_host_id,
       status: "requested",
       lrt_limit: lrtLimit,
       time_limit_minutes:
@@ -90,23 +137,20 @@ export async function createSession(
       renter_lane_exhausted_at: input.renterLaneExhaustedAt,
       renter_lane_refresh_eta: input.renterLaneRefreshEta,
       renter_quota_signal: input.renterQuotaSignal,
+      request_expires_at: new Date(Date.now() + 15 * 60 * 1000),
     })
     .returning();
 
-  if (session.room_id) {
-    await emitActivityEvent({
-      sessionId: id,
-      roomId: session.room_id,
-      eventType: SESSION_STARTED,
-      source: "renter",
-      payload: {
-        listing_id: input.listingId,
-        mode: requestedMode,
-        start_trigger: input.startTrigger ?? null,
-        trigger_confidence: input.triggerConfidence ?? null,
-      },
-    });
-  }
+  await emitRentalProviderEvent({
+    providerAccountId: listing.provider_account_id,
+    sessionId: session.id,
+    kind: "request.created",
+    payload: {
+      targetRoomId: session.target_room_id,
+      taskTitle: session.task_title,
+      repositoryAccess: Boolean(session.repo_owner && session.repo_name),
+    },
+  }).catch(() => undefined);
 
   return session;
 }

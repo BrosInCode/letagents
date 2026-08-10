@@ -68,6 +68,9 @@ export const defaultPatchReviewDeps: RentalPatchReviewDeps = {
     commitMessage,
     note,
   }) {
+    if (!session.repo_owner || !session.repo_name || !session.base_branch) {
+      throw new Error("repository_capability_required");
+    }
     return openRentalPatchPullRequest({
       repoProvider: session.repo_provider,
       repoOwner: session.repo_owner,

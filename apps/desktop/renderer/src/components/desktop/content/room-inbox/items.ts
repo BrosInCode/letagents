@@ -2,6 +2,7 @@ import type {
   DesktopAgentPresence,
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
+  DesktopRentalRequest,
   DesktopRoomMessage,
   DesktopRoomMessageThreadSummary,
   DesktopRoomThreadInboxPage,
@@ -59,7 +60,8 @@ export type DesktopInboxItemKind =
   | "task_blocked"
   | "github_failure"
   | "agent_blocked"
-  | "agent_offline";
+  | "agent_offline"
+  | "rental_request";
 
 export type DesktopInboxActivityTone = "new" | "neutral" | "danger" | "success" | "warning";
 
@@ -107,6 +109,10 @@ export type DesktopInboxItem =
   | (DesktopInboxItemBase & {
       kind: "agent_offline";
       presence: DesktopAgentPresence;
+    })
+  | (DesktopInboxItemBase & {
+      kind: "rental_request";
+      request: DesktopRentalRequest;
     });
 
 export interface BuildDesktopInboxItemsInput {
@@ -116,6 +122,7 @@ export interface BuildDesktopInboxItemsInput {
   githubEvents: readonly DesktopGitHubRoomEvent[];
   reasoningSessions: readonly DesktopReasoningSession[];
   presence?: readonly DesktopAgentPresence[];
+  rentalRequests?: readonly DesktopRentalRequest[];
   fallbackRepository?: string | null;
 }
 
@@ -126,11 +133,30 @@ export function buildDesktopInboxItems(input: BuildDesktopInboxItemsInput): Desk
     ...githubFailureInboxItems(input.githubEvents, input.fallbackRepository ?? null),
     ...agentBlockedInboxItems(input.reasoningSessions),
     ...agentOfflineInboxItems(input.presence || []),
+    ...rentalRequestInboxItems(input.rentalRequests || []),
   ];
 
   return items
     .filter((item) => input.filter === "all" || item.actionable)
     .sort(compareInboxItems);
+}
+
+function rentalRequestInboxItems(requests: readonly DesktopRentalRequest[]): DesktopInboxItem[] {
+  return requests
+    .filter((request) => request.status === "pending")
+    .map((request) => ({
+      id: `rental-request:${request.id}`,
+      kind: "rental_request" as const,
+      title: `${request.renterDisplayName || "Someone"} wants to rent your agent`,
+      preview: request.taskTitle,
+      context: "Renting · account",
+      timestamp: request.createdAt || request.updatedAt,
+      firstSeenTimestamp: request.createdAt || request.updatedAt,
+      occurrenceCount: 1,
+      actionable: true,
+      activity: [{ id: `rental:${request.id}`, label: "Rental request received", description: request.taskPrompt, timestamp: request.createdAt, tone: "new" }],
+      request,
+    }));
 }
 
 export function desktopInboxItemFingerprint(item: DesktopInboxItem): string {

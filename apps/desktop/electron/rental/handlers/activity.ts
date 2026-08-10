@@ -1,8 +1,5 @@
 import type {
-  DesktopRentalActivityEvent,
   DesktopRentalContextApproval,
-  DesktopRentalExposure,
-  DesktopRentalPatch,
 } from "../../ipc-types.js";
 import {
   mapApiActivityEventArray,
@@ -13,14 +10,11 @@ import {
   mapApiPatchArray,
   mapApiUsageSnapshot,
 } from "../api-mapper.js";
-import {
-  buildEmptyUsageSnapshot,
-  buildStubPatch,
-} from "./stubs.js";
 import type {
   RentalIpcRegistrar,
   RentalIpcRegistrationContext,
 } from "./types.js";
+import { rentalApiFailure, rentalApiUnavailable, rentalInvalidResponse } from "./types.js";
 
 export function registerActivityHandlers(
   register: RentalIpcRegistrar,
@@ -28,65 +22,51 @@ export function registerActivityHandlers(
 ): void {
   register("desktop:rental:get-activity", async (_event, sessionId) => {
     const id = String(sessionId ?? "");
-    if (!id) return [] satisfies DesktopRentalActivityEvent[];
-    if (apiClient) {
-      const result = await apiClient.getSessionActivity(id);
-      if (result.ok) return mapApiActivityEventArray(result.body);
-    }
-    return [] satisfies DesktopRentalActivityEvent[];
+    if (!id || !apiClient) return rentalApiUnavailable("Rental activity");
+    const result = await apiClient.getSessionActivity(id);
+    if (!result.ok) return rentalApiFailure("Rental activity", result);
+    return mapApiActivityEventArray(result.body);
   });
 
   register("desktop:rental:get-exposures", async (_event, sessionId) => {
     const id = String(sessionId ?? "");
-    if (!id) return [] satisfies DesktopRentalExposure[];
-    if (apiClient) {
-      const result = await apiClient.getExposures(id);
-      if (result.ok) return mapApiExposureArray(result.body);
-    }
-    return [] satisfies DesktopRentalExposure[];
+    if (!id || !apiClient) return rentalApiUnavailable("Rental exposures");
+    const result = await apiClient.getExposures(id);
+    if (!result.ok) return rentalApiFailure("Rental exposures", result);
+    return mapApiExposureArray(result.body);
   });
 
   register("desktop:rental:get-context-requests", async (_event, sessionId) => {
     const id = String(sessionId ?? "");
-    if (!id) return [] satisfies DesktopRentalContextApproval[];
-    if (apiClient) {
-      const result = await apiClient.getContextRequests(id);
-      if (result.ok) return mapApiContextApprovalArray(result.body);
-    }
-    return [] satisfies DesktopRentalContextApproval[];
+    if (!id || !apiClient) return rentalApiUnavailable("Rental access requests");
+    const result = await apiClient.getContextRequests(id);
+    if (!result.ok) return rentalApiFailure("Rental access requests", result);
+    return mapApiContextApprovalArray(result.body);
   });
 
   register("desktop:rental:get-patches", async (_event, sessionId) => {
     const id = String(sessionId ?? "");
-    if (!id) return [] satisfies DesktopRentalPatch[];
-    if (apiClient) {
-      const result = await apiClient.getPatches(id);
-      if (result.ok) return mapApiPatchArray(result.body);
-    }
-    return [] satisfies DesktopRentalPatch[];
+    if (!id || !apiClient) return rentalApiUnavailable("Rental patches");
+    const result = await apiClient.getPatches(id);
+    if (!result.ok) return rentalApiFailure("Rental patches", result);
+    return mapApiPatchArray(result.body);
   });
 
   register("desktop:rental:get-usage", async (_event, sessionId) => {
     const id = String(sessionId ?? "");
-    if (!id) return buildEmptyUsageSnapshot(id);
-    if (apiClient) {
-      const result = await apiClient.getSessionUsage(id);
-      if (result.ok) return mapApiUsageSnapshot(result.body, id);
-    }
-    return buildEmptyUsageSnapshot(id);
+    if (!id || !apiClient) return rentalApiUnavailable("Rental usage");
+    const result = await apiClient.getSessionUsage(id);
+    if (!result.ok) return rentalApiFailure("Rental usage", result);
+    return mapApiUsageSnapshot(result.body, id);
   });
 
   register("desktop:rental:approve-patch", async (_event, sessionId, patchId) => {
     const id = String(sessionId ?? "");
     const patch = String(patchId ?? "");
-    if (apiClient && id && patch) {
-      const result = await apiClient.approvePatch(id, patch);
-      if (result.ok) {
-        const mapped = mapApiPatch(result.body);
-        if (mapped) return mapped;
-      }
-    }
-    return buildStubPatch(id, patch, "passed");
+    if (!apiClient || !id || !patch) return rentalApiUnavailable("Patch approval");
+    const result = await apiClient.approvePatch(id, patch);
+    if (!result.ok) return rentalApiFailure("Patch approval", result);
+    return mapApiPatch(result.body) ?? rentalInvalidResponse("Patch approval");
   });
 
   register("desktop:rental:request-patch-changes", async (
@@ -97,16 +77,12 @@ export function registerActivityHandlers(
   ) => {
     const id = String(sessionId ?? "");
     const patch = String(patchId ?? "");
-    if (apiClient && id && patch) {
-      const result = await apiClient.requestPatchChanges(id, patch, {
-        note: typeof note === "string" ? note : "",
-      });
-      if (result.ok) {
-        const mapped = mapApiPatch(result.body);
-        if (mapped) return mapped;
-      }
-    }
-    return buildStubPatch(id, patch, "needs_revision");
+    if (!apiClient || !id || !patch) return rentalApiUnavailable("Patch change request");
+    const result = await apiClient.requestPatchChanges(id, patch, {
+      note: typeof note === "string" ? note : "",
+    });
+    if (!result.ok) return rentalApiFailure("Patch change request", result);
+    return mapApiPatch(result.body) ?? rentalInvalidResponse("Patch change request");
   });
 
   // Context request decisions must never pretend to succeed — a failed

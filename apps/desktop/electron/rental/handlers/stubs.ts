@@ -100,7 +100,7 @@ export function buildStubListing(
 export function buildEmptyProviderDashboard(): DesktopRentalProviderDashboard {
   return {
     listings: [],
-    activeSessions: [],
+    capacitySessions: [],
     pendingRequests: [],
     readiness: buildReadiness("unknown"),
     quotaSnapshots: [],
@@ -141,9 +141,13 @@ export function buildStubSession(
     taskPrompt: input.taskPrompt ?? "",
     mode: input.mode ?? "scoped",
     continuityMode: input.continuityMode ?? "smart_handoff",
+    roomHistoryAccess: null,
     continuityIngestDepth: input.continuityIngestDepth ?? "tier_1",
     continuityPackId: null,
     status,
+    launchState: null,
+    launchErrorCode: null,
+    launchErrorMessage: null,
     approvedScope: input.approvedScope ?? {
       includePaths: [],
       excludePaths: [],

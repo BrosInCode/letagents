@@ -10,8 +10,8 @@
  */
 export const VALID_TRANSITIONS: Record<string, string[]> = {
   requested: ["accepted", "cancelled"],
-  accepted: ["provisioning"],
-  provisioning: ["active", "failed"],
+  accepted: ["provisioning", "cancelled"],
+  provisioning: ["active", "failed", "cancelled"],
   active: [
     "blocked",
     "patch_review",

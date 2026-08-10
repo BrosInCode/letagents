@@ -119,6 +119,10 @@ function cursorPermissionUsesWorkspaceGeneration(
   return permissionProfileId === "sandboxed_write" || permissionProfileId === "full_access";
 }
 
+function isRoomOnlyRentalAttempt(request: ProviderSpawnRequest): boolean {
+  return request.supervisorEntryId?.startsWith("supervised_rental_") === true;
+}
+
 type CursorStreamMessage = Record<string, unknown> & {
   type?: unknown;
   subtype?: unknown;
@@ -194,6 +198,8 @@ export interface CursorProviderAdapterOptions {
     cwd: string;
     /** Exact durable permission authority selected for the supervised lane. */
     permissionProfileId?: CursorSupervisedProfileOptions["permissionProfileId"];
+    /** Prevent room-only rentals from resolving an ancestor Git project. */
+    roomOnlyRental?: boolean;
     /** Disposable root for non-authoritative MCP inspection. */
     profileRoot?: string;
     /** Inspection profiles deliberately omit Cursor login credentials. */
@@ -3469,6 +3475,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         workAttemptId: input.workAttemptId,
         workspaceRoot: input.cwd,
         permissionProfileId: input.permissionProfileId,
+        roomOnlyRental: input.roomOnlyRental,
         apiBaseUrl: desktopApiUrl,
         profileRoot: input.profileRoot,
         includeAuth: input.includeAuth,
@@ -4264,6 +4271,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         workAttemptId: req.workAttemptId,
         cwd: req.cwd,
         permissionProfileId: req.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
+        roomOnlyRental: isRoomOnlyRentalAttempt(req),
         includeAuth: false,
         devMcpServerEntryPath: req.devMcpServerEntryPath,
       });
@@ -4358,6 +4366,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     let supervisedRuntimeDataDir: string | undefined;
     let workspaceGeneration: SupervisedWorkspaceGenerationHandle | null = null;
     let providerWorkspace = handle.cwd;
+    const roomOnlyRental = isRoomOnlyRentalAttempt(handle.spawnRequest);
     if (handle.deliveryMode === "daemon_inbox") {
       // First enumerate from a random disposable profile with an inert local
       // MCP and no turn/provider capability. The authority wrapper denies
@@ -4370,6 +4379,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           profileRoot: inspectionProfileRoot,
           includeAuth: false,
           inspectionOnly: true,
+          roomOnlyRental,
           devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
         });
         const enumerationEnv = cursorMcpInspectionEnv({
@@ -4408,6 +4418,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           profileRoot: bridgeProfileRoot,
           includeAuth: false,
           inspectionOnly: false,
+          roomOnlyRental,
           devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
           mcpWorkingDirectory: bridgeProfileRoot,
           // Exercise the packaged server in its real credentialless bounded
@@ -4469,6 +4480,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           includeAuth: true,
           identityAttestationOnly: true,
           inspectionOnly: true,
+          roomOnlyRental,
           devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
           mcpWorkingDirectory: identityProfileRoot,
         });
@@ -4496,6 +4508,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           attestedPersonalIdentity: personalIdentity,
           exposeLoginCredentials: false,
           inspectionOnly: true,
+          roomOnlyRental,
           devMcpServerEntryPath: handle.spawnRequest.devMcpServerEntryPath,
           mcpWorkingDirectory: identityProfileRoot,
         });
@@ -4504,7 +4517,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
         // Only after both credentialless probes are removed and live identity
         // is proven do we atomically reseal the stable profile and mint the
         // real MCP child's exact turn capability.
-        if (roomTurnId && cursorPermissionUsesWorkspaceGeneration(handle.spawnRequest.permissionProfileId)) {
+        // Rental attempts already run in a disposable room-only workspace. A
+        // Git-backed generation here would either fail for the ordinary
+        // non-repository directory or walk up into an unrelated owner repo.
+        if (
+          roomTurnId
+          && cursorPermissionUsesWorkspaceGeneration(handle.spawnRequest.permissionProfileId)
+          && !isRoomOnlyRentalAttempt(handle.spawnRequest)
+        ) {
           workspaceGeneration = await this.deps.createWorkspaceGeneration({
             realWorkspace: handle.cwd,
             turnIdentity: roomTurnId,
@@ -4518,6 +4538,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           workAttemptId: handle.workAttemptId,
           cwd: providerWorkspace,
           permissionProfileId: handle.spawnRequest.permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"],
+          roomOnlyRental,
           authSourceHomeDir: identityProfile.homeDir,
           attestedPersonalIdentity: personalIdentity,
           exposeLoginCredentials: false,

@@ -57,6 +57,7 @@
           :primary-room="currentParentRoom"
           :project-entries="sidebarProjectEntries"
           :settings-entry="settingsEntry"
+          :rental-request-count="rentalRequestCount"
           :pinned-collapsed="pinnedCollapsed"
           :rooms-collapsed="roomsCollapsed"
           :collapsed-projects="collapsedProjects"
@@ -65,6 +66,7 @@
           :batch-action-busy="sidebarBatchActionBusy"
           @cycle-sidebar="cycleSidebar"
           @new-room="selectNewRoomEntry"
+          @open-rent="openRentMarketplace"
           @archive-room="archiveSidebarRoom"
           @archive-focus-room="archiveSidebarFocusRoom"
           @conclude-focus-room="openSidebarFocusRoomConclusion"
@@ -102,7 +104,7 @@
     ></div>
     <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
       <DesktopTopbar
-        v-if="activeEntry.type !== 'room' && !isSettingsSurface"
+        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && !isSettingsSurface"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"
@@ -162,6 +164,7 @@
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
           @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
+          @open-rental-request="openRentalRequestInbox"
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
@@ -173,7 +176,7 @@
       </KeepAlive>
 
       <SettingsView
-        v-if="activeEntry.type !== 'room'"
+        v-if="activeEntry.type === 'system'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :app-agent-actions="appAgentActions"
@@ -218,6 +221,12 @@
         @refresh="refreshSettingsSurface"
         @sign-out="signOut"
         @start-auth="startAuthFlow"
+      />
+
+      <RentMarketplaceView
+        v-else-if="activeEntry.type === 'marketplace'"
+        :rooms="settingsAccountRooms"
+        :initial-role="rentMarketplaceRole"
       />
 
     </section>
@@ -311,7 +320,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppAgentActionMetadata,
@@ -363,8 +372,9 @@ import { useDesktopNavigationState } from "./composables/useDesktopNavigationSta
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
+import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
   deriveSidebarLatestMessages,
@@ -405,6 +415,10 @@ import { APP_IDLE_ATTRIBUTE, isAppIdle } from "./domain/app-idle";
 import { shouldSkipPollTick } from "./domain/visibility-polling";
 import { desktopIpc } from "./ipc/index.js";
 
+const RentMarketplaceView = defineAsyncComponent(
+  () => import("./components/desktop/content/RentMarketplaceView.vue"),
+);
+
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
 const repoStatus = ref<RepoStatus | null>(null);
@@ -441,6 +455,8 @@ const chatScrollTopByRoom = ref<Record<string, number>>({});
 const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
+const rentalRequestCount = ref(0);
+const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
 const chatStorageAvailable = ref(true);
@@ -801,7 +817,32 @@ function refreshForegroundData(): void {
   // so refresh once on foreground return. Metadata-only, NOT the full snapshot —
   // SSE kept running while hidden, so event-fed sections are already current.
   void refreshSelectedRoomLiveMetadata().catch(() => undefined);
+  void refreshRentalRequestCount();
 }
+
+function openRentMarketplace(): void {
+  rentMarketplaceRole.value = "renter";
+  activeEntry.value = rentMarketplaceEntry;
+}
+
+function openRentalRequestInbox(): void {
+  rentMarketplaceRole.value = "provider";
+  activeEntry.value = rentMarketplaceEntry;
+}
+
+async function refreshRentalRequestCount(): Promise<void> {
+  if (!desktopIpc.rental?.getProviderDashboard) return;
+  try {
+    const dashboard = await loadRentalProviderDashboard();
+    rentalRequestCount.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests.length : 0;
+  } catch {
+    rentalRequestCount.value = 0;
+  }
+}
+
+useRentalProviderEvents(() => {
+  void refreshRentalRequestCount();
+});
 
 async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean> {
   const rootPath = rootPathOverride || repoStatus.value?.rootPath || activeProjectRootPath();
@@ -2175,6 +2216,7 @@ onMounted(() => {
   void loadAppAgentSettingsStatus();
   void loadAppAgentActions();
   void loadFirstRunSetup();
+  void refreshRentalRequestCount();
 });
 
 onBeforeUnmount(() => {

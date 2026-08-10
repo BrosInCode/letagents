@@ -729,6 +729,35 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(json.status, "accepted");
   });
 
+  it("POST accept binds the launch to the exact desktop installation", async () => {
+    let acceptedLaunch: unknown;
+    deps.acceptSession = async (_sessionId, _accountId, launch) => {
+      acceptedLaunch = launch;
+      return { id: "rsess_1", status: "accepted" };
+    };
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/accept",
+      {
+        hostId: "desktop-host-1",
+        installationId: "desktop-installation-1",
+        runtime: {
+          kind: "cursor",
+          permissionProfileId: "sandboxed_write",
+        },
+      },
+    );
+    assert.strictEqual(res.status, 200);
+    assert.deepEqual(acceptedLaunch, {
+      hostId: "desktop-host-1",
+      installationId: "desktop-installation-1",
+      runtime: {
+        kind: "cursor",
+        permissionProfileId: "sandboxed_write",
+      },
+    });
+  });
+
   it("POST accept returns 404 for non-owned session", async () => {
     deps.acceptSession = async () => null;
     const res = await req(
@@ -792,6 +821,30 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(json.roomId, "rroom_1");
     assert.strictEqual(json.participantId, "rpart_1");
     assert.strictEqual(json.session.status, "provisioning");
+  });
+
+  it("POST provision derives the participant identity from the provider account", async () => {
+    let provisionInput: Record<string, unknown> | undefined;
+    deps.provisionSession = async (input: Record<string, unknown>) => {
+      provisionInput = input;
+      return {
+        roomId: "rroom_1",
+        participantId: "rpart_1",
+        session: { id: input.sessionId, room_id: "rroom_1", status: "provisioning" },
+      };
+    };
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/provision",
+      {
+        parentRoomId: "github.com/BrosInCode/letagents",
+        providerDisplayName: "Forged Stranger",
+      },
+    );
+    assert.strictEqual(res.status, 201);
+    assert.equal(provisionInput?.providerDisplayName, "Provider Login");
+    assert.equal(provisionInput?.providerGithubLogin, "provider-login");
+    assert.equal(provisionInput?.providerGithubId, "12345");
   });
 
   it("POST provision returns an existing rental room on idempotent retry", async () => {

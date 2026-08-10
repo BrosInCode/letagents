@@ -27,7 +27,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.99";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.100";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -496,7 +496,7 @@ export class SupervisorDaemonClient {
         : {}),
       created_by: "desktop",
       created_at: now,
-      source_repo_path: input.repoRootPath,
+      source_repo_path: input.repoRootPath?.trim() || null,
       workspace_path: null,
       work_attempt_id: null,
       workplace_liveness: { state: "unknown", observed_at: null, detail: "Awaiting room registration." },

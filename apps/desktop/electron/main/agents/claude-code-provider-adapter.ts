@@ -30,6 +30,11 @@ import {
 } from "./provider-adapter.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
+  isRentalCredentialIsolationRequested,
+  rentalCredentialIsolationMarker,
+  rentalIsolatedChildEnvironment,
+} from "./rental-child-environment.js";
+import {
   DEFAULT_STOP_GRACE_MS,
   defaultGetProcessIdentity,
   defaultObserveProcessExit,
@@ -293,12 +298,14 @@ class ClaudeRoomTurnObservationDetachedError extends Error {}
  * before Claude or provider-started shell commands can inherit them.
  */
 export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const combined = { ...base, ...overrides };
+  if (isRentalCredentialIsolationRequested(combined)) return rentalIsolatedChildEnvironment(combined);
   const {
     CLAUDECODE: _omitted,
     LETAGENTS_TOKEN: _ownerToken,
     LETAGENTS_AGENT_SESSION_BEARER: _fixedWorkerBearer,
     ...env
-  } = { ...base, ...overrides };
+  } = combined;
   return env;
 }
 
@@ -874,6 +881,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         } : {}),
         LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
         LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn",
+        ...(req.supervisorEntryId.startsWith("supervised_rental_") ? {
+          [rentalCredentialIsolationMarker]: "1",
+        } : {}),
         ...(req.permissionProfileId ? { LETAGENTS_PERMISSION_PROFILE_ID: req.permissionProfileId } : {}),
       }
       : undefined;

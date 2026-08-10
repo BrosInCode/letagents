@@ -15,6 +15,7 @@ export {
   mapApiListingArray,
   mapApiPatchArray,
   mapApiRequestArray,
+  mapApiSessionArray,
 } from "./api-mapper/arrays.js";
 export {
   mapApiContextApproval,

@@ -17,6 +17,22 @@ function resolveCallerActivitySource(role: string | null): RentalActivitySource 
   return role === "renter" ? "renter" : "agent";
 }
 
+async function settleTerminalSessionControls(
+  deps: RentalInternalRouteDeps,
+  input: { sessionId: string; roomId: string | null; reason: "completed" | "cancelled" },
+): Promise<void> {
+  const results = await Promise.allSettled([
+    deps.revokeSessionLaunchAuthority?.(input.sessionId) ?? Promise.resolve(),
+    deps.releaseSessionLease?.({
+      sessionId: input.sessionId,
+      roomId: input.roomId,
+      reason: input.reason,
+    }) ?? Promise.resolve(),
+  ]);
+  const failed = results.find((result): result is PromiseRejectedResult => result.status === "rejected");
+  if (failed) throw failed.reason;
+}
+
 export function registerActivityLifecycleRoutes(
   app: Express,
   deps: RentalInternalRouteDeps,
@@ -102,13 +118,23 @@ export function registerActivityLifecycleRoutes(
 
         const updated = await deps.updateSessionLifecycle(sessionId, {
           status: "completed",
+          expectedStatus: current.status,
           endedAt: new Date(),
         });
 
         if (!updated) {
-          res.status(404).json({ error: "session not found" });
+          res.status(409).json({ error: "transition_fence_lost" });
           return;
         }
+
+        // The status CAS is the terminal fence. Revoking first can kill a live
+        // worker and then lose the CAS to a concurrent transition, stranding a
+        // nonterminal session with no worker and consumed capacity.
+        await settleTerminalSessionControls(deps, {
+          sessionId,
+          roomId: updated.room_id,
+          reason: "completed",
+        });
 
         // Emit session.completed event
         if (updated.room_id) {
@@ -121,12 +147,6 @@ export function registerActivityLifecycleRoutes(
             payload: { summary: summary ?? null },
           });
         }
-        await deps.releaseSessionLease?.({
-          sessionId,
-          roomId: updated.room_id,
-          reason: "completed",
-        });
-
         res.json(updated);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to complete session";
@@ -176,13 +196,20 @@ export function registerActivityLifecycleRoutes(
 
         const updated = await deps.updateSessionLifecycle(sessionId, {
           status: "cancelled",
+          expectedStatus: current.status,
           endedAt: new Date(),
         });
 
         if (!updated) {
-          res.status(404).json({ error: "session not found" });
+          res.status(409).json({ error: "transition_fence_lost" });
           return;
         }
+
+        await settleTerminalSessionControls(deps, {
+          sessionId,
+          roomId: updated.room_id,
+          reason: "cancelled",
+        });
 
         // Emit session.cancelled event
         if (updated.room_id) {
@@ -195,12 +222,6 @@ export function registerActivityLifecycleRoutes(
             payload: { reason: reason ?? null, cancelled_by: role },
           });
         }
-        await deps.releaseSessionLease?.({
-          sessionId,
-          roomId: updated.room_id,
-          reason: "cancelled",
-        });
-
         res.json(updated);
       } catch (err) {
         const message = err instanceof Error ? err.message : "Failed to cancel session";
