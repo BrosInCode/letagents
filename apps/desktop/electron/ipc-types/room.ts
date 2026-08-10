@@ -537,6 +537,12 @@ export type DesktopRoomStreamEvent =
   | {
       type: "open";
       roomIdentifier: string;
+      /** Durable message checkpoint established after server listeners attach. */
+      checkpoint?: string | null;
+      /** True only when the requested cursor cannot be reconciled incrementally. */
+      gap?: boolean;
+      /** True when this boundary came from the server room_sync handshake. */
+      verified?: boolean;
     }
   | {
       type: "message";
