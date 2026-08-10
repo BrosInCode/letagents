@@ -24,6 +24,12 @@ export function registerSessionRoutes(
 
       const {
         listingId,
+        targetRoomId,
+        target_room_id,
+        roomHistoryAccess,
+        room_history_access,
+        capabilityEnvelope,
+        capability_envelope,
         repoOwner,
         repoName,
         baseBranch,
@@ -38,23 +44,53 @@ export function registerSessionRoutes(
         timeLimitMinutes,
       } = req.body;
 
-      if (!listingId?.trim()) {
+      const normalizedListingId = typeof listingId === "string" ? listingId.trim() : "";
+      const normalizedRepoOwner = typeof repoOwner === "string" ? repoOwner.trim() : "";
+      const normalizedRepoName = typeof repoName === "string" ? repoName.trim() : "";
+      const normalizedBaseBranch = typeof baseBranch === "string" ? baseBranch.trim() : "";
+      const normalizedTaskTitle = typeof taskTitle === "string" ? taskTitle.trim() : "";
+      const normalizedTaskPrompt = typeof taskPrompt === "string" ? taskPrompt.trim() : "";
+      if (!normalizedListingId) {
         return res.status(400).json({ error: "listingId is required" });
       }
-      if (!repoOwner?.trim()) {
-        return res.status(400).json({ error: "repoOwner is required" });
+      const requestedTargetRoomId = typeof targetRoomId === "string"
+        ? targetRoomId.trim()
+        : typeof target_room_id === "string"
+          ? target_room_id.trim()
+          : "";
+      const malformedRepoField = [repoOwner, repoName, baseBranch]
+        .some((value) => value !== undefined && value !== null && typeof value !== "string");
+      if (malformedRepoField) {
+        return res.status(400).json({ error: "Repository fields must be strings" });
       }
-      if (!repoName?.trim()) {
-        return res.status(400).json({ error: "repoName is required" });
+      const hasAnyRepoField = Boolean(normalizedRepoOwner || normalizedRepoName || normalizedBaseBranch);
+      if (requestedTargetRoomId && hasAnyRepoField) {
+        return res.status(400).json({ error: "repository_rentals_not_available" });
       }
-      if (!baseBranch?.trim()) {
-        return res.status(400).json({ error: "baseBranch is required" });
+      if (!requestedTargetRoomId && (!normalizedRepoOwner || !normalizedRepoName || !normalizedBaseBranch)) {
+        return res.status(400).json({ error: "Legacy rentals require repoOwner, repoName, and baseBranch" });
       }
-      if (!taskTitle?.trim()) {
+      if (hasAnyRepoField && (!normalizedRepoOwner || !normalizedRepoName || !normalizedBaseBranch)) {
+        return res.status(400).json({ error: "Repository access requires repoOwner, repoName, and baseBranch" });
+      }
+      if (!normalizedTaskTitle) {
         return res.status(400).json({ error: "taskTitle is required" });
       }
-      if (!taskPrompt?.trim()) {
+      if (!normalizedTaskPrompt) {
         return res.status(400).json({ error: "taskPrompt is required" });
+      }
+      if (normalizedTaskTitle.length > 240 || normalizedTaskPrompt.length > 32_000) {
+        return res.status(400).json({ error: "Rental task is too large" });
+      }
+      if (lrtLimit !== undefined && (!Number.isInteger(lrtLimit) || lrtLimit < 1 || lrtLimit > 1_000_000_000)) {
+        return res.status(400).json({ error: "lrt_limit_invalid" });
+      }
+      if (timeLimitMinutes !== undefined && (
+        !Number.isInteger(timeLimitMinutes)
+        || timeLimitMinutes < 1
+        || timeLimitMinutes > 24 * 60
+      )) {
+        return res.status(400).json({ error: "timeLimitMinutes must be between 1 and 1440" });
       }
 
       const triggerContext = parseTriggerContext(req.body as Record<string, unknown>);
@@ -63,14 +99,30 @@ export function registerSessionRoutes(
       }
 
       try {
+        let authorizedTargetRoomId: string | undefined;
+        if (requestedTargetRoomId) {
+          if (!deps.resolveAuthorizedTargetRoom) {
+            return res.status(503).json({ error: "target_room_authorization_unavailable" });
+          }
+          const resolved = await deps.resolveAuthorizedTargetRoom(req, res, requestedTargetRoomId);
+          if (!resolved) return;
+          authorizedTargetRoomId = resolved;
+        }
+        const requestedHistoryAccess = roomHistoryAccess ?? room_history_access;
+        if (requestedHistoryAccess !== undefined && requestedHistoryAccess !== "full" && requestedHistoryAccess !== "filtered") {
+          return res.status(400).json({ error: "roomHistoryAccess must be full or filtered" });
+        }
         const session = await deps.createSession({
-          listingId: listingId.trim(),
+          listingId: normalizedListingId,
           renterAccountId: accountId,
-          repoOwner: repoOwner.trim(),
-          repoName: repoName.trim(),
-          baseBranch: baseBranch.trim(),
-          taskTitle: taskTitle.trim(),
-          taskPrompt: taskPrompt.trim(),
+          targetRoomId: authorizedTargetRoomId,
+          roomHistoryAccess: requestedHistoryAccess ?? (authorizedTargetRoomId ? "full" : "filtered"),
+          capabilityEnvelope: capabilityEnvelope ?? capability_envelope ?? null,
+          repoOwner: normalizedRepoOwner || undefined,
+          repoName: normalizedRepoName || undefined,
+          baseBranch: normalizedBaseBranch || undefined,
+          taskTitle: normalizedTaskTitle,
+          taskPrompt: normalizedTaskPrompt,
           mode,
           continuityMode,
           approvedScope: approvedScope ?? approved_scope ?? null,
@@ -90,14 +142,16 @@ export function registerSessionRoutes(
         const message = err instanceof Error ? err.message : "unknown_error";
         if (
           message === "listing_not_found" ||
-          message === "listing_not_active"
+          message === "listing_not_active" ||
+          message === "provider_offline"
         ) {
           return res.status(404).json({ error: message });
         }
         if (
           message === "mode_not_supported" ||
           message === "lrt_limit_required" ||
-          message === "lrt_limit_invalid"
+          message === "lrt_limit_invalid" ||
+          message === "repository_rentals_not_available"
         ) {
           return res.status(400).json({ error: message });
         }
@@ -206,7 +260,7 @@ export function registerSessionRoutes(
         return res.json(session);
       } catch (err: unknown) {
         const message = err instanceof Error ? err.message : "unknown_error";
-        if (message.startsWith("invalid_transition")) {
+        if (message.startsWith("invalid_transition") || message === "transition_fence_lost") {
           return res.status(409).json({ error: message });
         }
         return res.status(500).json({ error: message });

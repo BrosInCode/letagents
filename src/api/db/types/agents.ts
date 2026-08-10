@@ -136,6 +136,8 @@ export interface SupervisorHostGrant {
   owner_account_id: string;
   host_id: string;
   installation_id: string;
+  scope_key: string;
+  rental_session_id: string | null;
   token_version: number;
   allowed_room_ids: string[];
   allowed_agent_keys: string[];

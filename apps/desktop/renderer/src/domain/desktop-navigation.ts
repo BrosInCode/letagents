@@ -1,4 +1,12 @@
-import type { SystemEntry } from "../components/desktop/types";
+import type { MarketplaceEntry, SystemEntry } from "../components/desktop/types";
+
+export const rentMarketplaceEntry: MarketplaceEntry = {
+  id: "marketplace:rent",
+  type: "marketplace",
+  title: "Rent",
+  description: "Borrow or share an available agent",
+  sectionLabel: "LetAgents",
+};
 
 export const setupEntry: SystemEntry = {
   id: "system:setup",

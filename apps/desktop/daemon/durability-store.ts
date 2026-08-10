@@ -5,6 +5,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import type { ExecutionGeneration, ExecutionTerminalPayload, TaskWorkAttempt, WorkAttemptCheckpoint, WorkAttemptState } from "./types.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
 import { acquireWorkspaceFence, WorkspaceFenceError, type WorkspaceFenceHandle } from "./workspace-fence.js";
 import { ensureDaemonStateDatabase, openDaemonStateDatabase } from "./daemon-state-database.js";
@@ -182,6 +183,10 @@ export class WorkDurabilityStore {
     const attempt = this.readAttempt(database, workAttemptId);
     if (!attempt) throw new AttemptNotFoundError(`Unknown work attempt: ${workAttemptId}`);
     return attempt;
+  }
+
+  async listAttempts(): Promise<TaskWorkAttempt[]> {
+    return (await this.load()).attempts;
   }
 
   async rebindAttempt(workAttemptId: string, leaseId: string, leaseEpoch: number): Promise<TaskWorkAttempt> {
@@ -373,29 +378,7 @@ export class WorkDurabilityStore {
     const removed: string[] = [];
     for (const attempt of reserved) {
       try {
-        await this.beforeGcDelete?.(attempt);
-        try { await lstat(attempt.workspace_path); }
-        catch (error: unknown) {
-          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-          await this.finishGarbageCollection(attempt.work_attempt_id);
-          removed.push(attempt.work_attempt_id);
-          continue;
-        }
-        const collected = await this.withRepositoryGcQuiescence(attempt, async () => {
-          const fence = await acquireWorkspaceFence(attempt.workspace_path, `gc:${attempt.work_attempt_id}`, attempt.current_lease_epoch, "exclusive");
-          try {
-          try { await lstat(attempt.workspace_path); }
-          catch (error: unknown) {
-            if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-            await this.finishGarbageCollection(attempt.work_attempt_id);
-            return true;
-          }
-          await this.verifyWorkspaceForDeletion(attempt);
-          await rm(attempt.workspace_path, { recursive: true, force: false });
-          await this.finishGarbageCollection(attempt.work_attempt_id);
-          return true;
-          } finally { await fence.release(); }
-        });
+        const collected = await this.collectReservedAttempt(attempt);
         if (collected) removed.push(attempt.work_attempt_id);
       } catch (error) {
         console.error(`Refusing to garbage collect work attempt ${attempt.work_attempt_id}:`, error);
@@ -409,9 +392,76 @@ export class WorkDurabilityStore {
     return removed;
   }
 
+  /** Delete one concluded room-only attempt without collecting unrelated repositories. */
+  async garbageCollectEphemeralAttempt(workAttemptId: string): Promise<boolean> {
+    this.assertAttemptId(workAttemptId);
+    const reserved = await this.mutateAttempt(workAttemptId, (attempt) => {
+      if (!isEphemeralWorkspaceMarker(attempt.workspace_identity)) {
+        throw new ImmutableExecutionError("Targeted room-only GC requires an ephemeral workspace identity.");
+      }
+      if (attempt.state === "garbage_collected") return { ...attempt };
+      if (attempt.state !== "gc_pending") {
+        if (!attempt.concluded_at
+          || !["cleanly_concluded", "abandoned"].includes(attempt.state)
+          || attempt.postmortem_diff === null) {
+          throw new ImmutableExecutionError("Targeted room-only GC requires a concluded attempt with a postmortem.");
+        }
+        attempt.state = "gc_pending";
+      }
+      return { ...attempt };
+    });
+    if (reserved.state === "garbage_collected") return true;
+    try {
+      return await this.collectReservedAttempt(reserved);
+    } catch (error) {
+      if (!(error instanceof WorkspaceFenceError)) {
+        await this.mutateAttempt(workAttemptId, (attempt) => {
+          if (attempt.state === "gc_pending") attempt.state = "unreviewed";
+          return attempt;
+        });
+      }
+      throw error;
+    }
+  }
+
   private async load(): Promise<StoredAttempts> {
     const database = await this.getDatabase();
     return this.loadFromDatabase(database);
+  }
+
+  private async collectReservedAttempt(attempt: TaskWorkAttempt): Promise<boolean> {
+    await this.beforeGcDelete?.(attempt);
+    try { await lstat(attempt.workspace_path); }
+    catch (error: unknown) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      await this.finishGarbageCollection(attempt.work_attempt_id);
+      return true;
+    }
+    const collect = async () => {
+      const fence = await acquireWorkspaceFence(
+        attempt.workspace_path,
+        `gc:${attempt.work_attempt_id}`,
+        attempt.current_lease_epoch,
+        "exclusive",
+      );
+      try {
+        try { await lstat(attempt.workspace_path); }
+        catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await this.finishGarbageCollection(attempt.work_attempt_id);
+          return true;
+        }
+        await this.verifyWorkspaceForDeletion(attempt);
+        await rm(attempt.workspace_path, { recursive: true, force: false });
+        await this.finishGarbageCollection(attempt.work_attempt_id);
+        return true;
+      } finally { await fence.release(); }
+    };
+    // Room-only attempts never share Git metadata, so unrelated rental
+    // workspaces do not need to be quiesced to delete this exact directory.
+    return isEphemeralWorkspaceMarker(attempt.workspace_identity)
+      ? collect()
+      : this.withRepositoryGcQuiescence(attempt, collect);
   }
 
   private loadFromDatabase(database: DatabaseSync): StoredAttempts {
@@ -671,6 +721,12 @@ export class WorkDurabilityStore {
   }
 
   private async verifyWorkspaceGit(attempt: TaskWorkAttempt): Promise<void> {
+    if (isEphemeralWorkspaceMarker(attempt.workspace_identity)) {
+      if ((await realpath(attempt.workspace_path)) !== await realpath(attempt.workspace_identity.bare_path)) {
+        throw new ImmutableExecutionError("Ephemeral workspace identity does not match its canonical directory.");
+      }
+      return;
+    }
     if (!this.git) throw new ImmutableExecutionError("A Git identity verifier is required before garbage collection.");
     const identity = attempt.workspace_identity;
     const expectedBare = await realpath(identity.bare_path);
@@ -694,9 +750,15 @@ export class WorkDurabilityStore {
     const attempt = await this.getAttempt(workAttemptId);
     if (attempt.concluded_at || attempt.state === "gc_pending" || attempt.state === "garbage_collected") throw new ImmutableExecutionError("A non-live work attempt cannot capture a postmortem diff.");
     await this.verifyWorkspaceForDeletion(attempt);
-    const status = await this.captureGit(["-C", attempt.workspace_path, "status", "--porcelain"]);
-    const diff = await this.captureGit(["-C", attempt.workspace_path, "diff", "--binary", "--no-ext-diff"]);
-    const untracked = await this.captureUntrackedContents(attempt.workspace_path);
+    const ephemeral = isEphemeralWorkspaceMarker(attempt.workspace_identity);
+    const status = ephemeral ? "non-Git ephemeral workspace" : await this.captureGit(["-C", attempt.workspace_path, "status", "--porcelain"]);
+    const diff = ephemeral ? "not applicable" : await this.captureGit(["-C", attempt.workspace_path, "diff", "--binary", "--no-ext-diff"]);
+    // Room-only workspaces intentionally have no Git index from which to
+    // derive a trustworthy untracked-file set. Their durable output is the
+    // visible room transcript; teardown must not pretend the cwd is a repo.
+    const untracked = ephemeral
+      ? "not captured for room-only workspace"
+      : await this.captureUntrackedContents(attempt.workspace_path);
     const captured = this.limitPostmortem(`status --porcelain\n${status}\n\ndiff --binary\n${diff}\n\nuntracked contents\n${untracked}`, maxBytes);
     const root = await this.managedRealDirectory(this.attemptsRoot, true);
     const directory = join(root, workAttemptId);

@@ -18,6 +18,7 @@ import {
 } from "./agents/provider-registry.js";
 import { suggestLetAgentsCodename } from "./agents/codenames.js";
 import { readOpenModelSettings, type StoredOpenModelSettings } from "./agents/open-model-settings.js";
+import { assertRentalSafePermissionProfile } from "./agents/rental-permission-profiles.js";
 import type { DesktopSupervisorCreateInput, DesktopSupervisorManifestEntry, DesktopSupervisorRoomMove } from "../ipc-types.js";
 
 type GrantResponse = {
@@ -47,6 +48,11 @@ function metadataOf(response: GrantResponse): DesktopSupervisorGrantMetadata {
 export type SupervisedGrantPreparation = {
   entry: DesktopSupervisorManifestEntry;
   agentKey: string;
+};
+
+export type PreparedSupervisorGrant = {
+  metadata: DesktopSupervisorGrantMetadata;
+  token: string;
 };
 
 export type SupervisorGrantCoordinatorOperations = {
@@ -192,6 +198,67 @@ export class SupervisorGrantCoordinator {
         (await this.daemon.ensureRunning()).generation,
       );
       return { entry: prepared.entry, agentKey: prepared.agentKey };
+    });
+  }
+
+  /**
+   * Rental admission is authorized by the accepted-session endpoint rather
+   * than ordinary room participation. The caller obtains that one-session
+   * grant in Electron main, and this method applies the same durable ordering
+   * and exact-daemon-generation fence as a normal supervised launch.
+   */
+  async createRentalPausedAndInstall(input: DesktopSupervisorCreateInput & {
+    agentKey: string;
+    preparedGrant: PreparedSupervisorGrant;
+  }): Promise<SupervisedGrantPreparation> {
+    const entryId = `supervised_${input.creationRequestId?.trim() ?? ""}`;
+    if (!/^supervised_[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(entryId)) {
+      throw new Error("A valid supervised rental creation request id is required.");
+    }
+    if (supervisedDeliveryModeForProvider(input.providerId) !== "daemon_inbox") {
+      throw new Error("Rented agents require daemon-owned room delivery.");
+    }
+    assertRentalSafePermissionProfile(input.providerId, input.permissionProfileId);
+    return this.serialize(entryId, async () => {
+      await this.daemon.ensureRunning();
+      const roomId = await this.resolveRoomId(input.roomIdentifier);
+      const agentKey = input.agentKey.trim();
+      const grant = input.preparedGrant;
+      if (!agentKey || !grant.token.trim()) throw new Error("Rental launch authority is incomplete.");
+      if (grant.metadata.allowedRoomIds.length !== 1
+        || grant.metadata.allowedRoomIds[0] !== roomId
+        || grant.metadata.allowedAgentKeys.length !== 1
+        || grant.metadata.allowedAgentKeys[0] !== agentKey) {
+        throw new Error("Rental launch authority does not match the selected room and agent.");
+      }
+      const entry = await this.serializeDisplayNameMutation(roomId, async () => {
+        const displayName = hasGenericSupervisedDisplayName(input.displayName, input.providerId)
+          ? suggestLetAgentsCodename(
+              (await this.daemon.list(roomId)).map((candidate) => candidate.displayName),
+              input.creationRequestId ?? entryId,
+            )
+          : input.displayName.trim();
+        return this.daemon.create({ ...input, displayName, roomIdentifier: roomId });
+      });
+      await this.operations.replaceGrant({
+        agentKey,
+        metadata: grant.metadata,
+        token: grant.token,
+        entryId: entry.id,
+        lastInstalledDaemonGeneration: null,
+      });
+      await this.install(
+        entry,
+        agentKey,
+        {
+          metadata: grant.metadata,
+          token: grant.token,
+          entryId: entry.id,
+          lastInstalledDaemonGeneration: null,
+        },
+        (await this.daemon.ensureRunning()).generation,
+      );
+      return { entry, agentKey };
     });
   }
 

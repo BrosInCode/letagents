@@ -172,6 +172,20 @@
           </span>
           <span>New room</span>
         </button>
+        <button
+          v-if="!selectionActive"
+          class="sidebar-cta sidebar-rent-cta"
+          type="button"
+          :data-active="activeEntry.type === 'marketplace'"
+          data-testid="sidebar-rent"
+          @click="$emit('open-rent')"
+        >
+          <span class="cta-plus sidebar-rent-icon" aria-hidden="true"><Handshake /></span>
+          <span>Rent</span>
+          <span v-if="rentalRequestCount" class="sidebar-rent-count" :aria-label="`${rentalRequestCount} rental requests`">
+            {{ rentalRequestCount > 99 ? '99+' : rentalRequestCount }}
+          </span>
+        </button>
       </div>
 
       <div class="sidebar-room-sections">
@@ -666,6 +680,7 @@ import {
   ExternalLink,
   GitBranch,
   GripVertical,
+  Handshake,
   House,
   ListChecks,
   MessageSquare,
@@ -720,11 +735,13 @@ const props = defineProps<{
   selectionActive: boolean;
   selectedEntryIds: string[];
   batchActionBusy: SidebarRoomBatchActionId | null;
+  rentalRequestCount?: number;
 }>();
 
 const emit = defineEmits<{
   "cycle-sidebar": [];
   "new-room": [];
+  "open-rent": [];
   "archive-room": [entry: RoomEntry];
   "archive-focus-room": [entry: RoomEntry];
   "conclude-focus-room": [entry: RoomEntry];

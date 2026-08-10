@@ -84,6 +84,7 @@ import { registerRentalInternalRoutes } from "../routes/rental/internal/index.js
 import {
   registerRentalProviderRoutes,
 } from "../routes/rental/provider.js";
+import { registerRentalProviderHostRoutes } from "../routes/rental/provider-hosts.js";
 import {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
@@ -153,8 +154,10 @@ import {
   cancelSession,
   getSessionById,
   listProviderRequests,
+  listProviderSessions,
 } from "../rental/sessions.js";
 import { provisionRentalRoomForProvider } from "../rental/room-projection.js";
+import { publicRentalProviders } from "../rental/provider-hosts.js";
 import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
@@ -452,13 +455,22 @@ export function registerApiRoutes(app: Express): void {
     declineSession,
     provisionSession: provisionRentalRoomForProvider,
     listProviderRequests,
+    listProviderSessions,
   });
+  registerRentalProviderHostRoutes(app);
   registerRentalInternalRoutes(app);
   registerRentalRenterRoutes(app, {
     publicListings,
+    publicProviders: publicRentalProviders,
     shouldAllowListingsQuery: buildInMemoryListingsRateLimiter(),
     createSession,
     getSessionById,
     cancelSession,
+    resolveAuthorizedTargetRoom: async (req, res, roomId) => {
+      const canonicalRoomId = await resolveCanonicalRoomRequestId(roomId);
+      const room = await resolveRoomOrReply(canonicalRoomId, res);
+      if (!room || !(await requireParticipant(req, res, room))) return null;
+      return room.id;
+    },
   });
 }

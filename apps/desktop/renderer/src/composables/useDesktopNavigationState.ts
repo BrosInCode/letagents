@@ -8,7 +8,7 @@ import type {
   RepoStatus,
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode } from "../components/desktop/types";
-import { systemEntries } from "../domain/desktop-navigation";
+import { rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
 import {
   buildSidebarProjectGroups,
@@ -279,6 +279,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
       if (childRoom) return childRoom;
     }
 
+    if (entryId === rentMarketplaceEntry.id) return rentMarketplaceEntry;
     return systemEntries.find((entry) => entry.id === entryId) || null;
   }
 

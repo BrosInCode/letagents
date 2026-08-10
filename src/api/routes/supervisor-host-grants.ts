@@ -22,6 +22,7 @@ import {
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
 import { buildAgentActorLabel } from "../../shared/agent-identity.js";
 import { getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
+import { isRentalSupervisorGrantActive } from "../rental/session-launch.js";
 
 const MAX_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -58,6 +59,14 @@ async function requireCurrentSupervisorGrant(req: AuthenticatedRequest, res: Res
   if (!current || current.revoked_at || new Date(current.expires_at).getTime() <= Date.now()
     || current.current_generation !== generation || current.token_version !== grant.token_version) {
     res.status(409).json({ error: "Supervisor grant fence is stale." });
+    return null;
+  }
+  if (current.rental_session_id && !(await isRentalSupervisorGrantActive({
+    rentalSessionId: current.rental_session_id,
+    providerAccountId: current.owner_account_id,
+    hostId: current.host_id,
+  }))) {
+    res.status(409).json({ error: "Rental supervisor authority is no longer active." });
     return null;
   }
   return current;

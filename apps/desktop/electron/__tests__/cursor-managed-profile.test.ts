@@ -441,6 +441,45 @@ test("supervised Cursor accepts a validated Git submodule workspace", () => {
   assert.ok(profile.nativeAllowedWriteSubpaths?.includes(gitDirectory));
 });
 
+test("room-only rental Cursor profiles never inherit an ancestor Git repository", () => {
+  const sourceHome = join(tempDir, "source-home-room-only-rental");
+  const providerHomeRepository = join(tempDir, "provider-home-repository");
+  const workspace = join(
+    providerHomeRepository,
+    ".letagents",
+    "worktrees",
+    "room-only",
+    "2bbffeb2-a7ad-4cf0-bdac-114c6b37cb39",
+  );
+  mkdirSync(join(sourceHome, ".cursor"), { recursive: true });
+  assert.equal(spawnSync("git", ["init", providerHomeRepository], { encoding: "utf8" }).status, 0);
+  mkdirSync(workspace, { recursive: true });
+
+  const profile = prepareCursorSupervisedProfile({
+    workAttemptId: "attempt-room-only-rental",
+    apiBaseUrl: "https://desktop.letagents.example",
+    workspaceRoot: workspace,
+    sourceHomeDir: sourceHome,
+    profileRoot: join(tempDir, "supervised-profile-room-only-rental"),
+    permissionProfileId: "sandboxed_write",
+    roomOnlyRental: true,
+    inspectionOnly: true,
+  });
+  const canonicalWorkspace = realpathSync(workspace);
+  const ancestorGit = realpathSync(join(providerHomeRepository, ".git"));
+
+  assert.ok(profile.nativeAllowedReadSubpaths?.includes(canonicalWorkspace));
+  assert.ok(profile.nativeAllowedWriteSubpaths?.includes(canonicalWorkspace));
+  assert.equal(
+    profile.nativeAllowedReadSubpaths?.some((path) => path === ancestorGit || path.startsWith(`${ancestorGit}/`)),
+    false,
+  );
+  assert.equal(
+    profile.nativeAllowedWriteSubpaths?.some((path) => path === ancestorGit || path.startsWith(`${ancestorGit}/`)),
+    false,
+  );
+});
+
 test("supervised Cursor rejects a Git root redirected outside the selected workspace ancestry", () => {
   const sourceHome = join(tempDir, "source-home-supervised-redirected-root");
   const selected = join(tempDir, "workspace-supervised-redirected-root");

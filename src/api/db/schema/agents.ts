@@ -117,6 +117,8 @@ export const supervisor_host_grants = pgTable(
       .references(() => accounts.id, { onDelete: "cascade" }),
     host_id: text("host_id").notNull(),
     installation_id: text("installation_id").notNull(),
+    scope_key: text("scope_key").notNull().default("owner"),
+    rental_session_id: text("rental_session_id"),
     token_hash: text("token_hash").notNull().unique(),
     token_version: integer("token_version").notNull().default(1),
     allowed_room_ids: text("allowed_room_ids").array().notNull(),
@@ -130,10 +132,11 @@ export const supervisor_host_grants = pgTable(
   },
   (table) => ({
     active_host_idx: uniqueIndex("supervisor_host_grants_active_host_idx")
-      .on(table.owner_account_id, table.host_id, table.installation_id)
+      .on(table.owner_account_id, table.host_id, table.installation_id, table.scope_key)
       .where(sql`${table.revoked_at} IS NULL`),
     owner_idx: index("supervisor_host_grants_owner_idx").on(table.owner_account_id),
     expiry_idx: index("supervisor_host_grants_expiry_idx").on(table.expires_at),
+    rental_session_idx: index("supervisor_host_grants_rental_session_idx").on(table.rental_session_id),
   })
 );
 

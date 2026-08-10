@@ -6,7 +6,10 @@ import {
   providerSupportsConcurrentSupervisedAgents,
   resolveProviderConfigurationSnapshot,
 } from "../provider-configuration.js";
-import { supervisedPermissionProfilesForProvider } from "../supervised-permission-profiles.js";
+import {
+  assertSupervisedRentalPermissionProfileAvailable,
+  supervisedPermissionProfilesForProvider,
+} from "../supervised-permission-profiles.js";
 
 test("provider configuration maps permission profiles to native launch authority", () => {
   assert.deepEqual(resolveProviderConfigurationSnapshot({
@@ -195,6 +198,21 @@ test("supervised profile contract gates Claude prompt approval without changing 
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.isDefault, false);
   assert.equal(cursor.find((profile) => profile.id === "sandboxed_write")?.isDefault, true);
   assert.equal(cursor.find((profile) => profile.id === "full_access")?.status, "available");
+});
+
+test("rental admission rejects trusted-local profiles at the daemon launch boundary", () => {
+  assert.equal(
+    assertSupervisedRentalPermissionProfileAvailable("cursor", "sandboxed_write"),
+    "sandboxed_write",
+  );
+  assert.throws(
+    () => assertSupervisedRentalPermissionProfileAvailable("cursor", "full_access"),
+    /verified workspace-rooted permission profile/,
+  );
+  assert.throws(
+    () => assertSupervisedRentalPermissionProfileAvailable("codex", "full_access"),
+    /verified workspace-rooted permission profile/,
+  );
 });
 
 test("isolated supervised provider runtimes admit multiple agents in one room", () => {
