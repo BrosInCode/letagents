@@ -68,6 +68,7 @@ import {
   type GitHubWebhookRouteDeps,
 } from "../routes/github/webhooks.js";
 import { registerHealthRoutes } from "../routes/system/health.js";
+import { registerDesktopPushRoutes } from "../routes/desktop-push.js";
 import {
   registerLegacyProjectRoutes,
   type LegacyProjectRouteDeps,
@@ -424,6 +425,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerAuthRoutes(app);
   registerAccountRoomRoutes(app);
+  registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
 

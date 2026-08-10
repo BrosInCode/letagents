@@ -540,6 +540,13 @@
       "when": 1786320000000,
       "tag": "0076_rental_marketplace_hosts",
       "breakpoints": true
+    },
+    {
+      "idx": 77,
+      "version": "7",
+      "when": 1786406400000,
+      "tag": "0077_desktop_push_notifications",
+      "breakpoints": true
     }
   ]
 }

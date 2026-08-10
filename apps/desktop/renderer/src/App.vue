@@ -156,6 +156,8 @@
           :home-path="appInfo?.homePath || null"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
+          :notification-reveal-message-id="notificationRevealMessageId"
+          :notification-reveal-nonce="notificationRevealNonce"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
           :on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @chat-scroll-position="rememberChatScrollPosition"
@@ -334,6 +336,7 @@ import type {
   DesktopFocusRoomInfo,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopNotificationTarget,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
@@ -458,6 +461,8 @@ const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const rentalRequestCount = ref(0);
 const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
+const notificationRevealMessageId = ref<string | null>(null);
+const notificationRevealNonce = ref(0);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
 const chatStorageAvailable = ref(true);
 const chatStorageBusy = ref(false);
@@ -515,6 +520,7 @@ const {
 
 let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
+let unsubscribeNotificationActivation: (() => void) | null = null;
 let unsubscribeRepoStatusChanged: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
 let sidebarMetadataRefreshInFlight = false;
@@ -1938,6 +1944,16 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
   }
 }
 
+async function handleNotificationActivation(target: DesktopNotificationTarget): Promise<void> {
+  try {
+    await openRoomFromAppAgent(target.roomIdentifier);
+    notificationRevealMessageId.value = target.messageId;
+    notificationRevealNonce.value += 1;
+  } catch (error) {
+    console.warn("Could not open the room for this notification.", error);
+  }
+}
+
 async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
   await desktopIpc.room.stopStream();
   await refreshActiveRepoStatus();
@@ -2205,6 +2221,12 @@ watch(
 onMounted(() => {
   unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
   unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
+  unsubscribeNotificationActivation = desktopIpc.notifications?.onActivated?.((target) => {
+    void handleNotificationActivation(target);
+  }) || null;
+  void desktopIpc.notifications?.takePendingActivation?.().then((target) => {
+    if (target) void handleNotificationActivation(target);
+  });
   unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
   accountRoomsRefreshInterval = window.setInterval(() => {
     if (shouldSkipPollTick({ hidden: document.hidden })) return;
@@ -2241,6 +2263,8 @@ onBeforeUnmount(() => {
   unsubscribeRoomStream = null;
   unsubscribeOpenSettings?.();
   unsubscribeOpenSettings = null;
+  unsubscribeNotificationActivation?.();
+  unsubscribeNotificationActivation = null;
   unsubscribeRepoStatusChanged?.();
   unsubscribeRepoStatusChanged = null;
   void desktopIpc.repos?.stopStatusWatch?.();

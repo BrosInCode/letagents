@@ -82,6 +82,7 @@ export interface LegacyProjectMessageRouteDeps {
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
+      account_id?: string | null;
     }
   ): Promise<Message>;
   rememberRoomParticipantFromMessage(input: {
@@ -174,6 +175,7 @@ export function registerLegacyProjectMessageRoutes(
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
         attachments,
+        account_id: req.sessionAccount?.account_id ?? null,
       });
       await deps.rememberRoomParticipantFromMessage({
         projectId,

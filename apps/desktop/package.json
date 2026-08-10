@@ -22,6 +22,7 @@
     "build:electron": "tsc -p tsconfig.electron.json",
     "build:daemon": "tsc -p tsconfig.daemon.json",
     "package:artifact": "npm run build && node electron/scripts/package-artifact.mjs",
+    "package:mac": "npm run package:artifact && node electron/scripts/package-macos.mjs",
     "smoke:electron": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 electron .",
     "screenshot:agent-detail": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_AGENT_DETAIL_SCREENSHOT=/tmp/letagents-agent-detail-responsive.png electron .",
     "screenshot:board": "npm run build && cross-env LETAGENTS_DESKTOP_SMOKE_CHECK=1 LETAGENTS_DESKTOP_BOARD_SCREENSHOT=/tmp/letagents-room-board.png electron .",
@@ -49,6 +50,8 @@
     "zod": "4.4.3"
   },
   "devDependencies": {
+    "@electron/notarize": "3.1.1",
+    "@electron/osx-sign": "2.6.0",
     "@typescript-eslint/parser": "8.63.0",
     "@vitejs/plugin-vue": "5.2.4",
     "concurrently": "9.2.4",

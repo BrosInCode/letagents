@@ -6,6 +6,11 @@ import {
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
+import {
+  initializeDesktopNotifications,
+  prepareDesktopNotificationLaunch,
+  prepareDesktopNotifications,
+} from "./main/notifications.js";
 import { attachmentProtocolScheme } from "./main/paths.js";
 import { stopDesktopRoomStream } from "./main/room-stream.js";
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
@@ -16,6 +21,7 @@ import { stopActiveRentalProviderHostManager } from "./rental/provider-host-mana
 import { stopActiveRentalProviderEventPoller } from "./rental/provider-event-poller.js";
 
 configureDesktopSmokeEnvironment();
+prepareDesktopNotifications();
 
 protocol.registerSchemesAsPrivileged([
   {
@@ -31,7 +37,8 @@ protocol.registerSchemesAsPrivileged([
 
 registerDesktopIpcHandlers();
 
-app.whenReady().then(async () => {
+app.once("ready", async (_event, launchInfo) => {
+  prepareDesktopNotificationLaunch(launchInfo);
   await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
     console.warn(
       `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
@@ -59,6 +66,9 @@ app.whenReady().then(async () => {
   app.setName("LetAgents");
   configureApplicationMenu();
   createWindow();
+  await initializeDesktopNotifications().catch((error) => {
+    console.warn(`Desktop notification setup unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  });
 
   app.on("activate", () => {
     if (!hasOpenWindows()) {

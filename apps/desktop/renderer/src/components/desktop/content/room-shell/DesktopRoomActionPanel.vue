@@ -153,7 +153,7 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Notifications</strong>
+              <strong>Desktop notifications</strong>
               <small>{{ notificationDescription }}</small>
             </span>
             <span class="desktop-room-status-chip" :data-state="notificationShortLabel.toLowerCase()">{{ notificationShortLabel }}</span>
@@ -346,9 +346,9 @@ function selectLocalStorage(): void {
 
 const notificationDescription = computed(() => {
   if (props.notificationPermission === "unsupported") return "Desktop alerts are unavailable in this environment.";
-  if (props.notificationsEnabled) return "Desktop alerts can notify you about new room messages.";
+  if (props.notificationsEnabled) return "Desktop alerts are enabled for every joined room.";
   if (props.notificationPermission === "denied") return "Notifications are blocked by the system permission.";
-  return "Ask before showing desktop alerts for this room.";
+  return "Turn on desktop alerts for all joined rooms.";
 });
 
 const githubDotState = computed(() => {

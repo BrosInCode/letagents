@@ -151,6 +151,59 @@ test("room invalidation refreshes shared visibility after a repository webhook",
   assert.equal(calls, 3, "post-webhook lookup performs anonymous discovery plus private refinement");
 });
 
+test("a fresh visibility check bypasses a cached public result", async () => {
+  const roomName = `github.com/brosincode/fresh-visibility-${Date.now()}`;
+  let isPrivate = false;
+  let calls = 0;
+  globalThis.fetch = (async (_input, init) => {
+    calls += 1;
+    const authorization = new Headers(init?.headers).get("authorization");
+    if (isPrivate && !authorization) return new Response("not found", { status: 404 });
+    return new Response(JSON.stringify({ private: isPrivate }), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  assert.equal(await getGitHubRepoVisibility(roomName), "public");
+  isPrivate = true;
+  assert.equal(
+    await getGitHubRepoVisibility(roomName, "token", { bypassCache: true }),
+    "private",
+  );
+  assert.equal(calls, 3, "fresh access performs anonymous discovery plus authenticated refinement");
+});
+
+test("a fresh room decision bypasses both visibility and collaborator caches", async () => {
+  let visibilityBypassed = false;
+  let collaboratorBypassed = false;
+  const decision = await resolveGitHubRepoRoomAccessDecision(
+    {
+      roomName: "github.com/brosincode/secret-repo",
+      sessionAccount: {
+        provider: "github",
+        provider_access_token: "secret-token",
+        login: "EmmyMay",
+      },
+      freshCollaboratorCheck: true,
+    },
+    {
+      getVisibility: async (_roomName, _accessToken, options) => {
+        visibilityBypassed = options?.bypassCache === true;
+        return "private";
+      },
+      isCollaborator: async (input) => {
+        collaboratorBypassed = input.bypassCache === true;
+        return true;
+      },
+    },
+  );
+
+  assert.deepEqual(decision, { kind: "allow" });
+  assert.equal(visibilityBypassed, true);
+  assert.equal(collaboratorBypassed, true);
+});
+
 test("concurrent collaborator checks are single-flighted per repository and login", async () => {
   const roomName = `github.com/brosincode/permission-flight-${Date.now()}`;
   let repoCalls = 0;

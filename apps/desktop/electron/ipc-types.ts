@@ -5,6 +5,7 @@ export type * from "./ipc-types/api.js";
 export type * from "./ipc-types/auth.js";
 export type * from "./ipc-types/core.js";
 export * from "./ipc-types/launch-events.js";
+export type * from "./ipc-types/notifications.js";
 export type * from "./ipc-types/rental.js";
 export type * from "./ipc-types/room.js";
 export type * from "./ipc-types/setup.js";

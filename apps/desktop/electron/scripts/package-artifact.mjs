@@ -1,4 +1,4 @@
-import { chmod, cp, mkdir, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, cp, mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { dirname, join, resolve } from "node:path";
@@ -20,7 +20,30 @@ if (typeof mcpVersion !== "string" || !/^\d+\.\d+\.\d+$/.test(mcpVersion)) {
   throw new Error("package.json must declare letagentsRuntime.mcpVersion.");
 }
 await rm(release, { recursive: true, force: true });
-await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, { recursive: true });
+await cp(join(root, "node_modules", "electron", "dist", "Electron.app"), bundle, {
+  recursive: true,
+  verbatimSymlinks: true,
+});
+const bundleExecutable = join(bundle, "Contents", "MacOS", "LetAgents");
+await rename(join(bundle, "Contents", "MacOS", "Electron"), bundleExecutable);
+const infoPlist = join(bundle, "Contents", "Info.plist");
+const plistBuddy = "/usr/libexec/PlistBuddy";
+const setPlistValue = async (key, type, value) => {
+  const command = `Set :${key} ${value}`;
+  try {
+    await promisify(execFile)(plistBuddy, ["-c", command, infoPlist]);
+  } catch {
+    await promisify(execFile)(plistBuddy, ["-c", `Add :${key} ${type} ${value}`, infoPlist]);
+  }
+};
+await setPlistValue("CFBundleIdentifier", "string", "chat.letagents.desktop");
+await setPlistValue("CFBundleExecutable", "string", "LetAgents");
+await setPlistValue("CFBundleName", "string", "LetAgents");
+await setPlistValue("CFBundleDisplayName", "string", "LetAgents");
+await setPlistValue("CFBundleShortVersionString", "string", workspacePackageJson.version);
+await setPlistValue("CFBundleVersion", "string", workspacePackageJson.version);
+await setPlistValue("LSApplicationCategoryType", "string", "public.app-category.developer-tools");
+await setPlistValue("NSUserNotificationAlertStyle", "string", "alert");
 await mkdir(app, { recursive: true });
 for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
@@ -28,6 +51,7 @@ for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
 await writeFile(join(app, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
 await cp(join(root, "package-lock.json"), join(app, "package-lock.json"));
 await promisify(execFile)("npm", ["ci", "--omit=dev", "--ignore-scripts", "--prefer-offline"], { cwd: app, maxBuffer: 8 * 1024 * 1024 });
+await rm(join(app, "node_modules", ".bin"), { recursive: true, force: true });
 // Supervised Cursor must never download executable bridge code at turn time.
 // Install the exact public MCP package into the desktop artifact under forced,
 // credential-free npm configuration; runtime resolution validates its version
@@ -93,7 +117,7 @@ if (runtimeTreeSha256 !== runtimeIntegrity.LETAGENTS_MCP_RUNTIME_TREE_SHA256) {
 const requestedOpenCode = process.env.LETAGENTS_OPENCODE_BIN?.trim() || "opencode";
 const openCodePath = requestedOpenCode.includes("/")
   ? await realpath(requestedOpenCode)
-  : (await promisify(execFile)("which", [requestedOpenCode])).stdout.trim();
+  : await realpath((await promisify(execFile)("which", [requestedOpenCode])).stdout.trim());
 const openCodeReportedVersion = (await promisify(execFile)(openCodePath, ["--version"])).stdout.trim();
 if (!openCodeReportedVersion.includes(openCodeVersion)) {
   throw new Error(`Packaging requires OpenCode ${openCodeVersion}; found '${openCodeReportedVersion || "unknown"}'.`);
@@ -131,6 +155,8 @@ for (const relative of required) {
 await writeFile(join(app, "package-artifact-manifest.json"), `${JSON.stringify({
   format: 1,
   bundle,
+  bundleIdentifier: "chat.letagents.desktop",
+  version: workspacePackageJson.version,
   runtimeTreeSha256,
   files,
 }, null, 2)}\n`);
