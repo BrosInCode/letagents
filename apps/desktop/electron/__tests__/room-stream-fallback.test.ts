@@ -15,8 +15,10 @@ env.resetState({});
 // once at evaluation time, same as apiUrl.
 const CATCH_UP_RETRY_MS = 50;
 process.env.LETAGENTS_ROOM_STREAM_CATCHUP_RETRY_MS = String(CATCH_UP_RETRY_MS);
+process.env.LETAGENTS_ROOM_SYNC_HANDSHAKE_TIMEOUT_MS = String(CATCH_UP_RETRY_MS);
 test.after(() => {
   delete process.env.LETAGENTS_ROOM_STREAM_CATCHUP_RETRY_MS;
+  delete process.env.LETAGENTS_ROOM_SYNC_HANDSHAKE_TIMEOUT_MS;
 });
 
 // Capture the exact window-facing stream-event sequence. `emitRoomStreamEvent`
@@ -46,7 +48,8 @@ const ROOM = "focus_fallback_room";
 
 type StreamHandler =
   | { kind: "ok"; sse: ControllableSse }
-  | { kind: "fail"; status: number };
+  | { kind: "fail"; status: number }
+  | { kind: "hang" };
 
 type PollRecord = { url: string; after: string | null; timeout: string | null; signal: AbortSignal };
 type StreamRecord = { url: string; signal: AbortSignal };
@@ -54,6 +57,7 @@ type StreamRecord = { url: string; signal: AbortSignal };
 interface ControllableSse {
   response: Response;
   pushMessage(id: string, text?: string): void;
+  pushRoomSync(checkpoint: string | null, gap?: boolean): void;
   close(): void;
   error(err?: Error): void;
 }
@@ -82,6 +86,12 @@ function makeSse(): ControllableSse {
         })}\n\n`;
       controller.enqueue(encoder.encode(frame));
     },
+    pushRoomSync(checkpoint: string | null, gap = false) {
+      controller.enqueue(encoder.encode(
+        `event: room_sync\n` +
+        `data: ${JSON.stringify({ room_id: ROOM, checkpoint, gap })}\n\n`,
+      ));
+    },
     close() {
       controller.close();
     },
@@ -92,7 +102,7 @@ function makeSse(): ControllableSse {
 }
 
 type MessagePage = { id: string; text?: string }[];
-type CatchUpHandler = { kind: "page"; messages: MessagePage } | { kind: "fail"; status: number };
+type CatchUpHandler = { kind: "page"; messages: MessagePage; hasMore?: boolean } | { kind: "fail"; status: number };
 
 /**
  * Fetch router shared by every test. Stream fetches are answered from a FIFO of
@@ -107,7 +117,9 @@ type CatchUpHandler = { kind: "page"; messages: MessagePage } | { kind: "fail"; 
 function installFetchRouter(): {
   streamQueue: StreamHandler[];
   enqueueFallbackPoll(messages: MessagePage): void;
-  enqueueCatchUp(messages: MessagePage): void;
+  enqueueLatest(messages: MessagePage): void;
+  enqueueLatestFailure(status?: number): void;
+  enqueueCatchUp(messages: MessagePage, hasMore?: boolean): void;
   enqueueCatchUpFailure(status?: number): void;
   streamCalls: StreamRecord[];
   pollCalls: PollRecord[];
@@ -116,6 +128,7 @@ function installFetchRouter(): {
   const previousFetch = globalThis.fetch;
   const streamQueue: StreamHandler[] = [];
   const fallbackQueue: MessagePage[] = [];
+  const latestQueue: Array<{ messages?: MessagePage; status?: number }> = [];
   const catchUpQueue: CatchUpHandler[] = [];
   const streamCalls: StreamRecord[] = [];
   const pollCalls: PollRecord[] = [];
@@ -138,6 +151,7 @@ function installFetchRouter(): {
     if (url.includes("/messages/stream")) {
       streamCalls.push({ url, signal });
       const handler = streamQueue.shift() ?? { kind: "fail", status: 503 };
+      if (handler.kind === "hang") return hangUntilAborted(signal);
       if (handler.kind === "fail") {
         return new Response(null, { status: handler.status });
       }
@@ -160,7 +174,7 @@ function installFetchRouter(): {
         }
         if (handler) {
           return new Response(
-            JSON.stringify({ room_id: ROOM, messages: handler.messages }),
+            JSON.stringify({ room_id: ROOM, messages: handler.messages, has_more: handler.hasMore === true }),
             { status: 200, headers: { "Content-Type": "application/json" } },
           );
         }
@@ -175,6 +189,13 @@ function installFetchRouter(): {
       }
       return hangUntilAborted(signal);
     }
+    if (url.includes("/messages?") && url.includes("before=latest")) {
+      const latest = latestQueue.shift() || { messages: [] };
+      if (latest.status) return new Response(null, { status: latest.status });
+      return new Response(JSON.stringify({ room_id: ROOM, messages: latest.messages || [] }), {
+        status: 200, headers: { "Content-Type": "application/json" },
+      });
+    }
 
     // Any other outbound call in this suite is unexpected; answer benignly so a
     // stray call cannot crash the runtime, but it should never happen.
@@ -186,7 +207,9 @@ function installFetchRouter(): {
   return {
     streamQueue,
     enqueueFallbackPoll: (messages) => fallbackQueue.push(messages),
-    enqueueCatchUp: (messages) => catchUpQueue.push({ kind: "page", messages }),
+    enqueueLatest: (messages) => latestQueue.push({ messages }),
+    enqueueLatestFailure: (status = 500) => latestQueue.push({ status }),
+    enqueueCatchUp: (messages, hasMore = false) => catchUpQueue.push({ kind: "page", messages, hasMore }),
     enqueueCatchUpFailure: (status = 500) => catchUpQueue.push({ kind: "fail", status }),
     streamCalls,
     pollCalls,
@@ -222,7 +245,7 @@ test.afterEach(async () => {
   await stopDesktopRoomStream();
 });
 
-test("healthy SSE delivers messages without ever issuing a poll request", async () => {
+test("healthy SSE with an empty snapshot establishes the first cursor before reading live frames", async () => {
   const router = installFetchRouter();
   try {
     const sse = makeSse();
@@ -239,9 +262,89 @@ test("healthy SSE delivers messages without ever issuing a poll request", async 
 
     assert.deepEqual(messageIds(), ["msg_1", "msg_2"]);
     assert.equal(router.streamCalls.length, 1, "exactly one SSE transport opened");
-    assert.equal(router.pollCalls.length, 0, "no poll request while SSE is healthy");
+    assert.equal(router.pollCalls.length, 0, "initial null cursor never drains room history");
 
     sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("SSE sends the snapshot cursor and forwards the revision handshake", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([]);
+
+    await startDesktopRoomStream(ROOM, "msg_7");
+    await waitUntil(() => emitted.some((event) => event.type === "open"));
+    assert.match(router.streamCalls[0]?.url || "", /[?&]after=msg_7(?:&|$)/);
+
+    sse.pushRoomSync("msg_7", false);
+    await waitUntil(() => emitted.filter((event) => event.type === "open").length === 2);
+    const checkpointOpen = emitted.filter(
+      (event): event is Extract<DesktopRoomStreamEvent, { type: "open" }> => event.type === "open",
+    ).at(-1);
+    assert.equal(checkpointOpen?.checkpoint, "msg_7");
+    assert.equal(checkpointOpen?.gap, false);
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("SSE catch-up paginates until a reconnect backlog is exhausted", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([{ id: "msg_150" }], true);
+    router.enqueueCatchUp([{ id: "msg_151" }], false);
+
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => messageIds().includes("msg_151"));
+
+    const catchUps = router.pollCalls.filter((call) => call.timeout === "0");
+    assert.deepEqual(catchUps.map((call) => call.after), ["msg_1", "msg_150"]);
+    assert.deepEqual(messageIds(), ["msg_150", "msg_151"]);
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("older server without room_sync falls back after a bounded handshake timeout", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.enqueueCatchUp([]);
+    await startDesktopRoomStream(ROOM, "msg_1");
+
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === false,
+    ));
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("room startup does not block indefinitely when SSE never returns headers", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "hang" });
+    const startedAt = Date.now();
+    await startDesktopRoomStream(ROOM, null);
+    assert.ok(Date.now() - startedAt < CATCH_UP_RETRY_MS * 4);
+    assert.equal(router.streamCalls.length, 1);
+    assert.equal(router.streamCalls[0]?.signal.aborted, false, "hung SSE remains available for reconnect/stop");
+    assert.ok(emitted.some((event) => event.type === "open" && event.gap === true && event.verified === false));
   } finally {
     await stopDesktopRoomStream();
     router.restore();
@@ -257,12 +360,44 @@ test("SSE failure brings up the fallback poll and messages keep flowing", async 
 
     await startDesktopRoomStream(ROOM, "msg_1");
 
+    assert.ok(emitted.some((event) => event.type === "open" && event.gap === true && event.verified === false));
+
     await waitUntil(() => messageIds().includes("msg_2"));
 
     assert.ok(router.pollCalls.length >= 1, "fallback poll issued after SSE failed");
     assert.equal(router.pollCalls[0]?.after, "msg_1", "fallback poll resumes from the cursor");
     assert.equal(router.pollCalls[0]?.timeout, "25000", "fallback uses the long-poll timeout");
     assert.deepEqual(messageIds(), ["msg_2"]);
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("empty-room SSE outage discovers the first message from a bounded latest page", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "fail", status: 503 });
+    router.enqueueLatest([{ id: "msg_1" }]);
+    await startDesktopRoomStream(ROOM, null);
+    await waitUntil(() => messageIds().includes("msg_1"));
+    assert.deepEqual(messageIds(), ["msg_1"]);
+    assert.equal(router.pollCalls.length, 0, "null cursor does not request oldest-first poll history");
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("empty-room latest-page fallback retries after a transient failure", async () => {
+  const router = installFetchRouter();
+  try {
+    router.streamQueue.push({ kind: "fail", status: 503 });
+    router.enqueueLatestFailure();
+    router.enqueueLatest([{ id: "msg_1" }]);
+    await startDesktopRoomStream(ROOM, null);
+    await waitUntil(() => messageIds().includes("msg_1"), 5_000);
+    assert.deepEqual(messageIds(), ["msg_1"]);
   } finally {
     await stopDesktopRoomStream();
     router.restore();

@@ -158,14 +158,19 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     liveMetadataRefreshIntervalRoomIdentifier = null;
   }
 
-  async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
+  async function syncSelectedRoomStream(
+    roomIdentifier: string | null,
+    afterMessageId?: string | null,
+  ): Promise<void> {
     if (!desktopIpc.room?.startStream) return;
     if (!roomIdentifier) {
       clearLiveMetadataRefreshInterval();
       await desktopIpc.room.stopStream();
       return;
     }
-    const latestMessageId = options.selectedSnapshot.value?.messages.at(-1)?.id || null;
+    const latestMessageId = afterMessageId === undefined
+      ? options.selectedSnapshot.value?.messages.at(-1)?.id || null
+      : afterMessageId;
     await desktopIpc.room.startStream(roomIdentifier, latestMessageId);
     startLiveMetadataRefreshInterval(roomIdentifier);
   }

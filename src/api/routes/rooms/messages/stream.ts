@@ -4,7 +4,7 @@ import {
   startSseStream,
   stopSseStream,
 } from "../../../http/sse.js";
-import { hydrateMessageReplies, type Message } from "../../../db.js";
+import { getLatestMessages, getMessageById, hydrateMessageReplies, type Message } from "../../../db.js";
 import { parseScopedId } from "../../../db/utils.js";
 import {
   beginRoomAgentDelivery,
@@ -176,6 +176,36 @@ export function registerMessageStreamRoute(
     deps.artifactEvents?.on("artifact:updated", onArtifactUpdated);
     rentalEvents.on("activity:created", onRentalActivityCreated);
     messageInfoEvents.on("message_info:updated", onMessageInfoUpdated);
+
+    // The listeners above are installed before the checkpoint is read. That
+    // ordering closes the snapshot/subscribe race: anything committed while
+    // this query is in flight is either represented by the checkpoint or is
+    // already queued on this stream (duplicates are harmless client-side).
+    const requestedCursor = typeof req.query?.after === "string" && /^msg_\d+$/.test(req.query.after)
+      ? req.query.after
+      : null;
+    try {
+      const latest = await getLatestMessages(projectId, {
+        limit: 1,
+        include_prompt_only: deps.shouldIncludePromptOnlyMessages(req),
+        account_id: req.sessionAccount?.account_id ?? null,
+      });
+      const checkpoint = latest.messages[latest.messages.length - 1]?.id ?? null;
+      const cursorExists = !requestedCursor || requestedCursor === checkpoint || Boolean(await getMessageById(
+        projectId,
+        requestedCursor,
+        { include_prompt_only: deps.shouldIncludePromptOnlyMessages(req), account_id: req.sessionAccount?.account_id ?? null },
+      ));
+      writeEvent(`event: room_sync\ndata: ${JSON.stringify({
+        room_id: projectId,
+        checkpoint,
+        requested_cursor: requestedCursor,
+        gap: Boolean(requestedCursor && !cursorExists),
+      })}\n\n`);
+    } catch (error) {
+      console.error(`[room messages stream] failed to establish checkpoint for ${projectId}`, error);
+      writeEvent(`event: room_sync\ndata: ${JSON.stringify({ room_id: projectId, checkpoint: null, requested_cursor: requestedCursor, gap: true })}\n\n`);
+    }
 
     req.on("close", () => {
       streamClosed = true;
