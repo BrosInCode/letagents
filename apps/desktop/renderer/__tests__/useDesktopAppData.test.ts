@@ -71,6 +71,7 @@ describe("useDesktopAppData selected focus room snapshots", () => {
       harness.activeEntry.value = focusEntry("focus_a", "Focus A");
 
       const backgroundRefresh = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
 
       assert.equal(harness.state.selectedSnapshotLoading.value, false);
       assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "focus_a");
@@ -235,6 +236,547 @@ describe("useDesktopAppData selected focus room snapshots", () => {
 });
 
 describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
+  it("ignores transport open until the server establishes a sync boundary", () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
+
+    harness.state.handleRoomStreamEvent({
+      type: "open",
+      roomIdentifier: "focus_a",
+      checkpoint: "msg_1",
+      gap: false,
+      verified: false,
+    });
+
+    assert.deepEqual(harness.metadataRefreshCalls, []);
+    assert.deepEqual(harness.getSnapshotRequests, []);
+  });
+
+  it("falls back to a full snapshot when the stream reports a cursor gap", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_9", "Stale")]);
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      harness.getSnapshotRequests.length = 0;
+      harness.state.handleRoomStreamEvent({
+        type: "open",
+        roomIdentifier: "focus_a",
+        checkpoint: "msg_4",
+        gap: true,
+        verified: false,
+      });
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+  });
+
+  it("replays non-message events that arrive while the verified snapshot is loading", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const pending = deferred<DesktopRoomSnapshot>();
+    harness.nextSelectedSnapshot = pending.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refresh = harness.state.refreshSelectedSnapshot();
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update",
+        roomIdentifier: "focus_a",
+        task: taskSummary("task_during_snapshot"),
+      });
+      pending.resolve(focusSnapshot());
+      await refresh;
+    });
+
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.tasks.map((task) => task.id),
+      ["task_during_snapshot"],
+    );
+  });
+
+  it("waits for stream readiness and buffers events even before a selected snapshot exists", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const streamReady = deferred<void>();
+    const snapshotReady = deferred<DesktopRoomSnapshot>();
+    harness.nextStreamReady = streamReady.promise;
+    harness.nextSelectedSnapshot = snapshotReady.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refresh = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, []);
+      harness.state.handleRoomStreamEvent({
+        type: "task_update",
+        roomIdentifier: "focus_a",
+        task: taskSummary("task_before_snapshot"),
+      });
+      streamReady.resolve();
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+      snapshotReady.resolve(focusSnapshot());
+      await refresh;
+    });
+
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_before_snapshot"]);
+  });
+
+  it("releases an exact barrier when stream startup rejects", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    harness.nextStreamReady = Promise.reject(new Error("stream unavailable"));
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await assert.rejects(harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value), /stream unavailable/);
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_a", task: taskSummary("task_after_rejection"),
+      });
+    });
+
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_after_rejection"]);
+  });
+
+  it("a stale startup rejection cannot release a newer room barrier", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const roomAReady = deferred<void>();
+    harness.nextStreamReady = roomAReady.promise;
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refreshA = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      const refreshARejection = assert.rejects(refreshA, /stale stream failure/);
+      await flushAsync();
+
+      const roomBReady = deferred<void>();
+      const roomBSnapshot = deferred<DesktopRoomSnapshot>();
+      harness.nextStreamReady = roomBReady.promise;
+      harness.nextSelectedSnapshot = roomBSnapshot.promise;
+      harness.activeEntry.value = focusEntry("focus_b", "Focus B");
+      const refreshB = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_b", task: taskSummary("task_b"),
+      });
+
+      roomAReady.reject(new Error("stale stream failure"));
+      await refreshARejection;
+      roomBReady.resolve();
+      await flushAsync();
+      roomBSnapshot.resolve(roomSnapshot("focus_b", { kind: "focus", parentRoomId: "room_parent" }));
+      await refreshB;
+    });
+
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "focus_b");
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_b"]);
+  });
+
+  it("times out a hung snapshot, releases its buffer, and ignores late resolution", async () => {
+    const harness = createHarness({ snapshotTimeoutMs: 5 });
+    harness.selectedSnapshot.value = focusSnapshot();
+    const hungSnapshot = deferred<DesktopRoomSnapshot>();
+    harness.nextSelectedSnapshot = hungSnapshot.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refresh = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_a", task: taskSummary("task_during_timeout"),
+      });
+      await assert.rejects(refresh, /snapshot timed out/);
+      assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_during_timeout"]);
+
+      hungSnapshot.resolve(focusSnapshot());
+      await flushAsync();
+      assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_during_timeout"]);
+
+      harness.nextSelectedSnapshot = Promise.resolve(roomSnapshot("focus_a", {
+        kind: "focus",
+        parentRoomId: "room_parent",
+        tasks: [taskSummary("task_recovered")],
+      }));
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+    });
+
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_recovered"]);
+  });
+
+  it("bounds the full root refresh aggregate and releases buffered events", async () => {
+    const harness = createHarness({ snapshotTimeoutMs: 5 });
+    harness.activeEntry.value = parentEntry();
+    harness.selectedSnapshot.value = roomSnapshot("room_parent");
+    harness.nextSelectedSnapshot = Promise.resolve(roomSnapshot("room_parent"));
+    const appInfo = deferred<DesktopAppInfo>();
+    harness.nextAppInfo = appInfo.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refresh = harness.state.refresh();
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "room_parent", task: taskSummary("task_during_root_timeout"),
+      });
+      await assert.rejects(refresh, /root room refresh snapshot timed out/);
+      assert.deepEqual(
+        harness.selectedSnapshot.value?.tasks.map((task) => task.id),
+        ["task_during_root_timeout"],
+      );
+
+      appInfo.resolve({} as DesktopAppInfo);
+      await flushAsync();
+    });
+
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.tasks.map((task) => task.id),
+      ["task_during_root_timeout"],
+    );
+  });
+
+  it("catches fire-and-forget refresh failures and releases the barrier", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    harness.nextStreamReady = Promise.reject(new Error("refresh stream failed"));
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.state.handleRefreshRoom();
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_a", task: taskSummary("task_after_scheduled_failure"),
+      });
+    });
+
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.tasks.map((task) => task.id),
+      ["task_after_scheduled_failure"],
+    );
+  });
+
+  it("runs exactly one reconciliation when degraded startup later reaches verified SSE", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const streamReady = deferred<void>();
+    harness.nextStreamReady = streamReady.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const initial = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: false,
+      });
+      streamReady.resolve();
+      await initial;
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+
+      harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot());
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_a"]);
+  });
+
+  it("queues verified recovery until the degraded initial barrier accepts its snapshot", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const streamReady = deferred<void>();
+    const initialSnapshot = deferred<DesktopRoomSnapshot>();
+    const reconciliation = deferred<DesktopRoomSnapshot>();
+    harness.nextStreamReady = streamReady.promise;
+    harness.nextSelectedSnapshot = initialSnapshot.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const initial = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: false,
+      });
+      streamReady.resolve();
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+
+      harness.nextSelectedSnapshot = reconciliation.promise;
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_a", task: taskSummary("task_during_barrier"),
+      });
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+
+      initialSnapshot.resolve(focusSnapshot());
+      await initial;
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_a"]);
+
+      // The degraded marker remains until this accepted reconciliation. A
+      // duplicate verified frame must not start a third fetch.
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_a"]);
+      reconciliation.resolve(roomSnapshot("focus_a", {
+        kind: "focus",
+        parentRoomId: "room_parent",
+        tasks: [taskSummary("task_during_barrier")],
+      }));
+      await flushAsync();
+
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_a"]);
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_during_barrier"]);
+  });
+
+  it("a stale room gap recovery cannot clear the next room's event buffer", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    const roomA = deferred<DesktopRoomSnapshot>();
+    harness.nextSelectedSnapshot = roomA.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: true,
+      });
+      await flushAsync();
+
+      const roomB = deferred<DesktopRoomSnapshot>();
+      harness.nextSelectedSnapshot = roomB.promise;
+      harness.activeEntry.value = focusEntry("focus_b", "Focus B");
+      const refreshB = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_b", task: taskSummary("task_b"),
+      });
+
+      roomA.resolve(focusSnapshot());
+      await flushAsync();
+      roomB.resolve(roomSnapshot("focus_b", { kind: "focus", parentRoomId: "room_parent" }));
+      await refreshB;
+    });
+
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "focus_b");
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_b"]);
+  });
+
+  it("ignores late verified recovery from a degraded room after the barrier switches", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const roomA = deferred<DesktopRoomSnapshot>();
+    harness.nextSelectedSnapshot = roomA.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refreshA = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: false,
+      });
+
+      const roomB = deferred<DesktopRoomSnapshot>();
+      harness.nextSelectedSnapshot = roomB.promise;
+      harness.activeEntry.value = focusEntry("focus_b", "Focus B");
+      const refreshB = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_b", task: taskSummary("task_b"),
+      });
+
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_b"]);
+
+      roomB.resolve(roomSnapshot("focus_b", { kind: "focus", parentRoomId: "room_parent" }));
+      await refreshB;
+      roomA.resolve(focusSnapshot());
+      await refreshA;
+    });
+
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "focus_b");
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_b"]);
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_b"]);
+  });
+
+  it("ignores a late degraded gap from the prior room while the next barrier is active", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const roomA = deferred<DesktopRoomSnapshot>();
+    harness.nextSelectedSnapshot = roomA.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refreshA = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+
+      const roomB = deferred<DesktopRoomSnapshot>();
+      harness.nextSelectedSnapshot = roomB.promise;
+      harness.activeEntry.value = focusEntry("focus_b", "Focus B");
+      const refreshB = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_b", task: taskSummary("task_b"),
+      });
+
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: false,
+      });
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_b"]);
+
+      roomB.resolve(roomSnapshot("focus_b", { kind: "focus", parentRoomId: "room_parent" }));
+      await refreshB;
+      roomA.resolve(focusSnapshot());
+      await refreshA;
+    });
+
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "focus_b");
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_b"]);
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_b"]);
+  });
+
+  it("moves stream ownership when cached parent selection skips a snapshot barrier", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = focusSnapshot();
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      harness.getSnapshotRequests.length = 0;
+
+      harness.selectedSnapshot.value = roomSnapshot("room_parent");
+      await harness.state.syncSelectedRoomStream("room_parent");
+      const rootRecovery = deferred<DesktopRoomSnapshot>();
+      harness.nextSelectedSnapshot = rootRecovery.promise;
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: false,
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "room_parent", gap: true, verified: false,
+      });
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["room_parent"]);
+
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "room_parent", task: taskSummary("task_parent"),
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "room_parent", gap: false, verified: true,
+      });
+      rootRecovery.resolve(roomSnapshot("room_parent"));
+      await flushAsync();
+    });
+
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "room_parent");
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_parent"]);
+    assert.deepEqual(harness.getSnapshotRequests, ["room_parent"]);
+  });
+
+  it("retires a completed degraded barrier when the next room starts loading", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const roomAReady = deferred<void>();
+    const roomA = deferred<DesktopRoomSnapshot>();
+    harness.nextStreamReady = roomAReady.promise;
+    harness.nextSelectedSnapshot = roomA.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refreshA = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: false,
+      });
+      roomAReady.resolve();
+      await flushAsync();
+      roomA.resolve(focusSnapshot());
+      await refreshA;
+
+      const roomB = deferred<DesktopRoomSnapshot>();
+      harness.nextStreamReady = Promise.resolve();
+      harness.nextSelectedSnapshot = roomB.promise;
+      harness.activeEntry.value = focusEntry("focus_b", "Focus B");
+      const refreshB = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      // Preserve the stale visible room that made snapshotMatches(A) unsafe as
+      // an ownership check while B's authoritative snapshot is still pending.
+      harness.selectedSnapshot.value = focusSnapshot();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_b", task: taskSummary("task_b"),
+      });
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_b"]);
+
+      roomB.resolve(roomSnapshot("focus_b", { kind: "focus", parentRoomId: "room_parent" }));
+      await refreshB;
+    });
+
+    assert.equal(harness.selectedSnapshot.value?.roomIdentifier, "focus_b");
+    assert.deepEqual(harness.selectedSnapshot.value?.tasks.map((task) => task.id), ["task_b"]);
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_b"]);
+  });
+
+  it("carries degraded recovery authority into a repeated same-room barrier", async () => {
+    const harness = createHarness();
+    harness.selectedSnapshot.value = null;
+    const firstReady = deferred<void>();
+    const firstSnapshot = deferred<DesktopRoomSnapshot>();
+    harness.nextStreamReady = firstReady.promise;
+    harness.nextSelectedSnapshot = firstSnapshot.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const firstRefresh = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: true, verified: false,
+      });
+      firstReady.resolve();
+      await flushAsync();
+      firstSnapshot.resolve(focusSnapshot());
+      await firstRefresh;
+
+      const secondSnapshot = deferred<DesktopRoomSnapshot>();
+      const reconciliation = deferred<DesktopRoomSnapshot>();
+      harness.nextStreamReady = Promise.resolve();
+      harness.nextSelectedSnapshot = secondSnapshot.promise;
+      const secondRefresh = harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      await flushAsync();
+      harness.state.handleRoomStreamEvent({
+        type: "task_update", roomIdentifier: "focus_a", task: taskSummary("task_during_second_barrier"),
+      });
+      harness.nextSelectedSnapshot = reconciliation.promise;
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_a"]);
+
+      secondSnapshot.resolve(focusSnapshot());
+      await secondRefresh;
+      await flushAsync();
+      assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_a", "focus_a"]);
+      reconciliation.resolve(roomSnapshot("focus_a", {
+        kind: "focus",
+        parentRoomId: "room_parent",
+        tasks: [taskSummary("task_during_second_barrier")],
+      }));
+      await flushAsync();
+
+      harness.state.handleRoomStreamEvent({
+        type: "open", roomIdentifier: "focus_a", gap: false, verified: true,
+      });
+      await flushAsync();
+    });
+
+    assert.deepEqual(harness.getSnapshotRequests, ["focus_a", "focus_a", "focus_a"]);
+    assert.deepEqual(
+      harness.selectedSnapshot.value?.tasks.map((task) => task.id),
+      ["task_during_second_barrier"],
+    );
+  });
+
   it("applies a task_update to the snapshot without scheduling a full refresh", () => {
     const harness = createHarness();
     harness.selectedSnapshot.value = focusSnapshot();
@@ -356,7 +898,7 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
   });
 });
 
-function createHarness(): {
+function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
   accountRooms: Ref<DesktopAccountRoomEntry[]>;
   activeEntry: Ref<SidebarEntry>;
   getSnapshotRequests: Array<string | null>;
@@ -365,7 +907,9 @@ function createHarness(): {
   nextArtifacts: DesktopRoomSharedArtifact[];
   listAccountRoomsCalls: Array<DesktopAccountRoomListOptions | undefined>;
   nextAccountRooms: DesktopAccountRoomEntry[];
+  nextAppInfo: Promise<DesktopAppInfo>;
   nextSelectedSnapshot: Promise<DesktopRoomSnapshot>;
+  nextStreamReady: Promise<void>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
   settingsAccountRooms: Ref<DesktopAccountRoomEntry[]>;
@@ -393,6 +937,8 @@ function createHarness(): {
     })),
     nextAccountRooms: [] as DesktopAccountRoomEntry[],
     nextArtifacts: [] as DesktopRoomSharedArtifact[],
+    nextAppInfo: Promise.resolve({} as DesktopAppInfo),
+    nextStreamReady: Promise.resolve(),
   };
 
   const state = useDesktopAppData({
@@ -417,6 +963,8 @@ function createHarness(): {
     selectedRootRoomIdentifier: ref("room_parent"),
     selectedSnapshot,
     settingsAccountRooms,
+    snapshotTimeoutMs: options.snapshotTimeoutMs,
+    syncRoomStream: async () => harness.nextStreamReady,
     workers: ref<WorkerSnapshot[]>([]),
   });
 
@@ -439,8 +987,20 @@ function createHarness(): {
     set nextAccountRooms(value: DesktopAccountRoomEntry[]) {
       harness.nextAccountRooms = value;
     },
+    get nextAppInfo() {
+      return harness.nextAppInfo;
+    },
+    set nextAppInfo(value: Promise<DesktopAppInfo>) {
+      harness.nextAppInfo = value;
+    },
     get nextSelectedSnapshot() {
       return harness.nextSelectedSnapshot;
+    },
+    get nextStreamReady() {
+      return harness.nextStreamReady;
+    },
+    set nextStreamReady(value: Promise<void>) {
+      harness.nextStreamReady = value;
     },
     set nextSelectedSnapshot(value: Promise<DesktopRoomSnapshot>) {
       harness.nextSelectedSnapshot = value;
@@ -451,7 +1011,17 @@ function createHarness(): {
     state,
     windowBridge: {
       letagentsDesktop: {
+        app: {
+          getInfo: async (): Promise<DesktopAppInfo> => harness.nextAppInfo,
+        },
+        auth: {
+          getStatus: async (): Promise<DesktopAuthStatus> => ({} as DesktopAuthStatus),
+        },
+        diagnostics: {
+          getSnapshot: async (): Promise<DiagnosticsSnapshot> => ({} as DiagnosticsSnapshot),
+        },
         room: {
+          startStream: async () => harness.nextStreamReady,
           getSnapshot: async (roomIdentifier: string | null): Promise<DesktopRoomSnapshot> => {
             getSnapshotRequests.push(roomIdentifier);
             return harness.nextSelectedSnapshot;
@@ -470,6 +1040,17 @@ function createHarness(): {
         repos: {
           getStatus: async (): Promise<RepoStatus> => repoStatusFixture(),
           openRoom: async (): Promise<DesktopRepoRoomSelection> => canceledOpenRoom(),
+        },
+        setup: {
+          getMcpInstallState: async (): Promise<DesktopMcpInstallState> => ({
+            completed: true,
+            completedAt: null,
+            selectedTargetId: null,
+            targets: [],
+          }),
+        },
+        workers: {
+          list: async (): Promise<WorkerSnapshot[]> => [],
         },
       },
     },
@@ -555,12 +1136,15 @@ function accountRoomEntry(
 function deferred<T>(): {
   promise: Promise<T>;
   resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
 } {
   let resolve: (value: T) => void = () => undefined;
-  const promise = new Promise<T>((nextResolve) => {
+  let reject: (reason?: unknown) => void = () => undefined;
+  const promise = new Promise<T>((nextResolve, nextReject) => {
     resolve = nextResolve;
+    reject = nextReject;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 function parentEntry(): RoomEntry {
@@ -607,6 +1191,7 @@ function roomSnapshot(
     kind?: DesktopRoomInfo["kind"];
     parentRoomId?: string | null;
     focusRooms?: DesktopFocusRoomInfo[];
+    tasks?: DesktopRoomSnapshot["tasks"];
     messages?: DesktopRoomMessage[];
   } = {},
 ): DesktopRoomSnapshot {
@@ -655,7 +1240,7 @@ function roomSnapshot(
       localFilesPath: "",
     },
     focusRooms: options.focusRooms || [],
-    tasks: [],
+    tasks: options.tasks || [],
     participants: [],
     participantHiddenCount: 0,
     presence: [],

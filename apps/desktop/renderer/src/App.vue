@@ -1157,7 +1157,7 @@ const {
   clearLiveMetadataRefreshTimer,
   refreshSelectedRoomLiveMetadata,
   scheduleLiveMetadataRefresh,
-  syncSelectedRoomStream,
+  syncSelectedRoomStream: syncDesktopRoomStream,
 } = useDesktopRoomLiveSync({
   rootRoomSnapshot,
   selectedRoomIdentifier,
@@ -1176,6 +1176,7 @@ const {
   refreshSelectedSnapshot,
   repoStatusValue,
   selectedSnapshotLoading,
+  syncSelectedRoomStream,
   upsertSelectedTask,
 } = useDesktopAppData({
   accountRooms,
@@ -1197,6 +1198,7 @@ const {
   selectedRootRoomIdentifier,
   selectedSnapshot,
   settingsAccountRooms,
+  syncRoomStream: syncDesktopRoomStream,
   workers,
 });
 

@@ -69,10 +69,13 @@ interface DesktopAppDataOptions {
   selectedRootRoomIdentifier: Ref<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
   settingsAccountRooms: Ref<DesktopAccountRoomEntry[]>;
+  snapshotTimeoutMs?: number;
+  syncRoomStream: (roomIdentifier: string | null, afterMessageId?: string | null) => Promise<void>;
   workers: Ref<WorkerSnapshot[]>;
 }
 
 const selectedSnapshotCacheLimit = 8;
+const defaultRoomSnapshotTimeoutMs = 15_000;
 
 export function useDesktopAppData(options: DesktopAppDataOptions) {
   let selectedSnapshotRequestId = 0;
@@ -80,6 +83,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   const cachedSelectedSnapshots = new Map<string, DesktopRoomSnapshot>();
   let nextSelectedSnapshotCacheAlias: string | null | undefined;
   let skipNextSelectedSnapshotCache = false;
+  let streamReconcileGeneration = 0;
+  let streamReconcileRoom: string | null = null;
+  let activeStreamRoom: string | null = null;
+  let activeStreamToken = 0;
+  let bufferedStreamEvents: DesktopRoomStreamEvent[] = [];
+  const degradedStreamRooms = new Map<string, number>();
+  const pendingVerifiedRecoveries = new Map<string, number>();
 
   watch(options.selectedSnapshot, (snapshot) => {
     if (skipNextSelectedSnapshotCache) {
@@ -97,9 +107,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     options.loading.value = true;
+    let rootBarrierToken: number | null = null;
     try {
       const requestedRootRoomIdentifier = options.selectedRootRoomIdentifier.value;
       const requestedRootPath = selectedRootPath();
+      const preloadedRepoStatus = requestedRootRoomIdentifier
+        ? null
+        : await desktopIpc.repos.getStatus(requestedRootPath);
+      const barrierRoomIdentifier = requestedRootRoomIdentifier || preloadedRepoStatus?.roomIdentifier || null;
+      if (barrierRoomIdentifier) {
+        rootBarrierToken = await beginRoomSnapshotBarrier(barrierRoomIdentifier);
+      }
       const [
         nextAppInfo,
         loadedRootRoomContext,
@@ -108,11 +126,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextAuthStatus,
         nextMcpInstallState,
         nextSettingsAccountRooms,
-      ] = await Promise.all([
+      ] = await withSnapshotTimeout(Promise.all([
         desktopIpc.app.getInfo(),
         loadRootRoomContext({
           roomIdentifier: requestedRootRoomIdentifier,
           rootPath: requestedRootPath,
+          repoStatus: preloadedRepoStatus,
         }),
         desktopIpc.workers.list(),
         desktopIpc.diagnostics.getSnapshot(),
@@ -121,7 +140,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         // Single `include_archived=true` fetch; the non-archived subset below
         // feeds the sidebar and the full list feeds Settings.
         desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
-      ]);
+      ]), "root room refresh");
       const nextAccountRooms = (nextSettingsAccountRooms || []).filter((room) => !room.archived);
       const nextRootRoomSnapshot = await recoverRootRoomSnapshot(
         requestedRootRoomIdentifier,
@@ -153,8 +172,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         ? options.selectedMcpTargetIds.value
         : defaultMcpTargetSelection(nextMcpInstallState);
       options.reconcileActiveEntry();
+      if (nextRootRoomSnapshot.roomIdentifier) {
+        finishRoomSnapshotBarrier(nextRootRoomSnapshot.roomIdentifier, rootBarrierToken);
+      }
       await refreshSelectedSnapshot(nextRootRoomSnapshot);
     } finally {
+      if (streamReconcileRoom) finishRoomSnapshotBarrier(streamReconcileRoom, rootBarrierToken);
       options.loading.value = false;
     }
   }
@@ -170,11 +193,11 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
     const accountRoomIdentifier = resolveAccountRoomAliasIdentifier(requestedRoomIdentifier, accountRooms);
     if (accountRoomIdentifier) {
-      const recoveredSnapshot = await desktopIpc.room.getSnapshot(accountRoomIdentifier);
+      const recoveredSnapshot = await getRoomSnapshot(accountRoomIdentifier);
       if (recoveredSnapshot.access.status === "ready") return recoveredSnapshot;
     }
 
-    const workspaceSnapshot = await desktopIpc.room.getSnapshot(null);
+    const workspaceSnapshot = await getRoomSnapshot(null);
     return workspaceSnapshot.access.status === "ready"
       ? workspaceSnapshot
       : snapshot;
@@ -183,6 +206,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   async function loadRootRoomContext(input: {
     roomIdentifier: string | null;
     rootPath: string | null;
+    repoStatus?: RepoStatus | null;
   }): Promise<{
     snapshot: DesktopRoomSnapshot;
     repoStatus: RepoStatus;
@@ -204,8 +228,8 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
 
     const [repoStatus, snapshot] = await Promise.all([
-      desktopIpc.repos.getStatus(input.rootPath),
-      desktopIpc.room.getSnapshot(input.roomIdentifier),
+      input.repoStatus ? Promise.resolve(input.repoStatus) : desktopIpc.repos.getStatus(input.rootPath),
+      getRoomSnapshot(input.roomIdentifier),
     ]);
     return {
       snapshot,
@@ -308,13 +332,115 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     } else {
       publishOptimisticSelectedSnapshot(requestId, selectedRoomEntry, roomIdentifier, baseRootSnapshot);
     }
+    let barrierToken: number | null = null;
     try {
-      const nextSnapshot = await desktopIpc.room.getSnapshot(roomIdentifier);
+      barrierToken = await beginRoomSnapshotBarrier(roomIdentifier);
+      const nextSnapshot = await getRoomSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier });
+      finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
     } finally {
+      if (streamReconcileRoom === roomIdentifier) finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
       if (requestId === selectedSnapshotRequestId) selectedSnapshotLoading.value = false;
     }
+  }
+
+  async function beginRoomSnapshotBarrier(roomIdentifier: string): Promise<number> {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    const preserveDegradedStream = Boolean(
+      roomKey
+      && normalizeRoomIdentifier(activeStreamRoom) === roomKey
+      && degradedStreamRooms.get(roomKey) === activeStreamToken,
+    );
+    if (!preserveDegradedStream) {
+      pendingVerifiedRecoveries.clear();
+      degradedStreamRooms.clear();
+    }
+    const token = ++streamReconcileGeneration;
+    activeStreamRoom = roomIdentifier;
+    if (!preserveDegradedStream) activeStreamToken = token;
+    streamReconcileRoom = roomIdentifier;
+    bufferedStreamEvents = [];
+    try {
+      await options.syncRoomStream(roomIdentifier, null);
+      return token;
+    } catch (error) {
+      releaseRoomSnapshotBarrier(roomIdentifier, token, false);
+      throw error;
+    }
+  }
+
+  async function syncSelectedRoomStream(roomIdentifier: string | null): Promise<void> {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (!roomKey) {
+      ++streamReconcileGeneration;
+      activeStreamRoom = null;
+      activeStreamToken = 0;
+      streamReconcileRoom = null;
+      bufferedStreamEvents = [];
+      degradedStreamRooms.clear();
+      pendingVerifiedRecoveries.clear();
+      await options.syncRoomStream(null);
+      return;
+    }
+    if (normalizeRoomIdentifier(activeStreamRoom) !== roomKey) {
+      const token = ++streamReconcileGeneration;
+      activeStreamRoom = roomIdentifier;
+      activeStreamToken = token;
+      streamReconcileRoom = null;
+      bufferedStreamEvents = [];
+      degradedStreamRooms.clear();
+      pendingVerifiedRecoveries.clear();
+    }
+    await options.syncRoomStream(roomIdentifier);
+  }
+
+  function finishRoomSnapshotBarrier(roomIdentifier: string, token: number | null): void {
+    releaseRoomSnapshotBarrier(roomIdentifier, token, true);
+  }
+
+  function releaseRoomSnapshotBarrier(
+    roomIdentifier: string,
+    token: number | null,
+    reconcilePending: boolean,
+  ): void {
+    if (
+      token !== streamReconcileGeneration
+      || normalizeRoomIdentifier(streamReconcileRoom) !== normalizeRoomIdentifier(roomIdentifier)
+    ) return;
+    const pending = bufferedStreamEvents;
+    bufferedStreamEvents = [];
+    streamReconcileRoom = null;
+    for (const buffered of pending) handleRoomStreamEvent(buffered);
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (reconcilePending && (
+      roomKey
+      && normalizeRoomIdentifier(activeStreamRoom) === roomKey
+      && pendingVerifiedRecoveries.get(roomKey) === activeStreamToken
+    )) {
+      scheduleRoomStreamReconciliation(roomIdentifier);
+    }
+  }
+
+  function getRoomSnapshot(roomIdentifier: string | null): Promise<DesktopRoomSnapshot> {
+    return withSnapshotTimeout(desktopIpc.room.getSnapshot(roomIdentifier), roomIdentifier || "workspace room");
+  }
+
+  function withSnapshotTimeout<T>(promise: Promise<T>, label: string): Promise<T> {
+    const timeoutMs = options.snapshotTimeoutMs ?? defaultRoomSnapshotTimeoutMs;
+    return new Promise<T>((resolve, reject) => {
+      const timeout = setTimeout(() => reject(new Error(`${label} snapshot timed out`)), timeoutMs);
+      promise.then(
+        (value) => {
+          clearTimeout(timeout);
+          resolve(value);
+        },
+        (error) => {
+          clearTimeout(timeout);
+          reject(error);
+        },
+      );
+    });
   }
 
   function publishOptimisticSelectedSnapshot(
@@ -333,12 +459,52 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   }
 
   function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
-    if (!snapshotMatchesRoom(options.selectedSnapshot.value, event.roomIdentifier)) return;
-
-    if (event.type === "open") {
-      options.scheduleLiveMetadataRefresh(0);
+    if (streamReconcileRoom && event.type !== "open") {
+      if (normalizeRoomIdentifier(streamReconcileRoom) === normalizeRoomIdentifier(event.roomIdentifier)) {
+        bufferedStreamEvents.push(event);
+      }
       return;
     }
+
+    if (event.type === "open") {
+      // A transport open is not a consistency boundary. A verified handshake
+      // (or the bounded legacy timeout, represented as gap=true) starts one
+      // authoritative snapshot while subsequent typed events are buffered and
+      // replayed over it. This covers every snapshot resource, not only chat.
+      const roomKey = normalizeRoomIdentifier(event.roomIdentifier);
+      if (!roomKey || normalizeRoomIdentifier(activeStreamRoom) !== roomKey) return;
+      if (event.gap && normalizeRoomIdentifier(streamReconcileRoom) === roomKey) {
+        degradedStreamRooms.set(roomKey, activeStreamToken);
+        return;
+      }
+      if (
+        event.verified
+        && roomKey
+        && normalizeRoomIdentifier(activeStreamRoom) === roomKey
+        && degradedStreamRooms.get(roomKey) === activeStreamToken
+        && normalizeRoomIdentifier(streamReconcileRoom) === roomKey
+      ) {
+        pendingVerifiedRecoveries.set(roomKey, activeStreamToken);
+        return;
+      }
+      if (event.verified && normalizeRoomIdentifier(streamReconcileRoom) === roomKey) return;
+      if (
+        event.verified
+        && roomKey
+        && normalizeRoomIdentifier(activeStreamRoom) === roomKey
+        && degradedStreamRooms.get(roomKey) === activeStreamToken
+        && snapshotMatchesRoom(options.selectedSnapshot.value, event.roomIdentifier)
+      ) {
+        scheduleRoomStreamReconciliation(event.roomIdentifier);
+        return;
+      }
+      if (event.gap && !streamReconcileRoom) {
+        scheduleRoomStreamReconciliation(event.roomIdentifier);
+      }
+      return;
+    }
+
+    if (!snapshotMatchesRoom(options.selectedSnapshot.value, event.roomIdentifier)) return;
 
     if (event.type === "message") {
       const priorMessages = options.selectedSnapshot.value?.messages ?? [];
@@ -391,6 +557,44 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     }
   }
 
+  async function reconcileRoomStreamSnapshot(roomIdentifier: string): Promise<void> {
+    const generation = ++streamReconcileGeneration;
+    streamReconcileRoom = roomIdentifier;
+    bufferedStreamEvents = [];
+    try {
+      const snapshot = await getRoomSnapshot(roomIdentifier);
+      if (
+        generation !== streamReconcileGeneration
+        || !snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)
+      ) return;
+      setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot));
+      const pending = bufferedStreamEvents;
+      bufferedStreamEvents = [];
+      streamReconcileRoom = null;
+      for (const buffered of pending) handleRoomStreamEvent(buffered);
+      const roomKey = normalizeRoomIdentifier(roomIdentifier);
+      if (roomKey) {
+        degradedStreamRooms.delete(roomKey);
+        pendingVerifiedRecoveries.delete(roomKey);
+      }
+    } finally {
+      if (generation === streamReconcileGeneration) {
+        const pending = bufferedStreamEvents;
+        bufferedStreamEvents = [];
+        streamReconcileRoom = null;
+        for (const buffered of pending) handleRoomStreamEvent(buffered);
+      }
+    }
+  }
+
+  function scheduleRoomStreamReconciliation(roomIdentifier: string): void {
+    void reconcileRoomStreamSnapshot(roomIdentifier).catch(() => undefined);
+  }
+
+  function scheduleSelectedSnapshotRefresh(): void {
+    void refreshSelectedSnapshot().catch(() => undefined);
+  }
+
   function handleRefreshRoom(snapshot?: DesktopRoomSnapshot): void {
     if (snapshot) {
       options.rootRoomSnapshot.value = snapshot;
@@ -401,7 +605,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       options.scheduleLiveMetadataRefresh(0);
       return;
     }
-    void refreshSelectedSnapshot();
+    scheduleSelectedSnapshotRefresh();
     options.scheduleLiveMetadataRefresh(0);
   }
 
@@ -524,6 +728,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     refreshSelectedSnapshot,
     repoStatusValue,
     selectedSnapshotLoading,
+    syncSelectedRoomStream,
     upsertSelectedTask,
   };
 }

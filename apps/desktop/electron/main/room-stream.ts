@@ -48,6 +48,11 @@ let activeRoomStream: {
   // but the fallback poll is still up, so a single failed catch-up cannot pin
   // the duplicated-transport state for the rest of the room session.
   catchUpRetryTimer: NodeJS.Timeout | null;
+  handshakeTimer: NodeJS.Timeout | null;
+  handshakeReceived: boolean;
+  readyPromise: Promise<void>;
+  resolveReady: (() => void) | null;
+  readyTimer: NodeJS.Timeout | null;
 } | null = null;
 
 // Retry cadence for a failed SSE-open catch-up (see `openDesktopRoomStream`).
@@ -57,6 +62,10 @@ const catchUpRetryDelayMs =
   Number(process.env.LETAGENTS_ROOM_STREAM_CATCHUP_RETRY_MS) > 0
     ? Number(process.env.LETAGENTS_ROOM_STREAM_CATCHUP_RETRY_MS)
     : 20_000;
+const roomSyncHandshakeTimeoutMs =
+  Number(process.env.LETAGENTS_ROOM_SYNC_HANDSHAKE_TIMEOUT_MS) > 0
+    ? Number(process.env.LETAGENTS_ROOM_SYNC_HANDSHAKE_TIMEOUT_MS)
+    : 4_000;
 
 export function getActiveRoomIdentifier(): string | null {
   return activeRoomStream?.roomIdentifier ?? null;
@@ -232,6 +241,26 @@ function handleRoomStreamFrame(
     return;
   }
 
+  if (eventName === "room_sync") {
+    if (activeRoomStream?.roomIdentifier === roomIdentifier) {
+      activeRoomStream.handshakeReceived = true;
+      if (activeRoomStream.handshakeTimer) clearTimeout(activeRoomStream.handshakeTimer);
+      activeRoomStream.handshakeTimer = null;
+      activeRoomStream.resolveReady?.();
+      activeRoomStream.resolveReady = null;
+      if (activeRoomStream.readyTimer) clearTimeout(activeRoomStream.readyTimer);
+      activeRoomStream.readyTimer = null;
+    }
+    emitRoomStreamEvent({
+      type: "open",
+      roomIdentifier: eventRoomIdentifier,
+      checkpoint: typeof payload.checkpoint === "string" ? payload.checkpoint : null,
+      gap: payload.gap === true,
+      verified: true,
+    }, { deliverToManagedAgents: false });
+    return;
+  }
+
   if (eventName === "github_event") {
     const event = mapGitHubRoomEventPayload(payload);
     if (event) {
@@ -367,10 +396,10 @@ function handleRoomStreamFrame(
 // stay interchangeable and never diverge on what "delivered" means.
 async function fetchRoomMessagePollPage(
   stream: NonNullable<typeof activeRoomStream>,
-  after: string,
+  after: string | null,
   timeoutMs: number,
   signal: AbortSignal,
-): Promise<void> {
+): Promise<{ hasMore: boolean; lastMessageId: string | null }> {
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "application/json",
@@ -379,8 +408,13 @@ async function fetchRoomMessagePollPage(
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
   }
+  const params = new URLSearchParams({
+    limit: String(roomMessageHistoryPageSize),
+    timeout: String(timeoutMs),
+  });
+  if (after) params.set("after", after);
   const response = await fetch(
-    `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?limit=${roomMessageHistoryPageSize}&timeout=${timeoutMs}&after=${encodeURIComponent(after)}`,
+    `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/poll?${params.toString()}`,
     { headers: requestHeaders, signal },
   );
   if (!response.ok) {
@@ -389,10 +423,15 @@ async function fetchRoomMessagePollPage(
   const page = (await response.json()) as {
     room_id?: string;
     messages?: Parameters<typeof mapRoomMessagePayload>[0][];
+    has_more?: boolean;
   };
-  if (!isCurrentRoomStream(stream)) return;
+  if (!isCurrentRoomStream(stream)) {
+    return { hasMore: false, lastMessageId: stream.lastMessageId };
+  }
   for (const rawMessage of page.messages || []) {
-    if (!isCurrentRoomStream(stream)) return;
+    if (!isCurrentRoomStream(stream)) {
+      return { hasMore: false, lastMessageId: stream.lastMessageId };
+    }
     if (typeof rawMessage.id === "string") {
       stream.lastMessageId = rawMessage.id;
     }
@@ -403,6 +442,7 @@ async function fetchRoomMessagePollPage(
       message: mapRoomMessagePayload(rawMessage),
     }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id) });
   }
+  return { hasMore: page.has_more === true, lastMessageId: stream.lastMessageId };
 }
 
 // Fallback transport: a 25s server-held long-poll re-issued forever, but ONLY
@@ -413,15 +453,15 @@ async function pollDesktopRoomMessages(
 ): Promise<void> {
   while (isCurrentRoomStream(stream) && stream.pollActive) {
     const after = stream.lastMessageId;
-    if (!after) {
-      await new Promise((resolve) => setTimeout(resolve, 1500));
-      continue;
-    }
-
     const pollAbortController = new AbortController();
     stream.pollAbortController = pollAbortController;
     try {
-      await fetchRoomMessagePollPage(stream, after, 25_000, pollAbortController.signal);
+      if (!after) {
+        await fetchLatestRoomMessagePage(stream, pollAbortController.signal);
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+      } else {
+        await fetchRoomMessagePollPage(stream, after, 25_000, pollAbortController.signal);
+      }
     } catch (error) {
       if (
         !isCurrentRoomStream(stream) ||
@@ -441,6 +481,29 @@ async function pollDesktopRoomMessages(
         stream.pollAbortController = null;
       }
     }
+  }
+}
+
+async function fetchLatestRoomMessagePage(
+  stream: NonNullable<typeof activeRoomStream>,
+  signal: AbortSignal,
+): Promise<void> {
+  const storedAuth = await readStoredAuth();
+  const headers = new Headers({ Accept: "application/json", "X-LetAgents-Desktop-Client": "1" });
+  if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
+  const response = await fetch(
+    `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
+    { headers, signal },
+  );
+  if (!response.ok) throw new Error(`Room latest-page fetch failed with HTTP ${response.status}.`);
+  const page = await response.json() as { room_id?: string; messages?: Parameters<typeof mapRoomMessagePayload>[0][] };
+  for (const rawMessage of page.messages || []) {
+    if (!isCurrentRoomStream(stream)) return;
+    if (typeof rawMessage.id === "string") stream.lastMessageId = rawMessage.id;
+    const roomIdentifier = page.room_id || stream.roomIdentifier;
+    emitRoomStreamEvent({ type: "message", roomIdentifier, message: mapRoomMessagePayload(rawMessage) }, {
+      deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id),
+    });
   }
 }
 
@@ -472,9 +535,21 @@ function stopFallbackPoll(
 async function catchUpAfterSseOpen(
   stream: NonNullable<typeof activeRoomStream>,
 ): Promise<void> {
-  const after = stream.lastMessageId;
-  if (!after) return; // No cursor yet: nothing before stream start to backfill.
-  await fetchRoomMessagePollPage(stream, after, 0, stream.abortController.signal);
+  let after = stream.lastMessageId;
+  if (!after) return;
+  do {
+    const page = await fetchRoomMessagePollPage(
+      stream,
+      after,
+      0,
+      stream.abortController.signal,
+    );
+    if (!isCurrentRoomStream(stream) || !page.hasMore) return;
+    if (!page.lastMessageId || page.lastMessageId === after) {
+      throw new Error("Room catch-up did not advance its cursor.");
+    }
+    after = page.lastMessageId;
+  } while (true);
 }
 
 function clearCatchUpRetry(
@@ -596,7 +671,9 @@ async function openDesktopRoomStream(
 
   try {
     const response = await fetch(
-      `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/stream`,
+      `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/stream${
+        stream.lastMessageId ? `?after=${encodeURIComponent(stream.lastMessageId)}` : ""
+      }`,
       {
         headers: requestHeaders,
         signal: stream.abortController.signal,
@@ -611,7 +688,25 @@ async function openDesktopRoomStream(
     emitRoomStreamEvent({
       type: "open",
       roomIdentifier: stream.roomIdentifier,
+      checkpoint: stream.lastMessageId,
+      gap: false,
+      verified: false,
     });
+    stream.handshakeReceived = false;
+    if (stream.handshakeTimer) clearTimeout(stream.handshakeTimer);
+    stream.handshakeTimer = setTimeout(() => {
+      stream.handshakeTimer = null;
+      if (!isCurrentRoomStream(stream) || stream.handshakeReceived) return;
+      emitRoomStreamEvent({
+        type: "open",
+        roomIdentifier: stream.roomIdentifier,
+        checkpoint: stream.lastMessageId,
+        gap: true,
+        verified: false,
+      }, { deliverToManagedAgents: false });
+      stream.resolveReady?.();
+      stream.resolveReady = null;
+    }, roomSyncHandshakeTimeoutMs);
 
     // --- SSE just (re)connected: close the gap, then retire the fallback. ---
     // Ordering is what keeps this lossless and (near) duplicate-free across the
@@ -678,6 +773,19 @@ async function openDesktopRoomStream(
     // SSE reader reconnects on its existing exponential backoff.
     clearCatchUpRetry(stream);
     startFallbackPoll(stream);
+    // A failed SSE transport cannot provide room_sync. Unblock the initial
+    // snapshot only after the durable long-poll fallback has been started.
+    if (stream.resolveReady) {
+      emitRoomStreamEvent({
+        type: "open",
+        roomIdentifier: stream.roomIdentifier,
+        checkpoint: stream.lastMessageId,
+        gap: true,
+        verified: false,
+      }, { deliverToManagedAgents: false });
+    }
+    stream.resolveReady?.();
+    stream.resolveReady = null;
     const retryMs = Math.min(stream.retryMs, 30_000);
     stream.retryMs = Math.min(stream.retryMs * 2, 30_000);
     stream.reconnectTimer = setTimeout(() => {
@@ -703,10 +811,13 @@ export async function startDesktopRoomStream(
     if (afterMessageId) {
       activeRoomStream.lastMessageId = afterMessageId;
     }
+    await activeRoomStream.readyPromise;
     return;
   }
 
   await stopDesktopRoomStream();
+  let resolveReady: (() => void) | null = null;
+  const readyPromise = new Promise<void>((resolve) => { resolveReady = resolve; });
   activeRoomStream = {
     roomIdentifier: trimmedRoomIdentifier,
     abortController: new AbortController(),
@@ -719,12 +830,33 @@ export async function startDesktopRoomStream(
     stopped: false,
     pollActive: false,
     catchUpRetryTimer: null,
+    handshakeTimer: null,
+    handshakeReceived: false,
+    readyPromise,
+    resolveReady,
+    readyTimer: null,
   };
+  const startingStream = activeRoomStream;
+  startingStream.readyTimer = setTimeout(() => {
+    startingStream.readyTimer = null;
+    if (!isCurrentRoomStream(startingStream) || !startingStream.resolveReady) return;
+    startingStream.resolveReady();
+    startingStream.resolveReady = null;
+    emitRoomStreamEvent({
+      type: "open",
+      roomIdentifier: startingStream.roomIdentifier,
+      checkpoint: startingStream.lastMessageId,
+      gap: true,
+      verified: false,
+    }, { deliverToManagedAgents: false });
+  }, roomSyncHandshakeTimeoutMs);
   if (isDesktopSmokeCheck()) {
     emitRoomStreamEvent({
       type: "open",
       roomIdentifier: trimmedRoomIdentifier,
     });
+    activeRoomStream.resolveReady?.();
+    activeRoomStream.resolveReady = null;
     return;
   }
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
@@ -737,12 +869,15 @@ export async function startDesktopRoomStream(
       activeRoomStream,
       activeRoomStream.localRoomIdentifier,
     );
+    activeRoomStream.resolveReady?.();
+    activeRoomStream.resolveReady = null;
     return;
   }
   // Cloud rooms start with SSE only. The long-poll is now a fallback that
   // `openDesktopRoomStream` brings up if/when SSE drops, and retires again on
   // reconnect — instead of running a second permanent transport per room.
   void openDesktopRoomStream(activeRoomStream);
+  await activeRoomStream.readyPromise;
 }
 
 export async function stopDesktopRoomStream(
@@ -756,8 +891,18 @@ export async function stopDesktopRoomStream(
     return;
 
   activeRoomStream.stopped = true;
+  activeRoomStream.resolveReady?.();
+  activeRoomStream.resolveReady = null;
+  if (activeRoomStream.readyTimer) {
+    clearTimeout(activeRoomStream.readyTimer);
+    activeRoomStream.readyTimer = null;
+  }
   activeRoomStream.pollActive = false;
   activeRoomStream.abortController.abort();
+  if (activeRoomStream.handshakeTimer) {
+    clearTimeout(activeRoomStream.handshakeTimer);
+    activeRoomStream.handshakeTimer = null;
+  }
   activeRoomStream.pollAbortController?.abort();
   if (activeRoomStream.reconnectTimer) {
     clearTimeout(activeRoomStream.reconnectTimer);
