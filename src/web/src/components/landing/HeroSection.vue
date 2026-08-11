@@ -13,11 +13,43 @@
       <RouterLink to="/#start" class="btn btn-white btn-lg">Get Started</RouterLink>
       <RouterLink to="/#setup" class="btn btn-ghost-lg">View Setup</RouterLink>
     </div>
+
+    <section id="download-mac" class="hero-download" aria-labelledby="download-mac-title">
+      <div class="hero-download-copy">
+        <div class="hero-download-heading">
+          <span class="hero-beta-badge">Beta</span>
+          <h2 id="download-mac-title">LetAgents for Mac</h2>
+          <span class="hero-download-version">v{{ MAC_DESKTOP_BETA.version }}</span>
+        </div>
+        <p>Signed and notarized for macOS. Choose the build that matches your Mac.</p>
+      </div>
+
+      <div class="hero-download-links">
+        <a :href="MAC_DESKTOP_BETA.downloads.arm64" class="hero-download-link">
+          <span>Apple silicon</span>
+          <small>M-series</small>
+        </a>
+        <a :href="MAC_DESKTOP_BETA.downloads.x64" class="hero-download-link">
+          <span>Intel</span>
+          <small>x64</small>
+        </a>
+      </div>
+    </section>
+
+    <a
+      :href="MAC_DESKTOP_BETA.checksumsUrl"
+      class="hero-release-link"
+      target="_blank"
+      rel="noopener noreferrer"
+    >
+      View SHA-256 checksums
+    </a>
   </section>
 </template>
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
+import { MAC_DESKTOP_BETA } from '@/domain/desktopRelease'
 
 const words = ['Chat', 'Converse', 'Collaborate', 'Coordinate', 'Build', 'Ship']
 const currentWord = ref(words[0])
@@ -117,6 +149,124 @@ onUnmounted(() => {
   max-width: 460px;
 }
 
+.hero-download {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 24px;
+  max-width: 680px;
+  margin: 28px auto 0;
+  padding: 16px 18px 16px 20px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: rgba(255, 255, 255, 0.025);
+  text-align: left;
+  scroll-margin-top: 92px;
+}
+
+.hero-download-copy {
+  min-width: 0;
+}
+
+.hero-download-heading {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--text);
+  font-size: 0.92rem;
+}
+
+.hero-download-heading h2 {
+  margin: 0;
+  font-size: inherit;
+  font-weight: 750;
+}
+
+.hero-beta-badge {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  padding: 0 8px;
+  border: 1px solid rgba(245, 158, 11, 0.42);
+  border-radius: 999px;
+  background: rgba(245, 158, 11, 0.1);
+  color: #fbbf24;
+  font-size: 0.67rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.hero-download-version {
+  color: var(--text-muted);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.hero-download-copy p {
+  margin: 7px 0 0;
+  color: var(--text-muted);
+  font-size: 0.78rem;
+  line-height: 1.45;
+}
+
+.hero-download-links {
+  display: flex;
+  flex: 0 0 auto;
+  gap: 8px;
+}
+
+.hero-download-link {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 116px;
+  min-height: 54px;
+  padding: 8px 13px;
+  border: 1px solid var(--border-strong);
+  border-radius: calc(var(--radius-lg) - 3px);
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text);
+  text-decoration: none;
+  transition: border-color var(--duration-fast), background var(--duration-fast), transform var(--duration-fast);
+}
+
+.hero-download-link span {
+  font-size: 0.78rem;
+  font-weight: 700;
+}
+
+.hero-download-link small {
+  margin-top: 2px;
+  color: var(--text-muted);
+  font-size: 0.68rem;
+}
+
+.hero-download-link:hover {
+  border-color: var(--border-accent);
+  background: var(--accent-dim);
+  transform: translateY(-1px);
+}
+
+.hero-download-link:focus-visible,
+.hero-release-link:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
+}
+
+.hero-release-link {
+  display: inline-flex;
+  margin-top: 12px;
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  text-underline-offset: 3px;
+  transition: color var(--duration-fast);
+}
+
+.hero-release-link:hover {
+  color: var(--text-secondary);
+}
+
 .btn-white {
   display: inline-flex;
   align-items: center;
@@ -176,6 +326,20 @@ onUnmounted(() => {
     width: 100%;
     max-width: 420px;
     gap: 10px;
+  }
+  .hero-download {
+    align-items: stretch;
+    flex-direction: column;
+    max-width: 420px;
+    margin-top: 22px;
+    padding: 16px;
+  }
+  .hero-download-links {
+    width: 100%;
+  }
+  .hero-download-link {
+    flex: 1 1 0;
+    min-width: 0;
   }
   .btn-white, .btn-ghost-lg {
     width: 100%;

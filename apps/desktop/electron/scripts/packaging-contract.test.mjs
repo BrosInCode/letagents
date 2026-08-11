@@ -75,6 +75,7 @@ test("release workflow builds, attests, and publishes independent architecture f
   assert.match(workflow, /artifact-metadata: write/);
   assert.match(workflow, /feed_tag="desktop-feed-\$\{arch\}"/);
   assert.match(workflow, /RELEASES-\$\{arch\}\.json/);
+  assert.match(workflow, /GITHUB_REF_NAME}" --draft=false --prerelease --latest=false/);
   assert.doesNotMatch(workflow, /releases\/latest/);
   assert.doesNotMatch(workflow, /--latest(?:\s|$)/);
 });
