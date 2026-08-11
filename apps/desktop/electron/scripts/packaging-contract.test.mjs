@@ -50,6 +50,19 @@ test("signed release packaging requires and embeds the APNs provisioning contrac
   assert.match(workflow, /MACOS_PROVISIONING_PROFILE_PATH=/);
 });
 
+test("release DMGs are signed before notarization and Gatekeeper assessment", async () => {
+  const packager = await source(join(scriptsDirectory, "package-macos.mjs"));
+  const signDmg = packager.indexOf('await execFileAsync("codesign", ["--sign", identity, "--force", "--timestamp", dmg]);');
+  const verifyDmg = packager.indexOf('await execFileAsync("codesign", ["--verify", "--verbose=2", dmg]);');
+  const notarizeDmg = packager.indexOf("await notarize({ appPath: dmg, ...credentials });");
+  const assessDmg = packager.indexOf('"context:primary-signature"');
+
+  assert.ok(signDmg >= 0, "the DMG must receive a Developer ID signature");
+  assert.ok(verifyDmg > signDmg, "the DMG signature must be verified after signing");
+  assert.ok(notarizeDmg > verifyDmg, "the signed DMG must be notarized after verification");
+  assert.ok(assessDmg > notarizeDmg, "Gatekeeper assessment must run after notarization");
+});
+
 test("release workflow builds, attests, and publishes independent architecture feeds", async () => {
   const workflow = await source(join(repositoryRoot, ".github", "workflows", "desktop-release.yml"));
 
