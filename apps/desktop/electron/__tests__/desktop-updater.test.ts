@@ -116,11 +116,11 @@ test("release version parsing accepts stable and prerelease names", () => {
 test("desktop update feeds are architecture-specific and never use releases/latest", () => {
   assert.equal(
     desktopUpdateFeedBaseUrl("arm64"),
-    "https://github.com/BrosInCode/letagents/releases/download/desktop-feed-arm64",
+    "https://downloads.letagents.chat/desktop/feeds/arm64",
   );
   assert.equal(
     desktopUpdateFeedBaseUrl("x64"),
-    "https://github.com/BrosInCode/letagents/releases/download/desktop-feed-x64",
+    "https://downloads.letagents.chat/desktop/feeds/x64",
   );
   assert.equal(desktopUpdateFeedBaseUrl("ia32"), null);
 });
