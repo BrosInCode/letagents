@@ -63,7 +63,7 @@ test("release DMGs are signed before notarization and Gatekeeper assessment", as
   assert.ok(assessDmg > notarizeDmg, "Gatekeeper assessment must run after notarization");
 });
 
-test("release workflow builds, attests, and publishes independent architecture feeds", async () => {
+test("release workflow builds, attests, and publishes independent public R2 feeds", async () => {
   const workflow = await source(join(repositoryRoot, ".github", "workflows", "desktop-release.yml"));
 
   assert.match(workflow, /arch: arm64\s+runner: macos-15/);
@@ -73,9 +73,16 @@ test("release workflow builds, attests, and publishes independent architecture f
   assert.match(workflow, /vars\.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true'/);
   assert.match(workflow, /Report unavailable provenance attestation/);
   assert.match(workflow, /artifact-metadata: write/);
-  assert.match(workflow, /feed_tag="desktop-feed-\$\{arch\}"/);
+  assert.match(workflow, /R2_ACCESS_KEY_ID: \$\{\{ secrets\.R2_ACCESS_KEY_ID \}\}/);
+  assert.match(workflow, /R2_SECRET_ACCESS_KEY: \$\{\{ secrets\.R2_SECRET_ACCESS_KEY \}\}/);
+  assert.match(workflow, /desktop\/v\$\{DESKTOP_VERSION\}/);
+  assert.match(workflow, /desktop\/feeds\/\$\{arch\}\/RELEASES\.json/);
+  assert.match(workflow, /public,max-age=31536000,immutable/);
+  assert.match(workflow, /public,max-age=60,must-revalidate/);
+  assert.match(workflow, /Immutable R2 object/);
   assert.match(workflow, /RELEASES-\$\{arch\}\.json/);
   assert.match(workflow, /GITHUB_REF_NAME}" --draft=false --prerelease --latest=false/);
   assert.doesNotMatch(workflow, /releases\/latest/);
   assert.doesNotMatch(workflow, /--latest(?:\s|$)/);
+  assert.doesNotMatch(workflow, /desktop-feed-\$\{arch\}/);
 });

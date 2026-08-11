@@ -33,7 +33,7 @@ test("Squirrel.Mac metadata points at the signed ZIP", () => {
   assert.deepEqual(createSquirrelMacReleaseManifest({
     version: "0.1.0",
     arch: "arm64",
-    baseUrl: "https://github.com/BrosInCode/letagents/releases/download/desktop-v0.1.0",
+    baseUrl: "https://downloads.letagents.chat/desktop/v0.1.0",
     publishedAt: "2026-08-10T12:00:00Z",
     notes: "First desktop release",
   }), {
@@ -45,7 +45,7 @@ test("Squirrel.Mac metadata points at the signed ZIP", () => {
         pub_date: "2026-08-10T12:00:00.000Z",
         notes: "First desktop release",
         name: "LetAgents 0.1.0",
-        url: "https://github.com/BrosInCode/letagents/releases/download/desktop-v0.1.0/LetAgents-0.1.0-darwin-arm64.zip",
+        url: "https://downloads.letagents.chat/desktop/v0.1.0/LetAgents-0.1.0-darwin-arm64.zip",
       },
     }],
   });

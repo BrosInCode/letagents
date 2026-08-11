@@ -5,7 +5,7 @@ LetAgents desktop ships two macOS artifacts for both Apple Silicon (`arm64`) and
 - `LetAgents-<version>-darwin-<arch>.dmg` is the first-install artifact. Users open it and drag LetAgents to Applications.
 - `LetAgents-<version>-darwin-<arch>.zip` is the Squirrel.Mac update payload. The application updater downloads it; users should not install this file manually.
 
-Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, and `RELEASES-<arch>.json`. The latter uses Electron's static Squirrel.Mac format and points to the immutable, versioned ZIP URL. The workflow copies each architecture manifest to a dedicated rolling feed release as `RELEASES.json`; stable clients never depend on GitHub's repository-wide `releases/latest` selection.
+Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, and `RELEASES-<arch>.json`. The latter uses Electron's static Squirrel.Mac format and points to the immutable, versioned ZIP URL on Cloudflare R2. The workflow copies each architecture manifest to a dedicated public R2 feed as `RELEASES.json`; stable clients never depend on GitHub's repository-wide `releases/latest` selection or private-repository authentication.
 
 ## One-time Apple setup
 
@@ -23,11 +23,23 @@ Production builds need an Apple Developer Program membership, a `Developer ID Ap
 
 Signing credentials exist only in the release runner's temporary keychain. They are never written to a release artifact or committed to the repository.
 
+Cloudflare R2 delivery additionally uses two bucket-scoped GitHub Actions secrets and three non-secret repository variables:
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `R2_ACCESS_KEY_ID` | Secret | Access key for an R2 Account API token with Object Read & Write on only the desktop download bucket |
+| `R2_SECRET_ACCESS_KEY` | Secret | Matching S3 secret access key |
+| `R2_ACCOUNT_ID` | Variable | Cloudflare account identifier |
+| `R2_BUCKET_NAME` | Variable | R2 bucket containing desktop releases |
+| `R2_PUBLIC_BASE_URL` | Variable | Public R2 custom-domain origin, without a trailing slash |
+
+The token cannot create or delete buckets. Versioned objects are uploaded with one-year immutable caching and a SHA-256 metadata guard; an existing key with different bytes fails the release. Rolling `RELEASES.json` feeds use a short, revalidating cache policy.
+
 ## Cut a release
 
 1. Change `apps/desktop/package.json` to the next numeric `x.y.z` desktop version and merge that change to `staging` through a reviewed PR.
 2. From the exact reviewed commit, create and push the matching tag: `desktop-v<x.y.z>`.
-3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. A final job publishes both architectures in one immutable versioned GitHub Release, then advances the two update feeds.
+3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. A final job uploads both architectures to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the two public R2 update feeds.
 4. Download the DMG on a clean Mac and complete the first-install smoke test before announcing the release.
 
 The workflow refuses a tag that does not exactly match the desktop package version or a runner whose CPU does not match its matrix architecture. If either architecture fails signing, notarization, verification, attestation, or artifact generation, it does not publish the release.
@@ -61,7 +73,7 @@ or pass `MACOS_PROVISIONING_PROFILE_PATH`, `MACOS_NOTARY_API_KEY`, `MACOS_NOTARY
 
 ## Updates and rollback
 
-The in-app updater consumes the signed ZIP, never the DMG. Production clients fetch `https://github.com/BrosInCode/letagents/releases/download/desktop-feed-<arch>/RELEASES.json`: Apple Silicon uses `desktop-feed-arm64`, while Intel uses `desktop-feed-x64`. These rolling discovery manifests are the only mutable release assets and always point to immutable, architecture-matched ZIP URLs in a `desktop-v<x.y.z>` release. The versioned DMGs, ZIPs, checksums, metadata, and provenance records are never replaced. Production builds check their feed at startup and every six hours, and expose an on-demand check under **Settings → Updates** and **Help → Check for Updates**. For a staging feed, launch a packaged build with `LETAGENTS_DESKTOP_UPDATE_BASE_URL` set to an HTTPS directory containing `RELEASES.json`; do not put that override in a stable build.
+The in-app updater consumes the signed ZIP, never the DMG. Production clients fetch `https://downloads.letagents.chat/desktop/feeds/<arch>/RELEASES.json`: Apple Silicon uses `arm64`, while Intel uses `x64`. These rolling discovery manifests are the only mutable release objects and always point to immutable, architecture-matched ZIP URLs under `https://downloads.letagents.chat/desktop/v<x.y.z>/`. The versioned DMGs, ZIPs, checksums, and metadata are never replaced; GitHub Releases retain the same artifacts as a backup/archive and provenance-verification location. Production builds check their feed at startup and every six hours, and expose an on-demand check under **Settings → Updates** and **Help → Check for Updates**. For a staging feed, launch a packaged build with `LETAGENTS_DESKTOP_UPDATE_BASE_URL` set to an HTTPS directory containing `RELEASES.json`; do not put that override in a stable build.
 
 Squirrel downloads a newer signed ZIP in the background but never restarts the app automatically. **Restart & update** first blocks agent lifecycle mutations, asks the serving supervisor daemon to drain dispatch and relinquish its owner-only socket, and verifies that exact daemon process has exited. Provider processes are not terminated. Only after that proof does the app call Electron's installer and quit. On the next launch, the new application starts its bundled daemon and the existing startup reconciliation reconnects desired-running agents to their exact provider generations. If handoff fails, installation is cancelled, the update remains downloaded, and the current app stays open with a retryable error.
 

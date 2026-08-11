@@ -149,9 +149,17 @@ jobs:
           MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
           MACOS_NOTARY_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           MACOS_NOTARY_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
-          LETAGENTS_DESKTOP_RELEASE_BASE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/
-          LETAGENTS_DESKTOP_RELEASE_NOTES: LetAgents desktop ${{ env.DESKTOP_VERSION }}
-        run: npm --prefix apps/desktop run package:mac
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${R2_PUBLIC_BASE_URL}" =~ ^https://[^/]+$ ]]; then
+            echo "R2_PUBLIC_BASE_URL must be an HTTPS origin without a trailing slash." >&2
+            exit 1
+          fi
+          export LETAGENTS_DESKTOP_RELEASE_BASE_URL="${R2_PUBLIC_BASE_URL}/desktop/v${DESKTOP_VERSION}/"
+          export LETAGENTS_DESKTOP_RELEASE_NOTES="LetAgents desktop ${DESKTOP_VERSION}"
+          npm --prefix apps/desktop run package:mac
 
       - name: Attest installer and update provenance
         if: ${{ github.event.repository.visibility == 'public' || vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true' }}
@@ -214,6 +222,92 @@ jobs:
           path: release-artifacts
           merge-multiple: true
 
+      - name: Validate R2 release configuration
+        shell: bash
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          for variable_name in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET_NAME R2_PUBLIC_BASE_URL; do
+            if [[ -z "${!variable_name}" ]]; then
+              echo "${variable_name} is required for desktop release delivery." >&2
+              exit 1
+            fi
+          done
+          if [[ ! "${R2_ACCOUNT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "R2_ACCOUNT_ID must be the 32-character Cloudflare account identifier." >&2
+            exit 1
+          fi
+          if [[ ! "${R2_PUBLIC_BASE_URL}" =~ ^https://[^/]+$ ]]; then
+            echo "R2_PUBLIC_BASE_URL must be an HTTPS origin without a trailing slash." >&2
+            exit 1
+          fi
+          aws --version
+          echo "R2_ENDPOINT_URL=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> "${GITHUB_ENV}"
+          echo "R2_BUCKET_NAME=${R2_BUCKET_NAME}" >> "${GITHUB_ENV}"
+          echo "R2_PUBLIC_BASE_URL=${R2_PUBLIC_BASE_URL}" >> "${GITHUB_ENV}"
+
+      - name: Publish immutable versioned artifacts to R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(release-artifacts/*)
+          if [[ ${#artifacts[@]} -eq 0 ]]; then
+            echo "No desktop release artifacts were downloaded." >&2
+            exit 1
+          fi
+
+          for artifact in "${artifacts[@]}"; do
+            artifact_name=$(basename "${artifact}")
+            object_key="desktop/v${DESKTOP_VERSION}/${artifact_name}"
+            local_sha256=$(sha256sum "${artifact}" | awk '{print $1}')
+            existing_key=$(aws s3api list-objects-v2 \
+              --endpoint-url "${R2_ENDPOINT_URL}" \
+              --bucket "${R2_BUCKET_NAME}" \
+              --prefix "${object_key}" \
+              --query "Contents[?Key=='${object_key}'].Key | [0]" \
+              --output text)
+
+            if [[ -n "${existing_key}" && "${existing_key}" != "None" ]]; then
+              remote_sha256=$(aws s3api head-object \
+                --endpoint-url "${R2_ENDPOINT_URL}" \
+                --bucket "${R2_BUCKET_NAME}" \
+                --key "${object_key}" \
+                --query 'Metadata.sha256' \
+                --output text)
+              if [[ "${remote_sha256}" != "${local_sha256}" ]]; then
+                echo "Immutable R2 object ${object_key} already exists with different bytes." >&2
+                exit 1
+              fi
+              echo "Verified existing immutable R2 object ${object_key}."
+              continue
+            fi
+
+            case "${artifact_name}" in
+              *.dmg) content_type="application/x-apple-diskimage" ;;
+              *.zip) content_type="application/zip" ;;
+              *.json) content_type="application/json" ;;
+              *.sha256) content_type="text/plain" ;;
+              *) content_type="application/octet-stream" ;;
+            esac
+            aws s3 cp "${artifact}" "s3://${R2_BUCKET_NAME}/${object_key}" \
+              --endpoint-url "${R2_ENDPOINT_URL}" \
+              --cache-control "public,max-age=31536000,immutable" \
+              --content-type "${content_type}" \
+              --metadata "sha256=${local_sha256}" \
+              --no-progress
+          done
+
       - name: Publish immutable versioned release
         shell: bash
         env:
@@ -253,10 +347,13 @@ jobs:
             gh release edit "${GITHUB_REF_NAME}" --draft=false --prerelease --latest=false
           fi
 
-      - name: Advance architecture-specific update feeds
+      - name: Advance public architecture-specific update feeds
         shell: bash
         env:
-          GH_TOKEN: ${{ github.token }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
         run: |
           set -euo pipefail
           for arch in arm64 x64; do
@@ -265,19 +362,23 @@ jobs:
               echo "Missing update manifest ${source_manifest}." >&2
               exit 1
             fi
-            feed_tag="desktop-feed-${arch}"
-            feed_dir="${RUNNER_TEMP}/${feed_tag}"
-            mkdir -p "${feed_dir}"
-            cp "${source_manifest}" "${feed_dir}/RELEASES.json"
-            if gh release view "${feed_tag}" >/dev/null 2>&1; then
-              gh release upload "${feed_tag}" "${feed_dir}/RELEASES.json" --clobber
-              gh release edit "${feed_tag}" --draft=false --prerelease --latest=false
-            else
-              gh release create "${feed_tag}" "${feed_dir}/RELEASES.json" \
-                --target "${GITHUB_SHA}" \
-                --prerelease \
-                --latest=false \
-                --title "LetAgents desktop ${arch} update feed" \
-                --notes "Mutable Squirrel.Mac discovery manifest for the ${arch} stable channel. Versioned application artifacts remain immutable."
+            feed_key="desktop/feeds/${arch}/RELEASES.json"
+            manifest_sha256=$(sha256sum "${source_manifest}" | awk '{print $1}')
+            aws s3 cp "${source_manifest}" "s3://${R2_BUCKET_NAME}/${feed_key}" \
+              --endpoint-url "${R2_ENDPOINT_URL}" \
+              --cache-control "public,max-age=60,must-revalidate" \
+              --content-type "application/json" \
+              --metadata "sha256=${manifest_sha256}" \
+              --no-progress
+            remote_sha256=$(aws s3api head-object \
+              --endpoint-url "${R2_ENDPOINT_URL}" \
+              --bucket "${R2_BUCKET_NAME}" \
+              --key "${feed_key}" \
+              --query 'Metadata.sha256' \
+              --output text)
+            if [[ "${remote_sha256}" != "${manifest_sha256}" ]]; then
+              echo "R2 update feed verification failed for ${arch}." >&2
+              exit 1
             fi
+            echo "Published ${R2_PUBLIC_BASE_URL}/${feed_key}."
           done
