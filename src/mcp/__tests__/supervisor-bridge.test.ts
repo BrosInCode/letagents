@@ -947,6 +947,8 @@ test("scheduled cursor checkpoints retry transient failures and keep the newest 
     await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
     const scheduledSession = { ...session, session_id: "agent_session_scheduled_retry" };
     const env = supervisedEnv(socketPath);
+    scheduleSupervisedWorkerCursorCheckpoint(scheduledSession, "msg_012", env, { requestTimeoutMs: 50 });
+    scheduleSupervisedWorkerCursorCheckpoint(scheduledSession, "msg_2147483648", env, { requestTimeoutMs: 50 });
     scheduleSupervisedWorkerCursorCheckpoint(scheduledSession, "msg_12", env, { requestTimeoutMs: 50 });
     scheduleSupervisedWorkerCursorCheckpoint(scheduledSession, "msg_10", env, { requestTimeoutMs: 50 });
     await eventually(() => checkpoints.length >= 2, 1_500);

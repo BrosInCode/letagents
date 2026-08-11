@@ -2,7 +2,15 @@ import { and, asc, desc, eq, inArray, sql } from "drizzle-orm";
 
 import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
-import { message_attachments, message_thread_reads, messages } from "../schema.js";
+import {
+  message_account_thread_read_stats,
+  message_attachments,
+  message_room_thread_stats,
+  message_thread_participants,
+  message_thread_reads,
+  message_thread_summaries,
+  messages,
+} from "../schema.js";
 import {
   toMessageAttachment,
   toMessageReplyReference,
@@ -24,9 +32,12 @@ import {
   messageRowSelection,
 } from "./selections.js";
 import { visibleMessageCondition } from "./visibility.js";
+import { getMessageAccountAgentRouting } from "./account-agent-routing.js";
 
 interface MessageHydrationOptions {
   accountId?: string | null;
+  accountAgentRouting?: boolean;
+  threadSummaries?: ReadonlyMap<number, MessageThreadSummary>;
 }
 
 export interface MessageThreadPage {
@@ -49,9 +60,42 @@ export interface MessageThreadInboxPage {
   unread_thread_count: number;
 }
 
+const materializedThreadKeySelection = {
+  summary_thread_root_number: message_thread_summaries.thread_root_number,
+  summary_reply_count: message_thread_summaries.reply_count,
+  summary_latest_reply_number: message_thread_summaries.latest_reply_number,
+  summary_participant_count: message_thread_summaries.participant_count,
+  last_read_message_number: message_thread_reads.last_read_message_number,
+  last_read_reply_count: message_thread_reads.last_read_reply_count,
+};
+
+interface MaterializedThreadKeySelection {
+  summary_thread_root_number: number;
+  summary_reply_count: number;
+  summary_latest_reply_number: number;
+  summary_participant_count: number;
+  last_read_message_number: number | null;
+  last_read_reply_count: number | null;
+}
+
+interface MaterializedThreadSummarySelection extends MaterializedThreadKeySelection {
+  latest_reply_sender: string;
+  latest_reply_text: string;
+  latest_reply_source: string | null;
+  latest_reply_timestamp: string;
+}
+
+type MessageHistoryOptions = {
+  limit?: number;
+  after?: string;
+  include_prompt_only?: boolean;
+  account_id?: string | null;
+  account_agent_routing?: boolean;
+};
+
 export async function getMessages(
   roomId: string,
-  options?: { limit?: number; after?: string; include_prompt_only?: boolean; account_id?: string | null },
+  options?: MessageHistoryOptions,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const afterNumber = options?.after ? parseScopedId(options.after, "msg") : null;
@@ -70,7 +114,10 @@ export async function getMessages(
 
   const has_more = rows.length > limit;
   const bounded = has_more ? rows.slice(0, limit) : rows;
-  const hydratedMessages = await hydrateMessageReplies(roomId, bounded, { accountId: options?.account_id });
+  const hydratedMessages = await hydrateMessageReplies(roomId, bounded, {
+    accountId: options?.account_id,
+    accountAgentRouting: options?.account_agent_routing,
+  });
 
   return {
     messages: hydratedMessages,
@@ -80,7 +127,7 @@ export async function getMessages(
 
 export async function getLatestMessages(
   roomId: string,
-  options?: { limit?: number; include_prompt_only?: boolean; account_id?: string | null },
+  options?: Omit<MessageHistoryOptions, "after">,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const limit = clampLimit(options?.limit);
   const visibilityCondition = visibleMessageCondition(options?.include_prompt_only);
@@ -94,7 +141,10 @@ export async function getLatestMessages(
 
   const has_more = rows.length > limit;
   const bounded = (has_more ? rows.slice(0, limit) : rows).reverse();
-  const hydratedMessages = await hydrateMessageReplies(roomId, bounded, { accountId: options?.account_id });
+  const hydratedMessages = await hydrateMessageReplies(roomId, bounded, {
+    accountId: options?.account_id,
+    accountAgentRouting: options?.account_agent_routing,
+  });
 
   return {
     messages: hydratedMessages,
@@ -105,7 +155,7 @@ export async function getLatestMessages(
 export async function getMessagesBefore(
   roomId: string,
   beforeMessageId: string | undefined,
-  options?: { limit?: number; include_prompt_only?: boolean; account_id?: string | null },
+  options?: Omit<MessageHistoryOptions, "after">,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   const beforeNumber = beforeMessageId ? parseScopedId(beforeMessageId, "msg") : null;
   if (!beforeNumber) {
@@ -124,7 +174,10 @@ export async function getMessagesBefore(
 
   const has_more = rows.length > limit;
   const bounded = (has_more ? rows.slice(0, limit) : rows).reverse();
-  const hydratedMessages = await hydrateMessageReplies(roomId, bounded, { accountId: options?.account_id });
+  const hydratedMessages = await hydrateMessageReplies(roomId, bounded, {
+    accountId: options?.account_id,
+    accountAgentRouting: options?.account_agent_routing,
+  });
 
   return {
     messages: hydratedMessages,
@@ -135,7 +188,11 @@ export async function getMessagesBefore(
 export async function getMessageById(
   roomId: string,
   messageId: string,
-  options?: { include_prompt_only?: boolean; account_id?: string | null },
+  options?: {
+    include_prompt_only?: boolean;
+    account_id?: string | null;
+    account_agent_routing?: boolean;
+  },
 ): Promise<Message | null> {
   const messageNumber = parseScopedId(messageId, "msg");
   if (!messageNumber) {
@@ -152,7 +209,10 @@ export async function getMessageById(
     return null;
   }
 
-  const [hydrated] = await hydrateMessageReplies(roomId, rows, { accountId: options?.account_id });
+  const [hydrated] = await hydrateMessageReplies(roomId, rows, {
+    accountId: options?.account_id,
+    accountAgentRouting: options?.account_agent_routing,
+  });
   return hydrated ?? null;
 }
 
@@ -161,6 +221,9 @@ export async function hydrateMessageReplies(
   bounded: MessageRow[],
   options?: MessageHydrationOptions,
 ): Promise<Message[]> {
+  const accountRoutingPromise = options?.accountId && options.accountAgentRouting
+    ? getMessageAccountAgentRouting(db, roomId, options.accountId, bounded)
+    : Promise.resolve(new Map());
   const replyToNumbers = Array.from(new Set(
     bounded
       .map((row) => row.reply_to_number)
@@ -200,28 +263,49 @@ export async function hydrateMessageReplies(
     }
   }
 
-  const threadSummaries = await buildThreadSummariesForRoots(
+  const materializedSummaries = options?.threadSummaries ?? await buildThreadSummariesForRoots(
     roomId,
     Array.from(new Set(bounded.map((row) => row.thread_root_number ?? row.number))),
     options?.accountId ?? null,
   );
+  const threadSummaries = new Map(materializedSummaries);
+  const missingThreadRootNumbers = Array.from(new Set(
+    bounded
+      .filter((row) => row.thread_root_number !== null)
+      .map((row) => row.thread_root_number!)
+      .filter((rootNumber) => !threadSummaries.has(rootNumber)),
+  ));
+  if (missingThreadRootNumbers.length > 0) {
+    const emptySummaries = await buildEmptyThreadSummariesForRoots(
+      roomId,
+      missingThreadRootNumbers,
+      options?.accountId ?? null,
+    );
+    for (const [rootNumber, summary] of emptySummaries) {
+      threadSummaries.set(rootNumber, summary);
+    }
+  }
 
+  const accountRouting = await accountRoutingPromise;
   return bounded.map((row) => {
     const threadRootNumber = row.thread_root_number ?? row.number;
     const threadSummary = threadSummaries.get(threadRootNumber) ?? null;
-    return toMessageWithReply(
+    const message = toMessageWithReply(
       row,
       row.reply_to_number ? replyMap.get(row.reply_to_number) ?? null : null,
       attachmentMap.get(row.number) ?? [],
       threadSummary && (threadSummary.reply_count > 0 || row.thread_root_number) ? threadSummary : null,
     );
+    return options?.accountId && options.accountAgentRouting
+      ? { ...message, account_agent_routing: accountRouting.get(row.number) ?? null }
+      : message;
   });
 }
 
 export async function getMessagesAfter(
   roomId: string,
   afterMessageId: string | undefined,
-  options?: { limit?: number; include_prompt_only?: boolean; account_id?: string | null },
+  options?: Omit<MessageHistoryOptions, "after">,
 ): Promise<{ messages: Message[]; has_more: boolean }> {
   return getMessages(roomId, { ...options, after: afterMessageId });
 }
@@ -229,7 +313,13 @@ export async function getMessagesAfter(
 export async function getMessageThread(
   roomId: string,
   rootMessageId: string,
-  options?: { limit?: number; before?: string; include_prompt_only?: boolean; account_id?: string | null },
+  options?: {
+    limit?: number;
+    before?: string;
+    include_prompt_only?: boolean;
+    account_id?: string | null;
+    account_agent_routing?: boolean;
+  },
 ): Promise<MessageThreadPage | null> {
   const requestedRootNumber = parseScopedId(rootMessageId, "msg");
   if (!requestedRootNumber) {
@@ -278,10 +368,21 @@ export async function getMessageThread(
 
   const hasOlder = replyRows.length > limit;
   const boundedReplies = (hasOlder ? replyRows.slice(0, limit) : replyRows).reverse();
-  const [root] = await hydrateMessageReplies(roomId, [rootRow], { accountId: options?.account_id });
-  const replies = await hydrateMessageReplies(roomId, boundedReplies, { accountId: options?.account_id });
-  const summary = (await buildThreadSummariesForRoots(roomId, [rootNumber], options?.account_id ?? null)).get(rootNumber);
-  if (!root || !summary) return null;
+  const summaries = await buildThreadSummariesForRoots(roomId, [rootNumber], options?.account_id ?? null);
+  const summary = summaries.get(rootNumber)
+    ?? await buildEmptyThreadSummary(roomId, rootRow, options?.account_id ?? null);
+  summaries.set(rootNumber, summary);
+  const hydrationOptions = {
+    accountId: options?.account_id,
+    accountAgentRouting: options?.account_agent_routing,
+    threadSummaries: summaries,
+  };
+  const [root, ...replies] = await hydrateMessageReplies(
+    roomId,
+    [rootRow, ...boundedReplies],
+    hydrationOptions,
+  );
+  if (!root) return null;
 
   return {
     root,
@@ -297,8 +398,8 @@ export async function getMessageThreads(
     filter?: MessageThreadInboxFilter;
     limit?: number;
     before?: string;
-    include_prompt_only?: boolean;
     account_id?: string | null;
+    account_agent_routing?: boolean;
   },
 ): Promise<MessageThreadInboxPage> {
   const filter = options?.filter ?? "all";
@@ -308,71 +409,81 @@ export async function getMessageThreads(
   }
 
   const limit = clampLimit(options?.limit);
-  const latestReplyExpression = sql<number>`MAX(${messages.number})`;
-  const candidateRows = await db
-    .select({
-      thread_root_number: messages.thread_root_number,
-      latest_reply_number: latestReplyExpression,
-    })
-    .from(messages)
-    .where(and(
-      eq(messages.room_id, roomId),
-      sql`${messages.thread_root_number} IS NOT NULL`,
-      visibleMessageCondition(options?.include_prompt_only),
-    ))
-    .groupBy(messages.thread_root_number)
-    .orderBy(desc(latestReplyExpression));
+  const accountId = options?.account_id ?? null;
+  const readJoin = materializedThreadReadJoin(accountId);
 
-  const allCandidates = candidateRows
-    .map((row) => ({
-      rootNumber: Number(row.thread_root_number),
-      latestReplyNumber: Number(row.latest_reply_number),
-    }))
-    .filter((row) =>
-      Number.isInteger(row.rootNumber)
-      && row.rootNumber > 0
-      && Number.isInteger(row.latestReplyNumber)
-      && row.latestReplyNumber > 0
+  // Page only fixed-width projection/read keys before touching message rows.
+  // Deep keyset pages therefore hydrate at most limit+1 roots and latest
+  // replies instead of joining every preceding message before LIMIT.
+  const pageQuery = db
+    .select(materializedThreadKeySelection)
+    .from(message_thread_summaries)
+    .leftJoin(message_thread_reads, readJoin)
+    .where(and(
+      eq(message_thread_summaries.room_id, roomId),
+      beforeNumber
+        ? sql`${message_thread_summaries.latest_reply_number} < ${beforeNumber}`
+        : sql`TRUE`,
+    ))
+    .orderBy(desc(message_thread_summaries.latest_reply_number))
+    .limit(limit + 1);
+
+  let candidateRows: MaterializedThreadKeySelection[];
+  let unread_thread_count: number;
+  if (filter === "unread") {
+    const unreadStats = await getUnreadThreadStats(roomId, accountId);
+    unread_thread_count = unreadStats.unread;
+    if (unread_thread_count === 0) {
+      return { threads: [], has_more: false, unread_thread_count };
+    }
+    candidateRows = await loadUnreadThreadPageKeys(
+      roomId,
+      accountId!,
+      limit + 1,
+      beforeNumber,
+      unreadStats.readCount < unreadStats.total,
     );
-  const summaries = await buildThreadSummariesForRoots(
-    roomId,
-    allCandidates.map((row) => row.rootNumber),
-    options?.account_id ?? null,
-  );
-  const inboxItems = allCandidates
-    .map((candidate) => {
-      const summary = summaries.get(candidate.rootNumber);
-      return summary ? { ...candidate, summary } : null;
-    })
-    .filter((item): item is { rootNumber: number; latestReplyNumber: number; summary: MessageThreadSummary } =>
-      Boolean(item?.summary.latest_reply)
-    );
-  const unread_thread_count = inboxItems.filter((item) => item.summary.unread_count > 0).length;
-  const filteredByCursor = beforeNumber
-    ? inboxItems.filter((item) => item.latestReplyNumber < beforeNumber)
-    : inboxItems;
-  const filtered = filter === "unread"
-    ? filteredByCursor.filter((item) => item.summary.unread_count > 0)
-    : filteredByCursor;
-  const has_more = filtered.length > limit;
-  const bounded = has_more ? filtered.slice(0, limit) : filtered;
+  } else {
+    const [rows, unreadStats] = await Promise.all([
+      pageQuery,
+      getUnreadThreadStats(roomId, accountId),
+    ]);
+    candidateRows = rows;
+    unread_thread_count = unreadStats.unread;
+  }
+  const has_more = candidateRows.length > limit;
+  const bounded = has_more ? candidateRows.slice(0, limit) : candidateRows;
   if (bounded.length === 0) {
     return { threads: [], has_more, unread_thread_count };
   }
 
-  const rootRows = await db
-    .select(messageRowSelection)
-    .from(messages)
-    .where(and(
-      eq(messages.room_id, roomId),
-      inArray(messages.number, bounded.map((item) => item.rootNumber)),
-      visibleMessageCondition(options?.include_prompt_only),
-    ));
-  const rootRowsByNumber = new Map(rootRows.map((row) => [row.number, row]));
-  const orderedRootRows = bounded
-    .map((item) => rootRowsByNumber.get(item.rootNumber) ?? null)
+  const rootNumbers = bounded.map((row) => row.summary_thread_root_number);
+  const messageRows = await loadMessageRowsByNumber(
+    roomId,
+    bounded.flatMap((row) => [row.summary_thread_root_number, row.summary_latest_reply_number]),
+  );
+  const participants = await loadThreadParticipants(roomId, rootNumbers);
+  const summaries = new Map<number, MessageThreadSummary>();
+  for (const row of bounded) {
+    const latest = messageRows.get(row.summary_latest_reply_number);
+    if (!latest) continue;
+    summaries.set(
+      row.summary_thread_root_number,
+      toMaterializedThreadSummary(
+        toMaterializedThreadSummaryRow(row, latest),
+        participants.get(row.summary_thread_root_number) ?? [],
+        accountId,
+      ),
+    );
+  }
+  const rootRows = bounded
+    .map((row) => messageRows.get(row.summary_thread_root_number))
     .filter((row): row is MessageRow => Boolean(row));
-  const hydratedRoots = await hydrateMessageReplies(roomId, orderedRootRows, { accountId: options?.account_id });
+  const hydratedRoots = await hydrateMessageReplies(roomId, rootRows, {
+    accountId,
+    accountAgentRouting: options?.account_agent_routing,
+    threadSummaries: summaries,
+  });
 
   return {
     threads: hydratedRoots
@@ -407,24 +518,22 @@ export async function markMessageThreadRead(
     : await getVisibleMessageRow(roomId, rootNumber, false);
   if (!rootRow) return null;
 
-  let lastReadNumber: number | null = null;
+  let lastReadNumber: number;
   if (options?.message_id) {
-    lastReadNumber = parseScopedId(options.message_id, "msg");
-    if (!lastReadNumber) {
+    const requestedReadNumber = parseScopedId(options.message_id, "msg");
+    if (!requestedReadNumber) {
       throw new RequestValidationError("message_id must be a valid message id");
     }
+    lastReadNumber = requestedReadNumber;
     const target = await getVisibleMessageRow(roomId, lastReadNumber, false);
     if (!target || (target.number !== rootNumber && target.thread_root_number !== rootNumber)) {
       throw new RequestValidationError("message_id must belong to the requested thread");
     }
   } else {
-    const [latestReply] = await db
-      .select(messageRowSelection)
-      .from(messages)
-      .where(and(eq(messages.room_id, roomId), eq(messages.thread_root_number, rootNumber), visibleMessageCondition(false)))
-      .orderBy(desc(messages.number))
-      .limit(1);
-    lastReadNumber = latestReply?.number ?? rootRow.number;
+    const materialized = (await buildThreadSummariesForRoots(roomId, [rootNumber], accountId)).get(rootNumber) ?? null;
+    lastReadNumber = materialized?.latest_reply
+      ? parseScopedId(materialized.latest_reply.id, "msg") ?? rootRow.number
+      : rootRow.number;
   }
 
   const now = new Date().toISOString();
@@ -449,7 +558,8 @@ export async function markMessageThreadRead(
       },
     });
 
-  return (await buildThreadSummariesForRoots(roomId, [rootNumber], accountId)).get(rootNumber) ?? null;
+  return (await buildThreadSummariesForRoots(roomId, [rootNumber], accountId)).get(rootNumber)
+    ?? buildEmptyThreadSummary(roomId, rootRow, accountId);
 }
 
 async function getVisibleMessageRow(
@@ -475,96 +585,367 @@ async function buildThreadSummariesForRoots(
     return new Map();
   }
 
-  const rootRows = await db
-    .select(messageRowSelection)
-    .from(messages)
-    .where(and(eq(messages.room_id, roomId), inArray(messages.number, uniqueRootNumbers), visibleMessageCondition(false)));
-  const rootsByNumber = new Map(rootRows.map((row) => [row.number, row]));
-
-  const replyRows = await db
-    .select(messageRowSelection)
-    .from(messages)
-    .where(and(eq(messages.room_id, roomId), inArray(messages.thread_root_number, uniqueRootNumbers), visibleMessageCondition(false)))
-    .orderBy(asc(messages.thread_root_number), asc(messages.number));
-
-  const repliesByRoot = new Map<number, MessageRow[]>();
-  for (const replyRow of replyRows) {
-    const rootNumber = replyRow.thread_root_number;
-    if (!rootNumber) continue;
-    const replies = repliesByRoot.get(rootNumber) ?? [];
-    replies.push(replyRow);
-    repliesByRoot.set(rootNumber, replies);
-  }
-
-  const readMap = new Map<number, number>();
-  if (accountId) {
-    const readRows = await db
-      .select({
-        thread_root_number: message_thread_reads.thread_root_number,
-        last_read_message_number: message_thread_reads.last_read_message_number,
-      })
-      .from(message_thread_reads)
-      .where(and(
-        eq(message_thread_reads.room_id, roomId),
-        eq(message_thread_reads.account_id, accountId),
-        inArray(message_thread_reads.thread_root_number, uniqueRootNumbers),
-      ));
-    for (const readRow of readRows) {
-      readMap.set(readRow.thread_root_number, readRow.last_read_message_number);
-    }
-  }
-
+  const readJoin = materializedThreadReadJoin(accountId);
+  const rows = await db
+    .select(materializedThreadKeySelection)
+    .from(message_thread_summaries)
+    .leftJoin(message_thread_reads, readJoin)
+    .where(and(
+      eq(message_thread_summaries.room_id, roomId),
+      inArray(message_thread_summaries.thread_root_number, uniqueRootNumbers),
+    ));
+  const [participants, latestMessages] = await Promise.all([
+    loadThreadParticipants(roomId, rows.map((row) => row.summary_thread_root_number)),
+    loadMessageRowsByNumber(roomId, rows.map((row) => row.summary_latest_reply_number)),
+  ]);
   const summaries = new Map<number, MessageThreadSummary>();
-  for (const rootNumber of uniqueRootNumbers) {
-    const rootRow = rootsByNumber.get(rootNumber);
-    if (!rootRow) continue;
-    const replies = repliesByRoot.get(rootNumber) ?? [];
-    const latestReply = replies.at(-1) ?? null;
-    const lastReadNumber = readMap.get(rootNumber) ?? null;
-    const unreadCount = !accountId
-      ? 0
-      : lastReadNumber === null
-        ? replies.length
-        : replies.filter((reply) => reply.number > lastReadNumber).length;
-    summaries.set(rootNumber, {
-      root_message_id: formatMessageId(rootNumber),
-      reply_count: replies.length,
-      unread_count: unreadCount,
-      has_unread: unreadCount > 0,
-      latest_reply: latestReply ? toMessageReplyReference(latestReply) : null,
-      participants: buildThreadParticipants(rootRow, replies),
-      last_read_message_id: lastReadNumber ? formatMessageId(lastReadNumber) : null,
-    });
+  for (const row of rows) {
+    const latest = latestMessages.get(row.summary_latest_reply_number);
+    if (!latest) continue;
+    summaries.set(
+      row.summary_thread_root_number,
+      toMaterializedThreadSummary(
+        toMaterializedThreadSummaryRow(row, latest),
+        participants.get(row.summary_thread_root_number) ?? [],
+        accountId,
+      ),
+    );
   }
 
   return summaries;
 }
 
-function buildThreadParticipants(root: MessageRow, replies: MessageRow[]): MessageThreadParticipant[] {
-  const participants = new Map<string, MessageThreadParticipant & { latestNumber: number }>();
-  for (const row of [root, ...replies]) {
-    const key = `${row.sender}\0${row.source ?? ""}`;
-    const current = participants.get(key);
-    if (!current) {
-      participants.set(key, {
-        sender: row.sender,
-        source: row.source ?? null,
-        message_count: 1,
-        latest_message_id: formatMessageId(row.number),
-        latestNumber: row.number,
-      });
-      continue;
-    }
-    current.message_count += 1;
-    if (row.number > current.latestNumber) {
-      current.latest_message_id = formatMessageId(row.number);
-      current.latestNumber = row.number;
-    }
+function materializedThreadReadJoin(accountId: string | null) {
+  return accountId
+    ? and(
+      eq(message_thread_reads.room_id, message_thread_summaries.room_id),
+      eq(message_thread_reads.thread_root_number, message_thread_summaries.thread_root_number),
+      eq(message_thread_reads.account_id, accountId),
+    )
+    : sql`FALSE`;
+}
+
+function toMaterializedThreadSummaryRow(
+  key: MaterializedThreadKeySelection,
+  latest: MessageRow,
+): MaterializedThreadSummarySelection {
+  return {
+    ...key,
+    latest_reply_sender: latest.sender,
+    latest_reply_text: latest.text,
+    latest_reply_source: latest.source,
+    latest_reply_timestamp: latest.timestamp,
+  };
+}
+
+async function loadMessageRowsByNumber(
+  roomId: string,
+  messageNumbers: number[],
+): Promise<Map<number, MessageRow>> {
+  const uniqueNumbers = Array.from(new Set(messageNumbers));
+  if (uniqueNumbers.length === 0) return new Map();
+  const rows = await db
+    .select(messageRowSelection)
+    .from(messages)
+    .where(and(eq(messages.room_id, roomId), inArray(messages.number, uniqueNumbers)));
+  return new Map(rows.map((row) => [row.number, row]));
+}
+
+function toMaterializedThreadSummary(
+  row: MaterializedThreadSummarySelection,
+  participants: MessageThreadParticipant[],
+  accountId: string | null,
+): MessageThreadSummary {
+  const replyCount = Number(row.summary_reply_count) || 0;
+  const readReplyCount = accountId ? Number(row.last_read_reply_count) || 0 : replyCount;
+  const unreadCount = Math.max(0, replyCount - readReplyCount);
+  return {
+    root_message_id: formatMessageId(row.summary_thread_root_number),
+    reply_count: replyCount,
+    unread_count: unreadCount,
+    has_unread: unreadCount > 0,
+    latest_reply: {
+      id: formatMessageId(row.summary_latest_reply_number),
+      sender: row.latest_reply_sender,
+      text: row.latest_reply_text,
+      source: row.latest_reply_source,
+      timestamp: row.latest_reply_timestamp,
+      agent_identity: null,
+    },
+    participants,
+    participant_count: Number(row.summary_participant_count) || participants.length,
+    participants_truncated: participants.length < (Number(row.summary_participant_count) || 0),
+    last_read_message_id: row.last_read_message_number
+      ? formatMessageId(row.last_read_message_number)
+      : null,
+  };
+}
+
+async function loadThreadParticipants(
+  roomId: string,
+  rootNumbers: number[],
+): Promise<Map<number, MessageThreadParticipant[]>> {
+  const uniqueRootNumbers = Array.from(new Set(rootNumbers));
+  if (uniqueRootNumbers.length === 0) return new Map();
+
+  const rows = await db.execute<{
+    thread_root_number: number;
+    sender: string;
+    source: string | null;
+    message_count: number;
+    latest_message_number: number;
+  }>(sql`
+    SELECT roots.thread_root_number, participant.sender, participant.source,
+           participant.message_count, participant.latest_message_number
+      FROM (
+        SELECT value::integer AS thread_root_number
+          FROM jsonb_array_elements_text(${JSON.stringify(uniqueRootNumbers)}::jsonb)
+      ) AS roots
+      CROSS JOIN LATERAL (
+        SELECT candidate.sender, candidate.source, candidate.message_count,
+               candidate.latest_message_number
+          FROM ${message_thread_participants} AS candidate
+         WHERE candidate.room_id = ${roomId}
+           AND candidate.thread_root_number = roots.thread_root_number
+           AND candidate.message_count > 0
+         ORDER BY candidate.latest_message_number DESC
+         LIMIT 50
+      ) AS participant
+     ORDER BY roots.thread_root_number, participant.latest_message_number DESC
+  `);
+
+  const participants = new Map<number, MessageThreadParticipant[]>();
+  for (const row of rows.rows) {
+    if (row.latest_message_number === null) continue;
+    const list = participants.get(row.thread_root_number) ?? [];
+    list.push({
+      sender: row.sender,
+      source: row.source,
+      message_count: row.message_count,
+      latest_message_id: formatMessageId(row.latest_message_number),
+    });
+    participants.set(row.thread_root_number, list);
+  }
+  return participants;
+}
+
+async function buildEmptyThreadSummary(
+  roomId: string,
+  root: MessageRow,
+  accountId: string | null,
+): Promise<MessageThreadSummary> {
+  const reads = await loadThreadReadCursors(roomId, [root.number], accountId);
+  return toEmptyThreadSummary(root, reads.get(root.number) ?? null);
+}
+
+async function buildEmptyThreadSummariesForRoots(
+  roomId: string,
+  rootNumbers: number[],
+  accountId: string | null,
+): Promise<Map<number, MessageThreadSummary>> {
+  const uniqueRootNumbers = Array.from(new Set(rootNumbers));
+  if (uniqueRootNumbers.length === 0) return new Map();
+  const roots = await db
+    .select(messageRowSelection)
+    .from(messages)
+    .where(and(
+      eq(messages.room_id, roomId),
+      inArray(messages.number, uniqueRootNumbers),
+      visibleMessageCondition(false),
+    ));
+  const reads = await loadThreadReadCursors(roomId, roots.map((root) => root.number), accountId);
+  return new Map(roots.map((root) => [
+    root.number,
+    toEmptyThreadSummary(root, reads.get(root.number) ?? null),
+  ]));
+}
+
+async function loadThreadReadCursors(
+  roomId: string,
+  rootNumbers: number[],
+  accountId: string | null,
+): Promise<Map<number, number>> {
+  if (!accountId || rootNumbers.length === 0) return new Map();
+  const reads = await db
+    .select({
+      thread_root_number: message_thread_reads.thread_root_number,
+      last_read_message_number: message_thread_reads.last_read_message_number,
+    })
+    .from(message_thread_reads)
+    .where(and(
+      eq(message_thread_reads.room_id, roomId),
+      inArray(message_thread_reads.thread_root_number, Array.from(new Set(rootNumbers))),
+      eq(message_thread_reads.account_id, accountId),
+    ));
+  return new Map(reads.map((read) => [read.thread_root_number, read.last_read_message_number]));
+}
+
+function toEmptyThreadSummary(
+  root: MessageRow,
+  lastReadMessageNumber: number | null,
+): MessageThreadSummary {
+  return {
+    root_message_id: formatMessageId(root.number),
+    reply_count: 0,
+    unread_count: 0,
+    has_unread: false,
+    latest_reply: null,
+    participants: [{
+      sender: root.sender,
+      source: root.source,
+      message_count: 1,
+      latest_message_id: formatMessageId(root.number),
+    }],
+    participant_count: 1,
+    participants_truncated: false,
+    last_read_message_id: lastReadMessageNumber
+      ? formatMessageId(lastReadMessageNumber)
+      : null,
+  };
+}
+
+interface UnreadThreadStats {
+  total: number;
+  readCount: number;
+  unread: number;
+}
+
+async function getUnreadThreadStats(roomId: string, accountId: string | null): Promise<UnreadThreadStats> {
+  if (!accountId) return { total: 0, readCount: 0, unread: 0 };
+  const cached = await db.execute<{
+    total: number;
+    room_reply_version: number;
+    current_read_version: number;
+    cached_read_version: number;
+    cached_room_reply_version: number;
+    read_count: number;
+    fully_read: number;
+    account_stats_exists: boolean;
+  }>(sql`
+    SELECT stats.thread_count::integer AS total,
+           stats.reply_version::integer AS room_reply_version,
+           COALESCE(account_stats.current_read_version, 0)::integer AS current_read_version,
+           COALESCE(account_stats.cached_read_version, -1)::integer AS cached_read_version,
+           COALESCE(account_stats.cached_room_reply_version, -1)::integer
+             AS cached_room_reply_version,
+           COALESCE(account_stats.read_thread_count, 0)::integer AS read_count,
+           COALESCE(account_stats.fully_read_thread_count, 0)::integer AS fully_read
+           ,(account_stats.account_id IS NOT NULL) AS account_stats_exists
+      FROM ${message_room_thread_stats} AS stats
+      LEFT JOIN ${message_account_thread_read_stats} AS account_stats
+        ON account_stats.room_id = stats.room_id
+       AND account_stats.account_id = ${accountId}
+     WHERE stats.room_id = ${roomId}
+     LIMIT 1
+  `);
+  const row = cached.rows[0];
+  const total = Number(row?.total) || 0;
+  if (!row) return { total: 0, readCount: 0, unread: 0 };
+  if (!row.account_stats_exists) {
+    return { total, readCount: 0, unread: total };
+  }
+  if (
+    Number(row.cached_read_version) === Number(row.current_read_version)
+    && Number(row.cached_room_reply_version) === Number(row.room_reply_version)
+  ) {
+    const readCount = Number(row.read_count) || 0;
+    return {
+      total,
+      readCount,
+      unread: Math.max(0, total - (Number(row.fully_read) || 0)),
+    };
   }
 
-  return Array.from(participants.values())
-    .sort((left, right) => right.latestNumber - left.latestNumber)
-    .map(({ latestNumber: _latestNumber, ...participant }) => participant);
+  const refreshed = await db.execute<{ read_count: number; fully_read: number }>(sql`
+    SELECT COUNT(*)::integer AS read_count,
+           COUNT(*) FILTER (
+             WHERE thread_read.last_read_reply_count >= summary.reply_count
+           )::integer AS fully_read
+      FROM ${message_thread_reads} AS thread_read
+      JOIN ${message_thread_summaries} AS summary
+        ON summary.room_id = thread_read.room_id
+       AND summary.thread_root_number = thread_read.thread_root_number
+     WHERE thread_read.room_id = ${roomId}
+       AND thread_read.account_id = ${accountId}
+  `);
+  const readCount = Number(refreshed.rows[0]?.read_count) || 0;
+  const fullyRead = Number(refreshed.rows[0]?.fully_read) || 0;
+  await db.execute(sql`
+    INSERT INTO ${message_account_thread_read_stats} (
+      room_id, account_id, current_read_version, cached_read_version,
+      cached_room_reply_version, read_thread_count, fully_read_thread_count
+    ) VALUES (
+      ${roomId}, ${accountId}, ${Number(row.current_read_version)},
+      ${Number(row.current_read_version)}, ${Number(row.room_reply_version)},
+      ${readCount}, ${fullyRead}
+    )
+    ON CONFLICT (room_id, account_id) DO UPDATE SET
+      cached_read_version = EXCLUDED.cached_read_version,
+      cached_room_reply_version = EXCLUDED.cached_room_reply_version,
+      read_thread_count = EXCLUDED.read_thread_count,
+      fully_read_thread_count = EXCLUDED.fully_read_thread_count
+    WHERE ${message_account_thread_read_stats.current_read_version}
+      = EXCLUDED.current_read_version
+  `);
+  return {
+    total,
+    readCount,
+    unread: Math.max(0, total - fullyRead),
+  };
+}
+
+async function loadUnreadThreadPageKeys(
+  roomId: string,
+  accountId: string,
+  limit: number,
+  beforeNumber: number | null,
+  hasNeverReadThreads: boolean,
+): Promise<MaterializedThreadKeySelection[]> {
+  const staleReadQuery = db
+    .select(materializedThreadKeySelection)
+    .from(message_thread_reads)
+    .innerJoin(
+      message_thread_summaries,
+      and(
+        eq(message_thread_summaries.room_id, message_thread_reads.room_id),
+        eq(message_thread_summaries.thread_root_number, message_thread_reads.thread_root_number),
+      ),
+    )
+    .where(and(
+      eq(message_thread_reads.room_id, roomId),
+      eq(message_thread_reads.account_id, accountId),
+      sql`${message_thread_reads.last_read_reply_count} < ${message_thread_summaries.reply_count}`,
+      beforeNumber
+        ? sql`${message_thread_summaries.latest_reply_number} < ${beforeNumber}`
+        : sql`TRUE`,
+    ))
+    .orderBy(desc(message_thread_summaries.latest_reply_number))
+    .limit(limit);
+
+  const neverReadQuery = hasNeverReadThreads
+    ? db
+      .select(materializedThreadKeySelection)
+      .from(message_thread_summaries)
+      .leftJoin(message_thread_reads, materializedThreadReadJoin(accountId))
+      .where(and(
+        eq(message_thread_summaries.room_id, roomId),
+        sql`${message_thread_reads.thread_root_number} IS NULL`,
+        beforeNumber
+          ? sql`${message_thread_summaries.latest_reply_number} < ${beforeNumber}`
+          : sql`TRUE`,
+      ))
+      .orderBy(desc(message_thread_summaries.latest_reply_number))
+      .limit(limit)
+    : Promise.resolve([] as MaterializedThreadKeySelection[]);
+
+  const [staleRead, neverRead] = await Promise.all([staleReadQuery, neverReadQuery]);
+  const byRoot = new Map<number, MaterializedThreadKeySelection>();
+  for (const row of [...staleRead, ...neverRead]) {
+    byRoot.set(row.summary_thread_root_number, row);
+  }
+  return Array.from(byRoot.values())
+    .sort((left, right) => right.summary_latest_reply_number - left.summary_latest_reply_number)
+    .slice(0, limit);
 }
 
 export async function getRoomMessageCountsBySender(roomId: string): Promise<RoomActivityActorCount[]> {

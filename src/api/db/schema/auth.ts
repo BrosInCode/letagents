@@ -1,3 +1,4 @@
+import { sql } from "drizzle-orm";
 import { index, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { accounts } from "./core.js";
@@ -65,6 +66,8 @@ export const agents = pgTable("agents", {
   updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
 }, (table) => ({
   canonical_idx: uniqueIndex("agents_canonical_key_idx").on(table.canonical_key),
+  routing_canonical_idx: uniqueIndex("agents_routing_canonical_key_idx")
+    .on(sql`normalize_message_thread_routing_alias(${table.canonical_key}, true)`),
   owner_name_idx: uniqueIndex("agents_owner_name_idx").on(table.owner_account_id, table.name),
   owner_idx: index("agents_owner_account_id_idx").on(table.owner_account_id),
 }));

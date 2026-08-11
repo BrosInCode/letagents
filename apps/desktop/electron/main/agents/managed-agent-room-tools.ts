@@ -321,6 +321,8 @@ async function executeLocalRoomTool(
         reply_to: optionalString(request.arguments.reply_to ?? request.arguments.reply_to_id),
         thread_root_id: optionalString(request.arguments.thread_root_id),
         source: "agent",
+        publisher_agent_key: workerSession.agent_key ?? null,
+        publisher_agent_session_id: workerSession.session_id,
       });
       const mapped = mapRoomMessagePayload(message);
       await emitLocalRoomMessage(roomIdentifier, mapped);
@@ -337,6 +339,8 @@ async function executeLocalRoomTool(
         reply_to: optionalString(request.arguments.reply_to ?? request.arguments.reply_to_id),
         thread_root_id: threadRootId,
         source: "agent",
+        publisher_agent_key: workerSession.agent_key ?? null,
+        publisher_agent_session_id: workerSession.session_id,
       });
       const mapped = mapRoomMessagePayload(message);
       await emitLocalRoomMessage(roomIdentifier, mapped);
@@ -348,6 +352,8 @@ async function executeLocalRoomTool(
         sender: workerSender(workerSession),
         text: `[status] ${status}`,
         source: "agent",
+        publisher_agent_key: workerSession.agent_key ?? null,
+        publisher_agent_session_id: workerSession.session_id,
       });
       const mapped = mapRoomMessagePayload(message);
       await emitLocalRoomMessage(roomIdentifier, mapped);

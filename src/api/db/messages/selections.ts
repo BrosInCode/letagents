@@ -22,6 +22,8 @@ export const messageReplySelection = {
   sender: messages.sender,
   text: messages.text,
   source: messages.source,
+  publisher_agent_key: messages.publisher_agent_key,
+  publisher_agent_session_id: messages.publisher_agent_session_id,
   timestamp: messages.timestamp,
 };
 

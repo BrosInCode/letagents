@@ -23,6 +23,7 @@ import {
   formatManualGitRoomSummaryForRoomId,
 } from "../../rooms/formatting.js";
 import { isInviteCode, normalizeRoomId } from "../../rooms/routing.js";
+import { isMessageSenderWithinBounds } from "../../../../shared/message-contracts.mjs";
 
 export interface LegacyProjectRouteDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
@@ -281,12 +282,28 @@ export function registerLegacyProjectRoutes(
       return;
     }
 
+    const normalizedName = name.trim();
+    const normalizedDisplayName = display_name?.trim() || normalizedName;
+    const normalizedOwnerLabel = owner_label?.trim()
+      || req.sessionAccount.display_name
+      || req.sessionAccount.login;
+    const prospectiveKey = `${req.sessionAccount.login}/${normalizedName}`;
+    const prospectiveActorLabel = `${normalizedDisplayName} | ${normalizedOwnerLabel} | Agent`;
+    if (
+      !isMessageSenderWithinBounds(prospectiveKey)
+      || !isMessageSenderWithinBounds(normalizedDisplayName)
+      || !isMessageSenderWithinBounds(prospectiveActorLabel)
+    ) {
+      res.status(400).json({ error: "Agent identity fields exceed the supported message-routing bounds." });
+      return;
+    }
+
     const identity = await registerAgentIdentity({
       owner_account_id: req.sessionAccount.account_id,
       owner_login: req.sessionAccount.login,
-      owner_label: owner_label?.trim() || req.sessionAccount.display_name || req.sessionAccount.login,
-      name: name.trim(),
-      display_name: display_name?.trim(),
+      owner_label: normalizedOwnerLabel,
+      name: normalizedName,
+      display_name: normalizedDisplayName,
     });
 
     res.status(201).json(identity);

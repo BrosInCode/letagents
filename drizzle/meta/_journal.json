@@ -547,6 +547,13 @@
       "when": 1786406400000,
       "tag": "0077_desktop_push_notifications",
       "breakpoints": true
+    },
+    {
+      "idx": 78,
+      "version": "7",
+      "when": 1786492800000,
+      "tag": "0078_materialized_thread_summaries",
+      "breakpoints": true
     }
   ]
 }

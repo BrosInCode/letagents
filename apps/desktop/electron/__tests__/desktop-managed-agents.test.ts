@@ -32,11 +32,13 @@ const {
 } = await import("../main/agents/state.js");
 const {
   canDeliverDesktopEventToSession,
+  buildLocalLegacyAccountAgentRouting,
   codexManagedAgentMessageActivationDecision,
   desktopManagedAgentMessageActivationDecision,
   isOwnRoomStreamEvent,
   isStopPhraseRoomStreamEvent,
   resolveCodexRoomStreamEventRecipients,
+  resolveDesktopRoomStreamEventRecipients,
   shouldDeliverCodexRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToSession,
@@ -138,7 +140,12 @@ const {
 } = await import("../main/agents/codex-managed-agent-dispatch.js");
 const { buildCursorDesktopEventPrompt } = await import("../main/agents/cursor-event-prompt.js");
 
-import type { DesktopManagedAgentSession, DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
+import type {
+  DesktopManagedAgentSession,
+  DesktopRoomMessage,
+  DesktopRoomStreamEvent,
+  DesktopTaskSummary,
+} from "../ipc-types.js";
 import type {
   DesktopCodexLiveSessionState,
   DesktopCursorLiveSessionState,
@@ -1889,6 +1896,8 @@ test("desktop managed local replies are recognized as the worker's own messages"
   });
 
   assert.equal(result?.sender, workerSession.actor_label);
+  assert.equal(result?.agentIdentity?.agentKey, workerSession.agent_key);
+  assert.equal(result?.agentIdentity?.agentSessionId, workerSession.session_id);
   assert.equal(
     shouldDeliverRoomStreamEventToManagedAgent({
       id: "session_public",
@@ -2264,6 +2273,13 @@ test("desktop event routing treats only the exact room stop phrase as a worker s
       threadReplyToId: null,
       thread: null,
       replyTo: null,
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: true,
+      },
     },
   };
 
@@ -2274,6 +2290,26 @@ test("desktop event routing treats only the exact room stop phrase as a worker s
       message: { ...event.message, text: " /stop-codex-room " },
     }),
     false,
+  );
+  assert.equal(
+    isStopPhraseRoomStreamEvent(session, {
+      ...event,
+      message: {
+        ...event.message,
+        accountAgentRouting: {
+          version: 1,
+          authority: "receipts",
+          recipientAgentKeys: ["EmmyMay/cometlively"],
+          recipientSessions: [{
+            agentKey: "EmmyMay/cometlively",
+            agentSessionId: session.agent_session_id!,
+          }],
+          controlAuthorized: false,
+        },
+      },
+    }),
+    false,
+    "another account cannot turn addressed chat text into lifecycle control",
   );
   assert.equal(
     isStopPhraseRoomStreamEvent(session, {
@@ -2399,6 +2435,8 @@ test("desktop-delivered event prompts mark human thread replies to human-authore
             latestMessageId: "msg_agent_answer",
           },
         ],
+        participantCount: 2,
+        participantsTruncated: false,
         lastReadMessageId: null,
       },
       replyTo: {
@@ -2490,6 +2528,8 @@ function humanThreadReplyEvent(): Extract<DesktopRoomStreamEvent, { type: "messa
             latestMessageId: "msg_agent_answer",
           },
         ],
+        participantCount: 2,
+        participantsTruncated: false,
         lastReadMessageId: null,
       },
       replyTo: {
@@ -2877,6 +2917,8 @@ test("Codex room activation routes only explicit addresses while retaining a sha
           messageCount: 1,
           latestMessageId: "msg_dawn_prior",
         }],
+        participantCount: 1,
+        participantsTruncated: false,
         lastReadMessageId: null,
       },
     },
@@ -2922,6 +2964,529 @@ test("Codex room activation routes only explicit addresses while retaining a sha
   });
   assert.equal(shouldDeliverCodexRoomStreamEventToManagedAgent(dawn, ownBroadcast), false, "a worker never reactivates itself");
   assert.equal(codexManagedAgentMessageActivationDecision(dawn, directToDawn.message), "activate");
+});
+
+test("desktop account routing is exact beyond display caps and authoritative for snapshots", () => {
+  const workers = Array.from({ length: 60 }, (_, index) => publicManagedAgentSession({
+    id: `local_${index}`,
+    agentSessionId: `agent_session_${index}`,
+    actorLabel: `Agent ${index}`,
+    agentKey: `owner/agent-${index}`,
+    displayName: `Agent ${index}`,
+  }));
+  const target = workers[0]!;
+  const cappedParticipants = workers.slice(10).map((worker, index) => ({
+    sender: worker.actorLabel || worker.displayName || worker.agentKey || "Agent",
+    source: "agent",
+    messageCount: 1,
+    latestMessageId: `msg_${index + 10}`,
+  }));
+  const legacy = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_legacy_overlay",
+      text: "continuing",
+      threadRootId: "msg_root",
+      threadReplyToId: "msg_previous",
+      thread: {
+        rootMessageId: "msg_root",
+        replyCount: 70,
+        unreadCount: 1,
+        hasUnread: true,
+        latestReply: null,
+        participants: cappedParticipants,
+        participantCount: 70,
+        participantsTruncated: true,
+        lastReadMessageId: null,
+      },
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+          activationReason: "thread_participant",
+        }],
+      },
+    },
+  });
+  const codexLegacyKeys = resolveCodexRoomStreamEventRecipients(workers, legacy)
+    .map((worker) => worker.agentKey);
+  const providerLegacyKeys = resolveDesktopRoomStreamEventRecipients(workers, legacy)
+    .map((worker) => worker.agentKey);
+  assert.equal(codexLegacyKeys.includes(target.agentKey), true, "the old member beyond the display cap is retained");
+  assert.equal(codexLegacyKeys.includes(workers[1]!.agentKey), false, "membership does not widen to absent workers");
+  assert.equal(providerLegacyKeys.includes(target.agentKey), true, "provider-neutral routing consumes the same exact overlay");
+
+  const authoritativeEmpty = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_snapshot_empty",
+      text: "@everyone",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+      },
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients(workers, authoritativeEmpty), []);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients(workers, authoritativeEmpty), []);
+
+  const malformed = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_malformed_overlay",
+      accountAgentRouting: { version: 1, authority: "invalid" },
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients(workers, malformed), []);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients(workers, malformed), []);
+
+  const duplicate = {
+    ...workers[1]!,
+    providerId: "cursor" as const,
+    agentKey: target.agentKey,
+  };
+  const receipt = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_duplicate_durable_key",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], receipt),
+    [target],
+    "an exact receipt session remains authoritative during durable-key overlap",
+  );
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target, duplicate], receipt), [target]);
+
+  const exactLegacyNegative = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_exact_legacy_negative",
+      thread: {
+        ...legacy.message.thread!,
+        latestReply: {
+          id: "msg_prior",
+          sender: target.actorLabel!,
+          text: "prior",
+          source: "agent",
+          timestamp: "2026-01-01T00:00:00.000Z",
+        },
+        participants: [{
+          sender: target.actorLabel!,
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "msg_prior",
+        }],
+      },
+      replyTo: {
+        id: "msg_prior",
+        sender: target.actorLabel!,
+        text: "prior",
+        source: "agent",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target], exactLegacyNegative),
+    [],
+    "display participants cannot override an authoritative negative membership",
+  );
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target], exactLegacyNegative), []);
+
+  const exactLegacyTarget = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_exact_legacy_session",
+      text: "@everyone continue",
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+          activationReason: "broadcast",
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], exactLegacyTarget),
+    [target],
+    "server-selected legacy authority disambiguates a same-key overlap",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], exactLegacyTarget),
+    [target],
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([duplicate], exactLegacyTarget),
+    [],
+    "a remote exact legacy representative cannot be replaced by a local same-key worker",
+  );
+  const unwrappedLegacy = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_unwrapped_incomplete_population",
+      accountAgentRouting: undefined,
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target], unwrappedLegacy, false),
+    [],
+    "an incomplete provider population cannot manufacture unique legacy authority",
+  );
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target], unwrappedLegacy, false), []);
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target], exactLegacyTarget, false),
+    [target],
+    "exact server-selected sessions remain safe when another provider cannot enumerate",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target], exactLegacyTarget, false),
+    [target],
+  );
+  const exactLegacyEmpty = messageEvent({
+    message: {
+      ...exactLegacyTarget.message,
+      id: "msg_exact_legacy_empty",
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+      },
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients([target], exactLegacyEmpty), []);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target], exactLegacyEmpty), []);
+
+  const localRotationRouting = buildLocalLegacyAccountAgentRouting(
+    [target, duplicate],
+    {
+      ...legacy.message,
+      id: "msg_local_rotation_broadcast",
+      text: "@everyone continue",
+      accountAgentRouting: undefined,
+    },
+  );
+  assert.deepEqual(localRotationRouting, {
+    version: 1,
+    authority: "legacy",
+    recipientAgentKeys: [target.agentKey!],
+    recipientSessions: [{
+      agentKey: target.agentKey!,
+      agentSessionId: target.agentSessionId!,
+      activationReason: "local_legacy",
+    }],
+    controlAuthorized: true,
+  }, "local broadcast authority collapses a cross-provider rotation to one exact session");
+  const localRotationEvent = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_local_rotation_broadcast",
+      text: "@everyone continue",
+      accountAgentRouting: localRotationRouting,
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients([target, duplicate], localRotationEvent), [target]);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target, duplicate], localRotationEvent), [target]);
+
+  const exactLocalReplyRouting = buildLocalLegacyAccountAgentRouting(
+    [target, duplicate],
+    {
+      ...legacy.message,
+      id: "msg_local_exact_reply",
+      threadRootId: "msg_local_exact_reply",
+      threadReplyToId: null,
+      text: "following up",
+      replyTo: {
+        id: "msg_local_publisher",
+        sender: duplicate.actorLabel!,
+        text: "prior agent message",
+        source: "agent",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        agentIdentity: {
+          name: null,
+          displayName: duplicate.displayName,
+          ownerLabel: null,
+          ownerAttribution: null,
+          ideLabel: null,
+          actorLabel: duplicate.actorLabel,
+          agentKey: duplicate.agentKey,
+          agentSessionId: duplicate.agentSessionId,
+        },
+      },
+    },
+  );
+  assert.deepEqual(exactLocalReplyRouting.recipientSessions, [{
+    agentKey: target.agentKey!,
+    agentSessionId: duplicate.agentSessionId!,
+    activationReason: "local_legacy",
+  }], "a quoted local agent message preserves its exact overlapping session");
+  const humanAliasReplyRouting = buildLocalLegacyAccountAgentRouting(
+    [target],
+    {
+      ...legacy.message,
+      id: "msg_local_human_reply",
+      threadRootId: "msg_local_human_reply",
+      threadReplyToId: null,
+      text: "following up",
+      replyTo: {
+        id: "msg_local_human",
+        sender: target.actorLabel!,
+        text: "human with the same label",
+        source: "browser",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        agentIdentity: null,
+      },
+    },
+  );
+  assert.deepEqual(
+    humanAliasReplyRouting.recipientSessions,
+    [],
+    "a quoted browser message never becomes an agent target through its mutable sender label",
+  );
+
+  const externalMcpSession = {
+    id: "persisted:external_mcp",
+    agentSessionId: "external_mcp",
+    agentKey: "other/oak",
+    actorLabel: target.actorLabel,
+    displayName: target.displayName,
+    startedAt: "1969-12-31T23:59:59.000Z",
+  };
+  const crossProcessAmbiguousRouting = buildLocalLegacyAccountAgentRouting(
+    [target],
+    { ...legacy.message, id: "msg_external_mcp_alias", text: "@agent0 continue" },
+    [],
+    [target, externalMcpSession],
+  );
+  assert.deepEqual(
+    crossProcessAmbiguousRouting.recipientSessions,
+    [],
+    "an external MCP worker remains in desktop's room-global alias ambiguity set",
+  );
+  const crossProcessSameKeyRouting = buildLocalLegacyAccountAgentRouting(
+    [target],
+    { ...legacy.message, id: "msg_external_mcp_same_key", text: "@everyone continue" },
+    [],
+    [target, { ...externalMcpSession, agentKey: target.agentKey }],
+  );
+  assert.deepEqual(
+    crossProcessSameKeyRouting.recipientSessions,
+    [{
+      agentKey: target.agentKey!,
+      agentSessionId: "external_mcp",
+      activationReason: "local_legacy",
+    }],
+    "desktop cannot replace the globally selected external representative with a local generation",
+  );
+
+  const localRotationCases: Array<[string, DesktopRoomMessage, readonly string[]]> = [
+    ["thread participant", {
+      ...legacy.message,
+      id: "msg_local_rotation_thread",
+      threadRootId: "msg_local_rotation_root",
+      thread: {
+        ...legacy.message.thread!,
+        rootMessageId: "msg_local_rotation_root",
+        participants: [],
+      },
+      text: "continue",
+    }, [target.agentKey!]],
+    ["display alias mention", {
+      ...legacy.message,
+      id: "msg_local_rotation_mention",
+      text: "@agent0 continue",
+    }, []],
+    ["durable mention", {
+      ...legacy.message,
+      id: "msg_local_rotation_durable_mention",
+      text: `@agent:${target.agentKey} continue`,
+    }, []],
+    ["quoted reply", {
+      ...legacy.message,
+      id: "msg_local_rotation_reply",
+      text: "continue",
+      threadRootId: "",
+      threadReplyToId: "",
+      thread: null,
+      replyTo: {
+        id: "msg_local_rotation_quoted",
+        sender: target.actorLabel!,
+        text: "previous",
+        source: "agent",
+        timestamp: new Date(0).toISOString(),
+      },
+    }, []],
+  ];
+  for (const [label, message, participantKeys] of localRotationCases) {
+    const routing = buildLocalLegacyAccountAgentRouting(
+      [target, duplicate],
+      message,
+      participantKeys,
+    );
+    assert.deepEqual(
+      routing.recipientSessions,
+      [{
+        agentKey: target.agentKey!,
+        agentSessionId: target.agentSessionId!,
+        activationReason: "local_legacy",
+      }],
+      `local ${label} authority resolves the durable key before choosing one session`,
+    );
+  }
+  for (const text of ["@everyone done", `@agent:${target.agentKey} done`]) {
+    const ownRouting = buildLocalLegacyAccountAgentRouting(
+      [target, duplicate],
+      {
+        ...legacy.message,
+        id: `msg_local_rotation_self_${text.includes("everyone") ? "broadcast" : "mention"}`,
+        source: "agent",
+        sender: target.actorLabel!,
+        text,
+        agentIdentity: {
+          name: null,
+          displayName: target.displayName,
+          ownerLabel: null,
+          ownerAttribution: null,
+          ideLabel: null,
+          actorLabel: target.actorLabel!,
+          agentKey: target.agentKey!,
+          agentSessionId: null,
+        },
+      },
+    );
+    assert.deepEqual(
+      ownRouting.recipientSessions,
+      [],
+      "durable publisher authority suppresses every live generation of the same key",
+    );
+  }
+  const identitylessLocalAgentRouting = buildLocalLegacyAccountAgentRouting(
+    [target, duplicate],
+    {
+      ...legacy.message,
+      id: "msg_local_legacy_identityless_agent",
+      source: "agent",
+      sender: target.actorLabel!,
+      text: "@everyone continue",
+      agentIdentity: null,
+    },
+  );
+  assert.deepEqual(
+    identitylessLocalAgentRouting.recipientSessions,
+    [],
+    "identityless legacy agent rows fail closed instead of replaying into current workers",
+  );
+
+  const exactRotationReceipt = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_exact_rotation_receipt",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], exactRotationReceipt),
+    [target],
+    "an exact captured receipt session disambiguates a supported rotation overlap",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], exactRotationReceipt),
+    [target],
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([duplicate], exactRotationReceipt),
+    [],
+    "an absent captured session remains authoritative while it may be active on another desktop",
+  );
+  assert.equal(desktopManagedAgentMessageActivationDecision(target, exactRotationReceipt.message), "activate");
+  assert.equal(desktopManagedAgentMessageActivationDecision(duplicate, exactRotationReceipt.message), "silent");
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(target, exactRotationReceipt), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(duplicate, exactRotationReceipt), false);
+  const endedRotationReceipt = messageEvent({
+    message: {
+      ...exactRotationReceipt.message,
+      id: "msg_ended_rotation_receipt",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+          successorAgentSessionId: duplicate.agentSessionId!,
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([duplicate], endedRotationReceipt),
+    [duplicate],
+    "only the server-authorized exact successor inherits an ended receipt",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], endedRotationReceipt),
+    [duplicate],
+    "the successor decision overrides stale local visibility of the ended capture",
+  );
+
+  const duplicateLegacy = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_duplicate_legacy_key",
+      thread: {
+        ...legacy.message.thread!,
+        participants: [{
+          sender: target.agentKey!,
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "msg_1",
+        }],
+      },
+      accountAgentRouting: undefined,
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], duplicateLegacy),
+    [],
+    "a display participant cannot bypass an ambiguous durable membership key",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], duplicateLegacy),
+    [],
+  );
 });
 
 test("Codex room activation fails closed for duplicate names and accepts a canonical target", () => {
@@ -3079,6 +3644,8 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
           messageCount: 1,
           latestMessageId: "prior_reply",
         }],
+        participantCount: 1,
+        participantsTruncated: false,
         lastReadMessageId: null,
       },
     },
@@ -3128,6 +3695,109 @@ test("Codex task, reply, and identityless author routing resolve aliases across 
   "conflicting stable author fields fail closed instead of suppressing two workers");
 });
 
+test("task routing gives an exact active lease global authority across provider rotations", () => {
+  const oldCodex = publicManagedAgentSession({
+    id: "local_old_codex",
+    providerId: "codex",
+    agentSessionId: "agent_session_old",
+    actorLabel: "Oak | Emmy's agent | Codex",
+    agentKey: "EmmyMay/oak",
+    displayName: "Oak",
+  });
+  const currentCursor = publicManagedAgentSession({
+    id: "local_current_cursor",
+    providerId: "cursor",
+    agentSessionId: "agent_session_current",
+    actorLabel: "Oak | Emmy's agent | Cursor",
+    agentKey: "EmmyMay/oak",
+    displayName: "Oak",
+  });
+  const cedar = publicManagedAgentSession({
+    id: "local_cedar_cursor",
+    providerId: "cursor",
+    agentSessionId: "agent_session_cedar",
+    actorLabel: "Cedar | Emmy's agent | Cursor",
+    agentKey: "EmmyMay/cedar",
+    displayName: "Cedar",
+  });
+  const workers = [oldCodex, currentCursor, cedar];
+  const resolvers = [
+    resolveCodexRoomStreamEventRecipients,
+    resolveDesktopRoomStreamEventRecipients,
+  ];
+  const taskEvent = (
+    overrides: Partial<DesktopTaskSummary>,
+  ): Extract<DesktopRoomStreamEvent, { type: "task_update" }> => ({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary(overrides),
+  });
+  const activeWorkLease = (
+    overrides: Partial<DesktopTaskSummary["activeLeases"][number]> = {},
+  ): DesktopTaskSummary["activeLeases"][number] => ({
+    id: "lease_work",
+    kind: "work",
+    holderLabel: "Oak",
+    agentKey: "EmmyMay/oak",
+    agentSessionId: "agent_session_current",
+    status: "active",
+    updatedAt: "2026-06-14T12:10:00.000Z",
+    ...overrides,
+  });
+
+  for (const resolve of resolvers) {
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assignee: "Oak",
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease()],
+      })),
+      [currentCursor],
+      "the exact lease selects only the current session without requiring its shared key to be unique",
+    );
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease({ agentKey: "EmmyMay/cedar" })],
+      })),
+      [],
+      "an exact lease whose supplied durable key mismatches the worker fails closed",
+    );
+    assert.deepEqual(
+      resolve([
+        currentCursor,
+        { ...cedar, agentSessionId: currentCursor.agentSessionId, agentKey: currentCursor.agentKey },
+      ], taskEvent({
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease()],
+      })),
+      [],
+      "a duplicate exact session identity fails closed",
+    );
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease({ agentSessionId: null })],
+      })),
+      [],
+      "a key-only rotation remains ambiguous across providers",
+    );
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assignee: "Cedar",
+        assigneeAgentKey: "EmmyMay/cedar",
+        activeLeases: [activeWorkLease({
+          holderLabel: "Cedar",
+          agentKey: "EmmyMay/cedar",
+          agentSessionId: null,
+        })],
+      })),
+      [cedar],
+      "a key-only legacy lease still resolves when exactly one global worker owns the key",
+    );
+  }
+});
+
 test("Codex stop control reaches a blocked bound worker but excludes unsafe recipients", () => {
   resetState({
     agent_sessions: {
@@ -3173,6 +3843,13 @@ test("Codex stop control reaches a blocked bound worker but excludes unsafe reci
       ...messageEvent().message,
       id: "msg_stop_blocked",
       text: "/stop-codex-room",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: true,
+      },
     },
   });
 
@@ -3299,6 +3976,8 @@ test("desktop message routing keeps real thread replies participant-aware", () =
             latestMessageId: "msg_dawn",
           },
         ],
+        participantCount: 2,
+        participantsTruncated: false,
         lastReadMessageId: null,
       },
     },

@@ -298,6 +298,108 @@ test("Cursor runtime starts and stops in a local room without cloud worker regis
   }
 });
 
+test("Cursor stop control is owner-authorized for active and blocked sessions", async () => {
+  resetState();
+  let turns = 0;
+  const { runtime } = createRuntimeHarness({
+    async runTurn(): Promise<CursorTurnResult> {
+      turns += 1;
+      return {
+        sessionId: "cursor_stop_authority",
+        text: "ordinary addressed text",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  });
+  const started = await runtime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    stopPhrase: "/stop-cursor-room",
+  });
+  const stopMessage = {
+    ...messageEvent().message,
+    id: "msg_stop_other_account",
+    text: "/stop-cursor-room",
+    accountAgentRouting: {
+      version: 1 as const,
+      authority: "receipts" as const,
+      recipientAgentKeys: [started.session.agentKey!],
+      recipientSessions: [{
+        agentKey: started.session.agentKey!,
+        agentSessionId: started.session.agentSessionId!,
+      }],
+      controlAuthorized: false,
+    },
+  };
+  runtime.dispatchRoomStreamEvent(messageEvent({ message: stopMessage }));
+  await runtime.waitForIdle();
+  assert.equal(turns, 1, "addressed text from another account remains ordinary work");
+  assert.notEqual(getStoredCursorLiveSession(started.session.id)?.status, "interrupted");
+
+  runtime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...stopMessage,
+      id: "msg_stop_owner",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: true,
+      },
+    },
+  }));
+  await runtime.waitForIdle();
+  assert.equal(turns, 2);
+  assert.equal(getStoredCursorLiveSession(started.session.id)?.status, "interrupted");
+
+  resetState();
+  let blockedTurns = 0;
+  const { runtime: blockedRuntime } = createRuntimeHarness({
+    async runTurn(): Promise<CursorTurnResult> {
+      blockedTurns += 1;
+      return {
+        sessionId: null,
+        text: null,
+        status: "error",
+        error: "You've hit your usage limit.",
+        recentItems: [],
+      };
+    },
+  });
+  const blocked = await blockedRuntime.start({
+    providerId: "cursor",
+    roomIdentifier: "room_1",
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+    stopPhrase: "/stop-cursor-room",
+  });
+  blockedRuntime.dispatchRoomStreamEvent(messageEvent());
+  await blockedRuntime.waitForIdle();
+  assert.equal(getStoredCursorLiveSession(blocked.session.id)?.status, "blocked");
+  blockedRuntime.dispatchRoomStreamEvent(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_stop_blocked_owner",
+      text: "/stop-cursor-room",
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: true,
+      },
+    },
+  }));
+  await blockedRuntime.waitForIdle();
+  assert.equal(blockedTurns, 1, "blocked stop control bypasses the unavailable model turn");
+  assert.equal(getStoredCursorLiveSession(blocked.session.id)?.status, "interrupted");
+});
+
 test("Cursor runtime persists selected MCP policy and model, then reuses them for event turns", async () => {
   resetState();
   const calls: CursorTurnInput[] = [];
@@ -598,6 +700,7 @@ test("Cursor runtime preempts an active event and redelivers the newer event wit
     message: {
       ...baseMessage,
       id: "msg_2",
+      threadRootId: "msg_2",
       text: "newer urgent request",
     },
   }));
@@ -665,6 +768,7 @@ test("Cursor runtime queues write-capable events instead of preempting active wr
     message: {
       ...baseMessage,
       id: "msg_2",
+      threadRootId: "msg_2",
       text: "second write request",
     },
   }));

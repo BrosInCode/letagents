@@ -1,4 +1,5 @@
 import type {
+  DesktopManagedAgentSession,
   DesktopRentalActivityEvent,
   DesktopRoomMessage,
   DesktopRoomStreamEvent,
@@ -12,18 +13,30 @@ import {
   localRoomIdentifierForStorage,
   resolveLocalAwareRoomStorageMode,
 } from "./rooms/local-store.js";
-import { getLocalChatMessages } from "./rooms/messages/local-store.js";
+import {
+  getLocalChatMessages,
+  getLocalChatThreadRoutingAgentKeysForRoots,
+} from "./rooms/messages/local-store.js";
 import { resolveLocalThreadReaderKey } from "./rooms/messages/thread-reader.js";
 import {
   mapDesktopReasoningSessionPayload,
   mapDesktopReasoningUpdatePayload,
   mapGitHubRoomEventPayload,
   mapDesktopTaskSummaryPayload,
+  mapCloudRoomMessagePayload,
   mapRoomMessagePayload,
 } from "./rooms.js";
 import { mapRoomArtifactPayload } from "./rooms/snapshot/mappers.js";
 import { emitToMainWindow } from "./window.js";
-import { dispatchRoomStreamEventToManagedAgents } from "./agents/codex-supervisor.js";
+import {
+  dispatchRoomStreamEventToManagedAgents,
+  listDesktopManagedAgentSessionPopulationForRoom,
+} from "./agents/codex-supervisor.js";
+import {
+  readAgentLocalStateSnapshot,
+  type StoredAgentSessionState,
+} from "./agents/state.js";
+import type { LocalRoutingAuthorityWorker } from "./agents/codex-event-routing.js";
 import {
   createManagedMessageDeliveryTracker,
   type ManagedMessageDeliveryTracker,
@@ -38,6 +51,7 @@ let activeRoomStream: {
   lastMessageId: string | null;
   localRoomIdentifier: string | null;
   managedMessageDeliveryTracker: ManagedMessageDeliveryTracker;
+  localUiMessageTracker: ManagedMessageDeliveryTracker;
   stopped: boolean;
   // Cloud rooms deliver live messages over SSE. The HTTP long-poll is a
   // *fallback* transport that only runs while SSE is disconnected; `pollActive`
@@ -86,25 +100,309 @@ export function emitRoomStreamEvent(
     return;
   }
   try {
-    dispatchRoomStreamEventToManagedAgents(event);
+    managedAgentRoomStreamDispatcher(event);
   } catch {
     // Agent delivery must not break the human room stream.
   }
 }
 
-export function deliverDesktopRoomMessageToManagedAgents(
+export async function deliverDesktopRoomMessageToManagedAgents(
+  roomIdentifier: string,
+  message: DesktopRoomMessage,
+): Promise<void> {
+  await deliverDesktopRoomMessageToManagedAgentsInternal(roomIdentifier, message, true);
+}
+
+async function deliverDesktopRoomMessageToManagedAgentsInternal(
+  roomIdentifier: string,
+  message: DesktopRoomMessage,
+  scheduleRetry: boolean,
+): Promise<"ready" | "transient" | "invalid"> {
+  let deliveryMessage = message;
+  let transientHydrationFailure = false;
+  if (!message.accountAgentRouting) {
+    try {
+      const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
+      if (storage.effectiveMode === "local") {
+        const [routed] = await localAccountAgentRoutingHydrator(
+          roomIdentifier,
+          localRoomIdentifierForStorage(storage, roomIdentifier),
+          [message],
+        );
+        deliveryMessage = routed ?? message;
+      }
+    } catch {
+      transientHydrationFailure = true;
+      deliveryMessage = {
+        ...message,
+        accountAgentRouting: { version: 1, authority: "invalid" },
+      };
+    }
+  }
+  if (deliveryMessage.accountAgentRouting?.authority === "invalid") {
+    // A missing envelope that could not be projected is retryable. An
+    // explicitly invalid imported/server envelope is durable authority and
+    // must remain fail-closed instead of being reinterpreted as legacy data.
+    if (transientHydrationFailure) {
+      if (scheduleRetry) scheduleLocalManagedMessageDeliveryRetry(roomIdentifier, message);
+      return "transient";
+    }
+    return "invalid";
+  }
+  removePendingLocalManagedMessageDelivery(roomIdentifier, message.id);
+  const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(roomIdentifier, message.id);
+  if (!shouldDeliverToManagedAgents) return "ready";
+  managedAgentRoomStreamDispatcher({
+    type: "message",
+    roomIdentifier,
+    message: deliveryMessage ?? message,
+  });
+  return "ready";
+}
+
+type LocalManagedMessageDeliveryRetry = {
+  messages: Map<string, DesktopRoomMessage>;
+  attempt: number;
+  startedAt: number;
+  timer: ReturnType<typeof setTimeout> | null;
+};
+
+const MAX_LOCAL_MANAGED_DELIVERY_RETRY_MESSAGES = 500;
+const MAX_LOCAL_MANAGED_DELIVERY_RETRY_ATTEMPTS = 8;
+const MAX_LOCAL_MANAGED_DELIVERY_RETRY_AGE_MS = 30_000;
+const localManagedMessageDeliveryRetries = new Map<string, LocalManagedMessageDeliveryRetry>();
+
+function removePendingLocalManagedMessageDelivery(
+  roomIdentifier: string,
+  messageId: string,
+): void {
+  const roomKey = roomIdentifier.trim();
+  const pending = localManagedMessageDeliveryRetries.get(roomKey);
+  if (!pending) return;
+  pending.messages.delete(messageId);
+  if (pending.messages.size > 0) return;
+  if (pending.timer) clearTimeout(pending.timer);
+  localManagedMessageDeliveryRetries.delete(roomKey);
+}
+
+function clearLocalManagedMessageDeliveryRetries(roomIdentifier?: string): void {
+  const roomKey = roomIdentifier?.trim();
+  for (const [key, pending] of localManagedMessageDeliveryRetries) {
+    if (roomKey && key !== roomKey) continue;
+    if (pending.timer) clearTimeout(pending.timer);
+    localManagedMessageDeliveryRetries.delete(key);
+  }
+}
+
+export function inspectLocalManagedMessageDeliveryRetriesForTest(): {
+  rooms: number;
+  messages: number;
+} {
+  return {
+    rooms: localManagedMessageDeliveryRetries.size,
+    messages: [...localManagedMessageDeliveryRetries.values()]
+      .reduce((total, pending) => total + pending.messages.size, 0),
+  };
+}
+
+export function clearLocalManagedMessageDeliveryRetriesForTest(): void {
+  clearLocalManagedMessageDeliveryRetries();
+}
+
+function scheduleLocalManagedMessageDeliveryRetry(
   roomIdentifier: string,
   message: DesktopRoomMessage,
 ): void {
-  const shouldDeliverToManagedAgents = shouldDeliverManagedMessageEvent(roomIdentifier, message.id);
-  if (!shouldDeliverToManagedAgents) {
+  const roomKey = roomIdentifier.trim();
+  let pending = localManagedMessageDeliveryRetries.get(roomKey);
+  if (!pending) {
+    pending = { messages: new Map(), attempt: 0, startedAt: Date.now(), timer: null };
+    localManagedMessageDeliveryRetries.set(roomKey, pending);
+  }
+  // The ordered local poll remains the durable recovery owner. This small
+  // coalesced queue only closes the immediate-send latency gap; overflow is
+  // intentionally left for the poll rather than spawning per-message timers.
+  if (
+    pending.messages.size < MAX_LOCAL_MANAGED_DELIVERY_RETRY_MESSAGES
+    || pending.messages.has(message.id)
+  ) {
+    pending.messages.set(message.id, message);
+  }
+  scheduleLocalManagedMessageDeliveryRetryTimer(roomKey, pending);
+}
+
+function scheduleLocalManagedMessageDeliveryRetryTimer(
+  roomIdentifier: string,
+  pending: LocalManagedMessageDeliveryRetry,
+): void {
+  if (pending.timer || pending.messages.size === 0) return;
+  if (
+    pending.attempt >= MAX_LOCAL_MANAGED_DELIVERY_RETRY_ATTEMPTS
+    || Date.now() - pending.startedAt >= MAX_LOCAL_MANAGED_DELIVERY_RETRY_AGE_MS
+  ) {
+    localManagedMessageDeliveryRetries.delete(roomIdentifier);
     return;
   }
-  dispatchRoomStreamEventToManagedAgents({
-    type: "message",
-    roomIdentifier,
-    message,
-  });
+  const delayMs = Math.min(2_000, 50 * (2 ** Math.min(pending.attempt + 1, 5)));
+  pending.timer = setTimeout(() => {
+    pending.timer = null;
+    void retryLocalManagedMessageDeliveries(roomIdentifier, pending);
+  }, delayMs);
+  pending.timer.unref?.();
+}
+
+async function retryLocalManagedMessageDeliveries(
+  roomIdentifier: string,
+  pending: LocalManagedMessageDeliveryRetry,
+): Promise<void> {
+  if (localManagedMessageDeliveryRetries.get(roomIdentifier) !== pending) return;
+  if (
+    activeRoomStream
+    && (activeRoomStream.stopped || activeRoomStream.roomIdentifier !== roomIdentifier)
+  ) {
+    clearLocalManagedMessageDeliveryRetries(roomIdentifier);
+    return;
+  }
+  pending.attempt += 1;
+  for (const [messageId, message] of pending.messages) {
+    let result: "ready" | "transient" | "invalid";
+    try {
+      result = await deliverDesktopRoomMessageToManagedAgentsInternal(
+        roomIdentifier,
+        message,
+        false,
+      );
+    } catch {
+      result = "transient";
+    }
+    if (result === "transient") break;
+    pending.messages.delete(messageId);
+  }
+  if (pending.messages.size === 0) {
+    localManagedMessageDeliveryRetries.delete(roomIdentifier);
+    return;
+  }
+  scheduleLocalManagedMessageDeliveryRetryTimer(roomIdentifier, pending);
+}
+
+function isPersistedWorkerActiveInRoom(
+  session: StoredAgentSessionState,
+  roomIdentifiers: ReadonlySet<string>,
+): boolean {
+  return session.session_kind === "worker"
+    && !session.ended_at
+    && roomIdentifiers.has(String(session.room_id ?? "").trim())
+    && Boolean(String(session.session_id ?? "").trim())
+    && Boolean(String(session.agent_key ?? "").trim());
+}
+
+function localRoutingAuthorityPopulation(
+  roomIdentifier: string,
+  localRoomIdentifier: string,
+  desktopSessions: readonly DesktopManagedAgentSession[],
+): { complete: boolean; sessions: LocalRoutingAuthorityWorker[] } {
+  const snapshot = readAgentLocalStateSnapshot();
+  const roomIdentifiers = new Set(
+    [roomIdentifier, localRoomIdentifier].map((value) => value.trim()).filter(Boolean),
+  );
+  const sessions = new Map<string, LocalRoutingAuthorityWorker>();
+  for (const session of desktopSessions) {
+    const sessionId = String(session.agentSessionId ?? "").trim();
+    if (sessionId) sessions.set(sessionId, session);
+  }
+  for (const stored of Object.values(snapshot.state.agent_sessions ?? {})) {
+    if (!isPersistedWorkerActiveInRoom(stored, roomIdentifiers)) continue;
+    const sessionId = stored.session_id.trim();
+    if (sessions.has(sessionId)) continue;
+    sessions.set(sessionId, {
+      id: `persisted:${sessionId}`,
+      agentSessionId: sessionId,
+      agentKey: stored.agent_key?.trim() || null,
+      actorLabel: stored.actor_label?.trim() || null,
+      displayName: stored.display_name?.trim() || null,
+      startedAt: stored.created_at?.trim() || stored.updated_at?.trim() || "1970-01-01T00:00:00.000Z",
+    });
+  }
+  return { complete: snapshot.complete, sessions: [...sessions.values()] };
+}
+
+async function attachLocalAccountAgentRouting(
+  roomIdentifier: string,
+  localRoomIdentifier: string,
+  messages: readonly DesktopRoomMessage[],
+): Promise<DesktopRoomMessage[]> {
+  const roots = new Set<string>();
+  for (const message of messages) {
+    const rootId = message.threadRootId || message.thread?.rootMessageId || message.id;
+    if (!message.accountAgentRouting && rootId !== message.id) roots.add(rootId);
+  }
+
+  try {
+    const unresolvedMessages = messages.filter((message) => !message.accountAgentRouting);
+    if (unresolvedMessages.length === 0) return [...messages];
+    const population = listDesktopManagedAgentSessionPopulationForRoom(roomIdentifier);
+    const authorityPopulation = localRoutingAuthorityPopulation(
+      roomIdentifier,
+      localRoomIdentifier,
+      population.sessions,
+    );
+    if (!population.complete || !authorityPopulation.complete) {
+      return messages.map((message) => message.accountAgentRouting
+        ? message
+        : { ...message, accountAgentRouting: { version: 1, authority: "invalid" } });
+    }
+    const sessions = population.sessions;
+    const { buildLocalLegacyAccountAgentRouting } = await import("./agents/codex-event-routing.js");
+    const membership = roots.size > 0
+      ? await getLocalChatThreadRoutingAgentKeysForRoots(
+          localRoomIdentifier,
+          [...roots],
+          authorityPopulation.sessions,
+        )
+      : new Map<string, Set<string>>();
+    return messages.map((message) => {
+      const rootId = message.threadRootId || message.thread?.rootMessageId || message.id;
+      if (message.accountAgentRouting) return message;
+      const participantKeys = [...(membership.get(rootId) ?? [])].sort();
+      return {
+        ...message,
+        accountAgentRouting: buildLocalLegacyAccountAgentRouting(
+          sessions,
+          message,
+          participantKeys,
+          authorityPopulation.sessions,
+        ),
+      };
+    });
+  } catch {
+    // A local projection failure must not turn a persisted human message into
+    // a failed send or fall back to a capped display approximation.
+    return messages.map((message) => {
+      return message.accountAgentRouting
+        ? message
+        : { ...message, accountAgentRouting: { version: 1, authority: "invalid" } };
+    });
+  }
+}
+
+type LocalAccountAgentRoutingHydrator = typeof attachLocalAccountAgentRouting;
+let localAccountAgentRoutingHydrator: LocalAccountAgentRoutingHydrator =
+  attachLocalAccountAgentRouting;
+
+type ManagedAgentRoomStreamDispatcher = typeof dispatchRoomStreamEventToManagedAgents;
+let managedAgentRoomStreamDispatcher: ManagedAgentRoomStreamDispatcher =
+  dispatchRoomStreamEventToManagedAgents;
+
+export function setLocalAccountAgentRoutingHydratorForTest(
+  hydrator: LocalAccountAgentRoutingHydrator | null,
+): void {
+  localAccountAgentRoutingHydrator = hydrator ?? attachLocalAccountAgentRouting;
+}
+
+export function setManagedAgentRoomStreamDispatcherForTest(
+  dispatcher: ManagedAgentRoomStreamDispatcher | null,
+): void {
+  managedAgentRoomStreamDispatcher = dispatcher ?? dispatchRoomStreamEventToManagedAgents;
 }
 
 export function emitPersistedLocalRoomMessage(
@@ -122,13 +420,18 @@ export function emitPersistedLocalRoomMessage(
     return;
   }
 
-  stream.lastMessageId = message.id;
-  stream.managedMessageDeliveryTracker.remember(trimmedRoomIdentifier, message.id);
+  // The renderer gets the locally persisted message immediately, but the
+  // durable poll remains responsible for advancing the room cursor. Managed
+  // delivery starts now for low latency and is deduped against the later poll;
+  // if projection is temporarily unavailable, leaving the cursor untouched
+  // guarantees that the persisted row is retried in order.
+  stream.localUiMessageTracker.remember(trimmedRoomIdentifier, message.id);
   emitRoomStreamEvent({
     type: "message",
     roomIdentifier: trimmedRoomIdentifier,
     message,
   }, { deliverToManagedAgents: false });
+  void deliverDesktopRoomMessageToManagedAgents(trimmedRoomIdentifier, message);
 }
 
 export function emitPersistedLocalRoomArtifactUpdate(
@@ -381,7 +684,7 @@ function handleRoomStreamFrame(
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier: eventRoomIdentifier,
-      message: mapRoomMessagePayload(
+      message: mapCloudRoomMessagePayload(
         payload as Parameters<typeof mapRoomMessagePayload>[0],
       ),
     }, { deliverToManagedAgents: shouldDeliverToManagedAgents });
@@ -439,7 +742,7 @@ async function fetchRoomMessagePollPage(
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier,
-      message: mapRoomMessagePayload(rawMessage),
+      message: mapCloudRoomMessagePayload(rawMessage),
     }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id) });
   }
   return { hasMore: page.has_more === true, lastMessageId: stream.lastMessageId };
@@ -501,7 +804,7 @@ async function fetchLatestRoomMessagePage(
     if (!isCurrentRoomStream(stream)) return;
     if (typeof rawMessage.id === "string") stream.lastMessageId = rawMessage.id;
     const roomIdentifier = page.room_id || stream.roomIdentifier;
-    emitRoomStreamEvent({ type: "message", roomIdentifier, message: mapRoomMessagePayload(rawMessage) }, {
+    emitRoomStreamEvent({ type: "message", roomIdentifier, message: mapCloudRoomMessagePayload(rawMessage) }, {
       deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id),
     });
   }
@@ -608,14 +911,29 @@ async function pollLocalDesktopRoomMessages(
         readerKey: await resolveLocalThreadReaderKey(),
       });
       if (!isCurrentRoomStream(stream)) return;
-      for (const rawMessage of page.messages) {
+      const pageMessages = await localAccountAgentRoutingHydrator(
+        stream.roomIdentifier,
+        localRoomIdentifier,
+        page.messages.map(mapRoomMessagePayload),
+      );
+      if (pageMessages.some((message) => message.accountAgentRouting?.authority === "invalid")) {
+        throw new Error("Local message routing authority is temporarily unavailable.");
+      }
+      for (const message of pageMessages) {
         if (!isCurrentRoomStream(stream)) return;
-        stream.lastMessageId = rawMessage.id;
-        emitRoomStreamEvent({
-          type: "message",
-          roomIdentifier: stream.roomIdentifier,
-          message: mapRoomMessagePayload(rawMessage),
-        }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(stream.roomIdentifier, rawMessage.id) });
+        const shouldEmitToRenderer = stream.localUiMessageTracker.remember(
+          stream.roomIdentifier,
+          message.id,
+        );
+        if (shouldEmitToRenderer) {
+          emitRoomStreamEvent({
+            type: "message",
+            roomIdentifier: stream.roomIdentifier,
+            message,
+          }, { deliverToManagedAgents: false });
+        }
+        await deliverDesktopRoomMessageToManagedAgents(stream.roomIdentifier, message);
+        stream.lastMessageId = message.id;
       }
       await new Promise((resolve) => setTimeout(resolve, page.messages.length ? 250 : 1500));
     } catch (error) {
@@ -827,6 +1145,7 @@ export async function startDesktopRoomStream(
     lastMessageId: afterMessageId || null,
     localRoomIdentifier: null,
     managedMessageDeliveryTracker: createManagedMessageDeliveryTracker(),
+    localUiMessageTracker: createManagedMessageDeliveryTracker(),
     stopped: false,
     pollActive: false,
     catchUpRetryTimer: null,
@@ -890,6 +1209,7 @@ export async function stopDesktopRoomStream(
   )
     return;
 
+  clearLocalManagedMessageDeliveryRetries(activeRoomStream.roomIdentifier);
   activeRoomStream.stopped = true;
   activeRoomStream.resolveReady?.();
   activeRoomStream.resolveReady = null;

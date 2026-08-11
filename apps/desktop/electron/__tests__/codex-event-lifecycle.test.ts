@@ -353,6 +353,14 @@ function messageEvent(
   };
 }
 
+const ownerAuthorizedLegacyRouting = {
+  version: 1 as const,
+  authority: "legacy" as const,
+  recipientAgentKeys: [],
+  recipientSessions: [],
+  controlAuthorized: true,
+};
+
 async function seedDeliverableSession(input: {
   roomIdentifier: string;
   sessionId?: string;
@@ -670,6 +678,7 @@ test("codex stop-phrase message ends the session after the turn", async () => {
       id: "msg_stop_phrase",
       text: "/stop-codex-room",
       threadRootId: "msg_stop_phrase",
+      accountAgentRouting: ownerAuthorizedLegacyRouting,
     }));
 
     const session = await waitFor(
@@ -718,6 +727,7 @@ test("blocked Codex stop phrase tears down immediately instead of queuing stale 
   dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
     id: "msg_blocked_stop_phrase",
     text: "/stop-codex-room",
+    accountAgentRouting: ownerAuthorizedLegacyRouting,
   }));
 
   const stopped = await waitFor(() => {
@@ -748,6 +758,7 @@ test("codex stop-phrase message still ends the session when its turn is interrup
       id: "msg_interrupted_stop_phrase",
       text: "/stop-codex-room",
       threadRootId: "msg_interrupted_stop_phrase",
+      accountAgentRouting: ownerAuthorizedLegacyRouting,
     }));
 
     const session = await waitFor(

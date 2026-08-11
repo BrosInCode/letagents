@@ -1,3 +1,12 @@
+import {
+  normalizeRoutingHandle,
+  normalizeRoutingSender,
+  routingIdentityAliases,
+  routingSenderAliasRows,
+  routingSenderAliases,
+} from "../../shared/routing-aliases.mjs";
+import { parsePositivePgIntegerScopedId } from "./scoped-ids.js";
+
 export type AgentMessageActivationDecision = "activate" | "silent" | "unclear";
 
 export type AgentMessageActivationReason =
@@ -54,6 +63,19 @@ type ActivationTaskLeaseLike = {
 
 export type AgentMessageActivationContext = {
   activeTaskLeases?: readonly ActivationTaskLeaseLike[];
+  /** Legacy messages authored by this exact durable identity. */
+  selfMessageIds?: ReadonlySet<string>;
+  /** Thread roots whose routing projection contains this exact identity. */
+  threadParticipantRootIds?: ReadonlySet<string>;
+  /** Legacy messages whose globally resolved mention names this identity. */
+  explicitMentionMessageIds?: ReadonlySet<string>;
+  /** Legacy messages whose globally resolved reply target names this identity. */
+  replyTargetMessageIds?: ReadonlySet<string>;
+  /** Complete legacy decisions supplied by the room-global routing authority. */
+  authoritativeLegacyDecisions?: ReadonlyMap<
+    string,
+    AgentMessageActivation["for_current_agent"]
+  >;
 };
 
 const NON_AGENT_AT_HANDLES = new Set([
@@ -119,8 +141,8 @@ export function attachAgentMessageActivationsFromReceipts<T extends MessageLike>
 
   return messages.map((message) => {
     const msgIdStr = String(message.id ?? "");
-    const msgNum = parseInt(msgIdStr.replace(/^msg_/, ""), 10);
-    const receipt = !isNaN(msgNum) ? receiptsMap.get(msgNum) || receiptsMap.get(msgIdStr) : null;
+    const msgNum = parsePositivePgIntegerScopedId(msgIdStr, "msg");
+    const receipt = msgNum !== null ? receiptsMap.get(msgNum) || receiptsMap.get(msgIdStr) : null;
 
     if (receipt) {
       const reason = receipt.activation_reason as AgentMessageActivationReason;
@@ -136,7 +158,13 @@ export function attachAgentMessageActivationsFromReceipts<T extends MessageLike>
       };
     }
 
-    if (!isNaN(msgNum) && snapshotNumbers.has(msgNum)) {
+    // System failure rows are canonical silent control events. A routing
+    // snapshot with no receipt must not erase their diagnostic reason.
+    if (
+      msgNum !== null
+      && snapshotNumbers.has(msgNum)
+      && normalizeSender(message.source) !== "managed_agent_failure"
+    ) {
       return {
         ...message,
         activation: {
@@ -173,7 +201,16 @@ export function decideAgentMessageActivation(
   if (normalizeSender(message.source) === "managed_agent_failure") {
     return decision("silent", "system_event");
   }
-  if (senderMatchesIdentity(message.sender, identity)) {
+
+  const messageId = normalizedString(message.id);
+  const authoritativeLegacyDecision = context.authoritativeLegacyDecisions?.get(messageId);
+  if (authoritativeLegacyDecision) return authoritativeLegacyDecision;
+
+  if (
+    context.selfMessageIds !== undefined
+      ? context.selfMessageIds.has(messageId)
+      : senderMatchesIdentity(message.sender, identity)
+  ) {
     return decision("silent", "self_message");
   }
 
@@ -181,7 +218,12 @@ export function decideAgentMessageActivation(
   if (mentions.some(isBroadcastHandle)) {
     return decision("activate", "broadcast");
   }
-  if (mentions.some((mention) => identityAliases(identity).has(normalizeMentionIdentityHandle(mention)))) {
+  const authoritativeExplicitMentions = context.explicitMentionMessageIds;
+  if (
+    authoritativeExplicitMentions !== undefined
+      ? authoritativeExplicitMentions.has(messageId)
+      : mentions.some((mention) => activationIdentityAliases(identity).has(normalizeMentionIdentityHandle(mention)))
+  ) {
     return decision("activate", "explicit_mention");
   }
   if (hasBroadcastAddress(message.text)) {
@@ -191,7 +233,15 @@ export function decideAgentMessageActivation(
     return decision("silent", "explicit_other_mention");
   }
 
-  if (senderMatchesIdentity(message.reply_to?.sender, identity)) {
+  const authoritativeThreadParticipantRootIds = context.threadParticipantRootIds;
+  const authoritativeReplyTargets = context.replyTargetMessageIds;
+  const hasAuthoritativeThreadMembership = isThreadReply(message)
+    && authoritativeThreadParticipantRootIds !== undefined;
+  if (
+    authoritativeReplyTargets !== undefined
+      ? authoritativeReplyTargets.has(messageId)
+      : !hasAuthoritativeThreadMembership && senderMatchesIdentity(message.reply_to?.sender, identity)
+  ) {
     return decision("activate", "reply_target");
   }
 
@@ -199,7 +249,12 @@ export function decideAgentMessageActivation(
     return decision("silent", "other_reply_target");
   }
 
-  if (isThreadReply(message) && threadParticipantsIncludeIdentity(message, identity)) {
+  if (
+    isThreadReply(message)
+    && (hasAuthoritativeThreadMembership
+      ? authoritativeThreadParticipantRootIds.has(threadRootId(message))
+      : threadParticipantsIncludeIdentity(message, identity))
+  ) {
     return decision("activate", "thread_participant");
   }
 
@@ -224,8 +279,12 @@ function decision(
 
 function isThreadReply(message: MessageLike): boolean {
   const ownId = normalizedString(message.id);
-  const rootId = normalizedString(message.thread_root_id) || normalizedString(message.thread?.root_message_id);
+  const rootId = threadRootId(message);
   return Boolean(ownId && rootId && ownId !== rootId);
+}
+
+function threadRootId(message: MessageLike): string {
+  return normalizedString(message.thread_root_id) || normalizedString(message.thread?.root_message_id);
 }
 
 function isAgentReplyTarget(replyTo: MessageLike["reply_to"]): boolean {
@@ -379,7 +438,7 @@ function senderMatchesIdentity(sender: unknown, identity: ActivationIdentity): b
   const normalizedSender = normalizeSender(sender);
   if (!normalizedSender) return false;
 
-  const aliases = identityAliases(identity);
+  const aliases = activationIdentityAliases(identity);
   if (aliases.has(normalizedSender)) return true;
 
   return String(sender || "")
@@ -387,16 +446,114 @@ function senderMatchesIdentity(sender: unknown, identity: ActivationIdentity): b
     .some((part) => aliases.has(normalizeSender(part)));
 }
 
-function identityAliases(identity: ActivationIdentity): Set<string> {
-  const aliases = new Set<string>();
-  const values = [
-    identity.actor_label,
-    identity.display_name,
-    identity.agent_key,
-    identity.agent_key.split("/").pop(),
-  ];
-  for (const alias of aliasesForValues(values)) aliases.add(alias);
-  return aliases;
+export function activationIdentityAliases(identity: ActivationIdentity): Set<string> {
+  return routingIdentityAliases(identity);
+}
+
+/** Canonical aliases materialized from a historical message sender. */
+export function activationSenderAliases(sender: unknown, segmentLimit = 16): Set<string> {
+  return routingSenderAliases(sender, segmentLimit);
+}
+
+/**
+ * Resolve identity-bearing addresses against the complete active room
+ * population. A display alias is authority only when it names one durable
+ * agent key globally; account/provider filtering happens after this step.
+ * Full historical sender labels take precedence over their pipe-delimited
+ * compatibility segments.
+ */
+export function resolveGloballyAddressedAgentKeys(
+  message: Pick<MessageLike, "text" | "reply_to">,
+  identities: readonly ActivationIdentity[],
+): { explicitMentionKeys: Set<string>; replyTargetKeys: Set<string> } {
+  return createGlobalAgentAddressResolver(identities)(message);
+}
+
+/**
+ * Build the room-wide alias authority once, then resolve a page of legacy
+ * messages without rebuilding every active worker alias set per message.
+ */
+export function createGlobalAgentAddressResolver(
+  identities: readonly ActivationIdentity[],
+): (message: Pick<MessageLike, "text" | "reply_to"> & Partial<Pick<MessageLike, "sender">>) => {
+  broadcast: boolean;
+  hasMention: boolean;
+  hasAgentMention: boolean;
+  explicitMentionKeys: Set<string>;
+  replyTargetKeys: Set<string>;
+  senderKeys: Set<string>;
+} {
+  const keysByAlias = new Map<string, Set<string>>();
+  for (const identity of identities) {
+    const key = normalizedString(identity.agent_key);
+    if (!key) continue;
+    for (const alias of activationIdentityAliases(identity)) {
+      const keys = keysByAlias.get(alias) ?? new Set<string>();
+      keys.add(key);
+      keysByAlias.set(alias, keys);
+    }
+  }
+
+  return (message) => {
+    const mentions = extractMentionHandles(message.text);
+    const broadcast = mentions.some(isBroadcastHandle) || hasBroadcastAddress(message.text);
+    const hasMention = mentions.some((mention) => !isBroadcastHandle(mention));
+    const hasAgentMention = mentions.some(isLikelyAgentMentionHandle);
+    const explicitMentionKeys = new Set<string>();
+    for (const mention of mentions) {
+      if (isBroadcastHandle(mention)) continue;
+      const alias = normalizeMentionIdentityHandle(mention);
+      if (!alias) continue;
+      const keys = keysByAlias.get(alias);
+      if (keys?.size === 1) explicitMentionKeys.add(keys.values().next().value!);
+    }
+
+    const replyTargetKeys = new Set<string>();
+    const replyAliases = normalizedString(message.reply_to?.source) === "agent"
+      ? routingSenderAliasRows(message.reply_to?.sender)
+      : [];
+    const matchingKeys = (full: boolean): Set<string> => {
+      const keys = new Set<string>();
+      for (const row of replyAliases) {
+        if (row.isFull !== full) continue;
+        for (const key of keysByAlias.get(row.alias) ?? []) keys.add(key);
+      }
+      return keys;
+    };
+    const fullMatches = matchingKeys(true);
+    const replyMatches = fullMatches.size > 0 ? fullMatches : matchingKeys(false);
+    if (replyMatches.size === 1) replyTargetKeys.add(replyMatches.values().next().value!);
+
+    const senderKeys = new Set<string>();
+    const senderAliases = routingSenderAliasRows(message.sender);
+    const senderMatchingKeys = (full: boolean): Set<string> => {
+      const keys = new Set<string>();
+      for (const row of senderAliases) {
+        if (row.isFull !== full) continue;
+        for (const key of keysByAlias.get(row.alias) ?? []) keys.add(key);
+      }
+      return keys;
+    };
+    const senderFullMatches = senderMatchingKeys(true);
+    const senderMatches = senderFullMatches.size > 0
+      ? senderFullMatches
+      : senderMatchingKeys(false);
+    if (senderMatches.size === 1) senderKeys.add(senderMatches.values().next().value!);
+
+    return {
+      broadcast,
+      hasMention,
+      hasAgentMention,
+      explicitMentionKeys,
+      replyTargetKeys,
+      senderKeys,
+    };
+  };
+}
+
+/** Shared legacy task-follow-up classifier used by API and desktop overlays. */
+export function isTaskOwnerFollowUpMessageText(text: unknown): boolean {
+  return isTaskOwnerFollowUp(text);
 }
 
 function extractMentionHandles(text: unknown): string[] {
@@ -439,11 +596,11 @@ function normalizedString(value: unknown): string {
 }
 
 function normalizeSender(value: unknown): string {
-  return normalizedString(value).toLowerCase().replace(/\s+/g, " ");
+  return normalizeRoutingSender(value);
 }
 
 function normalizeHandle(value: unknown): string {
-  return normalizedString(value).toLowerCase().replace(/[^a-z0-9_.:/-]+/g, "");
+  return normalizeRoutingHandle(value);
 }
 
 function normalizeMentionIdentityHandle(value: unknown): string {

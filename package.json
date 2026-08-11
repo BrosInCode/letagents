@@ -11,6 +11,7 @@
     "dist/mcp/**",
     "dist/api/board-intent-payloads.js",
     "dist/shared/**",
+    "shared/**",
     "README.md"
   ],
   "scripts": {
