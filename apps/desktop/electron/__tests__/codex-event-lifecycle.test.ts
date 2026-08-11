@@ -79,6 +79,8 @@ type FakeCodexServerOptions = {
   onBootTurnRead?: (readCount: number) => void;
   /** Fired when a `turn/start` arrives (1-based event-turn count). */
   onTurnStart?: (turnCount: number) => void;
+  /** Close the app-server socket immediately after acknowledging an event turn. */
+  disconnectAfterTurnStart?: boolean;
 };
 
 type FakeCodexServer = {
@@ -86,6 +88,7 @@ type FakeCodexServer = {
   prompts: string[];
   unexpectedFetches: string[];
   turnStartCount(): number;
+  threadReadCount(): number;
   interruptCount(): number;
   restore(): void;
 };
@@ -109,6 +112,12 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
     return bootTurnStatuses[index] ?? "completed";
   }
 
+  function terminalMethod(status: string): string | null {
+    return /^(completed|interrupted|failed|cancelled|stopped)$/i.test(status)
+      ? `turn/${status.toLowerCase()}`
+      : null;
+  }
+
   class FakeWebSocket {
     static readonly OPEN = 1;
     readyState = FakeWebSocket.OPEN;
@@ -130,6 +139,7 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
 
       let result: Record<string, unknown> = {};
       let error: string | null = null;
+      let notification: { method: string; params: Record<string, unknown> } | null = null;
       if (message.method === "initialize") {
         result = {};
       } else if (message.method === "turn/start") {
@@ -141,15 +151,23 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
           prompts.push(String(message.params?.input?.[0]?.text ?? ""));
           eventTurns.set(turnId, replies.shift() ?? "NO_ROOM_REPLY");
           result = { turn: { id: turnId } };
+          const method = terminalMethod(options.eventTurnStatus ?? "completed");
+          if (method) {
+            notification = {
+              method,
+              params: { threadId: message.params?.threadId, turnId },
+            };
+          }
         }
       } else if (message.method === "thread/read") {
         error = threadReadErrors.shift() ?? null;
         if (!error) {
+          const status = bootTurnStatus();
           result = {
             thread: {
               status: { type: "idle" },
               turns: [
-                { id: "turn_boot", status: bootTurnStatus(), items: [] },
+                { id: "turn_boot", status, items: [] },
                 ...[...eventTurns.entries()].map(([id, text]) => ({
                   id,
                   status: options.eventTurnStatus ?? "completed",
@@ -158,6 +176,18 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
               ],
             },
           };
+          const nextStatus = bootTurnStatuses[
+            Math.min(bootReadCount, bootTurnStatuses.length - 1)
+          ] ?? status;
+          const method = isActiveCodexTurnStatusForTest(status)
+            ? terminalMethod(nextStatus)
+            : null;
+          if (method) {
+            notification = {
+              method,
+              params: { threadId: message.params?.threadId, turnId: "turn_boot" },
+            };
+          }
         }
       } else if (message.method === "turn/interrupt") {
         result = {};
@@ -169,6 +199,14 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
         this.onmessage?.({
           data: JSON.stringify(error ? { id: message.id, error: { message: error } } : { id: message.id, result }),
         });
+        if (!error && options.disconnectAfterTurnStart && message.method === "turn/start") {
+          this.readyState = 3;
+          this.onclose?.();
+          return;
+        }
+        if (!error && notification) {
+          this.onmessage?.({ data: JSON.stringify(notification) });
+        }
       });
     }
 
@@ -201,12 +239,17 @@ function installFakeCodexServer(options: FakeCodexServerOptions = {}): FakeCodex
     prompts,
     unexpectedFetches,
     turnStartCount: () => sentMessages.filter((message) => message.method === "turn/start").length,
+    threadReadCount: () => sentMessages.filter((message) => message.method === "thread/read").length,
     interruptCount: () => sentMessages.filter((message) => message.method === "turn/interrupt").length,
     restore: () => {
       globalThis.WebSocket = originalWebSocket;
       globalThis.fetch = originalFetch;
     },
   };
+}
+
+function isActiveCodexTurnStatusForTest(status: string): boolean {
+  return /^(active|inprogress|running|queued|pending)$/i.test(status.replace(/[^a-z]/gi, ""));
 }
 
 async function waitFor<T>(
@@ -401,6 +444,11 @@ test("codex dispatch enqueues, delivers, and publishes a room reply", async () =
     assert.equal(session?.status, "completed");
     assert.equal(session?.last_error, null);
     assert.equal(session?.active_work, null);
+    assert.equal(
+      server.threadReadCount(),
+      2,
+      "one readiness read plus one terminal transcript reconciliation read",
+    );
   } finally {
     server.restore();
   }
@@ -437,10 +485,36 @@ test("codex delivery waits for the in-flight turn to go idle and never interrupt
     const threadReadsBeforeTurnStart = server.sentMessages
       .slice(0, server.sentMessages.findIndex((message) => message.method === "turn/start"))
       .filter((message) => message.method === "thread/read").length;
-    assert.ok(
-      threadReadsBeforeTurnStart >= 2,
-      `expected at least two idle polls before turn/start, saw ${threadReadsBeforeTurnStart}`,
+    assert.equal(
+      threadReadsBeforeTurnStart,
+      2,
+      "the active snapshot and one lifecycle-triggered reconciliation should replace 1s polling",
     );
+  } finally {
+    server.restore();
+  }
+});
+
+test("codex connection loss settles an event turn without transcript polling", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_disconnect";
+  const seeded = await seedDeliverableSession({ roomIdentifier, sessionId: "codex_disconnect" });
+  const server = installFakeCodexServer({ disconnectAfterTurnStart: true });
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent(roomIdentifier, {
+      id: "msg_disconnect",
+      text: "@RiverField please check this",
+      threadRootId: "msg_disconnect",
+    }));
+
+    const session = await waitFor(() => {
+      const current = getStoredCodexLiveSession(seeded.session_id);
+      return current?.status === "unknown" ? current : null;
+    }, "codex event turn to settle after connection loss");
+
+    assert.match(session.last_error ?? "", /disconnected before .* turn completed/i);
+    assert.equal(session.active_work, null);
+    assert.equal(server.threadReadCount(), 1, "only the readiness read should occur");
   } finally {
     server.restore();
   }

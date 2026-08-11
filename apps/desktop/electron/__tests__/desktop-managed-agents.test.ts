@@ -317,7 +317,7 @@ function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCo
       const message = JSON.parse(raw) as {
         id?: number;
         method?: string;
-        params?: { input?: Array<{ text?: string }> };
+        params?: { threadId?: string; input?: Array<{ text?: string }> };
       };
       sentMessages.push(message as Record<string, unknown>);
       if (!message.id) {
@@ -328,10 +328,12 @@ function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCo
       }
 
       let result: Record<string, unknown>;
+      let completedTurnId: string | null = null;
       if (message.method === "initialize") {
         result = {};
       } else if (message.method === "turn/start") {
         const turnId = `turn_event_${++turnStartCount}`;
+        completedTurnId = turnId;
         prompts.push(String(message.params?.input?.[0]?.text ?? ""));
         completedTurns.set(turnId, replies.shift() ?? "NO_ROOM_REPLY");
         result = { turn: { id: turnId } };
@@ -358,6 +360,14 @@ function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCo
 
       queueMicrotask(() => {
         this.onmessage?.({ data: JSON.stringify({ id: message.id, result }) });
+        if (completedTurnId) {
+          this.onmessage?.({
+            data: JSON.stringify({
+              method: "turn/completed",
+              params: { threadId: message.params?.threadId, turnId: completedTurnId },
+            }),
+          });
+        }
       });
     }
 
