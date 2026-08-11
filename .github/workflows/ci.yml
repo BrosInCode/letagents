@@ -79,6 +79,9 @@ jobs:
       - name: Test Vue helpers
         run: npm run test:web
 
+      - name: Test public desktop download routes
+        run: node --import tsx --test src/api/__tests__/desktop-download.test.ts
+
       - name: Build Vue app
         run: npm run build:web
 
