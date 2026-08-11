@@ -5,13 +5,13 @@ import { fileURLToPath } from 'node:url'
 
 import { MAC_DESKTOP_BETA } from '../src/domain/desktopRelease'
 
-test('Mac beta links use public same-origin download routes', () => {
+test('Mac beta links use public immutable R2 assets', () => {
   assert.deepEqual(MAC_DESKTOP_BETA, {
-    version: '0.1.2',
-    checksumsUrl: '/downloads/mac/v0.1.2/checksums',
+    version: '0.1.3',
+    checksumsUrl: '/downloads/mac/v0.1.3/checksums',
     downloads: {
-      arm64: '/downloads/mac/arm64',
-      x64: '/downloads/mac/x64',
+      arm64: 'https://downloads.letagents.chat/desktop/v0.1.3/LetAgents-0.1.3-darwin-arm64.dmg',
+      x64: 'https://downloads.letagents.chat/desktop/v0.1.3/LetAgents-0.1.3-darwin-x64.dmg',
     },
   })
   assert.doesNotMatch(JSON.stringify(MAC_DESKTOP_BETA), /github\.com/)
