@@ -154,11 +154,16 @@ jobs:
         run: npm --prefix apps/desktop run package:mac
 
       - name: Attest installer and update provenance
+        if: ${{ github.event.repository.visibility == 'public' || vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true' }}
         uses: actions/attest@v4
         with:
           subject-path: |
             apps/desktop/release/artifacts/*.dmg
             apps/desktop/release/artifacts/*.zip
+
+      - name: Report unavailable provenance attestation
+        if: ${{ github.event.repository.visibility != 'public' && vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION != 'true' }}
+        run: echo "::notice::GitHub artifact attestations are unavailable for this private repository on its current organization plan. Set ENABLE_DESKTOP_PROVENANCE_ATTESTATION=true when the plan supports private-repository attestations."
 
       - name: Upload release artifacts to this workflow
         uses: actions/upload-artifact@v4
