@@ -69,6 +69,7 @@ import {
 } from "../routes/github/webhooks.js";
 import { registerHealthRoutes } from "../routes/system/health.js";
 import { registerDesktopPushRoutes } from "../routes/desktop-push.js";
+import { registerDesktopDownloadRoutes } from "../releases/desktop-download.js";
 import {
   registerLegacyProjectRoutes,
   type LegacyProjectRouteDeps,
@@ -193,6 +194,7 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomEntryRouteDeps;
 
   registerWebRoutes(app);
+  registerDesktopDownloadRoutes(app);
 
   registerRoomEntryRoutes(app, roomEntryRouteDeps);
 

@@ -67,6 +67,8 @@ export interface GitHubRequestInput {
   signal?: AbortSignal;
   /** When no signal is given, bound the call with AbortSignal.timeout(timeoutMs). */
   timeoutMs?: number;
+  /** Redirect policy; use manual when callers need GitHub's signed asset URL. */
+  redirect?: RequestRedirect;
 }
 
 // Perform an authenticated GitHub REST request and return the raw Response so the
@@ -83,6 +85,7 @@ export async function githubRequest(input: GitHubRequestInput): Promise<Response
     method: input.method ?? "GET",
     headers,
     body: input.body === undefined ? undefined : JSON.stringify(input.body),
+    redirect: input.redirect,
     ...(signal ? { signal } : {}),
   });
 }
