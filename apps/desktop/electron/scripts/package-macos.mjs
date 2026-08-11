@@ -138,6 +138,11 @@ await execFileAsync("hdiutil", [
 ]);
 await rm(dmgSource, { recursive: true, force: true });
 
+if (!skipSigning) {
+  await execFileAsync("codesign", ["--sign", identity, "--force", "--timestamp", dmg]);
+  await execFileAsync("codesign", ["--verify", "--verbose=2", dmg]);
+}
+
 if (credentials) {
   await notarize({ appPath: dmg, ...credentials });
   await execFileAsync("xcrun", ["stapler", "validate", dmg]);
