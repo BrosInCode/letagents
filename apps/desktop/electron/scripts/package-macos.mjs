@@ -40,7 +40,7 @@ const publishedAt = process.env.LETAGENTS_DESKTOP_RELEASE_PUBLISHED_AT?.trim() |
 const releaseNotes = process.env.LETAGENTS_DESKTOP_RELEASE_NOTES?.trim() || `LetAgents desktop ${version}`;
 const releaseBaseUrl = normalizeReleaseBaseUrl(
   process.env.LETAGENTS_DESKTOP_RELEASE_BASE_URL?.trim()
-    || `https://github.com/BrosInCode/letagents/releases/download/desktop-v${version}/`,
+    || `https://downloads.letagents.chat/desktop/v${version}/`,
 );
 
 if (process.platform !== "darwin") throw new Error("macOS packaging must run on macOS.");

@@ -4,7 +4,7 @@ const supportedDesktopUpdateArchitectures = new Set(["arm64", "x64"]);
 
 export function desktopUpdateFeedBaseUrl(arch: string): string | null {
   if (!supportedDesktopUpdateArchitectures.has(arch)) return null;
-  return `https://github.com/BrosInCode/letagents/releases/download/desktop-feed-${arch}`;
+  return `https://downloads.letagents.chat/desktop/feeds/${arch}`;
 }
 
 export interface DesktopUpdaterControllerOptions {
