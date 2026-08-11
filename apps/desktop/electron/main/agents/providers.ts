@@ -26,6 +26,10 @@ import {
 } from "./codex-app-server.js";
 import { codexInstallCommand } from "./codex-install.js";
 import {
+  pinInstalledCodexExecutable,
+  resolveCodexExecutable,
+} from "./codex-executable.js";
+import {
   openCodeInstallCommand,
   resolveOpenCodeBinary,
 } from "./opencode-runtime.js";
@@ -172,7 +176,7 @@ async function codexPreflight(
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
+  const command = resolveCodexExecutable();
   const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
@@ -585,25 +589,35 @@ async function installCodexRuntime(
   const install = codexInstallCommand();
   await new Promise<void>((resolve, reject) => {
     const child = spawn(install.command, install.args, {
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
+    let output = "";
+    const capture = (chunk: Buffer | string) => {
+      output = `${output}${String(chunk)}`.slice(-8_000);
+    };
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code === 0) {
         resolve();
         return;
       }
-      reject(new Error(`Codex installer exited with code ${code ?? "unknown"}.`));
+      const detail = output.trim();
+      reject(new Error(
+        `Codex installer exited with code ${code ?? "unknown"}${detail ? `: ${detail}` : "."}`,
+      ));
     });
   });
+  const executable = pinInstalledCodexExecutable();
 
   return {
     providerId: provider.id,
     action: "install_runtime",
     success: true,
     message: "Codex was installed.",
-    detail: install.detail,
+    detail: `${install.detail} LetAgents verified ${executable}.`,
   };
 }
 

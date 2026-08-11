@@ -4275,6 +4275,11 @@ test("agent provider setup confirmation copy covers install actions", () => {
 
 test("listDesktopAgentProviders excludes antigravity", () => {
   const providers = listDesktopAgentProviders();
+  assert.equal(
+    providers.find((provider) => provider.id === "codex")?.runtimeCommand,
+    "codex",
+    "Codex launch sites assume the registry uses the canonical command name",
+  );
   assert.ok(
     !providers.some((p) => p.id === "antigravity"),
     "antigravity should not appear in the Add Agent UI provider list",
