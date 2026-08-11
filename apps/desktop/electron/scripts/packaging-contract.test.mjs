@@ -69,6 +69,9 @@ test("release workflow builds, attests, and publishes independent architecture f
   assert.match(workflow, /arch: arm64\s+runner: macos-15/);
   assert.match(workflow, /arch: x64\s+runner: macos-15-intel/);
   assert.match(workflow, /uses: actions\/attest@v4/);
+  assert.match(workflow, /github\.event\.repository\.visibility == 'public'/);
+  assert.match(workflow, /vars\.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true'/);
+  assert.match(workflow, /Report unavailable provenance attestation/);
   assert.match(workflow, /artifact-metadata: write/);
   assert.match(workflow, /feed_tag="desktop-feed-\$\{arch\}"/);
   assert.match(workflow, /RELEASES-\$\{arch\}\.json/);
