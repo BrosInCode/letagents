@@ -9,6 +9,7 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopManagedAgentEffort,
 } from "../../ipc-types.js";
+import { resolveCodexExecutable } from "./codex-executable.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import { buildCursorChildEnv } from "./cursor-runner.js";
 import { readOpenModelSettings } from "./open-model-settings.js";
@@ -109,7 +110,7 @@ export async function listDesktopAgentProviderModels(
 async function listCodexModels(
   input: DesktopAgentProviderPreflightInput,
 ): Promise<DesktopAgentProviderModelsResult> {
-  const command = process.env.LETAGENTS_CODEX_BIN || "codex";
+  const command = resolveCodexExecutable();
   const cacheKey = `codex:${command}`;
   const forceRefresh = Boolean(input.refreshModels);
   const cached = modelListCache.get(cacheKey);

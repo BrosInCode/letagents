@@ -33,6 +33,7 @@ import {
   terminateSpawnedProcess,
   waitForLaunchedCodexAppServer,
 } from "./codex-app-server.js";
+import { resolveCodexExecutable } from "./codex-executable.js";
 import {
   buildCodexStartPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
@@ -1067,7 +1068,7 @@ async function startDesktopManagedCodexEngineAgent(
   const repoBranch = await buildRepoStatus(cwd)
     .then((status) => status.branch)
     .catch(() => null);
-  const codexBin = process.env.LETAGENTS_CODEX_BIN || "codex";
+  const codexBin = resolveCodexExecutable();
   const permissionProfile = assertManagedAgentPermissionProfileAvailable(engine.providerId, input.permissionProfileId);
   const preflight = await runDesktopAgentProviderPreflight(engine.providerId, {
     roomIdentifier,
