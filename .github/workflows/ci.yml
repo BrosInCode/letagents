@@ -430,6 +430,10 @@ jobs:
     needs: docker
     if: github.ref == 'refs/heads/staging'
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      GH_DEPLOY_TOKEN: ${{ github.token }}
     steps:
       - name: Deploy to production
         uses: appleboy/ssh-action@v1
@@ -437,6 +441,7 @@ jobs:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}
           key: ${{ secrets.DEPLOY_SSH_KEY }}
+          envs: GH_DEPLOY_TOKEN
           script: |
             set -e
 
@@ -457,7 +462,8 @@ jobs:
             rm -f .git/index.lock
 
             # Fetch and checkout the exact commit that triggered this deploy
-            git fetch origin staging
+            git fetch "https://x-access-token:${GH_DEPLOY_TOKEN}@github.com/${{ github.repository }}.git" staging
+            unset GH_DEPLOY_TOKEN
             git checkout ${{ github.sha }}
 
             # Pull the exact images built by this CI run
