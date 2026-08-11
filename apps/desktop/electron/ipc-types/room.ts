@@ -210,6 +210,16 @@ export interface DesktopRoomMessageReply {
   text: string;
   source: string | null;
   timestamp: string;
+  agentIdentity?: {
+    name: string | null;
+    displayName: string | null;
+    ownerLabel: string | null;
+    ownerAttribution: string | null;
+    ideLabel: string | null;
+    actorLabel: string | null;
+    agentKey: string | null;
+    agentSessionId: string | null;
+  } | null;
 }
 
 export interface DesktopRoomMessageThreadParticipant {
@@ -226,6 +236,8 @@ export interface DesktopRoomMessageThreadSummary {
   hasUnread: boolean;
   latestReply: DesktopRoomMessageReply | null;
   participants: DesktopRoomMessageThreadParticipant[];
+  participantCount: number;
+  participantsTruncated: boolean;
   lastReadMessageId: string | null;
 }
 
@@ -290,6 +302,37 @@ export interface DesktopRoomMessage {
   threadReplyToId: string | null;
   thread: DesktopRoomMessageThreadSummary | null;
   replyTo: DesktopRoomMessageReply | null;
+  /** Trusted provenance retained only for local/forked dispatch decisions. */
+  localControlAuthorized?: boolean;
+  /** Account-scoped, non-rendered managed-agent dispatch metadata. */
+  accountAgentRouting?:
+    | {
+      version: 1;
+      authority: "receipts";
+      recipientAgentKeys: string[];
+      /** Exact receipt targets. Present-empty is authoritative. */
+      recipientSessions: Array<{
+        agentKey: string;
+        agentSessionId: string;
+        successorAgentSessionId?: string;
+      }>;
+      /** Missing on older servers and therefore treated as false. */
+      controlAuthorized?: boolean;
+    }
+    | {
+      version: 1;
+      authority: "legacy";
+      recipientAgentKeys: string[];
+      /** Exact room-global targets. Present-empty is authoritative. */
+      recipientSessions: Array<{
+        agentKey: string;
+        agentSessionId: string;
+        activationReason: string;
+      }>;
+      /** Missing on older servers and therefore treated as false. */
+      controlAuthorized?: boolean;
+    }
+    | { version: 1; authority: "invalid" };
 }
 
 export interface DesktopGitHubIntegrationStatus {

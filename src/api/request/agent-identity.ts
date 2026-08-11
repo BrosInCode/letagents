@@ -15,6 +15,7 @@ function normalizeOptionalString(value: string | null | undefined): string | nul
 export interface ResolvedRequestAgentIdentity {
   actor_label: string;
   agent_key: string;
+  owner_account_id?: string | null;
   agent_instance_id: string | null;
   agent_session_id: string | null;
   session_kind: RoomAgentSessionKind;
@@ -61,6 +62,7 @@ export async function resolveRequestAgentIdentity(input: {
     return {
       actor_label: bearer.actor_label,
       agent_key: bearer.agent_key,
+      owner_account_id: bearer.owner_account_id ?? null,
       agent_instance_id: bearer.agent_instance_id,
       agent_session_id: bearer.agent_session_id,
       session_kind: bearer.session_kind,
@@ -91,6 +93,7 @@ export async function resolveRequestAgentIdentity(input: {
     return {
       actor_label: session.actor_label,
       agent_key: session.agent_key,
+      owner_account_id: session.owner_account_id,
       agent_instance_id: session.agent_instance_id,
       agent_session_id: session.session_id,
       session_kind: session.session_kind,
@@ -122,6 +125,7 @@ export async function resolveRequestAgentIdentity(input: {
       ide_label: ideLabel,
     }),
     agent_key: actorIdentity.canonical_key,
+    owner_account_id: actorIdentity.owner_account_id,
     agent_instance_id: normalizeOptionalString(input.actor_instance_id),
     agent_session_id: null,
     session_kind: "controller",

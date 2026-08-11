@@ -4,7 +4,9 @@ import { getPollTimeoutCapMs } from "../../../../shared/poll-timeout-cap.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
 import {
   agentSessionCredentials,
+  AGENT_MESSAGE_BODY_MAX_BYTES,
   appendIncludePromptOnly,
+  boundAgentMessageOutput,
   buildAgentDeliveryHeaders,
   bindSupervisedWorkerSession,
   scheduleSupervisedWorkerCursorCheckpoint,
@@ -12,13 +14,16 @@ import {
   ensureAgentIdentity,
   getFallbackProjectId,
   getLatestLocalChatMessages,
+  getLocalImportedRoutingAuthority,
   getLocalChatMessages,
+  getLocalChatThreadRoutingMembership,
   getLastMessageId,
   getRememberedRoomPresence,
+  getStoredAgentRoutingStateSnapshot,
   getTargetRoomId,
   identityFromAgentSession,
   isLocalRoomStorageEnabled,
-  listLocalTasks,
+  listLocalActiveTaskOwnerLeases,
   resolveLocalRoomStorageIdentifiers,
   resolveAgentSession,
   roomScopedApiCall,
@@ -33,7 +38,16 @@ import {
   requireValidWorkerBearerRuntime,
   supervisedBoundedDeliveryDisabledToolResult,
 } from "../../runtime/worker-bearer.js";
-import { attachAgentMessageActivations } from "../../../../shared/activation-routing.js";
+import {
+  attachAgentMessageActivations,
+  createGlobalAgentAddressResolver,
+  decideAgentMessageActivation,
+  isTaskOwnerFollowUpMessageText,
+  type AgentMessageActivation,
+  type AgentMessageActivationReason,
+  type ActivationIdentity,
+} from "../../../../shared/activation-routing.js";
+import { normalizeRoutingSender } from "../../../../../shared/routing-aliases.mjs";
 import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { fetchRecentRemoteMessages } from "./read-tool.js";
 import { jsonToolResponse } from "./response.js";
@@ -45,14 +59,14 @@ const DEFAULT_POLL_TIMEOUT_MS = 30000;
 // room history (busy rooms archive millions of characters, which blows the
 // tool's token budget). This bounds that no-cursor catch-up to a recent tail.
 export const DEFAULT_WAIT_CATCHUP_LIMIT = 100;
+export const MAX_WAIT_MESSAGES_PER_CALL = 100;
 
 export type WaitForMessagesFetchPlan =
   | { mode: "catch_up_tail"; limit: number }
   | { mode: "after_cursor"; after: string };
 
-// Decide how the initial fetch should behave. With a cursor we return
-// everything after it (genuine "new since I last polled", already bounded);
-// without one we fetch only the bounded recent tail.
+// Decide how the initial fetch should behave. Both paths return one bounded
+// page; callers continue from last_observed_message_id when truncated.
 export function planWaitForMessagesFetch(input: {
   effectiveAfterMessageId?: string;
   catchupLimit?: number;
@@ -68,16 +82,6 @@ export function planWaitForMessagesFetch(input: {
 
 type MessageRecord = Record<string, unknown>;
 
-type WaitForMessagesRemoteRequest = {
-  room_id: string | null;
-  project_id: string | null;
-  room_path: (targetRoomId: string) => string;
-  project_path: (targetProjectId: string) => string;
-  options: RequestInit;
-};
-
-const LOCAL_TASK_OWNER_STATUSES = new Set(["assigned", "in_progress", "blocked", "in_review"]);
-
 export function buildWaitForMessagesRequestOptions(input: {
   deliveryHeaders: Record<string, string>;
   signal?: AbortSignal;
@@ -85,24 +89,6 @@ export function buildWaitForMessagesRequestOptions(input: {
   return {
     ...(input.signal ? { signal: input.signal } : {}),
     headers: input.deliveryHeaders,
-  };
-}
-
-export function buildWaitForMessagesHistoryPageRequest(input: {
-  targetRoomId: string | null;
-  targetProjectId: string | null;
-  queryString: string;
-  deliveryHeaders: Record<string, string>;
-}): WaitForMessagesRemoteRequest {
-  const querySuffix = input.queryString ? `?${input.queryString}` : "";
-  return {
-    room_id: input.targetRoomId,
-    project_id: input.targetProjectId,
-    room_path: (targetRoomId) =>
-      appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages${querySuffix}`),
-    project_path: (targetProjectId) =>
-      appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages${querySuffix}`),
-    options: buildWaitForMessagesRequestOptions({ deliveryHeaders: input.deliveryHeaders }),
   };
 }
 
@@ -214,49 +200,262 @@ export async function localActivationContext(roomId: string): Promise<{
     agent_session_id: string | null;
   }>;
 }> {
-  const result = await listLocalTasks(roomId, { openOnly: true });
   return {
-    activeTaskLeases: result.tasks
-      .flatMap((task) => {
-        const agentKey = task.assignee_agent_key?.trim();
-        if (!LOCAL_TASK_OWNER_STATUSES.has(task.status) || !agentKey) {
-          return [];
-        }
-
-        return [{
-          kind: "work",
-          status: "active",
-          actor_label: task.assignee || agentKey,
-          agent_key: agentKey,
-          agent_instance_id: task.assignee_agent_instance_id,
-          agent_session_id: task.assignee_agent_session_id,
-        }];
-      }),
+    activeTaskLeases: await listLocalActiveTaskOwnerLeases(roomId),
   };
 }
 
-async function attachLocalActivationMetadata(
+export async function attachLocalActivationMetadata(
   roomId: string,
   messages: unknown[],
   agentSession: StoredAgentSessionState | null,
-  options: { includeTaskOwnerLeases?: boolean } = {},
+  options: {
+    includeTaskOwnerLeases?: boolean;
+    activeSessionRoomId?: string | null;
+  } = {},
 ): Promise<unknown[]> {
   if (!agentSession || agentSession.session_kind !== "worker") {
     return messages;
   }
 
   const records = messages.filter(isRecord);
-  const activationContext = options.includeTaskOwnerLeases === false
-    ? undefined
-    : await localActivationContext(roomId);
-  return attachAgentMessageActivations(records, {
+  if (records.length === 0) return messages;
+  const identity = {
     actor_label: agentSession.actor_label,
     agent_key: agentSession.agent_key,
     agent_instance_id: agentSession.agent_instance_id ?? null,
     agent_session_id: agentSession.session_id,
     display_name: agentSession.display_name,
     session_kind: agentSession.session_kind,
-  }, activationContext);
+  };
+  // Imported cloud rows carry immutable, account-scoped send-time authority.
+  // A present wrapper always wins over mutable local aliases, including when
+  // the current state population cannot be read completely.
+  const activeSessionRoomId = options.activeSessionRoomId?.trim() || roomId;
+  const routingState = getStoredAgentRoutingStateSnapshot(activeSessionRoomId);
+  const authoritativeLegacyDecisions = new Map<
+    string,
+    AgentMessageActivation["for_current_agent"]
+  >();
+  const legacyRecords: MessageRecord[] = [];
+  const normalizedIdentityKey = normalizeRoutingSender(identity.agent_key);
+  const validActivationReasons = new Set<AgentMessageActivationReason>([
+    "self_message",
+    "explicit_mention",
+    "explicit_other_mention",
+    "broadcast",
+    "reply_target",
+    "other_reply_target",
+    "thread_participant",
+    "task_owner",
+    "system_event",
+    "unaddressed",
+  ]);
+  for (const message of records) {
+    const id = messageId(message);
+    if (!id) continue;
+    const imported = getLocalImportedRoutingAuthority(message);
+    if (!imported) {
+      if (routingState.complete) {
+        legacyRecords.push(message);
+      } else {
+        authoritativeLegacyDecisions.set(id, {
+          decision: "silent",
+          reason: "unaddressed",
+          addressed: false,
+        });
+      }
+      continue;
+    }
+    if (
+      !routingState.accountReaderKey
+      || imported.readerKey !== routingState.accountReaderKey
+      || imported.routing.authority === "invalid"
+    ) {
+      authoritativeLegacyDecisions.set(id, {
+        decision: "silent",
+        reason: "unaddressed",
+        addressed: false,
+      });
+      continue;
+    }
+    const target = imported.routing.recipientSessions.find(
+      (candidate) => candidate.agentKey === normalizedIdentityKey,
+    );
+    const targetSessionId = imported.routing.authority === "receipts"
+      ? target && "successorAgentSessionId" in target
+        ? target.successorAgentSessionId ?? target.agentSessionId
+        : target?.agentSessionId
+      : target?.agentSessionId;
+    if (!target || targetSessionId !== identity.agent_session_id) {
+      authoritativeLegacyDecisions.set(id, {
+        decision: "silent",
+        reason: "unaddressed",
+        addressed: false,
+      });
+      continue;
+    }
+    const importedReason = imported.routing.authority === "legacy"
+      && "activationReason" in target
+      && validActivationReasons.has(target.activationReason as AgentMessageActivationReason)
+      ? target.activationReason as AgentMessageActivationReason
+      : "explicit_mention";
+    authoritativeLegacyDecisions.set(id, {
+      decision: "activate",
+      reason: importedReason,
+      addressed: true,
+    });
+  }
+  if (legacyRecords.length === 0) {
+    return attachAgentMessageActivations(records, identity, { authoritativeLegacyDecisions });
+  }
+
+  const threadRootIds = legacyRecords.flatMap((message) => {
+    const messageId = typeof message.id === "string" ? message.id : "";
+    const thread = isRecord(message.thread) ? message.thread : null;
+    const rootId = typeof message.thread_root_id === "string"
+      ? message.thread_root_id
+      : typeof thread?.root_message_id === "string"
+        ? thread.root_message_id
+        : "";
+    return rootId && rootId !== messageId ? [rootId] : [];
+  });
+  // Linked local/cloud rooms store messages under the SQLite room id while
+  // registered workers remain keyed by the canonical cloud room id. Routing
+  // ambiguity must always use that complete canonical population.
+  const storedActiveSessions = routingState.sessions;
+  const activeIdentities = storedActiveSessions.map((session) => ({
+    actor_label: session.actor_label,
+    agent_key: session.agent_key,
+    agent_instance_id: session.agent_instance_id ?? null,
+    agent_session_id: session.session_id,
+    display_name: session.display_name,
+    session_kind: session.session_kind,
+  } satisfies ActivationIdentity));
+  if (!activeIdentities.some((candidate) =>
+    candidate.agent_session_id === identity.agent_session_id
+    && candidate.agent_key === identity.agent_key)) {
+    // The request's authenticated current session is authoritative even when
+    // an older local-state file has not persisted it yet.
+    activeIdentities.push(identity);
+  }
+  const sameKeySessions = storedActiveSessions.filter(
+    (session) => session.agent_key === identity.agent_key,
+  );
+  const currentRepresentativeSessionId = sameKeySessions[0]?.session_id
+    ?? identity.agent_session_id;
+  const currentIsActive = currentRepresentativeSessionId === identity.agent_session_id;
+  const resolveGlobalAddress = createGlobalAgentAddressResolver(activeIdentities);
+  const explicitMentionMessageIds = new Set<string>();
+  const replyTargetMessageIds = new Set<string>();
+  const exactReplyTargetMessageIds = new Set<string>();
+  const selfMessageIds = new Set<string>();
+  for (const message of legacyRecords) {
+    const messageId = typeof message.id === "string" ? message.id : "";
+    if (!messageId) continue;
+    const addressed = resolveGlobalAddress(message);
+    const reply = isRecord(message.reply_to) ? message.reply_to : null;
+    const replyPublisherIdentity = isRecord(reply?.agent_identity)
+      ? reply.agent_identity
+      : null;
+    const replyPublisherKey = typeof replyPublisherIdentity?.agent_key === "string"
+      ? replyPublisherIdentity.agent_key.trim()
+      : "";
+    const replyPublisherSessionId = typeof replyPublisherIdentity?.agent_session_id === "string"
+      ? replyPublisherIdentity.agent_session_id.trim()
+      : "";
+    if (replyPublisherKey) {
+      addressed.replyTargetKeys.clear();
+      const exactReplyIdentity = replyPublisherSessionId
+        ? activeIdentities.find((candidate) =>
+            candidate.agent_key === replyPublisherKey
+            && candidate.agent_session_id === replyPublisherSessionId)
+        : undefined;
+      if (exactReplyIdentity) {
+        if (exactReplyIdentity.agent_session_id === identity.agent_session_id) {
+          exactReplyTargetMessageIds.add(messageId);
+        }
+      } else if (activeIdentities.some((candidate) => candidate.agent_key === replyPublisherKey)) {
+        addressed.replyTargetKeys.add(replyPublisherKey);
+      }
+    }
+    const publisherIdentity = isRecord(message.agent_identity)
+      ? message.agent_identity
+      : null;
+    const publisherAgentKey = typeof publisherIdentity?.agent_key === "string"
+      ? publisherIdentity.agent_key.trim()
+      : "";
+    if (
+      String(message.source ?? "").trim() === "agent"
+      && (publisherAgentKey
+        ? publisherAgentKey === identity.agent_key
+        : addressed.senderKeys.has(identity.agent_key))
+    ) {
+      selfMessageIds.add(messageId);
+    }
+    if (addressed.explicitMentionKeys.has(identity.agent_key)) {
+      explicitMentionMessageIds.add(messageId);
+    }
+    const thread = isRecord(message.thread) ? message.thread : null;
+    const rootId = typeof message.thread_root_id === "string"
+      ? message.thread_root_id
+      : typeof thread?.root_message_id === "string"
+        ? thread.root_message_id
+        : "";
+    if (
+      (!rootId || rootId === messageId)
+      && (
+        exactReplyTargetMessageIds.has(messageId)
+        || addressed.replyTargetKeys.has(identity.agent_key)
+      )
+    ) {
+      replyTargetMessageIds.add(messageId);
+    }
+  }
+  const [activationContext, projectedThreadParticipantRootIds] = await Promise.all([
+    options.includeTaskOwnerLeases === false
+      || !records.some((message) => isTaskOwnerFollowUpMessageText(message.text))
+      ? undefined
+      : localActivationContext(roomId),
+    getLocalChatThreadRoutingMembership(roomId, threadRootIds, identity, activeIdentities),
+  ]);
+  const exactContext = {
+    ...activationContext,
+    selfMessageIds,
+    threadParticipantRootIds: projectedThreadParticipantRootIds,
+    explicitMentionMessageIds,
+    replyTargetMessageIds,
+  };
+  const exactTaskSessionIdsForKey = new Set(
+    (activationContext?.activeTaskLeases ?? [])
+      .filter((lease) =>
+        lease.status === "active"
+        && lease.agent_key === identity.agent_key
+        && Boolean(lease.agent_session_id))
+      .map((lease) => lease.agent_session_id!),
+  );
+  for (const message of legacyRecords) {
+    const messageId = typeof message.id === "string" ? message.id : "";
+    if (!messageId) continue;
+    const resolved = decideAgentMessageActivation(message, identity, exactContext);
+    const exactTaskOwner = resolved.reason === "task_owner"
+      && activationContext?.activeTaskLeases?.some((lease) =>
+        lease.status === "active"
+        && lease.agent_session_id === identity.agent_session_id
+        && (!lease.agent_key || lease.agent_key === identity.agent_key));
+    const eligibleRepresentative = exactReplyTargetMessageIds.has(messageId)
+      ? true
+      : resolved.reason === "task_owner" && exactTaskSessionIdsForKey.size > 0
+        ? exactTaskSessionIdsForKey.size === 1 && exactTaskOwner
+        : currentIsActive;
+    authoritativeLegacyDecisions.set(
+      messageId,
+      eligibleRepresentative && resolved.decision === "activate"
+        ? resolved
+        : { decision: "silent", reason: "unaddressed", addressed: false },
+    );
+  }
+  return attachAgentMessageActivations(records, identity, { authoritativeLegacyDecisions });
 }
 
 // Resolving an out-of-window parent costs a lookup (a by-id fetch, or a
@@ -267,6 +466,9 @@ async function attachLocalActivationMetadata(
 // as immutable once posted; a bounded insertion-ordered map keeps memory flat
 // for long-running workers.
 const THREAD_CONTEXT_CACHE_MAX = 500;
+export const THREAD_CONTEXT_LOOKUP_MAX = 16;
+export const THREAD_CONTEXT_BYTES_MAX = 256 * 1024;
+const THREAD_CONTEXT_DEADLINE_MS = 1_000;
 const threadContextCache = new Map<string, MessageRecord>();
 
 function threadContextCacheKey(scopeId: string, targetMessageId: string): string {
@@ -298,7 +500,7 @@ export async function collectThreadContextMessages(input: {
   localRoomId: string | null;
   roomId: string | null;
   projectId: string | null;
-}): Promise<MessageRecord[]> {
+}): Promise<{ messages: MessageRecord[]; truncated: boolean }> {
   const records = input.messages.filter(isRecord);
   const knownIds = new Set(records.map(messageId).filter((id): id is string => Boolean(id)));
   const seenIds = new Set(knownIds);
@@ -310,9 +512,13 @@ export async function collectThreadContextMessages(input: {
   if (pendingIds.length === 0) {
     // Nothing quotes an out-of-window message (idle polls land here), so skip
     // storage-mode resolution entirely.
-    return [];
+    return { messages: [], truncated: false };
   }
   const contextMessages: MessageRecord[] = [];
+  let contextBytes = 0;
+  let lookups = 0;
+  let truncated = false;
+  const deadline = Date.now() + THREAD_CONTEXT_DEADLINE_MS;
   const useLocalStorage = Boolean(
     input.localRoomId && await isLocalRoomStorageEnabled(input.localRoomId)
   );
@@ -322,10 +528,15 @@ export async function collectThreadContextMessages(input: {
   const sqliteRoomId = localIdentifiers.localRoomId || input.localRoomId;
 
   while (pendingIds.length > 0) {
+    if (lookups >= THREAD_CONTEXT_LOOKUP_MAX || Date.now() >= deadline) {
+      truncated = true;
+      break;
+    }
     const nextId = pendingIds.shift();
     if (!nextId || seenIds.has(nextId)) continue;
     seenIds.add(nextId);
     const cached = threadContextCache.get(threadContextCacheKey(scopeId, nextId));
+    if (!cached) lookups += 1;
     const message = cached
       ?? (useLocalStorage && input.localRoomId
         ? await findLocalMessageById(sqliteRoomId || input.localRoomId, nextId)
@@ -338,6 +549,12 @@ export async function collectThreadContextMessages(input: {
     if (!cached) {
       rememberThreadContextMessages(scopeId, [message]);
     }
+    const messageBytes = Buffer.byteLength(JSON.stringify(message), "utf8");
+    if (contextBytes + messageBytes > THREAD_CONTEXT_BYTES_MAX) {
+      truncated = true;
+      break;
+    }
+    contextBytes += messageBytes;
     contextMessages.push(message);
     const parentId = replyReferenceId(message);
     if (parentId && !seenIds.has(parentId)) {
@@ -345,7 +562,7 @@ export async function collectThreadContextMessages(input: {
     }
   }
 
-  return contextMessages;
+  return { messages: contextMessages, truncated };
 }
 
 export function registerWaitForMessagesTool(server: McpServer): void {
@@ -380,8 +597,15 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const targetRoomId = getTargetRoomId(room_id);
       const targetProjectId = getFallbackProjectId();
       const localRoomId = targetRoomId ?? currentRoom?.room_id ?? targetProjectId;
-      const identity = await ensureAgentIdentity();
       const sessionRoomId = targetRoomId ?? currentRoom?.room_id ?? localRoomId ?? null;
+      const routingStateSnapshot = getStoredAgentRoutingStateSnapshot(sessionRoomId ?? "");
+      const localStorageEnabled = Boolean(
+        localRoomId && await isLocalRoomStorageEnabled(localRoomId),
+      );
+      if (localStorageEnabled && !routingStateSnapshot.complete) {
+        throw new Error("Local agent routing state is unavailable; retry after restoring the state file.");
+      }
+      const identity = await ensureAgentIdentity();
       const agentSession = resolveWaitAgentSession(sessionRoomId, agent_session_id);
       if (agentSession) {
         // Registration (or a successor generation) must bind strictly once.
@@ -400,8 +624,11 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         Math.max(timeout || DEFAULT_POLL_TIMEOUT_MS, 1000),
         maxPollMs
       );
-      if (localRoomId && await isLocalRoomStorageEnabled(localRoomId)) {
-        const { localRoomId: sqliteRoomId } = await resolveLocalRoomStorageIdentifiers(localRoomId);
+      if (localRoomId && localStorageEnabled) {
+        const {
+          localRoomId: sqliteRoomId,
+          cloudRoomId,
+        } = await resolveLocalRoomStorageIdentifiers(localRoomId);
         const effectiveLocalRoomId = sqliteRoomId || localRoomId;
         const effectiveAfterMessageId = resolveEffectiveAfterMessageId({
           requestedAfterMessageId: after_message_id,
@@ -412,11 +639,12 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         // keep the unchanged forward "everything after the cursor" behavior.
         const existing = fetchPlan.mode === "catch_up_tail"
           ? await getLatestLocalChatMessages(effectiveLocalRoomId, {
-              limit: fetchPlan.limit,
+              limit: Math.min(fetchPlan.limit, MAX_WAIT_MESSAGES_PER_CALL),
               include_prompt_only: true,
             })
           : await getLocalChatMessages(effectiveLocalRoomId, {
               after: effectiveAfterMessageId,
+              limit: MAX_WAIT_MESSAGES_PER_CALL,
               include_prompt_only: true,
             });
         const replayingExistingMessages = existing.messages.length > 0;
@@ -425,12 +653,18 @@ export function registerWaitForMessagesTool(server: McpServer): void {
           : await waitForLocalChatMessages(effectiveLocalRoomId, {
               after: effectiveAfterMessageId,
               timeoutMs: serverTimeout,
+              limit: MAX_WAIT_MESSAGES_PER_CALL,
               include_prompt_only: true,
             });
         const messages = await attachLocalActivationMetadata(effectiveLocalRoomId, result.messages, agentSession, {
           includeTaskOwnerLeases: !replayingExistingMessages,
+          activeSessionRoomId: cloudRoomId || sessionRoomId,
         });
-        const routing = filterSilentActivationMessages(messages);
+        const bounded = boundAgentMessageOutput(messages, {
+          direction: fetchPlan.mode === "catch_up_tail" ? "suffix" : "prefix",
+          maxBytes: AGENT_MESSAGE_BODY_MAX_BYTES,
+        });
+        const routing = filterSilentActivationMessages(bounded.messages);
         const observedCursor = routing.last_observed_message_id ?? getLastMessageId(result);
         touchRoomSession(effectiveLocalRoomId, observedCursor);
         const threadContext = await collectThreadContextMessages({
@@ -442,8 +676,13 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         return jsonToolResponse({
           room_id: effectiveLocalRoomId,
           ...addActivationRoutingTelemetry({
-            messages: toAgentReadableMessages(routing.messages, threadContext),
+            messages: toAgentReadableMessages(routing.messages, threadContext.messages),
           }, routing),
+          ...(result.has_more || bounded.truncated ? { truncated: true } : {}),
+          ...(bounded.omittedMessageCount > 0
+            ? { omitted_message_count: bounded.omittedMessageCount }
+            : {}),
+          ...(threadContext.truncated ? { thread_context_truncated: true } : {}),
         });
       }
 
@@ -464,6 +703,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
 
       const allMessages: unknown[] = [];
       let roomIdFromResponse: string | undefined;
+      let catchUpTruncated = false;
 
       // Long-poll the server (blocks up to serverTimeout for new messages),
       // optionally seeded with a cursor. Shared by the cursor path and by the
@@ -473,6 +713,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const longPollFromCursor = async (after?: string): Promise<void> => {
         const params = new URLSearchParams();
         if (after) params.set("after", after);
+        params.set("limit", String(MAX_WAIT_MESSAGES_PER_CALL));
         params.set("timeout", String(serverTimeout));
 
         const queryString = params.toString();
@@ -496,32 +737,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
 
         allMessages.push(...(firstResult.messages ?? []));
         roomIdFromResponse = roomIdFromResponse || firstResult.room_id || firstResult.project_id;
-
-        if (firstResult.has_more && allMessages.length > 0) {
-          let afterCursor = (allMessages[allMessages.length - 1] as { id?: string })?.id;
-
-          while (afterCursor) {
-            const pageParams = new URLSearchParams();
-            pageParams.set("after", afterCursor);
-            const qs = pageParams.toString();
-
-            const page = await roomScopedApiCall<{
-              messages?: Array<{ id?: string }>;
-              has_more?: boolean;
-            }>(buildWaitForMessagesHistoryPageRequest({
-              targetRoomId,
-              targetProjectId,
-              queryString: qs,
-              deliveryHeaders,
-            }));
-
-            const msgs = page.messages ?? [];
-            allMessages.push(...msgs);
-
-            if (!page.has_more || msgs.length === 0) break;
-            afterCursor = (msgs[msgs.length - 1] as { id?: string })?.id;
-          }
-        }
+        catchUpTruncated = Boolean(firstResult.has_more);
       };
 
       if (fetchPlan.mode === "catch_up_tail") {
@@ -533,6 +749,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
           targetRoomId,
           targetProjectId,
           limit: fetchPlan.limit,
+          deliveryHeaders,
         });
         if (recent.messages.length > 0) {
           allMessages.push(...recent.messages);
@@ -549,7 +766,11 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         await longPollFromCursor(fetchPlan.after);
       }
 
-      const routing = filterSilentActivationMessages(allMessages);
+      const bounded = boundAgentMessageOutput(allMessages, {
+        direction: fetchPlan.mode === "catch_up_tail" ? "suffix" : "prefix",
+        maxBytes: AGENT_MESSAGE_BODY_MAX_BYTES,
+      });
+      const routing = filterSilentActivationMessages(bounded.messages);
       const threadContext = await collectThreadContextMessages({
         messages: routing.messages,
         localRoomId,
@@ -557,10 +778,15 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         projectId: targetProjectId,
       });
       const output: Record<string, unknown> = addActivationRoutingTelemetry({
-        messages: toAgentReadableMessages(routing.messages, threadContext),
+        messages: toAgentReadableMessages(routing.messages, threadContext.messages),
       }, routing);
+      if (threadContext.truncated) output.thread_context_truncated = true;
       if (roomIdFromResponse) {
         output[targetRoomId ? "room_id" : "project_id"] = roomIdFromResponse;
+      }
+      if (catchUpTruncated || bounded.truncated) output.truncated = true;
+      if (bounded.omittedMessageCount > 0) {
+        output.omitted_message_count = bounded.omittedMessageCount;
       }
 
       if (targetRoomId) {

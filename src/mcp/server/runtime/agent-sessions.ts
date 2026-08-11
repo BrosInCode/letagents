@@ -1,6 +1,7 @@
 import {
   getStoredAgentSession,
   isLocalRoomStorageEnabled,
+  replaceLocalWorkerAgentSession,
   saveAgentSession,
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
@@ -227,7 +228,7 @@ export async function ensureLocalWorkerAgentSession(
   const now = new Date().toISOString();
   const runtime = input.runtime?.trim() || detectAgentRuntimeLabel();
   const displayName = input.displayName?.trim() || identity.display_name;
-  return saveAgentSession({
+  const session = {
     session_id: `local_${randomUUID()}`,
     session_token: `local_${randomUUID()}`,
     room_id: roomId,
@@ -249,7 +250,10 @@ export async function ensureLocalWorkerAgentSession(
     updated_at: now,
     last_seen_at: now,
     ended_at: null,
-  });
+  } satisfies StoredAgentSessionState;
+  return session.session_kind === "worker"
+    ? replaceLocalWorkerAgentSession(session)
+    : saveAgentSession(session);
 }
 
 export function getAgentSessionRepoBranch(cwd?: string | null): string | null {

@@ -17,7 +17,10 @@ import type {
 import { buildRepoStatus } from "../../repo-status.js";
 import { looksLikeInviteCode } from "./codex-start-prompt.js";
 import {
-  shouldDeliverRoomStreamEventToManagedAgent,
+  canDeliverCodexStopControlToManagedAgent,
+  isOwnRoomStreamEventForManagedAgentAmongWorkers,
+  isStopPhraseRoomStreamEvent,
+  resolveDesktopRoomStreamEventRecipients,
 } from "./codex-event-routing.js";
 import {
   isManagedRoomStreamEvent,
@@ -39,7 +42,10 @@ import {
 } from "./managed-agent-permission-profiles.js";
 import { normalizeManagedAgentModel } from "./managed-agent-models.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
-import type { DesktopManagedAgentRuntime } from "./managed-agent-runtime.js";
+import type {
+  DesktopManagedAgentDispatchContext,
+  DesktopManagedAgentRuntime,
+} from "./managed-agent-runtime.js";
 import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
@@ -325,18 +331,38 @@ export function createDesktopCursorRuntime(
     return toPublicCursorManagedAgentSession(updated);
   }
 
-  function dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+  function dispatchRoomStreamEvent(
+    event: DesktopRoomStreamEvent,
+    context?: DesktopManagedAgentDispatchContext,
+  ): void {
     if (!isManagedRoomStreamEvent(event)) {
       return;
     }
 
-    const sessions = listDesktopManagedCursorLiveSessions(event.roomIdentifier)
-      .filter((session) =>
-        shouldDeliverRoomStreamEventToManagedAgent(
-          toPublicCursorManagedAgentSession(session),
+    const sessions = listDesktopManagedCursorLiveSessions(event.roomIdentifier);
+    const publicSessions = sessions.map(toPublicCursorManagedAgentSession);
+    const roomSessions = context?.roomSessions ?? publicSessions;
+    const recipients = new Set(resolveDesktopRoomStreamEventRecipients(
+      roomSessions,
+      event,
+      context?.populationComplete ?? true,
+    ).map((session) => session.id));
+    for (const [index, session] of sessions.entries()) {
+      const publicSession = publicSessions[index];
+      if (!publicSession) continue;
+      if (
+        isStopPhraseRoomStreamEvent(session, event)
+        && canDeliverCodexStopControlToManagedAgent(publicSession)
+        && !isOwnRoomStreamEventForManagedAgentAmongWorkers(
+          publicSession,
+          roomSessions,
           event,
-        ));
-    for (const session of sessions) {
+        )
+      ) {
+        recipients.add(publicSession.id);
+      }
+    }
+    for (const session of sessions.filter((candidate) => recipients.has(candidate.session_id))) {
       engine.enqueueDesktopEventTurn(session, event);
     }
   }

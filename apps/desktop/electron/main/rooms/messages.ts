@@ -11,6 +11,7 @@ import type {
   DesktopRoomThreadReadResult,
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
+import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
 import { apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import {
   consumeLocalStagedAttachments,
@@ -50,13 +51,29 @@ import {
 import { roomMessageHistoryPageSize } from "../paths.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import {
+  mapCloudRoomMessagePayload,
   mapRoomMessagePayload,
   mapRoomMessageThreadSummary,
   type RoomMessagePayload,
 } from "./messages/mappers.js";
 import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
+import {
+  getStoredAgentSession,
+  type StoredAgentSessionState,
+} from "../agents/state.js";
 
-export { mapRoomMessagePayload, type RoomMessagePayload };
+export { mapCloudRoomMessagePayload, mapRoomMessagePayload, type RoomMessagePayload };
+
+export function desktopMessageAccountRoutingRequest(
+  headers: Record<string, string> = {},
+): { headers: Record<string, string> } {
+  return {
+    headers: {
+      ...headers,
+      "X-LetAgents-Desktop-Client": "1",
+    },
+  };
+}
 
 type RoomThreadInboxPayload = {
   threads: Array<{
@@ -118,10 +135,9 @@ export async function sendDesktopRoomMessage(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
       method: "POST",
-      headers: {
+      ...desktopMessageAccountRoutingRequest({
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
-      },
+      }),
       body: JSON.stringify({
         sender,
         text: trimmedText,
@@ -133,7 +149,7 @@ export async function sendDesktopRoomMessage(
   );
 
   return {
-    message: mapRoomMessagePayload(message),
+    message: mapCloudRoomMessagePayload(message),
   };
 }
 
@@ -185,6 +201,7 @@ export async function getDesktopRoomThread(
     has_older?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedThreadRootId)}/thread?${params.toString()}`,
+    desktopMessageAccountRoutingRequest(),
   );
   const summary = mapRoomMessageThreadSummary(
     page.summary ?? page.root.thread ?? null,
@@ -215,7 +232,7 @@ export async function getDesktopRoomThreads(
   if (beforeMessageId !== undefined && beforeMessageId !== null && typeof beforeMessageId !== "string") {
     throw new Error("Thread inbox cursor must be a message id.");
   }
-  if (trimmedBeforeMessageId && !/^msg_\d+$/.test(trimmedBeforeMessageId)) {
+  if (trimmedBeforeMessageId && !parsePositivePgIntegerScopedId(trimmedBeforeMessageId, "msg")) {
     throw new Error("Thread inbox cursor must be a message id.");
   }
   if (filter !== "all" && filter !== "unread") {
@@ -257,6 +274,7 @@ export async function getDesktopRoomThreads(
   try {
     const page = await apiFetch<RoomThreadInboxPayload>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/threads?${params.toString()}`,
+      desktopMessageAccountRoutingRequest(),
     );
     return mapThreadInboxPayload(page);
   } catch (error) {
@@ -414,6 +432,7 @@ export async function getDesktopRoomMessagesBefore(
     has_more?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages?limit=${encodeURIComponent(String(limit))}&before=${encodeURIComponent(trimmedBeforeMessageId)}`,
+    desktopMessageAccountRoutingRequest(),
   );
 
   return {
@@ -433,7 +452,7 @@ export async function getDesktopRoomMessage(
 ): Promise<DesktopRoomMessage | null> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedMessageId = messageId.trim();
-  if (!trimmedRoomIdentifier || !/^msg_\d+$/.test(trimmedMessageId)) return null;
+  if (!trimmedRoomIdentifier || !parsePositivePgIntegerScopedId(trimmedMessageId, "msg")) return null;
   if (isDesktopSmokeCheck()) return null;
 
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
@@ -457,6 +476,7 @@ export async function getDesktopRoomMessage(
   );
   const response = await apiFetch<{ message?: RoomMessagePayload | null }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}`,
+    desktopMessageAccountRoutingRequest(),
   );
   return response.message ? mapRoomMessagePayload(response.message) : null;
 }
@@ -522,6 +542,111 @@ export async function getDesktopRoomLatestMessages(
 
 export { readChatStorageSettings, setChatStorageMode, setRoomStorageMode };
 
+export function resolveLocalCloudPublishAuthority(input: {
+  source: string | null | undefined;
+  publisherAgentKey: string | null;
+  publisherSessionId: string | null;
+  localControlAuthorized: boolean | null | undefined;
+  cloudRoomIdentifier: string;
+  publisherSession: {
+    session_id: string;
+    session_token?: string;
+    agent_key?: string | null;
+    room_id: string;
+  } | null;
+}): "worker" | "human" | null {
+  if (
+    input.source === "agent"
+    && input.publisherSessionId
+    && input.publisherAgentKey
+    && input.publisherSession?.session_id === input.publisherSessionId
+    && Boolean(input.publisherSession.session_token)
+    && input.publisherSession.agent_key === input.publisherAgentKey
+    && input.publisherSession.room_id === input.cloudRoomIdentifier
+  ) {
+    return "worker";
+  }
+  if (
+    input.source === "browser"
+    && input.localControlAuthorized === true
+    && !input.publisherAgentKey
+    && !input.publisherSessionId
+  ) {
+    return "human";
+  }
+  return null;
+}
+
+type CloudSyncWorkerSession = Pick<
+  StoredAgentSessionState,
+  "session_id" | "session_token" | "agent_key" | "room_id"
+>;
+
+async function registerLocalPublisherForCloudSync(
+  cloudRoomIdentifier: string,
+  localSession: StoredAgentSessionState,
+  publisherAgentKey: string,
+): Promise<CloudSyncWorkerSession> {
+  if (
+    localSession.session_kind !== "worker"
+    || localSession.ended_at
+    || localSession.agent_key !== publisherAgentKey
+  ) {
+    throw new Error("Local publisher session is no longer authoritative.");
+  }
+  const created = await apiFetch<{
+    session_id?: string;
+    session_token?: string;
+    agent_key?: string | null;
+    room_id?: string;
+  }>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      actor_key: publisherAgentKey,
+      actor_label: localSession.actor_label || publisherAgentKey,
+      display_name: localSession.display_name || localSession.actor_label || publisherAgentKey,
+      ide_label: localSession.ide_label || "Agent",
+      session_kind: "worker",
+      runtime: localSession.runtime || "local-sync",
+      repo_branch: localSession.repo_branch || null,
+    }),
+  });
+  const sessionId = created.session_id?.trim() || "";
+  const sessionToken = created.session_token?.trim() || "";
+  if (
+    !sessionId
+    || !sessionToken
+    || created.agent_key !== publisherAgentKey
+    || created.room_id !== cloudRoomIdentifier
+  ) {
+    throw new Error("Cloud publisher registration returned mismatched authority.");
+  }
+  return {
+    session_id: sessionId,
+    session_token: sessionToken,
+    agent_key: publisherAgentKey,
+    room_id: cloudRoomIdentifier,
+  };
+}
+
+async function disconnectCloudSyncWorkerSession(
+  cloudRoomIdentifier: string,
+  session: CloudSyncWorkerSession,
+): Promise<void> {
+  await apiFetch(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_session_id: session.session_id,
+        agent_session_token: session.session_token,
+      }),
+    },
+  );
+}
+
 export async function syncDesktopLocalChatRoom(
   roomIdentifier: string,
 ): Promise<DesktopLocalChatSyncResult> {
@@ -541,10 +666,63 @@ export async function syncDesktopLocalChatRoom(
 
   const localMessages = await claimUnsyncedLocalChatMessages(localRoomIdentifier);
   const cloudIdsByLocalId = new Map<string, string>();
+  const cloudPublisherByLocalSessionId = new Map<string, CloudSyncWorkerSession>();
   let syncedCount = 0;
   let skippedCount = 0;
 
+  try {
   for (const localMessage of localMessages) {
+    const publisherSessionId = localMessage.agent_identity?.agent_session_id?.trim() || null;
+    const publisherAgentKey = localMessage.agent_identity?.agent_key?.trim() || null;
+    const publisherSession = publisherSessionId
+      ? getStoredAgentSession(publisherSessionId)
+      : null;
+    let effectivePublisherSessionId = publisherSessionId;
+    let effectivePublisherSession: CloudSyncWorkerSession | StoredAgentSessionState | null =
+      publisherSession;
+    if (
+      localMessage.source === "agent"
+      && publisherSessionId
+      && publisherAgentKey
+      && publisherSession?.room_id === localRoomIdentifier
+      && publisherSession.agent_key === publisherAgentKey
+      && publisherSession.session_kind === "worker"
+      && !publisherSession.ended_at
+    ) {
+      let cloudPublisher = cloudPublisherByLocalSessionId.get(publisherSessionId);
+      if (!cloudPublisher) {
+        try {
+          cloudPublisher = await registerLocalPublisherForCloudSync(
+            cloudRoomIdentifier,
+            publisherSession,
+            publisherAgentKey,
+          );
+          cloudPublisherByLocalSessionId.set(publisherSessionId, cloudPublisher);
+        } catch {
+          skippedCount += 1;
+          continue;
+        }
+      }
+      effectivePublisherSession = cloudPublisher;
+      effectivePublisherSessionId = cloudPublisher.session_id;
+    }
+    const publishAuthority = resolveLocalCloudPublishAuthority({
+      source: localMessage.source,
+      publisherAgentKey,
+      publisherSessionId: effectivePublisherSessionId,
+      localControlAuthorized: localMessage.local_control_authorized,
+      cloudRoomIdentifier,
+      publisherSession: effectivePublisherSession,
+    });
+    const publishAsWorker = publishAuthority === "worker";
+    const publishAsHuman = publishAuthority === "human";
+    if (!publishAsWorker && !publishAsHuman) {
+      // Never promote agent/imported/ambiguous provenance into an owner-human
+      // cloud write. The durable claim expires and can be retried if the exact
+      // worker session becomes available again.
+      skippedCount += 1;
+      continue;
+    }
     const replyToCloudId = localMessage.reply_to?.id
       ? cloudIdsByLocalId.get(localMessage.reply_to.id) ||
         await getSyncedCloudMessageId({
@@ -587,7 +765,7 @@ export async function syncDesktopLocalChatRoom(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-LetAgents-Desktop-Client": "1",
+          ...(publishAsHuman ? { "X-LetAgents-Desktop-Client": "1" } : {}),
         },
         body: JSON.stringify({
           sender: localMessage.sender,
@@ -596,6 +774,10 @@ export async function syncDesktopLocalChatRoom(
           thread_root_id: threadRootCloudId,
           attachments,
           client_message_id: localMessage.sync_key,
+          ...(publishAsWorker && effectivePublisherSession ? {
+            agent_session_id: effectivePublisherSession.session_id,
+            agent_session_token: effectivePublisherSession.session_token,
+          } : {}),
         }),
       },
     );
@@ -611,6 +793,10 @@ export async function syncDesktopLocalChatRoom(
     } else {
       skippedCount += 1;
     }
+  }
+  } finally {
+    await Promise.allSettled([...cloudPublisherByLocalSessionId.values()].map((session) =>
+      disconnectCloudSyncWorkerSession(cloudRoomIdentifier, session)));
   }
 
   const taskResult = await syncLocalRoomTasks({
@@ -923,7 +1109,7 @@ export async function getDesktopRoomMessageInfo(
 ): Promise<DesktopMessageInfo | null> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedMessageId = messageId.trim();
-  if (!trimmedRoomIdentifier || !/^msg_\d+$/.test(trimmedMessageId)) return null;
+  if (!trimmedRoomIdentifier || !parsePositivePgIntegerScopedId(trimmedMessageId, "msg")) return null;
   if (isDesktopSmokeCheck()) return null;
 
   const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);

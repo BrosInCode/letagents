@@ -1,4 +1,5 @@
 import type { DesktopTaskSummary } from "../../ipc-types.js";
+import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
 import {
   describeAgentMessageAttachments,
   type AgentMessageAttachmentDescriptor,
@@ -263,10 +264,7 @@ async function fetchCloudRecentWindow(
 }
 
 function parseMessageNumber(messageId: string): number | null {
-  const match = /^msg_(\d+)$/.exec(messageId.trim());
-  if (!match) return null;
-  const value = Number(match[1]);
-  return Number.isInteger(value) && value > 0 ? value : null;
+  return parsePositivePgIntegerScopedId(messageId, "msg");
 }
 
 function formatMessageId(number: number): string {

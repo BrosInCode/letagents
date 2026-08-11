@@ -37,6 +37,9 @@ import {
   createPresignedAttachmentDownload,
   isAttachmentStorageConfigured,
 } from "../../messages/attachment-storage.js";
+import { resolveMessageActivationIdentity } from "../rooms/messages/activation-identity.js";
+import { attachReceiptAuthorityActivations } from "../rooms/messages/receipt-activation.js";
+import type { ResolvedRequestAgentIdentity } from "../../request/agent-identity.js";
 
 interface MessageCreatedEvent {
   projectId: string;
@@ -64,6 +67,8 @@ function isAgentLikeSender(sender: unknown): boolean {
 
 export interface LegacyProjectMessageRouteDeps {
   messageEvents: EventEmitter;
+  getProjectById?(projectId: string): Promise<Project | null>;
+  attachReceiptAuthorityActivations?: typeof attachReceiptAuthorityActivations;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   requireParticipant(
     req: AuthenticatedRequest,
@@ -82,6 +87,8 @@ export interface LegacyProjectMessageRouteDeps {
       agent_prompt_kind?: AgentPromptKind | null;
       reply_to?: string | null;
       attachments?: NormalizedMessageAttachmentReference[];
+      publisher_agent_key?: string | null;
+      publisher_agent_session_id?: string | null;
       account_id?: string | null;
     }
   ): Promise<Message>;
@@ -104,9 +111,13 @@ export function registerLegacyProjectMessageRoutes(
   app: Express,
   deps: LegacyProjectMessageRouteDeps
 ): void {
+  const loadProjectById = deps.getProjectById ?? getProjectById;
+  const attachActivations = deps.attachReceiptAuthorityActivations
+    ?? attachReceiptAuthorityActivations;
+
   app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await loadProjectById(projectId);
 
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -137,6 +148,7 @@ export function registerLegacyProjectMessageRoutes(
 
     try {
       const requiresWorkerSession = req.authKind === "owner_token"
+        || req.authKind === "agent_session"
         || hasAgentSessionCredentials({ agent_session_id, agent_session_token })
         || isAgentLikeSender(sender);
       const workerIdentity = requiresWorkerSession
@@ -175,7 +187,13 @@ export function registerLegacyProjectMessageRoutes(
         agent_prompt_kind: promptKind,
         reply_to: replyToMessageId,
         attachments,
-        account_id: req.sessionAccount?.account_id ?? null,
+        ...(workerIdentity?.ok ? {
+          publisher_agent_key: workerIdentity.identity.agent_key,
+          publisher_agent_session_id: workerIdentity.identity.agent_session_id,
+        } : {}),
+        account_id: workerIdentity?.ok
+          ? workerIdentity.identity.owner_account_id ?? null
+          : req.sessionAccount?.account_id ?? null,
       });
       await deps.rememberRoomParticipantFromMessage({
         projectId,
@@ -205,7 +223,7 @@ export function registerLegacyProjectMessageRoutes(
 
   app.get("/projects/:id/messages/:messageId/attachments/:attachmentId", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await loadProjectById(projectId);
 
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -236,7 +254,7 @@ export function registerLegacyProjectMessageRoutes(
 
   app.get("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await loadProjectById(projectId);
 
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -251,6 +269,7 @@ export function registerLegacyProjectMessageRoutes(
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
     const before = typeof req.query.before === "string" ? req.query.before : undefined;
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const activationIdentity = await resolveMessageActivationIdentity(req, projectId);
     const result = before === "latest"
       ? await getLatestMessages(projectId, { limit, include_prompt_only: includePromptOnly })
       : before
@@ -263,7 +282,9 @@ export function registerLegacyProjectMessageRoutes(
 
     res.json({
       project_id: projectId,
-      messages: result.messages,
+      messages: await attachActivations(projectId, activationIdentity, result.messages, {
+        includeTaskOwnerLeases: false,
+      }),
       has_more: result.has_more,
       has_older: before ? result.has_more : undefined,
     });
@@ -271,7 +292,7 @@ export function registerLegacyProjectMessageRoutes(
 
   app.get("/projects/:id/messages/stream", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await loadProjectById(projectId);
 
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -283,6 +304,7 @@ export function registerLegacyProjectMessageRoutes(
     }
 
     let endDelivery: (() => Promise<void>) | null = null;
+    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
     try {
       const delivery = await beginRoomAgentDelivery({
         req,
@@ -294,6 +316,7 @@ export function registerLegacyProjectMessageRoutes(
         },
       });
       endDelivery = delivery?.end ?? null;
+      activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
     } catch (error) {
       if (error instanceof InvalidRoomAgentDeliverySessionError) {
         res.status(401).json({ error: error.message });
@@ -302,21 +325,52 @@ export function registerLegacyProjectMessageRoutes(
       throw error;
     }
     const heartbeat = startSseStream(res);
+    let streamClosed = false;
+    let messageWriteQueue = Promise.resolve();
 
-    const onMessageCreated = ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
+    const writeMessageCreated = async ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
       if (eventProjectId !== projectId) {
         return;
       }
+      if (streamClosed) return;
       if (!deps.shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
         return;
       }
 
-      res.write(`data: ${JSON.stringify(message)}\n\n`);
+      try {
+        const [attached] = await attachActivations(
+          projectId,
+          activationIdentity,
+          [message],
+        );
+        if (streamClosed) return;
+        res.write(`data: ${JSON.stringify(attached ?? message)}\n\n`);
+      } catch (error) {
+        console.error(`[legacy messages stream] failed to attach receipt authority for ${projectId}`, error);
+        if (streamClosed) return;
+        // Receipt authority is ordered with the canonical message. Close on
+        // the first failed lookup so reconnect/poll rereads the same cursor;
+        // never let an overlapping callback write after the response.
+        streamClosed = true;
+        res.end();
+      }
+    };
+
+    const onMessageCreated = (event: MessageCreatedEvent) => {
+      messageWriteQueue = messageWriteQueue
+        .then(() => writeMessageCreated(event))
+        .catch((error: unknown) => {
+          console.error(`[legacy messages stream] failed to write message event for ${projectId}`, error);
+          if (streamClosed) return;
+          streamClosed = true;
+          res.end();
+        });
     };
 
     deps.messageEvents.on("message:created", onMessageCreated);
 
     req.on("close", () => {
+      streamClosed = true;
       deps.messageEvents.off("message:created", onMessageCreated);
       if (endDelivery) {
         void endDelivery().catch((error: unknown) => {
@@ -329,7 +383,7 @@ export function registerLegacyProjectMessageRoutes(
 
   app.get("/projects/:id/messages/poll", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
-    const project = await getProjectById(projectId);
+    const project = await loadProjectById(projectId);
 
     if (!project) {
       res.status(404).json({ error: "Project not found" });
@@ -347,6 +401,7 @@ export function registerLegacyProjectMessageRoutes(
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
     let endDelivery: (() => Promise<void>) | null = null;
+    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
     try {
       const delivery = await beginRoomAgentDelivery({
         req,
@@ -355,6 +410,7 @@ export function registerLegacyProjectMessageRoutes(
         onSessionDisconnected: () => resolveRequest([]),
       });
       endDelivery = delivery?.end ?? null;
+      activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
     } catch (error) {
       if (error instanceof InvalidRoomAgentDeliverySessionError) {
         res.status(401).json({ error: error.message });
@@ -375,7 +431,16 @@ export function registerLegacyProjectMessageRoutes(
       await endDelivery?.().catch((error: unknown) => {
         console.error(`[legacy messages poll] failed to end agent delivery for ${project.id}`, error);
       });
-      res.json({ project_id: projectId, messages: existing.messages, has_more: existing.has_more });
+      res.json({
+        project_id: projectId,
+        messages: await attachActivations(
+          projectId,
+          activationIdentity,
+          existing.messages,
+          { includeTaskOwnerLeases: false },
+        ),
+        has_more: existing.has_more,
+      });
       return;
     }
 
@@ -393,13 +458,22 @@ export function registerLegacyProjectMessageRoutes(
     }
 
     function resolveRequest(msgs: Message[], hasMore = false) {
-      if (settled) {
-        return;
-      }
+      void resolveRequestAsync(msgs, hasMore).catch((error: unknown) => {
+        console.error(`[legacy messages poll] failed to attach receipt authority for ${projectId}`, error);
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      });
+    }
 
+    async function resolveRequestAsync(msgs: Message[], hasMore = false) {
+      if (settled) return;
       settled = true;
       cleanup();
-      res.json({ project_id: projectId, messages: msgs, has_more: hasMore });
+      const attached = await attachActivations(
+        projectId,
+        activationIdentity,
+        msgs,
+      );
+      res.json({ project_id: projectId, messages: attached, has_more: hasMore });
     }
 
     async function onMessageCreated({ projectId: eventProjectId }: MessageCreatedEvent) {

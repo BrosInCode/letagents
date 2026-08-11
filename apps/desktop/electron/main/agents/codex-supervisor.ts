@@ -119,7 +119,10 @@ import {
   normalizeManagedAgentEffortForProvider,
   normalizeManagedAgentModel,
 } from "./managed-agent-models.js";
-import { DesktopManagedAgentRuntimeRegistry } from "./managed-agent-runtime.js";
+import {
+  DesktopManagedAgentRuntimeRegistry,
+  type DesktopManagedAgentDispatchContext,
+} from "./managed-agent-runtime.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import {
   disconnectDesktopManagedWorker,
@@ -1370,12 +1373,19 @@ export function inspectDesktopManagedAgentSession(
   return desktopManagedAgentRuntimes.inspect(sessionId, roomIdentifier);
 }
 
-function dispatchRoomStreamEventToCodexManagedAgents(event: DesktopRoomStreamEvent): void {
+function dispatchRoomStreamEventToCodexManagedAgents(
+  event: DesktopRoomStreamEvent,
+  context?: DesktopManagedAgentDispatchContext,
+): void {
   if (!isManagedRoomStreamEvent(event)) {
     return;
   }
 
-  const sessions = listDeliverableCodexSessionsForRoomStreamEvent(event);
+  const sessions = listDeliverableCodexSessionsForRoomStreamEvent(
+    event,
+    context?.roomSessions,
+    context?.populationComplete ?? true,
+  );
 
   for (const session of sessions) {
     codexEventTurnEngine.enqueueDesktopEventTurn(session, event);
@@ -1384,6 +1394,18 @@ function dispatchRoomStreamEventToCodexManagedAgents(event: DesktopRoomStreamEve
 
 export function dispatchRoomStreamEventToManagedAgents(event: DesktopRoomStreamEvent): void {
   desktopManagedAgentRuntimes.dispatchRoomStreamEvent(event);
+}
+
+export function listDesktopManagedAgentSessionsForRoom(
+  roomIdentifier: string,
+): DesktopManagedAgentSession[] {
+  return desktopManagedAgentRuntimes.listSessions(roomIdentifier);
+}
+
+export function listDesktopManagedAgentSessionPopulationForRoom(
+  roomIdentifier: string,
+) {
+  return desktopManagedAgentRuntimes.listSessionPopulation(roomIdentifier);
 }
 
 /**

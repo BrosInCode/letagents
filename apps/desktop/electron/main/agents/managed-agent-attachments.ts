@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DesktopRoomStorageState } from "../../ipc-types.js";
+import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
 import { readStoredAuth } from "../auth.js";
 import { apiUrl, attachmentProtocolScheme } from "../paths.js";
 import {
@@ -288,10 +289,10 @@ async function fetchCloudMessageAttachmentPayloads(
   cloudRoomIdentifier: string,
   messageId: string,
 ): Promise<RoomMessageAttachmentPayload[] | null> {
-  const messageNumber = Number(/^msg_(\d+)$/.exec(messageId.trim())?.[1]);
+  const messageNumber = parsePositivePgIntegerScopedId(messageId, "msg");
   const params = new URLSearchParams();
   params.set("limit", "1");
-  if (Number.isInteger(messageNumber) && messageNumber > 1) {
+  if (messageNumber !== null && messageNumber > 1) {
     params.set("after", `msg_${messageNumber - 1}`);
   }
   const { apiFetch } = await import("../auth.js");

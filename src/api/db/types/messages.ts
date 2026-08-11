@@ -13,7 +13,39 @@ export interface Message {
   thread: MessageThreadSummary | null;
   reply_to: MessageReplyReference | null;
   attachments: MessageAttachment[];
+  /** Account-scoped desktop dispatch metadata; omitted from shared events. */
+  account_agent_routing?: MessageAccountAgentRouting | null;
 }
+
+export type MessageAccountAgentRouting =
+  | {
+      version: 1;
+      authority: "receipts";
+      recipient_agent_keys: string[];
+      /**
+       * Exact receipt targets disambiguate overlapping durable-key rotations.
+       * A successor is present only when the server proved that the captured
+       * session ended and exactly one same-owner session now owns the key.
+       */
+      recipient_agent_sessions?: Array<{
+        agent_key: string;
+        agent_session_id: string;
+        successor_agent_session_id?: string;
+      }>;
+      control_authorized: boolean;
+    }
+  | {
+      version: 1;
+      authority: "legacy";
+      recipient_agent_keys: string[];
+      /** Present-empty is authoritative; clients must not re-run local aliases. */
+      recipient_agent_sessions: Array<{
+        agent_key: string;
+        agent_session_id: string;
+        activation_reason: string;
+      }>;
+      control_authorized: boolean;
+    };
 
 export interface MessageAgentIdentity {
   actor_label: string;
@@ -27,6 +59,7 @@ export interface MessageReplyReference {
   text: string;
   source: string | null;
   timestamp: string;
+  agent_identity: MessageAgentIdentity | null;
 }
 
 export interface MessageThreadParticipant {
@@ -43,6 +76,8 @@ export interface MessageThreadSummary {
   has_unread: boolean;
   latest_reply: MessageReplyReference | null;
   participants: MessageThreadParticipant[];
+  participant_count: number;
+  participants_truncated: boolean;
   last_read_message_id: string | null;
 }
 
@@ -150,6 +185,7 @@ export interface MessageThreadReadRow {
   thread_root_number: number;
   account_id: string;
   last_read_message_number: number;
+  last_read_reply_count: number;
   read_at: string;
 }
 

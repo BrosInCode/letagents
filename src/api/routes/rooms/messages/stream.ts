@@ -4,8 +4,7 @@ import {
   startSseStream,
   stopSseStream,
 } from "../../../http/sse.js";
-import { getLatestMessages, getMessageById, hydrateMessageReplies, type Message } from "../../../db.js";
-import { parseScopedId } from "../../../db/utils.js";
+import { getLatestMessages, getMessageById, type Message } from "../../../db.js";
 import {
   beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
@@ -16,6 +15,7 @@ import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identi
 import {
   isPromptOnlyAgentMessage,
 } from "../../../../shared/room-agent-prompts.js";
+import { parsePositivePgIntegerScopedId } from "../../../../shared/scoped-ids.js";
 import {
   rentalActivityEvents,
   type RentalActivityCreatedEvent,
@@ -47,11 +47,13 @@ export function registerMessageStreamRoute(
     if (!project) return;
 
     const projectId = project.id;
+    const desktopHumanClient = isDesktopHumanClient(req);
+    const streamAccountId = req.sessionAccount?.account_id ?? null;
     let endDelivery: (() => Promise<void>) | null = null;
     let activationIdentity: ResolvedRequestAgentIdentity | null = null;
-    if (!isDesktopHumanClient(req)) {
+    if (!desktopHumanClient) {
       try {
-        const delivery = await beginRoomAgentDelivery({
+        const delivery = await (deps.beginRoomAgentDelivery ?? beginRoomAgentDelivery)({
           req,
           roomId: project.id,
           transport: "sse",
@@ -83,9 +85,16 @@ export function registerMessageStreamRoute(
         return;
       }
       try {
-        const streamMessage = await hydrateStreamMessage(project.id, message, req.sessionAccount?.account_id ?? null);
+        const streamMessage = await hydrateStreamMessage(
+          project.id,
+          message,
+          streamAccountId,
+          desktopHumanClient,
+          deps.getMessageById ?? getMessageById,
+        );
         if (streamClosed) return;
-        const [attached] = await attachReceiptAuthorityActivations(project.id, activationIdentity, [streamMessage]);
+        const [attached] = await (deps.attachReceiptAuthorityActivations
+          ?? attachReceiptAuthorityActivations)(project.id, activationIdentity, [streamMessage]);
         if (streamClosed) return;
         writeEvent(`data: ${JSON.stringify({
           ...(attached ?? streamMessage),
@@ -94,10 +103,17 @@ export function registerMessageStreamRoute(
       } catch (error) {
         console.error(`[room messages stream] failed to hydrate message for ${project.id}`, error);
         if (streamClosed) return;
-        writeEvent(`data: ${JSON.stringify({
-          ...message,
+        // Neither worker nor desktop-human clients may advance past a message
+        // whose receipt/account authority failed to hydrate. Close without a
+        // message frame so the durable fallback rereads this exact cursor.
+        streamClosed = true;
+        writeEvent(`event: room_sync\ndata: ${JSON.stringify({
           room_id: project.id,
+          checkpoint: null,
+          requested_cursor: null,
+          gap: true,
         })}\n\n`);
+        res.end();
       }
     };
 
@@ -181,20 +197,18 @@ export function registerMessageStreamRoute(
     // ordering closes the snapshot/subscribe race: anything committed while
     // this query is in flight is either represented by the checkpoint or is
     // already queued on this stream (duplicates are harmless client-side).
-    const requestedCursor = typeof req.query?.after === "string" && /^msg_\d+$/.test(req.query.after)
-      ? req.query.after
-      : null;
+    const requestedCursorNumber = parsePositivePgIntegerScopedId(req.query?.after, "msg");
+    const requestedCursor = requestedCursorNumber === null ? null : `msg_${requestedCursorNumber}`;
     try {
       const latest = await getLatestMessages(projectId, {
         limit: 1,
         include_prompt_only: deps.shouldIncludePromptOnlyMessages(req),
-        account_id: req.sessionAccount?.account_id ?? null,
       });
       const checkpoint = latest.messages[latest.messages.length - 1]?.id ?? null;
       const cursorExists = !requestedCursor || requestedCursor === checkpoint || Boolean(await getMessageById(
         projectId,
         requestedCursor,
-        { include_prompt_only: deps.shouldIncludePromptOnlyMessages(req), account_id: req.sessionAccount?.account_id ?? null },
+        { include_prompt_only: deps.shouldIncludePromptOnlyMessages(req) },
       ));
       writeEvent(`event: room_sync\ndata: ${JSON.stringify({
         room_id: projectId,
@@ -231,29 +245,17 @@ async function hydrateStreamMessage(
   roomId: string,
   message: Message,
   accountId: string | null,
+  accountAgentRouting: boolean,
+  loadMessageById: typeof getMessageById,
 ): Promise<Message> {
   if (!accountId) return message;
-  const messageNumber = parseScopedId(message.id, "msg");
-  if (!messageNumber) return message;
-  const rootNumber = parseScopedId(message.thread_root_id, "msg");
-  const replyToNumber = message.thread_reply_to_id
-    ? parseScopedId(message.thread_reply_to_id, "msg")
-    : null;
-  const [hydrated] = await hydrateMessageReplies(roomId, [{
-    room_id: roomId,
-    number: messageNumber,
-    reply_to_number: replyToNumber,
-    thread_root_number: rootNumber && rootNumber !== messageNumber ? rootNumber : null,
-    sender: message.sender,
-    text: message.text,
-    agent_prompt_kind: message.agent_prompt_kind,
-    source: message.source,
-    client_message_id: null,
-    publisher_agent_key: message.agent_identity?.agent_key ?? null,
-    publisher_agent_session_id: message.agent_identity?.agent_session_id ?? null,
-    publisher_account_id: null,
-    routing_snapshot_version: null,
-    timestamp: message.timestamp,
-  }], { accountId });
-  return hydrated ?? message;
+  const hydrated = await loadMessageById(roomId, message.id, {
+    include_prompt_only: true,
+    account_id: accountId,
+    account_agent_routing: accountAgentRouting,
+  });
+  if (!hydrated) {
+    throw new Error(`Message ${message.id} disappeared before account routing could be hydrated.`);
+  }
+  return hydrated;
 }

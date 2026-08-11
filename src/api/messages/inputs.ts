@@ -5,6 +5,7 @@ import {
   normalizeAgentPromptKind,
   type AgentPromptKind,
 } from "../../shared/room-agent-prompts.js";
+import { parsePositivePgIntegerScopedId } from "../../shared/scoped-ids.js";
 
 export function parseOptionalAgentPromptKind(value: unknown): AgentPromptKind | null {
   if (value === undefined || value === null || value === "") {
@@ -42,7 +43,7 @@ function parseOptionalMessageId(value: unknown, fieldName: "reply_to" | "thread_
   }
 
   const normalized = value.trim();
-  if (!/^msg_\d+$/.test(normalized)) {
+  if (parsePositivePgIntegerScopedId(normalized, "msg") === null) {
     throw new RequestValidationError(`${fieldName} must be a valid message id`);
   }
 

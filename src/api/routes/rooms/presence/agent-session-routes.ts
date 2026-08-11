@@ -27,6 +27,7 @@ import {
 } from "../../../request/agent-identity.js";
 import { buildAgentActorLabel, parseAgentActorLabel } from "../../../../shared/agent-identity.js";
 import { pickLocalCodename } from "../../../../shared/codenames.js";
+import { isMessageSenderWithinBounds } from "../../../../../shared/message-contracts.mjs";
 import {
   normalizeAgentPresenceStatus,
   normalizeRoomAgentSessionKind,
@@ -329,6 +330,17 @@ export function registerAgentSessionRoutes(
           owner_label: agent.owner_label,
           ide_label: resolvedIdeLabel,
         });
+        if (
+          !isMessageSenderWithinBounds(actorLabel)
+          || !isMessageSenderWithinBounds(sessionDisplayName)
+          || !isMessageSenderWithinBounds(agent.canonical_key)
+        ) {
+          res.status(400).json({
+            error: "Agent identity fields exceed the supported message-routing bounds.",
+            code: "agent_identity_too_long",
+          });
+          return;
+        }
 
         try {
           const created = await createFencedRoomAgentSession({

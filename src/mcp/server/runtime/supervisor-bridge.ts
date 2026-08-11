@@ -4,6 +4,8 @@ import { createConnection } from "node:net";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
+import { parsePositivePgIntegerScopedId } from "../../../../shared/message-contracts.mjs";
+
 import type { StoredAgentSessionState } from "../../local-state.js";
 import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
 
@@ -524,6 +526,7 @@ async function enqueueSupervisedWorkerCursorCheckpoint(
   env: NodeJS.ProcessEnv,
   options: SupervisorBridgeOptions,
 ): Promise<void> {
+  if (parseRoomMessageNumber(roomCursor) === null) return;
   const coordinates = await resolveSupervisorCoordinates(session, env, options);
   if (!coordinates) return;
   const key = [
@@ -626,13 +629,13 @@ function isNewerRoomCursor(candidate: string, current: string): boolean {
   if (candidate === current) return false;
   const candidateNumber = parseRoomMessageNumber(candidate);
   const currentNumber = parseRoomMessageNumber(current);
-  if (candidateNumber !== null && currentNumber !== null) return candidateNumber > currentNumber;
-  return true;
+  if (candidateNumber === null) return false;
+  if (currentNumber === null) return true;
+  return candidateNumber > currentNumber;
 }
 
-function parseRoomMessageNumber(cursor: string): bigint | null {
-  const match = /^msg_(\d+)$/.exec(cursor.trim());
-  return match ? BigInt(match[1]!) : null;
+function parseRoomMessageNumber(cursor: string): number | null {
+  return parsePositivePgIntegerScopedId(cursor, "msg");
 }
 
 /** Transport failures are retryable bookkeeping failures, not worker failures. */

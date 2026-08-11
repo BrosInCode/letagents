@@ -1,32 +1,53 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  DEFAULT_READ_MESSAGES_LIMIT,
-  selectRecentMessages,
-} from "../server/tools/messages/read-tool.js";
+  AGENT_MESSAGE_BODY_MAX_BYTES,
+  AGENT_MESSAGE_OUTPUT_MAX_BYTES,
+  boundAgentMessageOutput,
+} from "../server/runtime/messages.js";
 
-function messages(count: number): Array<{ id: string }> {
-  return Array.from({ length: count }, (_, index) => ({ id: `msg_${index + 1}` }));
+function messages(count: number, text = ""): Array<{ id: string; text: string }> {
+  return Array.from({ length: count }, (_, index) => ({
+    id: `msg_${index + 1}`,
+    text,
+  }));
 }
 
-test("selectRecentMessages keeps only the most recent N messages", () => {
-  const selection = selectRecentMessages(messages(5), 2);
+test("boundAgentMessageOutput keeps a prefix within the byte budget", () => {
+  const selection = boundAgentMessageOutput(messages(100, "x".repeat(950_000)), {
+    maxBytes: AGENT_MESSAGE_BODY_MAX_BYTES,
+  });
 
-  assert.deepEqual(selection.messages, [{ id: "msg_4" }, { id: "msg_5" }]);
-  assert.equal(selection.total_message_count, 5);
-  assert.equal(selection.omitted_message_count, 3);
+  assert.deepEqual(selection.messages.map((message) => (message as { id: string }).id), [
+    "msg_1",
+    "msg_2",
+  ]);
+  assert.equal(selection.truncated, true);
+  assert.equal(selection.omittedMessageCount, 98);
+  assert.ok(selection.outputBytes <= AGENT_MESSAGE_BODY_MAX_BYTES);
+  assert.ok(Buffer.byteLength(JSON.stringify({ messages: selection.messages }), "utf8")
+    < AGENT_MESSAGE_OUTPUT_MAX_BYTES);
 });
 
-test("selectRecentMessages returns everything when under the limit", () => {
-  const selection = selectRecentMessages(messages(3), 10);
+test("boundAgentMessageOutput keeps a suffix in chronological order", () => {
+  const selection = boundAgentMessageOutput(messages(5, "x".repeat(700_000)), {
+    direction: "suffix",
+    maxBytes: AGENT_MESSAGE_BODY_MAX_BYTES,
+  });
 
-  assert.equal(selection.messages.length, 3);
-  assert.equal(selection.omitted_message_count, 0);
+  assert.deepEqual(selection.messages.map((message) => (message as { id: string }).id), [
+    "msg_4",
+    "msg_5",
+  ]);
+  assert.equal(selection.omittedMessageCount, 3);
 });
 
-test("selectRecentMessages treats limit 0 as full history", () => {
-  const selection = selectRecentMessages(messages(DEFAULT_READ_MESSAGES_LIMIT + 50), 0);
+test("boundAgentMessageOutput compacts one oversized message", () => {
+  const selection = boundAgentMessageOutput(messages(1, "x".repeat(5_000_000)), {
+    maxBytes: AGENT_MESSAGE_BODY_MAX_BYTES,
+  });
 
-  assert.equal(selection.messages.length, DEFAULT_READ_MESSAGES_LIMIT + 50);
-  assert.equal(selection.omitted_message_count, 0);
+  assert.equal(selection.messages.length, 1);
+  assert.equal((selection.messages[0] as { content_truncated?: boolean }).content_truncated, true);
+  assert.ok(selection.outputBytes <= AGENT_MESSAGE_BODY_MAX_BYTES);
 });
