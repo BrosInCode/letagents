@@ -1,4 +1,4 @@
-import type { DesktopRoomStreamEvent } from "../../ipc-types.js";
+import type { DesktopManagedAgentSession, DesktopRoomStreamEvent } from "../../ipc-types.js";
 import {
   canDeliverCodexStopControlToManagedAgent,
   isOwnRoomStreamEventForManagedAgentAmongWorkers,
@@ -20,14 +20,18 @@ export function isManagedRoomStreamEvent(event: DesktopRoomStreamEvent): event i
 
 export function listDeliverableCodexSessionsForRoomStreamEvent(
   event: ManagedRoomEvent,
+  roomSessions?: readonly DesktopManagedAgentSession[],
+  populationComplete = true,
 ): DesktopCodexLiveSessionState[] {
   const codexSessions = listDesktopManagedCodexLiveSessions(event.roomIdentifier)
     .map((session) => bindCodexLiveSessionToWorker(session))
     .filter((session) => !session.provider_id || session.provider_id === "codex");
   const publicCodexSessions = codexSessions.map(toPublicManagedAgentSession);
+  const ambiguityPopulation = roomSessions ?? publicCodexSessions;
   const resolvedCodexIds = new Set(resolveCodexRoomStreamEventRecipients(
-    publicCodexSessions,
+    ambiguityPopulation,
     event,
+    populationComplete,
   ).map((session) => session.id));
 
   return codexSessions.filter((session) =>
@@ -36,7 +40,7 @@ export function listDeliverableCodexSessionsForRoomStreamEvent(
         canDeliverCodexStopControlToManagedAgent(toPublicManagedAgentSession(session)) &&
         !isOwnRoomStreamEventForManagedAgentAmongWorkers(
           toPublicManagedAgentSession(session),
-          publicCodexSessions,
+          ambiguityPopulation,
           event,
         ))
   );

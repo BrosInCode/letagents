@@ -13,10 +13,37 @@ export type SqliteStatement = {
 export type SqliteDatabase = {
   exec: (sql: string) => void;
   prepare: (sql: string) => SqliteStatement;
+  close?: () => void;
 };
 
 const require = createRequire(import.meta.url);
 let sharedDb: SqliteDatabase | null = null;
+let sharedDbInitialization: Promise<SqliteDatabase> | null = null;
+let initializationObserverForTest: (() => void) | null = null;
+
+async function initializeLocalChatDatabase(): Promise<SqliteDatabase> {
+  initializationObserverForTest?.();
+  await mkdir(dirname(localChatDatabasePath), { recursive: true });
+  const { DatabaseSync } = require("node:sqlite") as {
+    DatabaseSync: new (path: string) => SqliteDatabase;
+  };
+  const database = new DatabaseSync(localChatDatabasePath);
+  try {
+    database.exec("PRAGMA journal_mode = WAL");
+    database.exec("PRAGMA foreign_keys = ON");
+    database.exec("PRAGMA busy_timeout = 5000");
+    return database;
+  } catch (error) {
+    database.close?.();
+    throw error;
+  }
+}
+
+export function setLocalChatDatabaseInitializationObserverForTest(
+  observer: (() => void) | null,
+): void {
+  initializationObserverForTest = observer;
+}
 
 /**
  * Single shared DatabaseSync connection for all local chat SQLite stores
@@ -24,15 +51,14 @@ let sharedDb: SqliteDatabase | null = null;
  */
 export async function getLocalChatDatabase(): Promise<SqliteDatabase> {
   if (sharedDb) return sharedDb;
-  await mkdir(dirname(localChatDatabasePath), { recursive: true });
-  const { DatabaseSync } = require("node:sqlite") as {
-    DatabaseSync: new (path: string) => SqliteDatabase;
-  };
-  sharedDb = new DatabaseSync(localChatDatabasePath);
-  sharedDb.exec("PRAGMA journal_mode = WAL");
-  sharedDb.exec("PRAGMA foreign_keys = ON");
-  sharedDb.exec("PRAGMA busy_timeout = 5000");
-  return sharedDb;
+  sharedDbInitialization ??= initializeLocalChatDatabase();
+  try {
+    const initialized = await sharedDbInitialization;
+    sharedDb = initialized;
+    return initialized;
+  } finally {
+    sharedDbInitialization = null;
+  }
 }
 
 export function addColumnIfMissing(

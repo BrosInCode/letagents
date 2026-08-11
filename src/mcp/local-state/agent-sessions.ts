@@ -1,4 +1,4 @@
-import { readLocalState, updateLocalState } from "./storage.js";
+import { readLocalState, readLocalStateSnapshot, updateLocalState } from "./storage.js";
 import type { StoredAgentSessionState } from "./types.js";
 
 export function getStoredAgentSession(
@@ -12,16 +12,27 @@ export function getStoredAgentSession(
 }
 
 export function getCurrentAgentSession(roomId?: string | null): StoredAgentSessionState | null {
-  const state = readLocalState();
+  return getCurrentAgentSessionSnapshot(roomId).session;
+}
+
+export function getCurrentAgentSessionSnapshot(roomId?: string | null): {
+  session: StoredAgentSessionState | null;
+  complete: boolean;
+} {
+  const snapshot = readLocalStateSnapshot();
+  const state = snapshot.state;
   const sessionIds = state.current_agent_session_ids;
   if (!sessionIds) {
-    return null;
+    return { session: null, complete: snapshot.complete };
   }
 
   if (roomId) {
     const sessionId = sessionIds[roomId];
     const session = sessionId ? (state.agent_sessions?.[sessionId] ?? null) : null;
-    return session && !session.ended_at ? session : null;
+    return {
+      session: session && !session.ended_at ? session : null,
+      complete: snapshot.complete,
+    };
   }
 
   let best: StoredAgentSessionState | null = null;
@@ -31,7 +42,7 @@ export function getCurrentAgentSession(roomId?: string | null): StoredAgentSessi
       best = session;
     }
   }
-  return best;
+  return { session: best, complete: snapshot.complete };
 }
 
 /**
@@ -52,6 +63,36 @@ export function getStoredAgentSessionsForRoomIdentity(
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
+/** Complete active local worker population for global routing ambiguity. */
+export function getStoredActiveAgentSessionsForRoom(
+  roomId: string,
+): StoredAgentSessionState[] {
+  return getStoredAgentRoutingStateSnapshot(roomId).sessions;
+}
+
+export function getStoredAgentRoutingStateSnapshot(roomId: string): {
+  sessions: StoredAgentSessionState[];
+  complete: boolean;
+  accountReaderKey: string | null;
+} {
+  if (!roomId) return { sessions: [], complete: true, accountReaderKey: null };
+  const snapshot = readLocalStateSnapshot();
+  const sessions = Object.values(snapshot.state.agent_sessions ?? {})
+    .filter((session) =>
+      session.room_id === roomId
+      && session.session_kind === "worker"
+      && !session.ended_at)
+    .sort((left, right) =>
+      left.created_at.localeCompare(right.created_at)
+      || left.session_id.localeCompare(right.session_id));
+  const accountId = snapshot.state.auth?.account?.id?.trim() || "";
+  return {
+    sessions,
+    complete: snapshot.complete,
+    accountReaderKey: accountId ? `account:${accountId}` : null,
+  };
+}
+
 export function saveAgentSession(
   session: StoredAgentSessionState,
   makeCurrent = true
@@ -63,6 +104,41 @@ export function saveAgentSession(
       state.current_agent_session_ids = state.current_agent_session_ids ?? {};
       state.current_agent_session_ids[session.room_id] = session.session_id;
     }
+    return state;
+  });
+  return session;
+}
+
+/**
+ * Local MCP rooms have one process-owned generation per durable worker key.
+ * Replace it atomically so a crashed/restarted process cannot remain the
+ * permanent oldest routing representative.
+ */
+export function replaceLocalWorkerAgentSession(
+  session: StoredAgentSessionState,
+): StoredAgentSessionState {
+  updateLocalState((state) => {
+    const endedAt = session.created_at;
+    state.agent_sessions = state.agent_sessions ?? {};
+    for (const [sessionId, existing] of Object.entries(state.agent_sessions)) {
+      if (
+        sessionId !== session.session_id
+        && existing.room_id === session.room_id
+        && existing.session_kind === "worker"
+        && existing.agent_key === session.agent_key
+        && !existing.ended_at
+      ) {
+        state.agent_sessions[sessionId] = {
+          ...existing,
+          ended_at: endedAt,
+          updated_at: endedAt,
+          last_seen_at: endedAt,
+        };
+      }
+    }
+    state.agent_sessions[session.session_id] = session;
+    state.current_agent_session_ids = state.current_agent_session_ids ?? {};
+    state.current_agent_session_ids[session.room_id] = session.session_id;
     return state;
   });
   return session;

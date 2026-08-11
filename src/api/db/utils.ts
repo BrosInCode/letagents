@@ -3,6 +3,7 @@ import { inArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { id_sequences } from "./schema.js";
+import { parsePositivePgIntegerScopedId } from "../../shared/scoped-ids.js";
 
 export const DEFAULT_LIST_LIMIT = 200;
 
@@ -40,13 +41,7 @@ export function formatTaskId(number: number): string {
 }
 
 export function parseScopedId(id: string, prefix: string): number | null {
-  const match = new RegExp(`^${prefix}_(\\d+)$`).exec(id);
-  if (!match) {
-    return null;
-  }
-
-  const number = Number(match[1]);
-  return Number.isInteger(number) && number > 0 ? number : null;
+  return parsePositivePgIntegerScopedId(id, prefix);
 }
 
 export function hashToken(token: string): string {

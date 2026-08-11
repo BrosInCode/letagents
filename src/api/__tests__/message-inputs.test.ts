@@ -59,6 +59,12 @@ test("parseOptionalReplyToMessageId rejects malformed reply targets", () => {
     () => parseOptionalReplyToMessageId(42),
     /reply_to must be a valid message id/
   );
+  for (const invalid of ["msg_0", "msg_01", "msg_2147483648", "msg_9007199254740993"]) {
+    assert.throws(
+      () => parseOptionalReplyToMessageId(invalid),
+      /reply_to must be a valid message id/,
+    );
+  }
 });
 
 test("parseOptionalThreadRootMessageId trims and validates message ids", () => {

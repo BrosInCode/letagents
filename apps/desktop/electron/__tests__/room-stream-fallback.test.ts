@@ -237,6 +237,13 @@ function messageIds(): string[] {
     .map((event) => event.message.id);
 }
 
+function emittedMessage(id: string) {
+  return emitted.find(
+    (event): event is Extract<DesktopRoomStreamEvent, { type: "message" }> =>
+      event.type === "message" && event.message.id === id,
+  )?.message;
+}
+
 test.beforeEach(() => {
   emitted.length = 0;
 });
@@ -261,6 +268,10 @@ test("healthy SSE with an empty snapshot establishes the first cursor before rea
     await waitUntil(() => messageIds().length === 2);
 
     assert.deepEqual(messageIds(), ["msg_1", "msg_2"]);
+    assert.deepEqual(emittedMessage("msg_1")?.accountAgentRouting, {
+      version: 1,
+      authority: "invalid",
+    }, "an old cloud SSE frame without an envelope stays visible but cannot wake workers");
     assert.equal(router.streamCalls.length, 1, "exactly one SSE transport opened");
     assert.equal(router.pollCalls.length, 0, "initial null cursor never drains room history");
 
@@ -368,6 +379,10 @@ test("SSE failure brings up the fallback poll and messages keep flowing", async 
     assert.equal(router.pollCalls[0]?.after, "msg_1", "fallback poll resumes from the cursor");
     assert.equal(router.pollCalls[0]?.timeout, "25000", "fallback uses the long-poll timeout");
     assert.deepEqual(messageIds(), ["msg_2"]);
+    assert.deepEqual(emittedMessage("msg_2")?.accountAgentRouting, {
+      version: 1,
+      authority: "invalid",
+    }, "an old cloud poll row without an envelope never falls back to mutable aliases");
   } finally {
     await stopDesktopRoomStream();
     router.restore();

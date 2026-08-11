@@ -18,6 +18,12 @@ export {
   type MessageThreadPage,
 } from "./messages/history.js";
 export {
+  getMessageThreadReadOverlays,
+  type MessageThreadReadOverlay,
+  type MessageThreadReadTarget,
+} from "./messages/thread-read-overlays.js";
+export { getMessageAccountAgentRoutingById } from "./messages/account-agent-routing.js";
+export {
   createMessageAttachmentUpload,
   deletePendingMessageAttachmentUpload,
   getMessageAttachment,

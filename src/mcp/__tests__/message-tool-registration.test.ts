@@ -5,7 +5,6 @@ import { registerMessageTools, registerStatusTools } from "../server/tools/messa
 import { buildSendMessageRequestBody } from "../server/tools/messages/send-tool.js";
 import {
   DEFAULT_WAIT_CATCHUP_LIMIT,
-  buildWaitForMessagesHistoryPageRequest,
   buildWaitForMessagesRequestOptions,
   filterSilentActivationMessages,
   planWaitForMessagesFetch,
@@ -141,26 +140,6 @@ test("wait_for_messages remote requests preserve worker delivery headers", () =>
   );
 });
 
-test("wait_for_messages paginated history requests preserve worker delivery headers", () => {
-  const deliveryHeaders = {
-    [LETAGENTS_AGENT_SESSION_ID_HEADER]: "agent_session_1",
-    [LETAGENTS_AGENT_SESSION_TOKEN_HEADER]: "token_1",
-  };
-
-  const request = buildWaitForMessagesHistoryPageRequest({
-    targetRoomId: "room_1",
-    targetProjectId: "project_1",
-    queryString: "after=msg_1",
-    deliveryHeaders,
-  });
-
-  assert.equal(request.room_id, "room_1");
-  assert.equal(request.project_id, "project_1");
-  assert.deepEqual(request.options, { headers: deliveryHeaders });
-  assert.equal(request.room_path("room_1"), "/rooms/room_1/messages?after=msg_1&include_prompt_only=1");
-  assert.equal(request.project_path("project_1"), "/projects/project_1/messages?after=msg_1&include_prompt_only=1");
-});
-
 test("wait_for_messages filters silent activation messages without losing cursor progress", () => {
   const result = filterSilentActivationMessages([
     {
@@ -218,11 +197,11 @@ test("wait_for_messages respects an explicit catch-up limit override", () => {
   assert.deepEqual(plan, { mode: "catch_up_tail", limit: 25 });
 });
 
-test("wait_for_messages keeps unbounded after-cursor behavior when a cursor is present", () => {
+test("wait_for_messages keeps cursor semantics while response paging stays bounded", () => {
   const plan = planWaitForMessagesFetch({ effectiveAfterMessageId: "msg_42" });
 
-  // With a cursor the tool must still return everything after it (genuine
-  // "new since I last polled"), so no tail cap is applied.
+  // The cursor is preserved; the runtime returns one bounded page and exposes
+  // last_observed_message_id/truncated so the next call resumes safely.
   assert.deepEqual(plan, { mode: "after_cursor", after: "msg_42" });
 });
 

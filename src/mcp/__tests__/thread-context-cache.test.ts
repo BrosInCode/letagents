@@ -23,7 +23,9 @@ function message(id: string, replyToId?: string): Record<string, unknown> {
 test("idle polls skip thread-context resolution entirely", async () => {
   resetThreadContextCacheForTests();
 
-  assert.deepEqual(await collectThreadContextMessages({ messages: [], ...NO_STORAGE }), []);
+  assert.deepEqual(await collectThreadContextMessages({ messages: [], ...NO_STORAGE }), {
+    messages: [], truncated: false,
+  });
 });
 
 test("a cached parent resolves without touching storage", async () => {
@@ -35,7 +37,7 @@ test("a cached parent resolves without touching storage", async () => {
     ...NO_STORAGE,
   });
 
-  assert.deepEqual(context.map((record) => record.id), ["msg_1"]);
+  assert.deepEqual(context.messages.map((record) => record.id), ["msg_1"]);
 });
 
 test("messages observed in one poll resolve parents in later polls", async () => {
@@ -52,7 +54,7 @@ test("messages observed in one poll resolve parents in later polls", async () =>
     ...NO_STORAGE,
   });
 
-  assert.deepEqual(context.map((record) => record.id), ["msg_1"]);
+  assert.deepEqual(context.messages.map((record) => record.id), ["msg_1"]);
 });
 
 test("cache entries are scoped per room", async () => {

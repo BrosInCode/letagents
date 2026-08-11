@@ -50,6 +50,8 @@ export async function persistDesktopManagedAgentLocalReply(input: {
     source: input.source || "agent",
     attachments: input.attachments ?? [],
     idempotency_key: input.idempotencyKey ?? null,
+    publisher_agent_key: input.workerSession.agent_key ?? null,
+    publisher_agent_session_id: input.workerSession.session_id,
   });
 
   return mapRoomMessagePayload(localMessage);

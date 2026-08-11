@@ -31,6 +31,7 @@ import type {
   MessageCreatedEvent,
   RoomMessageRouteDeps,
 } from "./types.js";
+import { parsePositivePgIntegerScopedId } from "../../../../shared/scoped-ids.js";
 
 export function registerMessageHistoryRoutes(
   app: Express,
@@ -55,16 +56,18 @@ export function registerMessageHistoryRoutes(
       }
       const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
       const accountId = req.sessionAccount?.account_id ?? null;
+      const accountAgentRouting = isDesktopHumanClient(req);
       const activationIdentity = await resolveMessageActivationIdentity(req, project.id);
       const result = before === "latest"
-        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
+        ? await getLatestMessages(project.id, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting })
         : before
-          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId })
+          ? await getMessagesBefore(project.id, before, { limit, include_prompt_only: includePromptOnly, account_id: accountId, account_agent_routing: accountAgentRouting })
           : await getMessages(project.id, {
             limit,
             after,
             include_prompt_only: includePromptOnly,
             account_id: accountId,
+            account_agent_routing: accountAgentRouting,
           });
 
       res.json({
@@ -91,6 +94,7 @@ export function registerMessageHistoryRoutes(
       const message = await getMessageById(project.id, messageId, {
         include_prompt_only: includePromptOnly,
         account_id: req.sessionAccount?.account_id ?? null,
+        account_agent_routing: isDesktopHumanClient(req),
       });
       if (!message) {
         // Body deliberately avoids the phrase "not found" so MCP clients can
@@ -125,6 +129,7 @@ export function registerMessageHistoryRoutes(
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const accountId = req.sessionAccount?.account_id ?? null;
+    const accountAgentRouting = isDesktopHumanClient(req);
     let activationIdentity: ResolvedRequestAgentIdentity | null = null;
     let settled = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
@@ -202,6 +207,7 @@ export function registerMessageHistoryRoutes(
         limit,
         include_prompt_only: includePromptOnly,
         account_id: accountId,
+        account_agent_routing: accountAgentRouting,
       });
       if (next.messages.length > 0) {
         resolveRequest(next.messages, next.has_more);
@@ -227,6 +233,7 @@ export function registerMessageHistoryRoutes(
         limit,
         include_prompt_only: includePromptOnly,
         account_id: accountId,
+        account_agent_routing: accountAgentRouting,
       });
       if (!settled && existing.messages.length > 0) {
         // The initial/backlog response is awaited so the route handler does
@@ -264,18 +271,34 @@ export function registerMessageHistoryRoutes(
         return;
       }
       const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
-      const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
-      const page = await getMessageThreads(project.id, {
+      // The inbox is intentionally visible-thread-only. Prompt-only messages
+      // remain available from timeline/history endpoints but never affect
+      // inbox ordering, counts, or cursors.
+      const activationIdentity = await (
+        deps.resolveMessageActivationIdentity ?? resolveMessageActivationIdentity
+      )(req, project.id);
+      const page = await (deps.getMessageThreads ?? getMessageThreads)(project.id, {
         filter,
         limit,
         before,
-        include_prompt_only: includePromptOnly,
         account_id: req.sessionAccount?.account_id ?? null,
+        account_agent_routing: isDesktopHumanClient(req),
       });
+      const attachedRoots = await (
+        deps.attachReceiptAuthorityActivations ?? attachReceiptAuthorityActivations
+      )(
+        project.id,
+        activationIdentity,
+        page.threads.map((thread) => thread.root),
+        { includeTaskOwnerLeases: false },
+      );
 
       res.json({
         room_id: project.id,
-        threads: page.threads,
+        threads: page.threads.map((thread, index) => ({
+          ...thread,
+          root: attachedRoots[index] ?? thread.root,
+        })),
         has_more: page.has_more,
         unread_thread_count: page.unread_thread_count,
       });
@@ -302,20 +325,33 @@ export function registerMessageHistoryRoutes(
         return;
       }
       const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
-      const page = await getMessageThread(project.id, rootMessageId, {
+      const activationIdentity = await (
+        deps.resolveMessageActivationIdentity ?? resolveMessageActivationIdentity
+      )(req, project.id);
+      const page = await (deps.getMessageThread ?? getMessageThread)(project.id, rootMessageId, {
         limit,
         before,
         include_prompt_only: includePromptOnly,
         account_id: req.sessionAccount?.account_id ?? null,
+        account_agent_routing: isDesktopHumanClient(req),
       });
       if (!page) {
         res.status(404).json({ error: "thread not found" });
         return;
       }
 
+      const attached = await (
+        deps.attachReceiptAuthorityActivations ?? attachReceiptAuthorityActivations
+      )(project.id, activationIdentity, [page.root, ...page.replies], {
+        includeTaskOwnerLeases: false,
+      });
+      const [root = page.root, ...replies] = attached;
+
       res.json({
         room_id: project.id,
         ...page,
+        root,
+        replies,
       });
     } catch (error) {
       respondWithValidationOrInternalError(
@@ -368,5 +404,5 @@ export function registerMessageHistoryRoutes(
 }
 
 function isMessageId(value: string): boolean {
-  return /^msg_\d+$/.test(value);
+  return parsePositivePgIntegerScopedId(value, "msg") !== null;
 }

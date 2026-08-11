@@ -235,13 +235,29 @@ export function toMessage(row: MessageRow): Message {
   };
 }
 
-export function toMessageReplyReference(row: Pick<MessageRow, "number" | "sender" | "text" | "source" | "timestamp">): MessageReplyReference {
+export function toMessageReplyReference(row: Pick<
+  MessageRow,
+  | "number"
+  | "sender"
+  | "text"
+  | "source"
+  | "timestamp"
+  | "publisher_agent_key"
+  | "publisher_agent_session_id"
+>): MessageReplyReference {
   return {
     id: formatMessageId(row.number),
     sender: row.sender,
     text: row.text,
     source: row.source ?? null,
     timestamp: row.timestamp,
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id,
+        }
+      : null,
   };
 }
 

@@ -1,6 +1,5 @@
 import {
   closeSync,
-  existsSync,
   mkdirSync,
   openSync,
   readFileSync,
@@ -25,22 +24,35 @@ export function getLocalStatePath(): string {
   return process.env.LETAGENTS_STATE_PATH || DEFAULT_STATE_PATH;
 }
 
-function readLocalStateFromPath(statePath: string): LetagentsLocalState {
-  if (!existsSync(statePath)) {
-    return {};
-  }
+export type LocalStateSnapshot = {
+  state: LetagentsLocalState;
+  complete: boolean;
+};
 
+function readLocalStateSnapshotFromPath(statePath: string): LocalStateSnapshot {
   try {
     const raw = readFileSync(statePath, "utf-8");
     const parsed = JSON.parse(raw) as LetagentsLocalState;
-    return typeof parsed === "object" && parsed ? parsed : {};
-  } catch {
-    return {};
+    return typeof parsed === "object" && parsed && !Array.isArray(parsed)
+      ? { state: parsed, complete: true }
+      : { state: {}, complete: false };
+  } catch (error) {
+    return (error as NodeJS.ErrnoException)?.code === "ENOENT"
+      ? { state: {}, complete: true }
+      : { state: {}, complete: false };
   }
 }
 
+function readLocalStateFromPath(statePath: string): LetagentsLocalState {
+  return readLocalStateSnapshotFromPath(statePath).state;
+}
+
+export function readLocalStateSnapshot(): LocalStateSnapshot {
+  return readLocalStateSnapshotFromPath(getLocalStatePath());
+}
+
 export function readLocalState(): LetagentsLocalState {
-  return readLocalStateFromPath(getLocalStatePath());
+  return readLocalStateSnapshot().state;
 }
 
 function sleepSync(ms: number): void {

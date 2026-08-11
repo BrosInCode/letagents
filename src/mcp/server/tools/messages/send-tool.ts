@@ -144,6 +144,8 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       reply_to: replyTarget,
       ...(resolvedThreadRoot ? { thread_root_id: resolvedThreadRoot } : {}),
       source: "agent",
+      publisher_agent_key: agentSession?.agent_key ?? null,
+      publisher_agent_session_id: agentSession?.session_id ?? null,
     });
     touchCurrentRoom(message.id);
     return jsonToolResponse({

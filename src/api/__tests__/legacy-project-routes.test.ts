@@ -100,3 +100,42 @@ test("buildLegacyProjectRoomResponse adds Git Room metadata for repo rooms", () 
     }
   );
 });
+
+test("agent identity registration rejects labels that cannot be routed in messages", async () => {
+  let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
+  const app = {
+    get() {},
+    patch() {},
+    post(path: string, candidate: typeof handler) {
+      if (path === "/agents") handler = candidate;
+    },
+  };
+  registerLegacyProjectRoutes(app as never, createDeps() as never);
+  assert.ok(handler);
+
+  let statusCode = 200;
+  let body: unknown;
+  const response = {
+    status(code: number) {
+      statusCode = code;
+      return response;
+    },
+    json(value: unknown) {
+      body = value;
+      return response;
+    },
+  };
+  await handler({
+    sessionAccount: {
+      account_id: "acct_owner",
+      login: "owner",
+      display_name: "Owner",
+    },
+    body: { name: "worker", display_name: "x".repeat(2_049) },
+  }, response as never);
+
+  assert.equal(statusCode, 400);
+  assert.deepEqual(body, {
+    error: "Agent identity fields exceed the supported message-routing bounds.",
+  });
+});

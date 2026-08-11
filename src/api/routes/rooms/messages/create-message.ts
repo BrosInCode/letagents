@@ -80,7 +80,10 @@ export function registerCreateMessageRoute(
           publisher_agent_key: workerIdentity.agent_key,
           publisher_agent_session_id: workerIdentity.agent_session_id,
         } : {}),
-        account_id: req.sessionAccount?.account_id ?? null,
+        account_id: workerIdentity?.owner_account_id
+          ?? req.sessionAccount?.account_id
+          ?? null,
+        account_agent_routing: desktopHumanWrite,
       });
       await deps.rememberRoomParticipantFromMessage({
         projectId: project.id,
@@ -97,8 +100,13 @@ export function registerCreateMessageRoute(
           source: "open_room",
         });
       }
+      const { account_agent_routing: createdRouting, ...responseMessage } = message;
+      const responseRouting = desktopHumanWrite && req.sessionAccount
+        ? createdRouting ?? null
+        : null;
       res.status(201).json({
-        ...message,
+        ...responseMessage,
+        ...(responseRouting ? { account_agent_routing: responseRouting } : {}),
         room_id: project.id,
       });
     } catch (error) {

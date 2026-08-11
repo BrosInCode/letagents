@@ -21,10 +21,27 @@ export interface DesktopManagedAgentRuntime {
   ): Promise<DesktopManagedAgentInspectResult | null>;
   stop(input?: DesktopManagedAgentStopInput): Promise<DesktopManagedAgentSession | null>;
   retry(input: DesktopManagedAgentRetryInput): Promise<DesktopManagedAgentSession | null>;
-  dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void;
+  dispatchRoomStreamEvent(
+    event: DesktopRoomStreamEvent,
+    context?: DesktopManagedAgentDispatchContext,
+  ): void;
   resolvePermissionRequest?(
     input: DesktopManagedAgentPermissionDecisionInput,
   ): Promise<DesktopManagedAgentPermissionDecisionResult>;
+}
+
+export interface DesktopManagedAgentDispatchContext {
+  /** Complete cross-provider room population used for global ambiguity checks. */
+  roomSessions: DesktopManagedAgentSession[];
+  /** False when any provider failed to enumerate its room sessions. */
+  populationComplete: boolean;
+  failedProviderIds: DesktopAgentProviderId[];
+}
+
+export interface DesktopManagedAgentSessionPopulation {
+  sessions: DesktopManagedAgentSession[];
+  complete: boolean;
+  failedProviderIds: DesktopAgentProviderId[];
 }
 
 export class DesktopManagedAgentRuntimeRegistry {
@@ -50,7 +67,30 @@ export class DesktopManagedAgentRuntimeRegistry {
   }
 
   listSessions(roomIdentifier?: string | null): DesktopManagedAgentSession[] {
-    return this.list().flatMap((runtime) => runtime.listSessions(roomIdentifier));
+    return this.listSessionPopulation(roomIdentifier).sessions;
+  }
+
+  listSessionPopulation(
+    roomIdentifier?: string | null,
+  ): DesktopManagedAgentSessionPopulation {
+    const sessions: DesktopManagedAgentSession[] = [];
+    const failedProviderIds: DesktopAgentProviderId[] = [];
+    for (const runtime of this.list()) {
+      try {
+        sessions.push(...runtime.listSessions(roomIdentifier));
+      } catch (error) {
+        failedProviderIds.push(runtime.providerId);
+        const detail = error instanceof Error ? error.message : String(error);
+        console.warn(
+          `Desktop managed runtime '${runtime.providerId}' failed to list sessions: ${detail}`,
+        );
+      }
+    }
+    return {
+      sessions,
+      complete: failedProviderIds.length === 0,
+      failedProviderIds,
+    };
   }
 
   async start(input: DesktopManagedAgentStartInput): Promise<DesktopManagedAgentStartResult> {
@@ -118,9 +158,15 @@ export class DesktopManagedAgentRuntimeRegistry {
   }
 
   dispatchRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+    const population = this.listSessionPopulation(event.roomIdentifier);
+    const context: DesktopManagedAgentDispatchContext = {
+      roomSessions: population.sessions,
+      populationComplete: population.complete,
+      failedProviderIds: population.failedProviderIds,
+    };
     for (const runtime of this.list()) {
       try {
-        runtime.dispatchRoomStreamEvent(event);
+        runtime.dispatchRoomStreamEvent(event, context);
       } catch (error) {
         const detail = error instanceof Error ? error.message : String(error);
         console.warn(

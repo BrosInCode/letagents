@@ -23,6 +23,7 @@ import type {
 } from "./payloads.js";
 
 const taskPageSize = 200;
+const desktopMessageOverlayHeaders = { "X-LetAgents-Desktop-Client": "1" };
 
 type TaskPageResponse = PaginatedTaskPage<
   NonNullable<RoomSnapshotData["tasksData"]["tasks"]>[number]
@@ -84,6 +85,7 @@ export async function fetchRoomSnapshotData(
           }).then((page) => ({ messages: page.messages }))
         : apiFetch<MessagesResponse>(
             `/rooms/${encodeURIComponent(apiRoomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
+            { headers: desktopMessageOverlayHeaders },
           )
             .then((page) => expandMessagesWithThreadAncestors(apiRoomIdentifier, page.messages || []))
             .then((messages) => ({ messages })),
@@ -245,6 +247,7 @@ async function fetchThreadUntilReferencesPresent(
     if (before) params.set("before", before);
     const page = await apiFetch<ThreadPageResponse>(
       `/rooms/${encodeURIComponent(roomIdentifier)}/messages/${encodeURIComponent(rootId)}/thread?${params.toString()}`,
+      { headers: desktopMessageOverlayHeaders },
     ).catch(() => null);
     if (!page) return;
     for (const message of [page.root, ...(page.replies || [])]) {

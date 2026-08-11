@@ -12,6 +12,7 @@
 // intentionally excluded from this parity suite.
 
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
@@ -26,7 +27,10 @@ const {
   getLocalMessageThreads,
   getLocalMessageThread,
   markLocalMessageThreadRead,
+  getLocalChatThreadRoutingAgentKeys,
+  getLocalChatThreadRoutingAgentKeysForRoots,
 } = await import("../main/rooms/messages/local-store.js");
+const { getLocalChatDatabase } = await import("../main/rooms/local-db.js");
 
 const READER = "account:parity";
 
@@ -175,6 +179,183 @@ test("SQLite thread inbox: participant aggregation (dedup, counts, latest-first)
   // Latest message id per participant is tracked.
   assert.equal(participants[0]?.latest_message_id, s.replyA2.id);
   assert.equal(participants[1]?.latest_message_id, s.rootA.id);
+});
+
+test("SQLite thread inbox: display participants use the cloud 50-row cap", async () => {
+  const room = "parity_participant_cap";
+  const root = await addLocalChatMessage(room, {
+    sender: "Human",
+    text: "root",
+    source: "browser",
+  });
+  let latest = root;
+  for (let index = 0; index < 55; index += 1) {
+    latest = await addLocalChatMessage(room, {
+      sender: `Agent ${index}`,
+      text: `reply ${index}`,
+      source: "agent",
+      reply_to: latest.id,
+      thread_root_id: root.id,
+    });
+  }
+
+  const thread = await getLocalMessageThread(room, root.id, { readerKey: READER });
+  const participants = thread?.summary.participants ?? [];
+  assert.equal(thread?.summary.participant_count, 56);
+  assert.equal(participants.length, 50);
+  assert.equal(thread?.summary.participants_truncated, true);
+  assert.equal(participants[0]?.sender, "Agent 54");
+  assert.equal(participants.at(-1)?.sender, "Agent 5");
+});
+
+test("SQLite thread routing: capped and prompt-only historical members stay indexed", async () => {
+  const room = "parity_local_routing_projection";
+  const oldSender = "Old member | Test owner | Codex";
+  const promptSender = "Prompt member | Test owner | Codex";
+  const root = await addLocalChatMessage(room, {
+    sender: oldSender,
+    text: "root",
+    source: "agent",
+  });
+  let latest = root;
+  for (let index = 0; index < 55; index += 1) {
+    latest = await addLocalChatMessage(room, {
+      sender: `Agent ${index}`,
+      text: `reply ${index}`,
+      source: "agent",
+      reply_to: latest.id,
+      thread_root_id: root.id,
+    });
+  }
+  await addLocalChatMessage(room, {
+    sender: promptSender,
+    text: "",
+    source: "agent",
+    agent_prompt_kind: "auto",
+    reply_to: latest.id,
+    thread_root_id: root.id,
+  });
+  await addLocalChatMessage(room, {
+    sender: "A B",
+    text: "",
+    source: "agent",
+    agent_prompt_kind: "auto",
+    reply_to: latest.id,
+    thread_root_id: root.id,
+  });
+
+  const thread = await getLocalMessageThread(room, root.id, { readerKey: READER });
+  const displayParticipants = thread?.summary.participants ?? [];
+  assert.equal(displayParticipants.length, 50);
+  assert.equal(displayParticipants.some((participant) => participant.sender === oldSender), false);
+  assert.equal(displayParticipants.some((participant) => participant.sender === promptSender), false);
+
+  const membership = await getLocalChatThreadRoutingAgentKeys(room, root.id, [
+    { agentKey: "test/old", actorLabel: oldSender, displayName: "Old member" },
+    { agentKey: "test/prompt", actorLabel: promptSender, displayName: "Prompt member" },
+  ]);
+  assert.deepEqual([...membership].sort(), ["test/old", "test/prompt"]);
+  assert.deepEqual(
+    [...await getLocalChatThreadRoutingAgentKeys(room, root.id, [
+      { agentKey: "test/ab", actorLabel: "ab", displayName: "ab" },
+    ])],
+    [],
+    "local projection must preserve the pure router's sender-vs-handle distinction",
+  );
+  const secondRoot = await addLocalChatMessage(room, {
+    sender: oldSender,
+    text: "second root",
+    source: "agent",
+  });
+  await addLocalChatMessage(room, {
+    sender: "Human",
+    text: "second continuation",
+    source: "browser",
+    reply_to: secondRoot.id,
+    thread_root_id: secondRoot.id,
+  });
+  const batchedMembership = await getLocalChatThreadRoutingAgentKeysForRoots(
+    room,
+    [root.id, secondRoot.id],
+    [{ agentKey: "test/old", actorLabel: oldSender, displayName: "Old member" }],
+  );
+  assert.deepEqual([...batchedMembership.keys()].sort(), [root.id, secondRoot.id].sort());
+
+  const database = await getLocalChatDatabase();
+  const alias = oldSender.trim().toLowerCase().replace(/\s+/g, " ");
+  const plan = database
+    .prepare(`
+      EXPLAIN QUERY PLAN
+      SELECT alias_text FROM local_chat_thread_routing_aliases_v2
+      WHERE room_id = ? AND thread_root_number = ?
+        AND alias_hash = ? AND alias_text = ?
+      LIMIT 1
+    `)
+    .all(room, Number(root.id.slice(4)), createHash("md5").update(alias).digest("hex"), alias);
+  assert.match(plan.map((row) => String(row.detail || "")).join("\n"), /local_chat_thread_routing_alias_root_lookup_v2_idx/);
+});
+
+test("SQLite thread routing resolves full labels globally and keeps non-ASCII exact", async () => {
+  const room = "parity_routing_alias_contract";
+  const aliceLabel = "Oak | Alice | Codex";
+  const bobLabel = "Oak | Bob | Cursor";
+  const identities = [
+    { agentKey: "test/alice-oak", actorLabel: aliceLabel, displayName: "Oak" },
+    { agentKey: "test/bob-oak", actorLabel: bobLabel, displayName: "Oak" },
+  ];
+  const fullRoot = await addLocalChatMessage(room, {
+    sender: aliceLabel,
+    text: "root",
+    source: "agent",
+  });
+  await addLocalChatMessage(room, {
+    sender: "Human",
+    text: "continue",
+    source: "browser",
+    reply_to: fullRoot.id,
+    thread_root_id: fullRoot.id,
+  });
+  assert.deepEqual(
+    [...await getLocalChatThreadRoutingAgentKeys(room, fullRoot.id, identities)],
+    ["test/alice-oak"],
+    "a unique full label wins before an ambiguous Oak segment",
+  );
+
+  const ambiguousRoot = await addLocalChatMessage(room, { sender: "Oak", text: "root", source: "agent" });
+  await addLocalChatMessage(room, {
+    sender: "Human",
+    text: "continue",
+    source: "browser",
+    reply_to: ambiguousRoot.id,
+    thread_root_id: ambiguousRoot.id,
+  });
+  assert.deepEqual(
+    [...await getLocalChatThreadRoutingAgentKeys(room, ambiguousRoot.id, identities)],
+    [],
+    "a globally ambiguous full label fails closed",
+  );
+
+  const unicodeRoot = await addLocalChatMessage(room, {
+    sender: "İPEK\u00a0AGENT",
+    text: "root",
+    source: "agent",
+  });
+  await addLocalChatMessage(room, {
+    sender: "ΟΣ",
+    text: "",
+    source: "agent",
+    agent_prompt_kind: "auto",
+    reply_to: unicodeRoot.id,
+    thread_root_id: unicodeRoot.id,
+  });
+  assert.deepEqual(
+    [...await getLocalChatThreadRoutingAgentKeys(room, unicodeRoot.id, [
+      { agentKey: "test/ipek", actorLabel: "İpek Agent", displayName: "İpek Agent" },
+      { agentKey: "test/greek-exact", actorLabel: "ΟΣ", displayName: "ΟΣ" },
+      { agentKey: "test/greek-lower", actorLabel: "ος", displayName: "ος" },
+    ])].sort(),
+    ["test/greek-exact", "test/ipek"],
+  );
 });
 
 test("SQLite thread inbox: a reply id resolves to its thread root for read + fetch", async () => {

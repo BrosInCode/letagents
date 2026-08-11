@@ -151,33 +151,50 @@ function sleepSync(ms: number): void {
   }
 }
 
-function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
-  if (!existsSync(statePath)) {
-    return {};
-  }
+function parseLocalState(raw: string): SharedLetAgentsState {
+  const parsed = JSON.parse(raw) as SharedLetAgentsState & {
+    current_claude_code_live_session_ids?: unknown;
+    claude_code_live_sessions?: unknown;
+  };
+  if (!parsed || typeof parsed !== "object") return {};
+  // The Electron-owned Claude runtime no longer exists. Drop its private
+  // session cache whenever local state is loaded so the next state write
+  // cannot preserve or revive that legacy execution path.
+  const {
+    current_claude_code_live_session_ids: _legacyCurrentClaudeSessionIds,
+    claude_code_live_sessions: _legacyClaudeSessions,
+    ...current
+  } = parsed;
+  return current;
+}
 
+function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
+  if (!existsSync(statePath)) return {};
   try {
-    const parsed = JSON.parse(readFileSync(statePath, "utf-8")) as SharedLetAgentsState & {
-      current_claude_code_live_session_ids?: unknown;
-      claude_code_live_sessions?: unknown;
-    };
-    if (!parsed || typeof parsed !== "object") return {};
-    // The Electron-owned Claude runtime no longer exists. Drop its private
-    // session cache whenever local state is loaded so the next state write
-    // cannot preserve or revive that legacy execution path.
-    const {
-      current_claude_code_live_session_ids: _legacyCurrentClaudeSessionIds,
-      claude_code_live_sessions: _legacyClaudeSessions,
-      ...current
-    } = parsed;
-    return current;
+    return parseLocalState(readFileSync(statePath, "utf-8"));
   } catch {
     return {};
   }
 }
 
+export function readAgentLocalStateSnapshot(): {
+  state: SharedLetAgentsState;
+  complete: boolean;
+} {
+  const statePath = getLetAgentsLocalStatePath();
+  if (!existsSync(statePath)) {
+    return { state: {}, complete: true };
+  }
+
+  try {
+    return { state: parseLocalState(readFileSync(statePath, "utf-8")), complete: true };
+  } catch {
+    return { state: {}, complete: false };
+  }
+}
+
 export function readAgentLocalState(): SharedLetAgentsState {
-  return readLocalStateFromPath(getLetAgentsLocalStatePath());
+  return readAgentLocalStateSnapshot().state;
 }
 
 function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState): void {

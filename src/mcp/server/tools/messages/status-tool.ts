@@ -69,6 +69,8 @@ export function registerPostStatusTool(server: McpServer): void {
           sender,
           text: statusText,
           source: "agent",
+          publisher_agent_key: agentSession?.agent_key ?? null,
+          publisher_agent_session_id: agentSession?.session_id ?? null,
         });
         touchCurrentRoom(message.id);
         return jsonToolResponse({

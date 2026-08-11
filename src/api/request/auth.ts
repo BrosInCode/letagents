@@ -67,6 +67,7 @@ export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestA
           agent_session_id: session.session_id,
           actor_label: session.actor_label,
           agent_key: session.agent_key,
+          owner_account_id: session.owner_account_id,
           agent_instance_id: session.agent_instance_id,
           session_kind: "worker",
           runtime: session.runtime,

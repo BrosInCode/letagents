@@ -52,6 +52,12 @@ export interface RoomMessageRouteDeps {
   reasoningEvents: EventEmitter;
   artifactEvents?: EventEmitter;
   rentalActivityEvents?: EventEmitter;
+  beginRoomAgentDelivery?: typeof import("../../../rooms/agent-delivery.js").beginRoomAgentDelivery;
+  attachReceiptAuthorityActivations?: typeof import("./receipt-activation.js").attachReceiptAuthorityActivations;
+  getMessageById?: typeof import("../../../db.js").getMessageById;
+  getMessageThreads?: typeof import("../../../db.js").getMessageThreads;
+  getMessageThread?: typeof import("../../../db.js").getMessageThread;
+  resolveMessageActivationIdentity?: typeof import("./activation-identity.js").resolveMessageActivationIdentity;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<Project | null>;
   requireParticipant(
@@ -77,6 +83,7 @@ export interface RoomMessageRouteDeps {
       publisher_agent_key?: string | null;
       publisher_agent_session_id?: string | null;
       account_id?: string | null;
+      account_agent_routing?: boolean;
     }
   ): Promise<Message>;
   rememberRoomParticipantFromMessage(input: {

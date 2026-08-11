@@ -15,6 +15,7 @@ export interface AgentSessionRequestPrincipal {
   agent_session_id: string;
   actor_label: string;
   agent_key: string;
+  owner_account_id?: string | null;
   agent_instance_id: string | null;
   session_kind: "worker";
   runtime: string;

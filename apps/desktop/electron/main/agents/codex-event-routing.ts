@@ -4,6 +4,12 @@ import type {
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 import {
+  normalizeRoutingHandle,
+  normalizeRoutingSender,
+  routingIdentityAliases,
+  routingSenderAliasRows,
+} from "../../../../../shared/routing-aliases.mjs";
+import {
   managedAgentDeliveryMode,
   toPublicManagedAgentSession,
   type DesktopCodexLiveSessionState,
@@ -144,14 +150,18 @@ export function shouldDeliverCodexRoomStreamEventToManagedAgent(
 export function resolveCodexRoomStreamEventRecipients(
   workers: readonly DesktopManagedAgentSession[],
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+  populationComplete = true,
 ): DesktopManagedAgentSession[] {
   const deliverable = workers.filter(canDeliverDesktopEventToManagedAgent);
   const ownWorkers = event.type === "message"
     ? new Set(resolveMessageAuthorWorkers(deliverable, event.message))
     : new Set<DesktopManagedAgentSession>();
   const eligible = deliverable.filter((worker) => !ownWorkers.has(worker));
+  if (!populationComplete && !hasExactSessionRoutingAuthority(event)) {
+    return [];
+  }
   if (event.type === "task_update") {
-    return resolveCodexTaskRecipients(eligible, event.task);
+    return resolveEligibleTaskRecipients(workers, eligible, event.task, false);
   }
   return resolveCodexMessageRecipients(eligible, event.message);
 }
@@ -160,33 +170,191 @@ export function shouldDeliverRoomStreamEventToManagedAgent(
   worker: DesktopManagedAgentSession,
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): boolean {
-  const canReceiveOrQueue = worker.deliveryMode === "desktop_events" &&
-    Boolean(worker.agentSessionId) &&
-    worker.status !== "interrupted" &&
-    worker.status !== "failed";
-  if (!canReceiveOrQueue || isOwnRoomStreamEventForManagedAgent(worker, event)) {
-    return false;
+  return resolveDesktopRoomStreamEventRecipients([worker], event).length === 1;
+}
+
+/** Resolve provider-neutral desktop recipients with durable-key uniqueness. */
+export function resolveDesktopRoomStreamEventRecipients(
+  workers: readonly DesktopManagedAgentSession[],
+  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+  populationComplete = true,
+): DesktopManagedAgentSession[] {
+  const eligible = workers.filter((worker) =>
+    worker.deliveryMode === "desktop_events"
+    && Boolean(worker.agentSessionId)
+    && worker.status !== "interrupted"
+    && worker.status !== "failed"
+    && !isOwnRoomStreamEventForManagedAgentAmongWorkers(worker, workers, event));
+  if (!populationComplete && !hasExactSessionRoutingAuthority(event)) {
+    return [];
+  }
+  if (event.type === "task_update") {
+    return resolveEligibleTaskRecipients(workers, eligible, event.task, true);
+  }
+  const routing = event.message.accountAgentRouting;
+  if (routing?.authority === "invalid") return [];
+  if (routing?.authority === "receipts") {
+    return resolveReceiptWorkers(eligible, routing);
+  }
+  if (routing?.authority === "legacy") {
+    return resolveLegacyWorkers(eligible, routing);
+  }
+  return resolveProviderNeutralLegacyMessageRecipients(eligible, event.message);
+}
+
+function resolveProviderNeutralLegacyMessageRecipients<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  message: DesktopRoomMessage,
+): T[] {
+  if (normalizeKey(message.source) === "managed_agent_failure") return [];
+  const mentions = extractMentionHandles(message.text);
+  if (mentions.some(isBroadcastHandle) || hasBroadcastAddress(message.text)) {
+    return [...workers];
+  }
+  if (mentions.some(isLikelyAgentMentionHandle)) {
+    return resolveCodexMessageRecipients(workers, message);
+  }
+  if (isThreadReply(message) || isAgentReplyTarget(message.replyTo)) {
+    return resolveThreadAndReplyRecipients(workers, message);
+  }
+  return [...workers];
+}
+
+function hasExactSessionRoutingAuthority(
+  event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
+): boolean {
+  if (event.type !== "message") return false;
+  const routing = event.message.accountAgentRouting;
+  return Boolean(
+    routing
+    && routing.authority !== "invalid"
+    && "recipientSessions" in routing
+    && Array.isArray(routing.recipientSessions),
+  );
+}
+
+/**
+ * Turn local SQLite routing facts into the same exact-session authority that
+ * cloud desktop overlays carry. Alias resolution runs against the complete
+ * cross-provider population; rotation overlap is then collapsed to one
+ * deterministic live representative per durable key.
+ */
+export type LocalRoutingAuthorityWorker = Pick<
+  DesktopManagedAgentSession,
+  "id" | "agentSessionId" | "agentKey" | "actorLabel" | "displayName" | "startedAt"
+>;
+
+export function buildLocalLegacyAccountAgentRouting(
+  workers: readonly DesktopManagedAgentSession[],
+  message: DesktopRoomMessage,
+  threadParticipantAgentKeys: readonly string[] = [],
+  authorityWorkers?: readonly LocalRoutingAuthorityWorker[],
+): Extract<NonNullable<DesktopRoomMessage["accountAgentRouting"]>, { authority: "legacy" }> {
+  const deliverable = workers.filter(canDeliverDesktopEventToManagedAgent);
+  const completePopulation = authorityWorkers ?? deliverable;
+  const representativeByKey = new Map<string, LocalRoutingAuthorityWorker>();
+  const keysByAlias = new Map<string, Set<string>>();
+  for (const worker of [...completePopulation].sort((left, right) =>
+    left.startedAt.localeCompare(right.startedAt) || left.id.localeCompare(right.id))) {
+    const key = normalizeKey(specificAgentKey(worker.agentKey));
+    if (!key) continue;
+    if (!representativeByKey.has(key)) representativeByKey.set(key, worker);
+    for (const alias of routingIdentityAliases(worker)) {
+      const keys = keysByAlias.get(alias) ?? new Set<string>();
+      keys.add(key);
+      keysByAlias.set(alias, keys);
+    }
   }
 
-  if (event.type === "message") {
-    return desktopManagedAgentMessageActivationDecision(worker, event.message) !== "silent";
+  const uniquelyMatchedSenderKeys = (sender: string | null | undefined): Set<string> => {
+    const rows = routingSenderAliasRows(sender);
+    const matches = (full: boolean) => {
+      const keys = new Set<string>();
+      for (const row of rows) {
+        if (row.isFull !== full) continue;
+        for (const key of keysByAlias.get(row.alias) ?? []) keys.add(key);
+      }
+      return keys;
+    };
+    const full = matches(true);
+    const selected = full.size > 0 ? full : matches(false);
+    return selected.size === 1 ? selected : new Set<string>();
+  };
+
+  const selfKeys = new Set<string>();
+  if (normalizeKey(message.source) === "agent") {
+    const publisherKey = normalizeKey(specificAgentKey(message.agentIdentity?.agentKey));
+    if (publisherKey) {
+      selfKeys.add(publisherKey);
+    } else {
+      // Pre-authority local rows cannot distinguish an agent author from a
+      // same-named recipient. Replaying those rows through current workers is
+      // unsafe (and can self-reactivate a restarted worker), so exact local
+      // routing fails closed until a durable publisher identity is present.
+      return {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: false,
+      };
+    }
   }
 
-  const workerKeys = [
-    worker.agentSessionId,
-    specificAgentKey(worker.agentKey),
-    worker.actorLabel,
-    worker.displayName,
-  ].map(normalizeKey).filter(Boolean);
-  const taskTargetKeys = [
-    specificAgentKey(event.task.assigneeAgentKey),
-    event.task.assignee,
-    ...event.task.activeLeases
-      .filter((lease) => lease.status === "active")
-      .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey), lease.holderLabel]),
-  ].map(normalizeKey).filter(Boolean);
+  let addressedKeys = new Set<string>();
+  const exactRecipientSessionByKey = new Map<string, string>();
+  const mentions = extractMentionHandles(message.text);
+  if (mentions.some(isBroadcastHandle) || hasBroadcastAddress(message.text)) {
+    addressedKeys = new Set(representativeByKey.keys());
+  } else if (mentions.some(isLikelyAgentMentionHandle)) {
+    for (const mention of mentions) {
+      if (!isLikelyAgentMentionHandle(mention) || isBroadcastHandle(mention)) continue;
+      const matches = keysByAlias.get(normalizeMentionIdentityHandle(mention));
+      if (matches?.size === 1) addressedKeys.add(matches.values().next().value!);
+    }
+  } else if (isThreadReply(message)) {
+    addressedKeys = new Set(threadParticipantAgentKeys
+      .map((key) => normalizeKey(specificAgentKey(key)))
+      .filter((key) => Boolean(key) && representativeByKey.has(key)));
+  } else {
+    const replyPublisherKey = normalizeKey(specificAgentKey(message.replyTo?.agentIdentity?.agentKey));
+    const replyPublisherSessionId = normalizeKey(message.replyTo?.agentIdentity?.agentSessionId);
+    if (replyPublisherKey && representativeByKey.has(replyPublisherKey)) {
+      addressedKeys.add(replyPublisherKey);
+      if (
+        replyPublisherSessionId
+        && completePopulation.some((worker) =>
+          normalizeKey(specificAgentKey(worker.agentKey)) === replyPublisherKey
+          && normalizeKey(worker.agentSessionId) === replyPublisherSessionId)
+      ) {
+        exactRecipientSessionByKey.set(replyPublisherKey, replyPublisherSessionId);
+      }
+    } else if (normalizeKey(message.replyTo?.source) === "agent") {
+      addressedKeys = uniquelyMatchedSenderKeys(message.replyTo?.sender);
+    }
+  }
+  for (const key of selfKeys) addressedKeys.delete(key);
 
-  return !taskTargetKeys.length || workerKeys.some((key) => taskTargetKeys.includes(key));
+  const recipientSessions = [...addressedKeys].sort().flatMap((agentKey) => {
+    const representative = representativeByKey.get(agentKey);
+    const agentSessionId = exactRecipientSessionByKey.get(agentKey)
+      ?? representative?.agentSessionId;
+    return representative && agentSessionId
+      ? [{
+          agentKey,
+          agentSessionId,
+          activationReason: "local_legacy",
+        }]
+      : [];
+  });
+  return {
+    version: 1,
+    authority: "legacy",
+    recipientAgentKeys: recipientSessions.map((target) => target.agentKey),
+    recipientSessions,
+    controlAuthorized: message.localControlAuthorized
+      ?? message.source === "browser",
+  };
 }
 
 export type DesktopManagedAgentMessageActivationDecision = "activate" | "silent" | "unclear";
@@ -202,11 +370,34 @@ export function codexManagedAgentMessageActivationDecision(
 }
 
 export function desktopManagedAgentMessageActivationDecision(
-  worker: Pick<DesktopManagedAgentSession, "agentKey" | "actorLabel" | "displayName">,
+  worker: Pick<DesktopManagedAgentSession, "agentSessionId" | "agentKey" | "actorLabel" | "displayName">,
   message: DesktopRoomMessage,
 ): DesktopManagedAgentMessageActivationDecision {
   if (normalizeKey(message.source) === "managed_agent_failure") {
     return "silent";
+  }
+  const routing = message.accountAgentRouting;
+  if (routing?.authority === "invalid") return "silent";
+  if (routing?.authority === "receipts") {
+    const sessionId = normalizeKey(worker.agentSessionId);
+    const durableKey = normalizeKey(specificAgentKey(worker.agentKey));
+    return sessionId && durableKey && routing.recipientSessions.some((target) =>
+      normalizeKey(target.agentKey) === durableKey
+      && (
+        normalizeKey(target.agentSessionId) === sessionId
+        || normalizeKey(target.successorAgentSessionId) === sessionId
+      ))
+      ? "activate"
+      : "silent";
+  }
+  if (routing?.authority === "legacy") {
+    const sessionId = normalizeKey(worker.agentSessionId);
+    const durableKey = normalizeKey(specificAgentKey(worker.agentKey));
+    return sessionId && durableKey && routing.recipientSessions.some((target) =>
+      normalizeKey(target.agentKey) === durableKey
+      && normalizeKey(target.agentSessionId) === sessionId)
+      ? "activate"
+      : "silent";
   }
   const mentions = extractMentionHandles(message.text);
   if (mentions.some(isBroadcastHandle)) {
@@ -222,7 +413,7 @@ export function desktopManagedAgentMessageActivationDecision(
     return "silent";
   }
 
-  if (senderMatchesManagedAgent(message.replyTo?.sender, worker)) {
+  if (isAgentReplyTarget(message.replyTo) && senderMatchesManagedAgent(message.replyTo?.sender, worker)) {
     return "activate";
   }
 
@@ -230,7 +421,10 @@ export function desktopManagedAgentMessageActivationDecision(
     return "silent";
   }
 
-  if (isThreadReply(message) && threadParticipantsIncludeManagedAgent(message, worker)) {
+  if (
+    isThreadReply(message)
+    && threadParticipantsIncludeManagedAgent(message, worker)
+  ) {
     return "activate";
   }
 
@@ -238,10 +432,15 @@ export function desktopManagedAgentMessageActivationDecision(
 }
 
 export function isStopPhraseRoomStreamEvent(
-  session: { stop_phrase: string },
+  session: { stop_phrase?: string | null; stopPhrase?: string | null },
   event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>,
 ): boolean {
-  return event.type === "message" && event.message.text === session.stop_phrase;
+  const stopPhrase = session.stop_phrase ?? session.stopPhrase;
+  return event.type === "message"
+    && event.message.accountAgentRouting?.authority !== "invalid"
+    && event.message.accountAgentRouting?.controlAuthorized === true
+    && Boolean(stopPhrase)
+    && event.message.text === stopPhrase;
 }
 
 const NON_AGENT_AT_HANDLES = new Set([
@@ -267,10 +466,7 @@ const NON_AGENT_AT_HANDLES = new Set([
 ]);
 
 function normalizeKey(value: string | null | undefined): string {
-  return String(value || "")
-    .trim()
-    .toLowerCase()
-    .replace(/\s+/g, " ");
+  return normalizeRoutingSender(value);
 }
 
 function specificAgentKey(value: string | null | undefined): string {
@@ -296,9 +492,12 @@ function threadParticipantsIncludeManagedAgent(
   worker: Pick<DesktopManagedAgentSession, "agentKey" | "actorLabel" | "displayName">,
 ): boolean {
   const senders = [
-    message.replyTo?.sender,
-    message.thread?.latestReply?.sender,
-    ...(message.thread?.participants ?? []).map((participant) => participant.sender),
+    normalizeKey(message.replyTo?.source) === "agent" ? message.replyTo?.sender : null,
+    normalizeKey(message.thread?.latestReply?.source) === "browser"
+      ? null
+      : message.thread?.latestReply?.sender,
+    ...(message.thread?.participants ?? []).map((participant) =>
+      normalizeKey(participant.source) === "browser" ? null : participant.sender),
   ];
 
   return senders.some((sender) => senderMatchesManagedAgent(sender, worker));
@@ -356,6 +555,15 @@ function resolveCodexMessageRecipients<T extends CodexAddressableWorker>(
     return [];
   }
 
+  const routing = message.accountAgentRouting;
+  if (routing?.authority === "invalid") return [];
+  if (routing?.authority === "receipts") {
+    return resolveReceiptWorkers(workers, routing);
+  }
+  if (routing?.authority === "legacy") {
+    return resolveLegacyWorkers(workers, routing);
+  }
+
   const mentions = extractMentionHandles(message.text);
   if (mentions.some((mention) => normalizeMentionHandle(mention) === "everyone")) {
     return [...workers];
@@ -387,7 +595,54 @@ function resolveCodexMessageRecipients<T extends CodexAddressableWorker>(
     return workers.filter((worker) => addressed.has(worker));
   }
 
-  return resolveThreadAndReplyRecipients(workers, message);
+  const recipients = new Set(resolveThreadAndReplyRecipients(workers, message));
+  return workers.filter((worker) => recipients.has(worker));
+}
+
+function resolveReceiptWorkers<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  routing: Extract<NonNullable<DesktopRoomMessage["accountAgentRouting"]>, { authority: "receipts" }>,
+): T[] {
+  const requestedKeys = new Set(routing.recipientAgentKeys.map(normalizeKey).filter(Boolean));
+  const deliverySessionsByKey = new Map<string, Set<string>>();
+  for (const target of routing.recipientSessions) {
+    const key = normalizeKey(specificAgentKey(target.agentKey));
+    const sessionId = normalizeKey(
+      target.successorAgentSessionId ?? target.agentSessionId,
+    );
+    if (!key || !sessionId || !requestedKeys.has(key)) continue;
+    const sessions = deliverySessionsByKey.get(key) ?? new Set<string>();
+    sessions.add(sessionId);
+    deliverySessionsByKey.set(key, sessions);
+  }
+
+  const selected: T[] = [];
+  for (const key of requestedKeys) {
+    const exactSessionIds = deliverySessionsByKey.get(key);
+    if (!exactSessionIds?.size) continue;
+    const exactMatches = workers.filter((worker) =>
+      normalizeKey(specificAgentKey(worker.agentKey)) === key
+      && exactSessionIds.has(normalizeKey(worker.agentSessionId)));
+    if (exactMatches.length === 1) selected.push(exactMatches[0]!);
+    // Duplicate exact-session state is corrupt and remains fail-closed.
+  }
+  return selected;
+}
+
+function resolveLegacyWorkers<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  routing: Extract<NonNullable<DesktopRoomMessage["accountAgentRouting"]>, { authority: "legacy" }>,
+): T[] {
+  const selected: T[] = [];
+  for (const target of routing.recipientSessions) {
+    const key = normalizeKey(target.agentKey);
+    const sessionId = normalizeKey(target.agentSessionId);
+    const matches = workers.filter((worker) =>
+      normalizeKey(specificAgentKey(worker.agentKey)) === key
+      && normalizeKey(worker.agentSessionId) === sessionId);
+    if (matches.length === 1) selected.push(matches[0]!);
+  }
+  return selected;
 }
 
 function stableManagedAgentAliases(worker: CodexAddressableWorker): Set<string> {
@@ -408,43 +663,136 @@ function displayManagedAgentAliases(worker: CodexAddressableWorker): Set<string>
   return aliases;
 }
 
-function resolveCodexTaskRecipients<T extends CodexAddressableWorker>(
+function resolveEligibleTaskRecipients<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  eligible: readonly T[],
+  task: Extract<DesktopRoomStreamEvent, { type: "task_update" }>['task'],
+  includeUntargeted: boolean,
+): T[] {
+  // Identity ambiguity is a room-global property. Resolve before applying a
+  // runtime's eligibility filter so another provider or a stale local worker
+  // cannot disappear from duplicate-session/key checks.
+  const eligibleWorkers = new Set(eligible);
+  return resolveTaskRecipients(workers, task, includeUntargeted)
+    .filter((worker) => eligibleWorkers.has(worker));
+}
+
+function resolveTaskRecipients<T extends CodexAddressableWorker>(
   workers: readonly T[],
   task: Extract<DesktopRoomStreamEvent, { type: "task_update" }>['task'],
+  includeUntargeted: boolean,
 ): T[] {
-  // A durable assignment or lease identity is authoritative. In particular,
-  // a human-facing assignee label must never widen an exact assignment to a
-  // second worker which happens to share a display name.
-  const stableTargets = [
-    specificAgentKey(task.assigneeAgentKey),
-    ...task.activeLeases
-      .filter((lease) => lease.status === "active")
-      .flatMap((lease) => [lease.agentSessionId, specificAgentKey(lease.agentKey)]),
-  ].map(normalizeHandle).filter(Boolean);
-  if (stableTargets.length) {
-    const owner = resolveConvergentStableWorker(workers, stableTargets);
-    return owner ? [owner] : [];
+  const recipients = new Set<T>();
+  const activeLeases = task.activeLeases.filter((lease) => lease.status === "active");
+  const workLeases = activeLeases.filter((lease) => lease.kind === "work");
+  if (
+    includeUntargeted
+    &&
+    activeLeases.length === 0
+    && !String(task.assigneeAgentKey ?? "").trim()
+    && !String(task.assignee ?? "").trim()
+  ) {
+    return [...workers];
   }
 
-  const aliasTargets = [
-    task.assignee,
-    ...task.activeLeases
-      .filter((lease) => lease.status === "active")
-      .map((lease) => lease.holderLabel),
-  ];
-  return resolveUniqueAliasRecipients(workers, aliasTargets);
+  // At most one active work lease is valid for a task. Its exact session is
+  // newer authority than the durable key, so a supported old/new overlap may
+  // share that key without waking both workers. The task assignment and lease
+  // key still have to agree with the exact worker when they are present.
+  if (workLeases.length === 1) {
+    const workOwner = resolveTaskTargetWorker(workers, {
+      agentSessionId: workLeases[0]!.agentSessionId,
+      agentKeys: [task.assigneeAgentKey, workLeases[0]!.agentKey],
+      aliases: [task.assignee, workLeases[0]!.holderLabel],
+    });
+    if (workOwner) recipients.add(workOwner);
+  } else if (workLeases.length === 0) {
+    const assignee = resolveTaskTargetWorker(workers, {
+      agentSessionId: null,
+      agentKeys: [task.assigneeAgentKey],
+      aliases: [task.assignee],
+    });
+    if (assignee) recipients.add(assignee);
+  }
+
+  // Review leases are independent authorities and may legitimately coexist
+  // with the work lease. Resolve each tuple independently, then deduplicate a
+  // worker which happens to hold more than one lease.
+  for (const lease of activeLeases) {
+    if (lease.kind === "work") continue;
+    const owner = resolveTaskTargetWorker(workers, {
+      agentSessionId: lease.agentSessionId,
+      agentKeys: [lease.agentKey],
+      aliases: [lease.holderLabel],
+    });
+    if (owner) recipients.add(owner);
+  }
+
+  return workers.filter((worker) => recipients.has(worker));
+}
+
+function resolveTaskTargetWorker<T extends CodexAddressableWorker>(
+  workers: readonly T[],
+  target: {
+    agentSessionId: string | null | undefined;
+    agentKeys: readonly (string | null | undefined)[];
+    aliases: readonly (string | null | undefined)[];
+  },
+): T | null {
+  const exactSessionId = normalizeHandle(target.agentSessionId);
+  const hasSuppliedSessionId = Boolean(String(target.agentSessionId ?? "").trim());
+  const agentKeys = normalizeSuppliedAgentKeys(target.agentKeys);
+  if (agentKeys === null || (hasSuppliedSessionId && !exactSessionId)) return null;
+
+  if (exactSessionId) {
+    const exactMatches = workers.filter((worker) =>
+      normalizeHandle(worker.agentSessionId) === exactSessionId);
+    if (exactMatches.length !== 1) return null;
+
+    const exactWorker = exactMatches[0]!;
+    const workerKey = normalizeHandle(specificAgentKey(exactWorker.agentKey));
+    return agentKeys.every((key) => workerKey === key) ? exactWorker : null;
+  }
+
+  if (agentKeys.length) {
+    const keyMatches = workers.filter((worker) => {
+      const workerKey = normalizeHandle(specificAgentKey(worker.agentKey));
+      return agentKeys.every((key) => workerKey === key);
+    });
+    return keyMatches.length === 1 ? keyMatches[0]! : null;
+  }
+
+  const aliasMatches = resolveUniqueAliasRecipients(workers, target.aliases);
+  return aliasMatches.length === 1 ? aliasMatches[0]! : null;
+}
+
+function normalizeSuppliedAgentKeys(
+  values: readonly (string | null | undefined)[],
+): string[] | null {
+  const normalized = new Set<string>();
+  for (const value of values) {
+    if (!String(value ?? "").trim()) continue;
+    const key = normalizeHandle(specificAgentKey(value));
+    if (!key) return null;
+    normalized.add(key);
+  }
+  return [...normalized];
 }
 
 function resolveThreadAndReplyRecipients<T extends CodexAddressableWorker>(
   workers: readonly T[],
   message: DesktopRoomMessage,
+  includeDisplayThreadParticipants = true,
 ): T[] {
   const senders = [
-    message.replyTo?.sender,
-    ...(isThreadReply(message)
+    normalizeKey(message.replyTo?.source) === "agent" ? message.replyTo?.sender : null,
+    ...(includeDisplayThreadParticipants && isThreadReply(message)
       ? [
-        message.thread?.latestReply?.sender,
-        ...(message.thread?.participants ?? []).map((participant) => participant.sender),
+        normalizeKey(message.thread?.latestReply?.source) === "browser"
+          ? null
+          : message.thread?.latestReply?.sender,
+        ...(message.thread?.participants ?? []).map((participant) =>
+          normalizeKey(participant.source) === "browser" ? null : participant.sender),
       ]
       : []),
   ];
@@ -589,7 +937,7 @@ function hasBroadcastAddress(text: string | null | undefined): boolean {
 }
 
 function normalizeHandle(value: string | null | undefined): string {
-  return String(value || "").trim().toLowerCase().replace(/[^a-z0-9_.:/-]+/g, "");
+  return normalizeRoutingHandle(value);
 }
 
 function normalizeMentionIdentityHandle(value: string | null | undefined): string {

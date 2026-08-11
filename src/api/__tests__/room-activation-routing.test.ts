@@ -237,6 +237,27 @@ test("activation routing activates thread participants and direct reply targets"
   );
 });
 
+test("an authoritative empty thread membership cannot be re-promoted by display participants", () => {
+  assert.deepEqual(
+    decideAgentMessageActivation({
+      id: "msg_exact_membership_negative",
+      sender: "EmmyMay",
+      text: "continuing",
+      thread_root_id: "msg_3",
+      reply_to: { sender: worker.actor_label, source: "agent" },
+      thread: {
+        root_message_id: "msg_3",
+        participants: [{ sender: worker.actor_label }],
+      },
+    }, worker, { threadParticipantRootIds: new Set() }),
+    {
+      decision: "unclear",
+      reason: "unaddressed",
+      addressed: false,
+    },
+  );
+});
+
 test("activation routing leaves human quote replies deliverable as unaddressed", () => {
   assert.deepEqual(
     decideAgentMessageActivation({
@@ -715,4 +736,30 @@ test("activation routing attaches metadata only for worker sessions", () => {
     session_kind: "controller",
   });
   assert.equal("activation" in controllerMessages[0], false);
+});
+
+test("routing aliases use version-independent ASCII folding and exact non-ASCII", () => {
+  const participantDecision = (sender: string, actorLabel: string) =>
+    decideAgentMessageActivation({
+      id: "msg_2",
+      sender: "Human",
+      text: "continue",
+      thread_root_id: "msg_1",
+      thread: { root_message_id: "msg_1", participants: [{ sender }] },
+    }, {
+      ...worker,
+      actor_label: actorLabel,
+      display_name: actorLabel,
+      agent_key: `test/${actorLabel}`,
+    });
+
+  assert.equal(participantDecision("İPEK\u00a0AGENT", "İpek Agent").reason, "thread_participant");
+  assert.equal(participantDecision("ꟋGENT", "Ɤgent").reason, "thread_participant");
+  assert.equal(participantDecision("ΟΣ", "ος").reason, "unaddressed");
+  assert.equal(participantDecision("ΟΣ", "οσ").reason, "unaddressed");
+  assert.equal(participantDecision("Σ", "σ").reason, "unaddressed");
+  assert.equal(participantDecision("σ", "ς").reason, "unaddressed");
+  assert.equal(participantDecision("Ⓐgent", "ⓐgent").reason, "unaddressed");
+  assert.equal(participantDecision("İpek", "ipek").reason, "unaddressed");
+  assert.equal(participantDecision("ΟΣ", "ΟΣ").reason, "thread_participant");
 });

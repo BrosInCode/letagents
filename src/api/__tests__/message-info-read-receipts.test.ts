@@ -116,6 +116,37 @@ test("a snapshot message without a receipt stays silent: the router never re-pro
   assert.equal(attached.activation.for_current_agent.decision, "silent");
 });
 
+test("snapshot system failures retain the canonical silent system-event reason", () => {
+  const [attached] = attachAgentMessageActivationsFromReceipts(
+    [{
+      id: "msg_9",
+      sender: "GardenSignal",
+      text: "Worker turn failed",
+      source: "managed_agent_failure",
+    }],
+    workerIdentity,
+    new Map(),
+    new Set([9]),
+  ) as Array<{ activation: { for_current_agent: { decision: string; reason: string } } }>;
+  assert.deepEqual(attached.activation.for_current_agent, {
+    decision: "silent",
+    reason: "system_event",
+    addressed: false,
+  });
+});
+
+test("malformed scoped ids cannot borrow another message's receipt", () => {
+  for (const id of ["msg_5junk", "msg_05", "msg_0", "msg_2147483648", "msg_9007199254740992"]) {
+    const [attached] = attachAgentMessageActivationsFromReceipts(
+      [{ id, sender: "EmmyMay", text: "no mention", source: "human" }],
+      workerIdentity,
+      new Map([[5, { activation_reason: "broadcast" }]]),
+      new Set([5]),
+    ) as Array<{ activation: { for_current_agent: { decision: string } } }>;
+    assert.notEqual(attached.activation.for_current_agent.decision, "activate", id);
+  }
+});
+
 test("pre-snapshot legacy messages keep lazy routing so backlog mentions still activate rotated sessions", () => {
   const [mentioned, unaddressed] = attachAgentMessageActivationsFromReceipts(
     [
@@ -145,7 +176,7 @@ test("every delivery surface routes through the single receipt authority", () =>
   const history = routeSource("../routes/rooms/messages/history.ts");
   const stream = routeSource("../routes/rooms/messages/stream.ts");
   for (const source of [history, stream]) {
-    assert.match(source, /attachReceiptAuthorityActivations\(/);
+    assert.match(source, /attachReceiptAuthorityActivations/);
     assert.doesNotMatch(source, /attachAgentMessageActivations\(/);
     assert.doesNotMatch(source, /attachAgentMessageActivation\(/);
   }
@@ -242,12 +273,18 @@ test("message info invalidations coalesce ids and overflow to room-level", async
 });
 
 test("only the supervised reply namespace identifies a server-side reply target", async () => {
-  const { parseSupervisedReplySourceNumber } = await import("../db/messages/create.js");
+  const { chunkMessageReceiptRows, parseSupervisedReplySourceNumber } = await import("../db/messages/create.js");
   assert.equal(parseSupervisedReplySourceNumber("supervised-room:supervised_garden:msg_41:reply:v1"), 41);
   assert.equal(parseSupervisedReplySourceNumber("supervised-room:supervised_garden:room_a:msg_41:reply:v1"), 41);
+  assert.equal(parseSupervisedReplySourceNumber("supervised-room:supervised_garden:msg_041:reply:v1"), null);
+  assert.equal(parseSupervisedReplySourceNumber("supervised-room:supervised_garden:msg_41junk:reply:v1"), null);
+  assert.equal(parseSupervisedReplySourceNumber("supervised-room:supervised_garden:msg_2147483648:reply:v1"), null);
   assert.equal(parseSupervisedReplySourceNumber("local-chat:room_1:7"), null);
   assert.equal(parseSupervisedReplySourceNumber("supervised-room:supervised_garden:not-a-message:reply:v1"), null);
   assert.equal(parseSupervisedReplySourceNumber(null), null);
+  const receiptChunks = chunkMessageReceiptRows(Array.from({ length: 6_000 }, (_, index) => index));
+  assert.equal(receiptChunks.length, 12);
+  assert.ok(receiptChunks.every((chunk) => chunk.length <= 500));
 });
 
 test("terminal session ends are the only writer of unavailable receipts", () => {

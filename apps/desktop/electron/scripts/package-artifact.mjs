@@ -123,6 +123,9 @@ await mkdir(app, { recursive: true });
 for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
 }
+// Protocol/domain contracts are repository-neutral, but compiled desktop
+// imports resolve them from Contents/shared in the packaged application.
+await cp(join(root, "..", "..", "shared"), join(contents, "shared"), { recursive: true });
 await writeFile(join(app, "package.json"), `${JSON.stringify(packageJson, null, 2)}\n`);
 await cp(join(root, "package-lock.json"), join(app, "package-lock.json"));
 await cp(join(root, "..", "..", "LICENSE"), join(app, "LICENSE"));
@@ -202,7 +205,7 @@ await mkdir(join(app, "runtime"), { recursive: true });
 await cp(openCodePath, join(app, "runtime", "opencode"));
 await chmod(join(app, "runtime", "opencode"), 0o755);
 
-const required = [
+const requiredAppFiles = [
   "dist-electron/main.js",
   "dist-electron/main/agents/codex-provider-adapter.js",
   "dist-electron/main/agents/claude-code-provider-adapter.js",
@@ -221,13 +224,43 @@ const required = [
   "runtime/letagents/package-lock.json",
   "runtime/opencode",
 ];
+const required = [
+  ...requiredAppFiles.map((relative) => ({
+    absolutePath: join(app, relative),
+    manifestPath: relative,
+  })),
+  ...[
+    "shared/message-contracts.mjs",
+    "shared/routing-aliases.mjs",
+    "shared/sqlite-thread-routing.mjs",
+  ].map((relative) => ({
+    absolutePath: join(contents, relative),
+    manifestPath: `Contents/${relative}`,
+  })),
+];
 const files = [];
-for (const relative of required) {
-  const path = join(app, relative);
-  const info = await stat(path);
-  if (!info.isFile() || info.size === 0) throw new Error(`Packaged runtime is missing ${relative}`);
-  const bytes = await readFile(path);
-  files.push({ path: relative, bytes: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex") });
+for (const entry of required) {
+  const info = await stat(entry.absolutePath);
+  if (!info.isFile() || info.size === 0) {
+    throw new Error(`Packaged runtime is missing ${entry.manifestPath}`);
+  }
+  const bytes = await readFile(entry.absolutePath);
+  files.push({
+    path: entry.manifestPath,
+    bytes: bytes.length,
+    sha256: createHash("sha256").update(bytes).digest("hex"),
+  });
+}
+const packagedLocalStore = await import(pathToFileURL(join(
+  app,
+  "dist-electron",
+  "main",
+  "rooms",
+  "messages",
+  "local-store.js",
+)).href);
+if (typeof packagedLocalStore.addLocalChatMessage !== "function") {
+  throw new Error("Packaged local chat failed to import its external shared contracts.");
 }
 await writeFile(join(app, "package-artifact-manifest.json"), `${JSON.stringify({
   format: 2,
