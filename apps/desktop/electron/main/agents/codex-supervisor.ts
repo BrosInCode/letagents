@@ -86,6 +86,9 @@ import {
   type CodexTurnTimeoutReason,
 } from "./codex-turn-progress.js";
 import {
+  CodexTurnLifecycleObserver,
+} from "./codex-turn-lifecycle.js";
+import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
   type CodexRuntimeReasoningSummary,
@@ -162,7 +165,7 @@ import {
 } from "./state.js";
 
 const SESSION_MONITOR_INTERVAL_MS = 30_000;
-const DESKTOP_EVENT_TURN_POLL_INTERVAL_MS = 1_000;
+const DESKTOP_EVENT_MATERIALIZATION_RETRY_MS = 1_000;
 const DESKTOP_EVENT_CONTEXT_REQUEST_LIMIT = 3;
 const DESKTOP_EVENT_CONTEXT_REQUEST_TIMEOUT_MS = 30_000;
 const CODEX_RUNTIME_REASONING_THROTTLE_MS = 750;
@@ -1604,6 +1607,7 @@ async function startDesktopEventCodexTurn(input: {
 
 async function runDesktopEventTurnWithContext(input: {
   client: CodexRpcClient;
+  lifecycle: CodexTurnLifecycleObserver;
   session: DesktopCodexLiveSessionState;
   event: ManagedRoomEvent;
   storage: DesktopRoomStorageState;
@@ -1620,6 +1624,7 @@ async function runDesktopEventTurnWithContext(input: {
 
   let replyText = await waitForDesktopEventTurnCompletion(
     input.client,
+    input.lifecycle,
     input.session.session_id,
     started.turnId,
   );
@@ -1669,6 +1674,7 @@ async function runDesktopEventTurnWithContext(input: {
       updateActiveWorkSummary(started.session.session_id, `Reading ${contextRequest.tool} context.`);
       replyText = await waitForDesktopEventTurnCompletion(
         input.client,
+        input.lifecycle,
         input.session.session_id,
         started.turnId,
       );
@@ -1715,6 +1721,7 @@ async function runDesktopEventTurnWithContext(input: {
         updateActiveWorkSummary(roomToolTurn.session.session_id, `Running ${request.tool} room tool.`);
         const text = await waitForDesktopEventTurnCompletion(
           input.client,
+          input.lifecycle,
           input.session.session_id,
           roomToolTurn.turnId,
         );
@@ -1828,13 +1835,17 @@ async function waitForCodexEventTurnReadiness(input: {
     return null;
   }
 
+  const lifecycle = new CodexTurnLifecycleObserver();
   const client = new CodexRpcClient(session.server_url, (notification) => {
+    lifecycle.observe(notification);
     publishCodexRuntimeNotification(session.session_id, notification);
   });
+  const removeDisconnectListener = client.onDisconnect(() => lifecycle.notifyDisconnect());
   try {
     await client.connect();
-    return await waitForCurrentTurnToIdle(client, session.session_id);
+    return await waitForCurrentTurnToIdle(client, lifecycle, session.session_id);
   } finally {
+    removeDisconnectListener();
     client.close();
   }
 }
@@ -1848,9 +1859,12 @@ async function runDesktopEventCodexTurn(input: {
   const sessionId = input.active.session_id;
   const session = getStoredCodexLiveSession(sessionId) ?? input.active;
 
+  const lifecycle = new CodexTurnLifecycleObserver();
   const client = new CodexRpcClient(session.server_url, (notification) => {
+    lifecycle.observe(notification);
     publishCodexRuntimeNotification(session.session_id, notification);
   });
+  const removeDisconnectListener = client.onDisconnect(() => lifecycle.notifyDisconnect());
   // Bridge an engine-driven abort (preempt/stop) onto a Codex turn interrupt.
   // Codex never preempts on enqueue and drives its own stop path, so this only
   // fires if a future caller aborts the engine turn directly.
@@ -1869,6 +1883,7 @@ async function runDesktopEventCodexTurn(input: {
     const prompt = buildDesktopEventPrompt(bindCodexLiveSessionToWorker(session), input.event);
     const outcome = await runDesktopEventTurnWithContext({
       client,
+      lifecycle,
       session,
       event: input.event,
       storage: input.storage,
@@ -1886,12 +1901,14 @@ async function runDesktopEventCodexTurn(input: {
     };
   } finally {
     input.abortController.signal.removeEventListener("abort", onAbort);
+    removeDisconnectListener();
     client.close();
   }
 }
 
 async function waitForCurrentTurnToIdle(
   client: CodexRpcClient,
+  lifecycle: CodexTurnLifecycleObserver,
   sessionId: string,
 ): Promise<DesktopCodexLiveSessionState | null> {
   let tracking: ActiveCodexTurnProgress | null = null;
@@ -1930,7 +1947,7 @@ async function waitForCurrentTurnToIdle(
             }));
             return null;
           }
-          await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
+          await sleep(DESKTOP_EVENT_MATERIALIZATION_RETRY_MS);
           continue;
         }
         throw error;
@@ -1978,7 +1995,49 @@ async function waitForCurrentTurnToIdle(
         last_error: null,
         updated_at: new Date().toISOString(),
       }));
-      await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
+
+      while (true) {
+        const signal = await lifecycle.waitForTurn(session.thread_id, session.turn_id);
+        if (signal.kind === "disconnect") {
+          updateCodexLiveSession(sessionId, (current) => ({
+            ...current,
+            status: "unknown",
+            active_work: null,
+            last_error: "Codex app-server disconnected while waiting for the previous turn.",
+            updated_at: new Date().toISOString(),
+          }));
+          return null;
+        }
+        if (signal.kind !== "activity") {
+          break;
+        }
+
+        const activeSession = getStoredCodexLiveSession(sessionId) ?? session;
+        const observedAt = Date.now();
+        maybePublishCodexWaitingHeartbeat(activeSession, tracking, observedAt);
+        const activityTimeout = tracking.tracker.timeoutReason(observedAt);
+        if (!activityTimeout) {
+          continue;
+        }
+        try {
+          await client.request("turn/interrupt", {
+            threadId: activeSession.thread_id,
+            turnId: activeSession.turn_id,
+          });
+        } catch {
+          // Best effort; the final session state records the timeout.
+        }
+        updateCodexLiveSession(sessionId, (current) => ({
+          ...current,
+          status: "unknown",
+          active_work: null,
+          last_error: codexTurnTimeoutError("previous turn", activityTimeout),
+          updated_at: new Date().toISOString(),
+        }));
+        return null;
+      }
+      // Terminal notifications and the quiet-period watchdog both reconcile
+      // through exactly one authoritative thread read on the next loop pass.
     }
   } finally {
     if (tracking) stopCodexTurnProgress(sessionId, tracking);
@@ -1987,30 +2046,68 @@ async function waitForCurrentTurnToIdle(
 
 async function waitForDesktopEventTurnCompletion(
   client: CodexRpcClient,
+  lifecycle: CodexTurnLifecycleObserver,
   sessionId: string,
   turnId: string,
 ): Promise<string | null> {
   const tracking = startCodexTurnProgress(sessionId, turnId);
   try {
     while (true) {
-      await sleep(DESKTOP_EVENT_TURN_POLL_INTERVAL_MS);
       const session = getStoredCodexLiveSession(sessionId);
       if (!session) {
         return null;
       }
 
+      const signal = await lifecycle.waitForTurn(session.thread_id, turnId);
+      if (signal.kind === "disconnect") {
+        clearSessionActiveWork(sessionId, (current) => ({
+          ...current,
+          status: "unknown",
+          last_error: "Codex app-server disconnected before the desktop event turn completed.",
+          updated_at: new Date().toISOString(),
+        }));
+        return null;
+      }
+      if (signal.kind === "activity") {
+        const now = Date.now();
+        maybePublishCodexWaitingHeartbeat(session, tracking, now);
+        const timeoutReason = tracking.tracker.timeoutReason(now);
+        if (!timeoutReason) {
+          continue;
+        }
+        try {
+          await client.request("turn/interrupt", { threadId: session.thread_id, turnId });
+        } catch {
+          // Best effort; the final session state records the timeout.
+        }
+        clearSessionActiveWork(sessionId, (current) => ({
+          ...current,
+          status: "unknown",
+          last_error: codexTurnTimeoutError("desktop-delivered event turn", timeoutReason),
+          updated_at: new Date().toISOString(),
+        }));
+        return null;
+      }
+
       let read: ThreadReadResult | null = null;
-      try {
-        read = await client.request<ThreadReadResult>("thread/read", {
-          threadId: session.thread_id,
-          includeTurns: true,
-        });
-      } catch (error) {
-        if (isLikelyMaterializingError(error)) {
+      while (!read) {
+        try {
+          // Final reply and room-tool results live on exact turn items, so this
+          // remains a full read: normally once at terminal, or once per 30s
+          // quiet watchdog until app-server exposes an exact-turn read API.
+          read = await client.request<ThreadReadResult>("thread/read", {
+            threadId: session.thread_id,
+            includeTurns: true,
+          });
+        } catch (error) {
+          if (!isLikelyMaterializingError(error)) {
+            throw error;
+          }
           const now = Date.now();
           maybePublishCodexWaitingHeartbeat(session, tracking, now);
           const timeoutReason = tracking.tracker.timeoutReason(now);
           if (!timeoutReason) {
+            await sleep(DESKTOP_EVENT_MATERIALIZATION_RETRY_MS);
             continue;
           }
           try {
@@ -2026,7 +2123,6 @@ async function waitForDesktopEventTurnCompletion(
           }));
           return null;
         }
-        throw error;
       }
 
       const turn = (read?.thread?.turns ?? []).find((candidate) => candidate.id === turnId);
