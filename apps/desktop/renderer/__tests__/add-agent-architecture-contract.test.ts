@@ -93,9 +93,11 @@ test("extracted islands preserve the original responsive and sticky layout rules
   assert.doesNotMatch(styles, /^\.desktop-add-agent-(?:providers|managed-session|actions)\s*\{/m);
 });
 
-test("the room shell owns managed-session polling and provides the live context", () => {
+test("the room shell owns push-maintained sessions and a bounded repair timer", () => {
   assert.match(shell, /provide\(managedAgentSessionsKey/);
-  assert.match(shell, /managedAgentSessionsRefreshTimer = window\.setInterval/);
+  assert.match(shell, /managedAgentSessionsRefreshTimer = window\.setTimeout/);
+  assert.match(shell, /supervisorStateRepairDelayMs/);
+  assert.doesNotMatch(shell, /managedAgentSessionsRefreshTimer = window\.setInterval/);
   assert.match(shell, /requestId !== managedAgentSessionsRefreshRequestId/);
   assert.match(shell, /mutationVersion === managedAgentSessionsMutationVersion/);
   assert.match(shell, /managedAgentSessionsRefreshInFlight/);

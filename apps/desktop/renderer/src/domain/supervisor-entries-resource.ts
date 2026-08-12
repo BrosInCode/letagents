@@ -23,6 +23,39 @@ export function supervisorStateSubscriptionNeedsRepair(input: {
 }
 
 /**
+ * Schedule one repair at the next missing-push deadline. A completed repair is
+ * also evidence for scheduling purposes, so an unavailable/legacy daemon does
+ * not turn a stale snapshot into a zero-delay retry loop.
+ */
+export function supervisorStateRepairDelayMs(input: {
+  lastRepairAtMs: number | null;
+  nowMs: number;
+  staleAfterMs?: number;
+}): number {
+  const staleAfterMs = Math.max(1, input.staleAfterMs ?? SUPERVISOR_STATE_SUBSCRIPTION_STALE_MS);
+  if (input.lastRepairAtMs === null) return staleAfterMs;
+  return Math.max(0, staleAfterMs - Math.max(0, input.nowMs - input.lastRepairAtMs));
+}
+
+/**
+ * Electron can coalesce a renderer status read onto an older daemon-start
+ * operation. Compare the response that actually settled with the generation
+ * required by the push stream and allow at most one trailing negotiation for
+ * each newly required generation.
+ */
+export function supervisorStatusTrailingRefreshGeneration(input: {
+  ownerActive: boolean;
+  settledGeneration: number;
+  requiredGeneration: number;
+  lastAttemptedGeneration: number;
+}): number | null {
+  if (!input.ownerActive) return null;
+  if (input.settledGeneration >= input.requiredGeneration) return null;
+  if (input.lastAttemptedGeneration >= input.requiredGeneration) return null;
+  return input.requiredGeneration;
+}
+
+/**
  * Refreshing with retained data is not a loss of authority. First-load and
  * transport-error states still fail closed because they have no current proof.
  */
@@ -66,10 +99,9 @@ export function foldSupervisorActivityPush(
 }
 
 /**
- * Polling remains the authoritative entry snapshot, while the push stream is
- * authoritative for activity received after that snapshot began. Merging the
- * ordered event journal prevents an older poll response from erasing newer
- * human-readable progress.
+ * State snapshots are normally push-maintained; this merge also fences the
+ * exceptional repair read so a response that began before a newer activity
+ * push cannot erase human-readable progress.
  */
 export function mergeSupervisorEntriesPoll(
   current: readonly DesktopSupervisorManifestEntry[],

@@ -432,7 +432,9 @@ import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
   supervisorEntriesResourceFreshness,
+  supervisorStateRepairDelayMs,
   supervisorStateSubscriptionNeedsRepair,
+  supervisorStatusTrailingRefreshGeneration,
 } from "../../../domain/supervisor-entries-resource";
 import type { SidebarMode } from "../types";
 import AddAgentModal from "./AddAgentModal.vue";
@@ -622,6 +624,8 @@ const supervisorEntriesUpdatedAt = ref<string | null>(null);
 const supervisorStatus = ref<DesktopSupervisorDaemonStatus | null>(null);
 let supervisorStatusRequestToken = 0;
 let supervisorStatusRefreshInFlight: Promise<DesktopSupervisorDaemonStatus | null> | null = null;
+let supervisorStatusRequiredGeneration = 0;
+let supervisorStatusTrailingRefreshAttemptGeneration = 0;
 const agentInspectorRoomMoveAvailable = computed(() =>
   Boolean(supervisorStatus.value?.capabilities.agentRoomMove));
 const continuationRepairAvailable = computed(() =>
@@ -734,6 +738,7 @@ let unsubscribeSupervisorAgentStream: (() => void) | null = null;
 let unsubscribeSupervisorState: (() => void) | null = null;
 let supervisorStateSubscriptionActive = false;
 let supervisorStateLastSnapshotAtMs: number | null = null;
+let supervisorStateLastRepairAtMs: number | null = null;
 let supervisorStateDaemonGeneration = 0;
 let supervisorStateSequence = 0;
 let pendingSupervisorStateSnapshot: DesktopSupervisorStateSnapshot | null = null;
@@ -990,8 +995,9 @@ watch(() => props.room.identifier, () => {
   environmentPanelOpen.value = readEnvironmentPanelOpen(props.room.identifier);
   clearComposerGitHubEventPreviews();
   resetEventsIndicator();
+  supervisorStateLastRepairAtMs = null;
   void refreshManagedAgentSessions();
-  restartManagedAgentSessionsRefreshTimer();
+  scheduleManagedAgentSessionsRepair();
 }, { immediate: true });
 
 watch(() => props.repoStatus, () => {
@@ -1156,7 +1162,6 @@ onBeforeUnmount(() => {
 });
 
 onMounted(() => {
-  void refreshSupervisorStatus();
   void loadRentalRequests();
   document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
@@ -1236,6 +1241,7 @@ function acceptSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot)
       && snapshot.sequence < supervisorStateSequence
     )
   ) return;
+  const statusGeneration = supervisorStatus.value?.generation ?? 0;
   supervisorStateDaemonGeneration = snapshot.daemonGeneration;
   supervisorStateSequence = snapshot.sequence;
   supervisorEntriesMutationVersion += 1;
@@ -1251,6 +1257,12 @@ function acceptSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot)
   supervisorEntriesUpdatedAt.value = new Date().toISOString();
   supervisorEntriesState.value = "ready";
   supervisorEntriesError.value = null;
+  // Status/capability negotiation is generation-scoped. Push snapshots keep
+  // the manifest current, but a daemon handoff requires exactly one new
+  // negotiation before generation-specific controls may be used.
+  if (statusGeneration !== snapshot.daemonGeneration) {
+    void refreshSupervisorStatus(snapshot.daemonGeneration);
+  }
 }
 
 function rememberChatScrollPosition(scrollTop: number): void {
@@ -2089,7 +2101,8 @@ function markSupervisorStatusUnavailable(): void {
   }
 }
 
-function refreshSupervisorStatus(): Promise<DesktopSupervisorDaemonStatus | null> {
+function refreshSupervisorStatus(requiredGeneration = 0): Promise<DesktopSupervisorDaemonStatus | null> {
+  supervisorStatusRequiredGeneration = Math.max(supervisorStatusRequiredGeneration, requiredGeneration);
   if (supervisorStatusRefreshInFlight) return supervisorStatusRefreshInFlight;
   const requestToken = ++supervisorStatusRequestToken;
   const refresh = (async () => {
@@ -2108,6 +2121,21 @@ function refreshSupervisorStatus(): Promise<DesktopSupervisorDaemonStatus | null
   })();
   const tracked = refresh.finally(() => {
     if (supervisorStatusRefreshInFlight === tracked) supervisorStatusRefreshInFlight = null;
+    const trailingGeneration = supervisorStatusTrailingRefreshGeneration({
+      ownerActive: managedAgentSessionsRefreshOwnerActive,
+      settledGeneration: supervisorStatus.value?.generation ?? 0,
+      requiredGeneration: supervisorStatusRequiredGeneration,
+      lastAttemptedGeneration: supervisorStatusTrailingRefreshAttemptGeneration,
+    });
+    if (trailingGeneration !== null) {
+      // Electron also single-flights daemon startup/status reads. A request
+      // that was fresh in the renderer can therefore settle with the daemon
+      // generation from an older main-process operation. Compare the actual
+      // settled generation to the required push generation and negotiate one
+      // bounded trailing read for each newly observed generation.
+      supervisorStatusTrailingRefreshAttemptGeneration = trailingGeneration;
+      void refreshSupervisorStatus(trailingGeneration);
+    }
   });
   supervisorStatusRefreshInFlight = tracked;
   return tracked;
@@ -2121,10 +2149,13 @@ function refreshManagedAgentSessions(): Promise<void> {
   }
   const refresh = performManagedAgentSessionsRefresh();
   managedAgentSessionsRefreshInFlight = refresh.finally(() => {
+    supervisorStateLastRepairAtMs = Date.now();
     managedAgentSessionsRefreshInFlight = null;
     if (managedAgentSessionsRefreshOwnerActive && managedAgentSessionsRefreshQueued) {
       managedAgentSessionsRefreshQueued = false;
       void refreshManagedAgentSessions();
+    } else {
+      scheduleManagedAgentSessionsRepair();
     }
   });
   return managedAgentSessionsRefreshInFlight;
@@ -2157,7 +2188,9 @@ async function performManagedAgentSessionsRefresh(): Promise<void> {
           error: error instanceof Error ? error.message : "Supervisor daemon unavailable.",
         }))
       : Promise.resolve({ ok: true as const, entries: supervisorEntries.value }),
-    refreshSupervisorStatus(),
+    pollSupervisor || !supervisorStatus.value
+      ? refreshSupervisorStatus()
+      : Promise.resolve(supervisorStatus.value),
   ]);
   if (
     !managedAgentSessionsRefreshOwnerActive
@@ -2302,16 +2335,24 @@ function agentTargetForManagedSession(session: DesktopManagedAgentSession): Agen
   };
 }
 
-function restartManagedAgentSessionsRefreshTimer(): void {
+function scheduleManagedAgentSessionsRepair(): void {
   stopManagedAgentSessionsRefreshTimer();
   if (!props.room.identifier || (!desktopIpc.workers?.listManagedAgentSessions && !desktopIpc.supervisor?.listAgents)) return;
-  managedAgentSessionsRefreshTimer = window.setInterval(() => {
-    // Skip the tick while the window is hidden — a background room has no reason
-    // to poll supervisor/session state. `handleManagedAgentSessionsVisibilityChange`
-    // kicks one immediate refresh on foreground return.
+  const delayMs = supervisorStateRepairDelayMs({
+    lastRepairAtMs: supervisorStateLastRepairAtMs,
+    nowMs: Date.now(),
+  });
+  managedAgentSessionsRefreshTimer = window.setTimeout(() => {
+    managedAgentSessionsRefreshTimer = null;
+    // A hidden window has no observer that needs repaired projections. Foreground
+    // transition performs the repair and establishes the next deadline.
     if (shouldSkipPollTick({ hidden: document.hidden })) return;
+    // Managed-session pushes are a different channel from daemon state
+    // snapshots. Always repair that population on the bounded cadence;
+    // performManagedAgentSessionsRefresh polls daemon entries/status only if
+    // their own subscription heartbeat is stale.
     void refreshManagedAgentSessions();
-  }, 2_000);
+  }, delayMs);
 }
 
 function handleManagedAgentSessionsVisibilityChange(): void {
@@ -2321,7 +2362,7 @@ function handleManagedAgentSessionsVisibilityChange(): void {
 
 function stopManagedAgentSessionsRefreshTimer(): void {
   if (managedAgentSessionsRefreshTimer !== null) {
-    window.clearInterval(managedAgentSessionsRefreshTimer);
+    window.clearTimeout(managedAgentSessionsRefreshTimer);
     managedAgentSessionsRefreshTimer = null;
   }
 }
