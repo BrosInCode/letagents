@@ -13,14 +13,14 @@ import {
 import { isAgentSessionBearerCapability, isAgentSessionBearerFeatureEnabled } from "../../shared/agent-session-bearer.js";
 
 export async function resolveRequestAuth(req: Request): Promise<ResolvedRequestAuth> {
-  const cookies = parseCookies(req.headers.cookie);
+  const cookies = parseCookies(req.headers?.cookie);
   const sessionToken = cookies.letagents_session;
   let cookieSessionAccount = null;
   if (sessionToken) {
     cookieSessionAccount = await getSessionAccountByToken(sessionToken);
   }
 
-  const authHeader = req.headers.authorization;
+  const authHeader = req.headers?.authorization;
   if (!authHeader?.startsWith("Bearer ")) {
     return {
       account: cookieSessionAccount,

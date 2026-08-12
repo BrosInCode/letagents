@@ -3,17 +3,38 @@ import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
+import { once } from "node:events";
+
+import express from "express";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomMessageRoutes } = await import("../routes/rooms/messages/index.js");
+const { createRoomEventBroker, RoomEventBroker } = await import("../server/room-event-broker.js");
+const { isRoomEventVisibleToSubscriber } = await import("../routes/rooms/messages/delivery-visibility.js");
+const { closeHttpServerIntake } = await import("../server/graceful-shutdown.js");
 
-test("account-hydrated room stream messages do not disclose publisher idempotency identity", () => {
+test("account stream overlays batch without rehydrating canonical message bodies", () => {
   const streamSource = readFileSync(
     fileURLToPath(new URL("../routes/rooms/messages/stream.ts", import.meta.url)),
     "utf8",
   );
-  assert.match(streamSource, /loadMessageById\(roomId, message\.id/);
+  assert.match(streamSource, /hydrateLiveMessageForSubscriber\(/);
+  assert.doesNotMatch(streamSource, /getMessageById\(/);
   assert.doesNotMatch(streamSource, /client_message_id/);
+  assert.doesNotMatch(
+    streamSource,
+    /runStreamHydration[\s\S]*hydrateLiveMessageForSubscriber/,
+    "subscriber calls must reach the shared overlay batch before any capacity gate",
+  );
+  const pollSource = readFileSync(
+    fileURLToPath(new URL("../routes/rooms/messages/history.ts", import.meta.url)),
+    "utf8",
+  );
+  assert.doesNotMatch(
+    pollSource,
+    /runPollOverlay\(\(\) => hydrateLiveMessageForSubscriber/,
+    "live polls must reach the shared overlay batch before any capacity gate",
+  );
 });
 
 function createDeps() {
@@ -21,13 +42,63 @@ function createDeps() {
     throw new Error("not invoked");
   };
 
-  return {
+  const eventSources = {
     messageEvents: new EventEmitter(),
     taskEvents: new EventEmitter(),
     githubRoomEvents: new EventEmitter(),
     reasoningEvents: new EventEmitter(),
     artifactEvents: new EventEmitter(),
     rentalActivityEvents: new EventEmitter(),
+    messageInfoEvents: new EventEmitter(),
+  };
+
+  return {
+    ...eventSources,
+    roomEventBroker: createRoomEventBroker(eventSources),
+    roomMessageOverlayBatcher: {
+      async prepare(input: {
+        message: { thread?: { root_message_id: string } | null };
+        targets: Array<{ accountId: string; accountAgentRouting: boolean }>;
+      }) {
+        return new Map(input.targets.map((target) => [target.accountId, {
+          ...(input.message.thread ? {
+            thread_read: {
+              last_read_message_id: null,
+              unread_count: 0,
+              has_unread: false,
+            },
+          } : {}),
+          ...(target.accountAgentRouting ? {
+            account_agent_routing: {
+              version: 1 as const,
+              authority: "receipts" as const,
+              recipient_agent_keys: [],
+              recipient_agent_sessions: [],
+              control_authorized: false,
+            },
+          } : {}),
+        }]));
+      },
+      async prepareMany(input: {
+        messages: Array<{ id: string; thread?: { root_message_id: string } | null }>;
+        targets: Array<{ accountId: string; accountAgentRouting: boolean }>;
+      }) {
+        return new Map(input.messages.map((message) => [Number(message.id.slice(4)),
+          new Map(input.targets.map((target) => [target.accountId, {
+            ...(message.thread ? { thread_read: {
+              last_read_message_id: null, unread_count: 0, has_unread: false,
+            } } : {}),
+            ...(target.accountAgentRouting ? { account_agent_routing: {
+              version: 1 as const, authority: "receipts" as const,
+              recipient_agent_keys: [], recipient_agent_sessions: [], control_authorized: false,
+            } } : {}),
+          }]))]));
+      },
+      close() {},
+    },
+    getMessageStreamCheckpoint: async () => ({ checkpoint: null, cursorExists: true }),
+    resolveRequestProjectRepoAccessRoomName: async (_req: unknown, project: { id: string }) => project.id,
+    reauthorizeGitRoomParticipant: async () => true,
     resolveCanonicalRoomRequestId: unused,
     resolveRoomOrReply: unused,
     requireParticipant: unused,
@@ -40,6 +111,93 @@ function createDeps() {
     rememberAccountRoom: async () => undefined,
   };
 }
+
+const flushAsyncEvents = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+test("prompt-only broker frames admit only same-owner durable candidates for exact hydration", async () => {
+  const event = {
+    kind: "message_created" as const,
+    roomId: "room_1",
+    message: { id: "msg_1", text: "", agent_prompt_kind: "auto" } as never,
+    recipientAgentTargetSet: new Set(["acct_owner\u0000owner/target"]),
+  };
+  assert.equal(isRoomEventVisibleToSubscriber({
+    event,
+    includePromptOnly: true,
+    recipientAgentIdentity: {
+      owner_account_id: "acct_owner",
+      agent_key: "owner/target",
+      agent_session_id: "session_target",
+    },
+  }), true);
+  assert.equal(isRoomEventVisibleToSubscriber({
+    event,
+    includePromptOnly: true,
+    recipientAgentIdentity: {
+      owner_account_id: "acct_owner",
+      agent_key: "owner/other",
+      agent_session_id: "session_target",
+    },
+  }), false);
+  assert.equal(isRoomEventVisibleToSubscriber({
+    event,
+    includePromptOnly: true,
+    recipientAgentIdentity: {
+      owner_account_id: "acct_other",
+      agent_key: "owner/target",
+      agent_session_id: "session_target",
+    },
+  }), false, "the same durable key in another account cannot see the body");
+  assert.equal(isRoomEventVisibleToSubscriber({
+    event,
+    includePromptOnly: true,
+    recipientAgentIdentity: {
+      owner_account_id: "acct_owner",
+      agent_key: "owner/target",
+      agent_session_id: "session_overlap",
+    },
+  }), true, "a same-owner/key generation is only admitted to fresh server-side revalidation");
+  assert.equal(isRoomEventVisibleToSubscriber({
+    event,
+    includePromptOnly: true,
+    recipientAgentIdentity: null,
+  }), false);
+
+  const broker = new RoomEventBroker({ instanceId: "recipient-isolation" });
+  const intended = broker.subscribe("room_1", {
+    accept: (candidate) => isRoomEventVisibleToSubscriber({
+      event: candidate,
+      includePromptOnly: true,
+      recipientAgentIdentity: {
+        owner_account_id: "acct_owner",
+        agent_key: "owner/target",
+        agent_session_id: "session_target",
+      },
+    }),
+  });
+  const unrelated = broker.subscribe("room_1", {
+    accept: (candidate) => isRoomEventVisibleToSubscriber({
+      event: candidate,
+      includePromptOnly: true,
+      recipientAgentIdentity: {
+        owner_account_id: "acct_owner",
+        agent_key: "owner/other",
+        agent_session_id: "session_other",
+      },
+    }),
+  });
+  broker.publish(event);
+  assert.equal((await intended.next())?.type, "event", "the intended recipient still receives the prompt");
+  const unrelatedRead = unrelated.next();
+  assert.equal(await Promise.race([
+    unrelatedRead.then(() => true),
+    new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+  ]), false, "an unrelated subscriber never receives or queues the prompt body");
+  unrelated.close();
+  assert.equal(await unrelatedRead, null);
+  intended.close();
+  broker.close();
+});
 
 function responseRecorder() {
   return {
@@ -898,6 +1056,260 @@ test("desktop owner-token streams do not require worker delivery credentials", a
   assert.match(res.writes.join(""), /: connected/);
 });
 
+test("broker retirement closes a real SSE socket so HTTP shutdown drains", async () => {
+  const app = express();
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+  };
+  app.use((req, _res, next) => {
+    Object.assign(req, {
+      authKind: "owner_token",
+      sessionAccount: { account_id: "acct_1" },
+    });
+    next();
+  });
+  registerRoomMessageRoutes(app as never, deps as never);
+  const server = app.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const response = await fetch(
+    `http://127.0.0.1:${address.port}/rooms/room_1/messages/stream`,
+    { headers: { "X-LetAgents-Desktop-Client": "1" } },
+  );
+  assert.equal(response.status, 200);
+
+  const intakeStopped = closeHttpServerIntake(server);
+  deps.roomEventBroker.close();
+  const body = await response.text();
+  await Promise.race([
+    intakeStopped,
+    new Promise<never>((_resolve, reject) => setTimeout(
+      () => reject(new Error("HTTP server did not drain its broker-owned SSE connection")),
+      1_000,
+    )),
+  ]);
+  assert.match(body, /: connected/);
+});
+
+test("one canonical broker event resolves a thousand long polls without repeat history reads", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {}, put() {}, delete() {},
+  };
+  let historyReads = 0;
+  let routingRowCalls = 0;
+  let routingCalls = 0;
+  const eventSources = {
+    messageEvents: new EventEmitter(),
+    taskEvents: new EventEmitter(),
+    githubRoomEvents: new EventEmitter(),
+    reasoningEvents: new EventEmitter(),
+    artifactEvents: new EventEmitter(),
+    rentalActivityEvents: new EventEmitter(),
+    messageInfoEvents: new EventEmitter(),
+  };
+  const broker = createRoomEventBroker(eventSources);
+  const { createRoomMessageOverlayBatcher } = await import("../server/room-message-overlays.js");
+  const batcher = createRoomMessageOverlayBatcher({
+    async loadRoutingRows() {
+      routingRowCalls += 1;
+      return [{
+        number: 7,
+        thread_root_number: null,
+        routing_snapshot_version: 1,
+        publisher_account_id: null,
+        publisher_agent_key: null,
+        reply_to_number: null,
+        sender: "Human",
+        source: "browser",
+        text: "hello",
+      }];
+    },
+    async loadAccountRoutings(_roomId, accountIds) {
+      routingCalls += 1;
+      return new Map(accountIds.map((accountId) => [accountId, new Map([[7, {
+        version: 1 as const,
+        authority: "receipts" as const,
+        recipient_agent_keys: [],
+        recipient_agent_sessions: [],
+        control_authorized: false,
+      }]])]));
+    },
+  });
+  const deps = {
+    ...createDeps(),
+    ...eventSources,
+    roomEventBroker: broker,
+    roomMessageOverlayBatcher: batcher,
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    getMessagesAfter: async () => {
+      historyReads += 1;
+      return { messages: [], has_more: false };
+    },
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/");
+  assert.ok(handler);
+
+  const responses = Array.from({ length: 1_000 }, () => {
+    const requestEvents = new EventEmitter();
+    let resolveBody!: (body: { messages: Array<{ id?: string }> }) => void;
+    const body = new Promise<{ messages: Array<{ id?: string }> }>((resolve) => { resolveBody = resolve; });
+    const req = {
+      params: { 0: "room_1" },
+      query: { after: "msg_6", timeout: "60000" },
+      headers: { "x-letagents-desktop-client": "1" },
+      authKind: "owner_token",
+      sessionAccount: { account_id: "acct_1" },
+      get() { return undefined; },
+      on: requestEvents.on.bind(requestEvents),
+      off: requestEvents.off.bind(requestEvents),
+    };
+    const res = {
+      headersSent: false,
+      status() { return this; },
+      json(payload: { messages: Array<{ id?: string }> }) {
+        this.headersSent = true;
+        resolveBody(payload);
+        return this;
+      },
+    };
+    return { request: handler(req, res), body };
+  });
+  await Promise.all(responses.map(({ request }) => request));
+  assert.equal(historyReads, 1_000, "each new poll checks its own durable backlog once");
+
+  eventSources.messageEvents.emit("message:created", {
+    projectId: "room_1",
+    message: {
+      id: "msg_7", sender: "Human", text: "hello", source: "browser",
+      timestamp: new Date().toISOString(), routing_snapshot_version: 1,
+    },
+  });
+  const bodies = await Promise.all(responses.map(({ body }) => body));
+  assert.equal(historyReads, 1_000, "the live broker event causes no additional history query");
+  assert.equal(routingRowCalls, 1);
+  assert.equal(routingCalls, 1);
+  assert.ok(bodies.every((body) => body.messages[0]?.id === "msg_7"));
+  broker.close();
+  batcher.close();
+});
+
+test("one broker gap coalesces a thousand poll catch-ups without executor overflow", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {}, put() {}, delete() {},
+  };
+  let historyReads = 0;
+  let releaseGap!: () => void;
+  const gapGate = new Promise<void>((resolve) => { releaseGap = resolve; });
+  const eventSources = {
+    messageEvents: new EventEmitter(), taskEvents: new EventEmitter(),
+    githubRoomEvents: new EventEmitter(), reasoningEvents: new EventEmitter(),
+    artifactEvents: new EventEmitter(), rentalActivityEvents: new EventEmitter(),
+    messageInfoEvents: new EventEmitter(),
+  };
+  const broker = createRoomEventBroker(eventSources);
+  const batcher = {
+    async prepare(input: { targets: Array<{ accountId: string }> }) {
+      return new Map(input.targets.map((target) => [target.accountId, {
+        account_agent_routing: {
+          version: 1 as const,
+          authority: "receipts" as const,
+          recipient_agent_keys: [],
+          recipient_agent_sessions: [],
+          control_authorized: false,
+        },
+      }]));
+    },
+    async prepareMany(input: {
+      messages: Array<{ id: string }>;
+      targets: Array<{ accountId: string }>;
+    }) {
+      return new Map(input.messages.map((message) => [Number(message.id.slice(4)),
+        new Map(input.targets.map((target) => [target.accountId, {
+          account_agent_routing: {
+            version: 1 as const, authority: "receipts" as const,
+            recipient_agent_keys: [], recipient_agent_sessions: [], control_authorized: false,
+          },
+        }]))]));
+    },
+    close() {},
+  };
+  const getMessagesAfter = async () => {
+    historyReads += 1;
+    if (historyReads > 1_000) await gapGate;
+    return historyReads <= 1_000
+      ? { messages: [], has_more: false }
+      : { messages: [{
+          id: "msg_7", text: "", source: "system", agent_prompt_kind: "auto",
+        }], has_more: false };
+  };
+  registerRoomMessageRoutes(app as never, {
+    ...createDeps(), ...eventSources, roomEventBroker: broker,
+    roomMessageOverlayBatcher: batcher,
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+    shouldIncludePromptOnlyMessages: () => true,
+    beginRoomAgentDelivery: async () => ({
+      identity: {
+        actor_label: "Agent", agent_key: "owner/agent", agent_session_id: "session_1",
+        owner_account_id: "acct_1", session_kind: "worker",
+      },
+      checkCredential: async () => true,
+      end: async () => undefined,
+    }),
+    getMessagesAfter,
+  } as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/poll$/");
+  assert.ok(handler);
+  const responses = Array.from({ length: 1_000 }, () => {
+    const events = new EventEmitter();
+    let resolveBody!: (body: {
+      messages: Array<{ id?: string }>;
+      last_observed_message_id?: string | null;
+    }) => void;
+    const body = new Promise<{
+      messages: Array<{ id?: string }>;
+      last_observed_message_id?: string | null;
+    }>((resolve) => { resolveBody = resolve; });
+    const req = {
+      params: { 0: "room_1" }, query: { after: "msg_6", timeout: "60000" },
+      headers: {}, authKind: "agent_session", sessionAccount: null,
+      get() { return undefined; }, on: events.on.bind(events), off: events.off.bind(events),
+    };
+    const res = { headersSent: false, status() { return this; }, json(payload: never) {
+      this.headersSent = true; resolveBody(payload); return this;
+    } };
+    return { request: handler(req, res), body };
+  });
+  await Promise.all(responses.map(({ request }) => request));
+  assert.equal(historyReads, 1_000);
+  broker.markGap("room_1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(historyReads, 1_001, "all gap waiters share one canonical durable read");
+  releaseGap();
+  const bodies = await Promise.all(responses.map(({ body }) => body));
+  assert.ok(bodies.every((body) => (
+    body.messages.length === 0 && body.last_observed_message_id === "msg_7"
+  )), "silent prompt rows advance every worker cursor without exposing the body");
+  broker.close();
+  batcher.close();
+});
+
 test("browser streams hydrate account thread reads without requesting desktop routing", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
@@ -906,33 +1318,25 @@ test("browser streams hydrate account thread reads without requesting desktop ro
     },
     post() {}, put() {}, delete() {},
   };
-  let hydrationOptions: Record<string, unknown> | null = null;
+  let overlayTargets: Array<{ accountId: string; accountAgentRouting: boolean }> | null = null;
   const deps = {
     ...createDeps(),
     resolveCanonicalRoomRequestId: async () => "room_1",
     resolveRoomOrReply: async () => ({ id: "room_1" }),
     requireParticipant: async () => true,
     beginRoomAgentDelivery: async () => null,
-    getMessageById: async (_roomId: string, _messageId: string, options: Record<string, unknown>) => {
-      hydrationOptions = options;
-      return {
-        id: "msg_8",
-        sender: "Human",
-        text: "thread update",
-        source: "browser",
-        timestamp: new Date().toISOString(),
-        thread: {
-          root_message_id: "msg_1",
-          reply_count: 4,
-          unread_count: 2,
-          has_unread: true,
-          latest_reply: null,
-          participants: [],
-          participant_count: 0,
-          participants_truncated: false,
-          last_read_message_id: "msg_6",
-        },
-      };
+    roomMessageOverlayBatcher: {
+      async prepare(input: { targets: Array<{ accountId: string; accountAgentRouting: boolean }> }) {
+        overlayTargets = input.targets;
+        return new Map([["acct_1", {
+          thread_read: {
+            last_read_message_id: "msg_6",
+            unread_count: 2,
+            has_unread: true,
+          },
+        }]]);
+      },
+      close() {},
     },
   };
   registerRoomMessageRoutes(app as never, deps as never);
@@ -966,16 +1370,23 @@ test("browser streams hydrate account thread reads without requesting desktop ro
     message: {
       id: "msg_8", sender: "Human", text: "thread update",
       source: "browser", timestamp: new Date().toISOString(),
+      thread: {
+        root_message_id: "msg_1",
+        reply_count: 4,
+        unread_count: 4,
+        has_unread: true,
+        latest_reply: null,
+        participants: [],
+        participant_count: 0,
+        participants_truncated: false,
+        last_read_message_id: null,
+      },
     },
   });
   await new Promise((resolve) => setImmediate(resolve));
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.deepEqual(hydrationOptions, {
-    include_prompt_only: true,
-    account_id: "acct_1",
-    account_agent_routing: false,
-  });
+  assert.deepEqual(overlayTargets, [{ accountId: "acct_1", accountAgentRouting: false }]);
   assert.match(res.writes.join(""), /"last_read_message_id":"msg_6"/);
   closeHandler?.();
 });
@@ -1006,12 +1417,15 @@ test("worker streams fail closed when activation authority cannot be attached", 
         display_name: "Worker",
         owner_label: "Owner",
         ide_label: "Codex",
+        owner_account_id: "account_1",
         repo_branch: null,
       },
+      checkCredential: async () => true,
       end: async () => undefined,
     }),
-    attachReceiptAuthorityActivations: async () => {
-      throw new Error("injected activation authority failure");
+    roomMessageOverlayBatcher: {
+      async prepare() { throw new Error("injected activation authority failure"); },
+      close() {},
     },
   };
   registerRoomMessageRoutes(app as never, deps as never);
@@ -1079,7 +1493,10 @@ test("desktop streams close without advancing when account routing hydration ret
     resolveCanonicalRoomRequestId: async () => "room_1",
     resolveRoomOrReply: async () => ({ id: "room_1" }),
     requireParticipant: async () => true,
-    getMessageById: async () => null,
+    roomMessageOverlayBatcher: {
+      async prepare() { return new Map(); },
+      close() {},
+    },
   };
   registerRoomMessageRoutes(app as never, deps as never);
 
@@ -1207,6 +1624,7 @@ test("room streams forward rental activity and patch frames", async () => {
       created_at: new Date("2026-05-12T10:00:00.000Z"),
     },
   });
+  await flushAsyncEvents();
   closeHandler?.();
 
   const output = res.writes.join("");
@@ -1214,6 +1632,9 @@ test("room streams forward rental activity and patch frames", async () => {
   assert.match(output, /event: rental_patch/);
   assert.match(output, /"patch_id":"rpatch_1"/);
   assert.doesNotMatch(output, /event: rental_usage/);
+  assert.equal(output.match(/^id: /gm)?.length, 1, "only the final derived rental frame advances the cursor");
+  assert.ok(output.indexOf("event: rental_activity") < output.indexOf("id: "));
+  assert.ok(output.indexOf("id: ") < output.indexOf("event: rental_patch"));
 });
 
 test("room streams forward artifact update invalidations", async () => {
@@ -1281,6 +1702,7 @@ test("room streams forward artifact update invalidations", async () => {
       identity_key: "github:branch:ref:codex/git-rooms",
     },
   });
+  await flushAsyncEvents();
   closeHandler?.();
 
   const output = res.writes.join("");
@@ -1374,6 +1796,7 @@ test("room streams forward redacted GitHub event updates", async () => {
       created_at: "2026-06-28T10:00:01.000Z",
     },
   });
+  await flushAsyncEvents();
   closeHandler?.();
 
   const output = res.writes.join("");
@@ -1505,6 +1928,7 @@ test("room stream does NOT forward internal/provider_only/renter_only rental act
     },
   });
 
+  await flushAsyncEvents();
   closeHandler?.();
 
   const output = res.writes.join("");

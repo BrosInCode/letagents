@@ -28,6 +28,7 @@ import {
   participants,
   presence,
   reasoningSessions,
+  replaceRoomMessages,
   resetRoomState,
   room,
   roomArtifacts,
@@ -38,12 +39,14 @@ import {
 interface RoomLifecycleDeps {
   startParticipantRefreshLoop: (roomIdentifier: string) => void
   startPresenceRefreshLoop: (roomIdentifier: string) => void
-  startStreaming: (roomIdentifier: string) => void
+  startStreaming: (roomIdentifier: string, bootstrap?: boolean) => Promise<void>
+  finishStreamingBootstrap: (roomIdentifier: string, snapshotCommitted: boolean) => void
   stopStreaming: () => void
 }
 
 export function createRoomLifecycle(deps: RoomLifecycleDeps) {
   async function joinRoom(roomIdentifier: string) {
+    let bootstrapStreamStarted = false
     deps.stopStreaming()
     resetRoomState({
       activityHistoryLoading: true,
@@ -62,13 +65,15 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       room.value = joinedRoom
       isConnected.value = true
       persistRoomSession(room.value)
+      bootstrapStreamStarted = true
+      await deps.startStreaming(roomIdentifier, true)
       const bootstrapActivityHistoryRequestId =
         getActivityHistoryRequestSequence()
       const bootstrap = await loadRoomBootstrap(
         joinedRoom,
         getLastActivityHistoryRequest(),
       )
-      messages.value = mergeMessages([], bootstrap.messagePage.messages)
+      replaceRoomMessages(mergeMessages([], bootstrap.messagePage.messages))
       messagesHasOlder.value = bootstrap.messagePage.hasOlder
       tasks.value = bootstrap.tasks
       focusRooms.value = bootstrap.focusRooms
@@ -96,12 +101,18 @@ export function createRoomLifecycle(deps: RoomLifecycleDeps) {
       githubEventsError.value = bootstrap.githubEvents.error
       githubEventsLoading.value = false
 
+      deps.finishStreamingBootstrap(roomIdentifier, true)
+      bootstrapStreamStarted = false
+
       deps.startPresenceRefreshLoop(roomIdentifier)
       deps.startParticipantRefreshLoop(roomIdentifier)
-      deps.startStreaming(roomIdentifier)
       connectionState.value = 'live'
       return true
     } catch (err) {
+      if (bootstrapStreamStarted) {
+        deps.finishStreamingBootstrap(roomIdentifier, false)
+      }
+      deps.stopStreaming()
       connectionState.value = 'error'
       const error = err as Error & {
         status?: number

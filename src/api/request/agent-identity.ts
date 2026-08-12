@@ -6,6 +6,8 @@ import {
 } from "../db.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 import type { RoomAgentSessionKind } from "../../shared/agent-presence.js";
+import type { RoomAgentDeliveryCredentialFence } from "../../shared/agent-presence.js";
+import { hashToken } from "../db/utils.js";
 
 function normalizeOptionalString(value: string | null | undefined): string | null {
   const normalized = String(value ?? "").trim();
@@ -24,6 +26,7 @@ export interface ResolvedRequestAgentIdentity {
   owner_label: string;
   ide_label: string;
   repo_branch: string | null;
+  credential_fence?: RoomAgentDeliveryCredentialFence | null;
 }
 
 export async function resolveRequestAgentIdentity(input: {
@@ -71,6 +74,12 @@ export async function resolveRequestAgentIdentity(input: {
       owner_label: bearer.owner_label,
       ide_label: bearer.ide_label,
       repo_branch: bearer.repo_branch,
+      credential_fence: {
+        kind: "bearer",
+        bearer_id: bearer.bearer_id,
+        generation: bearer.bearer_generation,
+        expires_at: bearer.expires_at,
+      },
     };
   }
 
@@ -102,6 +111,7 @@ export async function resolveRequestAgentIdentity(input: {
       owner_label: session.owner_label,
       ide_label: session.ide_label,
       repo_branch: session.repo_branch ?? null,
+      credential_fence: { kind: "session_token", token_hash: hashToken(sessionToken) },
     };
   }
 
@@ -134,6 +144,7 @@ export async function resolveRequestAgentIdentity(input: {
     owner_label: actorIdentity.owner_label,
     ide_label: ideLabel,
     repo_branch: null,
+    credential_fence: null,
   };
 }
 

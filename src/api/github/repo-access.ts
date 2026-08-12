@@ -1,4 +1,5 @@
 import { parseRepoRoomName } from "../repo-workflow.js";
+import { createBridgedEmitter } from "../server/bridged-emitter.js";
 import { githubRequest } from "./app-client.js";
 
 interface GitHubRepo {
@@ -59,6 +60,10 @@ const repoAccessInflight = new Map<string, {
 const repoRoomCacheGeneration = new Map<string, object>();
 const repoLoginCacheGeneration = new Map<string, object>();
 const DEFAULT_GITHUB_API_BASE_URL = "https://api.github.com";
+
+// The same emitter handles process-local invalidation immediately and relays
+// the compact key to every API instance through the ordered PostgreSQL bridge.
+export const githubRepoAccessInvalidationEvents = createBridgedEmitter("repo_access");
 
 function normalizeCacheKey(value: string): string {
   return value.trim().toLowerCase();
@@ -165,6 +170,7 @@ export function clearGitHubRepoAccessCacheForRoom(roomName: string): void {
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.roomKey === roomKey) repoAccessInflight.delete(flightKey);
   }
+  githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: roomKey });
 }
 
 export function clearGitHubRepoAccessCacheForLogin(login: string): void {
@@ -179,6 +185,7 @@ export function clearGitHubRepoAccessCacheForLogin(login: string): void {
   for (const [flightKey, flight] of repoAccessInflight) {
     if (flight.loginKey === loginKey) repoAccessInflight.delete(flightKey);
   }
+  githubRepoAccessInvalidationEvents.emit("invalidate", { login: loginKey });
 }
 
 export function parseGitHubRepoName(roomName: string): { owner: string; repo: string } | null {

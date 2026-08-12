@@ -51,6 +51,7 @@ import {
   participants,
   presence,
   reasoningSessions,
+  appendRoomMessage,
   removeReasoningSession,
   room,
   roomArtifacts,
@@ -150,9 +151,7 @@ const roomStream = createRoomStream({
     isStreaming.value = streaming
   },
   appendMessage: (message) => {
-    if (messages.value.some((item) => item.id === message.id)) return false
-    messages.value = [...messages.value, message]
-    return true
+    return appendRoomMessage(message)
   },
   onGitHubMessage: () => {
     scheduleGitHubRoomUpdates()
@@ -189,16 +188,31 @@ const roomStream = createRoomStream({
   upsertReasoningSession,
   removeReasoningSession,
   getMessageCursor: () => messages.value[messages.value.length - 1]?.id ?? null,
-  resyncMessages: async (roomIdentifier, after) => {
+  resyncMessages: async (roomIdentifier, after, authoritativeGap, isCurrent) => {
     if (room.value?.identifier !== roomIdentifier) {
       return { success: false, cursor: after }
     }
-    return refreshRoomMessages(after)
+    return refreshRoomMessages(after, authoritativeGap, isCurrent)
+  },
+  reconcileFullState: async (roomIdentifier, isCurrent) => {
+    if (!isCurrent() || room.value?.identifier !== roomIdentifier) return false
+    const [activityRepaired, githubEventsRepaired] = await Promise.all([
+      // The stream generation already performs the bounded after-cursor
+      // message repair. Refresh every other snapshot resource without issuing
+      // an overlapping latest-message read.
+      refreshRoomActivity({ includeMessages: false }, isCurrent),
+      refreshRoomGitHubEvents(isCurrent),
+    ])
+    return isCurrent() && activityRepaired && githubEventsRepaired
   },
 })
 
-function startStreaming(roomIdentifier: string) {
-  roomStream.start(roomIdentifier)
+function startStreaming(roomIdentifier: string, bootstrap = false) {
+  return roomStream.start(roomIdentifier, bootstrap)
+}
+
+function finishStreamingBootstrap(roomIdentifier: string, snapshotCommitted: boolean) {
+  roomStream.finishBootstrap(roomIdentifier, snapshotCommitted)
 }
 
 function stopStreaming() {
@@ -217,6 +231,7 @@ const {
   startParticipantRefreshLoop,
   startPresenceRefreshLoop,
   startStreaming,
+  finishStreamingBootstrap,
   stopStreaming,
 })
 

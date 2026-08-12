@@ -5,11 +5,16 @@ import {
 } from "../db.js";
 import { createBridgedEmitter } from "./event-bridge.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
-import type { AgentPromptKind } from "../../shared/room-agent-prompts.js";
+import type { MessageRecipientAgentTarget } from "../db/types.js";
+import {
+  isPromptOnlyAgentMessage,
+  type AgentPromptKind,
+} from "../../shared/room-agent-prompts.js";
 
 export interface MessageCreatedEvent {
   projectId: string;
   message: Message;
+  recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
 export const messageEvents = createBridgedEmitter("messages");
@@ -36,7 +41,12 @@ export async function emitProjectMessage(
     with_created_message_in_transaction?: (tx: MessageCreateTransaction) => Promise<void>;
   }
 ): Promise<Message> {
-  const { message, canonical_message: canonicalMessage, created } = await addMessageWithCreateStatus(projectId, sender, text, {
+  const {
+    message,
+    canonical_message: canonicalMessage,
+    created,
+    recipientAgentTargets,
+  } = await addMessageWithCreateStatus(projectId, sender, text, {
     source: options?.source,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
     reply_to_message_id: options?.reply_to ?? null,
@@ -53,6 +63,10 @@ export async function emitProjectMessage(
     messageEvents.emit("message:created", {
       projectId,
       message: canonicalMessage,
+      recipientAgentTargets: isPromptOnlyAgentMessage(
+        canonicalMessage.text,
+        canonicalMessage.agent_prompt_kind,
+      ) ? recipientAgentTargets ?? [] : [],
     } satisfies MessageCreatedEvent);
   }
   return message;

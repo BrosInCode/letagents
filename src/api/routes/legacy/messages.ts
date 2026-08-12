@@ -1,4 +1,3 @@
-import type { EventEmitter } from "events";
 import type { Express, Request, Response } from "express";
 
 import {
@@ -19,13 +18,11 @@ import {
 } from "../../http/helpers.js";
 import { requireWorkerRequestAgentIdentity } from "../../request/agent-identity.js";
 import {
-  beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../rooms/agent-delivery.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
-import { startSseStream, stopSseStream } from "../../http/sse.js";
+import { openSseConnection, type SseConnection } from "../../http/sse.js";
 import {
-  isPromptOnlyAgentMessage,
   type AgentPromptKind,
 } from "../../../shared/room-agent-prompts.js";
 import { parseAgentActorLabel } from "../../../shared/agent-identity.js";
@@ -37,14 +34,27 @@ import {
   createPresignedAttachmentDownload,
   isAttachmentStorageConfigured,
 } from "../../messages/attachment-storage.js";
+import type { RoomEventBroker, RoomEventSubscription } from "../../server/room-event-broker.js";
+import type { RoomMessageOverlayBatcher } from "../../server/room-message-overlays.js";
+import { createTrailingSingleFlight } from "../../single-flight.js";
+import { getCanonicalRoomMessageCatchUp } from "../../server/room-message-catchup.js";
+import {
+  resolveRequestProjectRepoAccessRoomName,
+} from "../../rooms/access.js";
 import { resolveMessageActivationIdentity } from "../rooms/messages/activation-identity.js";
 import { attachReceiptAuthorityActivations } from "../rooms/messages/receipt-activation.js";
-import type { ResolvedRequestAgentIdentity } from "../../request/agent-identity.js";
-
-interface MessageCreatedEvent {
-  projectId: string;
-  message: Message;
-}
+import {
+  openLiveRoomDeliveryController,
+  roomSyncSseFrame,
+  subscribeVisibleRoomEvents,
+  type LiveRoomDeliveryController,
+} from "../rooms/messages/live-controller.js";
+import {
+  hydrateLiveMessageForSubscriber,
+  hydrateLiveMessagesForSubscriber,
+  isMessageVisibleToCurrentWorker,
+  resolveLiveMessageOverlayTarget,
+} from "../rooms/messages/live-message-delivery.js";
 
 function hasAgentSessionCredentials(input: {
   agent_session_id?: string;
@@ -66,9 +76,20 @@ function isAgentLikeSender(sender: unknown): boolean {
 }
 
 export interface LegacyProjectMessageRouteDeps {
-  messageEvents: EventEmitter;
+  getMessagesAfter?: typeof getMessagesAfter;
+  resolveRequestProjectRepoAccessRoomName?(
+    req: AuthenticatedRequest,
+    project: Project,
+  ): Promise<string>;
+  reauthorizeGitRoomParticipant?(
+    req: AuthenticatedRequest,
+    project: Project,
+  ): Promise<boolean>;
+  roomEventBroker: RoomEventBroker;
+  roomMessageOverlayBatcher: RoomMessageOverlayBatcher;
   getProjectById?(projectId: string): Promise<Project | null>;
   attachReceiptAuthorityActivations?: typeof attachReceiptAuthorityActivations;
+  beginRoomAgentDelivery?: typeof import("../../rooms/agent-delivery.js").beginRoomAgentDelivery;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   requireParticipant(
     req: AuthenticatedRequest,
@@ -112,9 +133,9 @@ export function registerLegacyProjectMessageRoutes(
   deps: LegacyProjectMessageRouteDeps
 ): void {
   const loadProjectById = deps.getProjectById ?? getProjectById;
+  const loadMessagesAfter = deps.getMessagesAfter ?? getMessagesAfter;
   const attachActivations = deps.attachReceiptAuthorityActivations
     ?? attachReceiptAuthorityActivations;
-
   app.post("/projects/:id/messages", async (req: AuthenticatedRequest, res) => {
     const projectId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(String(req.params.id)));
     const project = await loadProjectById(projectId);
@@ -127,7 +148,6 @@ export function registerLegacyProjectMessageRoutes(
     if (!(await deps.requireParticipant(req, res, project))) {
       return;
     }
-
     const {
       sender,
       text,
@@ -302,21 +322,29 @@ export function registerLegacyProjectMessageRoutes(
     if (!(await deps.requireParticipant(req, res, project))) {
       return;
     }
+    const accessRoomName = await (
+      deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
+    )(req, project);
 
-    let endDelivery: (() => Promise<void>) | null = null;
-    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
+    let connection: SseConnection | null = null;
+    let streamClosed = false;
+    let live: LiveRoomDeliveryController | null = null;
     try {
-      const delivery = await beginRoomAgentDelivery({
+      live = await openLiveRoomDeliveryController({
         req,
-        roomId: project.id,
+        project,
+        accessRoomName,
         transport: "sse",
+        trackDelivery: true,
         onSessionDisconnected: () => {
-          res.write(`event: session_disconnect\ndata: ${JSON.stringify({ project_id: projectId })}\n\n`);
-          res.end();
+          streamClosed = true;
+          void connection?.write(`event: session_disconnect\ndata: ${JSON.stringify({ project_id: projectId })}\n\n`)
+            .finally(() => connection?.close());
         },
+        onAuthorizationDenied: () => connection?.close(),
+        reauthorize: deps.reauthorizeGitRoomParticipant,
+        beginDelivery: deps.beginRoomAgentDelivery,
       });
-      endDelivery = delivery?.end ?? null;
-      activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
     } catch (error) {
       if (error instanceof InvalidRoomAgentDeliverySessionError) {
         res.status(401).json({ error: error.message });
@@ -324,60 +352,98 @@ export function registerLegacyProjectMessageRoutes(
       }
       throw error;
     }
-    const heartbeat = startSseStream(res);
-    let streamClosed = false;
-    let messageWriteQueue = Promise.resolve();
-
-    const writeMessageCreated = async ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
-      if (eventProjectId !== projectId) {
-        return;
-      }
-      if (streamClosed) return;
-      if (!deps.shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
-        return;
-      }
-
-      try {
-        const [attached] = await attachActivations(
-          projectId,
-          activationIdentity,
-          [message],
-        );
-        if (streamClosed) return;
-        res.write(`data: ${JSON.stringify(attached ?? message)}\n\n`);
-      } catch (error) {
-        console.error(`[legacy messages stream] failed to attach receipt authority for ${projectId}`, error);
-        if (streamClosed) return;
-        // Receipt authority is ordered with the canonical message. Close on
-        // the first failed lookup so reconnect/poll rereads the same cursor;
-        // never let an overlapping callback write after the response.
-        streamClosed = true;
-        res.end();
-      }
-    };
-
-    const onMessageCreated = (event: MessageCreatedEvent) => {
-      messageWriteQueue = messageWriteQueue
-        .then(() => writeMessageCreated(event))
-        .catch((error: unknown) => {
-          console.error(`[legacy messages stream] failed to write message event for ${projectId}`, error);
-          if (streamClosed) return;
-          streamClosed = true;
-          res.end();
-        });
-    };
-
-    deps.messageEvents.on("message:created", onMessageCreated);
-
-    req.on("close", () => {
+    if (!live) return;
+    const liveController = live;
+    const messageOverlayTarget = resolveLiveMessageOverlayTarget(
+      req,
+      liveController.activationIdentity,
+    );
+    liveController.activate();
+    if (streamClosed) {
+      await liveController.close();
+      if (!res.headersSent) res.status(401).json({ error: "Agent delivery session is no longer active." });
+      return;
+    }
+    connection = openSseConnection(req, res, `legacy room messages stream ${projectId}`);
+    const writeEvent = connection.write;
+    const eventCursor = req.get?.("Last-Event-ID")
+      || (typeof req.query?.event_cursor === "string" ? req.query.event_cursor : null);
+    const subscription = subscribeVisibleRoomEvents({
+      broker: deps.roomEventBroker,
+      roomId: projectId,
+      includePromptOnly: deps.shouldIncludePromptOnlyMessages(req),
+      activationIdentity: liveController.activationIdentity,
+      eventCursor,
+      messageOnly: true,
+      messageOverlayTarget,
+    });
+    connection.addCleanup(() => {
       streamClosed = true;
-      deps.messageEvents.off("message:created", onMessageCreated);
-      if (endDelivery) {
-        void endDelivery().catch((error: unknown) => {
-          console.error(`[legacy messages stream] failed to end agent delivery for ${project.id}`, error);
-        });
+      subscription.close();
+    });
+    connection.addCleanup(() => liveController.close());
+    if (!(await liveController.check())) {
+      connection.close();
+      return;
+    }
+    await writeEvent(roomSyncSseFrame({
+      project_id: projectId,
+      event_cursor: subscription.checkpointCursor,
+      gap: subscription.checkpointGap,
+    }));
+
+    void (async () => {
+      while (!streamClosed) {
+        const delivery = await subscription.next();
+        if (!delivery) {
+          connection?.close();
+          return;
+        }
+        if (streamClosed) return;
+        if (!(await liveController.check())) {
+          connection?.close();
+          return;
+        }
+        if (delivery.type === "gap") {
+          await writeEvent(roomSyncSseFrame({
+            project_id: projectId,
+            event_cursor: delivery.cursor,
+            gap: true,
+          }));
+          continue;
+        }
+        const event = delivery.envelope.event;
+        if (event.kind !== "message_created") continue;
+        try {
+          const attached = await hydrateLiveMessageForSubscriber({
+            roomId: projectId,
+            message: event.message,
+            identity: liveController.activationIdentity,
+            target: messageOverlayTarget,
+            broker: deps.roomEventBroker,
+            batcher: deps.roomMessageOverlayBatcher,
+          });
+          await writeEvent(`id: ${delivery.envelope.cursor}\ndata: ${JSON.stringify(attached)}\n\n`);
+        } catch (error) {
+          console.error(`[legacy messages stream] failed to hydrate message authority for ${projectId}`, error);
+          if (!streamClosed) {
+            // Advance the transport through an explicit repair boundary. A
+            // close-only failure would reconnect from the prior cursor and
+            // replay the same unhydratable frame forever.
+            await writeEvent(roomSyncSseFrame({
+              project_id: projectId,
+              event_cursor: delivery.envelope.cursor,
+              gap: true,
+            }));
+            streamClosed = true;
+            connection?.close();
+          }
+          return;
+        }
       }
-      stopSseStream(res, heartbeat);
+    })().catch((error: unknown) => {
+      console.error(`[legacy messages stream] failed to deliver event for ${projectId}`, error);
+      if (!streamClosed) connection?.close();
     });
   });
 
@@ -393,24 +459,34 @@ export function registerLegacyProjectMessageRoutes(
     if (!(await deps.requireParticipant(req, res, project))) {
       return;
     }
+    const accessRoomName = await (
+      deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
+    )(req, project);
 
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
     const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     let settled = false;
+    let resolving = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
-    let endDelivery: (() => Promise<void>) | null = null;
-    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
+    let subscription: RoomEventSubscription | null = null;
+    let live: LiveRoomDeliveryController | null = null;
     try {
-      const delivery = await beginRoomAgentDelivery({
+      live = await openLiveRoomDeliveryController({
         req,
-        roomId: project.id,
+        project,
+        accessRoomName,
         transport: "long_poll",
-        onSessionDisconnected: () => resolveRequest([]),
+        trackDelivery: true,
+        onSessionDisconnected: resolveDisconnectedRequest,
+        onAuthorizationDenied: denyRequest,
+        reauthorize: deps.reauthorizeGitRoomParticipant,
+        onEndError: (error) => {
+          console.error(`[legacy messages poll] failed to end agent delivery for ${projectId}`, error);
+        },
+        beginDelivery: deps.beginRoomAgentDelivery,
       });
-      endDelivery = delivery?.end ?? null;
-      activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
     } catch (error) {
       if (error instanceof InvalidRoomAgentDeliverySessionError) {
         res.status(401).json({ error: error.message });
@@ -418,75 +494,182 @@ export function registerLegacyProjectMessageRoutes(
       }
       throw error;
     }
-    const existing = await getMessagesAfter(projectId, after, {
-      limit,
-      include_prompt_only: includePromptOnly,
-    });
-
-    if (settled) {
-      return;
-    }
-
-    if (existing.messages.length > 0) {
-      await endDelivery?.().catch((error: unknown) => {
-        console.error(`[legacy messages poll] failed to end agent delivery for ${project.id}`, error);
-      });
-      res.json({
-        project_id: projectId,
-        messages: await attachActivations(
-          projectId,
-          activationIdentity,
-          existing.messages,
-          { includeTaskOwnerLeases: false },
-        ),
-        has_more: existing.has_more,
-      });
-      return;
-    }
-
-    function cleanup() {
+    if (!live) return;
+    const liveController = live;
+    const messageOverlayTarget = resolveLiveMessageOverlayTarget(
+      req,
+      liveController.activationIdentity,
+    );
+    async function cleanup() {
       if (timeout) {
         clearTimeout(timeout);
       }
-      deps.messageEvents.off("message:created", onMessageCreated);
+      subscription?.close();
+      subscription = null;
       req.off("close", onClientClose);
-      if (endDelivery) {
-        void endDelivery().catch((error: unknown) => {
-          console.error(`[legacy messages poll] failed to end agent delivery for ${projectId}`, error);
+      await liveController.close();
+    }
+
+    function denyRequest() {
+      void denyRequestAsync();
+    }
+
+    async function denyRequestAsync() {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      if (!res.headersSent) res.status(403).json({ error: "Room access is no longer authorized." });
+    }
+
+    function resolveDisconnectedRequest() {
+      void resolveDisconnectedRequestAsync();
+    }
+
+    async function resolveDisconnectedRequestAsync() {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      res.json({ project_id: projectId, messages: [], has_more: false });
+    }
+
+    async function resolveBrokerClosedRequestAsync() {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      res.json({ project_id: projectId, messages: [], has_more: false });
+    }
+
+    async function resolveCanonicalEventAsync(message: Message) {
+      if (settled || resolving) return;
+      resolving = true;
+      try {
+        if (!(await liveController.check())) {
+          await denyRequestAsync();
+          return;
+        }
+        const attached = await hydrateLiveMessageForSubscriber({
+          roomId: projectId,
+          message,
+          identity: liveController.activationIdentity,
+          target: messageOverlayTarget,
+          broker: deps.roomEventBroker,
+          batcher: deps.roomMessageOverlayBatcher,
         });
+        if (!(await liveController.check())) {
+          await denyRequestAsync();
+          return;
+        }
+        settled = true;
+        await cleanup();
+        res.json({ project_id: projectId, messages: [attached], has_more: false });
+      } catch (error) {
+        console.error(`[legacy messages poll] failed to hydrate broker message for ${projectId}`, error);
+        if (!settled) {
+          settled = true;
+          await cleanup();
+        }
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      } finally {
+        resolving = false;
+      }
+    }
+
+    async function resolveCanonicalCatchUpAsync(msgs: Message[], hasMore: boolean) {
+      if (settled || resolving) return;
+      resolving = true;
+      try {
+        if (!(await liveController.check())) return void await denyRequestAsync();
+        const hydratedPage = await hydrateLiveMessagesForSubscriber({
+          roomId: projectId,
+          messages: msgs,
+          identity: liveController.activationIdentity,
+          target: messageOverlayTarget,
+          broker: deps.roomEventBroker,
+          batcher: deps.roomMessageOverlayBatcher,
+          allowSilentPromptOnly: true,
+        });
+        const attached: Message[] = [];
+        for (const hydrated of hydratedPage) {
+          if (!liveController.activationIdentity
+            || isMessageVisibleToCurrentWorker(hydrated)) attached.push(hydrated);
+        }
+        if (!(await liveController.check())) return void await denyRequestAsync();
+        settled = true;
+        await cleanup();
+        res.json({
+          project_id: projectId,
+          messages: attached,
+          has_more: hasMore,
+          last_observed_message_id: msgs.at(-1)?.id ?? null,
+        });
+      } catch (error) {
+        console.error(`[legacy messages poll] failed canonical gap catch-up for ${projectId}`, error);
+        if (!settled) { settled = true; await cleanup(); }
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      } finally {
+        resolving = false;
       }
     }
 
     function resolveRequest(msgs: Message[], hasMore = false) {
-      void resolveRequestAsync(msgs, hasMore).catch((error: unknown) => {
-        console.error(`[legacy messages poll] failed to attach receipt authority for ${projectId}`, error);
-        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
-      });
+      void resolveRequestAsync(msgs, hasMore);
     }
 
     async function resolveRequestAsync(msgs: Message[], hasMore = false) {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      const attached = await attachActivations(
-        projectId,
-        activationIdentity,
-        msgs,
-      );
-      res.json({ project_id: projectId, messages: attached, has_more: hasMore });
-    }
-
-    async function onMessageCreated({ projectId: eventProjectId }: MessageCreatedEvent) {
-      if (eventProjectId !== projectId) {
+      if (settled || resolving) {
         return;
       }
+      resolving = true;
+      try {
+        settled = true;
+        await cleanup();
+        const attached = await attachActivations(
+          projectId,
+          liveController.activationIdentity,
+          msgs,
+          { includeTaskOwnerLeases: false },
+        );
+        res.json({ project_id: projectId, messages: attached, has_more: hasMore });
+      } finally {
+        resolving = false;
+      }
+    }
 
-      const next = await getMessagesAfter(projectId, after, {
+    const refreshAfterCursor = createTrailingSingleFlight(async () => {
+      if (settled) return;
+      if (!(await liveController.check())) {
+        await denyRequestAsync();
+        return;
+      }
+      const next = await getCanonicalRoomMessageCatchUp({
+        roomId: projectId,
+        after,
         limit,
-        include_prompt_only: includePromptOnly,
+        includePromptOnly,
+        load: loadMessagesAfter,
       });
-      if (next.messages.length > 0) {
-        resolveRequest(next.messages, next.has_more);
+      if (!(await liveController.check())) {
+        await denyRequestAsync();
+        return;
+      }
+      if (next.messages.length > 0) await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
+    });
+
+    async function pumpMessageEvents(): Promise<void> {
+      while (!settled && subscription) {
+        const delivery = await subscription.next();
+        if (!delivery) {
+          await resolveBrokerClosedRequestAsync();
+          return;
+        }
+        if (settled) return;
+        if (delivery.type === "gap") {
+          await refreshAfterCursor();
+          continue;
+        }
+        if (delivery.envelope.event.kind === "message_created") {
+          await resolveCanonicalEventAsync(delivery.envelope.event.message);
+        }
       }
     }
 
@@ -496,14 +679,43 @@ export function registerLegacyProjectMessageRoutes(
       }
 
       settled = true;
-      cleanup();
+      void cleanup();
     }
+
+    liveController.activate();
+    if (settled) return;
 
     timeout = setTimeout(() => {
       resolveRequest([]);
     }, timeoutMs);
 
-    deps.messageEvents.on("message:created", onMessageCreated);
+    subscription = subscribeVisibleRoomEvents({
+      broker: deps.roomEventBroker,
+      roomId: projectId,
+      includePromptOnly,
+      activationIdentity: liveController.activationIdentity,
+      messageOnly: true,
+      messageOverlayTarget,
+    });
     req.on("close", onClientClose);
+    void pumpMessageEvents().catch(async (error: unknown) => {
+      console.error(`[legacy messages poll] failed to observe room event for ${projectId}`, error);
+      if (!settled) {
+        settled = true;
+        await cleanup();
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      }
+    });
+
+    try {
+      await refreshAfterCursor();
+    } catch (error) {
+      if (!settled) {
+        settled = true;
+        await cleanup();
+        console.error(`[legacy messages poll] failed initial fetch for ${projectId}`, error);
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      }
+    }
   });
 }

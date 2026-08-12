@@ -398,7 +398,7 @@ const roomStallSweeper = createRoomStallSweeper({
 });
 
 let sweepTimer: NodeJS.Timeout | null = null;
-let sweepInFlight = false;
+let sweepPromise: Promise<void> | null = null;
 
 export function startLivenessSweep(): void {
   if (sweepTimer) {
@@ -406,46 +406,51 @@ export function startLivenessSweep(): void {
   }
 
   const tick = async () => {
-    if (sweepInFlight) {
+    if (sweepPromise) {
       return;
     }
-    sweepInFlight = true;
-    try {
+    const run = (async () => {
+      try {
       await livenessSweeper.sweepOnce();
-    } catch (error) {
+      } catch (error) {
       console.error("Liveness sweep failed:", error);
-    }
-    try {
+      }
+      try {
       await boardManagerFailoverSweeper.sweepOnce();
-    } catch (error) {
+      } catch (error) {
       console.error("Board Manager failover sweep failed:", error);
-    }
-    try {
+      }
+      try {
       await intentEscalationSweeper.sweepOnce();
-    } catch (error) {
+      } catch (error) {
       console.error("Intent escalation sweep failed:", error);
-    }
-    try {
+      }
+      try {
       await roomStallSweeper.sweepOnce();
-    } catch (error) {
+      } catch (error) {
       console.error("Room stall sweep failed:", error);
-    }
-    try {
+      }
+      try {
       await workflowEffectBroker.sweepOnce();
-    } catch (error) {
+      } catch (error) {
       console.error("Workflow effect reconciliation sweep failed:", error);
-    } finally {
-      sweepInFlight = false;
-    }
+      }
+    })();
+    const pending = run.finally(() => {
+      if (sweepPromise === pending) sweepPromise = null;
+    });
+    sweepPromise = pending;
+    await sweepPromise;
   };
 
   sweepTimer = setInterval(() => void tick(), LIVENESS_SWEEP_INTERVAL_MS);
   sweepTimer.unref?.();
 }
 
-export function stopLivenessSweep(): void {
+export async function stopLivenessSweep(): Promise<void> {
   if (sweepTimer) {
     clearInterval(sweepTimer);
     sweepTimer = null;
   }
+  await sweepPromise;
 }

@@ -221,6 +221,8 @@ export interface RoomAgentDeliverySessionRow {
   ide_label: string | null;
   repo_branch: string | null;
   transport: RoomAgentDeliveryTransport;
+  credential_fingerprint: string | null;
+  credential_epoch: number | null;
   active_connection_count: number;
   last_connected_at: string;
   last_disconnected_at: string | null;

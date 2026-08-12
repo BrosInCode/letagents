@@ -17,6 +17,15 @@ export interface Message {
   account_agent_routing?: MessageAccountAgentRouting | null;
 }
 
+/** Exact prompt-only receipt audience, scoped by account and generation. */
+export interface MessageRecipientAgentTarget {
+  agent_key: string;
+  agent_session_id: string;
+  owner_account_id: string;
+  /** Present only after the captured generation ended and one same-owner successor remains. */
+  successor_agent_session_id?: string;
+}
+
 export type MessageAccountAgentRouting =
   | {
       version: 1;
@@ -31,6 +40,7 @@ export type MessageAccountAgentRouting =
         agent_key: string;
         agent_session_id: string;
         successor_agent_session_id?: string;
+        activation_reason?: string;
       }>;
       control_authorized: boolean;
     }

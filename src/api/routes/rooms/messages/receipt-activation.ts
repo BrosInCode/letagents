@@ -13,10 +13,81 @@ import {
   type AccountRoutingMessageRow,
 } from "../../../db/messages/account-agent-routing.js";
 import { parseScopedId } from "../../../db/utils.js";
+import type { MessageAccountAgentRouting } from "../../../db/types.js";
 
 type MessageWithId = {
   id?: unknown;
+  source?: unknown;
 };
+
+type RoutingSessionTarget = NonNullable<MessageAccountAgentRouting["recipient_agent_sessions"]>[number];
+const routingTargetIndexes = new WeakMap<object, Map<string, RoutingSessionTarget>>();
+
+function routingTargetIndex(routing: MessageAccountAgentRouting): Map<string, RoutingSessionTarget> {
+  const existing = routingTargetIndexes.get(routing);
+  if (existing) return existing;
+  const index = new Map<string, RoutingSessionTarget>();
+  for (const target of routing.recipient_agent_sessions ?? []) {
+    index.set(`${target.agent_key}\u0000${target.agent_session_id}`, target);
+    if ("successor_agent_session_id" in target && target.successor_agent_session_id) {
+      index.set(`${target.agent_key}\u0000${target.successor_agent_session_id}`, target);
+    }
+  }
+  routingTargetIndexes.set(routing, index);
+  return index;
+}
+
+/**
+ * Apply an already-batched account routing envelope to one exact worker.
+ * This is deliberately DB-free so one canonical broker event can serve every
+ * SSE and long-poll subscriber without repeating receipt/snapshot queries.
+ */
+export function attachAccountRoutingAuthorityActivation<T extends MessageWithId>(
+  message: T,
+  identity: ResolvedRequestAgentIdentity | null,
+  routing: MessageAccountAgentRouting,
+): T {
+  if (!identity || identity.session_kind !== "worker") return message;
+  const currentSessionId = identity.agent_session_id ?? "";
+  const currentAgentKey = identity.agent_key ?? "";
+  const target = routingTargetIndex(routing).get(`${currentAgentKey}\u0000${currentSessionId}`);
+  const messageNumber = typeof message.id === "string"
+    ? parseScopedId(message.id, "msg")
+    : null;
+  const receipts = new Map<number, { activation_reason: string }>();
+  if (messageNumber && target) {
+    receipts.set(messageNumber, {
+      activation_reason: "activation_reason" in target
+        ? target.activation_reason || "explicit_mention"
+        : "explicit_mention",
+    });
+  }
+  const snapshots = routing.authority === "receipts" && messageNumber
+    ? new Set([messageNumber])
+    : new Set<number>();
+  const authoritativeLegacyDecisions = routing.authority === "legacy"
+    ? new Map([[String(message.id ?? ""), target
+      ? {
+          decision: "activate" as const,
+          reason: ("activation_reason" in target
+            ? target.activation_reason
+            : "explicit_mention") as AgentMessageActivation["for_current_agent"]["reason"],
+          addressed: true,
+        }
+      : {
+          decision: "silent" as const,
+          reason: "unaddressed" as const,
+          addressed: false,
+        }]])
+    : new Map();
+  return attachAgentMessageActivationsFromReceipts(
+    [message],
+    identity as ActivationIdentity,
+    receipts,
+    snapshots,
+    { authoritativeLegacyDecisions },
+  )[0] as T;
+}
 
 /**
  * The single activation authority for every delivery surface (history, poll,
