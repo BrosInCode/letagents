@@ -8,7 +8,10 @@ import {
   transferSupervisorOwnership,
 } from "../main/supervisor-ownership.js";
 
-const ipcSource = readFileSync(fileURLToPath(new URL("../main/ipc.ts", import.meta.url)), "utf8");
+const ipcSource = readFileSync(
+  fileURLToPath(new URL("../main/ipc-handlers/supervisor.ts", import.meta.url)),
+  "utf8",
+);
 
 test("supervisor list projects canonical agent keys for renderer mention routing", () => {
   const listHandler = ipcSource.slice(
