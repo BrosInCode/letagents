@@ -68,7 +68,11 @@ test("release workflow builds, attests, and publishes independent public R2 feed
 
   assert.match(workflow, /arch: arm64\s+runner: macos-15/);
   assert.match(workflow, /arch: x64\s+runner: macos-15-intel/);
-  assert.match(workflow, /uses: actions\/attest@v4/);
+  assert.match(
+    workflow,
+    /uses: actions\/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4/,
+    "release provenance must use the reviewed immutable actions/attest v4 commit",
+  );
   assert.match(workflow, /github\.event\.repository\.visibility == 'public'/);
   assert.match(workflow, /vars\.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true'/);
   assert.match(workflow, /Report unavailable provenance attestation/);
