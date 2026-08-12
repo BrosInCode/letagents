@@ -20,7 +20,7 @@ test("Mac beta routes redirect supported architectures directly to public R2 ass
   assert.equal(arm64.status, 302);
   assert.equal(
     arm64.headers.get("location"),
-    "https://downloads.letagents.chat/desktop/v0.1.3/LetAgents-0.1.3-darwin-arm64.dmg",
+    "https://downloads.letagents.chat/desktop/v0.1.4/LetAgents-0.1.4-darwin-arm64.dmg",
   );
   assert.equal(arm64.headers.get("cache-control"), "public, max-age=60, must-revalidate");
 
@@ -28,7 +28,7 @@ test("Mac beta routes redirect supported architectures directly to public R2 ass
   assert.equal(x64.status, 302);
   assert.equal(
     x64.headers.get("location"),
-    "https://downloads.letagents.chat/desktop/v0.1.3/LetAgents-0.1.3-darwin-x64.dmg",
+    "https://downloads.letagents.chat/desktop/v0.1.4/LetAgents-0.1.4-darwin-x64.dmg",
   );
 
   const unsupported = await fetch(`${baseUrl}/downloads/mac/universal`, { redirect: "manual" });
@@ -44,15 +44,15 @@ test("Mac beta checksum route is public and names both signed DMGs", async (t) =
   const address = server.address();
   assert.ok(address && typeof address === "object");
 
-  const response = await fetch(`http://127.0.0.1:${address.port}/downloads/mac/v0.1.3/checksums`);
+  const response = await fetch(`http://127.0.0.1:${address.port}/downloads/mac/v0.1.4/checksums`);
   assert.equal(response.status, 200);
   assert.match(response.headers.get("cache-control") ?? "", /immutable/);
   const body = await response.text();
-  assert.match(body, /LetAgents for Mac beta v0\.1\.3/);
-  assert.match(body, /LetAgents-0\.1\.3-darwin-arm64\.dmg/);
-  assert.match(body, /LetAgents-0\.1\.3-darwin-x64\.dmg/);
-  assert.match(body, /6010454bc7375a38571d707f90c077207a7d2b49b01a1db1655b03f4def9b502/);
-  assert.match(body, /b7574e17ef87aebf418926478de10d9937fd1a96ca0c7a53b826a109302c5560/);
+  assert.match(body, /LetAgents for Mac beta v0\.1\.4/);
+  assert.match(body, /LetAgents-0\.1\.4-darwin-arm64\.dmg/);
+  assert.match(body, /LetAgents-0\.1\.4-darwin-x64\.dmg/);
+  assert.match(body, /27abe236232d33db10ed4533f4a7443a66f93568e9fa73a2ca472b6467fcf1cb/);
+  assert.match(body, /4c807ad0c799b4e46ab81d1098e5b65934d6b0b49f0a99ced2713897e1c2bc35/);
 });
 
 test("previous immutable Mac beta checksum routes remain available", async (t) => {
@@ -64,13 +64,15 @@ test("previous immutable Mac beta checksum routes remain available", async (t) =
   const address = server.address();
   assert.ok(address && typeof address === "object");
 
-  const response = await fetch(`http://127.0.0.1:${address.port}/downloads/mac/v0.1.2/checksums`);
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("cache-control") ?? "", /immutable/);
-  const body = await response.text();
-  assert.match(body, /LetAgents for Mac beta v0\.1\.2/);
-  assert.match(body, /LetAgents-0\.1\.2-darwin-arm64\.dmg/);
-  assert.match(body, /LetAgents-0\.1\.2-darwin-x64\.dmg/);
-  assert.match(body, /e5355deced8383bc7d024ec60b109a38dde69dfeb6b6339352e1f5bc5c53bd43/);
-  assert.match(body, /67d2896b806695dae8c0224b3bc2780aee6902e897569c983ecc1bdb0330b6b0/);
+  for (const version of ["0.1.3", "0.1.2"]) {
+    const response = await fetch(
+      `http://127.0.0.1:${address.port}/downloads/mac/v${version}/checksums`,
+    );
+    assert.equal(response.status, 200);
+    assert.match(response.headers.get("cache-control") ?? "", /immutable/);
+    const body = await response.text();
+    assert.match(body, new RegExp(`LetAgents for Mac beta v${version.replaceAll(".", "\\.")}`));
+    assert.match(body, new RegExp(`LetAgents-${version.replaceAll(".", "\\.")}-darwin-arm64\\.dmg`));
+    assert.match(body, new RegExp(`LetAgents-${version.replaceAll(".", "\\.")}-darwin-x64\\.dmg`));
+  }
 });
