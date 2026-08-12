@@ -1,396 +1,96 @@
 <template>
-  <div class="rent-provider-dashboard" data-testid="rent-provider-dashboard">
-    <article class="surface-row single-line">
-      <div>
-        <p class="surface-title">Provider dashboard</p>
-        <p class="surface-subtitle">{{ summaryLine }}</p>
-      </div>
-      <div class="surface-meta">
-        <button
-          type="button"
-          class="rent-refresh-button"
-          data-testid="rent-provider-refresh"
-          :disabled="state === 'loading'"
-          @click="refresh"
-        >
-          {{ state === "loading" ? "Refreshing..." : "Refresh" }}
+  <section class="rent-provider" data-testid="rent-provider-dashboard">
+    <header class="rent-provider-hero">
+      <div><p>Provider desk</p><h2>{{ settings?.enabled ? 'Your capacity is visible.' : 'Your capacity is paused.' }}</h2><span>{{ statusCopy }}</span></div>
+      <button class="rent-button rent-button-secondary" type="button" :disabled="loading" @click="refresh()">{{ loading ? 'Refreshing…' : 'Refresh' }}</button>
+    </header>
+    <p v-if="error" class="rent-request-error" role="alert">{{ error }}</p>
+
+    <div class="rent-provider-overview">
+      <article><span class="rent-provider-health" :data-state="settings?.daemonState || 'offline'"></span><div><small>Local daemon</small><strong>{{ settings?.daemonState || 'Checking' }}</strong></div></article>
+      <article><small>Available slots</small><strong>{{ availableSlots }}</strong></article>
+      <article><small>Working now</small><strong>{{ workingSessions.length }}</strong></article>
+    </div>
+
+    <section class="rent-provider-section"><header><div><p>Incoming requests</p><span>Review the exact room, scope, and limits before launch.</span></div><strong>{{ dashboard.pendingRequests.length }}</strong></header>
+      <div v-if="loading" class="rent-provider-empty">Loading requests…</div>
+      <div v-else-if="dashboard.pendingRequests.length === 0" class="rent-provider-empty">No requests waiting. Keep this desktop available to receive one.</div>
+      <div v-else class="rent-provider-queue">
+        <button v-for="request in dashboard.pendingRequests" :key="request.id" class="rent-provider-request" type="button" :data-selected="reviewingRequest?.id === request.id" @click="openReview(request)">
+          <span class="rent-provider-request-mark">{{ initials(request.renterDisplayName || 'Renter') }}</span><span><strong>{{ request.taskTitle }}</strong><small>{{ request.renterDisplayName || 'Unknown renter' }} · {{ request.requestedTimeLimitMinutes || '—' }} min</small></span><span class="rent-provider-review-label">Review</span>
         </button>
       </div>
-    </article>
+    </section>
 
-    <article
-      v-if="state === 'error'"
-      class="surface-row single-line"
-      data-testid="rent-provider-error"
-      role="alert"
-    >
-      <div>
-        <p class="surface-title">Dashboard temporarily unavailable.</p>
-        <p class="surface-subtitle">{{ errorMessage || "Try Refresh in a moment." }}</p>
-      </div>
-      <div class="surface-meta">
-        <span class="state-pill" data-state="failed">error</span>
-      </div>
-    </article>
+    <section class="rent-provider-section"><header><div><p>Rental activity</p><span>Every session using a slot, including work that is preparing or needs attention.</span></div><strong>{{ dashboard.capacitySessions.length }}</strong></header>
+      <div v-if="dashboard.capacitySessions.length === 0" class="rent-provider-empty">No rental is using capacity on this desktop.</div>
+      <div v-else class="rent-provider-active"><article v-for="session in dashboard.capacitySessions" :key="session.id"><span class="rent-provider-health" :data-state="sessionIndicator(session)"></span><div><strong>{{ session.taskTitle }}</strong><small>{{ session.roomIdentifier || 'Preparing room' }} · {{ session.timeLimitMinutes || '—' }} min</small></div><span class="rent-provider-session-state" :data-state="sessionIndicator(session)">{{ sessionStateLabel(session) }}</span></article></div>
+    </section>
 
-    <article
-      v-else-if="state === 'disabled'"
-      class="surface-row single-line"
-      data-testid="rent-provider-disabled"
-    >
-      <div>
-        <p class="surface-title">Rent an Agent is turned off in this desktop app.</p>
-        <p class="surface-subtitle">Enable the rental marketplace for this app, then restart LetAgents Desktop.</p>
-      </div>
-      <div class="surface-meta">
-        <span class="state-pill" data-state="offline">disabled</span>
-      </div>
-    </article>
-
-    <template v-else>
-      <section class="rent-provider-section">
-        <header class="rent-provider-section-header">
-          <p class="surface-title">Pending requests</p>
-          <span class="rent-provider-count">{{ dashboard.pendingRequests.length }}</span>
-        </header>
-
-        <article
-          v-if="dashboard.pendingRequests.length === 0"
-          class="surface-row single-line"
-          data-testid="rent-provider-no-requests"
-        >
-          <p class="surface-title">No pending requests.</p>
-        </article>
-
-        <article
-          v-for="request in dashboard.pendingRequests"
-          :key="request.id"
-          class="surface-row"
-          :data-testid="`rent-provider-request-${request.id}`"
-        >
-          <div>
-            <p class="surface-title">{{ request.taskTitle }}</p>
-            <p class="surface-subtitle">
-              {{ request.renterDisplayName || "Unknown renter" }} ·
-              {{ rentalModeLabel(request.mode) }} · {{ rentalContinuityLabel(request.continuityMode) }}
-            </p>
-          </div>
-          <div class="surface-meta">
-            <span class="state-pill" :data-state="requestState(request.status)">
-              {{ humanizeToken(request.status) }}
-            </span>
-            <button
-              type="button"
-              class="rent-refresh-button rent-action-decline"
-              :data-testid="`rent-provider-decline-${request.id}`"
-              :disabled="actionBusyFor === request.id || request.status !== 'pending'"
-              @click="decline(request.id)"
-            >
-              {{ actionBusyFor === request.id && actionKind === "decline" ? "Declining..." : "Decline" }}
-            </button>
-            <button
-              type="button"
-              class="rent-refresh-button rent-action-accept"
-              :data-testid="`rent-provider-accept-${request.id}`"
-              :disabled="actionBusyFor === request.id || request.status !== 'pending'"
-              @click="accept(request.id)"
-            >
-              {{ actionBusyFor === request.id && actionKind === "accept" ? "Accepting..." : "Accept" }}
-            </button>
-          </div>
-        </article>
-      </section>
-
-      <section class="rent-provider-section">
-        <header class="rent-provider-section-header">
-          <p class="surface-title">Active sessions</p>
-          <span class="rent-provider-count">{{ dashboard.activeSessions.length }}</span>
-        </header>
-
-        <article
-          v-if="dashboard.activeSessions.length === 0"
-          class="surface-row single-line"
-          data-testid="rent-provider-no-active"
-        >
-          <p class="surface-title">No active rentals.</p>
-        </article>
-
-        <article
-          v-for="session in dashboard.activeSessions"
-          :key="session.id"
-          class="surface-row"
-          :data-testid="`rent-provider-session-${session.id}`"
-        >
-          <div>
-            <p class="surface-title">{{ session.taskTitle }}</p>
-            <p class="surface-subtitle">
-              <code>{{ session.id }}</code> · {{ rentalModeLabel(session.mode) }} ·
-              <span v-if="session.lrtLimit !== null">
-                {{ session.lrtUsed }}/{{ session.lrtLimit }} rental credits
-              </span>
-              <span v-else>{{ session.lrtUsed }} rental credits</span>
-            </p>
-          </div>
-          <div class="surface-meta">
-            <span class="state-pill" :data-state="sessionStateFor(session.status)">
-              {{ humanizeToken(session.status) }}
-            </span>
-            <button
-              type="button"
-              class="rent-refresh-button"
-              :data-testid="`rent-provider-open-session-${session.id}`"
-              @click="emit('open-session', session)"
-            >
-              Open
-            </button>
-          </div>
-        </article>
-      </section>
-
-      <section class="rent-provider-section">
-        <header class="rent-provider-section-header">
-          <p class="surface-title">My listings</p>
-          <span class="rent-provider-count">{{ dashboard.listings.length }}</span>
-        </header>
-
-        <article
-          v-if="dashboard.listings.length === 0"
-          class="surface-row single-line"
-          data-testid="rent-provider-no-listings"
-        >
-          <p class="surface-title">No listings yet.</p>
-          <p class="surface-subtitle">
-            Your rentable agents will appear here after listings are created.
-          </p>
-        </article>
-
-        <article
-          v-for="listing in dashboard.listings"
-          :key="listing.id"
-          class="surface-row"
-          :data-testid="`rent-provider-listing-${listing.id}`"
-        >
-          <div>
-            <p class="surface-title">{{ listing.displayName }}</p>
-            <p class="surface-subtitle">
-              {{ listing.ideKind }}
-              <span v-if="listing.modelLabel"> · {{ listing.modelLabel }}</span>
-              · {{ listing.activeSessionCount }}/{{ listing.maxConcurrentSessions }} active
-            </p>
-          </div>
-          <div class="surface-meta">
-            <span class="state-pill" :data-state="listingState(listing.status)">
-              {{ humanizeToken(listing.status) }}
-            </span>
-          </div>
-        </article>
-      </section>
-    </template>
-
-    <p v-if="actionError" class="rent-provider-action-error" role="alert" data-testid="rent-provider-action-error">
-      {{ actionError }}
-    </p>
-  </div>
+    <RentRequestReviewSheet :open="Boolean(reviewingRequest)" :request="reviewingRequest" :session="reviewSession" :runtimes="settings?.runtimes || []" :busy="launching" :error="reviewError" @close="closeReview" @launch="launch" @decline="decline" />
+  </section>
 </template>
 
 <script setup lang="ts">
 import { computed, onMounted, ref } from "vue";
-import type {
-  DesktopRentalProviderDashboard,
-  DesktopRentalSession,
-} from "../../../../../electron/ipc-types";
-import { humanizeToken, rentalContinuityLabel, rentalModeLabel } from "./rent-session-detail/presentation";
+import type { DesktopRentalLaunchConfiguration, DesktopRentalProviderDashboard, DesktopRentalProviderSettings, DesktopRentalRequest, DesktopRentalSession } from "../../../../../electron/ipc-types";
+import { desktopIpc } from "../../../ipc/index.js";
+import { loadRentalProviderDashboard, useRentalProviderEvents } from "../../../composables/useRentalProviderEvents";
+import RentRequestReviewSheet from "./RentRequestReviewSheet.vue";
 
-const emit = defineEmits<{
-  "open-session": [session: DesktopRentalSession];
-}>();
-
-type ViewState = "loading" | "ready" | "error" | "disabled";
-
-const state = ref<ViewState>("loading");
-const errorMessage = ref<string | null>(null);
-const dashboard = ref<DesktopRentalProviderDashboard>(emptyDashboard());
-const actionBusyFor = ref<string | null>(null);
-const actionKind = ref<"accept" | "decline" | null>(null);
-const actionError = ref<string | null>(null);
-
-const summaryLine = computed(() => {
-  if (state.value === "loading") return "Loading dashboard...";
-  if (state.value === "error") return "Could not load dashboard.";
-  if (state.value === "disabled") return "Rent an Agent disabled.";
-  const requests = dashboard.value.pendingRequests.length;
-  const sessions = dashboard.value.activeSessions.length;
-  const listings = dashboard.value.listings.length;
-  return `${requests} pending · ${sessions} active · ${listings} listing${listings === 1 ? "" : "s"}.`;
-});
-
-onMounted(() => {
-  void refresh();
-});
-
-async function refresh(): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
-  if (!bridge?.getProviderDashboard) {
-    state.value = "disabled";
-    return;
-  }
-
-  state.value = "loading";
-  errorMessage.value = null;
+const dashboard = ref<DesktopRentalProviderDashboard>(emptyDashboard()); const settings = ref<DesktopRentalProviderSettings | null>(null); const loading = ref(true); const error = ref<string | null>(null); const reviewingRequest = ref<DesktopRentalRequest | null>(null); const reviewSession = ref<DesktopRentalSession | null>(null); const reviewError = ref<string | null>(null); const launching = ref(false);
+let reviewRequestToken = 0;
+const workingSessions = computed(() => dashboard.value.capacitySessions.filter((session) => session.status === 'active' && session.launchState === 'active'));
+const availableSlots = computed(() => Math.max(0, (settings.value?.maxConcurrentSessions || 0) - dashboard.value.capacitySessions.length));
+const statusCopy = computed(() => settings.value?.blockers.length ? settings.value.blockers[0] : settings.value?.enabled ? `${availableSlots.value} slot${availableSlots.value === 1 ? '' : 's'} available from this Mac.` : 'Turn on availability in Settings → Renting when you are ready.');
+onMounted(() => { void refresh(); });
+useRentalProviderEvents(() => { void refresh(false); });
+async function refresh(showLoading = true): Promise<void> { if (showLoading) loading.value = true; error.value = null; try { const bridge = desktopIpc.rental; if (!bridge) throw new Error('Restart LetAgents Desktop to use renting.'); const [nextDashboard, nextSettings] = await Promise.all([loadRentalProviderDashboard(), bridge.getProviderSettings()]); dashboard.value = nextDashboard; settings.value = nextSettings; } catch (cause) { error.value = cause instanceof Error ? cause.message : 'Could not load provider availability.'; } finally { if (showLoading) loading.value = false; } }
+async function openReview(request: DesktopRentalRequest): Promise<void> {
+  const token = ++reviewRequestToken;
+  reviewingRequest.value = request;
+  reviewSession.value = null;
+  reviewError.value = null;
   try {
-    const result = await bridge.getProviderDashboard();
-    if (isDisabledResult(result)) {
-      state.value = "disabled";
-      dashboard.value = emptyDashboard();
-      return;
-    }
-    dashboard.value = normalizeDashboard(result);
-    state.value = "ready";
-  } catch (error) {
-    errorMessage.value = error instanceof Error ? error.message : "Unknown error.";
-    state.value = "error";
+    const session = await desktopIpc.rental?.getSession(request.sessionId);
+    if (token !== reviewRequestToken || reviewingRequest.value?.id !== request.id) return;
+    if (!session || session.id !== request.sessionId) throw new Error('Could not load this request.');
+    reviewSession.value = session;
+  } catch (cause) {
+    if (token !== reviewRequestToken || reviewingRequest.value?.id !== request.id) return;
+    reviewError.value = cause instanceof Error ? cause.message : 'Could not inspect this request.';
   }
 }
-
-async function accept(requestId: string): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
-  if (!bridge?.acceptRequest) return;
-  actionBusyFor.value = requestId;
-  actionKind.value = "accept";
-  actionError.value = null;
+function closeReview(): void { reviewRequestToken += 1; reviewingRequest.value = null; reviewSession.value = null; reviewError.value = null; }
+async function launch(configuration: DesktopRentalLaunchConfiguration): Promise<void> {
+  const request = reviewingRequest.value;
+  const token = reviewRequestToken;
+  if (!request || reviewSession.value?.id !== request.sessionId) { reviewError.value = 'Review details are still loading.'; return; }
+  launching.value = true;
+  reviewError.value = null;
   try {
-    const result = await bridge.acceptRequest(requestId);
-    if (isDisabledResult(result)) {
-      actionError.value = "Rent an Agent is disabled.";
-      return;
-    }
+    await desktopIpc.rental!.acceptRequest(request.sessionId, configuration);
+    if (token === reviewRequestToken && reviewingRequest.value?.id === request.id) closeReview();
     await refresh();
-  } catch (error) {
-    actionError.value = error instanceof Error ? error.message : "Could not accept request.";
-  } finally {
-    actionBusyFor.value = null;
-    actionKind.value = null;
-  }
+  } catch (cause) {
+    if (token === reviewRequestToken && reviewingRequest.value?.id === request.id) reviewError.value = cause instanceof Error ? cause.message : 'Could not launch this rental.';
+  } finally { launching.value = false; }
 }
-
-async function decline(requestId: string): Promise<void> {
-  const bridge = window.letagentsDesktop?.rental;
-  if (!bridge?.declineRequest) return;
-  actionBusyFor.value = requestId;
-  actionKind.value = "decline";
-  actionError.value = null;
+async function decline(): Promise<void> {
+  const request = reviewingRequest.value;
+  const token = reviewRequestToken;
+  if (!request || reviewSession.value?.id !== request.sessionId) { reviewError.value = 'Review details are still loading.'; return; }
+  launching.value = true;
   try {
-    const result = await bridge.declineRequest(requestId);
-    if (isDisabledResult(result)) {
-      actionError.value = "Rent an Agent is disabled.";
-      return;
-    }
+    await desktopIpc.rental!.declineRequest(request.sessionId);
+    if (token === reviewRequestToken && reviewingRequest.value?.id === request.id) closeReview();
     await refresh();
-  } catch (error) {
-    actionError.value = error instanceof Error ? error.message : "Could not decline request.";
-  } finally {
-    actionBusyFor.value = null;
-    actionKind.value = null;
-  }
+  } catch (cause) {
+    if (token === reviewRequestToken && reviewingRequest.value?.id === request.id) reviewError.value = cause instanceof Error ? cause.message : 'Could not decline this request.';
+  } finally { launching.value = false; }
 }
-
-function emptyDashboard(): DesktopRentalProviderDashboard {
-  return {
-    listings: [],
-    activeSessions: [],
-    pendingRequests: [],
-    readiness: {
-      status: "unknown",
-      summary: null,
-      blockers: [],
-      warnings: [],
-      badges: [],
-      checks: [],
-      lastCheckedAt: null,
-    },
-    quotaSnapshots: [],
-    updatedAt: null,
-  };
-}
-
-function normalizeDashboard(value: unknown): DesktopRentalProviderDashboard {
-  if (!value || typeof value !== "object") return emptyDashboard();
-  const candidate = value as Partial<DesktopRentalProviderDashboard>;
-  const fallback = emptyDashboard();
-  return {
-    listings: Array.isArray(candidate.listings) ? candidate.listings : fallback.listings,
-    activeSessions: Array.isArray(candidate.activeSessions) ? candidate.activeSessions : fallback.activeSessions,
-    pendingRequests: Array.isArray(candidate.pendingRequests) ? candidate.pendingRequests : fallback.pendingRequests,
-    readiness: candidate.readiness ?? fallback.readiness,
-    quotaSnapshots: Array.isArray(candidate.quotaSnapshots) ? candidate.quotaSnapshots : fallback.quotaSnapshots,
-    updatedAt: candidate.updatedAt ?? fallback.updatedAt,
-  };
-}
-
-function isDisabledResult(value: unknown): boolean {
-  return (
-    typeof value === "object"
-    && value !== null
-    && !Array.isArray(value)
-    && (value as { enabled?: unknown }).enabled === false
-  );
-}
-
-function listingState(status: string): string {
-  if (status === "active") return "active";
-  if (status === "paused") return "away";
-  return "offline";
-}
-
-function sessionStateFor(status: string): string {
-  if (status === "active" || status === "in_progress" || status === "running") return "active";
-  if (status === "queued" || status === "pending" || status === "starting") return "starting";
-  return "offline";
-}
-
-function requestState(status: string): string {
-  if (status === "pending") return "starting";
-  if (status === "accepted") return "connected";
-  return "offline";
-}
-
+function initials(value: string): string { return value.split(/\s+/).slice(0, 2).map((part) => part[0]).join('').toUpperCase(); }
+function sessionIndicator(session: DesktopRentalSession): 'online' | 'starting' | 'error' | 'offline' { if (session.status === 'active' && session.launchState === 'active') return 'online'; if (session.launchState === 'launch_failed' || session.status === 'blocked' || session.status === 'budget_exhausted') return 'error'; if (session.status === 'stale') return 'offline'; return 'starting'; }
+function sessionStateLabel(session: DesktopRentalSession): string { if (session.status === 'active' && session.launchState === 'active') return 'Working'; if (session.launchState === 'launch_failed') return 'Launch failed'; if (session.status === 'blocked') return 'Needs attention'; if (session.status === 'budget_exhausted') return 'Budget exhausted'; if (session.status === 'patch_review') return 'Patch review'; if (session.status === 'pr_opened') return 'PR open'; if (session.status === 'stale') return 'Offline'; if (session.launchState === 'provisioning' || session.status === 'provisioning') return 'Preparing'; return 'Awaiting launch'; }
+function emptyDashboard(): DesktopRentalProviderDashboard { return { listings: [], capacitySessions: [], pendingRequests: [], readiness: { status: 'unknown', summary: null, blockers: [], warnings: [], badges: [], checks: [], lastCheckedAt: null }, quotaSnapshots: [], updatedAt: null }; }
 </script>
-
-<style scoped>
-.rent-provider-dashboard {
-  display: flex;
-  flex-direction: column;
-  gap: 0.75rem;
-}
-.rent-provider-section {
-  display: flex;
-  flex-direction: column;
-  gap: 0.4rem;
-}
-.rent-provider-section-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  padding: 0.4rem 0.2rem 0;
-}
-.rent-provider-count {
-  font-variant-numeric: tabular-nums;
-  font-size: 0.85rem;
-  background: var(--color-surface-2, rgba(255, 255, 255, 0.06));
-  border-radius: 999px;
-  padding: 0.1rem 0.55rem;
-}
-.rent-action-accept {
-  background: var(--color-accent, #4f7cff);
-  color: white;
-  border-color: transparent;
-}
-.rent-action-decline {
-  background: transparent;
-}
-.rent-provider-action-error {
-  color: var(--color-danger, #ff8a80);
-  font-size: 0.85rem;
-  margin: 0.4rem 0 0;
-}
-</style>

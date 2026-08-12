@@ -9,7 +9,6 @@
         ref="dialogElement"
         class="desktop-reasoning-inspector"
         :data-live="streamState === 'live'"
-        :data-updating="recentlyUpdated"
         role="dialog"
         aria-modal="true"
         :aria-labelledby="titleId"
@@ -24,6 +23,11 @@
           </div>
           <div class="desktop-reasoning-inspector-actions">
             <span class="desktop-reasoning-freshness" :data-state="streamState" :title="streamDescription">
+              <span
+                v-if="streamState === 'live'"
+                class="desktop-reasoning-freshness-dot"
+                aria-hidden="true"
+              />
               {{ streamLabel }}
             </span>
             <button type="button" @click="emit('close')">Close</button>
@@ -32,10 +36,7 @@
 
         <div class="desktop-reasoning-inspector-body">
           <section class="desktop-reasoning-summary" :data-updating="recentlyUpdated">
-            <span>
-              Current summary
-              <small v-if="streamState === 'live'" class="desktop-reasoning-live-dot" aria-label="Streaming" />
-            </span>
+            <span>Current summary</span>
             <p>{{ currentSummary }}</p>
           </section>
 
@@ -87,14 +88,16 @@
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import type {
   DesktopReasoningSession,
   DesktopReasoningSnapshot,
   DesktopReasoningUpdate,
 } from "../../../../../electron/ipc-types";
 import { displayNameFromActor } from "../../../domain/agents";
-import { timestampValue } from "../../../domain/time";
+import { classifyReasoningStream } from "../../../domain/reasoning";
+import { formatShortDateTime, timestampValue } from "../../../domain/time";
+import { desktopIpc } from "../../../ipc/index.js";
 
 interface ReasoningField {
   label: string;
@@ -128,6 +131,24 @@ const detailError = ref<string | null>(null);
 const recentlyUpdated = ref(false);
 let fetchSerial = 0;
 let livePulseTimer: ReturnType<typeof setTimeout> | null = null;
+const now = ref(Date.now());
+let stalenessTimer: ReturnType<typeof setInterval> | null = null;
+const STALENESS_TICK_MS = 30_000;
+
+function startStalenessTimer(): void {
+  now.value = Date.now();
+  stopStalenessTimer();
+  stalenessTimer = setInterval(() => {
+    now.value = Date.now();
+  }, STALENESS_TICK_MS);
+}
+
+function stopStalenessTimer(): void {
+  if (stalenessTimer) {
+    clearInterval(stalenessTimer);
+    stalenessTimer = null;
+  }
+}
 
 const activeSession = computed(() => detailSession.value || props.session);
 const titleId = computed(() => `desktop-reasoning-${sanitizeId(activeSession.value?.id || "stream")}`);
@@ -240,46 +261,20 @@ const currentLiveTimelineEntry = computed<ReasoningTimelineEntry[]>(() => {
   }];
 });
 
-const streamState = computed(() => {
-  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").toLowerCase();
-  if (isCodexReasoningSummary.value) return "live";
-  if (isCodexSnapshot.value) return "snapshot";
-  if (status === "working" || status === "reviewing") return "live";
-  if (status === "blocked") return "blocked";
-  return "recent";
-});
-const isCodexReasoningSummary = computed(() => {
+const streamClassification = computed(() => {
   const snapshot = currentSnapshot.value;
-  const text = [
-    snapshot?.summary,
-    snapshot?.checking,
-    snapshot?.next_action,
-  ].join(" ").toLowerCase();
-  return text.includes("readable reasoning") || text.includes("reasoning summary");
+  return classifyReasoningStream({
+    status: snapshot?.status || activeSession.value?.status,
+    summary: snapshot?.summary,
+    checking: snapshot?.checking,
+    nextAction: snapshot?.next_action,
+    updatedAt: activeSession.value?.updatedAt || activeSession.value?.createdAt,
+    now: now.value,
+  });
 });
-const isCodexSnapshot = computed(() => {
-  if (isCodexReasoningSummary.value) return false;
-  const snapshot = currentSnapshot.value;
-  const text = [
-    snapshot?.summary,
-    snapshot?.checking,
-    snapshot?.next_action,
-  ].join(" ").toLowerCase();
-  return text.includes("codex_app_server") || text.includes("app-server snapshot") || text.includes("snapshot-derived");
-});
-const streamLabel = computed(() => {
-  if (isCodexReasoningSummary.value) return "Live thinking";
-  if (isCodexSnapshot.value) return "Snapshot";
-  const status = String(currentSnapshot.value?.status || activeSession.value?.status || "").trim();
-  return status ? labelFromStatus(status) : "Reasoning";
-});
-const streamDescription = computed(() =>
-  isCodexReasoningSummary.value
-    ? "Readable Codex reasoning summary stream"
-    : isCodexSnapshot.value
-      ? "Codex app-server snapshot"
-      : streamLabel.value
-);
+const streamState = computed(() => streamClassification.value.state);
+const streamLabel = computed(() => streamClassification.value.label);
+const streamDescription = computed(() => streamClassification.value.description);
 
 watch(() => props.open, (next) => {
   if (!next) {
@@ -292,10 +287,18 @@ watch(() => props.open, (next) => {
       clearTimeout(livePulseTimer);
       livePulseTimer = null;
     }
+    stopStalenessTimer();
     return;
   }
+  startStalenessTimer();
   void nextTick(() => dialogElement.value?.focus());
 });
+
+onBeforeUnmount(stopStalenessTimer);
+
+// The open watcher is not immediate; start the clock now if we mount open
+// (deep-linked modal), otherwise a stale session reads "live" until first tick.
+if (props.open) startStalenessTimer();
 
 watch(
   () => props.session,
@@ -346,7 +349,7 @@ watch(
       return;
     }
     try {
-      const result = await window.letagentsDesktop.room.getReasoningSession(roomIdentifier, sessionId);
+      const result = await desktopIpc.room.getReasoningSession(roomIdentifier, sessionId);
       if (serial !== fetchSerial) return;
       detailSession.value = result.session;
       detailUpdates.value = [...result.updates].sort((left, right) =>
@@ -418,13 +421,6 @@ function labelFromStatus(value: string | null): string {
 }
 
 function formatTimestamp(value: string | null | undefined): string {
-  const parsed = new Date(String(value || ""));
-  if (Number.isNaN(parsed.getTime())) return "unknown";
-  return parsed.toLocaleString(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "2-digit",
-    minute: "2-digit",
-  });
+  return formatShortDateTime(value) ?? "unknown";
 }
 </script>

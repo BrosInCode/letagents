@@ -10,8 +10,7 @@
  * Part of PR p1.2b.
  */
 
-import { EventEmitter } from "node:events";
-
+import { createBridgedEmitter } from "../server/event-bridge.js";
 import { db } from "../db/client.js";
 import { rental_activity_events } from "../db/schema.js";
 import {
@@ -51,7 +50,7 @@ export interface RentalActivityCreatedEvent {
   activity: ActivityEvent;
 }
 
-export const rentalActivityEvents = new EventEmitter();
+export const rentalActivityEvents = createBridgedEmitter("rental_activity");
 
 function generateEventId(): string {
   const timestamp = Date.now().toString(36);

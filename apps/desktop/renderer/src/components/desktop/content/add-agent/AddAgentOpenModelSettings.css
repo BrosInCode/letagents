@@ -1,0 +1,43 @@
+.desktop-add-agent-open-model-config label {
+  display: grid;
+  gap: 4px;
+}
+
+.desktop-add-agent-open-model-config label small {
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+}
+
+.desktop-add-agent-open-model-config input {
+  min-height: 40px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: var(--radius-md);
+  background: rgba(0, 0, 0, 0.12);
+  color: var(--text);
+  font-size: 0.8rem;
+}
+
+.desktop-add-agent-open-model-config-actions {
+  display: inline-flex;
+  gap: 6px;
+}
+
+.desktop-add-agent-open-model-config-actions button {
+  min-height: 28px;
+  padding: 0 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.76rem;
+  font-weight: 850;
+}
+
+.desktop-add-agent-open-model-config p {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.78rem;
+  line-height: 1.4;
+}

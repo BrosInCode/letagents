@@ -1,0 +1,273 @@
+/*
+ * Message info: anchored card on wide windows, bottom sheet on narrow. A
+ * teleported overlay — it must never displace the room layout.
+ */
+.room-message-info-surface {
+  position: fixed;
+  z-index: 60;
+  top: 64px;
+  right: 16px;
+  display: flex;
+  flex-direction: column;
+  width: min(400px, calc(100vw - 32px));
+  /* Hug the content: a three-line card must not stretch to the viewport. */
+  max-height: calc(100vh - 80px);
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.11);
+  border-radius: 16px;
+  background: rgba(17, 17, 18, 0.97);
+  color: var(--text, #fafafa);
+  box-shadow: -18px 0 48px rgba(0, 0, 0, 0.3), 0 22px 64px rgba(0, 0, 0, 0.45);
+  backdrop-filter: blur(22px) saturate(1.06);
+}
+
+@media (max-width: 719px) {
+  .room-message-info-surface {
+    top: auto;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    width: auto;
+    max-height: 72vh;
+    border-radius: 16px 16px 0 0;
+  }
+
+  /* The sheet is bottom-anchored, so it may keep bottom: 0. */
+}
+
+.room-message-info-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 16px 16px 10px;
+}
+
+.room-message-info-header h3 {
+  margin: 0;
+  font-size: 0.95rem;
+  font-weight: 680;
+}
+
+.room-message-info-sent {
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.72rem;
+}
+
+.room-message-info-close {
+  display: inline-flex;
+  padding: 6px;
+  border: 0;
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-secondary, #a1a1aa);
+  cursor: pointer;
+}
+.room-message-info-close svg { width: 14px; height: 14px; }
+.room-message-info-close { transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background-color 160ms ease, color 160ms ease; }
+.room-message-info-close:active { transform: scale(0.94); }
+@media (hover: hover) and (pointer: fine) {
+  .room-message-info-close:hover { background: rgba(255, 255, 255, 0.08); color: var(--text, #fafafa); }
+}
+.room-message-info-close:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+
+.room-message-info-preview {
+  padding: 10px 16px;
+  border-block: 1px solid rgba(255, 255, 255, 0.07);
+  background: rgba(0, 0, 0, 0.25);
+  font-size: 0.8rem;
+}
+.room-message-info-preview strong { display: block; font-weight: 640; }
+.room-message-info-preview p {
+  display: -webkit-box;
+  margin: 2px 0 0;
+  overflow: hidden;
+  color: var(--text-secondary, #a1a1aa);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.room-message-info-body {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  min-height: 0;
+  padding: 14px 16px 20px;
+  overflow-y: auto;
+}
+
+.room-message-info-quiet {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  padding: 14px;
+  border: 1px solid rgba(255, 255, 255, 0.07);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.026);
+}
+.room-message-info-quiet-mark {
+  display: grid;
+  place-items: center;
+  width: 30px;
+  height: 30px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--text-secondary, #a1a1aa);
+}
+.room-message-info-quiet-mark svg { width: 15px; height: 15px; }
+.room-message-info-quiet strong { display: block; font-size: 0.8rem; font-weight: 650; }
+.room-message-info-quiet p { margin: 3px 0 0; color: var(--text-secondary, #a1a1aa); font-size: 0.73rem; line-height: 1.45; }
+
+.room-message-info-section h4 {
+  margin: 0 0 8px;
+  color: var(--text-secondary, #71717a);
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.room-message-info-section ul,
+.room-message-info-disclosure ul {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.room-message-info-section li,
+.room-message-info-disclosure li {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+.room-message-info-disclosure li { justify-content: space-between; }
+
+.room-message-info-avatar {
+  display: grid;
+  flex-shrink: 0;
+  place-items: center;
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 0.72rem;
+  font-weight: 680;
+}
+.room-message-info-avatar[data-kind="agent"] { background: rgba(96, 165, 250, 0.14); color: #93c5fd; }
+.room-message-info-avatar[data-kind="person"] { background: rgba(74, 222, 128, 0.12); color: #86efac; }
+
+.room-message-info-identity { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.room-message-info-time { flex-shrink: 0; color: var(--text-secondary, #71717a); font-size: 0.7rem; font-variant-numeric: tabular-nums; }
+
+.room-message-info-dot {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-right: 2px;
+  border-radius: 50%;
+  vertical-align: 1px;
+  background: #71717a;
+}
+.room-message-info-dot[data-tone="positive"] { background: #4ade80; }
+.room-message-info-dot[data-tone="active"] { background: #60a5fa; }
+.room-message-info-dot[data-tone="waiting"] { background: #fbbf24; }
+.room-message-info-dot[data-tone="attention"] { background: #fb7185; }
+.room-message-info-name { font-size: 0.8rem; font-weight: 620; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.room-message-info-detail { color: var(--text-secondary, #a1a1aa); font-size: 0.72rem; }
+
+.room-message-info-view-reply {
+  flex-shrink: 0;
+  min-height: 30px;
+  padding: 3px 10px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text, #fafafa);
+  font-size: 0.72rem;
+  font-weight: 620;
+  cursor: pointer;
+}
+.room-message-info-view-reply { transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), background-color 160ms ease; }
+.room-message-info-view-reply:active { transform: scale(0.97); }
+@media (hover: hover) and (pointer: fine) {
+  .room-message-info-view-reply:hover { background: rgba(255, 255, 255, 0.1); }
+}
+.room-message-info-view-reply:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
+
+.room-message-info-disclosure summary {
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.74rem;
+  cursor: pointer;
+}
+.room-message-info-disclosure ul { padding-top: 8px; }
+
+.room-message-info-copy {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: 0.72rem;
+  cursor: pointer;
+  text-decoration: underline dotted;
+}
+
+.room-message-info-state {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  align-items: center;
+  margin: 0;
+  padding: 28px 16px;
+  color: var(--text-secondary, #a1a1aa);
+  font-size: 0.78rem;
+  text-align: center;
+}
+.room-message-info-state button {
+  min-height: 32px;
+  padding: 4px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  border-radius: 7px;
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--text, #fafafa);
+  cursor: pointer;
+}
+
+.room-message-info-skeleton {
+  width: 100%;
+  height: 40px;
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.05);
+  animation: room-message-info-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes room-message-info-pulse {
+  50% { opacity: 0.45; }
+}
+
+.room-message-info-enter-active { transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1), opacity 160ms ease; }
+.room-message-info-leave-active { transition: transform 120ms ease, opacity 120ms ease; }
+.room-message-info-enter-from,
+.room-message-info-leave-to { opacity: 0; transform: translateX(12px); }
+
+@media (max-width: 719px) {
+  .room-message-info-enter-from,
+  .room-message-info-leave-to { transform: translateY(16px); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .room-message-info-enter-active,
+  .room-message-info-leave-active { transition: none; }
+  .room-message-info-skeleton { animation: none; }
+  .room-message-info-view-reply,
+  .room-message-info-close { transition-property: background-color, color; }
+  .room-message-info-view-reply:active,
+  .room-message-info-close:active { transform: none; }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .room-message-info-surface { background: #151516; backdrop-filter: none; }
+}

@@ -9,6 +9,7 @@
 import type { Express } from "express";
 
 import { registerActivityLifecycleRoutes } from "./activity-lifecycle-routes.js";
+import { registerContextRequestRoutes } from "./context-request-routes.js";
 import { registerContextToolRoutes } from "./context-tool-routes.js";
 import { defaultRentalInternalDeps } from "./deps.js";
 import { registerHeartbeatQuotaRoutes } from "./heartbeat-quota-routes.js";
@@ -27,6 +28,7 @@ export function registerRentalInternalRoutes(
   registerUsageBudgetRoutes(app, deps);
   registerHeartbeatQuotaRoutes(app, deps);
   registerContextToolRoutes(app, deps);
+  registerContextRequestRoutes(app, deps);
   registerPatchCommandRoutes(app, deps);
   registerActivityLifecycleRoutes(app, deps);
 }

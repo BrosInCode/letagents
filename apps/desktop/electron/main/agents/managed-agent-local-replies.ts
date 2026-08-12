@@ -7,6 +7,7 @@ import {
 } from "../rooms/local-store.js";
 import { addLocalChatMessage } from "../rooms/messages/local-store.js";
 import { mapRoomMessagePayload } from "../rooms/messages/mappers.js";
+import type { RoomMessageAttachmentPayload } from "../attachments.js";
 import type { StoredAgentSessionState } from "./state.js";
 
 export type DesktopManagedAgentReplyTarget = {
@@ -31,6 +32,10 @@ export async function persistDesktopManagedAgentLocalReply(input: {
   replyTo: string | null;
   threadRootId?: string | null;
   text: string;
+  attachments?: RoomMessageAttachmentPayload[];
+  source?: string;
+  sender?: string;
+  idempotencyKey?: string | null;
 }): Promise<DesktopRoomMessage | null> {
   if (input.storage.effectiveMode !== "local") {
     return null;
@@ -38,20 +43,28 @@ export async function persistDesktopManagedAgentLocalReply(input: {
 
   const localRoomIdentifier = localRoomIdentifierForStorage(input.storage, input.roomIdentifier);
   const localMessage = await addLocalChatMessage(localRoomIdentifier, {
-    sender: desktopManagedAgentReplySender(input.workerSession),
+    sender: input.sender || desktopManagedAgentReplySender(input.workerSession),
     text: input.text,
     reply_to: input.replyTo,
     thread_root_id: input.threadRootId ?? null,
-    source: "agent",
+    source: input.source || "agent",
+    attachments: input.attachments ?? [],
+    idempotency_key: input.idempotencyKey ?? null,
+    publisher_agent_key: input.workerSession.agent_key ?? null,
+    publisher_agent_session_id: input.workerSession.session_id,
   });
 
   return mapRoomMessagePayload(localMessage);
 }
 
 function desktopManagedAgentReplySender(workerSession: StoredAgentSessionState): string {
+  const actorLabel = workerSession.actor_label?.trim();
+  if (actorLabel?.includes(" | ")) {
+    return actorLabel;
+  }
   const displayName = workerSession.display_name?.trim();
   if (!displayName) {
-    return workerSession.actor_label?.trim() || "Codex";
+    return "Codex";
   }
   const ownerLabel = workerSession.owner_label?.trim() || "Local desktop";
   const ideLabel = workerSession.ide_label?.trim() || "Codex";

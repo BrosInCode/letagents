@@ -4,10 +4,12 @@ import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const {
+  getTaskBoardStalePromptState,
   isDesktopHumanTaskWriteForTest,
   isCurrentStalePromptAction,
   registerRoomTaskRoutes,
 } = await import("../routes/rooms/tasks/index.js");
+const { normalizeExpectedHeadSha } = await import("../routes/rooms/tasks/review-verdict.js");
 
 function createDeps() {
   const unused = async () => {
@@ -99,10 +101,19 @@ test("registerRoomTaskRoutes preserves canonical task route order", () => {
     { method: "delete", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/stale-prompt-mute$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/lease-action$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/review-lease-action$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)\\/review-verdict$/" },
     { method: "get", path: "/^(?:\\/api)?\\/rooms\\/(.+)\\/tasks\\/github-status$/" },
     { method: "get", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
     { method: "patch", path: "/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/" },
   ]);
+});
+
+test("review verdict route accepts only an exact 40-hex expected head SHA", () => {
+  const expected = "a".repeat(40);
+  assert.equal(normalizeExpectedHeadSha(expected.toUpperCase()), expected);
+  for (const value of [undefined, "", "a".repeat(39), "a".repeat(41), `${"a".repeat(39)}g`, "HEAD"]) {
+    assert.equal(normalizeExpectedHeadSha(value), null);
+  }
 });
 
 test("review lease action denies parent board writes from hard-isolated Focus Rooms", async () => {
@@ -318,6 +329,48 @@ test("isCurrentStalePromptAction only allows prompts from the current task versi
     }),
     false
   );
+});
+
+test("getTaskBoardStalePromptState does not override active mutes", () => {
+  const task = {
+    id: "task_244",
+    room_id: "github.com/brosincode/letagents",
+    title: "Muted board prompt",
+    description: null,
+    status: "accepted",
+    assignee: null,
+    assignee_agent_key: null,
+    created_by: "Human",
+    source_message_id: null,
+    pr_url: null,
+    workflow_artifacts: [],
+    workflow_refs: [],
+    created_at: "2026-07-03T11:00:00.000Z",
+    updated_at: "2026-07-03T11:00:00.000Z",
+  };
+
+  const state = getTaskBoardStalePromptState({
+    task: task as never,
+    leases: [
+      {
+        id: "lease_1",
+        task_id: "task_244",
+        kind: "work",
+        updated_at: "2026-07-03T11:10:00.000Z",
+      },
+    ] as never,
+    mute: {
+      task_id: "task_244",
+      task_updated_at: task.updated_at,
+      muted_by: "Emmy",
+      created_at: "2026-07-03T11:15:00.000Z",
+      updated_at: "2026-07-03T11:15:00.000Z",
+    } as never,
+  });
+
+  assert.equal(state.muted, true);
+  assert.equal(state.is_stale, false);
+  assert.equal(state.reason, null);
 });
 
 test("stale prompt mute denies parent board writes from hard-isolated Focus Rooms", async () => {

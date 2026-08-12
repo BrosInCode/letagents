@@ -45,22 +45,51 @@
     :style="desktopShellStyle"
     data-testid="desktop-shell"
   >
-    <DesktopSidebar
-      v-if="!isSettingsSurface && sidebarMode !== 'hidden'"
-      :sidebar-mode="sidebarMode"
-      :active-entry="activeEntry"
-      :primary-room="currentParentRoom"
-      :project-entries="sidebarProjectEntries"
-      :settings-entry="settingsEntry"
-      :rooms-collapsed="roomsCollapsed"
-      :collapsed-projects="collapsedProjects"
-      @cycle-sidebar="cycleSidebar"
-      @new-room="selectNewRoomEntry"
-      @archive-room="archiveSidebarRoom"
-      @select-entry="handleSidebarEntrySelected"
-      @toggle-project="toggleProject"
-      @toggle-rooms-collapsed="toggleRoomsCollapsed"
-    />
+    <Transition name="desktop-sidebar">
+      <div
+        v-show="!isSettingsSurface && sidebarMode !== 'hidden'"
+        class="desktop-sidebar-frame"
+        :aria-hidden="isSettingsSurface || sidebarMode === 'hidden'"
+        :inert="isSettingsSurface || sidebarMode === 'hidden'"
+      >
+        <DesktopSidebar
+          :active-entry="activeEntry"
+          :primary-room="currentParentRoom"
+          :project-entries="sidebarProjectEntries"
+          :settings-entry="settingsEntry"
+          :rental-request-count="rentalRequestCount"
+          :pinned-collapsed="pinnedCollapsed"
+          :rooms-collapsed="roomsCollapsed"
+          :collapsed-projects="collapsedProjects"
+          :selection-active="sidebarSelectionActive"
+          :selected-entry-ids="sidebarSelectedEntryIds"
+          :batch-action-busy="sidebarBatchActionBusy"
+          :update-status="updateStatus"
+          @cycle-sidebar="cycleSidebar"
+          @new-room="selectNewRoomEntry"
+          @open-rent="openRentMarketplace"
+          @open-updates="openUpdatesSurface"
+          @archive-room="archiveSidebarRoom"
+          @archive-focus-room="archiveSidebarFocusRoom"
+          @conclude-focus-room="openSidebarFocusRoomConclusion"
+          @mark-room-read="markRoomEntryRead"
+          @pin-room="togglePinSidebarRoom"
+          @rename-room="renameSidebarRoom"
+          @start-selection="startSidebarRoomSelection"
+          @cancel-selection="cancelSidebarRoomSelection"
+          @toggle-entry-selection="toggleSidebarRoomSelection"
+          @set-entry-selection="setSidebarRoomSelection"
+          @batch-action="handleSidebarBatchAction"
+          @select-entry="handleSidebarEntrySelected"
+          @set-projects-collapsed="setAllProjectsCollapsed"
+          @reorder-parent-room="handleSidebarParentRoomReorder"
+          @reorder-child-room="handleSidebarChildRoomReorder"
+          @toggle-project="toggleProject"
+          @toggle-pinned-collapsed="togglePinnedCollapsed"
+          @toggle-rooms-collapsed="toggleRoomsCollapsed"
+        />
+      </div>
+    </Transition>
     <div
       v-if="showSidebarResizeHandle"
       class="sidebar-resize-handle"
@@ -75,40 +104,9 @@
       @pointerdown="startSidebarResize"
       @keydown="handleSidebarResizeKeydown"
     ></div>
-    <div
-      v-if="showSidebarPeek"
-      class="sidebar-peek-zone"
-      data-testid="sidebar-peek-zone"
-      @pointerenter="openSidebarPeek"
-    ></div>
-    <Transition name="sidebar-peek">
-      <div
-        v-if="sidebarPeekOpen"
-        class="sidebar-peek-panel"
-        data-testid="sidebar-peek-panel"
-        @pointerleave="closeSidebarPeek"
-      >
-        <DesktopSidebar
-          sidebar-mode="expanded"
-          :active-entry="activeEntry"
-          :primary-room="currentParentRoom"
-          :project-entries="sidebarProjectEntries"
-          :settings-entry="settingsEntry"
-          :rooms-collapsed="roomsCollapsed"
-          :collapsed-projects="collapsedProjects"
-          @cycle-sidebar="closeSidebarPeek"
-          @new-room="selectNewRoomEntry"
-          @archive-room="archiveSidebarRoom"
-          @select-entry="handleSidebarEntrySelected"
-          @toggle-project="toggleProject"
-          @toggle-rooms-collapsed="toggleRoomsCollapsed"
-        />
-      </div>
-    </Transition>
-
     <section class="app-main" :data-room-entry="activeEntry.type === 'room'" data-testid="desktop-main">
       <DesktopTopbar
-        v-if="activeEntry.type !== 'room' && !isSettingsSurface"
+        v-if="activeEntry.type !== 'room' && activeEntry.type !== 'marketplace' && !isSettingsSurface"
         :active-entry="activeEntry"
         :sidebar-mode="sidebarMode"
         :loading="loading"
@@ -119,15 +117,19 @@
 
       <AuthOnboardingView
         v-if="activeEntry.type === 'room' && selectedNeedsAccess"
+        :sidebar-mode="sidebarMode"
         :access="selectedAccess"
         :auth-status="authStatus"
         :busy="authBusy || loading"
         :feedback="authFeedback"
+        :snapshot-pending="authSnapshotPending"
+        :room-label="selectedRoomInfo.displayName || selectedRoomInfo.name"
         @start-auth="startAuthFlow"
         @open-verification="openVerification"
         @poll-auth="pollAuthFlow"
         @refresh-room="refresh"
         @sign-out="signOut"
+        @cycle-sidebar="cycleSidebar"
       />
 
       <KeepAlive :max="1">
@@ -136,7 +138,7 @@
           :key="selectedRoomRenderKey"
           :sidebar-mode="sidebarMode"
           :room-loading="selectedSnapshotLoading"
-          :room="selectedRoomInfo"
+          :room="selectedRoomWithProjectContext"
           :storage="selectedRoomStorage"
           :focus-rooms="selectedFocusRooms"
           :tasks="selectedSnapshot?.tasks || []"
@@ -146,26 +148,39 @@
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :room-artifacts="selectedSnapshot?.roomArtifacts || []"
+          :board-settings="selectedSnapshot?.boardSettings || null"
           :messages="selectedSnapshot?.messages || []"
           :github-events="selectedSnapshot?.githubEvents || null"
+          :source-states="selectedSnapshot?.sourceStates || null"
           :repo-status="repoStatusValue"
+          :git-room-matches-active-repo="selectedGitRoomMatchesActiveRepo"
+          :durable-project-root-path="selectedRoomProjectRootPath"
+          :home-path="appInfo?.homePath || null"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
+          :notification-reveal-message-id="notificationRevealMessageId"
+          :notification-reveal-nonce="notificationRevealNonce"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
+          :on-focus-room-concluded="handleRoomDetailsFocusRoomConcluded"
           @chat-scroll-position="rememberChatScrollPosition"
           @message-sent="handleOwnMessageSent"
           @room-renamed="handleRoomRenamed"
           @task-updated="upsertSelectedTask"
           @refresh-room="handleRoomShellRefresh"
+          @message-reveal-unavailable="handleRoomMessageRevealUnavailable"
+          @open-rental-request="openRentalRequestInbox"
           @open-focus-room="openFocusRoomFromRoomsTab"
+          @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
+          @choose-worktree="openWorktreeForAgent"
+          @open-repo-root="openWorkspaceGitRoom"
           @add-agent-open-request-consumed="openAddAgentAfterRepoPick = false"
         />
       </KeepAlive>
 
       <SettingsView
-        v-if="activeEntry.type !== 'room'"
+        v-if="activeEntry.type === 'system'"
         :account-rooms="settingsAccountRooms"
         :app-info="appInfo"
         :app-agent-actions="appAgentActions"
@@ -191,6 +206,7 @@
         :selected-room-identifier="selectedRoomIdentifier"
         :setup-api-available="setupApiAvailable"
         :workers="workers"
+        :update-status="updateStatus"
         @back-mcp="goBackMcpOnboarding"
         @back-to-app="activeEntry = currentParentRoom"
         @clear-mcp-target-selection="clearMcpTargetSelection"
@@ -198,6 +214,8 @@
         @delete-room="deleteAccountRoom"
         @finish-mcp="completeMcpOnboarding"
         @install-mcp-targets="installSelectedMcpTargets"
+        @check-update="checkDesktopUpdate"
+        @install-update="installDesktopUpdate"
         @leave-room="leaveAccountRoom"
         @open-room="openAccountRoomFromSettings"
         @restore-room="restoreAccountRoom"
@@ -210,6 +228,12 @@
         @refresh="refreshSettingsSurface"
         @sign-out="signOut"
         @start-auth="startAuthFlow"
+      />
+
+      <RentMarketplaceView
+        v-else-if="activeEntry.type === 'marketplace'"
+        :rooms="settingsAccountRooms"
+        :initial-role="rentMarketplaceRole"
       />
 
     </section>
@@ -227,25 +251,83 @@
       @run="runAppAgent"
     />
 
-    <DesktopNewRoomModal
-      v-if="newRoomModalOpen"
-      v-model:join-code="newRoomJoinCode"
-      :busy="newRoomBusy"
-      :feedback="newRoomFeedback"
-      :feedback-state="newRoomFeedbackState"
-      :project-selection="newRoomProjectSelection"
-      @close="closeNewRoomModal"
-      @confirm-project="confirmProjectRoomFromModal"
-      @create-invite="createInviteRoom"
-      @create-local="createLocalRoomFromModal"
-      @open-project="openProjectRoomFromModal"
-      @join="joinRoomCodeFromModal"
+    <Transition name="new-room-modal">
+      <DesktopNewRoomModal
+        v-if="newRoomModalOpen"
+        v-model:join-code="newRoomJoinCode"
+        v-model:room-name="newRoomName"
+        v-model:storage="newRoomStorage"
+        :step="newRoomStep"
+        :busy="newRoomBusy"
+        :active-action="newRoomActiveAction"
+        :feedback="newRoomFeedback"
+        :feedback-state="newRoomFeedbackState"
+        :project-selection="newRoomProjectSelection"
+        :success="newRoomSuccess"
+        :status-message="newRoomStatusMessage"
+        :join-error="newRoomJoinError"
+        :can-submit-join="canSubmitJoin"
+        :can-submit-standalone="canSubmitStandalone"
+        @back="backFromSubstep"
+        @choose-join="chooseJoinIntent"
+        @choose-project="chooseProjectIntent"
+        @choose-standalone="chooseStandaloneIntent"
+        @close="closeNewRoomModal"
+        @confirm-project="confirmProjectRoomFromModal"
+        @copy-code="copyInviteCode"
+        @create-standalone="createStandaloneRoom"
+        @dismiss-success="dismissSuccess"
+        @open-project="openProjectRoomFromModal"
+        @open-success="openSuccessRoom"
+        @join="joinRoomCodeFromModal"
+        @retry="retryLastAction"
+      />
+    </Transition>
+
+    <SidebarFocusRoomConclusionDialog
+      :open="Boolean(sidebarFocusRoomConclusionTarget)"
+      :entry="sidebarFocusRoomConclusionTarget"
+      :busy="sidebarFocusRoomConclusionBusy"
+      :error="sidebarFocusRoomConclusionError"
+      :fallback-focus-entry-id="sidebarFocusRoomConclusionReturnFocusId"
+      @close="closeSidebarFocusRoomConclusion"
+      @submit="submitSidebarFocusRoomConclusion"
+      @after-leave="handleSidebarFocusRoomConclusionAfterLeave"
     />
+
+    <SidebarRoomBatchActionDialog
+      :open="Boolean(sidebarBatchDialogAction)"
+      :action="sidebarBatchDialogAction"
+      :entries="sidebarBatchDialogTargets"
+      :busy="Boolean(sidebarBatchActionBusy)"
+      :error="sidebarBatchDialogError"
+      @close="closeSidebarBatchDialog"
+      @confirm="confirmSidebarBatchAction"
+      @after-leave="handleSidebarBatchDialogAfterLeave"
+    />
+
+    <div
+      class="desktop-action-toasts"
+      role="status"
+      :aria-live="actionToasts.some((toast) => toast.state === 'error') ? 'assertive' : 'polite'"
+      data-testid="desktop-action-toasts"
+    >
+      <button
+        v-for="toast in actionToasts"
+        :key="toast.id"
+        type="button"
+        class="desktop-action-toast"
+        :data-state="toast.state"
+        @click="dismissActionToast(toast.id)"
+      >
+        {{ toast.message }}
+      </button>
+    </div>
   </main>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
   DesktopAccountRoomEntry,
   DesktopAppAgentActionMetadata,
@@ -256,8 +338,11 @@ import type {
   DesktopAppInfo,
   DesktopAuthStatus,
   DesktopChatStorageSettings,
+  DesktopFocusRoomInfo,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
+  DesktopUpdateStatus,
+  DesktopNotificationTarget,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
@@ -266,28 +351,42 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import DesktopSidebar from "./components/desktop/sidebar/DesktopSidebar.vue";
+import SidebarFocusRoomConclusionDialog from "./components/desktop/sidebar/SidebarFocusRoomConclusionDialog.vue";
+import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRoomBatchActionDialog.vue";
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
+import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboarding";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
-import type { RoomEntry, SidebarEntry } from "./components/desktop/types";
+import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
+import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import type {
+  FocusRoomConcludedEvent,
+  FocusRoomConclusionInput,
+} from "./domain/focus-room-conclusion";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./components/desktop/setup/types";
 import type { SettingsPaneId } from "./components/desktop/settings/types";
-import { useDesktopAccountRoomSettings } from "./composables/useDesktopAccountRoomSettings";
+import {
+  useDesktopAccountRoomSettings,
+  type SidebarRoomBatchMutationResult,
+} from "./composables/useDesktopAccountRoomSettings";
+import { useDesktopActionToasts } from "./composables/useDesktopActionToasts";
 import { useDesktopAppData } from "./composables/useDesktopAppData";
 import { useDesktopAuthFlow } from "./composables/useDesktopAuthFlow";
 import { useDesktopNavigationState } from "./composables/useDesktopNavigationState";
 import { useDesktopNewRoomModal } from "./composables/useDesktopNewRoomModal";
 import { useDesktopRoomLiveSync } from "./composables/useDesktopRoomLiveSync";
 import { useDesktopSetupOnboarding } from "./composables/useDesktopSetupOnboarding";
+import { loadRentalProviderDashboard, useRentalProviderEvents } from "./composables/useRentalProviderEvents";
 import { chatScrollPositionKey, shouldRememberChatScrollPosition } from "./domain/chat-scroll";
-import { appAgentEntry, settingsEntry } from "./domain/desktop-navigation";
+import { appAgentEntry, rentMarketplaceEntry, settingsEntry } from "./domain/desktop-navigation";
 import { readStoredString, rememberStoredString } from "./domain/desktop-storage";
 import {
+  deriveSidebarLatestMessages,
   hasUnreadRoomActivity,
   markRoomRead,
   readStoredRoomMessageIds,
@@ -296,17 +395,47 @@ import {
 } from "./domain/desktop-room-read-state";
 import {
   normalizeRoomIdentifier,
+  findSidebarRoomEntryByIdentifier,
   readStoredRecentRootRooms,
   rememberRecentRootRooms,
 } from "./domain/sidebar-rooms";
 import {
+  flattenSidebarRoomEntries,
+  isSidebarRoomSelectable,
+  resolveSidebarRoomBatchAction,
+  type SidebarRoomBatchActionId,
+} from "./domain/sidebar-room-selection";
+import {
+  applySidebarRoomOrder,
+  orderedSidebarChildRooms,
+  readStoredSidebarRoomOrder,
+  rememberSidebarRoomOrder,
+  reorderSidebarChildRooms,
+  reorderSidebarParentRooms,
+  type SidebarChildRoomReorder,
+  type SidebarParentRoomReorder,
+} from "./domain/sidebar-room-order";
+import {
   appAgentArchivedRoomIdentifiers,
   appAgentRefreshTargets,
 } from "./domain/app-agent";
+import { openManagedAgentWorktree } from "./domain/managed-agent-worktrees";
+import { APP_IDLE_ATTRIBUTE, isAppIdle } from "./domain/app-idle";
+import { shouldSkipPollTick } from "./domain/visibility-polling";
+import { desktopIpc } from "./ipc/index.js";
+
+const RentMarketplaceView = defineAsyncComponent(
+  () => import("./components/desktop/content/RentMarketplaceView.vue"),
+);
 
 const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
+const updateStatus = ref<DesktopUpdateStatus | null>(null);
 const repoStatus = ref<RepoStatus | null>(null);
+// Canonical status of the launched desktop workspace, used only to identity-match
+// a repo-backed room's self-heal target so it never inherits an unrelated repo.
+const workspaceRepoStatus = ref<RepoStatus | null>(null);
+let workspaceRepoStatusRootPath: string | null = null;
 const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
@@ -316,20 +445,31 @@ const activeEntryStorageKey = "letagents-desktop:active-entry";
 const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
 const readRoomMessagesStorageKey = "letagents-desktop:read-room-message-ids";
 const sidebarWidthStorageKey = "letagents-desktop:sidebar-width";
+const sidebarRoomOrderStorageKey = "letagents-desktop:sidebar-room-order";
 const sidebarMinWidth = 260;
 const sidebarMaxWidth = 440;
 const sidebarDefaultWidth = 296;
+// Sidebar room metadata poll cadence. Since PR #820 this is one light
+// `/account/rooms` request per tick, and `refreshForegroundData` already fires
+// the same work on focus/visibility, so a 15s steady-state interval is plenty —
+// an aggressive 5s cadence was redundant against the foreground-return refresh.
+const SIDEBAR_METADATA_REFRESH_INTERVAL_MS = 15_000;
 const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedRootRoomStorageKey));
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
 const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, readRoomMessagesStorageKey));
 const sidebarWidth = ref(readStoredSidebarWidth());
+const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
 const isSidebarResizing = ref(false);
 const sidebarLatestMessages = ref<Record<string, DesktopRoomLatestMessage>>({});
 const chatScrollTopByRoom = ref<Record<string, number>>({});
 const loadingChatScrollRoomIdentifiers = ref<Set<string>>(new Set());
 const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
+const rentalRequestCount = ref(0);
+const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
+const notificationRevealMessageId = ref<string | null>(null);
+const notificationRevealNonce = ref(0);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
 const chatStorageAvailable = ref(true);
 const chatStorageBusy = ref(false);
@@ -351,10 +491,11 @@ const {
   activeEntry,
   collapsedProjects,
   currentParentRoom,
-  cycleSidebar,
+  cycleSidebar: toggleSidebarMode,
   focusRooms,
   getAuthRoomIdentifier,
   openRoomSnapshot,
+  pinnedCollapsed,
   pinnedRoom,
   projectEntries,
   reconcileActiveEntry,
@@ -370,6 +511,7 @@ const {
   selectedRoomInfo,
   sidebarMode,
   toggleProject,
+  togglePinnedCollapsed,
   toggleRoomsCollapsed,
 } = useDesktopNavigationState({
   accountRooms,
@@ -385,27 +527,117 @@ const {
 
 let unsubscribeRoomStream: (() => void) | null = null;
 let unsubscribeOpenSettings: (() => void) | null = null;
+let unsubscribeOpenUpdates: (() => void) | null = null;
+let unsubscribeUpdateStatus: (() => void) | null = null;
+let unsubscribeNotificationActivation: (() => void) | null = null;
+let unsubscribeRepoStatusChanged: (() => void) | null = null;
 let accountRoomsRefreshInterval: number | null = null;
 let sidebarMetadataRefreshInFlight = false;
 let repoStatusRefreshInFlight = false;
-let repoStatusRefreshTimer: number | null = null;
+let repoStatusWatchRootPath: string | null = null;
+let repoStatusWatchRequestId = 0;
+
+const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
+const sidebarFocusRoomConclusionTarget = ref<RoomEntry | null>(null);
+const sidebarFocusRoomConclusionParent = ref<RoomEntry | null>(null);
+const sidebarFocusRoomConclusionReturnFocusId = ref<string | null>(null);
+const sidebarFocusRoomConclusionError = ref<string | null>(null);
+const sidebarFocusRoomConclusionPendingToast = ref<{
+  message: string;
+  state: "error" | "success";
+} | null>(null);
+const sidebarSelectionActive = ref(false);
+const sidebarSelectedEntryIds = ref<string[]>([]);
+const sidebarBatchActionBusy = ref<SidebarRoomBatchActionId | null>(null);
+const sidebarBatchDialogAction = ref<"conclude" | "hide" | null>(null);
+const sidebarBatchDialogTargets = ref<RoomEntry[]>([]);
+const sidebarBatchDialogError = ref<string | null>(null);
+const sidebarBatchPendingToast = ref<{
+  message: string;
+  state: "error" | "success";
+} | null>(null);
 
 const isSettingsSurface = computed(() => activeEntry.value.type === "system");
-const sidebarPeekOpen = ref(false);
-const showSidebarPeek = computed(() => !isSettingsSurface.value && sidebarMode.value === "hidden");
 const showSidebarResizeHandle = computed(() => !isSettingsSurface.value && sidebarMode.value === "expanded");
 const desktopShellStyle = computed(() => ({
   "--sidebar-width": `${sidebarWidth.value}px`,
   "--sidebar-min-width": `${sidebarMinWidth}px`,
   "--sidebar-max-width": `${sidebarMaxWidth}px`,
 }));
+
+async function cycleSidebar(): Promise<void> {
+  const hidingSidebar = sidebarMode.value !== "hidden";
+  if (hidingSidebar && sidebarBatchActionBusy.value) return;
+  if (hidingSidebar && sidebarSelectionActive.value) cancelSidebarRoomSelection();
+  toggleSidebarMode();
+  if (!hidingSidebar) return;
+
+  await nextTick();
+  document.querySelector<HTMLElement>(
+    '[data-testid="room-sidebar-reveal-button"], [data-testid="auth-sidebar-reveal-button"], [data-testid="sidebar-reveal-button"]',
+  )?.focus({ preventScroll: true });
+}
+
+const selectedRoomWithProjectContext = computed(() => {
+  const room = selectedRoomInfo.value;
+  const parentRoom = rootRoomSnapshot.value?.room || null;
+  const isListedChild = Boolean(
+    rootRoomSnapshot.value?.focusRooms.some((focusRoom) =>
+      normalizeRoomIdentifier(focusRoom.identifier) === normalizeRoomIdentifier(room.identifier)
+    )
+  );
+  return roomWithInheritedProjectContext(room, parentRoom, isListedChild);
+});
+
+const selectedGitRoomMatchesActiveRepo = computed(() => {
+  const gitRoom = selectedRoomWithProjectContext.value.gitRoom;
+  if (!gitRoom || !repoStatus.value?.isGitRepo) return false;
+  const activeRoomIdentifier = normalizeRoomIdentifier(repoStatus.value.roomIdentifier);
+  if (
+    activeRoomIdentifier &&
+    activeRoomIdentifier === normalizeRoomIdentifier(selectedRoomWithProjectContext.value.identifier)
+  ) return true;
+  const rootGitRoom = rootRoomSnapshot.value?.room?.gitRoom || null;
+  if (rootGitRoom) return gitRoomsShareRepo(rootGitRoom, gitRoom);
+  return normalizeRoomIdentifier(selectedRoomWithProjectContext.value.identifier)
+    === normalizeRoomIdentifier(rootRoomSnapshot.value?.roomIdentifier);
+});
+
+const selectedRoomProjectRootPath = computed(() => activeProjectRootPath());
+
+function gitRoomsShareRepo(
+  left: NonNullable<DesktopRoomSnapshot["room"]>["gitRoom"],
+  right: NonNullable<DesktopRoomSnapshot["room"]>["gitRoom"],
+): boolean {
+  if (!left || !right) return false;
+  const leftRepo = left.repository.id || `${left.host}:${left.repository.fullName}`.toLowerCase();
+  const rightRepo = right.repository.id || `${right.host}:${right.repository.fullName}`.toLowerCase();
+  return left.provider === right.provider && left.host === right.host && leftRepo === rightRepo;
+}
 const sidebarProjectEntries = computed(() =>
-  projectEntries.value.map((project) => ({
+  applySidebarRoomOrder(projectEntries.value.map((project) => ({
     ...project,
     parent: withRoomUnreadState(project.parent),
+    branchRooms: project.branchRooms.map(withRoomUnreadState),
     focusRooms: project.focusRooms.map(withRoomUnreadState),
-  }))
+  })), sidebarRoomOrder.value)
 );
+const sidebarSelectedEntries = computed(() => {
+  const selectedIds = new Set(sidebarSelectedEntryIds.value);
+  return flattenSidebarRoomEntries(sidebarProjectEntries.value)
+    .filter((entry, index, entries) =>
+      selectedIds.has(entry.id)
+      && entries.findIndex((candidate) => candidate.id === entry.id) === index
+    );
+});
+watch(sidebarProjectEntries, (projects) => {
+  if (!sidebarSelectionActive.value || !sidebarSelectedEntryIds.value.length) return;
+  const availableIds = new Set(flattenSidebarRoomEntries(projects).map((entry) => entry.id));
+  const nextSelection = sidebarSelectedEntryIds.value.filter((entryId) => availableIds.has(entryId));
+  if (nextSelection.length !== sidebarSelectedEntryIds.value.length) {
+    sidebarSelectedEntryIds.value = nextSelection;
+  }
+});
 const selectedRoomRenderKey = computed(() =>
   selectedRoomIdentifier.value
   || selectedSnapshot.value?.room?.identifier
@@ -426,7 +658,10 @@ const selectedRoomStorage = computed<DesktopRoomStorageState>(() =>
   }
 );
 
+const requestedSettingsPane = ref<SettingsPaneId | null>(null);
+
 const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
+  if (requestedSettingsPane.value) return requestedSettingsPane.value;
   if (activeEntry.value.type !== "system") return "storage:chat";
   if (activeEntry.value.id === "system:setup") return "system:setup";
   if (activeEntry.value.id === "system:app-agent") return "system:app-agent";
@@ -437,16 +672,13 @@ const settingsPaneForActiveEntry = computed<SettingsPaneId>(() => {
 });
 
 function openSettingsSurface(): void {
+  requestedSettingsPane.value = null;
   activeEntry.value = settingsEntry;
 }
 
-function openSidebarPeek(): void {
-  if (!showSidebarPeek.value) return;
-  sidebarPeekOpen.value = true;
-}
-
-function closeSidebarPeek(): void {
-  sidebarPeekOpen.value = false;
+function openUpdatesSurface(): void {
+  requestedSettingsPane.value = "system:updates";
+  activeEntry.value = settingsEntry;
 }
 
 function readStoredSidebarWidth(): number {
@@ -525,7 +757,7 @@ async function refreshActiveRepoStatus(): Promise<void> {
   if (!rootPath) return;
   repoStatusRefreshInFlight = true;
   try {
-    const nextRepoStatus = await window.letagentsDesktop.repos.getStatus(rootPath).catch(() => null);
+    const nextRepoStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
     if (nextRepoStatus) repoStatus.value = nextRepoStatus;
   } finally {
     repoStatusRefreshInFlight = false;
@@ -533,51 +765,191 @@ async function refreshActiveRepoStatus(): Promise<void> {
 }
 
 function activeProjectRootPath(): string | null {
-  const identifier = normalizeRoomIdentifier(selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier);
-  if (!identifier) return null;
-  return recentRootRooms.value.find(
-    (room) => normalizeRoomIdentifier(room.identifier) === identifier
-  )?.rootPath || null;
+  // Derive the project context from the sidebar group that actually contains the
+  // active room, NOT the last-opened global root snapshot (which can be a stale,
+  // unrelated non-repo room). This is what keeps a focus room attached to its
+  // real repo project. Fall back to the global root only when the active entry is
+  // in no repo-backed group.
+  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
+  // Presence-based, not nullish: if the active room IS in a group, that group is
+  // authoritative even when it's a non-repo group (null identifier/gitRoom) — a
+  // grouped non-repo room must not inherit a stale repo snapshot. Fall back to the
+  // global root only when the active entry is in no group at all.
+  return resolveActiveProjectRootPath({
+    activeRootIdentifier: context
+      ? context.roomIdentifier
+      : selectedRootRoomIdentifier.value ?? rootRoomSnapshot.value?.roomIdentifier,
+    // A repo-backed room whose durable root was lost self-heals from the
+    // workspace ONLY when their canonical Git identity matches; otherwise it
+    // fails closed so a focus room never launches in an unrelated repo.
+    activeRootGitRoom: context
+      ? context.gitRoom
+      : rootRoomSnapshot.value?.room?.gitRoom ?? null,
+    recentRootRooms: recentRootRooms.value,
+    workspaceRepoStatus: workspaceRepoStatus.value,
+  });
 }
 
-function scheduleFocusedRepoStatusRefresh(delayMs = 150): void {
-  if (repoStatusRefreshTimer !== null) {
-    window.clearTimeout(repoStatusRefreshTimer);
+async function refreshWorkspaceRepoStatus(force = false): Promise<void> {
+  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
+  if (!workspaceRoot) return;
+  // Re-probe on force (e.g. window focus) so a branch/worktree switch can't leave
+  // a stale identity authorizing the wrong ref; otherwise load once per workspace.
+  if (!force && workspaceRepoStatusRootPath === workspaceRoot && workspaceRepoStatus.value) return;
+  workspaceRepoStatusRootPath = workspaceRoot;
+  const status = await desktopIpc.repos.getStatus(workspaceRoot).catch(() => null);
+  if (workspaceRepoStatusRootPath === workspaceRoot) workspaceRepoStatus.value = status;
+}
+
+async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
+  if (!desktopIpc.repos?.startStatusWatch) return;
+  const nextRootPath = rootPath?.trim() || null;
+  if (repoStatusWatchRootPath === nextRootPath) return;
+  const requestId = ++repoStatusWatchRequestId;
+  repoStatusWatchRootPath = nextRootPath;
+  await desktopIpc.repos.stopStatusWatch?.().catch(() => undefined);
+  if (requestId !== repoStatusWatchRequestId || repoStatusWatchRootPath !== nextRootPath) return;
+  if (!nextRootPath) return;
+  const nextStatus = await desktopIpc.repos.startStatusWatch(nextRootPath).catch(() => null);
+  if (requestId === repoStatusWatchRequestId && nextStatus && activeProjectRootPath() === nextRootPath) {
+    repoStatus.value = nextStatus;
   }
-  repoStatusRefreshTimer = window.setTimeout(() => {
-    repoStatusRefreshTimer = null;
-    void refreshActiveRepoStatus();
-  }, delayMs);
+}
+
+function handleRepoStatusChanged(nextStatus: RepoStatus): void {
+  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
+  if (workspaceRoot && nextStatus.rootPath === workspaceRoot) {
+    workspaceRepoStatusRootPath = workspaceRoot;
+    workspaceRepoStatus.value = nextStatus;
+  }
+  const rootPath = activeProjectRootPath();
+  if (rootPath && nextStatus.rootPath !== rootPath) return;
+  repoStatus.value = nextStatus;
 }
 
 function refreshForegroundData(): void {
-  scheduleFocusedRepoStatusRefresh();
+  // The main-process Git watcher retains invalidations while hidden and drains
+  // them on BrowserWindow focus/show. Avoid racing it with a second full status
+  // reconstruction from the renderer.
+  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
+  void refreshWorkspaceRepoStatus(repoStatusWatchRootPath !== workspaceRoot);
   void refreshSidebarRoomMetadata();
+  // Poll-only metadata catch-up: the periodic tick early-returns while hidden,
+  // so refresh once on foreground return. Metadata-only, NOT the full snapshot —
+  // SSE kept running while hidden, so event-fed sections are already current.
+  void refreshSelectedRoomLiveMetadata().catch(() => undefined);
+  void refreshRentalRequestCount();
+}
+
+function openRentMarketplace(): void {
+  rentMarketplaceRole.value = "renter";
+  activeEntry.value = rentMarketplaceEntry;
+}
+
+function openRentalRequestInbox(): void {
+  rentMarketplaceRole.value = "provider";
+  activeEntry.value = rentMarketplaceEntry;
+}
+
+async function refreshRentalRequestCount(): Promise<void> {
+  if (!desktopIpc.rental?.getProviderDashboard) return;
+  try {
+    const dashboard = await loadRentalProviderDashboard();
+    rentalRequestCount.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests.length : 0;
+  } catch {
+    rentalRequestCount.value = 0;
+  }
+}
+
+useRentalProviderEvents(() => {
+  void refreshRentalRequestCount();
+});
+
+async function openWorkspaceGitRoom(rootPathOverride?: string): Promise<boolean> {
+  const rootPath = rootPathOverride || repoStatus.value?.rootPath || activeProjectRootPath();
+  if (!rootPath) return false;
+  loading.value = true;
+  try {
+    const selection = await desktopIpc.repos.openRoom(rootPath);
+    if (selection.error || !selection.snapshot) {
+      return false;
+    }
+    if (selection.repoStatus) {
+      repoStatus.value = selection.repoStatus;
+    }
+    openRoomSnapshot(selection.snapshot, {
+      aliasIdentifiers: [selection.roomIdentifier],
+      rootPath: selection.repoPath || rootPath,
+      kind: "project",
+      meta: selection.repoStatus?.branch || null,
+    });
+    return true;
+  } catch (error) {
+    console.warn("Could not open the matching Git Room.", error);
+    return false;
+  } finally {
+    loading.value = false;
+  }
 }
 
 function handleVisibilityChange(): void {
+  syncAppIdleAttribute();
   if (document.visibilityState !== "visible") return;
   refreshForegroundData();
 }
 
 function handleWindowFocus(): void {
+  syncAppIdleAttribute();
   refreshForegroundData();
+}
+
+function handleWindowBlur(): void {
+  syncAppIdleAttribute();
+}
+
+// Pause the launcher orb's decorative ink animations while the window is hidden
+// or blurred (see domain/app-idle + styles/app-agent.css). Toggling one
+// attribute on the document root keeps the choreography in one place and lets
+// CSS scope the paused state to the launcher ink animations.
+function syncAppIdleAttribute(): void {
+  document.documentElement.toggleAttribute(
+    APP_IDLE_ATTRIBUTE,
+    isAppIdle({ hidden: document.hidden, focused: document.hasFocus() }),
+  );
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
   const roomIdentifiers = sidebarRoomIdentifiers();
-  if (!roomIdentifiers.length || !window.letagentsDesktop.room.getLatestMessages) {
+  if (!roomIdentifiers.length) {
     sidebarLatestMessages.value = {};
     return;
   }
 
-  const latestMessages = await window.letagentsDesktop.room.getLatestMessages(roomIdentifiers).catch(() => []);
-  const nextLatestMessages: Record<string, DesktopRoomLatestMessage> = {};
-  for (const latestMessage of latestMessages) {
-    const key = roomReadKey(latestMessage.roomIdentifier);
-    if (!key) continue;
-    nextLatestMessages[key] = latestMessage;
+  // The `/account/rooms` payload (already refreshed before this call) carries
+  // `latestMessageId` / `latestMessageAt` for every cloud room and focus room,
+  // so we derive sidebar latest-message state from it instead of fanning out one
+  // `/rooms/:id/messages` request per sidebar room. Local-storage entries are
+  // delegated to the fallback lookup: they appear in the payload with null
+  // latest fields because their latest message lives in the local DB (that
+  // fallback is a local read, not HTTP). Rooms absent from the payload fall
+  // back the same way.
+  const { latestMessages, uncoveredRoomIdentifiers } = deriveSidebarLatestMessages({
+    accountRooms: accountRooms.value,
+    sidebarRoomIdentifiers: roomIdentifiers,
+  });
+  const nextLatestMessages: Record<string, DesktopRoomLatestMessage> = { ...latestMessages };
+
+  if (uncoveredRoomIdentifiers.length && desktopIpc.room.getLatestMessages) {
+    const fallbackMessages = await desktopIpc.room
+      .getLatestMessages(uncoveredRoomIdentifiers)
+      .catch(() => []);
+    for (const latestMessage of fallbackMessages) {
+      const key = roomReadKey(latestMessage.roomIdentifier);
+      if (!key) continue;
+      nextLatestMessages[key] = latestMessage;
+    }
   }
+
   sidebarLatestMessages.value = nextLatestMessages;
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();
@@ -586,7 +958,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
 function sidebarRoomIdentifiers(): string[] {
   const identifiers = new Set<string>();
   for (const project of projectEntries.value) {
-    for (const entry of [project.parent, ...project.focusRooms]) {
+    for (const entry of [project.parent, ...projectChildRooms(project)]) {
       const identifier = entry.roomIdentifier?.trim();
       if (identifier) identifiers.add(identifier);
     }
@@ -637,17 +1009,50 @@ function selectedSnapshotMatchesEntry(entry: RoomEntry): boolean {
 }
 
 function handleSidebarEntrySelected(entry: SidebarEntry): void {
+  if (sidebarSelectionActive.value) cancelSidebarRoomSelection();
   if (entry.type === "room") {
     markRoomEntryRead(entry);
   }
   selectSidebarEntry(entry);
 }
 
+function startSidebarRoomSelection(entry?: RoomEntry): void {
+  sidebarSelectionActive.value = true;
+  sidebarBatchDialogError.value = null;
+  if (!entry || !isSidebarRoomSelectable(entry)) return;
+  if (!sidebarSelectedEntryIds.value.includes(entry.id)) {
+    sidebarSelectedEntryIds.value = [...sidebarSelectedEntryIds.value, entry.id];
+  }
+}
+
+function cancelSidebarRoomSelection(): void {
+  if (sidebarBatchActionBusy.value) return;
+  sidebarSelectionActive.value = false;
+  sidebarSelectedEntryIds.value = [];
+  closeSidebarBatchDialog();
+}
+
+function toggleSidebarRoomSelection(entryId: string): void {
+  const selected = new Set(sidebarSelectedEntryIds.value);
+  if (selected.has(entryId)) selected.delete(entryId);
+  else selected.add(entryId);
+  sidebarSelectedEntryIds.value = [...selected];
+}
+
+function setSidebarRoomSelection(entryIds: string[], selected: boolean): void {
+  const next = new Set(sidebarSelectedEntryIds.value);
+  for (const entryId of entryIds) {
+    if (selected) next.add(entryId);
+    else next.delete(entryId);
+  }
+  sidebarSelectedEntryIds.value = [...next];
+}
+
 function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
   const normalizedIdentifier = normalizeRoomIdentifier(roomIdentifier);
   if (!normalizedIdentifier) return;
   const existingFocusRoom = projectEntries.value
-    .flatMap((project) => project.focusRooms)
+    .flatMap(projectChildRooms)
     .find((entry) => normalizeRoomIdentifier(entry.roomIdentifier) === normalizedIdentifier);
   if (existingFocusRoom) {
     handleSidebarEntrySelected(existingFocusRoom);
@@ -673,11 +1078,46 @@ function openFocusRoomFromRoomsTab(roomIdentifier: string): void {
   handleSidebarEntrySelected(fallbackEntry);
 }
 
+async function handleRoomDetailsFocusRoomConcluded(event: FocusRoomConcludedEvent): Promise<void> {
+  const focusRoomIdentifier = normalizeRoomIdentifier(event.focusRoomIdentifier);
+  const parentRoomIdentifier = normalizeRoomIdentifier(event.parentRoomIdentifier);
+  const targetWasActive = activeEntry.value.type === "room"
+    && normalizeRoomIdentifier(activeEntry.value.roomIdentifier) === focusRoomIdentifier;
+  const parentBeforeRefresh = findSidebarRoomEntryByIdentifier(
+    projectEntries.value,
+    parentRoomIdentifier,
+  );
+
+  let refreshError: unknown = null;
+  try {
+    await refresh();
+  } catch (error) {
+    refreshError = error;
+  }
+
+  if (targetWasActive) {
+    const parentAfterRefresh = findSidebarRoomEntryByIdentifier(
+      projectEntries.value,
+      parentRoomIdentifier,
+    ) || parentBeforeRefresh;
+    if (parentAfterRefresh) handleSidebarEntrySelected(parentAfterRefresh);
+  }
+
+  if (refreshError) {
+    pushActionToast(
+      `${event.displayName} concluded, but the room list could not be refreshed.`,
+      "error",
+    );
+    return;
+  }
+  pushActionToast(`${event.displayName} concluded.`, "success");
+}
+
 function seedReadMarkersForKnownRooms(): void {
   let nextMarkers = readRoomMessageIds.value;
   let changed = false;
   for (const project of projectEntries.value) {
-    for (const entry of [project.parent, ...project.focusRooms]) {
+    for (const entry of [project.parent, ...projectChildRooms(project)]) {
       const result = seedRoomReadMarker(nextMarkers, entry.roomIdentifier, latestMessageIdForEntry(entry));
       nextMarkers = result.readMarkers;
       changed = changed || result.changed;
@@ -687,6 +1127,10 @@ function seedReadMarkersForKnownRooms(): void {
     readRoomMessageIds.value = nextMarkers;
     rememberRoomMessageIds();
   }
+}
+
+function projectChildRooms(project: ProjectGroup): RoomEntry[] {
+  return orderedSidebarChildRooms(project);
 }
 
 function markActiveRoomRead(): void {
@@ -701,6 +1145,26 @@ function markRoomEntryRead(entry: RoomEntry): void {
   rememberRoomMessageIds();
 }
 
+function setAllProjectsCollapsed(collapsed: boolean): void {
+  collapsedProjects.value = Object.fromEntries(
+    projectEntries.value.map((project) => [project.id, collapsed]),
+  );
+}
+
+function handleSidebarParentRoomReorder(input: SidebarParentRoomReorder): void {
+  const next = reorderSidebarParentRooms(sidebarProjectEntries.value, input);
+  if (!next) return;
+  sidebarRoomOrder.value = next;
+  rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, next);
+}
+
+function handleSidebarChildRoomReorder(input: SidebarChildRoomReorder): void {
+  const next = reorderSidebarChildRooms(sidebarProjectEntries.value, input);
+  if (!next) return;
+  sidebarRoomOrder.value = next;
+  rememberSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey, next);
+}
+
 function rememberRoomMessageIds(): void {
   try {
     window.localStorage.setItem(readRoomMessagesStorageKey, JSON.stringify(readRoomMessageIds.value));
@@ -712,8 +1176,9 @@ function rememberRoomMessageIds(): void {
 const {
   clearLiveMetadataRefreshInterval,
   clearLiveMetadataRefreshTimer,
+  refreshSelectedRoomLiveMetadata,
   scheduleLiveMetadataRefresh,
-  syncSelectedRoomStream,
+  syncSelectedRoomStream: syncDesktopRoomStream,
 } = useDesktopRoomLiveSync({
   rootRoomSnapshot,
   selectedRoomIdentifier,
@@ -732,6 +1197,7 @@ const {
   refreshSelectedSnapshot,
   repoStatusValue,
   selectedSnapshotLoading,
+  syncSelectedRoomStream,
   upsertSelectedTask,
 } = useDesktopAppData({
   accountRooms,
@@ -753,8 +1219,17 @@ const {
   selectedRootRoomIdentifier,
   selectedSnapshot,
   settingsAccountRooms,
+  syncRoomStream: syncDesktopRoomStream,
   workers,
 });
+
+const authSnapshotPending = computed(() =>
+  isAuthSnapshotPending({
+    rootLoading: loading.value,
+    selectedLoading: selectedSnapshotLoading.value,
+    hasSnapshot: Boolean(selectedSnapshot.value),
+  }),
+);
 
 const {
   authBusy,
@@ -777,35 +1252,62 @@ const {
 });
 
 const {
+  backFromSubstep,
+  canSubmitJoin,
+  canSubmitStandalone,
+  chooseJoinIntent,
+  chooseProjectIntent,
+  chooseStandaloneIntent,
   closeNewRoomModal,
   confirmProjectRoomFromModal,
-  createInviteRoom,
-  createLocalRoomFromModal,
+  copyInviteCode,
+  createStandaloneRoom,
+  dismissSuccess,
   joinRoomCodeFromModal,
+  newRoomActiveAction,
   newRoomBusy,
   newRoomFeedback,
   newRoomFeedbackState,
   newRoomJoinCode,
+  newRoomJoinError,
   newRoomModalOpen,
+  newRoomName,
   newRoomProjectSelection,
+  newRoomStatusMessage,
+  newRoomStep,
+  newRoomStorage,
+  newRoomSuccess,
   openProjectRoomFromModal,
+  openSuccessRoom,
+  retryLastAction,
   selectNewRoomEntry,
 } = useDesktopNewRoomModal({
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
   setRepoStatus: (status) => {
     if (status) repoStatus.value = status;
   },
+  getDefaultStorageMode: () =>
+    chatStorageSettings.value?.defaultMode === "local" || chatStorageSettings.value?.mode === "local"
+      ? "local"
+      : "cloud",
 });
 const {
+  batchConcludeSidebarFocusRooms,
+  batchHideSidebarRooms,
+  batchSetSidebarRoomsPinned,
+  archiveSidebarFocusRoom,
   archiveSidebarRoom,
+  concludeSidebarFocusRoom,
   deleteAccountRoom,
   leaveAccountRoom,
   openAccountRoomFromSettings,
   refreshSettings,
+  renameSidebarRoom,
   restoreAccountRoom,
   settingsFeedback,
   settingsRoomActionBusyKey,
   toggleAccountRoomPin,
+  togglePinSidebarRoom,
 } = useDesktopAccountRoomSettings({
   accountRooms,
   activeEntry,
@@ -823,7 +1325,268 @@ const {
   onRoomArchived: async (roomIdentifier, displayName) => {
     await leaveArchivedRoomIfActive(roomIdentifier, displayName);
   },
+  onRoomRenamed: (room) => {
+    if (normalizeRoomIdentifier(room.identifier) === normalizeRoomIdentifier(selectedRoomIdentifier.value)) {
+      handleRoomRenamed(room);
+    }
+  },
+  notify: (message, state) => pushActionToast(message, state),
 });
+
+async function handleSidebarBatchAction(action: SidebarRoomBatchActionId): Promise<void> {
+  if (sidebarBatchActionBusy.value) return;
+  const resolution = resolveSidebarRoomBatchAction({
+    action,
+    entries: sidebarSelectedEntries.value,
+    primaryRoomId: currentParentRoom.value.id,
+  });
+  if (!resolution.targets.length) return;
+
+  if (action === "mark-read") {
+    resolution.targets.forEach(markRoomEntryRead);
+    pushActionToast(
+      `${resolution.targets.length} ${resolution.targets.length === 1 ? "room" : "rooms"} marked as read.`,
+      "success",
+    );
+    return;
+  }
+
+  if (action === "pin") {
+    sidebarBatchActionBusy.value = action;
+    const result = await batchSetSidebarRoomsPinned(
+      resolution.targets,
+      resolution.pinned === true,
+    );
+    sidebarBatchActionBusy.value = null;
+    if (result.refreshError) {
+      const succeededIds = new Set(result.succeededEntryIds);
+      sidebarSelectedEntryIds.value = sidebarSelectedEntryIds.value.filter(
+        (entryId) => !succeededIds.has(entryId),
+      );
+      if (!sidebarSelectedEntryIds.value.length) sidebarSelectionActive.value = false;
+    }
+    reportSidebarBatchMutation(
+      result,
+      resolution.targets.length,
+      resolution.pinned ? "pinned" : "unpinned",
+    );
+    return;
+  }
+
+  sidebarBatchDialogAction.value = action;
+  sidebarBatchDialogTargets.value = resolution.targets;
+  sidebarBatchDialogError.value = null;
+}
+
+function closeSidebarBatchDialog(): void {
+  if (sidebarBatchActionBusy.value) return;
+  sidebarBatchDialogAction.value = null;
+  sidebarBatchDialogTargets.value = [];
+  sidebarBatchDialogError.value = null;
+  sidebarBatchPendingToast.value = null;
+}
+
+async function confirmSidebarBatchAction(): Promise<void> {
+  const action = sidebarBatchDialogAction.value;
+  const targets = [...sidebarBatchDialogTargets.value];
+  if (!action || sidebarBatchActionBusy.value || !targets.length) return;
+
+  const activeTarget = targets.find((entry) =>
+    activeEntry.value.id === entry.id
+    || (
+      activeEntry.value.type === "room"
+      && normalizeRoomIdentifier(activeEntry.value.roomIdentifier)
+        === normalizeRoomIdentifier(entry.roomIdentifier)
+    )
+  ) || null;
+  const parentBeforeRefresh = activeTarget?.parentRoomIdentifier
+    ? findSidebarRoomEntryByIdentifier(projectEntries.value, activeTarget.parentRoomIdentifier)
+    : null;
+
+  sidebarBatchActionBusy.value = action;
+  sidebarBatchDialogError.value = null;
+  let result: SidebarRoomBatchMutationResult;
+  try {
+    result = action === "conclude"
+      ? await batchConcludeSidebarFocusRooms(targets)
+      : await batchHideSidebarRooms(targets);
+  } catch (caught) {
+    sidebarBatchActionBusy.value = null;
+    sidebarBatchDialogError.value = caught instanceof Error
+      ? caught.message
+      : `The selected rooms could not be ${action === "conclude" ? "concluded" : "hidden"}.`;
+    return;
+  }
+  sidebarBatchActionBusy.value = null;
+  sidebarBatchDialogAction.value = null;
+  sidebarBatchDialogTargets.value = [];
+
+  const succeededIds = new Set(result.succeededEntryIds);
+  if (activeTarget && succeededIds.has(activeTarget.id)) {
+    if (activeTarget.kind === "focus") {
+      const parent = activeTarget.parentRoomIdentifier
+        ? findSidebarRoomEntryByIdentifier(projectEntries.value, activeTarget.parentRoomIdentifier)
+          || parentBeforeRefresh
+        : parentBeforeRefresh;
+      if (parent) {
+        markRoomEntryRead(parent);
+        selectSidebarEntry(parent);
+      }
+    } else if (action === "hide" && activeTarget.roomIdentifier) {
+      await leaveArchivedRoomIfActive(activeTarget.roomIdentifier, activeTarget.title);
+    }
+  }
+
+  sidebarSelectedEntryIds.value = sidebarSelectedEntryIds.value.filter(
+    (entryId) => !succeededIds.has(entryId),
+  );
+  if (!sidebarSelectedEntryIds.value.length) sidebarSelectionActive.value = false;
+  reportSidebarBatchMutation(
+    result,
+    targets.length,
+    action === "conclude" ? "concluded" : "hidden",
+    true,
+  );
+}
+
+function reportSidebarBatchMutation(
+  result: SidebarRoomBatchMutationResult,
+  targetCount: number,
+  completedVerb: string,
+  deferUntilDialogLeaves = false,
+): void {
+  const completed = result.succeededEntryIds.length;
+  const partiallyCompleted = result.partiallySucceededEntryIds.length;
+  const roomNoun = targetCount === 1 ? "room" : "rooms";
+  if (!result.failures.length && !result.refreshError) {
+    deliverSidebarBatchToast(
+      `${completed} ${completed === 1 ? "room" : "rooms"} ${completedVerb}.`,
+      "success",
+      deferUntilDialogLeaves,
+    );
+    return;
+  }
+
+  const parts = [`${completed} of ${targetCount} ${roomNoun} ${completedVerb}.`];
+  if (partiallyCompleted) {
+    parts.push(
+      `${partiallyCompleted} ${partiallyCompleted === 1 ? "room was" : "rooms were"} partially updated.`,
+    );
+  }
+  if (result.failures.length) {
+    parts.push(`${result.failures.length} failed: ${result.failures[0]?.message || "Unknown error"}`);
+  }
+  if (result.refreshError) {
+    parts.push(`The sidebar could not refresh: ${result.refreshError}`);
+  }
+  deliverSidebarBatchToast(parts.join(" "), "error", deferUntilDialogLeaves);
+}
+
+function deliverSidebarBatchToast(
+  message: string,
+  state: "error" | "success",
+  deferUntilDialogLeaves: boolean,
+): void {
+  if (deferUntilDialogLeaves) {
+    sidebarBatchPendingToast.value = { message, state };
+    return;
+  }
+  pushActionToast(message, state);
+}
+
+function handleSidebarBatchDialogAfterLeave(): void {
+  const toast = sidebarBatchPendingToast.value;
+  sidebarBatchPendingToast.value = null;
+  if (toast) pushActionToast(toast.message, toast.state);
+}
+
+const sidebarFocusRoomConclusionBusy = computed(() => {
+  const target = sidebarFocusRoomConclusionTarget.value;
+  if (!target) return false;
+  return settingsRoomActionBusyKey.value
+    === `conclude-focus:${target.roomIdentifier || target.focusKey}`;
+});
+
+function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
+  if (
+    entry.kind !== "focus"
+    || entry.focusStatus === "concluded"
+    || !entry.focusKey
+    || !entry.parentRoomIdentifier
+  ) return;
+
+  sidebarFocusRoomConclusionTarget.value = entry;
+  sidebarFocusRoomConclusionParent.value = findSidebarRoomEntryByIdentifier(
+    projectEntries.value,
+    entry.parentRoomIdentifier,
+  );
+  sidebarFocusRoomConclusionReturnFocusId.value = entry.id;
+  sidebarFocusRoomConclusionError.value = null;
+  sidebarFocusRoomConclusionPendingToast.value = null;
+}
+
+function openRoomDetailsFocusRoomConclusion(focusRoom: DesktopFocusRoomInfo): void {
+  const focusRoomIdentifier = normalizeRoomIdentifier(focusRoom.identifier || focusRoom.roomId);
+  const parentRoomIdentifier = normalizeRoomIdentifier(focusRoom.parentRoomId);
+  const entry = projectEntries.value
+    .flatMap((project) => project.focusRooms)
+    .find((candidate) => {
+      if (
+        focusRoomIdentifier
+        && normalizeRoomIdentifier(candidate.roomIdentifier) === focusRoomIdentifier
+      ) return true;
+      return Boolean(
+        focusRoom.focusKey
+        && candidate.focusKey === focusRoom.focusKey
+        && normalizeRoomIdentifier(candidate.parentRoomIdentifier) === parentRoomIdentifier
+      );
+    });
+  if (!entry) {
+    pushActionToast("This focus room is no longer available to conclude.", "error");
+    return;
+  }
+  openSidebarFocusRoomConclusion(entry);
+}
+
+function closeSidebarFocusRoomConclusion(): void {
+  if (sidebarFocusRoomConclusionBusy.value) return;
+  sidebarFocusRoomConclusionTarget.value = null;
+  sidebarFocusRoomConclusionError.value = null;
+  sidebarFocusRoomConclusionPendingToast.value = null;
+}
+
+async function submitSidebarFocusRoomConclusion(input: FocusRoomConclusionInput): Promise<void> {
+  const target = sidebarFocusRoomConclusionTarget.value;
+  if (!target || sidebarFocusRoomConclusionBusy.value) return;
+
+  const parent = sidebarFocusRoomConclusionParent.value;
+  const targetWasActive = activeEntry.value.id === target.id;
+  sidebarFocusRoomConclusionError.value = null;
+  const result = await concludeSidebarFocusRoom(target, input);
+  if (!result.ok) {
+    sidebarFocusRoomConclusionError.value = result.error;
+    return;
+  }
+
+  sidebarFocusRoomConclusionReturnFocusId.value = parent?.id || null;
+  const displayName = target.title || "Focus room";
+  sidebarFocusRoomConclusionPendingToast.value = result.refreshError
+    ? {
+        message: `${displayName} concluded, but the room list could not be refreshed: ${result.refreshError}`,
+        state: "error",
+      }
+    : { message: `${displayName} concluded.`, state: "success" };
+  sidebarFocusRoomConclusionTarget.value = null;
+  if (targetWasActive && parent) {
+    handleSidebarEntrySelected(parent);
+  }
+}
+
+function handleSidebarFocusRoomConclusionAfterLeave(): void {
+  const toast = sidebarFocusRoomConclusionPendingToast.value;
+  sidebarFocusRoomConclusionPendingToast.value = null;
+  if (toast) pushActionToast(toast.message, toast.state);
+}
 
 const {
   clearMcpTargetSelection,
@@ -877,8 +1640,18 @@ async function pickRepoRoomForAgent(): Promise<void> {
   }
 }
 
-function getChatStorageBridge(): typeof window.letagentsDesktop.chatStorage | null {
-  const bridge = window.letagentsDesktop?.chatStorage;
+async function openWorktreeForAgent(rootPath: string): Promise<void> {
+  await openManagedAgentWorktree({
+    rootPath,
+    openWorkspaceGitRoom,
+    setReopenAddAgent: (value) => {
+      openAddAgentAfterRepoPick.value = value;
+    },
+  });
+}
+
+function getChatStorageBridge(): typeof desktopIpc.chatStorage | null {
+  const bridge = desktopIpc.chatStorage;
   if (!bridge) {
     chatStorageAvailable.value = false;
     chatStorageFeedback.value = {
@@ -909,7 +1682,7 @@ async function loadChatStorageSettings(): Promise<void> {
 
 async function loadAppAgentSettingsStatus(): Promise<void> {
   try {
-    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.getSettingsStatus();
+    appAgentSettingsStatus.value = await desktopIpc.appAgent.getSettingsStatus();
   } catch (error) {
     appAgentFeedback.value = {
       state: "error",
@@ -923,7 +1696,7 @@ async function loadAppAgentSettingsStatus(): Promise<void> {
 
 async function loadAppAgentActions(): Promise<void> {
   try {
-    appAgentActions.value = await window.letagentsDesktop.appAgent.listActions();
+    appAgentActions.value = await desktopIpc.appAgent.listActions();
   } catch (error) {
     appAgentFeedback.value = {
       state: "error",
@@ -939,7 +1712,7 @@ async function saveAppAgentSettings(input: DesktopAppAgentSaveSettingsInput): Pr
   appAgentBusy.value = true;
   appAgentFeedback.value = null;
   try {
-    appAgentSettingsStatus.value = await window.letagentsDesktop.appAgent.saveSettings(input);
+    appAgentSettingsStatus.value = await desktopIpc.appAgent.saveSettings(input);
     appAgentFeedback.value = {
       state: "success",
       message: "App Agent settings saved.",
@@ -962,7 +1735,23 @@ async function refreshSettingsSurface(): Promise<void> {
     refreshSettings(),
     loadAppAgentSettingsStatus(),
     loadAppAgentActions(),
+    refreshDesktopUpdateStatus(),
   ]);
+}
+
+async function refreshDesktopUpdateStatus(): Promise<void> {
+  if (!desktopIpc.updates?.getStatus) return;
+  updateStatus.value = await desktopIpc.updates.getStatus();
+}
+
+async function checkDesktopUpdate(): Promise<void> {
+  if (!desktopIpc.updates?.check) return;
+  updateStatus.value = await desktopIpc.updates.check();
+}
+
+async function installDesktopUpdate(): Promise<void> {
+  if (!desktopIpc.updates?.install) return;
+  updateStatus.value = await desktopIpc.updates.install();
 }
 
 function openAppAgentSettings(): void {
@@ -984,7 +1773,7 @@ async function runAppAgent(input: DesktopAppAgentRunInput): Promise<void> {
       activeRoomGitRoom:
         input.activeRoomGitRoom || selectedRoomInfo.value.gitRoom || null,
     };
-    const result = await window.letagentsDesktop.appAgent.run(runInput);
+    const result = await desktopIpc.appAgent.run(runInput);
     appAgentResult.value = result;
     if (result.settingsStatus) {
       appAgentSettingsStatus.value = result.settingsStatus;
@@ -1175,7 +1964,7 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
     .find((room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedIdentifier);
   loading.value = true;
   try {
-    const snapshot = await window.letagentsDesktop.room.getSnapshot(normalizedIdentifier);
+    const snapshot = await desktopIpc.room.getSnapshot(normalizedIdentifier);
     openRoomSnapshot(snapshot, {
       kind: "room",
       rootPath: null,
@@ -1186,14 +1975,24 @@ async function openRoomFromAppAgent(roomIdentifier: string): Promise<void> {
   }
 }
 
+async function handleNotificationActivation(target: DesktopNotificationTarget): Promise<void> {
+  try {
+    await openRoomFromAppAgent(target.roomIdentifier);
+    notificationRevealMessageId.value = target.messageId;
+    notificationRevealNonce.value += 1;
+  } catch (error) {
+    console.warn("Could not open the room for this notification.", error);
+  }
+}
+
 async function refreshActiveRoomAfterChatStorageChange(): Promise<void> {
-  await window.letagentsDesktop.room.stopStream();
+  await desktopIpc.room.stopStream();
   await refreshActiveRepoStatus();
   clearSelectedSnapshotCache();
   selectedSnapshot.value = null;
   const rootRoomIdentifier = selectedRootRoomIdentifier.value || rootRoomSnapshot.value?.roomIdentifier || null;
   if (rootRoomIdentifier) {
-    const nextRootSnapshot = await window.letagentsDesktop.room.getSnapshot(rootRoomIdentifier);
+    const nextRootSnapshot = await desktopIpc.room.getSnapshot(rootRoomIdentifier);
     rootRoomSnapshot.value = nextRootSnapshot;
     selectedRootRoomIdentifier.value = nextRootSnapshot.roomIdentifier;
     rememberRootRoomSnapshot(nextRootSnapshot);
@@ -1276,6 +2075,10 @@ function handleRoomShellRefresh(snapshot?: DesktopRoomSnapshot): void {
   handleRefreshRoom(snapshot);
   if (!snapshot?.roomIdentifier) return;
   void syncSelectedRoomStream(snapshot.roomIdentifier);
+}
+
+function handleRoomMessageRevealUnavailable(_messageId: string): void {
+  pushActionToast("That earlier message is not available in the loaded room history.", "info");
 }
 
 function rememberChatScrollPosition(roomIdentifier: string, scrollTop: number): void {
@@ -1383,16 +2186,26 @@ watch(
   { deep: true, immediate: true }
 );
 
-watch(showSidebarPeek, (enabled) => {
-  if (!enabled) {
-    closeSidebarPeek();
-  }
-});
-
 watch(
   () => selectedRootRoomIdentifier.value,
   (roomIdentifier) => {
     rememberStoredString(selectedRootRoomStorageKey, roomIdentifier);
+  },
+  { immediate: true }
+);
+
+watch(
+  () => appInfo.value?.workspaceRoot || null,
+  () => {
+    void refreshWorkspaceRepoStatus();
+  },
+  { immediate: true }
+);
+
+watch(
+  () => activeProjectRootPath(),
+  (rootPath) => {
+    void restartRepoStatusWatch(rootPath);
   },
   { immediate: true }
 );
@@ -1437,17 +2250,33 @@ watch(
 );
 
 onMounted(() => {
-  unsubscribeRoomStream = window.letagentsDesktop?.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
-  unsubscribeOpenSettings = window.letagentsDesktop?.ui?.onOpenSettings(openSettingsSurface) || null;
+  unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
+  unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
+  unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
+  unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {
+    updateStatus.value = status;
+  }) || null;
+  unsubscribeNotificationActivation = desktopIpc.notifications?.onActivated?.((target) => {
+    void handleNotificationActivation(target);
+  }) || null;
+  void desktopIpc.notifications?.takePendingActivation?.().then((target) => {
+    if (target) void handleNotificationActivation(target);
+  });
+  unsubscribeRepoStatusChanged = desktopIpc.repos?.onStatusChanged?.(handleRepoStatusChanged) || null;
   accountRoomsRefreshInterval = window.setInterval(() => {
+    if (shouldSkipPollTick({ hidden: document.hidden })) return;
     void refreshSidebarRoomMetadata();
-  }, 5_000);
+  }, SIDEBAR_METADATA_REFRESH_INTERVAL_MS);
   window.addEventListener("focus", handleWindowFocus);
+  window.addEventListener("blur", handleWindowBlur);
   document.addEventListener("visibilitychange", handleVisibilityChange);
+  syncAppIdleAttribute();
   void loadChatStorageSettings();
   void loadAppAgentSettingsStatus();
   void loadAppAgentActions();
   void loadFirstRunSetup();
+  void refreshRentalRequestCount();
+  void refreshDesktopUpdateStatus();
 });
 
 onBeforeUnmount(() => {
@@ -1458,16 +2287,23 @@ onBeforeUnmount(() => {
     window.clearInterval(accountRoomsRefreshInterval);
     accountRoomsRefreshInterval = null;
   }
-  if (repoStatusRefreshTimer !== null) {
-    window.clearTimeout(repoStatusRefreshTimer);
-    repoStatusRefreshTimer = null;
-  }
   window.removeEventListener("focus", handleWindowFocus);
+  window.removeEventListener("blur", handleWindowBlur);
   document.removeEventListener("visibilitychange", handleVisibilityChange);
+  document.documentElement.removeAttribute(APP_IDLE_ATTRIBUTE);
   unsubscribeRoomStream?.();
   unsubscribeRoomStream = null;
   unsubscribeOpenSettings?.();
   unsubscribeOpenSettings = null;
-  void window.letagentsDesktop?.room?.stopStream?.();
+  unsubscribeOpenUpdates?.();
+  unsubscribeOpenUpdates = null;
+  unsubscribeUpdateStatus?.();
+  unsubscribeUpdateStatus = null;
+  unsubscribeNotificationActivation?.();
+  unsubscribeNotificationActivation = null;
+  unsubscribeRepoStatusChanged?.();
+  unsubscribeRepoStatusChanged = null;
+  void desktopIpc.repos?.stopStatusWatch?.();
+  void desktopIpc.room?.stopStream?.();
 });
 </script>

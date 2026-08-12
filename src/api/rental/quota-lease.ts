@@ -39,6 +39,7 @@
  * Plan: docs/RENT_AN_AGENT_TASK_BREAKDOWN.md PR p2.9 (decision slice).
  */
 
+import { isExactConfidence } from "../../shared/rental/lrt.js";
 import type { QuotaConfidence } from "../../shared/rental/meter-types.js";
 
 // ---------------------------------------------------------------------------
@@ -46,15 +47,22 @@ import type { QuotaConfidence } from "../../shared/rental/meter-types.js";
 // ---------------------------------------------------------------------------
 
 /**
- * The lane the lease holds. provider + model uniquely identify a
- * quota source on the provider's account; `quotaLaneId` is the
- * provider's own label (e.g. Antigravity's `lane_id`) and lets us
- * disambiguate two models under the same vendor that share a quota.
+ * The lane the lease holds. A quota source belongs to ONE provider
+ * account: providerAccountId + provider + model identify it.
+ * `quotaLaneId` is the provider's own label (e.g. Antigravity's
+ * `lane_id`); it is carried for display/diagnostics but does not
+ * currently participate in conflict decisions.
+ *
+ * `providerAccountId` is optional because leases persisted before it
+ * existed lack the field. Legacy account-less lanes are treated as
+ * GLOBAL (they conflict with every account on the same provider+model)
+ * — fail-closed until those sessions release.
  */
 export interface QuotaLane {
   provider: string;
   model: string | null;
   quotaLaneId: string | null;
+  providerAccountId?: string | null;
 }
 
 export interface QuotaLeaseSnapshot {
@@ -85,10 +93,12 @@ export interface QuotaLease {
 // ---------------------------------------------------------------------------
 
 /**
- * Canonical key used to index active leases. Mirrors the same
- * shape the desktop renter trigger classifier uses to scope
- * failure buffers, so the two layers can talk about "the same
- * lane" without ambiguity.
+ * Coarse lane key: provider + model, WITHOUT the provider account.
+ * Used for the advisory lock and the active-lease DB scan so that
+ * decisions across accounts — including legacy account-less leases —
+ * are serialized under one lock. Ownership scoping happens in
+ * {@link lanesConflict}, not here. Mirrors the shape the desktop
+ * renter trigger classifier uses to scope failure buffers.
  */
 export function laneKey(provider: string, model: string | null): string {
   return `${provider}::${model ?? ""}`;
@@ -96,6 +106,35 @@ export function laneKey(provider: string, model: string | null): string {
 
 export function laneKeyOf(lane: QuotaLane): string {
   return laneKey(lane.provider, lane.model);
+}
+
+/**
+ * Whether two lanes contend for the same quota source.
+ *
+ * Same provider+model is required; then ownership decides:
+ *   • both lanes carry a providerAccountId → conflict only when equal
+ *     (different providers' quotas are independent);
+ *   • either side lacks an account (legacy persisted lease, or a
+ *     caller that didn't scope) → conflict — fail-closed, preserving
+ *     the pre-scoping global invariant until such leases drain.
+ */
+export function lanesConflict(a: QuotaLane, b: QuotaLane): boolean {
+  if (laneKeyOf(a) !== laneKeyOf(b)) return false;
+  const accountA = normalizedAccountId(a);
+  const accountB = normalizedAccountId(b);
+  if (accountA === null || accountB === null) return true;
+  return accountA === accountB;
+}
+
+/**
+ * Anything that is not a non-empty string degrades to null — i.e. to
+ * the fail-closed global lane. The lease jsonb is persisted data;
+ * a malformed value (number, object, empty string) must never take
+ * the "scoped" branch, where it would conflict with nothing.
+ */
+function normalizedAccountId(lane: QuotaLane): string | null {
+  const value = lane.providerAccountId;
+  return typeof value === "string" && value.trim() ? value : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -141,26 +180,71 @@ export type QuotaLeaseReason =
 export interface CanCreateLeaseDecision {
   allowed: boolean;
   reason: QuotaLeaseReason;
-  /** The session id currently holding the lane, if locked. */
+  /** A session id currently holding the lane, if locked. */
   heldBy: string | null;
+  /** Unreleased leases other sessions hold on this lane. */
+  activeCount: number;
+  /** The capacity the decision was made against. */
+  capacity: number;
+}
+
+/** Sanity ceiling on lane concurrency, whatever the listing says. */
+export const MAX_LANE_CAPACITY = 16;
+
+/**
+ * How many concurrent leases a lane admits for a listing.
+ *
+ * Above-1 concurrency is only safe when usage can be attributed to a
+ * specific session — i.e. the meter emits exact per-session token logs
+ * (official_exact / local_exact). Percent-window and estimated meters
+ * only observe lane-level consumption, so concurrent sessions would
+ * double-count each other's spend; those lanes stay at capacity 1
+ * regardless of the listing's max_concurrent_sessions.
+ *
+ * Callers must pass EVERY confidence signal they have (the vetted
+ * listing enum column AND the latest snapshot's self-reported value) —
+ * the weakest one governs, so a provider-attested snapshot claiming
+ * `official_exact` cannot unlock concurrency past what the
+ * server-controlled column allows.
+ */
+export function laneCapacity(
+  maxConcurrentSessions: number | null | undefined,
+  ...confidences: QuotaConfidence[]
+): number {
+  const requested =
+    typeof maxConcurrentSessions === "number"
+    && Number.isInteger(maxConcurrentSessions)
+    && maxConcurrentSessions >= 1
+      ? Math.min(maxConcurrentSessions, MAX_LANE_CAPACITY)
+      : 1;
+  if (requested === 1) return 1;
+  if (confidences.length === 0) return 1;
+  return confidences.every((confidence) => isExactConfidence(confidence))
+    ? requested
+    : 1;
 }
 
 /**
  * Decide whether a new lease can be created for `lane` given the
- * currently-active leases. A lane with an active (not-released)
- * lease is locked. The caller passes an array because the
- * DB-orchestrating layer reads ALL active rental_sessions for
- * that lane in one query and feeds them in.
+ * currently-active leases and the lane's capacity (§17.8; capacity
+ * above 1 per {@link laneCapacity}). The caller passes an array
+ * because the DB-orchestrating layer reads ALL active rental_sessions
+ * for that lane in one query and feeds them in.
  *
  * Re-entry guard: if the lane is already held by `sessionId`,
  * returns `same_session` rather than `lane_locked` so a retry
- * after a transient failure can be idempotent.
+ * after a transient failure can be idempotent (and does not consume
+ * an extra capacity slot).
  */
 export function canCreateLease(
   active: ReadonlyArray<QuotaLease>,
   lane: QuotaLane,
   sessionId: string,
+  capacity: number = 1,
 ): CanCreateLeaseDecision {
+  const effectiveCapacity =
+    Number.isInteger(capacity) && capacity >= 1 ? capacity : 1;
+
   if (
     typeof lane.provider !== "string"
     || !lane.provider.trim()
@@ -169,24 +253,34 @@ export function canCreateLease(
       allowed: false,
       reason: QUOTA_LEASE_REASONS.INVALID_LANE,
       heldBy: null,
+      activeCount: 0,
+      capacity: effectiveCapacity,
     };
   }
 
-  const key = laneKeyOf(lane);
+  const holders: string[] = [];
   for (const lease of active) {
     if (lease.releasedAt) continue;
-    if (laneKeyOf(lease.lane) !== key) continue;
+    if (!lanesConflict(lease.lane, lane)) continue;
     if (lease.sessionId === sessionId) {
       return {
         allowed: true,
         reason: QUOTA_LEASE_REASONS.SAME_SESSION,
         heldBy: lease.sessionId,
+        activeCount: holders.length,
+        capacity: effectiveCapacity,
       };
     }
+    holders.push(lease.sessionId);
+  }
+
+  if (holders.length >= effectiveCapacity) {
     return {
       allowed: false,
       reason: QUOTA_LEASE_REASONS.LANE_LOCKED,
-      heldBy: lease.sessionId,
+      heldBy: holders[0] ?? null,
+      activeCount: holders.length,
+      capacity: effectiveCapacity,
     };
   }
 
@@ -194,6 +288,8 @@ export function canCreateLease(
     allowed: true,
     reason: QUOTA_LEASE_REASONS.AVAILABLE,
     heldBy: null,
+    activeCount: holders.length,
+    capacity: effectiveCapacity,
   };
 }
 

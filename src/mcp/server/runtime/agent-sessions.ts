@@ -1,6 +1,7 @@
 import {
   getStoredAgentSession,
   isLocalRoomStorageEnabled,
+  replaceLocalWorkerAgentSession,
   saveAgentSession,
   type StoredAgentIdentityState,
   type StoredAgentSessionState,
@@ -19,11 +20,19 @@ import {
   detectAgentRuntimeLabel,
   ensureAgentIdentity,
 } from "./identity.js";
+import { isSupervisedBoundedTurn, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { resolveCurrentSupervisedWorkerSession } from "./supervisor-bridge.js";
+
+// A worker bearer already represents a server-side worker session. This local
+// marker lets the MCP tool contract stay session-shaped without persisting or
+// transmitting a second set of credentials.
+export const WORKER_BEARER_AGENT_SESSION_ID = "worker_bearer";
 
 export function buildAgentDeliveryHeaders(
   agentSession?: StoredAgentSessionState | null
 ): Record<string, string> {
-  if (!agentSession) {
+  const runtime = requireValidWorkerBearerRuntime();
+  if (!agentSession || runtime.mode === "worker" || runtime.mode === "supervised") {
     return {};
   }
 
@@ -82,6 +91,38 @@ export function resolveAgentSession(
   return session;
 }
 
+/**
+ * The stable base this client declares as `requested_base_display_name` when
+ * registering. Rules (task_66):
+ * - An explicit display_name that replays the EXACT label of any prior stored
+ *   session for this room+identity is a resume, not a rename: reuse the base
+ *   recorded when THAT label was allocated, so a server-decorated label
+ *   converges. The whole lineage is consulted (most recent first) because a
+ *   latest-only lookup would lose an older concurrent sibling's base and
+ *   misread its restart as a deliberate rename.
+ * - Any other explicit display_name is deliberate intent and IS the base —
+ *   a numeric-ending custom name ("Agent 47") is therefore never demoted.
+ * - With no explicit name, fall back to the most recent recorded base in the
+ *   lineage, then to the durable identity's display name.
+ */
+export function resolveClientRequestedBase(input: {
+  explicitDisplayName?: string | null;
+  identityDisplayName: string;
+  priorSessions?: readonly Pick<StoredAgentSessionState, "display_name" | "requested_base_display_name">[] | null;
+}): string {
+  const explicit = input.explicitDisplayName?.trim() || "";
+  const lineage = input.priorSessions ?? [];
+  if (explicit) {
+    const replayed = lineage.find((session) => session.display_name?.trim() === explicit);
+    const replayedBase = replayed?.requested_base_display_name?.trim() || "";
+    return replayedBase || explicit;
+  }
+  const latestBase = lineage
+    .map((session) => session.requested_base_display_name?.trim() || "")
+    .find((base) => base.length > 0);
+  return latestBase || input.identityDisplayName.trim();
+}
+
 export function identityFromAgentSession(session: StoredAgentSessionState): StoredAgentIdentityState {
   return {
     name: normalizeAgentBaseName(session.display_name),
@@ -118,9 +159,54 @@ export async function resolveWorkerToolIdentity(input: {
   roomId?: string | null;
   agentSessionId?: string | null;
 }): Promise<{ identity: StoredAgentIdentityState; agentSession: StoredAgentSessionState }> {
+  const runtimeMode = requireValidWorkerBearerRuntime().mode;
+  if (runtimeMode === "supervised") {
+    const agentSession = await resolveCurrentSupervisedWorkerSession(input.roomId);
+    if (
+      input.agentSessionId
+      && input.agentSessionId !== WORKER_BEARER_AGENT_SESSION_ID
+      && input.agentSessionId !== agentSession.session_id
+    ) {
+      throw new Error(`Daemon-supervised worker session is ${agentSession.session_id}, not ${input.agentSessionId}.`);
+    }
+    return { identity: identityFromAgentSession(agentSession), agentSession };
+  }
+  if (
+    runtimeMode === "worker" &&
+    (!input.agentSessionId || input.agentSessionId === WORKER_BEARER_AGENT_SESSION_ID)
+  ) {
+    const identity = await ensureAgentIdentity();
+    const now = new Date().toISOString();
+    return {
+      identity,
+      agentSession: {
+        session_id: WORKER_BEARER_AGENT_SESSION_ID,
+        session_token: "",
+        room_id: input.roomId ?? "worker_bearer_room",
+        session_kind: "worker",
+        runtime: detectAgentRuntimeLabel(),
+        host_id: null,
+        host_kind: null,
+        host_label: null,
+        liveness_capability: null,
+        tool_bridge_id: null,
+        actor_label: identity.actor_label,
+        agent_key: identity.canonical_key ?? identity.runtime_key ?? identity.actor_label,
+        agent_instance_id: AGENT_INSTANCE_UUID,
+        display_name: identity.display_name,
+        owner_label: identity.owner_label,
+        ide_label: identity.ide_label ?? detectAgentIdeLabel(),
+        repo_branch: null,
+        created_at: now,
+        updated_at: now,
+        last_seen_at: now,
+        ended_at: null,
+      },
+    };
+  }
   const agentSession = input.agentSessionId
     ? requireWorkerAgentSession(input.roomId, input.agentSessionId)
-    : input.roomId && await isLocalRoomStorageEnabled(input.roomId)
+    : input.roomId && !isSupervisedBoundedTurn() && await isLocalRoomStorageEnabled(input.roomId)
       ? await ensureLocalWorkerAgentSession(input.roomId)
       : requireWorkerAgentSession(input.roomId, input.agentSessionId);
   return {
@@ -142,7 +228,7 @@ export async function ensureLocalWorkerAgentSession(
   const now = new Date().toISOString();
   const runtime = input.runtime?.trim() || detectAgentRuntimeLabel();
   const displayName = input.displayName?.trim() || identity.display_name;
-  return saveAgentSession({
+  const session = {
     session_id: `local_${randomUUID()}`,
     session_token: `local_${randomUUID()}`,
     room_id: roomId,
@@ -164,7 +250,10 @@ export async function ensureLocalWorkerAgentSession(
     updated_at: now,
     last_seen_at: now,
     ended_at: null,
-  });
+  } satisfies StoredAgentSessionState;
+  return session.session_kind === "worker"
+    ? replaceLocalWorkerAgentSession(session)
+    : saveAgentSession(session);
 }
 
 export function getAgentSessionRepoBranch(cwd?: string | null): string | null {
@@ -172,10 +261,11 @@ export function getAgentSessionRepoBranch(cwd?: string | null): string | null {
   return getGitCurrentBranch(workingDir);
 }
 
-export function agentSessionCredentials(agentSession: StoredAgentSessionState): {
-  agent_session_id: string;
-  agent_session_token: string;
-} {
+export function agentSessionCredentials(agentSession: StoredAgentSessionState): Record<string, string> {
+  const runtime = requireValidWorkerBearerRuntime();
+  if (runtime.mode === "worker" || runtime.mode === "supervised") {
+    return {};
+  }
   return {
     agent_session_id: agentSession.session_id,
     agent_session_token: agentSession.session_token,

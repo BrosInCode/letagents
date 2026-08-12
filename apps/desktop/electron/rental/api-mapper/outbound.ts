@@ -71,6 +71,13 @@ export function toApiCreateSessionBody(
   input: Partial<DesktopRentalStartInput>,
 ): Record<string, unknown> {
   const body: Record<string, unknown> = {};
+  if (typeof input.roomIdentifier === "string" && input.roomIdentifier.trim()) {
+    body.targetRoomId = input.roomIdentifier.trim();
+    // The marketplace disclosure is part of the request contract: a rented
+    // agent may page history with room tools, while normal ingress still
+    // starts at the current tail so old messages never replay as new work.
+    body.roomHistoryAccess = "full";
+  }
   const passThrough: Array<keyof DesktopRentalStartInput> = [
     "listingId",
     "repoOwner",
@@ -135,6 +142,7 @@ export function toApiListingCreateBody(
     "defaultLrtLimit",
     "defaultTimeLimitMinutes",
     "manualAcceptRequired",
+    "maxConcurrentSessions",
   ];
   for (const key of passThrough) {
     const value = input[key];
@@ -165,6 +173,7 @@ export function toApiListingPatchBody(
     "defaultLrtLimit",
     "defaultTimeLimitMinutes",
     "manualAcceptRequired",
+    "maxConcurrentSessions",
   ];
   for (const key of passThrough) {
     const value = input[key];

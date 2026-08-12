@@ -20,21 +20,64 @@ interface AgentReasoningLauncherOptions {
 export function useAgentReasoningLauncher(options: AgentReasoningLauncherOptions) {
   function openAgentModal(target: AgentModalTarget): void {
     if (options.openAgentDetail) {
+      // Inspector supervision is resolved later from the message's own stable
+      // session/key identity plus the daemon manifest. Presence actor labels
+      // are presentation data and must not grant supervised controls.
       options.openAgentDetail(target);
       return;
     }
 
-    const session = latestReasoningForAgent(target, options.reasoningSessions());
+    const resolvedTarget = agentTargetWithPresenceSession(target, options.presence());
+    const session = latestReasoningForAgent(resolvedTarget, options.reasoningSessions());
     if (session) {
       options.openReasoning(session.id);
       return;
     }
-    if (hasReasoningStreamSurface(target, options.presence())) {
-      options.openFallback(target);
+    if (hasReasoningStreamSurface(resolvedTarget, options.presence())) {
+      options.openFallback(resolvedTarget);
     }
   }
 
   return { openAgentModal };
+}
+
+/**
+ * Older room messages may predate embedded agent-session identity. Resolve the
+ * clicked actor through current presence, but only when the stable identity
+ * join selects one worker. Ambiguous same-key/same-label peers fail closed.
+ */
+export function agentTargetWithPresenceSession(
+  target: AgentModalTarget,
+  presenceEntries: readonly DesktopAgentPresence[],
+): AgentModalTarget {
+  if (target.agentSessionId?.trim()) return target;
+
+  const candidates = presenceEntries.filter((presence) => Boolean(presence.agentSessionId?.trim()));
+  const targetAgentKey = normalizeAgentKey(target.agentKey);
+  const targetActorKeys = new Set([
+    target.actorLabel,
+    target.sender,
+  ].map(normalizeAgentKey).filter(Boolean));
+
+  let matches = targetAgentKey
+    ? candidates.filter((presence) => normalizeAgentKey(presence.agentKey) === targetAgentKey)
+    : [];
+  if (matches.length > 1 && targetActorKeys.size) {
+    matches = matches.filter((presence) => targetActorKeys.has(normalizeAgentKey(presence.actorLabel)));
+  } else if (matches.length === 0 && targetActorKeys.size) {
+    matches = candidates.filter((presence) => targetActorKeys.has(normalizeAgentKey(presence.actorLabel)));
+  }
+  if (matches.length !== 1) return target;
+
+  const presence = matches[0]!;
+  return {
+    ...target,
+    actorLabel: target.actorLabel || presence.actorLabel,
+    displayName: target.displayName || presence.displayName,
+    ideLabel: target.ideLabel || presence.ideLabel,
+    agentKey: target.agentKey || presence.agentKey,
+    agentSessionId: presence.agentSessionId,
+  };
 }
 
 export function latestReasoningForAgent(

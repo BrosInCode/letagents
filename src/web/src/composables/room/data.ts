@@ -8,7 +8,7 @@ import {
   HANDOFF_PRESENCE_PAGE_SIZE,
   MESSAGE_HISTORY_PAGE_SIZE,
 } from './constants'
-import { isPromptOnlyRoomMessage } from './identity'
+import { isVisibleRoomMessage } from './identity'
 import type {
   FocusRoomInfo,
   MessagePage,
@@ -49,16 +49,29 @@ export async function fetchMessages(
     before,
   })
 
-  try {
-    const data = await apiFetch(
-      `${roomPath(roomIdentifier)}/messages?${params.toString()}`,
-    )
-    return {
-      messages: data.messages || [],
-      hasOlder: Boolean(data.has_older ?? data.has_more),
-    }
-  } catch {
-    return { messages: [], hasOlder: false }
+  const data = await apiFetch(
+    `${roomPath(roomIdentifier)}/messages?${params.toString()}`,
+  )
+  return {
+    messages: data.messages || [],
+    hasOlder: Boolean(data.has_older ?? data.has_more),
+  }
+}
+
+export async function fetchMessagesAfter(
+  roomIdentifier: string,
+  after: string,
+): Promise<{ messages: RoomMessage[]; hasMore: boolean }> {
+  const params = new URLSearchParams({
+    limit: String(MESSAGE_HISTORY_PAGE_SIZE),
+    after,
+  })
+  const data = await apiFetch(
+    `${roomPath(roomIdentifier)}/messages?${params.toString()}`,
+  )
+  return {
+    messages: data.messages || [],
+    hasMore: Boolean(data.has_more),
   }
 }
 
@@ -69,7 +82,7 @@ export function mergeMessages(
   const byId = new Map<string, RoomMessage>()
   for (const msg of current) byId.set(msg.id, msg)
   for (const msg of incoming) {
-    if (!isPromptOnlyRoomMessage(msg)) {
+    if (isVisibleRoomMessage(msg)) {
       byId.set(msg.id, msg)
     }
   }

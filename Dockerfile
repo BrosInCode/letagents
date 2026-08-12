@@ -9,6 +9,7 @@ RUN npm ci
 # Copy source and config
 COPY tsconfig.json ./
 COPY src/ src/
+COPY shared/ shared/
 COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./
 
@@ -24,6 +25,7 @@ WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 COPY --from=builder /app/dist/ dist/
+COPY --from=builder /app/shared/ shared/
 COPY drizzle/ drizzle/
 COPY drizzle.config.ts ./
 COPY tsconfig.json ./
@@ -41,6 +43,7 @@ RUN npm ci --omit=dev
 
 # Copy compiled server from builder
 COPY --from=builder /app/dist/ dist/
+COPY --from=builder /app/shared/ shared/
 
 # Copy built Vue SPA to where server.ts expects it (src/web/dist/)
 COPY --from=builder /app/src/web/dist/ src/web/dist/

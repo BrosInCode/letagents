@@ -1,3 +1,11 @@
+import type { RoomSharedArtifactDetail } from "../db/schema/artifacts.js";
+
+export type {
+  RoomSharedArtifactChangedFile,
+  RoomSharedArtifactChangeSummaryDetail,
+  RoomSharedArtifactDetail,
+} from "../db/schema/artifacts.js";
+
 export type RepoWorkflowProvider = "github" | "gitlab" | "bitbucket";
 
 export interface RepoRoomRef {
@@ -123,10 +131,13 @@ export type RepoRoomEvent =
   | RepoPushEvent
   | RepoBranchLifecycleEvent;
 
-export type TaskWorkflowRefProvider = RepoWorkflowProvider | "unknown";
+export type TaskWorkflowRefProvider = RepoWorkflowProvider | "git" | "unknown";
 export type TaskWorkflowArtifactKind =
   | "issue"
   | "branch"
+  | "commit"
+  | "diff"
+  | "change_summary"
   | "pull_request"
   | "merge_request"
   | "review"
@@ -143,6 +154,7 @@ export interface TaskWorkflowArtifact {
   url?: string | null;
   ref?: string | null;
   state?: string | null;
+  detail?: RoomSharedArtifactDetail | null;
 }
 
 export interface TaskWorkflowArtifactMatch {

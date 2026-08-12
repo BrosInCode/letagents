@@ -17,6 +17,22 @@ export function parseSenderIdentity(input: { sender?: string | null }): SenderId
   };
 }
 
+export function resolveOwnerAttribution(input: {
+  ownerAttribution?: string | null;
+  ownerLabel?: string | null;
+  actorLabel?: string | null;
+  sender?: string | null;
+}): string | null {
+  const explicit = input.ownerAttribution?.trim();
+  if (explicit) return explicit;
+  const ownerLabel = input.ownerLabel?.trim();
+  if (ownerLabel) {
+    return /['’]s\s+agent$/i.test(ownerLabel) ? ownerLabel : `${ownerLabel}'s agent`;
+  }
+  return parseSenderIdentity({ sender: input.actorLabel }).ownerAttribution
+    || parseSenderIdentity({ sender: input.sender }).ownerAttribution;
+}
+
 export function getSenderColor(sender: string, source: string | null): string {
   if (source === "github") return "#a78bfa";
   if (["system", "letagents"].includes(sender.toLowerCase())) return "#71717a";

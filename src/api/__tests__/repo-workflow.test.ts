@@ -356,6 +356,41 @@ test("validateTaskWorkflowArtifactsInput accepts valid artifacts", () => {
   );
 });
 
+test("validateTaskWorkflowArtifactsInput accepts local git artifacts", () => {
+  assert.deepEqual(
+    validateTaskWorkflowArtifactsInput([
+      {
+        provider: "git",
+        kind: "commit",
+        id: "abc123",
+        title: "Local commit",
+        ref: "feature/git-rooms",
+      },
+      {
+        provider: "git",
+        kind: "change_summary",
+        ref: "feature/git-rooms",
+        title: "Agent changes",
+      },
+    ]),
+    [
+      {
+        provider: "git",
+        kind: "commit",
+        id: "abc123",
+        title: "Local commit",
+        ref: "feature/git-rooms",
+      },
+      {
+        provider: "git",
+        kind: "change_summary",
+        ref: "feature/git-rooms",
+        title: "Agent changes",
+      },
+    ]
+  );
+});
+
 test("synchronizeTaskWorkflowArtifactsWithPrUrl replaces stale legacy PR artifacts when pr_url changes", () => {
   assert.deepEqual(
     synchronizeTaskWorkflowArtifactsWithPrUrl({
@@ -629,4 +664,188 @@ test("projectIssueEvent: issue closed does NOT transition proposed task", () => 
 test("projectIssueEvent: issue opened does NOT transition", () => {
   const result = projectIssueEvent({ action: "opened", currentStatus: "in_progress" });
   assert.equal(result, null);
+});
+
+function changeSummaryFile(overrides: Record<string, unknown> = {}): Record<string, unknown> {
+  return {
+    path: "src/a.ts",
+    previousPath: null,
+    status: "modified",
+    additions: 4,
+    deletions: 1,
+    binary: false,
+    staged: true,
+    unstaged: false,
+    untracked: false,
+    ...overrides,
+  };
+}
+
+function changeSummaryArtifact(detail: Record<string, unknown>): Record<string, unknown> {
+  return { provider: "git", kind: "change_summary", ref: "feature/x", detail };
+}
+
+test("validateTaskWorkflowArtifactsInput coerces counts and whitelists file status in detail", () => {
+  const artifacts = validateTaskWorkflowArtifactsInput([
+    changeSummaryArtifact({
+      type: "change_summary",
+      version: 1,
+      changedFileCount: 1,
+      additions: 4,
+      deletions: -3, // invalid negative -> 0
+      stagedFileCount: 1,
+      unstagedFileCount: 0,
+      untrackedFileCount: 0,
+      hiddenFileCount: 0,
+      files: [changeSummaryFile({ status: "bogus" })], // unknown status -> "unknown"
+    }),
+  ]);
+  const detail = artifacts?.[0]?.detail as { deletions: number; files: Array<{ status: string }> };
+  assert.equal(detail.deletions, 0);
+  assert.equal(detail.files[0].status, "unknown");
+});
+
+test("validateTaskWorkflowArtifactsInput rejects an unsupported detail type", () => {
+  assert.throws(() =>
+    validateTaskWorkflowArtifactsInput([
+      changeSummaryArtifact({ type: "pull_request", version: 1 }),
+    ]),
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput caps detail files at 200 and folds the rest into hiddenFileCount", () => {
+  const files = Array.from({ length: 250 }, (_value, index) =>
+    changeSummaryFile({ path: `src/f${index}.ts` }),
+  );
+  const artifacts = validateTaskWorkflowArtifactsInput([
+    changeSummaryArtifact({
+      type: "change_summary",
+      version: 1,
+      changedFileCount: 250,
+      additions: 250,
+      deletions: 0,
+      stagedFileCount: 0,
+      unstagedFileCount: 250,
+      untrackedFileCount: 0,
+      hiddenFileCount: 0,
+      files,
+    }),
+  ]);
+  const detail = artifacts?.[0]?.detail as { files: unknown[]; hiddenFileCount: number };
+  assert.equal(detail.files.length, 200);
+  assert.equal(detail.hiddenFileCount, 50);
+});
+
+test("validateTaskWorkflowArtifactsInput rejects a change_summary file without a path", () => {
+  assert.throws(() =>
+    validateTaskWorkflowArtifactsInput([
+      changeSummaryArtifact({
+        type: "change_summary",
+        version: 1,
+        changedFileCount: 1,
+        additions: 0,
+        deletions: 0,
+        stagedFileCount: 0,
+        unstagedFileCount: 0,
+        untrackedFileCount: 0,
+        hiddenFileCount: 0,
+        files: [{ status: "modified" }],
+      }),
+    ]),
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput still accepts artifacts without detail", () => {
+  const artifacts = validateTaskWorkflowArtifactsInput([
+    { provider: "github", kind: "pull_request", url: "https://github.com/x/y/pull/1" },
+  ]);
+  assert.ok(artifacts?.[0]);
+  assert.equal(artifacts[0].detail, undefined);
+});
+
+test("validateTaskWorkflowArtifactsInput rejects detail with changedFileCount 0 but populated files", () => {
+  assert.throws(() =>
+    validateTaskWorkflowArtifactsInput([
+      changeSummaryArtifact({
+        type: "change_summary",
+        version: 1,
+        changedFileCount: 0,
+        additions: 0,
+        deletions: 0,
+        stagedFileCount: 0,
+        unstagedFileCount: 0,
+        untrackedFileCount: 0,
+        hiddenFileCount: 0,
+        files: [changeSummaryFile()],
+      }),
+    ]),
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput rejects detail whose changedFileCount != files + hidden", () => {
+  assert.throws(() =>
+    validateTaskWorkflowArtifactsInput([
+      changeSummaryArtifact({
+        type: "change_summary",
+        version: 1,
+        changedFileCount: 5, // inconsistent: 1 file + 0 hidden != 5
+        additions: 1,
+        deletions: 0,
+        stagedFileCount: 0,
+        unstagedFileCount: 1,
+        untrackedFileCount: 0,
+        hiddenFileCount: 0,
+        files: [changeSummaryFile()],
+      }),
+    ]),
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput rejects change_summary detail when state is clean", () => {
+  assert.throws(() =>
+    validateTaskWorkflowArtifactsInput([
+      {
+        provider: "git",
+        kind: "change_summary",
+        ref: "feature/x",
+        state: "clean",
+        detail: {
+          type: "change_summary",
+          version: 1,
+          changedFileCount: 1,
+          additions: 4,
+          deletions: 1,
+          stagedFileCount: 1,
+          unstagedFileCount: 0,
+          untrackedFileCount: 0,
+          hiddenFileCount: 0,
+          files: [changeSummaryFile()],
+        },
+      },
+    ]),
+  );
+});
+
+test("validateTaskWorkflowArtifactsInput rejects change_summary detail on a non-change_summary kind", () => {
+  assert.throws(() =>
+    validateTaskWorkflowArtifactsInput([
+      {
+        provider: "github",
+        kind: "pull_request",
+        url: "https://github.com/x/y/pull/9",
+        detail: {
+          type: "change_summary",
+          version: 1,
+          changedFileCount: 0,
+          additions: 0,
+          deletions: 0,
+          stagedFileCount: 0,
+          unstagedFileCount: 0,
+          untrackedFileCount: 0,
+          hiddenFileCount: 0,
+          files: [],
+        },
+      },
+    ]),
+  );
 });

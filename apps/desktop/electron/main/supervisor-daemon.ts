@@ -1,0 +1,1958 @@
+import { randomUUID } from "node:crypto";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
+import { createConnection } from "node:net";
+import { execFileSync, spawn, type ChildProcess } from "node:child_process";
+import { access, mkdir } from "node:fs/promises";
+import { EventEmitter } from "node:events";
+
+import type {
+  DesktopSupervisorActivityEvent,
+  DesktopSupervisorAttemptDetail,
+  DesktopSupervisorCreateInput,
+  DesktopSupervisorDaemonStatus,
+  DesktopSupervisorDesiredState,
+  DesktopSupervisorManifestEntry,
+  DesktopSupervisorRoomDeliveryRetryInput,
+  DesktopSupervisorStateSnapshot,
+  DesktopSupervisorTurnControlInput,
+  DesktopSupervisorTurnControlResolutionInput,
+  DesktopSupervisorTurnControlResult,
+} from "../ipc-types.js";
+import { apiUrl, desktopRoot, workspaceRoot } from "./paths.js";
+import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
+import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
+
+export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
+// Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
+// handoff; implementation equality decides whether the already-running daemon
+// actually contains this desktop build's fixes.
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.100";
+const REQUEST_TIMEOUT_MS = 3_000;
+const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
+// Room-ingress bootstrap is an authority-bearing admission that mints a
+// worker session and reads the initial room tail against the cloud. Each of
+// those daemon-side requests is bounded at 20s, so the client deadline must
+// cover both plus overhead — the tight control-request timeout aborted real
+// launches on slow networks and orphaned their durable claims as paused.
+const BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS = 45_000;
+// Host-grant installation attaches to the live provider (up to ~32s of
+// bounded probes) and mints a worker session (3 cloud attempts x 10s) inside
+// the entry lock; the tight control timeout aborted real launches while the
+// daemon was still doing legitimate bounded work.
+const INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS = 60_000;
+// Runtime recovery attaches to the provider and drains delivery; conversation
+// restoration probes provider continuations at 0/1/3/7s offsets. Both exceed
+// the 3s control budget by design.
+const RECOVERY_REQUEST_TIMEOUT_MS = 30_000;
+const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
+const START_TIMEOUT_MS = 8_000;
+const NATURAL_EXIT_TIMEOUT_MS = 2_000;
+const TERMINATE_EXIT_TIMEOUT_MS = 2_000;
+const KILL_EXIT_TIMEOUT_MS = 1_000;
+const PROCESS_POLL_INTERVAL_MS = 25;
+const STATE_WATCH_RETRY_BASE_MS = 1_000;
+const STATE_WATCH_RETRY_MAX_MS = 30_000;
+/**
+ * While a focused agent's feed sits ended, re-poll at this cadence. The daemon
+ * ends the feed when a provider generation exits but keeps the entry so the next
+ * generation reopens it; this idle picks that reopen up without spinning against
+ * a daemon that answers an ended feed immediately.
+ */
+const AGENT_STREAM_REOPEN_POLL_MS = 1_000;
+const activityEmitter = new EventEmitter();
+const stateEmitter = new EventEmitter();
+const agentStreamEmitter = new EventEmitter();
+const activitySequences = new Map<string, number>();
+let stateWatchOperation: Promise<void> | null = null;
+let stateWatchUnsupportedGeneration: number | null = null;
+/** The single agent whose live feed is currently subscribed (inspector focus). */
+let focusedAgentStreamEntryId: string | null = null;
+let focusedAgentStreamEpoch = 0;
+let agentStreamWatchOperation: Promise<void> | null = null;
+let agentStreamWatchAbortController: AbortController | null = null;
+
+/** Main-process lifecycle signal. Renderer IPC never receives this hook. */
+export function onSupervisorDaemonGeneration(
+  listener: (status: DesktopSupervisorDaemonStatus) => void,
+): () => void {
+  return supervisorDaemonClient.onGeneration(listener);
+}
+
+type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
+type WireEntry = {
+  id: string;
+  room_id: string;
+  display_name: string;
+  provider: string;
+  model: string | null;
+  reasoning_effort?: "low" | "medium" | "high" | "xhigh" | "max" | null;
+  config_revision?: number;
+  runtime_configuration_revision?: number;
+  charter: string;
+  desired_state: DesktopSupervisorDesiredState;
+  observed_state: DesktopSupervisorManifestEntry["observedState"];
+  condition: DesktopSupervisorManifestEntry["condition"];
+  last_error?: string | null;
+  permission_profile_id: string | null;
+  delivery_mode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
+  provider_launch_policy?: unknown;
+  created_by: string;
+  created_at: string;
+  source_repo_path?: string | null;
+  workspace_path?: string | null;
+  work_attempt_id?: string | null;
+  provider_ref?: {
+    provider_continuation_id: string;
+    execution_generation_id: string;
+    provider_connection?: { pid?: number | null } | null;
+  } | null;
+  worker_binding?: {
+    agent_session_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    updated_at: string;
+  } | null;
+  last_worker_binding?: {
+    agent_session_id: string;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    updated_at: string;
+  } | null;
+  workplace_liveness?: { state: string; observed_at: string | null; detail: string | null };
+  native_liveness?: { state: string; observed_at: string | null; detail: string | null };
+  ready_reached_at?: string | null;
+  activity?: WireActivityEvent[];
+  last_turn_control_sequence?: number;
+  reconciliation?: { exit_timestamps_ms?: number[]; last_terminal?: Record<string, unknown> };
+  turn_control?: {
+    action_id: string;
+    action_sequence: number;
+    work_attempt_id: string;
+    execution_generation_id: string;
+    target_room_id?: string | null;
+    target_source_message_id?: string | null;
+    target_provider_continuation_id?: string | null;
+    inbox_item_id?: string | null;
+    provider_turn_id?: string | null;
+    // Older daemons can still report a turn-control journal while a desktop
+    // handoff is in progress. Treat the extra display hint as additive.
+    has_correction?: boolean;
+    correction_text?: string | null;
+    status: "prepared" | "dispatching" | "completed" | "retryable" | "uncertain";
+    capability: "native_interrupt" | "restart_resume" | "unsupported";
+    interrupted: boolean | null;
+    resumed: boolean | null;
+    state: "idle" | "working" | null;
+    stages: DesktopSupervisorTurnControlResult["stages"];
+    error: string | null;
+    recorded_at: string;
+    updated_at: string;
+  } | null;
+  room_agent_state?: {
+    connection: { state: string; observed_at: string | null; detail: string | null };
+    ingress: { state: string; observed_at: string | null; detail: string | null };
+    inbox: { state: string; pending_count: number; blocked_by_message_id: string | null; detail: string | null };
+    turn: { state: string; inbox_item_id: string | null; source_message_id: string | null; provider_turn_id: string | null; detail: string | null };
+    task: { state: string; task_id: string | null; title: string | null };
+  } | null;
+  delivery_receipts?: Array<{
+    inbox_item_id: string; source_message_id: string; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
+    provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code?: string | null; terminal_reason?: string | null; updated_at: string;
+    timeline?: Array<{ phase: string; observed_at: string; detail: string | null }>;
+  }>;
+};
+type WireActivityEvent = {
+  observed_at: string;
+  sequence: number;
+  provider: string;
+  kind: string;
+  method: string;
+  summary: string;
+  status: DesktopSupervisorActivityEvent["status"];
+  payload: unknown;
+  payload_truncated: boolean;
+  payload_redacted: boolean;
+  durable_payload_ref: string | null;
+};
+type WireLegacyLaneOwner = {
+  reservation_id: string;
+  room_id: string;
+  provider: string;
+  owner_pid: number;
+  owner_process_identity: string;
+  state: "reserved" | "active";
+  session_id: string | null;
+  created_at: string;
+  updated_at: string;
+};
+
+export type DaemonProcessState = "live" | "zombie";
+export type DaemonProcessIdentity = {
+  pid: number;
+  kernelStartTime: string;
+  command: string;
+  state: DaemonProcessState;
+  expectedScriptPath: string;
+};
+
+type DaemonIdentityInspection = Omit<DaemonProcessIdentity, "expectedScriptPath">;
+type RetiredDaemonObservation =
+  | { kind: "same"; identity: DaemonProcessIdentity }
+  | { kind: "absent" }
+  | { kind: "zombie" }
+  | { kind: "unverifiable" }
+  | { kind: "changed"; reason: string };
+
+export type DaemonHandoffDiagnostic = {
+  event: "supervisor_daemon_handoff";
+  outcome: string;
+  pid: number;
+  implementationVersion: string;
+  authorityReleased: boolean;
+  detail: string;
+};
+
+const PS_DAEMON_IDENTITY = /^(\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(\S+)\s+(.+)$/;
+
+export function defaultInspectDaemonProcess(pid: number): DaemonIdentityInspection | null | undefined {
+  try {
+    const output = execFileSync(
+      "/bin/ps",
+      ["-p", String(pid), "-o", "lstart=", "-o", "state=", "-o", "command="],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
+    ).trim();
+    const match = output.match(PS_DAEMON_IDENTITY);
+    if (!match) return undefined;
+    return {
+      pid,
+      kernelStartTime: match[1]!.replace(/\s+/g, " "),
+      state: match[2]!.startsWith("Z") ? "zombie" : "live",
+      command: match[3]!,
+    };
+  } catch {
+    try {
+      process.kill(pid, 0);
+      return undefined;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ESRCH" ? null : undefined;
+    }
+  }
+}
+
+export class SupervisorDaemonProtocolMismatchError extends Error {
+  constructor(readonly clientVersion: number, readonly daemonVersion: number, message: string) {
+    super(message);
+  }
+}
+
+export interface SupervisorDaemonLifecycleOptions {
+  socketPath?: string;
+  daemonScriptPath?: string;
+  daemonWorkingDirectory?: string;
+  spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
+  /** @deprecated Prefer signalDaemon so tests can distinguish TERM from KILL. */
+  terminateDaemon?: (pid: number) => void;
+  signalDaemon?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+  inspectDaemonProcess?: (pid: number) => DaemonIdentityInspection | null | undefined;
+  reportHandoffDiagnostic?: (diagnostic: DaemonHandoffDiagnostic) => void;
+  handoffTimeoutMs?: number;
+  terminateTimeoutMs?: number;
+  killTimeoutMs?: number;
+  processPollIntervalMs?: number;
+  startTimeoutMs?: number;
+  requestTimeoutMs?: number;
+  turnControlRequestTimeoutMs?: number;
+  now?: () => Date;
+}
+
+export function supervisorDaemonSpawnEnvironment(
+  env: Readonly<NodeJS.ProcessEnv> = process.env,
+  sourceWorkspaceRoot = workspaceRoot,
+): NodeJS.ProcessEnv {
+  const result: NodeJS.ProcessEnv = { ...env, ELECTRON_RUN_AS_NODE: "1" };
+  // Never trust a caller's cwd/cache-derived dev entry. The desktop's compiled
+  // location is the authority for the repo build paired with this dev renderer.
+  delete result.LETAGENTS_DEV_MCP_SERVER_ENTRY;
+  if (env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()) {
+    result.LETAGENTS_DEV_MCP_SERVER_ENTRY = join(sourceWorkspaceRoot, "dist", "mcp", "server.js");
+  }
+  return result;
+}
+
+export class SupervisorDaemonClient {
+  readonly socketPath: string;
+  readonly daemonScriptPath: string;
+  private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
+  private applicationUpdateHandoff: Promise<void> | null = null;
+  private applicationUpdatePrepared = false;
+  private lastReadyGeneration: number | null = null;
+  private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
+  private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
+  private readonly daemonWorkingDirectory: string;
+  private readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
+  private readonly inspectDaemonProcess: (pid: number) => DaemonIdentityInspection | null | undefined;
+  private readonly reportHandoffDiagnostic: (diagnostic: DaemonHandoffDiagnostic) => void;
+  private readonly naturalExitTimeoutMs: number;
+  private readonly terminateTimeoutMs: number;
+  private readonly killTimeoutMs: number;
+  private readonly processPollIntervalMs: number;
+  private readonly startTimeoutMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly turnControlRequestTimeoutMs: number;
+  private readonly now: () => Date;
+
+  constructor(options: SupervisorDaemonLifecycleOptions = {}) {
+    this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
+    this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
+    this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
+    this.signalDaemon = options.signalDaemon ?? ((pid, signal) => {
+      if (signal === "SIGTERM" && options.terminateDaemon) {
+        options.terminateDaemon(pid);
+        return;
+      }
+      process.kill(pid, signal);
+    });
+    this.inspectDaemonProcess = options.inspectDaemonProcess ?? defaultInspectDaemonProcess;
+    this.reportHandoffDiagnostic = options.reportHandoffDiagnostic ?? ((diagnostic) => {
+      console.error(JSON.stringify(diagnostic));
+    });
+    this.naturalExitTimeoutMs = options.handoffTimeoutMs ?? NATURAL_EXIT_TIMEOUT_MS;
+    this.terminateTimeoutMs = options.terminateTimeoutMs ?? TERMINATE_EXIT_TIMEOUT_MS;
+    this.killTimeoutMs = options.killTimeoutMs ?? KILL_EXIT_TIMEOUT_MS;
+    this.processPollIntervalMs = options.processPollIntervalMs ?? PROCESS_POLL_INTERVAL_MS;
+    this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
+    this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
+    this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
+    this.now = options.now ?? (() => new Date());
+    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
+      const child = spawn(process.execPath, [scriptPath], {
+        cwd,
+        detached: true,
+        stdio: "ignore",
+        env: supervisorDaemonSpawnEnvironment(),
+      });
+      child.unref();
+      return child;
+    });
+  }
+
+  ensureRunning(): Promise<DesktopSupervisorDaemonStatus> {
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return Promise.reject(new Error("Supervised agents currently require macOS."));
+    }
+    if (this.applicationUpdateHandoff || this.applicationUpdatePrepared) {
+      return Promise.reject(new Error("Supervisor startup is paused while LetAgents installs an application update."));
+    }
+    if (!this.ensureOperation) {
+      this.ensureOperation = this.ensureRunningOnce()
+        .then((status) => this.rememberReadyStatus(status))
+        .finally(() => { this.ensureOperation = null; });
+    }
+    return this.ensureOperation;
+  }
+
+  /**
+   * Retire the serving daemon without touching provider processes. The next
+   * desktop version will start its bundled daemon and recover exact provider
+   * generations during normal startup reconciliation.
+   */
+  prepareForApplicationUpdate(): Promise<void> {
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return Promise.reject(new Error("Application update handoff currently requires macOS."));
+    }
+    if (this.applicationUpdatePrepared) return Promise.resolve();
+    if (!this.applicationUpdateHandoff) {
+      this.applicationUpdateHandoff = this.prepareForApplicationUpdateOnce()
+        .then(() => {
+          this.applicationUpdatePrepared = true;
+        })
+        .finally(() => {
+          this.applicationUpdateHandoff = null;
+        });
+    }
+    return this.applicationUpdateHandoff;
+  }
+
+  /** Restore the current app's daemon only when Squirrel failed to take over. */
+  resumeAfterApplicationUpdateFailure(): Promise<DesktopSupervisorDaemonStatus> {
+    this.applicationUpdatePrepared = false;
+    return this.ensureRunning();
+  }
+
+  /**
+   * Observe an existing daemon without becoming its lifecycle owner.
+   * Subscriptions use this path so merely registering an IPC listener can
+   * never spawn or resurrect the supervisor process.
+   */
+  async connectIfRunning(): Promise<DesktopSupervisorDaemonStatus | null> {
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return null;
+    }
+    try {
+      const negotiated = await this.request<Record<string, unknown>>(
+        "daemon.negotiate",
+        undefined,
+        SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      );
+      return this.rememberReadyStatus(mapStatus(negotiated));
+    } catch (error) {
+      if (isConnectionUnavailable(error)) return null;
+      throw error;
+    }
+  }
+
+  onGeneration(listener: (status: DesktopSupervisorDaemonStatus) => void): () => void {
+    this.generationListeners.add(listener);
+    return () => this.generationListeners.delete(listener);
+  }
+
+  private rememberReadyStatus(status: DesktopSupervisorDaemonStatus): DesktopSupervisorDaemonStatus {
+    if (this.lastReadyGeneration !== status.generation) {
+      this.lastReadyGeneration = status.generation;
+      queueMicrotask(() => {
+        for (const listener of this.generationListeners) listener(status);
+      });
+    }
+    return status;
+  }
+
+  async list(roomIdentifier?: string | null): Promise<DesktopSupervisorManifestEntry[]> {
+    await this.ensureRunning();
+    // Rich manifest projections open several durable stores and can be slower
+    // on their first read. This must not share the tight timeout used by small
+    // control requests or a healthy cold daemon is misreported as unavailable.
+    const entries = await this.request<WireEntry[]>(
+      "manifest.list",
+      undefined,
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      MANIFEST_LIST_REQUEST_TIMEOUT_MS,
+    );
+    return entries.map(mapEntry).filter((entry) => !roomIdentifier || entry.roomId === roomIdentifier);
+  }
+
+  async watchState(input: {
+    afterDaemonGeneration: number;
+    afterSequence: number;
+    waitMs?: number;
+  }): Promise<DesktopSupervisorStateSnapshot> {
+    const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
+    const value = await this.request<{
+      daemon_generation: number;
+      sequence: number;
+      entries: WireEntry[];
+    }>("manifest.watch_state", {
+      after_daemon_generation: input.afterDaemonGeneration,
+      after_sequence: input.afterSequence,
+      wait_ms: waitMs,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true);
+    if (
+      !Number.isSafeInteger(value.daemon_generation)
+      || value.daemon_generation < 1
+      || !Number.isSafeInteger(value.sequence)
+      || value.sequence < 1
+      || !Array.isArray(value.entries)
+    ) {
+      throw new Error("Supervisor daemon returned an invalid state snapshot.");
+    }
+    return {
+      daemonGeneration: value.daemon_generation,
+      sequence: value.sequence,
+      entries: value.entries.map(mapEntry),
+    };
+  }
+
+  async watchAgentStream(input: {
+    entryId: string;
+    afterSequence: number;
+    waitMs?: number;
+    signal?: AbortSignal;
+  }): Promise<{ sequence: number; streamGeneration: number; droppedEvents: number; events: import("../ipc-types/agents.js").DesktopAgentStreamEvent[]; ended: boolean }> {
+    const waitMs = Math.max(0, Math.min(30_000, input.waitMs ?? 25_000));
+    const value = await this.request<{
+      sequence: number;
+      stream_generation: number;
+      dropped_events: number;
+      events: Array<{ sequence: number; observed_at: string; kind: string; method: string; summary: string | null; payload: unknown }>;
+      ended: boolean;
+    }>("supervisor.watch_agent_stream", {
+      entry_id: input.entryId,
+      after_sequence: input.afterSequence,
+      wait_ms: waitMs,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, waitMs + this.requestTimeoutMs, true, input.signal);
+    return {
+      sequence: Number(value.sequence ?? input.afterSequence),
+      streamGeneration: Number(value.stream_generation ?? 0),
+      droppedEvents: Number(value.dropped_events ?? 0),
+      ended: value.ended === true,
+      events: (Array.isArray(value.events) ? value.events : []).map((event) => ({
+        sequence: Number(event.sequence),
+        observedAt: String(event.observed_at ?? ""),
+        kind: String(event.kind ?? ""),
+        method: String(event.method ?? ""),
+        summary: typeof event.summary === "string" ? event.summary : null,
+        payload: event.payload,
+      })),
+    };
+  }
+
+  async create(input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> {
+    if (!input.charter.trim()) throw new Error("A supervised agent charter is required.");
+    const creationRequestId = input.creationRequestId?.trim() || randomUUID();
+    if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(creationRequestId)) {
+      throw new Error("A valid supervised agent creation request id is required.");
+    }
+    const now = this.now().toISOString();
+    const entry: WireEntry = {
+      id: `supervised_${creationRequestId}`,
+      room_id: input.roomIdentifier,
+      display_name: input.displayName.trim() || "Supervised agent",
+      provider: input.providerId,
+      model: input.model?.trim() || null,
+      charter: input.charter.trim(),
+      // This durable paused claim is the engine-ownership fence. Electron
+      // stops any legacy owner only after this CAS succeeds, then activates it.
+      desired_state: "paused",
+      observed_state: "absent",
+      condition: "none",
+      permission_profile_id: input.permissionProfileId ?? null,
+      // Admission declares the durable ingress owner independently from the
+      // provider's opaque native launch policy. Provider descriptors opt into
+      // daemon delivery only after their bounded-turn adapter is ready.
+      delivery_mode: supervisedDeliveryModeForProvider(input.providerId),
+      // A caller-supplied policy belongs to the selected native provider. Do
+      // not reinterpret it as a LetAgents permission profile on its way to
+      // the daemon. The Codex default remains only for the existing UI that
+      // has not supplied an explicit provider policy yet.
+      provider_launch_policy: input.launchPolicy ?? (input.providerId === "codex" && (!input.permissionProfileId || input.permissionProfileId === "full_access")
+        ? { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } }
+        : {}),
+      created_by: "desktop",
+      created_at: now,
+      source_repo_path: input.repoRootPath?.trim() || null,
+      workspace_path: null,
+      work_attempt_id: null,
+      workplace_liveness: { state: "unknown", observed_at: null, detail: "Awaiting room registration." },
+      native_liveness: { state: "unknown", observed_at: null, detail: "Awaiting native provider launch." },
+      activity: [],
+      // Creation is the one authoritative point where the desktop can prove
+      // no worker session has ever been minted for this immutable entry id.
+      // Legacy entries that omitted this field remain revocation-unknown.
+      last_worker_binding: null,
+    };
+    await this.ensureRunning();
+    return mapEntry(await this.request<WireEntry>("manifest.put", { entry }));
+  }
+
+  async assertLegacyStartAllowed(roomIdentifier: string, provider: string): Promise<void> {
+    const owner = (await this.list(roomIdentifier)).find((entry) => entry.provider === provider && entry.desiredState !== "stopped");
+    if (owner) {
+      throw new Error(`${owner.displayName} already owns the ${provider} lane through the supervised engine. Stop it before starting a legacy agent.`);
+    }
+  }
+
+  async reserveLegacyLane(roomIdentifier: string, provider: string, reservationId: string): Promise<WireLegacyLaneOwner> {
+    await this.ensureRunning();
+    const ownerProcessIdentity = defaultGetProcessIdentity(process.pid);
+    if (typeof ownerProcessIdentity !== "string" || !ownerProcessIdentity) {
+      throw new Error("Could not prove the Electron process birth identity for a legacy lane reservation.");
+    }
+    return this.request<WireLegacyLaneOwner>("lane.reserve_legacy", {
+      reservation_id: reservationId,
+      room_id: roomIdentifier,
+      provider,
+      owner_pid: process.pid,
+      owner_process_identity: ownerProcessIdentity,
+    });
+  }
+
+  async activateLegacyLane(reservationId: string, sessionId: string): Promise<WireLegacyLaneOwner> {
+    await this.ensureRunning();
+    return this.request<WireLegacyLaneOwner>("lane.activate_legacy", {
+      reservation_id: reservationId,
+      session_id: sessionId,
+    });
+  }
+
+  async releaseLegacyLane(input: { reservationId?: string | null; sessionId?: string | null; roomIdentifier?: string | null; provider?: string | null }): Promise<boolean> {
+    await this.ensureRunning();
+    const result = await this.request<{ released: boolean }>("lane.release_legacy", {
+      reservation_id: input.reservationId ?? null,
+      session_id: input.sessionId ?? null,
+      room_id: input.roomIdentifier ?? null,
+      provider: input.provider ?? null,
+    });
+    return result.released;
+  }
+
+  async setDesiredState(id: string, desiredState: DesktopSupervisorDesiredState): Promise<DesktopSupervisorManifestEntry> {
+    if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle requires an exact identity and desired state.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    return mapEntry(await this.request<WireEntry>("manifest.set_desired_state", { id, desired_state: desiredState }));
+  }
+
+  async recoverAgentRuntime(id: string): Promise<DesktopSupervisorManifestEntry> {
+    if (!nonEmptyString(id) || id !== id.trim()) {
+      throw new Error("Agent runtime recovery requires an exact identity.");
+    }
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRuntimeRecovery) {
+      throw new Error("This supervisor is too old for safe provider runtime recovery; rebuild the desktop daemon.");
+    }
+    const result = await this.request<{ outcome: "recovering"; entry: WireEntry }>(
+      "supervisor.recover_agent_runtime",
+      { entry_id: id, daemon_generation: status.generation },
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      RECOVERY_REQUEST_TIMEOUT_MS,
+    );
+    return mapEntry(result.entry);
+  }
+
+  async setDisplayName(id: string, displayName: string): Promise<DesktopSupervisorManifestEntry> {
+    const normalized = displayName.trim();
+    if (!nonEmptyString(id) || !normalized || normalized.length > 120) {
+      throw new Error("Agent naming requires an exact identity and display name.");
+    }
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) {
+      throw new Error("This supervisor is too old for durable agent naming; rebuild the desktop daemon.");
+    }
+    return mapEntry(await this.request<WireEntry>("manifest.set_display_name", {
+      id,
+      display_name: normalized,
+    }));
+  }
+
+  /** This call deliberately accepts only a renderer-safe exact identity tuple. */
+  async retryRoomDelivery(input: DesktopSupervisorRoomDeliveryRetryInput): Promise<void> {
+    const status = await this.ensureRunning();
+    if (!status.capabilities.roomDeliveryRetry) {
+      throw new Error("This supervisor does not support room delivery retry.");
+    }
+    await this.request<{ accepted: boolean }>("supervisor.retry_room_delivery", {
+      entry_id: input.entryId,
+      room_id: input.roomId,
+      source_message_id: input.sourceMessageId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      agent_session_id: input.agentSessionId,
+      daemon_generation: status.generation,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+  }
+
+  async restoreAgentConversation(input: import("../ipc-types/agents.js").DesktopSupervisorConversationRestoreInput): Promise<void> {
+    const status = await this.ensureRunning();
+    if (!status.capabilities.providerContinuationRepair) {
+      throw new Error("This supervisor does not support provider conversation restoration.");
+    }
+    await this.request<{ accepted: boolean }>("supervisor.restore_agent_conversation", {
+      entry_id: input.entryId,
+      room_id: input.roomId,
+      source_message_id: input.sourceMessageId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      agent_session_id: input.agentSessionId,
+      daemon_generation: status.generation,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+  }
+
+  async skipRoomDelivery(input: import("../ipc-types/agents.js").DesktopSupervisorRoomDeliverySkipInput): Promise<void> {
+    const status = await this.ensureRunning();
+    if (!status.capabilities.roomDeliverySkip) {
+      throw new Error("This supervisor does not support safely skipping a blocked room message.");
+    }
+    await this.request<{ accepted: boolean }>("supervisor.skip_room_delivery", {
+      entry_id: input.entryId,
+      room_id: input.roomId,
+      source_message_id: input.sourceMessageId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      agent_session_id: input.agentSessionId,
+      daemon_generation: status.generation,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+  }
+
+  async compareAndSetDesiredState(
+    id: string,
+    expectedDesiredState: DesktopSupervisorDesiredState,
+    desiredState: DesktopSupervisorDesiredState,
+  ): Promise<DesktopSupervisorManifestEntry | null> {
+    if (!nonEmptyString(id) || !["running", "paused", "stopped"].includes(expectedDesiredState) || !["running", "paused", "stopped"].includes(desiredState)) throw new Error("Agent lifecycle compare-and-set requires exact typed fields.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    const result = await this.request<{ applied: boolean; entry: WireEntry }>("manifest.compare_and_set_desired_state", {
+      id,
+      expected_desired_state: expectedDesiredState,
+      desired_state: desiredState,
+    });
+    return result.applied ? mapEntry(result.entry) : null;
+  }
+
+  async controlTurn(input: DesktopSupervisorTurnControlInput): Promise<DesktopSupervisorTurnControlResult> {
+    if (!input || !nonEmptyString(input.entryId) || !nonEmptyString(input.roomId)
+      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1
+      || !nonEmptyString(input.workAttemptId) || !nonEmptyString(input.executionGenerationId)
+      || !nonEmptyString(input.providerContinuationId) || !nonEmptyString(input.providerTurnId)
+      || !nonEmptyString(input.inboxItemId) || !nonEmptyString(input.sourceMessageId)
+      || !validTurnControlActionId(input.actionId)
+      || !Number.isSafeInteger(input.actionSequence) || input.actionSequence < 1
+      || (input.correction !== null && input.correction !== undefined && typeof input.correction !== "string")) {
+      throw new Error("Turn control requires exact typed identity and a bounded action id.");
+    }
+    const status = await this.ensureRunning();
+    if (status.generation !== input.daemonGeneration) {
+      throw new Error("The supervisor generation changed before turn control was sent.");
+    }
+    return this.request<DesktopSupervisorTurnControlResult>("manifest.control_turn", {
+      id: input.entryId,
+      daemon_generation: input.daemonGeneration,
+      room_id: input.roomId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      provider_continuation_id: input.providerContinuationId,
+      provider_turn_id: input.providerTurnId,
+      inbox_item_id: input.inboxItemId,
+      source_message_id: input.sourceMessageId,
+      action_id: input.actionId,
+      action_sequence: input.actionSequence,
+      correction: input.correction ?? null,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, this.turnControlRequestTimeoutMs);
+  }
+
+  async resolveTurnControl(input: DesktopSupervisorTurnControlResolutionInput): Promise<DesktopSupervisorManifestEntry> {
+    await this.ensureRunning();
+    return mapEntry(await this.request<WireEntry>("manifest.resolve_turn_control", {
+      id: input.entryId,
+      work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId,
+      action_id: input.actionId,
+      resolution: input.resolution,
+    }));
+  }
+
+  async readAttempt(id: string): Promise<DesktopSupervisorAttemptDetail> {
+    await this.ensureRunning();
+    const detail = await this.request<Record<string, unknown>>("attempt.read", { id }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+    return {
+      entryId: String(detail.entry_id ?? id),
+      workAttemptId: typeof detail.work_attempt_id === "string" ? detail.work_attempt_id : null,
+      workspacePath: typeof detail.workspace_path === "string" ? detail.workspace_path : null,
+      lastTerminal: detail.last_terminal && typeof detail.last_terminal === "object" ? detail.last_terminal as Record<string, unknown> : null,
+      restartCount: Number(detail.restart_count ?? 0),
+      activity: Array.isArray(detail.activity) ? detail.activity.map((event) => mapActivity(event as WireActivityEvent)) : [],
+    };
+  }
+  async getAgentInspectorDetail(input: import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail> {
+    if (!nonEmptyString(input.entryId) || !nonEmptyString(input.roomId) || (input.sourceMessageId !== undefined && input.sourceMessageId !== null && !nonEmptyString(input.sourceMessageId))) throw new Error("Agent inspector detail requires exact non-empty entry, room, and optional source identities.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorDetail) throw new Error("This supervisor does not support agent inspector detail history.");
+    const detail = await this.request<Record<string, unknown>>("supervisor.get_agent_inspector_detail", { entry_id: input.entryId, room_id: input.roomId, source_message_id: input.sourceMessageId ?? null }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+    return mapAgentInspectorDetail(detail, input);
+  }
+
+  async getAgentConfiguration(entryId: string, daemonGeneration: number): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Agent configuration requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    const value = await this.request<Record<string, unknown>>("supervisor.get_agent_configuration", { entry_id: entryId, daemon_generation: daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+    return mapAgentConfiguration(value, entryId, daemonGeneration);
+  }
+
+  async updateAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationUpdateResult> {
+    if (!input || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1 || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1
+      || !input.configuration || typeof input.configuration !== "object"
+      || !Object.hasOwn(input.configuration, "model") || !Object.hasOwn(input.configuration, "reasoningEffort") || !Object.hasOwn(input.configuration, "charter") || !Object.hasOwn(input.configuration, "permissionProfileId")) throw new Error("Agent configuration update requires exact typed coordinates and fields.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    const result = await this.request<Record<string, unknown>>("supervisor.update_agent_configuration", { entry_id: input.entryId, daemon_generation: input.daemonGeneration, expected_revision: input.expectedRevision, configuration: {
+      model: input.configuration.model, reasoning_effort: input.configuration.reasoningEffort, charter: input.configuration.charter,
+      permission_profile_id: input.configuration.permissionProfileId,
+    } });
+    if (result.outcome === "invalid") {
+      if (typeof result.error !== "string" || !result.error.trim()) throw new Error("Supervisor returned an invalid configuration error response.");
+      return { outcome: "invalid", error: result.error };
+    }
+    if (result.outcome !== "updated" && result.outcome !== "conflict") throw new Error("Supervisor returned an invalid configuration update result.");
+    return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, input.entryId, input.daemonGeneration) };
+  }
+
+  async prepareRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMovePrepareInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.entryId) || !nonEmptyString(input.destinationRoomId) || !nonEmptyString(input.requestId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move preparation requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.prepare_room_move", { entry_id: input.entryId, destination_room_id: input.destinationRoomId, request_id: input.requestId, daemon_generation: input.daemonGeneration }), input.entryId);
+  }
+
+  async commitRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move commit requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.commit_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 15_000), input.entryId, input.operationId);
+  }
+
+  async acknowledgeRoomMoveSourceRevocation(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput & { sourceAgentSessionId: string }): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.sourceAgentSessionId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move credential acknowledgement requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.acknowledge_room_move_source_revocation", {
+      operation_id: input.operationId, entry_id: input.entryId, source_agent_session_id: input.sourceAgentSessionId, daemon_generation: input.daemonGeneration,
+    }), input.entryId, input.operationId);
+  }
+
+  async rollbackRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput & { error: string }): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !nonEmptyString(input.error) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move rollback requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.rollback_room_move", {
+      operation_id: input.operationId, entry_id: input.entryId, error: input.error, daemon_generation: input.daemonGeneration,
+    }), input.entryId, input.operationId);
+  }
+
+  async getRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMoveOperationInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {
+    if (!nonEmptyString(input.operationId) || !nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Room-move status requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    return mapRoomMove(await this.request<Record<string, unknown>>("supervisor.get_room_move", { operation_id: input.operationId, entry_id: input.entryId, daemon_generation: input.daemonGeneration }), input.entryId, input.operationId);
+  }
+
+  async getCurrentRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorCurrentRoomMoveInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove | null> {
+    if (!nonEmptyString(input.entryId) || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) throw new Error("Current room-move discovery requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentRoomMove) throw new Error("This supervisor is too old for durable room moves; rebuild the desktop daemon.");
+    const result = await this.request<Record<string, unknown> | null>("supervisor.get_current_room_move", {
+      entry_id: input.entryId,
+      daemon_generation: input.daemonGeneration,
+    });
+    return result === null ? null : mapRoomMove(result, input.entryId);
+  }
+
+  async retireAgent(entryId: string, daemonGeneration: number): Promise<void> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Retire requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    await this.request("supervisor.retire_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
+  }
+
+  async purgeAgent(
+    entryId: string,
+    daemonGeneration: number,
+    revokedAgentSessionId: string | null = null,
+    grantRevokedWithoutWorkerSession = false,
+    includeCleanupIdentity = false,
+  ): Promise<{
+    outcome: "purged" | "invalid" | "revocation_required";
+    operationId?: string;
+    revocationKind?: "worker_session" | "grant_only";
+    agentSessionId?: string;
+    purgedWorkAttemptId?: string;
+    error?: string;
+  }> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1
+      || !(revokedAgentSessionId === null || nonEmptyString(revokedAgentSessionId))
+      || (revokedAgentSessionId !== null && grantRevokedWithoutWorkerSession)
+      || typeof grantRevokedWithoutWorkerSession !== "boolean"
+      || typeof includeCleanupIdentity !== "boolean") throw new Error("Purge requires exact typed coordinates.");
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
+    const result = await this.request<Record<string, unknown>>("supervisor.purge_agent", {
+      entry_id: entryId,
+      daemon_generation: daemonGeneration,
+      revoked_agent_session_id: revokedAgentSessionId,
+      grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
+    });
+    if (result.outcome === "purged") {
+      return {
+        outcome: "purged",
+        ...(includeCleanupIdentity && typeof result.purged_work_attempt_id === "string" && result.purged_work_attempt_id.trim()
+          ? { purgedWorkAttemptId: result.purged_work_attempt_id }
+          : {}),
+      };
+    }
+    if (result.outcome === "revocation_required" && typeof result.operation_id === "string" && result.operation_id.trim()) {
+      if (result.revocation_kind === "worker_session"
+        && typeof result.agent_session_id === "string" && result.agent_session_id.trim()) {
+        return {
+          outcome: "revocation_required",
+          operationId: result.operation_id,
+          revocationKind: "worker_session",
+          agentSessionId: result.agent_session_id,
+        };
+      }
+      if (result.revocation_kind === "grant_only" && result.agent_session_id === undefined) {
+        return { outcome: "revocation_required", operationId: result.operation_id, revocationKind: "grant_only" };
+      }
+    }
+    if (result.outcome === "invalid" && typeof result.error === "string" && result.error.trim()) return { outcome: "invalid", error: result.error };
+    throw new Error("Supervisor returned an invalid purge result.");
+  }
+
+  async appendActivity(id: string, event: DesktopSupervisorActivityEvent): Promise<DesktopSupervisorManifestEntry> {
+    await this.ensureRunning();
+    return mapEntry(await this.request<WireEntry>("manifest.append_activity", { id, event: wireActivity(event) }));
+  }
+
+  async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null): Promise<DesktopSupervisorManifestEntry> {
+    await this.ensureRunning();
+    return mapEntry(await this.request<WireEntry>("manifest.update_workplace_liveness", {
+      id,
+      state,
+      detail,
+      observed_at: this.now().toISOString(),
+    }));
+  }
+
+  /** Main-process only: a secret crosses only the owner-only local socket. */
+  async installWorkerCredential(input: {
+    entryId: string; roomId: string; workAttemptId: string;
+    executionGenerationId: string; agentSessionId: string; credential: string;
+  }): Promise<"installed" | "stale"> {
+    if (!input.credential.trim()) throw new Error("A supervised worker credential is required.");
+    const status = await this.ensureRunning();
+    const result = await this.request<{ status?: unknown }>("supervisor.install_worker_credential", {
+      entry_id: input.entryId, room_id: input.roomId, work_attempt_id: input.workAttemptId,
+      execution_generation_id: input.executionGenerationId, agent_session_id: input.agentSessionId,
+      agent_session_token: input.credential, daemon_generation: status.generation,
+    });
+    return result.status === "installed" ? "installed" : "stale";
+  }
+
+  /**
+   * Main-process-only Open Model credential ingress. The provider key is
+   * decrypted by Electron and crosses only the owner-only daemon socket.
+   */
+  async installOpenModelCredential(input: {
+    entryId: string;
+    apiKey: string | null;
+    baseUrl: string;
+    model: string;
+    daemonGeneration: number;
+  }): Promise<"installed" | "stale"> {
+    if (!input.baseUrl.trim() || !input.model.trim()) {
+      throw new Error("An Open Model endpoint and model are required.");
+    }
+    const status = await this.ensureRunning();
+    if (status.generation !== input.daemonGeneration) return "stale";
+    const result = await this.request<{ status?: unknown }>(
+      "supervisor.install_open_model_credential",
+      {
+        entry_id: input.entryId,
+        api_key: input.apiKey,
+        base_url: input.baseUrl,
+        model: input.model,
+        daemon_generation: input.daemonGeneration,
+      },
+    );
+    return result.status === "installed" ? "installed" : "stale";
+  }
+
+  /**
+   * Main-process-only grant ingress.  This is deliberately not represented in
+   * IPC types: a supervisor bearer may cross only the owner-only Unix socket
+   * to the exact daemon generation that will hold it in process memory.
+   */
+  async installHostGrant(input: {
+    entryId: string;
+    roomId: string;
+    agentKey: string;
+    grantId: string;
+    supervisorGrant: string;
+    grantGeneration: number;
+    daemonGeneration: number;
+    hostId: string;
+    installationId: string;
+    expiresAt: string;
+    apiUrl?: string;
+    /** Rebind only an already-live exact provider generation; never converge. */
+    credentialOnly?: boolean;
+    /** Install owner authority for explicit runtime replacement; never attach or converge. */
+    recoveryOnly?: boolean;
+  }): Promise<"installed" | "stale" | "provider_unavailable"> {
+    if (input.credentialOnly && input.recoveryOnly) {
+      throw new Error("Host grant installation cannot be both reconnect-only and recovery-only.");
+    }
+    if (!input.supervisorGrant.trim()) throw new Error("A supervised host grant is required.");
+    const status = await this.ensureRunning();
+    // Never let a request started against an old process install into its
+    // successor. The daemon independently checks this fence too.
+    if (status.generation !== input.daemonGeneration) return "stale";
+    const result = await this.request<{ status?: unknown }>("supervisor.install_host_grant", {
+      entry_id: input.entryId,
+      room_id: input.roomId,
+      agent_key: input.agentKey,
+      grant_id: input.grantId,
+      supervisor_grant: input.supervisorGrant,
+      grant_generation: input.grantGeneration,
+      host_id: input.hostId,
+      installation_id: input.installationId,
+      grant_expires_at: input.expiresAt,
+      api_url: input.apiUrl ?? apiUrl,
+      daemon_generation: input.daemonGeneration,
+      credential_only: Boolean(input.credentialOnly),
+      ...(input.recoveryOnly ? { recovery_only: true } : {}),
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS);
+    if (result.status === "installed" || result.status === "provider_unavailable") return result.status;
+    return "stale";
+  }
+
+  /** Establish a daemon-inbox entry's one-time durable room boundary. */
+  async bootstrapRoomIngress(entryId: string, daemonGeneration: number): Promise<"bootstrapped" | "existing" | "stale"> {
+    const status = await this.ensureRunning();
+    if (status.generation !== daemonGeneration) return "stale";
+    const result = await this.request<{ status?: unknown }>("supervisor.bootstrap_room_ingress", {
+      entry_id: entryId,
+      daemon_generation: daemonGeneration,
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
+    return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
+  }
+
+  private async ensureRunningOnce(): Promise<DesktopSupervisorDaemonStatus> {
+    let retiredGeneration: number | undefined;
+    try {
+      const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
+      const daemonVersion = Number(negotiated.protocol_version ?? 0);
+      const implementationVersion = String(negotiated.implementation_version ?? "unknown");
+      if (
+        daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
+        && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
+      ) return mapStatus(negotiated);
+      const retired = this.captureRetiredDaemon(negotiated);
+      retiredGeneration = Number(negotiated.generation);
+      // Handoff drains in-flight provider dispatch reservations, which can
+      // span a full provider launch; the tight control timeout aborted real
+      // upgrades attempted while any agent was mid-launch.
+      await this.request("daemon.prepare_handoff", undefined, daemonVersion, RECOVERY_REQUEST_TIMEOUT_MS);
+      await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
+    } catch (error) {
+      if (!isConnectionUnavailable(error)) throw error;
+    }
+    await access(this.daemonScriptPath);
+    await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
+    const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory);
+    child.once("error", () => undefined);
+    return this.waitForHealthy(retiredGeneration);
+  }
+
+  private async prepareForApplicationUpdateOnce(): Promise<void> {
+    if (this.ensureOperation) await this.ensureOperation;
+    let negotiated: Record<string, unknown>;
+    try {
+      negotiated = await this.request<Record<string, unknown>>(
+        "daemon.negotiate",
+        undefined,
+        SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      );
+    } catch (error) {
+      // A failed or never-started supervisor has no owner-only socket to
+      // relinquish. Keep the update fence active, but do not prevent Squirrel
+      // from replacing the app that may contain the daemon recovery fix.
+      if (isConnectionUnavailable(error)) return;
+      throw error;
+    }
+    const daemonVersion = Number(negotiated.protocol_version ?? 0);
+    const implementationVersion = String(negotiated.implementation_version ?? "unknown");
+    const retired = this.captureRetiredDaemon(negotiated);
+    await this.request(
+      "daemon.prepare_handoff",
+      undefined,
+      daemonVersion,
+      RECOVERY_REQUEST_TIMEOUT_MS,
+    );
+    await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
+  }
+
+  private async waitForHealthy(retiredGeneration?: number): Promise<DesktopSupervisorDaemonStatus> {
+    const deadline = Date.now() + this.startTimeoutMs;
+    let lastError: unknown = null;
+    while (Date.now() < deadline) {
+      try {
+        const result = await this.request<Record<string, unknown>>("daemon.negotiate");
+        const status = mapStatus(result);
+        if (status.protocolVersion !== SUPERVISOR_DAEMON_PROTOCOL_VERSION) {
+          throw new SupervisorDaemonProtocolMismatchError(SUPERVISOR_DAEMON_PROTOCOL_VERSION, status.protocolVersion, "Replacement daemon protocol does not match the desktop.");
+        }
+        if (status.implementationVersion !== SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION) {
+          throw new Error(
+            `Replacement supervisor daemon is still ${status.implementationVersion}; expected ${SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION}. Rebuild the desktop daemon and try again.`,
+          );
+        }
+        if (retiredGeneration !== undefined && status.generation <= retiredGeneration) {
+          throw new Error(
+            `Replacement supervisor daemon did not acquire a newer singleton generation; received ${status.generation} after ${retiredGeneration}.`,
+          );
+        }
+        return status;
+      } catch (error) {
+        lastError = error;
+        await delay(50);
+      }
+    }
+    throw new Error(`Timed out waiting for the supervisor daemon: ${lastError instanceof Error ? lastError.message : "unreachable"}`);
+  }
+
+  private captureRetiredDaemon(negotiated: Record<string, unknown>): DaemonProcessIdentity {
+    const pid = Number(negotiated.pid);
+    if (!Number.isSafeInteger(pid) || pid <= 1 || pid === process.pid) {
+      throw new Error("Refusing daemon handoff because the serving daemon PID is invalid.");
+    }
+    const inspected = this.safeInspectDaemon(pid);
+    if (!inspected || inspected.state === "zombie") {
+      throw new Error("Refusing daemon handoff because the serving daemon process identity is unverifiable.");
+    }
+    if (inspected.pid !== pid) {
+      throw new Error("Refusing daemon handoff because the inspected daemon PID does not match the serving daemon.");
+    }
+    if (!this.commandPointsAtExpectedDaemon(inspected.command)) {
+      throw new Error("Refusing daemon handoff because the serving PID does not point at the expected daemon script.");
+    }
+    return { ...inspected, expectedScriptPath: this.daemonScriptPath };
+  }
+
+  private async enforceRetiredDaemonExit(
+    retired: DaemonProcessIdentity,
+    daemonVersion: number,
+    implementationVersion: string,
+  ): Promise<void> {
+    let observation = await this.waitForRetiredProcessChange(retired, this.naturalExitTimeoutMs);
+    let authorityReleased = await this.isSocketReleased(daemonVersion);
+    if (observation.kind === "absent" || observation.kind === "zombie") {
+      if (!authorityReleased) throw new Error("Retired daemon process ended without releasing its control socket.");
+      if (observation.kind === "zombie") {
+        this.emitHandoffDiagnostic(retired, implementationVersion, true, "zombie_after_natural_exit", "Retired daemon is a zombie after authority release; replacement may proceed.");
+      }
+      return;
+    }
+    if (observation.kind !== "same") {
+      if (!authorityReleased) {
+        throw new Error(`Existing supervisor daemon still owns its socket and its process identity is ${observation.kind}; leaving it serving.`);
+      }
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, observation.kind, this.observationDetail(observation));
+      return;
+    }
+
+    if (implementationVersion === "2.0.25" && authorityReleased) {
+      this.emitHandoffDiagnostic(retired, implementationVersion, authorityReleased, "legacy_sigterm_expected", "Daemon 2.0.25 released authority but retains live RPC handles; SIGTERM escalation is expected.");
+    }
+    observation = this.guardedSignalRetiredDaemon(retired, "SIGTERM");
+    if (observation.kind === "same") {
+      observation = await this.waitForRetiredProcessChange(retired, this.terminateTimeoutMs);
+    }
+    authorityReleased = await this.isSocketReleased(daemonVersion);
+    if (observation.kind === "absent" || observation.kind === "zombie") {
+      if (!authorityReleased) throw new Error("Retired daemon did not release its control socket after SIGTERM.");
+      return;
+    }
+    if (observation.kind !== "same") {
+      if (!authorityReleased) {
+        throw new Error(`Existing supervisor daemon still owns its socket after SIGTERM and its process identity is ${observation.kind}; leaving it serving.`);
+      }
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, observation.kind, this.observationDetail(observation));
+      return;
+    }
+
+    observation = this.guardedSignalRetiredDaemon(retired, "SIGKILL");
+    if (observation.kind === "same") {
+      observation = await this.waitForRetiredProcessChange(retired, this.killTimeoutMs);
+    }
+    authorityReleased = await this.isSocketReleased(daemonVersion);
+    if (!authorityReleased) {
+      throw new Error("Existing supervisor daemon still owns its socket after bounded TERM/KILL enforcement; replacement was not started.");
+    }
+    if (observation.kind === "same") {
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, "non_zombie_survived_sigkill", "Retired daemon survived SIGKILL but no longer owns authority; replacement will prove singleton acquisition.");
+      return;
+    }
+    if (observation.kind === "zombie") {
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, "zombie_after_sigkill", "Retired daemon became a zombie after SIGKILL; replacement will prove singleton acquisition.");
+      return;
+    }
+    if (observation.kind !== "absent") {
+      this.emitHandoffDiagnostic(retired, implementationVersion, true, observation.kind, this.observationDetail(observation));
+    }
+  }
+
+  private guardedSignalRetiredDaemon(
+    retired: DaemonProcessIdentity,
+    signal: "SIGTERM" | "SIGKILL",
+  ): RetiredDaemonObservation {
+    const observation = this.observeRetiredDaemon(retired);
+    if (observation.kind !== "same") return observation;
+    if (!Number.isSafeInteger(retired.pid) || retired.pid <= 1 || retired.pid === process.pid) {
+      return { kind: "changed", reason: "invalid daemon PID" };
+    }
+    // Deliberately signal the exact positive daemon PID. Provider-stop code may
+    // signal provider process groups; daemon replacement must never do so.
+    try {
+      this.signalDaemon(retired.pid, signal);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") {
+        return this.observeRetiredDaemon(retired);
+      }
+      throw error;
+    }
+    return observation;
+  }
+
+  private async waitForRetiredProcessChange(
+    retired: DaemonProcessIdentity,
+    timeoutMs: number,
+  ): Promise<RetiredDaemonObservation> {
+    const deadline = Date.now() + timeoutMs;
+    let observation = this.observeRetiredDaemon(retired);
+    while (observation.kind === "same" && Date.now() < deadline) {
+      await delay(Math.min(this.processPollIntervalMs, Math.max(0, deadline - Date.now())));
+      observation = this.observeRetiredDaemon(retired);
+    }
+    return observation;
+  }
+
+  private observeRetiredDaemon(retired: DaemonProcessIdentity): RetiredDaemonObservation {
+    const current = this.safeInspectDaemon(retired.pid);
+    if (current === null) return { kind: "absent" };
+    if (current === undefined) return { kind: "unverifiable" };
+    if (current.pid !== retired.pid) return { kind: "changed", reason: "inspected PID changed" };
+    if (current.kernelStartTime !== retired.kernelStartTime) {
+      return { kind: "changed", reason: "kernel start time changed (PID reuse)" };
+    }
+    if (current.state === "zombie") return { kind: "zombie" };
+    if (current.command !== retired.command) return { kind: "changed", reason: "full command changed" };
+    if (!this.commandPointsAtExpectedDaemon(current.command, retired.expectedScriptPath)) {
+      return { kind: "changed", reason: "command no longer points at expected daemon script" };
+    }
+    return { kind: "same", identity: retired };
+  }
+
+  private safeInspectDaemon(pid: number): DaemonIdentityInspection | null | undefined {
+    try {
+      return this.inspectDaemonProcess(pid);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private commandPointsAtExpectedDaemon(command: string, expectedScriptPath = this.daemonScriptPath): boolean {
+    return command === expectedScriptPath || command.endsWith(` ${expectedScriptPath}`);
+  }
+
+  private async isSocketReleased(daemonVersion: number): Promise<boolean> {
+    try {
+      await this.request("daemon.negotiate", undefined, daemonVersion);
+      return false;
+    } catch (error) {
+      if (isConnectionUnavailable(error)) return true;
+      // A timeout, malformed response, or daemon error still proves that the
+      // socket was connectable; it does not prove authority release. Keep the
+      // result conservative so an exact identity-guarded TERM/KILL can retire
+      // an acknowledged-but-unresponsive predecessor.
+      return false;
+    }
+  }
+
+  private observationDetail(observation: Exclude<RetiredDaemonObservation, { kind: "same" }>): string {
+    return observation.kind === "changed"
+      ? `Retired daemon identity changed: ${observation.reason}. It was not signalled.`
+      : `Retired daemon identity is ${observation.kind}. It was not signalled.`;
+  }
+
+  private emitHandoffDiagnostic(
+    retired: DaemonProcessIdentity,
+    implementationVersion: string,
+    authorityReleased: boolean,
+    outcome: string,
+    detail: string,
+  ): void {
+    this.reportHandoffDiagnostic({
+      event: "supervisor_daemon_handoff",
+      outcome,
+      pid: retired.pid,
+      implementationVersion,
+      authorityReleased,
+      detail,
+    });
+  }
+
+  private request<T = unknown>(
+    method: string,
+    params?: unknown,
+    version = SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    timeoutMs = this.requestTimeoutMs,
+    unrefSocket = false,
+    signal?: AbortSignal,
+  ): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const id = randomUUID();
+      const socket = createConnection(this.socketPath);
+      if (unrefSocket) socket.unref();
+      let buffer = "";
+      let settled = false;
+      let onAbort: (() => void) | null = null;
+      const finish = (error?: Error, value?: T) => {
+        if (settled) return;
+        settled = true;
+        if (onAbort) signal?.removeEventListener("abort", onAbort);
+        socket.destroy();
+        if (error) reject(error); else resolve(value as T);
+      };
+      onAbort = () => finish(new Error(`Supervisor daemon request aborted: ${method}`));
+      if (signal?.aborted) {
+        onAbort();
+        return;
+      }
+      signal?.addEventListener("abort", onAbort, { once: true });
+      socket.setEncoding("utf8");
+      socket.setTimeout(timeoutMs, () => finish(new Error(`Supervisor daemon request timed out: ${method}`)));
+      socket.once("error", (error) => finish(error));
+      socket.on("data", (chunk: string) => {
+        buffer += chunk;
+        const newline = buffer.indexOf("\n");
+        if (newline < 0) return;
+        try {
+          const response = JSON.parse(buffer.slice(0, newline)) as WireResponse;
+          if (response.id !== id) throw new Error("Supervisor daemon response id mismatch.");
+          if (!response.ok) {
+            if (/Protocol version mismatch/i.test(response.error ?? "")) {
+              throw new SupervisorDaemonProtocolMismatchError(version, response.version, response.error ?? "Protocol version mismatch.");
+            }
+            throw new Error(response.error || `Supervisor daemon request failed: ${method}`);
+          }
+          finish(undefined, response.result as T);
+        } catch (error) {
+          finish(error instanceof Error ? error : new Error("Invalid supervisor daemon response."));
+        }
+      });
+      socket.once("connect", () => {
+        if (!settled) socket.write(`${JSON.stringify({ version, id, method, params })}\n`);
+      });
+    });
+  }
+}
+
+function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatus {
+  return {
+    healthy: value.healthy === true,
+    protocolVersion: Number(value.protocol_version ?? 0),
+    implementationVersion: String(value.implementation_version ?? "unknown"),
+    capabilities: {
+      roomDeliveryRetry: booleanField(value.capabilities, "room_delivery_retry"),
+      providerContinuationRepair: booleanField(value.capabilities, "provider_continuation_repair"),
+      roomDeliverySkip: booleanField(value.capabilities, "room_delivery_skip"),
+      agentInspectorDetail: booleanField(value.capabilities, "agent_inspector_detail_v1"),
+      agentInspectorSettings: booleanField(value.capabilities, "agent_inspector_settings_v1"),
+      agentRoomMove: booleanField(value.capabilities, "agent_room_move_v1"),
+      agentLifecycle: booleanField(value.capabilities, "agent_lifecycle_v1"),
+      agentRuntimeRecovery: booleanField(value.capabilities, "agent_runtime_recovery_v1"),
+      agentStateSubscription: booleanField(value.capabilities, "agent_state_subscription_v1"),
+      agentActivityStream: booleanField(value.capabilities, "agent_activity_stream_v1"),
+    },
+    generation: Number(value.generation ?? 0),
+    pid: Number(value.pid ?? 0),
+    startedAt: String(value.started_at ?? ""),
+  };
+}
+
+function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, daemonGeneration: number): import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration {
+  if (value.entry_id !== entryId || value.daemon_generation !== daemonGeneration || typeof value.provider !== "string" || !value.provider.trim() || typeof value.charter !== "string" || !value.charter.trim()
+    || !Object.hasOwn(value, "model") || (value.model !== null && typeof value.model !== "string")
+    || !Object.hasOwn(value, "permission_profile_id") || (value.permission_profile_id !== null && typeof value.permission_profile_id !== "string")
+    || !Array.isArray(value.supervised_permission_profiles)
+    || !Object.hasOwn(value, "provider_launch_policy") || value.provider_launch_policy === null || typeof value.provider_launch_policy !== "object" || Array.isArray(value.provider_launch_policy)
+    || !Number.isSafeInteger(value.config_revision) || (value.config_revision as number) < 1
+    || !Number.isSafeInteger(value.runtime_configuration_revision) || (value.runtime_configuration_revision as number) < 1
+    || (value.runtime_configuration_revision as number) > (value.config_revision as number)) throw new Error("Supervisor returned an invalid agent configuration response.");
+  const effort = value.reasoning_effort;
+  if (effort !== null && (typeof effort !== "string" || !["low", "medium", "high", "xhigh", "max"].includes(effort))) throw new Error("Supervisor returned an invalid reasoning effort.");
+  return { entryId, daemonGeneration, provider: value.provider, model: value.model as string | null,
+    reasoningEffort: effort as import("../ipc-types/agents.js").DesktopManagedAgentEffort | null, charter: value.charter,
+    permissionProfileId: value.permission_profile_id as string | null,
+    supervisedPermissionProfiles: value.supervised_permission_profiles.map((profile) => mapSupervisedPermissionProfile(profile)),
+    providerLaunchPolicy: value.provider_launch_policy, configRevision: value.config_revision as number, runtimeConfigurationRevision: value.runtime_configuration_revision as number };
+}
+
+function mapSupervisedPermissionProfile(value: unknown): import("../ipc-types/agents.js").DesktopManagedAgentPermissionProfile {
+  const profile = record(value);
+  const id = typeof profile?.id === "string" && profile.id.trim() ? profile.id : null;
+  const label = typeof profile?.label === "string" && profile.label.trim() ? profile.label : null;
+  const description = typeof profile?.description === "string" && profile.description.trim() ? profile.description : null;
+  const status = enumValue(profile?.status, ["available", "gated", "unsupported"] as const);
+  const risk = enumValue(profile?.risk, ["low", "medium", "high"] as const);
+  if (!id || !label || !description || !status || !risk || typeof profile?.isDefault !== "boolean" || (profile.detail !== null && typeof profile.detail !== "string")) {
+    throw new Error("Supervisor returned an invalid supervised permission profile.");
+  }
+  return { id, label, description, status, risk, detail: profile.detail as string | null, isDefault: profile.isDefault };
+}
+
+function mapRoomMove(value: Record<string, unknown>, entryId: string, operationId?: string): import("../ipc-types/agents.js").DesktopSupervisorRoomMove {
+  const fail = (): never => { throw new Error("Supervisor returned an invalid or unfenced room-move response."); };
+  const nonEmpty = (key: string): string => typeof value[key] === "string" && (value[key] as string).trim() ? value[key] as string : fail();
+  const nullable = (key: string): string | null => value[key] === null ? null : typeof value[key] === "string" && (value[key] as string).trim() ? value[key] as string : fail();
+  const phase = enumValue(value.phase, ["prepared", "waiting_for_current_turn", "joining_destination", "membership_committed", "rotating_credentials", "bootstrapping_destination_tail", "active", "failed", "rollback_required"] as const) ?? fail();
+  const mappedOperation = nonEmpty("operation_id");
+  const daemonGeneration = typeof value.daemon_generation === "number" && Number.isSafeInteger(value.daemon_generation) && value.daemon_generation > 0 ? value.daemon_generation : fail();
+  if (nonEmpty("agent_id") !== entryId || (operationId !== undefined && mappedOperation !== operationId) || typeof value.source_credentials_revoked !== "boolean") fail();
+  return { operationId: mappedOperation, requestId: nonEmpty("request_id"), entryId, sourceRoomId: nonEmpty("source_room_id"), destinationRoomId: nonEmpty("destination_room_id"), daemonGeneration,
+    workAttemptId: nullable("work_attempt_id"), executionGenerationId: nullable("execution_generation_id"), agentSessionId: nullable("agent_session_id"), phase,
+    remoteRoomId: nullable("remote_room_id"), destinationCursor: nullable("destination_cursor"), sourceCredentialsRevoked: value.source_credentials_revoked as boolean, error: nullable("error"), createdAt: nonEmpty("created_at"), updatedAt: nonEmpty("updated_at") };
+}
+
+function booleanField(value: unknown, key: string): boolean {
+  return value !== null && typeof value === "object" && !Array.isArray(value) && Reflect.get(value, key) === true;
+}
+export function mapAgentInspectorDetail(value: Record<string, unknown>, input: import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail {
+  type Detail = import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail;
+  const fail = (): never => { throw new Error("Supervisor returned an invalid or unfenced agent inspector detail response."); };
+  const availability = enumValue(value.availability, ["available", "pruned", "not_loaded"] as const) ?? fail();
+  const inboxItemId = nullableNonEmptyString(value.inbox_item_id);
+  const requestedSourceMessageId = nullableNonEmptyString(value.requested_source_message_id);
+  if (value.entry_id !== input.entryId || value.room_id !== input.roomId || inboxItemId === undefined || requestedSourceMessageId === undefined || requestedSourceMessageId !== (input.sourceMessageId ?? null)) fail();
+  const mapOutcome = (candidate: unknown): Detail["receipt"] extends { outcome: infer T } ? T : never => {
+    if (candidate === null) return null as never;
+    const outcome = record(candidate) ?? fail();
+    if (outcome.kind !== undefined && !nonEmptyString(outcome.kind)) fail();
+    if (outcome.text !== undefined && nullableString(outcome.text) === undefined) fail();
+    if (outcome.evidence !== undefined && !nonEmptyString(outcome.evidence)) fail();
+    return { ...(outcome.kind === undefined ? {} : { kind: String(outcome.kind) }), ...(outcome.text === undefined ? {} : { text: outcome.text as string | null }), ...(outcome.evidence === undefined ? {} : { evidence: String(outcome.evidence) }) } as never;
+  };
+  const source = value.source_message === null ? null : (() => { const row = record(value.source_message) ?? fail(); const id = nonEmptyString(row.id) ?? fail(); const roomId = nonEmptyString(row.room_id); const sender = nullableString(row.sender); const text = nullableString(row.text); const createdAt = nullableNonEmptyString(row.created_at); const replyTo = nullableNonEmptyString(row.reply_to); const threadRoot = nullableNonEmptyString(row.thread_root_id); const activation = row.activation === null ? null : record(row.activation); if (roomId !== input.roomId || sender === undefined || text === undefined || createdAt === undefined || replyTo === undefined || threadRoot === undefined || (row.activation !== null && !activation)) fail(); return { id, room_id: roomId!, sender, text, created_at: createdAt, reply_to: replyTo, thread_root_id: threadRoot, activation }; })();
+  const receipt = value.receipt === null ? null : (() => { const row = record(value.receipt) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"] as const) ?? fail(); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const failureCode = row.failure_code == null ? null : enumValue(row.failure_code, ["provider_continuation_missing"] as const); const terminalReason = row.terminal_reason == null ? null : enumValue(row.terminal_reason, ["upgrade_authority_unavailable"] as const); const blocked = nullableNonEmptyString(row.blocked_by_inbox_item_id); const next = row.next_attempt_at_ms; if (providerTurn === undefined || error === undefined || (row.failure_code != null && !failureCode) || (row.terminal_reason != null && !terminalReason) || blocked === undefined || !(next === null || (typeof next === "number" && Number.isSafeInteger(next) && next >= 0)) || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { state, attempt_count: row.attempt_count, provider_turn_id: providerTurn, outcome: mapOutcome(row.outcome), last_error: error, failure_code: failureCode, terminal_reason: terminalReason, blocked_by_inbox_item_id: blocked, next_attempt_at_ms: next as number | null }; })();
+  const terminal = value.terminal === null ? null : (() => { const row = record(value.terminal) ?? fail(); const outcome = nonEmptyString(row.outcome) ?? fail(); const text = nullableString(row.normalized_text); const evidence = nonEmptyString(row.evidence_source) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); if (text === undefined) fail(); return { outcome, normalized_text: text, evidence_source: evidence, observed_at: at }; })();
+  const publication = value.publication === null ? null : (() => { const row = record(value.publication) ?? fail(); const client = nonEmptyString(row.client_message_id) ?? fail(); const canonical = nullableNonEmptyString(row.canonical_message_id); const roomId = nullableNonEmptyString(row.room_id); if (canonical === undefined || roomId === undefined || (roomId !== null && roomId !== input.roomId)) fail(); return { client_message_id: client, canonical_message_id: canonical, room_id: roomId }; })();
+  const rawUncertainEffects = value.uncertain_effects ?? [];
+  if (!Array.isArray(value.timeline) || value.timeline.length > 100 || !Array.isArray(value.items) || value.items.length > 50 || !Array.isArray(rawUncertainEffects) || rawUncertainEffects.length > 32) fail();
+  const timelineRows = value.timeline as unknown[]; const itemRows = value.items as unknown[]; const uncertainEffectRows = rawUncertainEffects as unknown[];
+  const timeline = timelineRows.map((candidate) => { const row = record(candidate) ?? fail(); const phase = enumValue(row.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); const detail = nullableString(row.detail); if (detail === undefined) fail(); return { phase, observedAt: at, detail }; });
+  const items = itemRows.map((candidate) => { const row = record(candidate) ?? fail(); const sourceId = nonEmptyString(row.source_message_id) ?? fail(); const itemId = nonEmptyString(row.inbox_item_id) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"] as const) ?? fail(); const updatedAt = nonEmptyString(row.updated_at) ?? fail(); const sender = nullableString(row.sender); const preview = nullableString(row.text_preview); const createdAt = nullableNonEmptyString(row.created_at); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const failureCode = row.failure_code == null ? null : enumValue(row.failure_code, ["provider_continuation_missing"] as const); const terminalReason = row.terminal_reason == null ? null : enumValue(row.terminal_reason, ["upgrade_authority_unavailable"] as const); const canonical = nullableNonEmptyString(row.canonical_message_id); if (sender === undefined || preview === undefined || createdAt === undefined || providerTurn === undefined || error === undefined || (row.failure_code != null && !failureCode) || (row.terminal_reason != null && !terminalReason) || canonical === undefined || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { source_message_id: sourceId, inbox_item_id: itemId, state, attempt_count: row.attempt_count, updated_at: updatedAt, sender, text_preview: preview, created_at: createdAt, outcome: mapOutcome(row.outcome), provider_turn_id: providerTurn, last_error: error, failure_code: failureCode, terminal_reason: terminalReason, canonical_message_id: canonical }; });
+  const uncertainEffects = uncertainEffectRows.map((candidate) => { const row = record(candidate) ?? fail(); return { effect_id: nonEmptyString(row.effect_id) ?? fail(), tool_name: nonEmptyString(row.tool_name) ?? fail(), mcp_request_id: nonEmptyString(row.mcp_request_id) ?? fail(), error: nonEmptyString(row.error) ?? fail(), created_at: nonEmptyString(row.created_at) ?? fail(), updated_at: nonEmptyString(row.updated_at) ?? fail() }; });
+  const repair = value.continuation_repair == null ? null : (() => {
+    const row = record(value.continuation_repair) ?? fail();
+    const phase = enumValue(row.phase, ["probing", "replacement_created", "committed", "failed"] as const) ?? fail();
+    const replacement = nullableNonEmptyString(row.replacement_continuation);
+    const error = nullableString(row.last_error);
+    if (row.agent_id !== input.entryId || row.room_id !== input.roomId || replacement === undefined || error === undefined
+      || typeof row.daemon_generation !== "number" || !Number.isSafeInteger(row.daemon_generation)
+      || typeof row.expected_pid !== "number" || !Number.isSafeInteger(row.expected_pid) || row.expected_pid < 1
+      || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 1) fail();
+    return {
+      repair_id: nonEmptyString(row.repair_id) ?? fail(), agent_id: input.entryId, room_id: input.roomId,
+      inbox_item_id: nonEmptyString(row.inbox_item_id) ?? fail(), daemon_generation: row.daemon_generation,
+      execution_generation_id: nonEmptyString(row.execution_generation_id) ?? fail(),
+      work_attempt_id: nonEmptyString(row.work_attempt_id) ?? fail(), expected_pid: row.expected_pid,
+      expected_process_identity: nonEmptyString(row.expected_process_identity) ?? fail(),
+      missing_continuation: nonEmptyString(row.missing_continuation) ?? fail(),
+      replacement_continuation: replacement, phase, attempt_count: row.attempt_count,
+      last_error: error, created_at: nonEmptyString(row.created_at) ?? fail(), updated_at: nonEmptyString(row.updated_at) ?? fail(),
+    };
+  })();
+  const boundary = value.history_boundary === null ? null : (() => { const row = record(value.history_boundary) ?? fail(); const observed = nullableNonEmptyString(row.earliest_retained_observed_message_id); const inbox = nullableNonEmptyString(row.earliest_retained_inbox_message_id); const sequence = row.earliest_retained_receipt_sequence; const pruned = nullableNonEmptyString(row.pruned_before_message_id); const at = nullableNonEmptyString(row.pruned_at); if (observed === undefined || inbox === undefined || !(sequence === null || (typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0)) || pruned === undefined || at === undefined) fail(); return { earliest_retained_observed_message_id: observed, earliest_retained_inbox_message_id: inbox, earliest_retained_receipt_sequence: sequence as number | null, pruned_before_message_id: pruned, pruned_at: at }; })();
+  const requestedSourceId = input.sourceMessageId ?? null;
+  if (availability === "available" && (!requestedSourceId || !inboxItemId || !source || source.id !== requestedSourceId || !receipt)) fail();
+  if (availability !== "available" && (inboxItemId || source || receipt || terminal || publication || repair || timeline.length)) fail();
+  if (requestedSourceId === null && availability !== "not_loaded") fail();
+  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary } as Detail;
+}
+
+/**
+ * The daemon socket is a process boundary, not a typed function call.  Keep
+ * the causal projection deliberately fail-closed: it is ephemeral UI state,
+ * so a malformed row must never make the desktop accept a partly-coerced
+ * delivery identity (or crash while rendering the manifest).
+ */
+export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
+  const activeWorkerBinding = entry.worker_binding ?? null;
+  const workerBinding = activeWorkerBinding ?? entry.last_worker_binding ?? null;
+  return {
+    id: entry.id,
+    roomId: entry.room_id,
+    displayName: entry.display_name,
+    provider: entry.provider,
+    model: entry.model,
+    charter: entry.charter,
+    desiredState: entry.desired_state,
+    observedState: entry.observed_state,
+    condition: entry.condition,
+    lastError: entry.last_error ?? null,
+    permissionProfileId: entry.permission_profile_id,
+    deliveryMode: entry.delivery_mode ?? "mcp_polling",
+    createdBy: entry.created_by,
+    createdAt: entry.created_at,
+    workspacePath: entry.workspace_path ?? null,
+    workAttemptId: entry.work_attempt_id ?? null,
+    agentSessionId: workerBinding?.agent_session_id ?? null,
+    agentSessionBindingState: activeWorkerBinding ? "active" : workerBinding ? "historical" : "none",
+    bindingUpdatedAt: workerBinding?.updated_at ?? null,
+    executionGenerationId: entry.provider_ref?.execution_generation_id ?? null,
+    providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
+    providerPid: entry.provider_ref?.provider_connection?.pid ?? null,
+    workplaceLiveness: {
+      state: entry.workplace_liveness?.state ?? "unknown",
+      observedAt: entry.workplace_liveness?.observed_at ?? null,
+      detail: entry.workplace_liveness?.detail ?? null,
+    },
+    nativeLiveness: {
+      state: entry.native_liveness?.state ?? "unknown",
+      observedAt: entry.native_liveness?.observed_at ?? null,
+      detail: entry.native_liveness?.detail ?? null,
+    },
+    readyReachedAt: entry.ready_reached_at ?? null,
+    restartCount: entry.reconciliation?.exit_timestamps_ms?.length ?? 0,
+    lastTerminal: entry.reconciliation?.last_terminal ?? null,
+    activity: (entry.activity ?? []).map(mapActivity),
+    lastTurnControlSequence: entry.last_turn_control_sequence ?? 0,
+    roomAgentState: projectRoomAgentState(entry.room_agent_state),
+    deliveryReceipts: projectDeliveryReceipts(entry.delivery_receipts),
+    turnControl: entry.turn_control ? {
+      actionId: entry.turn_control.action_id,
+      actionSequence: entry.turn_control.action_sequence,
+      workAttemptId: entry.turn_control.work_attempt_id,
+      executionGenerationId: entry.turn_control.execution_generation_id,
+      targetRoomId: entry.turn_control.target_room_id ?? null,
+      targetSourceMessageId: entry.turn_control.target_source_message_id ?? null,
+      targetProviderContinuationId: entry.turn_control.target_provider_continuation_id ?? null,
+      inboxItemId: entry.turn_control.inbox_item_id ?? null,
+      providerTurnId: entry.turn_control.provider_turn_id ?? null,
+      hasCorrection: Boolean(entry.turn_control.has_correction),
+      correctionText: entry.turn_control.correction_text ?? null,
+      status: entry.turn_control.status,
+      capability: entry.turn_control.capability,
+      interrupted: entry.turn_control.interrupted,
+      resumed: entry.turn_control.resumed,
+      state: entry.turn_control.state,
+      stages: entry.turn_control.stages,
+      error: entry.turn_control.error,
+      recordedAt: entry.turn_control.recorded_at,
+      updatedAt: entry.turn_control.updated_at,
+    } : null,
+  };
+}
+
+type UnknownRecord = Record<string, unknown>;
+
+function record(value: unknown): UnknownRecord | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value) ? value as UnknownRecord : null;
+}
+
+function nonEmptyString(value: unknown): string | null {
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function validTurnControlActionId(value: unknown): value is string {
+  return typeof value === "string"
+    && Buffer.byteLength(value, "utf8") <= 256
+    && /^[A-Za-z0-9._:-]+$/.test(value);
+}
+
+function nullableString(value: unknown): string | null | undefined {
+  return value === null || typeof value === "string" ? value : undefined;
+}
+
+function nullableNonEmptyString(value: unknown): string | null | undefined {
+  return value === null || (typeof value === "string" && value.trim().length > 0) ? value : undefined;
+}
+
+function enumValue<T extends string>(value: unknown, allowed: readonly T[]): T | null {
+  return typeof value === "string" && (allowed as readonly string[]).includes(value) ? value as T : null;
+}
+
+function projectRoomAgentState(value: unknown): DesktopSupervisorManifestEntry["roomAgentState"] {
+  const root = record(value);
+  if (!root) return null;
+  const connection = record(root.connection);
+  const hasIngress = Object.hasOwn(root, "ingress");
+  const ingress = hasIngress ? record(root.ingress) : null;
+  const inbox = record(root.inbox);
+  const turn = record(root.turn);
+  const task = record(root.task);
+  if (!connection || (hasIngress && !ingress) || !inbox || !turn || !task) return null;
+
+  const connectionState = enumValue(connection.state, ["connected", "reconnecting", "disconnected"] as const);
+  const ingressState = ingress
+    ? enumValue(ingress.state, ["starting", "observing", "backoff", "blocked", "stopped"] as const)
+    : connectionState === "connected" ? "observing" as const : "stopped" as const;
+  const inboxState = enumValue(inbox.state, ["empty", "queued", "blocked", "restoring_conversation", "waiting_for_desktop_credentials"] as const);
+  const turnState = enumValue(turn.state, ["idle", "dispatching", "responding", "publishing", "retrying", "failed"] as const);
+  const taskState = enumValue(task.state, ["none", "assigned", "working", "blocked"] as const);
+  const observedAt = nullableNonEmptyString(connection.observed_at);
+  const connectionDetail = nullableString(connection.detail);
+  const ingressObservedAt = ingress ? nullableNonEmptyString(ingress.observed_at) : observedAt;
+  const ingressDetail = ingress ? nullableString(ingress.detail) : null;
+  const blockedByMessageId = nullableNonEmptyString(inbox.blocked_by_message_id);
+  const inboxDetail = nullableString(inbox.detail);
+  const inboxItemId = nullableNonEmptyString(turn.inbox_item_id);
+  const sourceMessageId = nullableNonEmptyString(turn.source_message_id);
+  const providerTurnId = nullableNonEmptyString(turn.provider_turn_id);
+  const turnDetail = nullableString(turn.detail);
+  const taskId = nullableNonEmptyString(task.task_id);
+  const title = nullableString(task.title);
+  if (!connectionState || !ingressState || !inboxState || !turnState || !taskState
+    || observedAt === undefined || connectionDetail === undefined || ingressObservedAt === undefined || ingressDetail === undefined || blockedByMessageId === undefined || inboxDetail === undefined
+    || inboxItemId === undefined || sourceMessageId === undefined || providerTurnId === undefined || turnDetail === undefined
+    || taskId === undefined || title === undefined
+    || typeof inbox.pending_count !== "number" || !Number.isFinite(inbox.pending_count) || !Number.isInteger(inbox.pending_count) || inbox.pending_count < 0) return null;
+  return {
+    connection: { state: connectionState, observedAt, detail: connectionDetail },
+    ingress: { state: ingressState, observedAt: ingressObservedAt, detail: ingressDetail },
+    inbox: { state: inboxState, pendingCount: inbox.pending_count, blockedByMessageId, detail: inboxDetail },
+    turn: { state: turnState, inboxItemId, sourceMessageId, providerTurnId, detail: turnDetail },
+    task: { state: taskState, taskId, title },
+  };
+}
+
+function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry["deliveryReceipts"] {
+  if (!Array.isArray(value)) return [];
+  return value.flatMap((candidate) => {
+    const receipt = record(candidate);
+    if (!receipt) return [];
+    const inboxItemId = nonEmptyString(receipt.inbox_item_id);
+    const sourceMessageId = nonEmptyString(receipt.source_message_id);
+    const replyClientMessageId = nonEmptyString(receipt.reply_client_message_id);
+    const canonicalMessageId = receipt.canonical_message_id === undefined
+      ? null
+      : nullableNonEmptyString(receipt.canonical_message_id);
+    const state = enumValue(receipt.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "acknowledged", "acknowledged_no_reply", "retryable", "blocked", "restoring_conversation", "cancelled_by_room_move", "cancelled_by_user", "queued_behind_blocked"] as const);
+    const providerTurnId = nullableNonEmptyString(receipt.provider_turn_id);
+    const blockedByMessageId = nullableNonEmptyString(receipt.blocked_by_message_id);
+    const error = nullableString(receipt.error);
+    const failureCode = receipt.failure_code === undefined || receipt.failure_code === null
+      ? null
+      : enumValue(receipt.failure_code, ["provider_continuation_missing"] as const);
+    const terminalReason = receipt.terminal_reason === undefined || receipt.terminal_reason === null
+      ? null
+      : enumValue(receipt.terminal_reason, ["upgrade_authority_unavailable"] as const);
+    const updatedAt = nonEmptyString(receipt.updated_at);
+    if (!inboxItemId || !sourceMessageId || !replyClientMessageId || canonicalMessageId === undefined || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || failureCode === undefined || terminalReason === undefined || !updatedAt
+      || typeof receipt.attempt_count !== "number" || !Number.isFinite(receipt.attempt_count) || !Number.isInteger(receipt.attempt_count) || receipt.attempt_count < 0
+      || !Array.isArray(receipt.timeline)) return [];
+    const timeline: NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"] = [];
+    for (const event of receipt.timeline) {
+      const value = record(event);
+      if (!value) return [];
+      const phase = enumValue(value.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const);
+      const observedAt = nonEmptyString(value.observed_at);
+      const detail = nullableString(value.detail);
+      if (!phase || !observedAt || detail === undefined) return [];
+      timeline.push({ phase, observedAt, detail });
+    }
+    return [{ inboxItemId, sourceMessageId, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
+  });
+}
+
+function mapActivity(event: WireActivityEvent): DesktopSupervisorActivityEvent {
+  return sanitizeDesktopActivityEvent({
+    observedAt: event.observed_at,
+    sequence: event.sequence,
+    provider: event.provider,
+    kind: event.kind,
+    method: event.method,
+    summary: event.summary,
+    status: event.status,
+    payload: event.payload,
+    payloadTruncated: event.payload_truncated,
+    payloadRedacted: event.payload_redacted,
+    durablePayloadRef: event.durable_payload_ref,
+  });
+}
+
+function wireActivity(event: DesktopSupervisorActivityEvent): WireActivityEvent {
+  const safe = sanitizeDesktopActivityEvent(event);
+  return {
+    observed_at: safe.observedAt,
+    sequence: safe.sequence,
+    provider: safe.provider,
+    kind: safe.kind,
+    method: safe.method,
+    summary: safe.summary,
+    status: safe.status,
+    payload: safe.payload,
+    payload_truncated: safe.payloadTruncated,
+    payload_redacted: safe.payloadRedacted,
+    durable_payload_ref: safe.durablePayloadRef,
+  };
+}
+
+function sanitizeDesktopActivityEvent(event: DesktopSupervisorActivityEvent): DesktopSupervisorActivityEvent {
+  const payload = safeStreamPayload(event.payload);
+  const provider = redactCredentialText(event.provider);
+  const kind = redactCredentialText(event.kind);
+  const method = redactCredentialText(event.method);
+  const summary = redactCredentialText(event.summary);
+  const durableRef = event.durablePayloadRef === null ? null : redactCredentialText(event.durablePayloadRef);
+  const bound = (value: string, max: number) => {
+    if (value.length <= max) return value;
+    const markerStart = value.lastIndexOf("[REDACTED]", max);
+    if (markerStart >= 0 && markerStart < max && markerStart + "[REDACTED]".length > max) return value.slice(-max);
+    return value.slice(0, max);
+  };
+  const providerValue = bound(provider.value, 160);
+  const kindValue = bound(kind.value, 160);
+  const methodValue = bound(method.value, 500);
+  const summaryValue = bound(summary.value, 500);
+  const durableValue = durableRef ? bound(durableRef.value, 2_048) : null;
+  return {
+    ...event,
+    provider: providerValue,
+    kind: kindValue,
+    method: methodValue,
+    summary: summaryValue,
+    payload: payload.payload,
+    payloadTruncated: event.payloadTruncated || payload.payloadTruncated
+      || provider.value.length > providerValue.length || kind.value.length > kindValue.length
+      || method.value.length > methodValue.length || summary.value.length > summaryValue.length
+      || (durableRef?.value.length ?? 0) > (durableValue?.length ?? 0),
+    payloadRedacted: event.payloadRedacted || payload.payloadRedacted || provider.redacted || kind.redacted || method.redacted || summary.redacted || durableRef?.redacted === true,
+    durablePayloadRef: durableValue,
+  };
+}
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isConnectionUnavailable(error: unknown): boolean {
+  return ["ENOENT", "ECONNREFUSED", "ECONNRESET", "EPIPE"].includes((error as NodeJS.ErrnoException)?.code ?? "");
+}
+
+export const supervisorDaemonClient = new SupervisorDaemonClient();
+supervisorDaemonClient.onGeneration((status) => {
+  if (stateWatchUnsupportedGeneration !== status.generation) {
+    stateWatchUnsupportedGeneration = null;
+  }
+  if (stateEmitter.listenerCount("state") > 0) ensureSupervisorStateWatch();
+});
+
+export function onSupervisorActivity(
+  listener: (payload: { entryId: string; event: DesktopSupervisorActivityEvent }) => void,
+): () => void {
+  activityEmitter.on("activity", listener);
+  return () => activityEmitter.off("activity", listener);
+}
+
+export function onSupervisorState(
+  listener: (snapshot: DesktopSupervisorStateSnapshot) => void,
+): () => void {
+  stateEmitter.on("state", listener);
+  ensureSupervisorStateWatch();
+  return () => stateEmitter.off("state", listener);
+}
+
+function ensureSupervisorStateWatch(): void {
+  if (stateWatchOperation || stateEmitter.listenerCount("state") === 0) return;
+  stateWatchOperation = runSupervisorStateWatch().finally(() => {
+    stateWatchOperation = null;
+  });
+}
+
+export function supervisorStateWatchRetryDelay(failureCount: number): number {
+  const boundedFailureCount = Math.max(1, Math.min(31, Math.trunc(failureCount)));
+  return Math.min(
+    STATE_WATCH_RETRY_MAX_MS,
+    STATE_WATCH_RETRY_BASE_MS * (2 ** (boundedFailureCount - 1)),
+  );
+}
+
+async function runSupervisorStateWatch(): Promise<void> {
+  let afterDaemonGeneration = 0;
+  let afterSequence = 0;
+  let consecutiveFailures = 0;
+  while (stateEmitter.listenerCount("state") > 0) {
+    try {
+      const status = await supervisorDaemonClient.connectIfRunning();
+      if (!status) return;
+      if (stateWatchUnsupportedGeneration === status.generation) return;
+      if (!status.capabilities.agentStateSubscription) {
+        stateWatchUnsupportedGeneration = status.generation;
+        return;
+      }
+      if (afterDaemonGeneration !== status.generation) {
+        afterDaemonGeneration = 0;
+        afterSequence = 0;
+      }
+      const snapshot = await supervisorDaemonClient.watchState({
+        afterDaemonGeneration,
+        afterSequence,
+      });
+      afterDaemonGeneration = snapshot.daemonGeneration;
+      afterSequence = snapshot.sequence;
+      consecutiveFailures = 0;
+      stateEmitter.emit("state", snapshot);
+    } catch {
+      // The renderer keeps its last authoritative snapshot. Reconnection is a
+      // transport concern and must not transiently dismantle its live controls.
+      // A capped exponential delay avoids turning a persistent failure into a
+      // tight background loop.
+      consecutiveFailures += 1;
+      await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));
+    }
+  }
+}
+
+function unrefDelay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref();
+  });
+}
+
+export function onSupervisorAgentStream(
+  listener: (batch: import("../ipc-types/agents.js").DesktopAgentStreamBatch) => void,
+): () => void {
+  agentStreamEmitter.on("agent-stream", listener);
+  return () => agentStreamEmitter.off("agent-stream", listener);
+}
+
+/**
+ * Focus the live feed on exactly one agent (or clear it). Only the inspected
+ * agent's token firehose is streamed; switching focus abandons the previous
+ * long-poll and starts a fresh one. Passing null stops streaming entirely.
+ */
+export function setFocusedAgentStream(entryId: string | null): void {
+  if (focusedAgentStreamEntryId === entryId) return;
+  focusedAgentStreamEntryId = entryId;
+  // The epoch distinguishes close→reopen of the same agent while an old
+  // long-poll is still in flight. Entry identity alone cannot observe that
+  // lifecycle edge, and would otherwise resume the stale cursor/feed.
+  focusedAgentStreamEpoch += 1;
+  // Destroy the old long-poll socket now. Waiting for its 25-second server
+  // timeout would make close→reopen of the same agent appear frozen even
+  // though the renderer requested a new viewer lifecycle.
+  agentStreamWatchAbortController?.abort();
+  if (entryId && !agentStreamWatchOperation) {
+    agentStreamWatchOperation = runAgentStreamWatch().finally(() => { agentStreamWatchOperation = null; });
+  }
+}
+
+async function runAgentStreamWatch(): Promise<void> {
+  let afterSequence = 0;
+  let watchedEntryId: string | null = null;
+  let watchedGeneration = 0;
+  let watchedFocusEpoch = -1;
+  let consecutiveFailures = 0;
+  let endedNotified = false;
+  let watchedStreamGeneration = 0;
+  while (focusedAgentStreamEntryId !== null) {
+    const entryId = focusedAgentStreamEntryId;
+    const focusEpoch = focusedAgentStreamEpoch;
+    try {
+      const status = await supervisorDaemonClient.connectIfRunning();
+      if (!status) return;
+      if (focusedAgentStreamEntryId !== entryId || focusedAgentStreamEpoch !== focusEpoch) continue;
+      if (!status.capabilities.agentActivityStream) {
+        // Old daemon: tell the renderer the feed is unavailable, then stop.
+        agentStreamEmitter.emit("agent-stream", {
+          entryId,
+          events: [],
+          ended: true,
+          reset: true,
+          droppedEvents: 0,
+        });
+        return;
+      }
+      // A focus change or daemon restart resets the cursor and the ended latch.
+      if (watchedEntryId !== entryId || watchedGeneration !== status.generation || watchedFocusEpoch !== focusEpoch) {
+        watchedEntryId = entryId;
+        watchedGeneration = status.generation;
+        watchedFocusEpoch = focusEpoch;
+        afterSequence = 0;
+        endedNotified = false;
+        watchedStreamGeneration = 0;
+      }
+      const watchController = new AbortController();
+      agentStreamWatchAbortController = watchController;
+      const batch = await supervisorDaemonClient.watchAgentStream({
+        entryId,
+        afterSequence,
+        signal: watchController.signal,
+      }).finally(() => {
+        if (agentStreamWatchAbortController === watchController) agentStreamWatchAbortController = null;
+      });
+      consecutiveFailures = 0;
+      if (focusedAgentStreamEntryId !== entryId || focusedAgentStreamEpoch !== focusEpoch) continue; // focus moved or closed/reopened mid-poll
+      afterSequence = batch.sequence;
+      const reset = watchedStreamGeneration !== batch.streamGeneration;
+      watchedStreamGeneration = batch.streamGeneration;
+      // A reopened provider generation reuses the daemon buffer and keeps its
+      // monotonic cursor, so post-reopen events climb past ours and clear the
+      // latch; the renderer un-ends the feed on the next non-ended batch.
+      if (batch.events.length > 0) endedNotified = false;
+      if (reset || batch.events.length > 0 || batch.droppedEvents > 0 || (batch.ended && !endedNotified)) {
+        agentStreamEmitter.emit("agent-stream", {
+          entryId,
+          events: batch.events,
+          ended: batch.ended,
+          reset,
+          droppedEvents: batch.droppedEvents,
+        });
+      }
+      if (batch.ended) {
+        // `ended` is a generation boundary, not a terminal state: the daemon
+        // keeps the entry so the next generation reopens the feed. Notify the
+        // renderer once and stay subscribed while this entry is focused, idling
+        // so a permanently ended feed re-polls slowly instead of spinning.
+        endedNotified = true;
+        if (focusedAgentStreamEntryId === entryId) await unrefDelay(AGENT_STREAM_REOPEN_POLL_MS);
+      }
+    } catch {
+      if (focusedAgentStreamEntryId !== entryId || focusedAgentStreamEpoch !== focusEpoch) continue;
+      consecutiveFailures += 1;
+      await unrefDelay(supervisorStateWatchRetryDelay(consecutiveFailures));
+    }
+  }
+}
+
+export async function publishSupervisorActivity(input: {
+  entryId: string;
+  provider: string;
+  kind: string;
+  method: string;
+  summary: string;
+  status: DesktopSupervisorActivityEvent["status"];
+  payload?: unknown;
+}): Promise<DesktopSupervisorManifestEntry> {
+  const sequence = Math.max((activitySequences.get(input.entryId) ?? 0) + 1, Date.now());
+  activitySequences.set(input.entryId, sequence);
+  const { value: redactedPayload, redacted } = redactActivityPayload(input.payload ?? { summary: input.summary });
+  const serialized = safeJson(redactedPayload);
+  const truncated = serialized.length > 8_192;
+  const event = sanitizeDesktopActivityEvent({
+    observedAt: new Date().toISOString(),
+    sequence,
+    provider: input.provider,
+    kind: input.kind,
+    method: input.method,
+    summary: input.summary,
+    status: input.status,
+    payload: truncated ? `${serialized.slice(0, 8_192)}…` : redactedPayload,
+    payloadTruncated: truncated,
+    payloadRedacted: redacted,
+    durablePayloadRef: null,
+  });
+  const entry = await supervisorDaemonClient.appendActivity(input.entryId, event);
+  activityEmitter.emit("activity", { entryId: input.entryId, event });
+  return entry;
+}
+
+function redactActivityPayload(payload: unknown): { value: unknown; redacted: boolean } {
+  let redacted = false;
+  const seen = new WeakSet<object>();
+  const walk = (value: unknown, key = "", depth = 0): unknown => {
+    if (/token|secret|password|authorization|api[_-]?key|credential/i.test(key)) {
+      redacted = true;
+      return "[redacted]";
+    }
+    if (depth > 8) { redacted = true; return "[truncated-depth]"; }
+    if (typeof value === "string") {
+      const safe = redactCredentialText(value);
+      redacted ||= safe.redacted;
+      return safe.value.length > 4_096 ? (redacted = true, `${safe.value.slice(0, 4_096)}…`) : safe.value;
+    }
+    if (typeof value === "bigint") return value.toString();
+    if (!value || typeof value !== "object") return value;
+    if (seen.has(value)) { redacted = true; return "[circular]"; }
+    seen.add(value);
+    if (Array.isArray(value)) return value.slice(0, 100).map((item) => walk(item, key, depth + 1));
+    return Object.fromEntries(Object.entries(value as Record<string, unknown>).slice(0, 100).map(([nextKey, nextValue]) => [nextKey, walk(nextValue, nextKey, depth + 1)]));
+  };
+  return { value: walk(payload), redacted };
+}
+
+function safeJson(value: unknown): string {
+  try { return JSON.stringify(value); } catch { return JSON.stringify("[unserializable]"); }
+}

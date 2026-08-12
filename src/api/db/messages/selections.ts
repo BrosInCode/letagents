@@ -10,6 +10,10 @@ export const messageRowSelection = {
   agent_prompt_kind: messages.agent_prompt_kind,
   source: messages.source,
   client_message_id: messages.client_message_id,
+  publisher_agent_key: messages.publisher_agent_key,
+  publisher_agent_session_id: messages.publisher_agent_session_id,
+  publisher_account_id: messages.publisher_account_id,
+  routing_snapshot_version: messages.routing_snapshot_version,
   timestamp: messages.timestamp,
 };
 
@@ -18,6 +22,8 @@ export const messageReplySelection = {
   sender: messages.sender,
   text: messages.text,
   source: messages.source,
+  publisher_agent_key: messages.publisher_agent_key,
+  publisher_agent_session_id: messages.publisher_agent_session_id,
   timestamp: messages.timestamp,
 };
 

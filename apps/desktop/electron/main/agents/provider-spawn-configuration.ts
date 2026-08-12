@@ -1,0 +1,62 @@
+import { isDeepStrictEqual } from "node:util";
+
+import type { ProviderSpawnRequest } from "./provider-adapter.js";
+import { assertManagedAgentPermissionProfileAvailable } from "./managed-agent-permission-profiles.js";
+
+/**
+ * Shared final attestation used by every native adapter. The daemon has
+ * already normalized the snapshot; adapters independently require that the
+ * real provider policy still carries the selected authority.
+ */
+export function attestProviderSpawnPolicy(
+  provider: "codex" | "claude-code" | "cursor" | "open-model",
+  request: ProviderSpawnRequest,
+): Record<string, unknown> {
+  if (!request.permissionProfileId) return plainPolicy(request.launchPolicy, provider);
+  const profile = assertManagedAgentPermissionProfileAvailable(provider, request.permissionProfileId as never).id;
+  const policy = plainPolicy(request.launchPolicy, provider);
+  if (provider === "codex") {
+    requireMatch(policy, "approvalPolicy", "never", provider);
+    requireMatch(policy, "sandboxPolicy", { type: "dangerFullAccess" }, provider);
+  } else if (provider === "open-model") {
+    requireMatch(policy, "permission", { "*": "allow" }, provider);
+  } else if (provider === "claude-code") {
+    const authority = profile === "read_only"
+      ? { permissionMode: "plan", dangerouslySkipPermissions: false }
+      : profile === "full_access"
+        ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
+        : { permissionMode: "acceptEdits", dangerouslySkipPermissions: false };
+    requireMatch(policy, "permissionMode", authority.permissionMode, provider);
+    requireMatch(policy, "dangerouslySkipPermissions", authority.dangerouslySkipPermissions, provider);
+  } else if (profile === "read_only") {
+    requireMatch(policy, "mode", "ask", provider);
+    requireMatch(policy, "force", false, provider);
+    if (Object.hasOwn(policy, "sandbox") && ![null, "enabled"].includes(policy.sandbox as null | string)) {
+      throw new Error("Cursor read-only launch disables its sandbox.");
+    }
+  } else {
+    requireMatch(policy, "force", true, provider);
+    requireMatch(policy, "sandbox", profile === "sandboxed_write" ? "enabled" : "disabled", provider);
+    if (Object.hasOwn(policy, "mode") && policy.mode !== null) throw new Error(`Cursor ${profile} launch retained a read-only mode.`);
+  }
+  if (provider !== "codex" && request.reasoningEffort !== null && request.reasoningEffort !== undefined) {
+    throw new Error(`${provider} does not support the selected reasoning effort.`);
+  }
+  if (!Number.isSafeInteger(request.configurationRevision) || Number(request.configurationRevision) < 1) {
+    throw new Error(`${provider} launch omitted its exact configuration revision.`);
+  }
+  return policy;
+}
+
+function plainPolicy(value: unknown, provider: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) {
+    throw new Error(`${provider} launch policy must be a plain native CLI options object.`);
+  }
+  return value as Record<string, unknown>;
+}
+
+function requireMatch(policy: Record<string, unknown>, key: string, expected: unknown, provider: string): void {
+  if (!Object.hasOwn(policy, key) || !isDeepStrictEqual(policy[key], expected)) {
+    throw new Error(`${provider} launch does not attest permission-profile authority at '${key}'.`);
+  }
+}

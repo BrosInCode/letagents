@@ -1,23 +1,28 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
-import type { DesktopGitRoomInfo } from "../ipc-types.js";
+import type {
+  DesktopGitRoomInfo,
+  DesktopManagedAgentSession,
+  DesktopRoomMessage,
+  DesktopRoomStreamEvent,
+  DesktopTaskSummary,
+} from "../ipc-types.js";
+import { createElectronTestEnv } from "./harness.js";
 
 const execFileAsync = promisify(execFile);
 const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), "../../../..");
 const nodeRequire = createRequire(import.meta.url);
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-desktop-local-chat-"));
-process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
-process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
-process.env.LETAGENTS_LOCAL_PROFILE_PATH = join(tempDir, "local-profile.json");
+const { tempDir } = createElectronTestEnv({
+  prefix: "letagents-desktop-local-chat-",
+  paths: ["chatStorage", "localChatDb", "localProfile"],
+});
 
 const {
   addLocalChatMessage,
@@ -26,11 +31,16 @@ const {
   getLocalChatMessagesBefore,
   getLocalMessageThread,
   getLocalMessageThreads,
+  getLocalChatThreadRoutingAgentKeysForRoots,
   getSyncedCloudMessageId,
   importLocalChatMessages,
   markLocalChatMessageSynced,
   markLocalMessageThreadRead,
+  setLocalMessageSchemaInitializationObserverForTest,
 } = await import("../main/rooms/messages/local-store.js");
+const {
+  setLocalChatDatabaseInitializationObserverForTest,
+} = await import("../main/rooms/local-db.js");
 const {
   readLocalProfileId,
   readChatStorageSettings,
@@ -47,6 +57,7 @@ const {
   createLocalRoom,
   getLocalRoomIncludingArchived,
   getLocalTask,
+  importLocalTasks,
   localRoomIdentifierForStorage,
   listLocalRoomEntries,
   listLocalTasks,
@@ -59,12 +70,386 @@ const {
   setLocalRoomPinned,
   updateLocalTask,
 } = await import("../main/rooms/local-store.js");
+const {
+  buildLocalRoomArtifactIdentityKey,
+  getLocalRoomArtifacts,
+  publishLocalRoomArtifact,
+  syncLocalRoomArtifactsForTask,
+} = await import("../main/rooms/artifacts/local-store.js");
+const {
+  executeManagedAgentContextRequest,
+} = await import("../main/agents/managed-agent-context.js");
+const {
+  desktopMessageAccountRoutingRequest,
+  resolveLocalCloudPublishAuthority,
+} = await import("../main/rooms/messages.js");
+const {
+  clearLocalManagedMessageDeliveryRetriesForTest,
+  deliverDesktopRoomMessageToManagedAgents,
+  emitPersistedLocalRoomMessage,
+  inspectLocalManagedMessageDeliveryRetriesForTest,
+  setLocalAccountAgentRoutingHydratorForTest,
+  setManagedAgentRoomStreamDispatcherForTest,
+  startDesktopRoomStream,
+  stopDesktopRoomStream,
+} = await import("../main/room-stream.js");
+const { mapRoomMessagePayload } = await import("../main/rooms/messages/mappers.js");
+const { buildLocalLegacyAccountAgentRouting } = await import(
+  "../main/agents/codex-event-routing.js"
+);
 
-test.after(() => {
-  delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
-  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
-  delete process.env.LETAGENTS_LOCAL_PROFILE_PATH;
-  rmSync(tempDir, { recursive: true, force: true });
+function localRoutingWorker(input: {
+  id: string;
+  key: string;
+  label: string;
+  startedAt: string;
+}): DesktopManagedAgentSession {
+  return {
+    id: input.id,
+    providerId: "codex",
+    runtime: `codex:${input.id}`,
+    roomIdentifier: "github.com/BrosInCode/local-managed-delivery",
+    roomDisplayName: "Local managed delivery",
+    repoRootPath: tempDir,
+    repoBranch: null,
+    status: "running",
+    deliveryMode: "desktop_events",
+    permissionProfileId: "sandboxed_write",
+    permissionProfile: {
+      id: "sandboxed_write",
+      label: "Sandboxed write",
+      description: "test",
+      status: "available",
+      risk: "medium",
+      detail: null,
+      isDefault: true,
+    },
+    canStop: true,
+    agentSessionId: input.id,
+    actorLabel: input.label,
+    agentKey: input.key,
+    displayName: input.label,
+    ownerLabel: "Owner",
+    ideLabel: "Codex",
+    reasoningSessionId: null,
+    activeWork: null,
+    pendingPermissionRequests: [],
+    startedAt: input.startedAt,
+    updatedAt: input.startedAt,
+    lastError: null,
+  };
+}
+
+test("desktop message payload requests always opt into account routing authority", () => {
+  assert.deepEqual(desktopMessageAccountRoutingRequest(), {
+    headers: { "X-LetAgents-Desktop-Client": "1" },
+  });
+  assert.deepEqual(desktopMessageAccountRoutingRequest({
+    "Content-Type": "application/json",
+    "X-LetAgents-Desktop-Client": "0",
+  }), {
+    headers: {
+      "Content-Type": "application/json",
+      "X-LetAgents-Desktop-Client": "1",
+    },
+  });
+});
+
+test("local cloud sync preserves exact worker provenance and never promotes it to human control", () => {
+  const worker = {
+    session_id: "agent_session_exact",
+    session_token: "secret",
+    agent_key: "owner/worker",
+    room_id: "room_cloud",
+  };
+  assert.equal(resolveLocalCloudPublishAuthority({
+    source: "agent",
+    publisherAgentKey: worker.agent_key,
+    publisherSessionId: worker.session_id,
+    localControlAuthorized: true,
+    cloudRoomIdentifier: worker.room_id,
+    publisherSession: worker,
+  }), "worker");
+  assert.equal(resolveLocalCloudPublishAuthority({
+    source: "agent",
+    publisherAgentKey: worker.agent_key,
+    publisherSessionId: worker.session_id,
+    localControlAuthorized: true,
+    cloudRoomIdentifier: worker.room_id,
+    publisherSession: null,
+  }), null, "a missing exact worker credential cannot fall through to human authority");
+  assert.equal(resolveLocalCloudPublishAuthority({
+    source: "browser",
+    publisherAgentKey: null,
+    publisherSessionId: null,
+    localControlAuthorized: true,
+    cloudRoomIdentifier: worker.room_id,
+    publisherSession: null,
+  }), "human");
+  assert.equal(resolveLocalCloudPublishAuthority({
+    source: "browser",
+    publisherAgentKey: worker.agent_key,
+    publisherSessionId: worker.session_id,
+    localControlAuthorized: true,
+    cloudRoomIdentifier: worker.room_id,
+    publisherSession: worker,
+  }), null, "imported worker provenance cannot be relabelled as an owner-human write");
+});
+
+test("desktop local database initialization is single-flight for concurrent cold callers", async () => {
+  let databaseInitializations = 0;
+  let schemaInitializations = 0;
+  setLocalChatDatabaseInitializationObserverForTest(() => {
+    databaseInitializations += 1;
+  });
+  setLocalMessageSchemaInitializationObserverForTest(() => {
+    schemaInitializations += 1;
+    if (schemaInitializations === 1) throw new Error("injected schema failure");
+  });
+
+  await assert.rejects(
+    addLocalChatMessage("room_cold_init", {
+      sender: "Before retry",
+      text: "must fail",
+      source: "agent",
+    }),
+    /injected schema failure/,
+  );
+  const messages = await Promise.all(Array.from({ length: 12 }, (_, index) =>
+    addLocalChatMessage("room_cold_init", {
+      sender: `Agent ${index}`,
+      text: `message ${index}`,
+      source: "agent",
+    })));
+
+  assert.deepEqual(
+    messages.map((message) => message.id).sort((left, right) =>
+      Number(left.slice(4)) - Number(right.slice(4))),
+    Array.from({ length: 12 }, (_, index) => `msg_${index + 1}`),
+  );
+  assert.equal(databaseInitializations, 1, "concurrent callers share one database open");
+  assert.equal(schemaInitializations, 2, "a failed schema attempt is retried once and shared");
+  setLocalChatDatabaseInitializationObserverForTest(null);
+  setLocalMessageSchemaInitializationObserverForTest(null);
+});
+
+test("local managed delivery retries transient routing authority before consuming dedupe", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/local-routing-retry";
+  await createLocalRoom({
+    roomIdentifier: "local_routing_retry",
+    displayName: "Routing Retry",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+  let attempts = 0;
+  setLocalAccountAgentRoutingHydratorForTest(async (_roomIdentifier, _localRoomIdentifier, messages) => {
+    attempts += 1;
+    if (attempts === 1) throw new Error("projection temporarily unavailable");
+    return messages.map((message) => ({
+      ...message,
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy" as const,
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: true,
+      },
+    }));
+  });
+  try {
+    await deliverDesktopRoomMessageToManagedAgents(cloudRoomIdentifier, {
+      id: "msg_9001",
+      sender: "Human",
+      text: "continue",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-08-11T00:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      threadRootId: "msg_9000",
+      threadReplyToId: "msg_9000",
+      thread: null,
+      replyTo: null,
+    });
+    assert.equal(attempts, 1, "the unavailable result returns without marking the message delivered");
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert.equal(attempts, 2, "the exact persisted message is rehydrated after projection recovery");
+  } finally {
+    setLocalAccountAgentRoutingHydratorForTest(null);
+  }
+});
+
+test("local managed delivery never reinterprets an explicit invalid routing envelope", async () => {
+  let hydrationAttempts = 0;
+  setLocalAccountAgentRoutingHydratorForTest(async (_roomIdentifier, _localRoomIdentifier, messages) => {
+    hydrationAttempts += 1;
+    return [...messages];
+  });
+  try {
+    await deliverDesktopRoomMessageToManagedAgents("local_invalid_authority", {
+      id: "msg_9002",
+      sender: "Imported worker",
+      text: "@everyone",
+      attachments: [],
+      agentPromptKind: null,
+      source: "agent",
+      timestamp: "2026-08-11T00:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      accountAgentRouting: { version: 1, authority: "invalid" },
+      threadRootId: "msg_9002",
+      threadReplyToId: null,
+      thread: null,
+      replyTo: null,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert.equal(
+      hydrationAttempts,
+      0,
+      "present-but-invalid imported authority stays silent instead of falling back to legacy routing",
+    );
+  } finally {
+    setLocalAccountAgentRoutingHydratorForTest(null);
+  }
+});
+
+test("local managed delivery coalesces persistent projection failures into one bounded room retry", async () => {
+  let hydrationAttempts = 0;
+  setLocalAccountAgentRoutingHydratorForTest(async () => {
+    hydrationAttempts += 1;
+    throw new Error("projection remains unavailable");
+  });
+  try {
+    await Promise.all(Array.from({ length: 1_000 }, (_, index) =>
+      deliverDesktopRoomMessageToManagedAgents("local_retry_storm", {
+        id: `msg_${10_000 + index}`,
+        sender: "Human",
+        text: `continue ${index}`,
+        attachments: [],
+        agentPromptKind: null,
+        source: "browser",
+        timestamp: "2026-08-11T00:00:00.000Z",
+        actorLabel: null,
+        agentIdentity: null,
+        threadRootId: `msg_${10_000 + index}`,
+        threadReplyToId: null,
+        thread: null,
+        replyTo: null,
+      })));
+    assert.deepEqual(inspectLocalManagedMessageDeliveryRetriesForTest(), {
+      rooms: 1,
+      messages: 500,
+    });
+    await new Promise((resolve) => setTimeout(resolve, 180));
+    assert.equal(
+      hydrationAttempts,
+      1_001,
+      "one room retry probes the oldest pending message instead of spawning 1,000 timers",
+    );
+  } finally {
+    clearLocalManagedMessageDeliveryRetriesForTest();
+    setLocalAccountAgentRoutingHydratorForTest(null);
+  }
+});
+
+test("persisted local agent messages reach other managed workers once without poll duplicates", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/local-managed-delivery";
+  const localRoomIdentifier = "local_managed_delivery";
+  await createLocalRoom({
+    roomIdentifier: localRoomIdentifier,
+    displayName: "Local managed delivery",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+
+  const oak = localRoutingWorker({
+    id: "agent_session_oak",
+    key: "owner/oak",
+    label: "Oak",
+    startedAt: "2026-08-11T00:00:00.000Z",
+  });
+  const cedar = localRoutingWorker({
+    id: "agent_session_cedar",
+    key: "owner/cedar",
+    label: "Cedar",
+    startedAt: "2026-08-11T00:00:01.000Z",
+  });
+  const workers = [oak, cedar];
+  const managedEvents: Array<Extract<DesktopRoomStreamEvent, { type: "message" }>> = [];
+
+  setManagedAgentRoomStreamDispatcherForTest((event) => {
+    if (event.type === "message") managedEvents.push(event);
+  });
+  setLocalAccountAgentRoutingHydratorForTest(async (_room, _localRoom, messages) =>
+    messages.map((message) => ({
+      ...message,
+      accountAgentRouting: buildLocalLegacyAccountAgentRouting(
+        workers,
+        message,
+        message.threadRootId && message.threadRootId !== message.id
+          ? [oak.agentKey!, cedar.agentKey!]
+          : [],
+      ),
+    })));
+
+  try {
+    await startDesktopRoomStream(cloudRoomIdentifier);
+    const root = await addLocalChatMessage(localRoomIdentifier, {
+      sender: "Human",
+      text: "Coordinate here",
+      source: "browser",
+    });
+    const inputs = [
+      { text: "@Oak please inspect", reply_to: null, thread_root_id: null },
+      { text: "@everyone status", reply_to: null, thread_root_id: null },
+      { text: "Thread update", reply_to: root.id, thread_root_id: root.id },
+    ];
+    const messages: DesktopRoomMessage[] = [];
+    for (const [index, input] of inputs.entries()) {
+      const payload = await addLocalChatMessage(localRoomIdentifier, {
+        sender: "Cedar",
+        text: input.text,
+        source: "agent",
+        reply_to: input.reply_to,
+        thread_root_id: input.thread_root_id,
+        publisher_agent_key: cedar.agentKey,
+        publisher_agent_session_id: cedar.agentSessionId,
+        idempotency_key: `local-managed-delivery:${index}`,
+      });
+      const message = mapRoomMessagePayload(payload);
+      messages.push(message);
+      emitPersistedLocalRoomMessage(cloudRoomIdentifier, message);
+    }
+
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    for (const message of messages) {
+      // This is the same persisted row the durable poll later observes. The
+      // immediate delivery must win once; replay must be a no-op.
+      await deliverDesktopRoomMessageToManagedAgents(cloudRoomIdentifier, message);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+
+    for (const message of messages) {
+      const deliveries = managedEvents.filter((event) => event.message.id === message.id);
+      assert.equal(deliveries.length, 1, `${message.text} is dispatched exactly once`);
+      assert.deepEqual(deliveries[0]?.message.accountAgentRouting, {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: ["owner/oak"],
+        recipientSessions: [{
+          agentKey: "owner/oak",
+          agentSessionId: "agent_session_oak",
+          activationReason: "local_legacy",
+        }],
+        controlAuthorized: false,
+      }, message.text);
+    }
+  } finally {
+    await stopDesktopRoomStream(cloudRoomIdentifier);
+    setManagedAgentRoomStreamDispatcherForTest(null);
+    setLocalAccountAgentRoutingHydratorForTest(null);
+  }
 });
 
 test("desktop local chat store persists messages, replies, and sync metadata", async () => {
@@ -95,6 +480,16 @@ test("desktop local chat store persists messages, replies, and sync metadata", a
     localMessageId: first.id,
     cloudMessageId: "msg_44",
   });
+  const [syncedLocalOrigin] = (await getLocalChatMessages("room_1", {
+    after: null,
+    limit: 1,
+  })).messages;
+  assert.equal(syncedLocalOrigin?.local_control_authorized, true);
+  assert.equal(
+    syncedLocalOrigin?.account_agent_routing,
+    undefined,
+    "publishing a local-origin message does not reclassify it as an envelope-less cloud import",
+  );
   assert.equal(
     await getSyncedCloudMessageId({
       roomId: "room_1",
@@ -102,6 +497,56 @@ test("desktop local chat store persists messages, replies, and sync metadata", a
     }),
     "msg_44",
   );
+});
+
+test("desktop local messages enforce canonical ids and shared sender bounds", async () => {
+  const root = await addLocalChatMessage("room_contract", {
+    sender: "😀".repeat(512),
+    text: "boundary",
+  });
+  assert.equal(root.id, "msg_1");
+  await assert.rejects(
+    addLocalChatMessage("room_contract", { sender: "x".repeat(513), text: "too many characters" }),
+    /must not exceed 512 characters or 2048 UTF-8 bytes/,
+  );
+  await assert.rejects(
+    addLocalChatMessage("room_contract", { sender: "😀".repeat(513), text: "too many bytes" }),
+    /must not exceed 512 characters or 2048 UTF-8 bytes/,
+  );
+  for (const malformed of ["msg_01", "msg_2147483648", "msg_9007199254740993"]) {
+    await assert.rejects(
+      addLocalChatMessage("room_contract", { sender: "Agent", text: "bad id", reply_to: malformed }),
+      /reply_to must be a valid local message id/,
+    );
+  }
+  const { DatabaseSync } = nodeRequire("node:sqlite") as {
+    DatabaseSync: new (path: string) => { prepare(sql: string): { run(...params: unknown[]): void }; close(): void };
+  };
+  const database = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  database.prepare(`
+    INSERT INTO local_chat_room_sequences (room_id, next_number)
+    VALUES ('room_sequence_overflow', 2147483648)
+  `).run();
+  database.close();
+  await assert.rejects(
+    addLocalChatMessage("room_sequence_overflow", { sender: "Agent", text: "overflow" }),
+    /sequence could not be allocated/,
+  );
+});
+
+test("desktop local chat store deduplicates idempotent managed failure messages", async () => {
+  const input = {
+    sender: "letagents",
+    text: "Agent could not reply: quota exhausted",
+    source: "managed_agent_failure",
+    idempotency_key: "managed_agent_failure:session_1:msg_1:quota_exhausted",
+  };
+  const first = await addLocalChatMessage("room_failure_dedupe", input);
+  const repeated = await addLocalChatMessage("room_failure_dedupe", input);
+  const page = await getLocalChatMessages("room_failure_dedupe");
+
+  assert.equal(repeated.id, first.id);
+  assert.equal(page.messages.length, 1);
 });
 
 test("desktop local chat store rejects thread targets hidden from chat", async () => {
@@ -287,6 +732,446 @@ test("desktop local chat import seeds thread read state from cloud metadata", as
   assert.equal(otherReaderPage?.summary.unread_count, 1);
 });
 
+test("desktop cloud import resolves reply edges independently of timestamp order", async () => {
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  await importLocalChatMessages("room_import_reply_first", [
+    {
+      id: "msg_101",
+      sender: "Agent",
+      text: "first reply",
+      attachments: [],
+      source: "agent",
+      timestamp,
+      thread_root_id: "msg_100",
+      thread_reply_to_id: "msg_100",
+      reply_to: { id: "msg_100", sender: "Human", text: "root", source: "browser", timestamp },
+      thread: null,
+    },
+    {
+      id: "msg_102",
+      sender: "Agent",
+      text: "nested reply",
+      attachments: [],
+      source: "agent",
+      timestamp,
+      thread_root_id: "msg_100",
+      thread_reply_to_id: "msg_101",
+      reply_to: { id: "msg_101", sender: "Agent", text: "first reply", source: "agent", timestamp },
+      thread: null,
+    },
+    {
+      id: "msg_100",
+      sender: "Human",
+      text: "root",
+      attachments: [],
+      source: "browser",
+      timestamp,
+      thread_root_id: "msg_100",
+      thread_reply_to_id: null,
+      reply_to: null,
+      thread: null,
+    },
+  ]);
+
+  const messages = await getLocalChatMessages("room_import_reply_first");
+  const root = messages.messages.find((message) => message.text === "root")!;
+  const firstReply = messages.messages.find((message) => message.text === "first reply")!;
+  const nestedReply = messages.messages.find((message) => message.text === "nested reply")!;
+  assert.equal(firstReply.reply_to?.id, root.id);
+  assert.equal(firstReply.thread_root_id, root.id);
+  assert.equal(nestedReply.reply_to?.id, firstReply.id);
+  assert.equal(nestedReply.thread_root_id, root.id);
+  const thread = await getLocalMessageThread("room_import_reply_first", root.id);
+  assert.deepEqual(thread?.replies.map((message) => message.text), ["first reply", "nested reply"]);
+});
+
+test("desktop cloud edge correction removes the reply's obsolete phantom root", async () => {
+  const room = "room_import_reply_before_root";
+  const timestamp = "2026-01-01T00:00:00.000Z";
+  const reply = {
+    id: "msg_201",
+    sender: "Oak",
+    text: "reply before root",
+    attachments: [],
+    source: "agent",
+    timestamp,
+    thread_root_id: "msg_200",
+    thread_reply_to_id: "msg_200",
+    reply_to: { id: "msg_200", sender: "Human", text: "root", source: "browser", timestamp },
+    thread: null,
+    agent_identity: {
+      actor_label: "Oak",
+      agent_key: "owner/oak",
+      agent_session_id: "oak-session",
+    },
+  };
+  await importLocalChatMessages(room, [reply]);
+  await importLocalChatMessages(room, [{
+    id: "msg_200",
+    sender: "Human",
+    text: "root",
+    attachments: [],
+    source: "browser",
+    timestamp,
+    thread_root_id: "msg_200",
+    thread_reply_to_id: null,
+    reply_to: null,
+    thread: null,
+  }, reply]);
+
+  let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
+  for (let attempt = 0; attempt < 50 && !membership; attempt += 1) {
+    try {
+      membership = await getLocalChatThreadRoutingAgentKeysForRoots(
+        room,
+        ["msg_1", "msg_2"],
+        [{ agentKey: "owner/oak", actorLabel: "Oak", displayName: "Oak" }],
+      );
+    } catch (error) {
+      if ((error as { name?: string }).name !== "LocalThreadRoutingProjectionUnavailableError") throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+  }
+  assert.ok(membership);
+  assert.deepEqual([...(membership.get("msg_1") ?? [])], []);
+  assert.deepEqual([...(membership.get("msg_2") ?? [])], ["owner/oak"]);
+});
+
+test("desktop cloud-to-local import preserves durable publisher routing authority", async () => {
+  // Model a staggered rollout: the first import came from a client that did
+  // not persist the new trusted publisher/control fields.
+  await importLocalChatMessages("room_import_durable_publisher", [
+    {
+      id: "msg_20",
+      sender: "Old visible label",
+      text: "root",
+      attachments: [],
+      source: "agent",
+      timestamp: "2026-01-02T00:00:00.000Z",
+      thread_root_id: "msg_20",
+      thread_reply_to_id: null,
+      reply_to: null,
+      thread: null,
+    },
+    {
+      id: "msg_21",
+      sender: "Human",
+      text: "/stop-codex-room",
+      attachments: [],
+      source: "browser",
+      timestamp: "2026-01-02T00:00:01.000Z",
+      thread_root_id: "msg_20",
+      thread_reply_to_id: "msg_20",
+      reply_to: null,
+      thread: null,
+    },
+  ]);
+  await importLocalChatMessages("room_import_durable_publisher", [
+    {
+      id: "msg_20",
+      sender: "Old visible label",
+      text: "root",
+      attachments: [],
+      source: "agent",
+      timestamp: "2026-01-02T00:00:00.000Z",
+      thread_root_id: "msg_20",
+      thread_reply_to_id: null,
+      reply_to: null,
+      thread: null,
+      agent_identity: {
+        actor_label: "Old visible label",
+        agent_key: "local/stable-key",
+        agent_session_id: "cloud-old-session",
+      },
+    },
+    {
+      id: "msg_21",
+      sender: "Human",
+      text: "/stop-codex-room",
+      attachments: [],
+      source: "browser",
+      timestamp: "2026-01-02T00:00:01.000Z",
+      thread_root_id: "msg_20",
+      thread_reply_to_id: "msg_20",
+      reply_to: {
+        id: "msg_20",
+        sender: "Old visible label",
+        text: "root",
+        source: "agent",
+        timestamp: "2026-01-02T00:00:00.000Z",
+      },
+      thread: null,
+      account_agent_routing: {
+        version: 1,
+        authority: "legacy",
+        recipient_agent_keys: [],
+        recipient_agent_sessions: [],
+        control_authorized: false,
+      },
+    },
+    {
+      id: "msg_22",
+      sender: "Owner",
+      text: "/stop-cursor-room",
+      attachments: [],
+      source: "browser",
+      timestamp: "2026-01-02T00:00:02.000Z",
+      thread_root_id: "msg_22",
+      thread_reply_to_id: null,
+      reply_to: null,
+      thread: null,
+      account_agent_routing: {
+        version: 1,
+        authority: "receipts",
+        recipient_agent_keys: [],
+        recipient_agent_sessions: [],
+        control_authorized: true,
+      },
+    },
+    {
+      id: "msg_23",
+      sender: "Human",
+      text: "old server row without routing",
+      attachments: [],
+      source: "browser",
+      timestamp: "2026-01-02T00:00:03.000Z",
+      thread_root_id: "msg_23",
+      thread_reply_to_id: null,
+      reply_to: null,
+      thread: null,
+    },
+  ], { readerKey: "account:owner" });
+
+  const imported = await getLocalChatMessages("room_import_durable_publisher", {
+    readerKey: "account:owner",
+  });
+  assert.equal(imported.messages.find((message) => message.id === "msg_1")?.agent_identity?.agent_session_id,
+    "cloud-old-session");
+  assert.equal(imported.messages.find((message) => message.id === "msg_2")?.local_control_authorized, false,
+    "a collaborator-authored browser stop remains unauthorized after a cloud-to-local fork");
+  assert.deepEqual(imported.messages.find((message) => message.id === "msg_2")?.account_agent_routing, {
+    version: 1,
+    authority: "legacy",
+    recipient_agent_keys: [],
+    recipient_agent_sessions: [],
+    control_authorized: false,
+  }, "immutable cloud routing authority survives local replay");
+  assert.equal(imported.messages.find((message) => message.id === "msg_3")?.local_control_authorized, true,
+    "the importing owner retains their account-scoped stop authority");
+  assert.deepEqual(imported.messages.find((message) => message.id === "msg_4")?.account_agent_routing, {
+    version: 1,
+    authority: "invalid",
+  }, "a cloud-imported row without an envelope never becomes mutable local legacy authority");
+
+  const otherAccount = await getLocalChatMessages("room_import_durable_publisher", {
+    readerKey: "account:other",
+  });
+  const otherAccountStop = otherAccount.messages.find((message) => message.id === "msg_2");
+  assert.deepEqual(otherAccountStop?.account_agent_routing, {
+    version: 1,
+    authority: "invalid",
+  }, "an account-scoped cloud routing envelope fails closed after an account switch");
+  assert.equal(otherAccountStop?.local_control_authorized, false,
+    "owner control authority never crosses the imported routing audience");
+  const otherAccountOwnerStop = otherAccount.messages.find((message) => message.id === "msg_3");
+  assert.deepEqual(otherAccountOwnerStop?.account_agent_routing, {
+    version: 1,
+    authority: "invalid",
+  });
+  assert.equal(otherAccountOwnerStop?.local_control_authorized, false);
+
+  const membership = await getLocalChatThreadRoutingAgentKeysForRoots(
+    "room_import_durable_publisher",
+    ["msg_1"],
+    [
+      {
+        agentKey: "local/stable-key",
+        actorLabel: "Renamed legitimate worker",
+        displayName: "Maple",
+      },
+      {
+        agentKey: "local/impostor",
+        actorLabel: "Old visible label",
+        displayName: "Old visible label",
+      },
+    ],
+  );
+  assert.deepEqual(
+    [...(membership.get("msg_1") ?? [])],
+    ["local/stable-key"],
+    "the imported authenticated key outranks a later worker reusing the old display alias",
+  );
+});
+
+test("desktop cloud publisher correction replaces stale local routing projection", async () => {
+  const base = {
+    id: "msg_30",
+    sender: "Historical label",
+    text: "root",
+    attachments: [],
+    source: "agent",
+    timestamp: "2026-01-03T00:00:00.000Z",
+    thread_root_id: "msg_30",
+    thread_reply_to_id: null,
+    reply_to: null,
+    thread: null,
+  };
+  await importLocalChatMessages("room_import_publisher_correction", [{
+    ...base,
+    agent_identity: {
+      actor_label: "Historical label",
+      agent_key: "owner/key-a",
+      agent_session_id: "session_a",
+    },
+  }]);
+  await importLocalChatMessages("room_import_publisher_correction", [{
+    ...base,
+    agent_identity: {
+      actor_label: "Historical label",
+      agent_key: "owner/key-b",
+      agent_session_id: "session_b",
+    },
+  }]);
+
+  const membership = await getLocalChatThreadRoutingAgentKeysForRoots(
+    "room_import_publisher_correction",
+    ["msg_1"],
+    [
+      { agentKey: "owner/key-a", actorLabel: "A", displayName: "A" },
+      { agentKey: "owner/key-b", actorLabel: "B", displayName: "B" },
+    ],
+  );
+  assert.deepEqual([...(membership.get("msg_1") ?? [])], ["owner/key-b"]);
+});
+
+test("desktop cloud publisher correction invalidates a large root without foreground replay", async () => {
+  const room = "room_import_large_publisher_correction";
+  const base = {
+    id: "msg_40",
+    sender: "Historical label",
+    text: "root",
+    attachments: [],
+    source: "agent",
+    timestamp: "2026-01-04T00:00:00.000Z",
+    thread_root_id: "msg_40",
+    thread_reply_to_id: null,
+    reply_to: null,
+    thread: null,
+  };
+  await importLocalChatMessages(room, [{
+    ...base,
+    agent_identity: {
+      actor_label: "Historical label",
+      agent_key: "owner/old-key",
+      agent_session_id: "old-session",
+    },
+  }]);
+  const { DatabaseSync } = nodeRequire("node:sqlite") as {
+    DatabaseSync: new (path: string) => {
+      exec(sql: string): void;
+      prepare(sql: string): {
+        get(...params: unknown[]): Record<string, unknown> | undefined;
+        run(...params: unknown[]): void;
+      };
+      close(): void;
+    };
+  };
+  const raw = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  raw.exec("BEGIN IMMEDIATE");
+  try {
+    raw.prepare(`
+      WITH RECURSIVE replies(number) AS (
+        SELECT 2 UNION ALL SELECT number + 1 FROM replies WHERE number <= 5001
+      )
+      INSERT INTO local_chat_messages (
+        room_id, number, thread_root_number, sender, text, source, timestamp
+      )
+      SELECT ?, number, 1, 'Reply ' || number, 'body', 'agent',
+             '2026-01-04T00:00:01.000Z'
+        FROM replies
+    `).run(room);
+    raw.prepare(`
+      WITH RECURSIVE projected(number) AS (
+        SELECT 1 UNION ALL SELECT number + 1 FROM projected WHERE number < 2000
+      )
+      INSERT INTO local_chat_thread_routing_aliases_v2 (
+        room_id, thread_root_number, participant_hash, participant_text,
+        alias_hash, alias_text, is_full
+      )
+      SELECT ?, 1, printf('%032x', number), 'Participant ' || number,
+             printf('%032x', number + 10000), 'alias ' || number, 1
+        FROM projected
+    `).run(room);
+    raw.prepare(`
+      WITH RECURSIVE projected(number) AS (
+        SELECT 1 UNION ALL SELECT number + 1 FROM projected WHERE number < 2000
+      )
+      INSERT INTO local_chat_thread_routing_agents_v2 (
+        room_id, thread_root_number, participant_hash, participant_text,
+        agent_key_hash, agent_key
+      )
+      SELECT ?, 1, printf('%032x', number), 'Participant ' || number,
+             printf('%032x', number + 20000), 'owner/key-' || number
+        FROM projected
+    `).run(room);
+    raw.exec("COMMIT");
+  } catch (error) {
+    raw.exec("ROLLBACK");
+    throw error;
+  } finally {
+    raw.close();
+  }
+
+  let timerFired = false;
+  setTimeout(() => { timerFired = true; }, 0);
+  const startedAt = performance.now();
+  await importLocalChatMessages(room, [{
+    ...base,
+    agent_identity: {
+      actor_label: "Historical label",
+      agent_key: "owner/new-key",
+      agent_session_id: "new-session",
+    },
+  }]);
+  const correctionMs = performance.now() - startedAt;
+  const afterCorrection = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  const retainedProjection = afterCorrection.prepare(`
+    SELECT
+      (SELECT COUNT(*) FROM local_chat_thread_routing_aliases_v2
+        WHERE room_id = ? AND thread_root_number = 1) AS alias_count,
+      (SELECT COUNT(*) FROM local_chat_thread_routing_agents_v2
+        WHERE room_id = ? AND thread_root_number = 1) AS agent_count,
+      (SELECT COUNT(*) FROM local_chat_thread_routing_invalidated_roots_v2
+        WHERE room_id = ? AND thread_root_number = 1) AS invalidated_count
+  `).get(room, room, room);
+  afterCorrection.close();
+  assert.equal(Number(retainedProjection?.alias_count), 2000);
+  assert.equal(Number(retainedProjection?.agent_count), 2000);
+  assert.equal(Number(retainedProjection?.invalidated_count), 1);
+  await new Promise<void>((resolve) => setTimeout(resolve, 0));
+  assert.equal(timerFired, true, "the correction leaves the event loop available for async repair");
+  assert.ok(correctionMs < 100, `publisher correction touched historical projection rows (${correctionMs.toFixed(1)}ms)`);
+
+  let membership: Awaited<ReturnType<typeof getLocalChatThreadRoutingAgentKeysForRoots>> | null = null;
+  for (let attempt = 0; attempt < 100 && !membership; attempt += 1) {
+    try {
+      membership = await getLocalChatThreadRoutingAgentKeysForRoots(
+        room,
+        ["msg_1"],
+        [
+          { agentKey: "owner/old-key", actorLabel: "Old", displayName: "Old" },
+          { agentKey: "owner/new-key", actorLabel: "New", displayName: "New" },
+        ],
+      );
+    } catch (error) {
+      if ((error as { name?: string }).name !== "LocalThreadRoutingProjectionUnavailableError") throw error;
+      await new Promise<void>((resolve) => setTimeout(resolve, 20));
+    }
+  }
+  assert.ok(membership, "the queued root repair eventually completes");
+  assert.deepEqual([...(membership.get("msg_1") ?? [])], ["owner/new-key"]);
+});
+
 test("desktop local chat store claims unsynced messages with stable sync keys", async () => {
   const message = await addLocalChatMessage("room_sync", {
     sender: "Human",
@@ -307,6 +1192,57 @@ test("desktop local chat store claims unsynced messages with stable sync keys", 
     cloudMessageId: "msg_9",
   });
   assert.deepEqual(await claimUnsyncedLocalChatMessages("room_sync"), []);
+});
+
+test("desktop local chat keeps attachment-only messages visible in history, sync, and thread summaries", async () => {
+  const attachmentOnly = await addLocalChatMessage("room_visibility_null", {
+    sender: "Human",
+    text: "",
+    source: "browser",
+    attachments: [{
+      id: "att_only",
+      file_name: "notes.txt",
+      mime_type: "text/plain",
+      size_bytes: 5,
+      content_base64: "aGVsbG8=",
+    }],
+  });
+  const hiddenPrompt = await addLocalChatMessage("room_visibility_null", {
+    sender: "Agent",
+    text: "",
+    agent_prompt_kind: "auto",
+    source: "agent",
+  });
+  const attachmentReply = await addLocalChatMessage("room_visibility_null", {
+    sender: "Agent",
+    text: "",
+    reply_to: attachmentOnly.id,
+    thread_root_id: attachmentOnly.id,
+    source: "agent",
+  });
+
+  const history = await getLocalChatMessages("room_visibility_null");
+  assert.deepEqual(history.messages.map((message) => message.id), [
+    attachmentOnly.id,
+    attachmentReply.id,
+  ]);
+  assert.equal(history.messages[0]?.attachments?.[0]?.id, "att_only");
+  assert.equal(history.messages.some((message) => message.id === hiddenPrompt.id), false);
+
+  const syncClaim = await claimUnsyncedLocalChatMessages("room_visibility_null");
+  assert.deepEqual(syncClaim.map((message) => message.id), [
+    attachmentOnly.id,
+    attachmentReply.id,
+  ]);
+
+  const thread = await getLocalMessageThread("room_visibility_null", attachmentOnly.id);
+  assert.deepEqual(thread?.replies.map((message) => message.id), [attachmentReply.id]);
+  assert.equal(thread?.summary.reply_count, 1);
+  assert.equal(thread?.summary.latest_reply?.id, attachmentReply.id);
+
+  const inbox = await getLocalMessageThreads("room_visibility_null");
+  assert.deepEqual(inbox.threads.map((item) => item.root.id), [attachmentOnly.id]);
+  assert.equal(inbox.threads[0]?.summary.latest_reply?.id, attachmentReply.id);
 });
 
 test("desktop storage resolver applies app default, room overrides, and local metadata", async () => {
@@ -424,6 +1360,132 @@ test("desktop local Git rooms persist Git metadata for snapshots and account ent
     () => assertLocalRoomPublishable(room),
     /Local Git Rooms stay local/,
   );
+});
+
+test("desktop local room artifacts persist and link to tasks", async () => {
+  const room = await createLocalRoom({
+    roomIdentifier: "local_artifacts_room",
+    displayName: "Local Artifacts",
+  });
+  assert.equal(
+    buildLocalRoomArtifactIdentityKey({
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+    }),
+    "git:commit:id:abc123",
+  );
+
+  const published = await publishLocalRoomArtifact({
+    roomId: room.roomIdentifier,
+    artifact: {
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+      title: "Initial local commit",
+      ref: "feature/local-artifacts",
+      state: "created",
+    },
+    linkedTaskIds: ["task_1"],
+  });
+  assert.equal(published.artifact.provider, "git");
+  assert.equal(published.artifact.kind, "commit");
+  assert.deepEqual(published.artifact.linked_task_ids, ["task_1"]);
+
+  await publishLocalRoomArtifact({
+    roomId: room.roomIdentifier,
+    artifact: {
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+      title: "Updated local commit",
+    },
+    taskId: "task_2",
+  });
+
+  const artifacts = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(artifacts.artifacts?.length, 1);
+  assert.equal(artifacts.artifacts?.[0]?.title, "Updated local commit");
+  assert.equal(artifacts.artifacts?.[0]?.ref, "feature/local-artifacts");
+  assert.equal(artifacts.artifacts?.[0]?.state, "created");
+  assert.deepEqual(artifacts.artifacts?.[0]?.linked_task_ids, ["task_1", "task_2"]);
+
+  const filtered = await getLocalRoomArtifacts(room.roomIdentifier, { taskId: "task_2" });
+  assert.equal(filtered.artifacts?.[0]?.identity_key, "git:commit:id:abc123");
+  await syncLocalRoomArtifactsForTask({
+    roomId: room.roomIdentifier,
+    taskId: "task_3",
+    artifacts: [{
+      provider: "git",
+      kind: "commit",
+      id: "abc123",
+      title: "Task sync title",
+    }],
+  });
+  const afterTaskSync = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(afterTaskSync.artifacts?.[0]?.title, "Updated local commit");
+  assert.equal(afterTaskSync.artifacts?.[0]?.source, "manual");
+
+  await assert.rejects(
+    publishLocalRoomArtifact({
+      roomId: room.roomIdentifier,
+      artifact: { provider: "git", kind: "commit", title: "Missing identity" },
+    }),
+    /stable identity/,
+  );
+  await assert.rejects(
+    publishLocalRoomArtifact({
+      roomId: room.roomIdentifier,
+      artifact: { provider: "git", kind: "commit", number: null },
+    }),
+    /stable identity/,
+  );
+});
+
+test("managed agent local context resolves linked local room artifacts", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/context-linked-local-room";
+  const linked = await createLocalRoom({
+    roomIdentifier: "context_linked_local_room",
+    displayName: "Context Linked Local Room",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+  await publishLocalRoomArtifact({
+    roomId: linked.roomIdentifier,
+    artifact: {
+      provider: "git",
+      kind: "commit",
+      id: "ctx123",
+      title: "Context commit",
+    },
+  });
+
+  const result = await executeManagedAgentContextRequest({
+    session_id: "context_session",
+    room_id: cloudRoomIdentifier,
+    room_identifier: cloudRoomIdentifier,
+    joined_via: "join_room",
+    cwd: tempDir,
+    stop_phrase: "stop",
+    max_minutes: 30,
+    token: "token",
+    thread_id: "thread",
+    turn_id: "turn",
+    server_url: "http://127.0.0.1",
+    launched_server: false,
+    codex_bin: "codex",
+    status: "completed",
+    started_at: "2026-07-04T00:00:00.000Z",
+    updated_at: "2026-07-04T00:00:00.000Z",
+  } as any, {
+    tool: "get_room_context_summary",
+    arguments: {},
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.storage, "local");
+  assert.equal(result.roomIdentifier, linked.roomIdentifier);
+  assert.equal((result.artifacts as any[])?.[0]?.identityKey, "git:commit:id:ctx123");
 });
 
 test("desktop linked local rooms use the cloud room as the visible account identity", async () => {
@@ -544,11 +1606,42 @@ test("desktop local room task store supports board create and lifecycle updates"
     assignee: "Local Agent",
     assigneeAgentKey: "local/agent",
     prUrl: "https://github.com/BrosInCode/letagents/pull/1",
+    workflowArtifacts: [{
+      provider: "git",
+      kind: "commit",
+      id: "def456",
+      number: null,
+      title: "Local task commit",
+      url: null,
+      ref: null,
+      state: null,
+    }],
   });
   assert.equal(updated.status, "accepted");
   assert.equal(updated.assignee, "Local Agent");
   assert.equal(updated.assigneeAgentKey, "local/agent");
   assert.equal(updated.prUrl, "https://github.com/BrosInCode/letagents/pull/1");
+  assert.equal(updated.workflowArtifacts?.[0]?.provider, "git");
+  assert.equal(
+    (await getLocalRoomArtifacts("task_room", { taskId: task.id })).artifacts?.[0]?.identity_key,
+    "git:commit:id:def456",
+  );
+
+  await updateLocalTask("task_room", task.id, {
+    workflowArtifacts: [],
+  });
+  assert.deepEqual((await getLocalRoomArtifacts("task_room", { taskId: task.id })).artifacts, []);
+  await assert.rejects(
+    () => updateLocalTask("task_room", task.id, {
+      workflowArtifacts: [{
+        provider: "git",
+        kind: "invalid",
+        id: "bad",
+      } as any],
+    }),
+    /artifact.kind is invalid/,
+  );
+  assert.deepEqual((await getLocalTask("task_room", task.id))?.workflowArtifacts, []);
 
   assert.deepEqual((await listLocalTasks("task_room")).map((entry) => entry.id), [task.id]);
   assert.equal((await getLocalTask("task_room", task.id))?.status, "accepted");
@@ -557,6 +1650,43 @@ test("desktop local room task store supports board create and lifecycle updates"
     () => updateLocalTask("task_room", task.id, { status: "done" }),
     /Invalid transition: accepted -> done/,
   );
+});
+
+test("desktop local task import syncs workflow artifacts into shared artifacts", async () => {
+  await createLocalRoom({
+    roomIdentifier: "task_import_artifact_room",
+    displayName: "Task Import Artifact Room",
+  });
+  await importLocalTasks("task_import_artifact_room", [{
+    id: "task_9",
+    title: "Imported task",
+    description: null,
+    status: "accepted",
+    assignee: null,
+    assigneeAgentKey: null,
+    createdBy: "GitHub",
+    prUrl: null,
+    workflowArtifacts: [{
+      provider: "git",
+      kind: "commit",
+      id: "import123",
+      number: null,
+      title: "Imported commit",
+      url: null,
+      ref: "feature/imported",
+      state: null,
+    }],
+    workflowRefs: [],
+    activeLeases: [],
+    activeLocks: [],
+    stalePromptState: null,
+    createdAt: "2026-07-04T00:00:00.000Z",
+    updatedAt: "2026-07-04T00:00:00.000Z",
+  } satisfies DesktopTaskSummary]);
+
+  const artifacts = await getLocalRoomArtifacts("task_import_artifact_room", { taskId: "task_9" });
+  assert.equal(artifacts.artifacts?.[0]?.identity_key, "git:commit:id:import123");
+  assert.deepEqual(artifacts.artifacts?.[0]?.linked_task_ids, ["task_9"]);
 });
 
 test("desktop local task reassignment clears stale agent session owner metadata", async () => {
@@ -664,6 +1794,13 @@ test("desktop local task review leases are claimed and released locally", async 
   const task = await addLocalTask("review_room", {
     title: "Review locally",
   });
+  await updateLocalTask("review_room", task.id, { status: "accepted" });
+  await updateLocalTask("review_room", task.id, {
+    status: "assigned",
+    assignee: "Local Worker",
+    assigneeAgentKey: "local/worker",
+  });
+  await updateLocalTask("review_room", task.id, { status: "in_review" });
 
   const claimed = await claimLocalTaskReviewLease("review_room", task.id, {
     holderLabel: "Local Reviewer",
@@ -681,6 +1818,25 @@ test("desktop local task review leases are claimed and released locally", async 
   assert.deepEqual(released.task.activeLeases, []);
 });
 
+test("desktop local task review leases reject tasks outside review states", async () => {
+  await createLocalRoom({
+    roomIdentifier: "review_status_room",
+    displayName: "Review Status Room",
+  });
+  const task = await addLocalTask("review_status_room", {
+    title: "Not ready for review",
+  });
+
+  await assert.rejects(
+    () => claimLocalTaskReviewLease("review_status_room", task.id, {
+      holderLabel: "Local Reviewer",
+      agentKey: "local/reviewer",
+      agentSessionId: "local_session_status",
+    }),
+    /Cannot assign review authority while task is proposed/,
+  );
+});
+
 test("desktop local task review leases reject the assigned worker", async () => {
   await createLocalRoom({
     roomIdentifier: "review_assignee_room",
@@ -691,9 +1847,13 @@ test("desktop local task review leases reject the assigned worker", async () => 
   });
   await updateLocalTask("review_assignee_room", task.id, {
     status: "accepted",
+  });
+  await updateLocalTask("review_assignee_room", task.id, {
+    status: "assigned",
     assignee: "Local Worker",
     assigneeAgentKey: "local/worker",
   });
+  await updateLocalTask("review_assignee_room", task.id, { status: "in_review" });
 
   await assert.rejects(
     () => claimLocalTaskReviewLease("review_assignee_room", task.id, {

@@ -37,6 +37,7 @@ export interface DesktopRoomInfo {
 }
 
 export type DesktopRoomSharedArtifactProvider =
+  | "git"
   | "github"
   | "gitlab"
   | "bitbucket"
@@ -44,6 +45,9 @@ export type DesktopRoomSharedArtifactProvider =
 export type DesktopRoomSharedArtifactKind =
   | "issue"
   | "branch"
+  | "commit"
+  | "diff"
+  | "change_summary"
   | "pull_request"
   | "merge_request"
   | "review"
@@ -53,6 +57,36 @@ export type DesktopRoomSharedArtifactSource =
   | "task_workflow_artifact"
   | "github_event"
   | "manual";
+
+// Structured per-artifact detail, mirroring the API's RoomSharedArtifactDetail.
+// Discriminated on `type` + `version`; only change_summary today. For change
+// summaries this is file paths + counts (numstat) — never source code.
+export interface DesktopRoomSharedArtifactChangedFile {
+  path: string;
+  previousPath: string | null;
+  status: string;
+  additions: number;
+  deletions: number;
+  binary: boolean;
+  staged: boolean;
+  unstaged: boolean;
+  untracked: boolean;
+}
+
+export interface DesktopRoomSharedArtifactChangeSummaryDetail {
+  type: "change_summary";
+  version: 1;
+  changedFileCount: number;
+  additions: number;
+  deletions: number;
+  stagedFileCount: number;
+  unstagedFileCount: number;
+  untrackedFileCount: number;
+  hiddenFileCount: number;
+  files: DesktopRoomSharedArtifactChangedFile[];
+}
+
+export type DesktopRoomSharedArtifactDetail = DesktopRoomSharedArtifactChangeSummaryDetail;
 
 export interface DesktopRoomSharedArtifact {
   roomId: string;
@@ -65,6 +99,7 @@ export interface DesktopRoomSharedArtifact {
   url: string | null;
   ref: string | null;
   state: string | null;
+  detail: DesktopRoomSharedArtifactDetail | null;
   source: DesktopRoomSharedArtifactSource;
   firstSeenAt: string;
   updatedAt: string;
@@ -175,6 +210,16 @@ export interface DesktopRoomMessageReply {
   text: string;
   source: string | null;
   timestamp: string;
+  agentIdentity?: {
+    name: string | null;
+    displayName: string | null;
+    ownerLabel: string | null;
+    ownerAttribution: string | null;
+    ideLabel: string | null;
+    actorLabel: string | null;
+    agentKey: string | null;
+    agentSessionId: string | null;
+  } | null;
 }
 
 export interface DesktopRoomMessageThreadParticipant {
@@ -191,6 +236,8 @@ export interface DesktopRoomMessageThreadSummary {
   hasUnread: boolean;
   latestReply: DesktopRoomMessageReply | null;
   participants: DesktopRoomMessageThreadParticipant[];
+  participantCount: number;
+  participantsTruncated: boolean;
   lastReadMessageId: string | null;
 }
 
@@ -206,8 +253,34 @@ export interface DesktopRoomMessageAttachment {
   contentBase64: string | null;
 }
 
+/** Public Message-info projection (cloud rooms). Mirrors GET /rooms/:room/messages/:id/info. */
+export interface DesktopMessageInfo {
+  message: {
+    id: string;
+    sender: string;
+    textPreview: string;
+    timestamp: string;
+    threadRootId: string;
+    replyToId: string | null;
+  };
+  seenByPeople: Array<{ name: string; avatarUrl: string | null; seenAt: string }>;
+  agentsAsked: Array<{
+    receiptId: string;
+    agentKey: string;
+    actorLabel: string;
+    activationReasonLabel: string;
+    receiptState: string;
+    observed: boolean;
+    replyMessageId: string | null;
+  }>;
+  alsoObserved: Array<{ agentKey: string; displayName: string }>;
+  summaryCounts: { seenCount: number; askedCount: number; replyCount: number; observedCount: number };
+}
+
 export interface DesktopRoomMessage {
   id: string;
+  /** Exact idempotency identity supplied by the message publisher. */
+  clientMessageId?: string | null;
   sender: string;
   text: string;
   attachments: DesktopRoomMessageAttachment[];
@@ -229,6 +302,37 @@ export interface DesktopRoomMessage {
   threadReplyToId: string | null;
   thread: DesktopRoomMessageThreadSummary | null;
   replyTo: DesktopRoomMessageReply | null;
+  /** Trusted provenance retained only for local/forked dispatch decisions. */
+  localControlAuthorized?: boolean;
+  /** Account-scoped, non-rendered managed-agent dispatch metadata. */
+  accountAgentRouting?:
+    | {
+      version: 1;
+      authority: "receipts";
+      recipientAgentKeys: string[];
+      /** Exact receipt targets. Present-empty is authoritative. */
+      recipientSessions: Array<{
+        agentKey: string;
+        agentSessionId: string;
+        successorAgentSessionId?: string;
+      }>;
+      /** Missing on older servers and therefore treated as false. */
+      controlAuthorized?: boolean;
+    }
+    | {
+      version: 1;
+      authority: "legacy";
+      recipientAgentKeys: string[];
+      /** Exact room-global targets. Present-empty is authoritative. */
+      recipientSessions: Array<{
+        agentKey: string;
+        agentSessionId: string;
+        activationReason: string;
+      }>;
+      /** Missing on older servers and therefore treated as false. */
+      controlAuthorized?: boolean;
+    }
+    | { version: 1; authority: "invalid" };
 }
 
 export interface DesktopGitHubIntegrationStatus {
@@ -287,6 +391,45 @@ export interface DesktopGitHubEventsPage {
   hasMore: boolean;
 }
 
+export interface DesktopBoardSettingsSummary {
+  managerMode: "off" | "manager_optional" | "intent_required";
+  activeManager: {
+    agentSessionId: string;
+    agentKey: string;
+    actorLabel: string;
+    runtimeSource: "desktop_managed" | "open_model" | "external" | "unknown";
+  } | null;
+  pendingIntentCount: number;
+}
+
+/**
+ * Which room snapshot source a per-source status refers to. These mirror the
+ * fields loaded by the snapshot fetcher so the UI can tell "genuinely empty"
+ * apart from "this source failed to load".
+ */
+export type DesktopSnapshotSourceKey =
+  | "focusRooms"
+  | "tasks"
+  | "participants"
+  | "presence"
+  | "reasoning"
+  | "activityHistory"
+  | "roomArtifacts"
+  | "boardSettings"
+  | "messages"
+  | "githubEvents";
+
+export interface DesktopSnapshotSourceState {
+  status: "ready" | "error";
+  /** Human-readable failure detail when status is "error"; null when ready. */
+  error: string | null;
+}
+
+export type DesktopSnapshotSourceStates = Record<
+  DesktopSnapshotSourceKey,
+  DesktopSnapshotSourceState
+>;
+
 export interface DesktopRoomSnapshot {
   roomIdentifier: string | null;
   access: DesktopRoomAccess;
@@ -302,6 +445,55 @@ export interface DesktopRoomSnapshot {
   roomArtifacts: DesktopRoomSharedArtifact[];
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
+  boardSettings: DesktopBoardSettingsSummary;
+  /**
+   * Per-source load status for this snapshot. A source that failed to load is
+   * marked "error" (with its data falling back to empty) so consumers can show
+   * a degraded state instead of a false-empty view. Defaults to all-ready.
+   */
+  sourceStates: DesktopSnapshotSourceStates;
+}
+
+/** Durable snapshot deltas replayed only to managed agents after a live gap. */
+export interface DesktopRoomDeliveryRepair {
+  token: number;
+  messages: DesktopRoomMessage[];
+  tasks: DesktopTaskSummary[];
+}
+
+/**
+ * Poll-only room metadata — the subset of a snapshot that the server pushes no
+ * events for and must therefore be re-polled on a cadence: focus rooms,
+ * participants, presence, recent activity, and board settings. Everything else
+ * a room shows (messages, tasks, GitHub events, artifacts, reasoning) is
+ * event-fed, so the periodic refresh fetches only these sections and applies
+ * them onto the current snapshot, leaving the event-fed sections untouched.
+ */
+export type DesktopRoomLiveMetadataSourceKey = Extract<
+  DesktopSnapshotSourceKey,
+  "focusRooms" | "participants" | "presence" | "activityHistory" | "boardSettings"
+>;
+
+export type DesktopRoomLiveMetadataSourceStates = Record<
+  DesktopRoomLiveMetadataSourceKey,
+  DesktopSnapshotSourceState
+>;
+
+export interface DesktopRoomLiveMetadata {
+  roomIdentifier: string | null;
+  focusRooms: DesktopFocusRoomInfo[];
+  participants: DesktopParticipantSummary[];
+  participantHiddenCount: number;
+  presence: DesktopAgentPresence[];
+  recentActivity: DesktopActivityEntry[];
+  boardSettings: DesktopBoardSettingsSummary;
+  /**
+   * Per-source load status for just the poll-only sections. A section that
+   * failed to load is marked "error" (data falling back to empty) so the
+   * renderer keeps its previously loaded data for that section instead of
+   * blanking it — matching the full snapshot's graceful degradation.
+   */
+  sourceStates: DesktopRoomLiveMetadataSourceStates;
 }
 
 export interface DesktopSendRoomMessageResult {
@@ -395,11 +587,31 @@ export type DesktopRoomStreamEvent =
   | {
       type: "open";
       roomIdentifier: string;
+      /** Durable message checkpoint established after server listeners attach. */
+      checkpoint?: string | null;
+      /** True only when the requested cursor cannot be reconciled incrementally. */
+      gap?: boolean;
+      /** True when this boundary came from the server room_sync handshake. */
+      verified?: boolean;
+      /** Correlates an authoritative snapshot with a verified broker gap. */
+      deliveryRepairToken?: number;
     }
   | {
       type: "message";
       roomIdentifier: string;
       message: DesktopRoomMessage;
+    }
+  | {
+      /** Bounded authoritative tail used after a very large durable catch-up. */
+      type: "message_window";
+      roomIdentifier: string;
+      messages: DesktopRoomMessage[];
+    }
+  | {
+      /** One durable-history page, merged in one renderer pass. */
+      type: "message_batch";
+      roomIdentifier: string;
+      messages: DesktopRoomMessage[];
     }
   | {
       type: "task_update";
@@ -415,6 +627,7 @@ export type DesktopRoomStreamEvent =
       type: "artifact_update";
       roomIdentifier: string;
       artifactIdentityKey: string | null;
+      artifact?: DesktopRoomSharedArtifact | null;
     }
   | {
       type: "reasoning_update";

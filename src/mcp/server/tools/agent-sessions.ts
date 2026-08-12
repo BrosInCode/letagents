@@ -21,17 +21,25 @@ import {
   getSessionLivenessRegistration,
   getAgentSessionRepoBranch,
   getStoredAgentSession,
+  getStoredAgentSessionsForRoomIdentity,
   getTargetRoomId,
   ensureLocalWorkerAgentSession,
   isLocalRoomStorageEnabled,
   joinRoomIdentifier,
   resolveLocalRoomStorageIdentifiers,
+  resolveClientRequestedBase,
   saveAgentSession,
   toPublicAgentSession,
   toPublicRoomState,
   toRepoRoomAuthRequiredResult,
   withAgentIdentity,
+  resolveWorkerToolIdentity,
 } from "../runtime.js";
+import {
+  requireValidWorkerBearerRuntime,
+  workerModeDisabledToolResult,
+} from "../runtime/worker-bearer.js";
+import { bindSupervisedWorkerSessionWithContext } from "../runtime/supervisor-bridge.js";
 
 export function registerAgentSessionTools(server: McpServer): void {
   // -- register_agent_session -------------------------------------------------
@@ -59,9 +67,34 @@ export function registerAgentSessionTools(server: McpServer): void {
       cwd: z
         .string()
         .optional()
-        .describe("Working directory used to detect the worker's active git branch. Defaults to the MCP server's working directory."),
+        .describe("Worker working directory used for branch detection and exact supervised Codex binding. Defaults to the MCP server's working directory."),
     },
     async ({ room_id, session_kind, runtime, display_name, cwd }) => {
+      const workerRuntime = requireValidWorkerBearerRuntime();
+      if (workerRuntime.mode === "supervised") {
+        // Resolve before currentRoom, config, branch, or local storage. The
+        // daemon context is the only authority for a bounded worker's room.
+        const { agentSession } = await resolveWorkerToolIdentity({ roomId: room_id?.trim() || null });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  worker_bearer_mode: false,
+                  supervised_bounded_mode: true,
+                  agent_session: toPublicAgentSession(agentSession),
+                  agent_session_id: agentSession.session_id,
+                  use_agent_session_id: "This exact daemon-supervised agent_session_id may be passed to room tools. The credential remains daemon-private.",
+                },
+                null,
+                2,
+              ),
+            },
+          ],
+        };
+      }
       const targetRoomId = getTargetRoomId(room_id);
       if (!targetRoomId) {
         return {
@@ -112,6 +145,34 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
+      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
+      const apiRoomId = cloudRoomId || targetRoomId;
+      if (workerRuntime.mode === "worker") {
+        // The supplied bearer is issued for an existing server-side agent
+        // session. Do not call the owner-only registration endpoint or write
+        // any session credential to local storage.
+        const { agentSession } = await resolveWorkerToolIdentity({ roomId: apiRoomId });
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text: JSON.stringify(
+                {
+                  success: true,
+                  worker_bearer_mode: workerRuntime.mode === "worker",
+                  supervised_bounded_mode: false,
+                  agent_session: toPublicAgentSession(agentSession),
+                  agent_session_id: agentSession.session_id,
+                  use_agent_session_id: "This local worker-bearer session marker may be passed to room tools. The supplied bearer remains the only server credential.",
+                },
+                null,
+                2
+              ),
+            },
+          ],
+        };
+      }
+
       const identity = await ensureAgentIdentity();
       if (!identity.canonical_key) {
         return {
@@ -131,8 +192,24 @@ export function registerAgentSessionTools(server: McpServer): void {
         };
       }
 
-      const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(targetRoomId);
-      const apiRoomId = cloudRoomId || targetRoomId;
+      // Stable-base signal (task_66): declare the intent behind display_name
+      // so the server can converge a replayed decorated label without ever
+      // guessing from numeric shape.
+      const priorRoomSessions = getStoredAgentSessionsForRoomIdentity(apiRoomId, identity.canonical_key);
+      const requestedSessionKind = session_kind ?? "worker";
+      const requestedBaseDisplayName = resolveClientRequestedBase({
+        explicitDisplayName: display_name,
+        identityDisplayName: identity.display_name,
+        priorSessions: priorRoomSessions,
+      });
+      const replacementSession = requestedSessionKind === "worker"
+        ? priorRoomSessions.find((session) =>
+            !session.ended_at
+            && session.session_kind === "worker"
+            && session.agent_instance_id === AGENT_INSTANCE_UUID
+            && Boolean(session.session_token)
+          ) ?? null
+        : null;
       const created = await apiCall<Record<string, unknown>>(
         `/rooms/${encodeRoomIdPath(apiRoomId)}/agent-sessions`,
         {
@@ -143,10 +220,13 @@ export function registerAgentSessionTools(server: McpServer): void {
             ide_label: identity.ide_label ?? detectAgentIdeLabel(),
             agent_instance_id: AGENT_INSTANCE_UUID,
             display_name: display_name?.trim() || identity.display_name,
+            requested_base_display_name: requestedBaseDisplayName,
             session_kind: session_kind ?? "worker",
             runtime: requestedRuntime,
             repo_branch: repoBranch,
             registration_liveness: getSessionLivenessRegistration(requestedRuntime),
+            replace_agent_session_id: replacementSession?.session_id ?? null,
+            replace_agent_session_token: replacementSession?.session_token ?? null,
           }),
         }
       );
@@ -157,7 +237,14 @@ export function registerAgentSessionTools(server: McpServer): void {
         throw new Error("Agent session registration response was missing session credentials.");
       }
 
-      const session = saveAgentSession({
+      if (replacementSession) {
+        endStoredAgentSession(
+          replacementSession.session_id,
+          typeof created.created_at === "string" ? created.created_at : new Date().toISOString(),
+        );
+      }
+
+      let session = saveAgentSession({
         session_id: sessionId,
         session_token: sessionToken,
         room_id: typeof created.room_id === "string" ? created.room_id : apiRoomId,
@@ -172,6 +259,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         agent_key: typeof created.agent_key === "string" ? created.agent_key : identity.canonical_key,
         agent_instance_id: typeof created.agent_instance_id === "string" ? created.agent_instance_id : AGENT_INSTANCE_UUID,
         display_name: typeof created.display_name === "string" ? created.display_name : identity.display_name,
+        // Prefer the server-recorded allocation base; fall back to the base we
+        // declared so a later resume still replays a stable signal.
+        requested_base_display_name:
+          (typeof created.assigned_base_display_name === "string" && created.assigned_base_display_name.trim())
+            || requestedBaseDisplayName
+            || null,
         owner_label: typeof created.owner_label === "string" ? created.owner_label : identity.owner_label,
         ide_label: typeof created.ide_label === "string" ? created.ide_label : identity.ide_label ?? detectAgentIdeLabel(),
         repo_branch: typeof created.repo_branch === "string" ? created.repo_branch : repoBranch,
@@ -181,6 +274,17 @@ export function registerAgentSessionTools(server: McpServer): void {
         ended_at: typeof created.ended_at === "string" ? created.ended_at : null,
       });
 
+      const supervisorBinding = await bindSupervisedWorkerSessionWithContext(
+        session,
+        process.env,
+        { cwd: cwd?.trim() || process.cwd() },
+      );
+      if (supervisorBinding.supervisorContextCwd) {
+        session = saveAgentSession({
+          ...session,
+          supervisor_context_cwd: supervisorBinding.supervisorContextCwd,
+        });
+      }
       scheduleCodexRuntimeStreamBridgeBind(session);
 
       return {
@@ -213,6 +317,18 @@ export function registerAgentSessionTools(server: McpServer): void {
       agent_session_id: z.string().optional().describe("Registered agent session to disconnect."),
     },
     async ({ room_id, agent_session_id }) => {
+      if (requireValidWorkerBearerRuntime().mode === "supervised") {
+        return {
+          content: [{
+            type: "text" as const,
+            text: JSON.stringify({
+              success: false,
+              error: "supervised_bounded_mode",
+              message: "Agent-session disconnection is owned by the desktop supervisor during a bounded turn.",
+            }, null, 2),
+          }],
+        };
+      }
       let targetRoomId = getTargetRoomId(room_id);
       const localSession = agent_session_id
         ? getStoredAgentSession(agent_session_id)
@@ -367,6 +483,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("Optional hard stop in minutes. Defaults to 0, which means run until stopped."),
     },
     async ({ room, cwd, stop_phrase, max_minutes }) => {
+      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
+      if (disabled) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
+        };
+      }
       const joinedVia: JoinedVia = looksLikeInviteCode(room) ? "join_code" : "join_room";
 
       try {
@@ -426,6 +548,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("Optional session id. Defaults to the current local Codex live session."),
     },
     async ({ session_id }) => {
+      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
+      if (disabled) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
+        };
+      }
       const provider = getManagedAgentProvider("codex");
       const status = await provider.inspectLocalSession(session_id, currentRoom?.room_id);
       if (!status) {
@@ -475,6 +603,12 @@ export function registerAgentSessionTools(server: McpServer): void {
         .describe("If true, also terminate the spawned codex app-server process when possible."),
     },
     async ({ session_id, shutdown_server }) => {
+      const disabled = workerModeDisabledToolResult("Local Codex session orchestration");
+      if (disabled) {
+        return {
+          content: [{ type: "text" as const, text: JSON.stringify(disabled, null, 2) }],
+        };
+      }
       const provider = getManagedAgentProvider("codex");
       const stopped = await provider.stopLocalSession({
         session_id,

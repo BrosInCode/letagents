@@ -1,25 +1,10 @@
 import type { Express } from "express";
-
 import {
-  startSseStream,
-  stopSseStream,
+  openSseConnection,
+  type SseConnection,
 } from "../../../http/sse.js";
-import { hydrateMessageReplies, type Message } from "../../../db.js";
-import { parseScopedId } from "../../../db/utils.js";
-import {
-  beginRoomAgentDelivery,
-  InvalidRoomAgentDeliverySessionError,
-} from "../../../rooms/agent-delivery.js";
-import { attachAgentMessageActivation } from "../../../../shared/activation-routing.js";
-import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
-import {
-  isPromptOnlyAgentMessage,
-} from "../../../../shared/room-agent-prompts.js";
-import { resolveMessageActivationContext } from "./activation-context.js";
-import {
-  rentalActivityEvents,
-  type RentalActivityCreatedEvent,
-} from "../../../rental/activity-emitter.js";
+import { getMessageStreamCheckpoint } from "../../../db.js";
+import { InvalidRoomAgentDeliverySessionError } from "../../../rooms/agent-delivery.js";
 import { isDesktopHumanClient } from "./request-identity.js";
 import { toPublicGitHubRoomEvent } from "../events.js";
 import {
@@ -27,16 +12,30 @@ import {
   rentalActivityStreamNames,
 } from "./rental-stream-events.js";
 import { resolveParticipantRoom } from "./helpers.js";
-import type {
-  MessageCreatedEvent,
-  GitHubRoomEventUpdatedEvent,
-  ReasoningSessionRemovedEvent,
-  ReasoningSessionUpdatedEvent,
-  RoomArtifactUpdatedEvent,
-  RoomMessageRouteDeps,
-  TaskUpdatedEvent,
-} from "./types.js";
+import type { RoomMessageRouteDeps } from "./types.js";
+import type { RoomEvent, RoomEventEnvelope } from "../../../server/room-event-broker.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
+import { createBoundedExecutor } from "../../../bounded-async.js";
+import {
+  resolveRequestProjectRepoAccessRoomName,
+} from "../../../rooms/access.js";
+import {
+  openLiveRoomDeliveryController,
+  roomSyncSseFrame,
+  subscribeVisibleRoomEvents,
+  type LiveRoomDeliveryController,
+} from "./live-controller.js";
+import {
+  hydrateLiveMessageForSubscriber,
+  resolveLiveMessageOverlayTarget,
+} from "./live-message-delivery.js";
+
+const runStreamCheckpoint = createBoundedExecutor({
+  label: "room stream checkpoint",
+  maxConcurrent: 32,
+  maxQueued: 256,
+  timeoutMs: 8_000,
+});
 
 export function registerMessageStreamRoute(
   app: Express,
@@ -47,166 +46,223 @@ export function registerMessageStreamRoute(
     if (!project) return;
 
     const projectId = project.id;
-    let endDelivery: (() => Promise<void>) | null = null;
-    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
-    if (!isDesktopHumanClient(req)) {
-      try {
-        const delivery = await beginRoomAgentDelivery({
-          req,
-          roomId: project.id,
-          transport: "sse",
-          onSessionDisconnected: () => {
-            res.write(`event: session_disconnect\ndata: ${JSON.stringify({ room_id: projectId })}\n\n`);
-            res.end();
-          },
-        });
-        endDelivery = delivery?.end ?? null;
-        activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
-      } catch (error) {
+    const accessRoomName = await (
+      deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
+    )(req, project);
+    let connection: SseConnection | null = null;
+    let streamClosed = false;
+    let live: LiveRoomDeliveryController | null = null;
+    try {
+      live = await openLiveRoomDeliveryController({
+        req,
+        project,
+        accessRoomName,
+        transport: "sse",
+        trackDelivery: !isDesktopHumanClient(req),
+        onSessionDisconnected: () => {
+          streamClosed = true;
+          void connection?.write(`event: session_disconnect\ndata: ${JSON.stringify({ room_id: projectId })}\n\n`)
+            .finally(() => connection?.close());
+        },
+        onAuthorizationDenied: () => connection?.close(),
+        reauthorize: deps.reauthorizeGitRoomParticipant,
+        beginDelivery: deps.beginRoomAgentDelivery,
+      });
+    } catch (error) {
         if (error instanceof InvalidRoomAgentDeliverySessionError) {
           res.status(401).json({ error: error.message });
           return;
         }
         throw error;
+    }
+    if (!live) return;
+    const liveController = live;
+    liveController.activate();
+    if (streamClosed) {
+      await liveController.close();
+      if (!res.headersSent) res.status(401).json({ error: "Agent delivery session is no longer active." });
+      return;
+    }
+
+    connection = openSseConnection(req, res, `room messages stream ${projectId}`);
+    const writeEvent = connection.write;
+    const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
+    const messageOverlayTarget = resolveLiveMessageOverlayTarget(
+      req,
+      liveController.activationIdentity,
+    );
+    const eventCursor = req.get?.("Last-Event-ID")
+      || (typeof req.query?.event_cursor === "string" ? req.query.event_cursor : null);
+    const subscription = subscribeVisibleRoomEvents({
+      broker: deps.roomEventBroker,
+      roomId: projectId,
+      includePromptOnly,
+      activationIdentity: liveController.activationIdentity,
+      eventCursor,
+      messageOverlayTarget,
+    });
+
+    connection.addCleanup(() => {
+      streamClosed = true;
+      subscription.close();
+    });
+    connection.addCleanup(() => liveController.close());
+    if (!(await liveController.check())) {
+      connection.close();
+      return;
+    }
+
+    // The broker subscription is installed before the checkpoint is read. That
+    // ordering closes the snapshot/subscribe race: anything committed while
+    // this query is in flight is either represented by the checkpoint or is
+    // already queued on this stream (duplicates are harmless client-side).
+    const requestedCursor = typeof req.query?.after === "string" && /^msg_\d+$/.test(req.query.after)
+      ? req.query.after
+      : null;
+    try {
+      const { checkpoint, cursorExists } = await runStreamCheckpoint(
+        () => (deps.getMessageStreamCheckpoint ?? getMessageStreamCheckpoint)(projectId, {
+          requestedCursor,
+          includePromptOnly,
+        }),
+      );
+      await writeEvent(roomSyncSseFrame({
+        room_id: projectId,
+        checkpoint,
+        requested_cursor: requestedCursor,
+        event_cursor: subscription.checkpointCursor,
+        gap: subscription.checkpointGap || Boolean(requestedCursor && !cursorExists),
+      }));
+    } catch (error) {
+      console.error(`[room messages stream] failed to establish checkpoint for ${projectId}`, error);
+      await writeEvent(roomSyncSseFrame({
+        room_id: projectId,
+        checkpoint: null,
+        requested_cursor: requestedCursor,
+        event_cursor: subscription.checkpointCursor,
+        gap: true,
+      }));
+    }
+
+    void pumpRoomEvents().catch((error: unknown) => {
+      console.error(`[room messages stream] failed to deliver event for ${projectId}`, error);
+      if (!streamClosed) connection?.close();
+    });
+
+    async function pumpRoomEvents(): Promise<void> {
+      while (!streamClosed) {
+        const delivery = await subscription.next();
+        if (!delivery) {
+          connection?.close();
+          return;
+        }
+        if (streamClosed) return;
+        if (!(await liveController.check())) {
+          connection?.close();
+          return;
+        }
+        if (delivery.type === "gap") {
+          await writeEvent(roomSyncSseFrame({
+            room_id: projectId,
+            checkpoint: null,
+            requested_cursor: requestedCursor,
+            event_cursor: delivery.cursor,
+            gap: true,
+          }));
+          continue;
+        }
+        await writeRoomEvent(delivery.envelope);
       }
     }
 
-    const heartbeat = startSseStream(res);
-    let streamClosed = false;
-    let messageWriteQueue = Promise.resolve();
-
-    const writeMessageCreated = async ({ projectId: eventProjectId, message }: MessageCreatedEvent) => {
-      if (eventProjectId !== projectId) return;
-      if (streamClosed) return;
-      if (!deps.shouldIncludePromptOnlyMessages(req) && isPromptOnlyAgentMessage(message.text, message.agent_prompt_kind)) {
-        return;
+    async function writeRoomEvent(envelope: RoomEventEnvelope): Promise<void> {
+      const eventId = `id: ${envelope.cursor}\n`;
+      const event = envelope.event;
+      switch (event.kind) {
+        case "message_created": {
+          try {
+            // Let every listener enter the shared per-event overlay batch.
+            // A per-connection executor here would reject listeners before
+            // their work can coalesce into the one bounded database plan.
+            const deliveryMessage = await hydrateLiveMessageForSubscriber({
+              roomId: projectId,
+              message: event.message,
+              identity: liveController.activationIdentity,
+              target: messageOverlayTarget,
+              broker: deps.roomEventBroker,
+              batcher: deps.roomMessageOverlayBatcher,
+            });
+            if (streamClosed) return;
+            if (!(await liveController.check())) {
+              connection?.close();
+              return;
+            }
+            await writeEvent(`${eventId}data: ${JSON.stringify({
+              ...deliveryMessage,
+              room_id: projectId,
+            })}\n\n`);
+          } catch (error) {
+            console.error(`[room messages stream] failed to hydrate message for ${projectId}`, error);
+            if (!streamClosed) {
+              // Never fall back to the shared canonical body after a
+              // recipient/account overlay failed. Ask the client to repair
+              // through its authorized read path instead.
+              await writeEvent(roomSyncSseFrame({
+                room_id: projectId,
+                checkpoint: null,
+                event_cursor: envelope.cursor,
+                gap: true,
+              }));
+              streamClosed = true;
+              connection?.close();
+            }
+          }
+          return;
+        }
+        case "task_updated":
+          await writeEvent(`${eventId}event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: projectId })}\n\n`);
+          return;
+        case "github_event_updated":
+          await writeEvent(`${eventId}event: github_event\ndata: ${JSON.stringify({
+            ...toPublicGitHubRoomEvent(event.event),
+            room_id: projectId,
+          })}\n\n`);
+          return;
+        case "reasoning_updated":
+          await writeEvent(`${eventId}event: reasoning_update\ndata: ${JSON.stringify({
+            room_id: projectId,
+            session: event.session,
+            update: event.update,
+          })}\n\n`);
+          return;
+        case "reasoning_removed":
+          await writeEvent(`${eventId}event: reasoning_remove\ndata: ${JSON.stringify({
+            room_id: projectId,
+            session_id: event.sessionId,
+          })}\n\n`);
+          return;
+        case "artifact_updated":
+          await writeEvent(`${eventId}event: artifact_update\ndata: ${JSON.stringify({
+            room_id: projectId,
+            artifact_identity_key: event.artifact?.identity_key ?? null,
+          })}\n\n`);
+          return;
+        case "message_info_updated":
+          await writeEvent(`${eventId}event: message_info_updated\ndata: ${JSON.stringify({
+            room_id: projectId,
+            message_ids: event.messageIds,
+          })}\n\n`);
+          return;
+        case "rental_activity_created": {
+          if (event.activity.visibility !== "rental_visible") return;
+          const payload = rentalActivityPayload(projectId, event.activity);
+          const streamNames = rentalActivityStreamNames(event.activity);
+          for (const [index, streamName] of streamNames.entries()) {
+            const cursorLine = index === streamNames.length - 1 ? eventId : "";
+            await writeEvent(`${cursorLine}event: ${streamName}\ndata: ${JSON.stringify(payload)}\n\n`);
+          }
+        }
       }
-      try {
-        const streamMessage = await hydrateStreamMessage(project.id, message, req.sessionAccount?.account_id ?? null);
-        const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
-        if (streamClosed) return;
-        res.write(`data: ${JSON.stringify({
-          ...(activationIdentity ? attachAgentMessageActivation(streamMessage, activationIdentity, activationContext) : streamMessage),
-          room_id: project.id,
-        })}\n\n`);
-      } catch (error) {
-        console.error(`[room messages stream] failed to hydrate message for ${project.id}`, error);
-        const activationContext = await resolveMessageActivationContext(project.id, activationIdentity);
-        if (streamClosed) return;
-        res.write(`data: ${JSON.stringify({
-          ...(activationIdentity ? attachAgentMessageActivation(message, activationIdentity, activationContext) : message),
-          room_id: project.id,
-        })}\n\n`);
-      }
-    };
-
-    const onMessageCreated = (event: MessageCreatedEvent) => {
-      messageWriteQueue = messageWriteQueue
-        .then(() => writeMessageCreated(event))
-        .catch((error: unknown) => {
-          console.error(`[room messages stream] failed to write message event for ${project.id}`, error);
-        });
-    };
-
-    const onTaskUpdated = (event: TaskUpdatedEvent) => {
-      if (event.projectId !== projectId) return;
-      res.write(`event: task_update\ndata: ${JSON.stringify({ ...event.task, room_id: project.id })}\n\n`);
-    };
-
-    const onGitHubEventUpdated = (event: GitHubRoomEventUpdatedEvent) => {
-      if (event.projectId !== projectId) return;
-      res.write(`event: github_event\ndata: ${JSON.stringify({
-        ...toPublicGitHubRoomEvent(event.event),
-        room_id: project.id,
-      })}\n\n`);
-    };
-
-    const onReasoningUpdated = (event: ReasoningSessionUpdatedEvent) => {
-      if (event.projectId !== projectId) return;
-      res.write(
-        `event: reasoning_update\ndata: ${JSON.stringify({
-          room_id: project.id,
-          session: event.session,
-          update: event.update ?? null,
-        })}\n\n`
-      );
-    };
-
-    const onReasoningRemoved = (event: ReasoningSessionRemovedEvent) => {
-      if (event.projectId !== projectId) return;
-      res.write(`event: reasoning_remove\ndata: ${JSON.stringify({ room_id: project.id, session_id: event.session_id })}\n\n`);
-    };
-
-    const onArtifactUpdated = (event: RoomArtifactUpdatedEvent) => {
-      if (event.projectId !== projectId) return;
-      res.write(`event: artifact_update\ndata: ${JSON.stringify({
-        room_id: project.id,
-        artifact_identity_key: event.artifact?.identity_key ?? null,
-      })}\n\n`);
-    };
-
-    const rentalEvents = deps.rentalActivityEvents ?? rentalActivityEvents;
-    const onRentalActivityCreated = (event: RentalActivityCreatedEvent) => {
-      const activity = event.activity;
-      if (activity.room_id !== projectId) return;
-      // Generic room stream is not role-aware; only rental_visible events are safe here.
-      if (activity.visibility !== "rental_visible") return;
-      const payload = rentalActivityPayload(project.id, activity);
-      for (const streamName of rentalActivityStreamNames(activity)) {
-        res.write(`event: ${streamName}\ndata: ${JSON.stringify(payload)}\n\n`);
-      }
-    };
-
-    deps.messageEvents.on("message:created", onMessageCreated);
-    deps.taskEvents.on("task:updated", onTaskUpdated);
-    deps.githubRoomEvents?.on("github_event:updated", onGitHubEventUpdated);
-    deps.reasoningEvents.on("reasoning:updated", onReasoningUpdated);
-    deps.reasoningEvents.on("reasoning:removed", onReasoningRemoved);
-    deps.artifactEvents?.on("artifact:updated", onArtifactUpdated);
-    rentalEvents.on("activity:created", onRentalActivityCreated);
-
-    req.on("close", () => {
-      streamClosed = true;
-      deps.messageEvents.off("message:created", onMessageCreated);
-      deps.taskEvents.off("task:updated", onTaskUpdated);
-      deps.githubRoomEvents?.off("github_event:updated", onGitHubEventUpdated);
-      deps.artifactEvents?.off("artifact:updated", onArtifactUpdated);
-      rentalEvents.off("activity:created", onRentalActivityCreated);
-      if (endDelivery) {
-        void endDelivery().catch((error: unknown) => {
-          console.error(`[room messages stream] failed to end agent delivery for ${project.id}`, error);
-        });
-      }
-      deps.reasoningEvents.off("reasoning:updated", onReasoningUpdated);
-      deps.reasoningEvents.off("reasoning:removed", onReasoningRemoved);
-      stopSseStream(res, heartbeat);
-    });
+    }
   });
-}
-
-async function hydrateStreamMessage(
-  roomId: string,
-  message: Message,
-  accountId: string | null,
-): Promise<Message> {
-  if (!accountId) return message;
-  const messageNumber = parseScopedId(message.id, "msg");
-  if (!messageNumber) return message;
-  const rootNumber = parseScopedId(message.thread_root_id, "msg");
-  const replyToNumber = message.thread_reply_to_id
-    ? parseScopedId(message.thread_reply_to_id, "msg")
-    : null;
-  const [hydrated] = await hydrateMessageReplies(roomId, [{
-    room_id: roomId,
-    number: messageNumber,
-    reply_to_number: replyToNumber,
-    thread_root_number: rootNumber && rootNumber !== messageNumber ? rootNumber : null,
-    sender: message.sender,
-    text: message.text,
-    agent_prompt_kind: message.agent_prompt_kind,
-    source: message.source,
-    client_message_id: null,
-    timestamp: message.timestamp,
-  }], { accountId });
-  return hydrated ?? message;
 }

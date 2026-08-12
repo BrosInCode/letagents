@@ -30,6 +30,18 @@
           </header>
 
           <RentSessionSummary :session="session" :usage="usage" />
+
+          <button
+            v-if="pendingContextRequestCount > 0 && activeTab !== 'access'"
+            type="button"
+            class="rent-detail-pending-banner"
+            data-testid="rent-detail-pending-access-banner"
+            @click="activeTab = 'access'"
+          >
+            {{ pendingContextRequestCount }} pending access
+            {{ pendingContextRequestCount === 1 ? "request" : "requests" }} — review now
+          </button>
+
           <RentSessionTabs v-model="activeTab" />
 
           <div class="rent-detail-body">
@@ -57,6 +69,29 @@
               data-testid="rent-detail-patches"
               @approve="approvePatch"
               @request-changes="requestPatchChanges"
+            />
+            <p
+              v-if="contextNotice && activeTab === 'access'"
+              class="rent-detail-notice"
+              role="status"
+              data-testid="rent-detail-context-notice"
+            >
+              {{ contextNotice }}
+            </p>
+            <RentContextRequestsPanel
+              v-if="activeTab === 'access'"
+              :requests="contextRequests"
+              :loading="loadingContextRequests"
+              :busy-for="contextActionBusyFor"
+              data-testid="rent-detail-access"
+              @approve="approveContextRequest"
+              @deny="denyContextRequest"
+            />
+            <RentExposuresPanel
+              v-if="activeTab === 'exposures'"
+              :exposures="exposures"
+              :loading="loadingExposures"
+              data-testid="rent-detail-exposures"
             />
           </div>
 
@@ -86,6 +121,8 @@
 import { nextTick, ref, toRef, watch } from "vue";
 import type { DesktopRentalSession } from "../../../../../electron/ipc-types";
 import RentActivityPanel from "./rent-session-detail/RentActivityPanel.vue";
+import RentContextRequestsPanel from "./rent-session-detail/RentContextRequestsPanel.vue";
+import RentExposuresPanel from "./rent-session-detail/RentExposuresPanel.vue";
 import RentPatchesPanel from "./rent-session-detail/RentPatchesPanel.vue";
 import RentSessionSummary from "./rent-session-detail/RentSessionSummary.vue";
 import RentSessionTabs from "./rent-session-detail/RentSessionTabs.vue";
@@ -114,16 +151,25 @@ const {
   activeTab,
   activity,
   anyLoading,
+  approveContextRequest,
   approvePatch,
   canCancel,
   cancelBusy,
   cancelSession,
+  contextActionBusyFor,
+  contextNotice,
+  contextRequests,
+  denyContextRequest,
   errorMessage,
+  exposures,
   loadingActivity,
+  loadingContextRequests,
+  loadingExposures,
   loadingPatches,
   patchActionBusyFor,
   patchActionKind,
   patches,
+  pendingContextRequestCount,
   refresh,
   requestPatchChanges,
   usage,
@@ -165,6 +211,26 @@ function handleDialogTab(event: KeyboardEvent): void {
 .rent-detail-error {
   color: var(--color-danger, #ff8a80);
   font-size: 0.85rem;
+}
+.rent-detail-notice {
+  font-size: 0.85rem;
+  padding: 0.5rem 0.75rem;
+  border-radius: 0.5rem;
+  border: 1px solid color-mix(in srgb, var(--color-warning, #ffd54f) 45%, transparent);
+  background: color-mix(in srgb, var(--color-warning, #ffd54f) 10%, transparent);
+}
+.rent-detail-pending-banner {
+  appearance: none;
+  margin: 0 1.25rem 0.5rem;
+  padding: 0.5rem 0.85rem;
+  border-radius: 0.5rem;
+  font: inherit;
+  font-size: 0.85rem;
+  text-align: left;
+  cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--color-warning, #ffd54f) 55%, transparent);
+  background: color-mix(in srgb, var(--color-warning, #ffd54f) 12%, transparent);
+  color: inherit;
 }
 .rent-detail-footer {
   display: flex;

@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
+import { mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
+import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
 
 const emptySnapshotData: RoomSnapshotData = {
@@ -13,8 +14,14 @@ const emptySnapshotData: RoomSnapshotData = {
   reasoningData: { sessions: [], reasoning_sessions: [] },
   activityHistoryData: { entries: [] },
   roomArtifactsData: { artifacts: [] },
+  boardSettingsData: {
+    settings: { manager_mode: "manager_optional" },
+    active_manager: null,
+    pending_intent_count: 0,
+  },
   messagesData: { messages: [] },
   githubEventsData: null,
+  sourceStates: readySourceStates(),
 };
 
 test("mapDesktopGitRoomPayload accepts locally persisted desktop Git metadata", () => {
@@ -45,6 +52,66 @@ test("mapDesktopGitRoomPayload accepts locally persisted desktop Git metadata", 
   assert.equal(gitRoom?.ref.name, "feature/player-3d-presentation");
   assert.equal(gitRoom?.accessMode, "local");
   assert.equal(gitRoom?.source, "local_git");
+});
+
+test("mapRoomArtifactPayload hydrates desktop artifact fields and rejects incomplete payloads", () => {
+  const artifact = mapRoomArtifactPayload({
+    room_id: "room_1",
+    identity_key: "git:change_summary:id:agent_1:feature",
+    provider: "git",
+    kind: "change_summary",
+    artifact_id: "agent_1:feature",
+    artifact_number: null,
+    title: "Agent changes",
+    url: null,
+    ref: "feature/local",
+    state: "updated",
+    source: "task_workflow_artifact",
+    first_seen_at: "2026-05-12T10:40:00.000Z",
+    updated_at: "2026-05-12T11:10:00.000Z",
+    linked_task_ids: ["task_1", 42 as never, "task_2"],
+  });
+
+  assert.equal(artifact?.identityKey, "git:change_summary:id:agent_1:feature");
+  assert.equal(artifact?.provider, "git");
+  assert.equal(artifact?.kind, "change_summary");
+  assert.deepEqual(artifact?.linkedTaskIds, ["task_1", "task_2"]);
+  assert.equal(mapRoomArtifactPayload({ room_id: "room_1", provider: "git", kind: "branch" }), null);
+  assert.equal(mapRoomArtifactPayload({ room_id: "room_1", identity_key: "bad", provider: "git", kind: "unknown" }), null);
+});
+
+test("mapRoomArtifacts maps and sorts a room-artifacts response (the artifacts-only refetch transform)", () => {
+  // getDesktopRoomArtifacts feeds the /artifacts (or local-store) response
+  // through mapRoomArtifacts; this asserts that transform's mapping + ordering.
+  const artifacts = mapRoomArtifacts({
+    artifacts: [
+      {
+        room_id: "room_1",
+        identity_key: "git:branch:ref:feature/old",
+        provider: "git",
+        kind: "branch",
+        ref: "feature/old",
+        first_seen_at: "2026-05-12T10:00:00.000Z",
+        updated_at: "2026-05-12T10:00:00.000Z",
+      },
+      {
+        room_id: "room_1",
+        identity_key: "git:commit:id:abc123",
+        provider: "git",
+        kind: "commit",
+        first_seen_at: "2026-05-12T11:00:00.000Z",
+        updated_at: "2026-05-12T12:00:00.000Z",
+      },
+      // Incomplete payload (no identity key) is dropped.
+      { room_id: "room_1", provider: "git", kind: "branch" },
+    ],
+  });
+
+  assert.deepEqual(artifacts.map((artifact) => artifact.identityKey), [
+    "git:commit:id:abc123",
+    "git:branch:ref:feature/old",
+  ]);
+  assert.equal(artifacts[0]?.kind, "commit");
 });
 
 test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => {
@@ -288,4 +355,23 @@ test("mapSnapshotData preserves snapshot ordering and payload fallbacks", () => 
     app_name: "GitHub Actions",
     head_branch: "codex/desktop-events",
   });
+});
+
+test("mapSnapshotData carries per-source states through unchanged", () => {
+  const data: RoomSnapshotData = {
+    ...emptySnapshotData,
+    sourceStates: {
+      ...readySourceStates(),
+      tasks: { status: "error", error: "API request failed: 500" },
+      githubEvents: { status: "error", error: "network down" },
+    },
+  };
+
+  const snapshot = mapSnapshotData(data);
+
+  assert.equal(snapshot.sourceStates.tasks.status, "error");
+  assert.equal(snapshot.sourceStates.tasks.error, "API request failed: 500");
+  assert.equal(snapshot.sourceStates.githubEvents.status, "error");
+  assert.equal(snapshot.sourceStates.messages.status, "ready");
+  assert.equal(snapshot.sourceStates.messages.error, null);
 });

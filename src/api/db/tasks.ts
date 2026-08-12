@@ -2,12 +2,21 @@ import { and, asc, desc, eq, inArray, notInArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { syncRoomSharedArtifactsForTask } from "./room-shared-artifacts.js";
-import { tasks } from "./schema.js";
-import { clampLimit, nextRoomScopedNumber, parseScopedId } from "./utils.js";
+import { task_leases, tasks } from "./schema.js";
+import { clampLimit, formatTaskId, nextRoomScopedNumber, parseScopedId, type RoomSequenceExecutor } from "./utils.js";
 import { toTask } from "./mappers.js";
+import {
+  approveBoardIntent,
+  assertConsumeBoardIntentApproval,
+  getBoardIntent,
+  markBoardIntentTaskResult,
+} from "./coordination/board-intents.js";
+import { createTaskLeaseRow } from "./coordination/lease-rows.js";
+import { updateTaskLeaseWorkflowRefs } from "./coordination/task-leases.js";
+import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import { resolveTaskAssignmentState, type TaskAssignmentPatch } from "./task-assignment.js";
 import { normalizeTaskWorkflowArtifacts, synchronizeTaskWorkflowArtifactsWithPrUrl, type TaskWorkflowArtifact, type TaskWorkflowArtifactMatch } from "../repo-workflow.js";
-import type { Task, TaskOwnershipState, TaskRow, TaskStatus } from "./types.js";
+import type { BoardIntent, BoardIntentConsumptionInput, BoardIntentPayload, Task, TaskOwnershipState, TaskRow, TaskStatus, TaskWorkLeaseCreationInput } from "./types.js";
 
 export const VALID_TRANSITIONS: Record<TaskStatus, TaskStatus[]> = {
   proposed: ["accepted", "cancelled"],
@@ -25,6 +34,27 @@ export function isValidTransition(from: TaskStatus, to: TaskStatus): boolean {
   return VALID_TRANSITIONS[from]?.includes(to) ?? false;
 }
 
+function optionalPayloadString(payload: BoardIntentPayload, key: string): string | null {
+  const value = payload[key];
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+export function normalizeTaskCreateBoardIntentPayload(payload: BoardIntentPayload): {
+  title: string;
+  description?: string | null;
+  sourceMessageId?: string | null;
+} | null {
+  const title = optionalPayloadString(payload, "title");
+  if (!title) return null;
+  return {
+    title,
+    description: optionalPayloadString(payload, "description"),
+    sourceMessageId: optionalPayloadString(payload, "source_message_id"),
+  };
+}
+
 export async function getTasksForRooms(roomIds: readonly string[]): Promise<Task[]> {
   if (roomIds.length === 0) {
     return [];
@@ -39,17 +69,19 @@ export async function getTasksForRooms(roomIds: readonly string[]): Promise<Task
   return (rows as TaskRow[]).map(toTask);
 }
 
-export async function createTask(
+async function insertTaskRow(
   roomId: string,
   title: string,
   createdBy: string,
   description?: string,
-  sourceMessageId?: string
+  sourceMessageId?: string,
+  executor: RoomSequenceExecutor = db,
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
 ): Promise<Task> {
   const now = new Date().toISOString();
   const task: TaskRow = {
     room_id: roomId,
-    number: await nextRoomScopedNumber("tasks", roomId),
+    number: 0,
     title,
     description: description ?? null,
     status: "proposed",
@@ -63,9 +95,129 @@ export async function createTask(
     updated_at: now,
   };
 
-  await db.insert(tasks).values(task);
+  if (options?.boardIntentApproval) {
+    await assertConsumeBoardIntentApproval(options.boardIntentApproval, executor);
+  }
+
+  task.number = await nextRoomScopedNumber("tasks", roomId, executor);
+  await executor.insert(tasks).values(task);
+
+  if (
+    options?.boardIntentApproval?.action_type === "task_create"
+    && options.boardIntentApproval.intent_id
+  ) {
+    await markBoardIntentTaskResult({
+      room_id: roomId,
+      intent_id: options.boardIntentApproval.intent_id,
+      task_id: formatTaskId(task.number),
+    }, executor);
+  }
 
   return toTask(task);
+}
+
+/**
+ * Move a freshly created (proposed) task straight to accepted so agents can
+ * claim it — the escalation path's whole point is unblocking claims without
+ * an admin. Runs on the caller's executor so it commits with the escalation.
+ */
+export async function acceptProposedTaskTx(
+  executor: Pick<typeof db, "update">,
+  input: { room_id: string; task_id: string }
+): Promise<boolean> {
+  const taskNumber = parseScopedId(input.task_id, "task");
+  if (!taskNumber) return false;
+
+  const now = new Date().toISOString();
+  const rows = await executor
+    .update(tasks)
+    .set({ status: "accepted", updated_at: now })
+    .where(
+      and(
+        eq(tasks.room_id, input.room_id),
+        eq(tasks.number, taskNumber),
+        eq(tasks.status, "proposed")
+      )
+    )
+    .returning({ number: tasks.number });
+
+  return rows.length > 0;
+}
+
+export async function createTask(
+  roomId: string,
+  title: string,
+  createdBy: string,
+  description?: string,
+  sourceMessageId?: string,
+  options?: { boardIntentApproval?: BoardIntentConsumptionInput | null }
+): Promise<Task> {
+  if (options?.boardIntentApproval) {
+    return db.transaction((tx) =>
+      insertTaskRow(roomId, title, createdBy, description, sourceMessageId, tx, options)
+    );
+  }
+
+  return insertTaskRow(roomId, title, createdBy, description, sourceMessageId);
+}
+
+export async function approveTaskCreateBoardIntent(input: {
+  room_id: string;
+  intent_id: string;
+  decision_by: string;
+  reason?: string | null;
+  now?: Date;
+}, executor?: Parameters<Parameters<(typeof db)["transaction"]>[0]>[0]): Promise<{ intent: BoardIntent; approval_token: string; task: Task } | null> {
+  // Callers already inside a transaction (e.g. an announcement's message
+  // hook) pass their executor so approval + task creation join it.
+  const run = async (tx: NonNullable<typeof executor>) => {
+    const existing = await getBoardIntent({
+      room_id: input.room_id,
+      intent_id: input.intent_id,
+    }, tx);
+    if (!existing || existing.action_type !== "task_create") {
+      return null;
+    }
+
+    const approved = await approveBoardIntent(input, tx);
+    if (!approved) return null;
+
+    const payload = normalizeTaskCreateBoardIntentPayload(approved.intent.payload);
+    if (!payload) {
+      throw new Error(`Board intent ${input.intent_id} has an invalid task creation payload.`);
+    }
+
+    const task = await insertTaskRow(
+      input.room_id,
+      payload.title,
+      approved.intent.proposer_actor_label ?? input.decision_by,
+      payload.description ?? undefined,
+      payload.sourceMessageId ?? undefined,
+      tx,
+      {
+        boardIntentApproval: {
+          room_id: input.room_id,
+          action_type: "task_create",
+          payload: approved.intent.payload,
+          intent_id: approved.intent.id,
+          approval_token: approved.approval_token,
+          now: input.now,
+        },
+      }
+    );
+
+    const intent = await getBoardIntent({
+      room_id: input.room_id,
+      intent_id: approved.intent.id,
+    }, tx);
+    return {
+      intent: intent ?? { ...approved.intent, status: "used", task_id: task.id },
+      approval_token: approved.approval_token,
+      task,
+    };
+  };
+
+  return executor ? run(executor) : db.transaction(run);
 }
 
 export async function getTasks(
@@ -262,6 +414,18 @@ export async function updateTask(
     assignee_agent_key?: string | null;
     pr_url?: string;
     workflow_artifacts?: TaskWorkflowArtifact[];
+  },
+  options?: {
+    boardIntentApproval?: BoardIntentConsumptionInput | null;
+    workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+    // When the caller's authority to mutate this task derives from holding a
+    // work lease, the observed lease identity is fenced INSIDE the write tx
+    // (plan §4.5): the shared advisory lock + full-tuple re-validation runs
+    // atomically with the UPDATE, so a rebind that commits between the route's
+    // lease read and this write makes the fence stale and the write throws
+    // LeaseFenceStaleError instead of a stale predecessor overwriting the
+    // successor's task state. Absent for owner/admin or lease-creation writes.
+    leaseFence?: LeaseFence | null;
   }
 ): Promise<Task | null> {
   const task = await getTaskRowById(roomId, taskId);
@@ -293,23 +457,87 @@ export async function updateTask(
       });
   const now = new Date().toISOString();
 
-  await db
-    .update(tasks)
-    .set({
-      status: assignment.status,
-      assignee: assignment.assignee,
-      assignee_agent_key: assignment.assignee_agent_key,
-      pr_url: newPrUrl,
-      workflow_artifacts: newWorkflowArtifacts,
-      updated_at: now,
-    })
-    .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+  const writeTaskUpdate = async (executor: Pick<typeof db, "update">) => {
+    await executor
+      .update(tasks)
+      .set({
+        status: assignment.status,
+        assignee: assignment.assignee,
+        assignee_agent_key: assignment.assignee_agent_key,
+        pr_url: newPrUrl,
+        workflow_artifacts: newWorkflowArtifacts,
+        updated_at: now,
+      })
+      .where(and(eq(tasks.room_id, roomId), eq(tasks.number, taskNumber)));
+  };
 
-  await syncRoomSharedArtifactsForTask({
-    room_id: roomId,
-    task_id: taskId,
-    artifacts: newWorkflowArtifacts,
-  });
+  const writeWorkLeaseCreation = async (executor: Pick<typeof db, "insert">) => {
+    if (!options?.workLeaseCreation) {
+      return;
+    }
+    await executor.insert(task_leases).values(
+      createTaskLeaseRow(
+        {
+          ...options.workLeaseCreation,
+          room_id: roomId,
+          task_id: taskId,
+          kind: "work",
+        },
+        now
+      )
+    );
+  };
+
+  // All lease-scoped side effects (the fenced lease's pr_url ref bind + the
+  // shared-artifact upsert/link/prune) run through one executor so that, on the
+  // fenced path, they commit or roll back ATOMICALLY with the task write under
+  // acquireLeaseFenceTx (plan §4.5). No base-client writes leak out of the tx.
+  const writeArtifactSideEffects = async (
+    executor: Parameters<typeof syncRoomSharedArtifactsForTask>[1] &
+      Parameters<typeof updateTaskLeaseWorkflowRefs>[3]
+  ) => {
+    if (options?.leaseFence && updates.pr_url !== undefined) {
+      await updateTaskLeaseWorkflowRefs(
+        roomId,
+        options.leaseFence.lease_id,
+        { pr_url: updates.pr_url ?? null },
+        executor
+      );
+    }
+    await syncRoomSharedArtifactsForTask(
+      { room_id: roomId, task_id: taskId, artifacts: newWorkflowArtifacts },
+      executor
+    );
+  };
+
+  if (options?.boardIntentApproval || options?.workLeaseCreation || options?.leaseFence) {
+    await db.transaction(async (tx) => {
+      // Fence FIRST, under the shared lease advisory lock, so the whole write
+      // linearizes against a concurrent rebind. A stale fence aborts the tx
+      // before any task state changes.
+      if (options.leaseFence) {
+        const held = await acquireLeaseFenceTx(tx, options.leaseFence);
+        if (!held) throw new LeaseFenceStaleError();
+      }
+      if (options.boardIntentApproval) {
+        await assertConsumeBoardIntentApproval(options.boardIntentApproval, tx);
+      }
+      await writeTaskUpdate(tx);
+      await writeWorkLeaseCreation(tx);
+      // Fenced path: refs + artifact sync inside the same fenced tx.
+      if (options.leaseFence) {
+        await writeArtifactSideEffects(tx);
+      }
+    });
+    // Non-fenced tx (board-intent / lease-creation only): the lease ref bind is
+    // still performed by enforcement; sync outside the tx as before.
+    if (!options?.leaseFence) {
+      await writeArtifactSideEffects(db);
+    }
+  } else {
+    await writeTaskUpdate(db);
+    await writeArtifactSideEffects(db);
+  }
 
   return toTask({
     ...task,

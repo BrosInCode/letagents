@@ -2,6 +2,9 @@ import { computed, onBeforeUnmount, onMounted, ref, watch, type Ref } from "vue"
 
 const storageKey = "letagents-desktop:app-agent-position";
 const launcherSize = 76;
+const narrowBoardLauncherSize = 44;
+const narrowBoardMaxWidth = 640;
+const narrowBoardDockGap = 14;
 const panelWidth = 390;
 const estimatedPanelHeight = 260;
 const launcherOrbCenterOffset = { x: launcherSize / 2, y: launcherSize / 2 };
@@ -82,6 +85,7 @@ export function useAppAgentPosition(
 ) {
   const position = ref({ x: 0, y: 0 });
   const launcherPosition = ref({ x: 0, y: 0 });
+  const dockedToNarrowBoard = ref(false);
   const dragMoved = ref(false);
   const suppressClick = ref(false);
   let resizeObserver: ResizeObserver | null = null;
@@ -99,6 +103,8 @@ export function useAppAgentPosition(
 
   function startDrag(event: PointerEvent): void {
     if (event.button !== 0) return;
+    syncNarrowBoardDock();
+    if (dockedToNarrowBoard.value) return;
     const startX = event.clientX;
     const startY = event.clientY;
     const initial = { ...position.value };
@@ -153,6 +159,10 @@ export function useAppAgentPosition(
   }
 
   function rememberPosition(): void {
+    if (dockedToNarrowBoard.value) {
+      position.value = narrowBoardDockPosition();
+      return;
+    }
     const anchorPosition = open.value
       ? appAgentLauncherPositionFromPanel(position.value)
       : position.value;
@@ -193,12 +203,14 @@ export function useAppAgentPosition(
   }
 
   function isLauncherSize(size: { width: number; height: number }): boolean {
-    return size.width === launcherSize && size.height === launcherSize;
+    return (size.width === launcherSize && size.height === launcherSize)
+      || (size.width === narrowBoardLauncherSize && size.height === narrowBoardLauncherSize);
   }
 
   function surfaceSize(nextOpen: boolean): { width: number; height: number } {
     if (!nextOpen) {
-      return { width: launcherSize, height: launcherSize };
+      const size = dockedToNarrowBoard.value ? narrowBoardLauncherSize : launcherSize;
+      return { width: size, height: size };
     }
     const rect = surfaceElement.value?.getBoundingClientRect();
     if (rect && rect.width > 0 && rect.height > 0) {
@@ -214,38 +226,104 @@ export function useAppAgentPosition(
   }
 
   function placePanelFromLauncher(): void {
-    position.value = appAgentPanelPositionFromLauncher(launcherPosition.value);
+    syncNarrowBoardDock();
+    const anchor = dockedToNarrowBoard.value
+      ? narrowBoardDockPosition()
+      : launcherPosition.value;
+    const centerOffset = dockedToNarrowBoard.value
+      ? narrowBoardLauncherSize / 2
+      : launcherOrbCenterOffset.x;
+    position.value = {
+      x: anchor.x + centerOffset - panelOrbCenterOffset.x,
+      y: anchor.y + centerOffset - panelOrbCenterOffset.y,
+    };
     clampPosition(true);
   }
 
   function placeLauncherFromPanelOrb(): void {
+    syncNarrowBoardDock();
+    if (dockedToNarrowBoard.value) {
+      position.value = narrowBoardDockPosition();
+      return;
+    }
     position.value = launcherPosition.value;
     clampPosition(false);
     rememberLauncherPosition(position.value, true);
   }
 
   function handleResize(): void {
+    syncNarrowBoardDock();
+    if (dockedToNarrowBoard.value && !open.value) {
+      position.value = narrowBoardDockPosition();
+      return;
+    }
     clampPosition();
     if (!open.value) {
       rememberLauncherPosition(position.value, true);
     }
   }
 
+  function narrowBoardDockPosition(): { x: number; y: number } {
+    const boardRect = document.querySelector<HTMLElement>(".desktop-board-panel")
+      ?.getBoundingClientRect();
+    const boardRight = boardRect?.right ?? window.innerWidth;
+    const boardTop = boardRect?.top ?? topViewportMargin;
+    return {
+      x: Math.max(viewportMargin, boardRight - narrowBoardLauncherSize - narrowBoardDockGap),
+      y: Math.max(topViewportMargin, boardTop + narrowBoardDockGap),
+    };
+  }
+
+  function syncNarrowBoardDock(): void {
+    const nextDocked = window.innerWidth <= narrowBoardMaxWidth
+      && document.querySelector(".desktop-board-panel") !== null;
+    if (nextDocked === dockedToNarrowBoard.value) return;
+    dockedToNarrowBoard.value = nextDocked;
+    if (!open.value) {
+      position.value = nextDocked
+        ? narrowBoardDockPosition()
+        : launcherPosition.value;
+    }
+  }
+
   onMounted(() => {
     restorePosition();
+    syncNarrowBoardDock();
     window.addEventListener("resize", handleResize);
-    if (typeof ResizeObserver !== "undefined" && surfaceElement.value) {
+    if (typeof ResizeObserver !== "undefined") {
       resizeObserver = new ResizeObserver(() => {
         window.requestAnimationFrame(() => {
+          syncNarrowBoardDock();
+          if (dockedToNarrowBoard.value && !open.value) {
+            position.value = narrowBoardDockPosition();
+            return;
+          }
           clampPosition();
         });
       });
-      resizeObserver.observe(surfaceElement.value);
+      if (surfaceElement.value) resizeObserver.observe(surfaceElement.value);
     }
+  });
+
+  watch(surfaceElement, (nextElement, previousElement) => {
+    if (!resizeObserver) return;
+    if (previousElement) resizeObserver.unobserve(previousElement);
+    if (nextElement) resizeObserver.observe(nextElement);
+    window.requestAnimationFrame(() => {
+      syncNarrowBoardDock();
+      if (dockedToNarrowBoard.value && !open.value) {
+        position.value = narrowBoardDockPosition();
+      }
+    });
   });
 
   watch(open, () => {
     window.requestAnimationFrame(() => {
+      syncNarrowBoardDock();
+      if (!open.value && dockedToNarrowBoard.value) {
+        position.value = narrowBoardDockPosition();
+        return;
+      }
       clampPosition();
       if (!open.value) {
         rememberLauncherPosition(position.value, true);

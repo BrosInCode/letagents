@@ -1,10 +1,11 @@
+import { normalizeBoardManagerFailoverMode } from "../../shared/board-manager-failover.js";
 import { normalizeAgentPromptKind } from "../../shared/room-agent-prompts.js";
 import { buildRoomActivitySourceFlags, deriveRoomAgentActivityState } from "../../shared/room-agent-activity.js";
 import { buildTaskWorkflowRefs, normalizeTaskWorkflowArtifacts } from "../repo-workflow.js";
 import { isInviteCode } from "../rooms/routing.js";
-import { github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
+import { board_intents, board_manager_assignments, github_app_installations, github_app_repositories, github_repositories, github_webhook_deliveries, room_aliases, room_board_settings, rooms, room_git_bindings, room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import { formatAttachmentId, formatMessageId, formatTaskId } from "./utils.js";
-import type { CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
+import type { BoardIntent, BoardIntentRow, BoardManagerAssignment, BoardManagerAssignmentRow, CoordinationEvent, CoordinationEventRow, FocusRoomStatus, GitRoomBinding, GitHubAppInstallation, GitHubAppRepository, GitHubRepositoryLink, GitHubWebhookDelivery, GitHubWebhookDeliveryStatus, Message, MessageAttachment, MessageAttachmentData, MessageAttachmentRow, MessageAttachmentUpload, MessageAttachmentUploadRow, MessageReplyReference, MessageRow, MessageThreadSummary, Project, ReasoningSession, ReasoningSessionRow, ReasoningSessionUpdate, ReasoningSessionUpdateRow, RoomAgentDeliverySession, RoomAgentDeliverySessionRow, RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, RoomAgentPresence, RoomAgentPresenceRow, RoomAgentSession, RoomAgentSessionRow, RoomAlias, RoomBoardSettings, RoomBoardSettingsRow, RoomKind, RoomParticipant, RoomParticipantRow, RoomSharedArtifact, RoomSharedArtifactTaskLink, StaleTaskPromptMute, StaleTaskPromptMuteRow, Task, TaskLease, TaskLeaseRow, TaskLock, TaskLockRow, TaskRow } from "./types.js";
 
 export function toProject(row: typeof rooms.$inferSelect): Project {
   const inviteRoom = isInviteCode(row.id);
@@ -95,6 +96,7 @@ export function toRoomSharedArtifact(
     url: row.url,
     ref: row.ref,
     state: row.state,
+    detail: row.detail ?? null,
     source: row.source,
     first_seen_at: row.first_seen_at,
     updated_at: row.updated_at,
@@ -213,6 +215,13 @@ export function toMessageAttachmentUpload(row: MessageAttachmentUploadRow): Mess
 export function toMessage(row: MessageRow): Message {
   return {
     id: formatMessageId(row.number),
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id ?? null,
+        }
+      : null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
@@ -226,13 +235,29 @@ export function toMessage(row: MessageRow): Message {
   };
 }
 
-export function toMessageReplyReference(row: Pick<MessageRow, "number" | "sender" | "text" | "source" | "timestamp">): MessageReplyReference {
+export function toMessageReplyReference(row: Pick<
+  MessageRow,
+  | "number"
+  | "sender"
+  | "text"
+  | "source"
+  | "timestamp"
+  | "publisher_agent_key"
+  | "publisher_agent_session_id"
+>): MessageReplyReference {
   return {
     id: formatMessageId(row.number),
     sender: row.sender,
     text: row.text,
     source: row.source ?? null,
     timestamp: row.timestamp,
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id,
+        }
+      : null,
   };
 }
 
@@ -244,6 +269,13 @@ export function toMessageWithReply(
 ): Message {
   return {
     id: formatMessageId(row.number),
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id ?? null,
+        }
+      : null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: normalizeAgentPromptKind(row.agent_prompt_kind),
@@ -305,6 +337,7 @@ export function toTaskLease(row: TaskLeaseRow): TaskLease {
     agent_instance_id: row.agent_instance_id,
     agent_session_id: row.agent_session_id,
     actor_label: row.actor_label,
+    epoch: row.epoch,
     branch_ref: row.branch_ref,
     pr_url: row.pr_url,
     output_intent: row.output_intent,
@@ -347,6 +380,64 @@ export function toCoordinationEvent(row: CoordinationEventRow): CoordinationEven
     reason: row.reason,
     metadata: row.metadata,
     created_at: row.created_at,
+  };
+}
+
+export function toRoomBoardSettings(row: typeof room_board_settings.$inferSelect | RoomBoardSettingsRow): RoomBoardSettings {
+  return {
+    room_id: row.room_id,
+    manager_mode: row.manager_mode as RoomBoardSettings["manager_mode"],
+    manager_failover: normalizeBoardManagerFailoverMode(row.manager_failover),
+    stall_nudged_at: row.stall_nudged_at,
+    updated_by: row.updated_by,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function toBoardManagerAssignment(
+  row: typeof board_manager_assignments.$inferSelect | BoardManagerAssignmentRow
+): BoardManagerAssignment {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    agent_session_id: row.agent_session_id,
+    agent_key: row.agent_key,
+    actor_label: row.actor_label,
+    runtime_source: row.runtime_source as BoardManagerAssignment["runtime_source"],
+    assigned_by: row.assigned_by,
+    status: row.status as BoardManagerAssignment["status"],
+    last_heartbeat_at: row.last_heartbeat_at,
+    released_by: row.released_by,
+    release_reason: row.release_reason,
+    released_at: row.released_at,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
+  };
+}
+
+export function toBoardIntent(row: typeof board_intents.$inferSelect | BoardIntentRow): BoardIntent {
+  return {
+    id: row.id,
+    room_id: row.room_id,
+    task_id: row.task_id,
+    action_type: row.action_type as BoardIntent["action_type"],
+    payload: row.payload,
+    payload_hash: row.payload_hash,
+    status: row.status as BoardIntent["status"],
+    proposer_actor_label: row.proposer_actor_label,
+    proposer_actor_key: row.proposer_actor_key,
+    proposer_actor_instance_id: row.proposer_actor_instance_id,
+    proposer_agent_session_id: row.proposer_agent_session_id,
+    decision_by: row.decision_by,
+    decision_reason: row.decision_reason,
+    approval_token_hash: row.approval_token_hash,
+    decided_at: row.decided_at,
+    expires_at: row.expires_at,
+    escalated_at: row.escalated_at,
+    auto_approved: row.auto_approved,
+    created_at: row.created_at,
+    updated_at: row.updated_at,
   };
 }
 
@@ -419,6 +510,8 @@ export function toRoomAgentDeliverySession(row: RoomAgentDeliverySessionRow): Ro
     last_connected_at: row.last_connected_at,
     last_disconnected_at: row.last_disconnected_at,
     reconnect_grace_expires_at: row.reconnect_grace_expires_at,
+    offline_announced_at: row.offline_announced_at,
+    recovery_announced_at: row.recovery_announced_at,
     created_at: row.created_at,
     updated_at: row.updated_at,
   };
@@ -439,7 +532,9 @@ export function toRoomAgentSession(row: RoomAgentSessionRow): RoomAgentSession {
     agent_key: row.agent_key,
     agent_instance_id: row.agent_instance_id,
     display_name: row.display_name,
+    assigned_base_display_name: row.assigned_base_display_name ?? null,
     owner_account_id: row.owner_account_id,
+    supervisor_grant_id: row.supervisor_grant_id,
     owner_label: row.owner_label,
     ide_label: row.ide_label,
     repo_branch: row.repo_branch ?? null,

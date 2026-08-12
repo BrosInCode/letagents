@@ -3,10 +3,13 @@ import type { Response } from "express";
 
 import type {
   GitRoomBinding,
+  BoardIntentConsumptionInput,
+  LeaseFence,
   Project,
   Task,
   TaskLeaseKind,
   TaskStatus,
+  TaskWorkLeaseCreationInput,
   getTaskOwnershipState,
 } from "../../../db.js";
 import type { FocusParentBoardWriteIsolationDecision } from "../../../focus-rooms/task-write-isolation.js";
@@ -19,15 +22,25 @@ export type TaskUpdatePatch = ReturnType<typeof buildTaskUpdatePatch>["updates"]
 export type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
 
 export type TaskCoordinationGuardDecision =
-  | { kind: "allow" }
+  | {
+      kind: "allow";
+      boardIntentApproval?: BoardIntentConsumptionInput | null;
+      workLeaseCreation?: TaskWorkLeaseCreationInput | null;
+      leaseFence?: LeaseFence | null;
+    }
   | { kind: "deny"; code: string; error: string };
 
 export type TaskAdmissionGuardDecision =
-  | { kind: "allow" }
+  | { kind: "allow"; boardIntentApproval?: BoardIntentConsumptionInput | null }
   | { kind: "deny"; code: string; error: string };
 
 export interface RoomTaskRouteDeps {
   taskEvents: EventEmitter;
+  // DB accessors injected (not direct imports) so the route's fence-forwarding
+  // and 409 mapping can be unit-tested without a database.
+  getTaskById: typeof import("../../../db.js").getTaskById;
+  getTaskOwnershipState: typeof import("../../../db.js").getTaskOwnershipState;
+  updateTask: typeof import("../../../db.js").updateTask;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,
@@ -61,11 +74,14 @@ export interface RoomTaskRouteDeps {
     req: AuthenticatedRequest;
     projectId: string;
     title: string;
+    description?: string | null;
     sourceMessageId?: string | null;
     actorLabel: string | null;
     actorKey: string | null;
     actorInstanceId: string | null;
     actorSessionId: string | null;
+    boardIntentId?: string | null;
+    boardApprovalToken?: string | null;
   }): Promise<TaskAdmissionGuardDecision>;
   isTrustedAgentCreator(projectId: string, createdBy: string): Promise<boolean>;
   emitTaskLifecycleStatusMessage(
@@ -92,6 +108,8 @@ export interface RoomTaskRouteDeps {
     actorKey: string | null;
     actorInstanceId: string | null;
     actorSessionId: string | null;
+    boardIntentId?: string | null;
+    boardApprovalToken?: string | null;
   }): Promise<TaskCoordinationGuardDecision>;
   enforceFocusParentBoardWriteIsolation(input: {
     req: AuthenticatedRequest;

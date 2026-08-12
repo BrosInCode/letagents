@@ -1,6 +1,21 @@
 // Compatibility facade for MCP server runtime helpers. The implementation lives
 // in src/mcp/server/runtime/* so tool modules can import focused responsibilities
 // without turning this file back into the runtime god module.
+import {
+  isLocalRoomStorageEnabled as isStoredLocalRoomStorageEnabled,
+  touchRoomSession as touchStoredRoomSession,
+} from "../local-state.js";
+import { isSupervisedBoundedTurn } from "./runtime/worker-bearer.js";
+
+/** A daemon-supervised turn must always use its exact cloud worker route. */
+export async function isLocalRoomStorageEnabled(roomId: string): Promise<boolean> {
+  return !isSupervisedBoundedTurn() && isStoredLocalRoomStorageEnabled(roomId);
+}
+
+export function touchRoomSession(roomId: string, lastMessageId?: string): void {
+  if (!isSupervisedBoundedTurn()) touchStoredRoomSession(roomId, lastMessageId);
+}
+
 export {
   API_URL,
   ApiError,
@@ -47,11 +62,16 @@ export {
   identityFromAgentSession,
   requireWorkerAgentSession,
   resolveAgentSession,
+  resolveClientRequestedBase,
   resolveWorkerToolIdentity,
   toPublicAgentSession,
+  WORKER_BEARER_AGENT_SESSION_ID,
 } from "./runtime/agent-sessions.js";
 export {
   appendIncludePromptOnly,
+  AGENT_MESSAGE_BODY_MAX_BYTES,
+  AGENT_MESSAGE_OUTPUT_MAX_BYTES,
+  boundAgentMessageOutput,
   getLastMessageId,
   normalizeOptionalToolString,
   toAgentReadableMessages,
@@ -60,11 +80,14 @@ export {
 export {
   currentRoom,
   attachMcpServer,
+  getCurrentSupervisedRoomAuthority,
   getFallbackProjectId,
   getTargetRoomId,
   rememberRoom,
+  runWithCurrentSupervisedRoom,
   shutdownRuntime,
   toPublicRoomResponse,
+  toPublicCurrentRoomState,
   toPublicRoomState,
   toPublicStoredRoomSession,
   toRoomState,
@@ -78,6 +101,15 @@ export {
   syncRoomPresence,
 } from "./runtime/presence.js";
 export { roomScopedApiCall } from "./runtime/room-api.js";
+export {
+  borrowSupervisedWorkerCredential,
+  borrowCurrentSupervisedWorkerCredential,
+  bindSupervisedWorkerSession,
+  checkpointSupervisedWorkerCursor,
+  isRetryableSupervisorBridgeError,
+  scheduleSupervisedWorkerCursorCheckpoint,
+  resolveCurrentSupervisedWorkerSession,
+} from "./runtime/supervisor-bridge.js";
 export {
   autoJoinFromContext,
   buildJoinResponse,
@@ -101,6 +133,10 @@ export {
   getPendingDeviceAuth,
   getStoredAgentIdentity,
   getStoredAgentSession,
+  getCurrentAgentSessionSnapshot,
+  getStoredAgentSessionsForRoomIdentity,
+  getStoredActiveAgentSessionsForRoom,
+  getStoredAgentRoutingStateSnapshot,
   getStoredAuth,
   getStoredCurrentRoom,
   getStoredRoomSession,
@@ -109,15 +145,17 @@ export {
   setPendingDeviceAuth,
   setStoredAuth,
   setStoredAgentIdentity,
-  touchRoomSession,
   addLocalChatMessage,
   addLocalTask,
   claimLocalTaskReviewLease,
+  getLatestLocalChatMessages,
+  getLocalImportedRoutingAuthority,
   getLocalChatMessages,
+  getLocalChatThreadRoutingMembership,
   getLocalTask,
+  listLocalActiveTaskOwnerLeases,
   listLocalTasks,
   isLocalChatStorageEnabled,
-  isLocalRoomStorageEnabled,
   resolveLocalRoomStorageIdentifiers,
   releaseLocalTaskReviewLease,
   updateLocalTask,

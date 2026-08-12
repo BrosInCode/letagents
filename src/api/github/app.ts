@@ -45,6 +45,9 @@ export interface GitHubWebhookPullRequest {
   draft?: boolean;
   merged?: boolean;
   state?: string;
+  changed_files?: number | null;
+  additions?: number | null;
+  deletions?: number | null;
   base?: {
     ref?: string;
     sha?: string;

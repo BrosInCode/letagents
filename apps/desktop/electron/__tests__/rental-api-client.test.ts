@@ -430,6 +430,12 @@ describe("endpoint URL + verb sanity", () => {
         pathPattern: /\/api\/rental\/provider\/requests$/,
       },
       {
+        label: "listProviderSessions",
+        run: (c) => c.listProviderSessions("host one", "installation one"),
+        method: "GET",
+        pathPattern: /\/api\/rental\/provider\/sessions\?hostId=host%20one&installationId=installation%20one$/,
+      },
+      {
         label: "acceptRequest",
         run: (c) => c.acceptRequest("rsess_1"),
         method: "POST",

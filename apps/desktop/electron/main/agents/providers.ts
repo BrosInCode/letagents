@@ -7,25 +7,51 @@ import type {
   DesktopAgentProviderPreflightInput,
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
+  DesktopGitRoomInfo,
   DesktopMcpInstallTarget,
 } from "../../ipc-types.js";
+import { buildRepoStatus } from "../../repo-status.js";
 import {
   buildMcpInstallState,
   installLetAgentsMcpServer,
 } from "../mcp-setup.js";
 import { isDesktopSmokeCheck } from "../smoke.js";
 import {
+  getLocalRoom,
+  getLocalRoomByCloudRoom,
+} from "../rooms/local-store.js";
+import {
   firstRedactedCodexAppServerOutputLine,
   sensitiveCodexAppServerEnvValues,
 } from "./codex-app-server.js";
 import { codexInstallCommand } from "./codex-install.js";
+import {
+  pinInstalledCodexExecutable,
+  resolveCodexExecutable,
+} from "./codex-executable.js";
+import {
+  openCodeInstallCommand,
+  resolveOpenCodeBinary,
+} from "./opencode-runtime.js";
 import { getOpenModelSettingsStatus } from "./open-model-settings.js";
 import { runDesktopCursorProviderPreflight } from "./cursor-provider-preflight.js";
 import {
-  defaultManagedAgentPermissionProfileId,
-  listManagedAgentPermissionProfiles,
-} from "./managed-agent-permission-profiles.js";
+  normalizeManagedAgentModel,
+  validateDesktopManagedAgentModel,
+} from "./managed-agent-models.js";
+import {
+  applyManagedAgentBranchScopePreflight,
+  branchScopedGitRoomName,
+  gitRoomFromBranchRoomIdentifier,
+} from "./managed-agent-branch-scope.js";
+import { inspectClaudeCodeVersion } from "./claude-code-version.js";
+import {
+  getDesktopAgentProvider,
+  isDesktopAgentProviderId,
+} from "./provider-registry.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
+
+export { listDesktopAgentProviders } from "./provider-registry.js";
 
 type ExecResult = {
   ok: boolean;
@@ -38,102 +64,27 @@ type ExecResult = {
 type ExecOptions = {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
+  timeoutMs?: number;
 };
 
 const COMMAND_TIMEOUT_MS = 8_000;
 
-const agentProviders: DesktopAgentProvider[] = [
-  {
-    id: "claude-code",
-    name: "Claude Code",
-    description: "Start a Claude Code agent here.",
-    capabilities: [
-      "external_mcp",
-      "desktop_managed_runtime",
-      "auth_preflight",
-      "turn_control",
-    ],
-    runtimeCommand: "claude",
-    mcpTargetId: "claude-code",
-    permissionProfiles: listManagedAgentPermissionProfiles("claude-code"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("claude-code"),
-  },
-  {
-    id: "antigravity",
-    name: "Antigravity",
-    description: "Join from Antigravity.",
-    capabilities: ["external_mcp"],
-    runtimeCommand: null,
-    mcpTargetId: "antigravity",
-    permissionProfiles: [],
-    defaultPermissionProfileId: null,
-  },
-  {
-    id: "cursor",
-    name: "Cursor",
-    description: "Start a local Cursor agent here.",
-    capabilities: [
-      "external_mcp",
-      "desktop_managed_runtime",
-      "auth_preflight",
-      "turn_control",
-    ],
-    runtimeCommand: "cursor-agent",
-    mcpTargetId: "cursor",
-    permissionProfiles: listManagedAgentPermissionProfiles("cursor"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("cursor"),
-  },
-  {
-    id: "codex",
-    name: "Codex",
-    description: "Start a Codex agent here.",
-    capabilities: [
-      "external_mcp",
-      "desktop_managed_runtime",
-      "installable_runtime",
-      "auth_preflight",
-      "turn_control",
-      "reasoning_stream",
-    ],
-    runtimeCommand: "codex",
-    mcpTargetId: "codex",
-    permissionProfiles: listManagedAgentPermissionProfiles("codex"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("codex"),
-  },
-  {
-    id: "open-model",
-    name: "Open Model",
-    description: "Bring your own key for any OpenAI Responses-compatible endpoint.",
-    capabilities: [
-      "desktop_managed_runtime",
-      "installable_runtime",
-      "auth_preflight",
-      "turn_control",
-      "reasoning_stream",
-    ],
-    runtimeCommand: "codex",
-    mcpTargetId: "codex",
-    permissionProfiles: listManagedAgentPermissionProfiles("open-model"),
-    defaultPermissionProfileId: defaultManagedAgentPermissionProfileId("open-model"),
-  },
-];
-
-export function listDesktopAgentProviders(): DesktopAgentProvider[] {
-  return agentProviders.map((provider) => ({
-    ...provider,
-    capabilities: [...provider.capabilities],
-    permissionProfiles: provider.permissionProfiles.map((profile) => ({ ...profile })),
-  }));
-}
+export type DesktopAgentProviderPreflightOptions = {
+  /**
+   * Wall-clock cap per provider CLI command. Defaults to COMMAND_TIMEOUT_MS;
+   * pass 0 to disable (tests use this so results never depend on host load).
+   */
+  commandTimeoutMs?: number;
+};
 
 function assertAgentProviderId(providerId: string): asserts providerId is DesktopAgentProviderId {
-  if (!agentProviders.some((provider) => provider.id === providerId)) {
+  if (!isDesktopAgentProviderId(providerId)) {
     throw new Error(`Unknown agent provider: ${providerId}`);
   }
 }
 
 function findAgentProvider(providerId: DesktopAgentProviderId): DesktopAgentProvider {
-  const provider = agentProviders.find((candidate) => candidate.id === providerId);
+  const provider = getDesktopAgentProvider(providerId);
   if (!provider) {
     throw new Error(`Unknown agent provider: ${providerId}`);
   }
@@ -151,7 +102,7 @@ async function execFileWithTimeout(
       command,
       args,
       {
-        timeout: COMMAND_TIMEOUT_MS,
+        timeout: options.timeoutMs ?? COMMAND_TIMEOUT_MS,
         cwd: options.cwd,
         env,
       },
@@ -185,6 +136,7 @@ function firstOutputLine(result: ExecResult): string | null {
 async function getProviderMcpStatus(
   provider: DesktopAgentProvider,
 ): Promise<DesktopMcpInstallTarget["status"] | null> {
+  if (!provider.mcpTargetId) return null;
   const state = await buildMcpInstallState();
   return state.targets.find((target) => target.id === provider.mcpTargetId)?.status ?? null;
 }
@@ -222,9 +174,10 @@ async function codexPreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  const command = resolveCodexExecutable();
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -251,7 +204,7 @@ async function codexPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(command, ["login", "status"]);
+  const authResult = await execFileWithTimeout(command, ["login", "status"], { timeoutMs });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -307,12 +260,13 @@ async function claudeCodePreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
   const command = process.env.LETAGENTS_CLAUDE_CODE_BIN ||
     process.env.LETAGENTS_CLAUDE_BIN ||
     provider.runtimeCommand ||
     "claude";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
@@ -339,7 +293,20 @@ async function claudeCodePreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(command, ["auth", "status"]);
+  const versionReadiness = inspectClaudeCodeVersion(version ?? "");
+  if (!versionReadiness.supported) {
+    return {
+      providerId: provider.id,
+      status: "error",
+      canStart: false,
+      message: "Claude Code needs an update.",
+      detail: versionReadiness.error,
+      nextAction: null,
+      version,
+      mcpStatus,
+    };
+  }
+  const authResult = await execFileWithTimeout(command, ["auth", "status"], { timeoutMs });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -371,9 +338,7 @@ async function claudeCodePreflight(
     status: "ready",
     canStart: true,
     message: "Claude Code is ready to start.",
-    detail: mcpStatus === "installed"
-      ? "This desktop can start and monitor a local Claude Code agent."
-      : "This desktop can start Claude Code directly; install the LetAgents connection only for manual Claude Code joins.",
+    detail: "This desktop supplies the managed LetAgents connection and can start and monitor a local Claude Code agent.",
     nextAction: null,
     version,
     mcpStatus,
@@ -384,16 +349,17 @@ async function openModelPreflight(
   provider: DesktopAgentProvider,
   input: DesktopAgentProviderPreflightInput,
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
+  timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const command = process.env.LETAGENTS_CODEX_BIN || provider.runtimeCommand || "codex";
-  const versionResult = await execFileWithTimeout(command, ["--version"]);
+  const command = resolveOpenCodeBinary();
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
   if (commandMissing(versionResult)) {
     return {
       providerId: provider.id,
       status: "missing_runtime",
       canStart: false,
-      message: "The Codex CLI engine is not installed.",
-      detail: "Open Model agents run on the Codex CLI engine pointed at your model endpoint. Install it before starting one.",
+      message: "The OpenCode execution engine is not installed.",
+      detail: "Development builds need OpenCode on PATH. Release builds include a pinned OpenCode runtime.",
       nextAction: "install_runtime",
       version: null,
       mcpStatus,
@@ -404,8 +370,8 @@ async function openModelPreflight(
       providerId: provider.id,
       status: "error",
       canStart: false,
-      message: "The Codex CLI engine could not be checked.",
-      detail: firstOutputLine(versionResult) || "The Codex command failed before returning a version.",
+      message: "The OpenCode execution engine could not be checked.",
+      detail: firstOutputLine(versionResult) || "The OpenCode command failed before returning a version.",
       nextAction: null,
       version: null,
       mcpStatus,
@@ -413,22 +379,8 @@ async function openModelPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const appServerResult = await execFileWithTimeout(command, ["app-server", "--help"]);
-  if (!appServerResult.ok) {
-    return {
-      providerId: provider.id,
-      status: "error",
-      canStart: false,
-      message: "The Codex app-server could not be checked.",
-      detail: firstOutputLine(appServerResult) ||
-        "Open Model agents need a Codex CLI build with app-server support. Update Codex, then try again.",
-      nextAction: "install_runtime",
-      version,
-      mcpStatus,
-    };
-  }
-
   const settings = await getOpenModelSettingsStatus();
+  const effectiveModel = normalizeManagedAgentModel(input.model) || settings.model;
   if (settings.error) {
     return {
       providerId: provider.id,
@@ -441,13 +393,13 @@ async function openModelPreflight(
       mcpStatus,
     };
   }
-  if (!settings.configured) {
+  if (!settings.baseUrl || !effectiveModel) {
     return {
       providerId: provider.id,
       status: "config_required",
       canStart: false,
       message: "Configure a model endpoint before starting an Open Model agent.",
-      detail: "Add an endpoint URL that speaks the OpenAI Responses API (OpenRouter, vLLM, ...) and a model below. Paste an API key if the endpoint needs one (local endpoints usually do not).",
+      detail: "Add an OpenAI-compatible endpoint URL (OpenRouter, vLLM, Ollama, …) and save a default model or choose one below. Paste a provider API key only when that endpoint requires one; OpenCode itself has no separate login.",
       nextAction: null,
       version,
       mcpStatus,
@@ -472,9 +424,9 @@ async function openModelPreflight(
     status: "ready",
     canStart: true,
     message: "Open Model is ready to start.",
-    detail: `Runs the Codex engine with ${settings.model} via your configured endpoint${settings.hasApiKey ? " using your saved API key" : ""}.`,
+    detail: `Runs ${effectiveModel} through OpenCode and your configured endpoint${settings.hasApiKey ? " using your encrypted provider API key" : ""}. No OpenCode account is required.`,
     nextAction: null,
-    version: version ? `${version} - ${settings.model}` : settings.model,
+    version: version ? `${version} - ${effectiveModel}` : effectiveModel,
     mcpStatus,
   };
 }
@@ -482,12 +434,56 @@ async function openModelPreflight(
 export async function runDesktopAgentProviderPreflight(
   providerId: DesktopAgentProviderId,
   input: DesktopAgentProviderPreflightInput = {},
+  options: DesktopAgentProviderPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   assertAgentProviderId(providerId);
   const provider = findAgentProvider(providerId);
+  const withManagedRuntimeValidation = async (
+    result: DesktopAgentProviderPreflight,
+  ): Promise<DesktopAgentProviderPreflight> => {
+    if (
+      !result.canStart
+      || (
+        !provider.capabilities.includes("desktop_managed_runtime")
+        && !provider.capabilities.includes("supervised_runtime")
+      )
+    ) {
+      return result;
+    }
+    const validation = await validateDesktopManagedAgentModel({
+      providerId,
+      ...input,
+    });
+    if (validation.error) {
+      return {
+        ...result,
+        status: "config_required",
+        canStart: false,
+        message: "Selected model is not available.",
+        detail: validation.error,
+      };
+    }
+
+    const gitRoom = await resolveManagedAgentPreflightGitRoom(input);
+    const branchScopedName = branchScopedGitRoomName(gitRoom);
+    if (!branchScopedName) {
+      return result;
+    }
+
+    const repoRootPath = input.repoRootPath?.trim();
+    const repoStatus = repoRootPath
+      ? await buildRepoStatus(repoRootPath).catch(() => null)
+      : null;
+    return applyManagedAgentBranchScopePreflight({
+      providerName: provider.name,
+      preflight: result,
+      gitRoom,
+      repoStatus,
+    });
+  };
   if (isDesktopSmokeCheck()) {
     if (provider.id === "codex") {
-      return {
+      return withManagedRuntimeValidation({
         providerId: provider.id,
         status: "missing_runtime",
         canStart: false,
@@ -496,49 +492,80 @@ export async function runDesktopAgentProviderPreflight(
         nextAction: "install_runtime",
         version: null,
         mcpStatus: "installed",
-      };
+      });
     }
-    return {
+    return withManagedRuntimeValidation({
       providerId: provider.id,
-      status: provider.capabilities.includes("desktop_managed_runtime")
+      status: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      )
         ? input.repoRootPath?.trim()
           ? "ready"
           : "repo_required"
         : "ready",
-      canStart: provider.capabilities.includes("desktop_managed_runtime") && Boolean(input.repoRootPath?.trim()),
-      message: provider.capabilities.includes("desktop_managed_runtime")
+      canStart: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      ) && Boolean(input.repoRootPath?.trim()),
+      message: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      )
         ? input.repoRootPath?.trim()
           ? `${provider.name} is ready to start.`
           : `Choose a local repository before starting ${provider.name}.`
         : `${provider.name} is connected to LetAgents.`,
-      detail: provider.capabilities.includes("desktop_managed_runtime")
+      detail: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      )
         ? input.repoRootPath?.trim()
-          ? "Smoke mode can launch and supervise this local provider."
-          : "A desktop-managed agent needs a local repo or worktree for code actions."
+          ? "The desktop can launch and supervise this local provider."
+          : "A supervised agent needs a local repo or worktree for code actions."
         : "Open this agent app, then ask it to join this room through LetAgents.",
-      nextAction: provider.capabilities.includes("desktop_managed_runtime") && !input.repoRootPath?.trim()
+      nextAction: (
+        provider.capabilities.includes("desktop_managed_runtime")
+        || provider.capabilities.includes("supervised_runtime")
+      ) && !input.repoRootPath?.trim()
         ? "choose_repo"
         : null,
       version: provider.id === "codex" ? "codex smoke" : null,
       mcpStatus: "installed",
-    };
+    });
   }
   const mcpStatus = await getProviderMcpStatus(provider);
 
   if (provider.id === "codex") {
-    return codexPreflight(provider, input, mcpStatus);
+    return withManagedRuntimeValidation(await codexPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
   }
   if (provider.id === "claude-code") {
-    return claudeCodePreflight(provider, input, mcpStatus);
+    return withManagedRuntimeValidation(await claudeCodePreflight(provider, input, mcpStatus, options.commandTimeoutMs));
   }
   if (provider.id === "cursor") {
-    return runDesktopCursorProviderPreflight(provider, input, mcpStatus);
+    return withManagedRuntimeValidation(await runDesktopCursorProviderPreflight(provider, input, mcpStatus, {
+      commandTimeoutMs: options.commandTimeoutMs,
+    }));
   }
   if (provider.id === "open-model") {
-    return openModelPreflight(provider, input, mcpStatus);
+    return withManagedRuntimeValidation(await openModelPreflight(provider, input, mcpStatus, options.commandTimeoutMs));
   }
 
   return bridgePreflight(provider, mcpStatus);
+}
+
+async function resolveManagedAgentPreflightGitRoom(
+  input: DesktopAgentProviderPreflightInput,
+): Promise<DesktopGitRoomInfo | null> {
+  const identifierGitRoom = gitRoomFromBranchRoomIdentifier(input.roomIdentifier);
+  if (identifierGitRoom) return identifierGitRoom;
+  if (input.roomGitRoom) return input.roomGitRoom;
+
+  const roomIdentifier = input.roomIdentifier?.trim();
+  if (!roomIdentifier) return null;
+  const localRoom = await getLocalRoom(roomIdentifier)
+    || await getLocalRoomByCloudRoom(roomIdentifier);
+  return localRoom?.gitRoom ?? null;
 }
 
 async function installCodexRuntime(
@@ -562,24 +589,67 @@ async function installCodexRuntime(
   const install = codexInstallCommand();
   await new Promise<void>((resolve, reject) => {
     const child = spawn(install.command, install.args, {
-      stdio: "ignore",
+      stdio: ["ignore", "pipe", "pipe"],
       detached: false,
     });
+    let output = "";
+    const capture = (chunk: Buffer | string) => {
+      output = `${output}${String(chunk)}`.slice(-8_000);
+    };
+    child.stdout?.on("data", capture);
+    child.stderr?.on("data", capture);
     child.on("error", reject);
     child.on("exit", (code) => {
       if (code === 0) {
         resolve();
         return;
       }
-      reject(new Error(`Codex installer exited with code ${code ?? "unknown"}.`));
+      const detail = output.trim();
+      reject(new Error(
+        `Codex installer exited with code ${code ?? "unknown"}${detail ? `: ${detail}` : "."}`,
+      ));
     });
   });
+  const executable = pinInstalledCodexExecutable();
 
   return {
     providerId: provider.id,
     action: "install_runtime",
     success: true,
     message: "Codex was installed.",
+    detail: `${install.detail} LetAgents verified ${executable}.`,
+  };
+}
+
+async function installOpenCodeRuntime(
+  confirmed: boolean | undefined,
+  provider: DesktopAgentProvider,
+): Promise<DesktopAgentProviderSetupResult> {
+  if (!confirmed) {
+    return providerSetupConfirmationResult({ id: provider.id, name: provider.name }, "install_runtime");
+  }
+  if (isDesktopSmokeCheck()) {
+    return {
+      providerId: provider.id,
+      action: "install_runtime",
+      success: true,
+      message: "OpenCode was installed.",
+      detail: "Smoke mode skipped the OpenCode installer.",
+    };
+  }
+  const install = openCodeInstallCommand();
+  await new Promise<void>((resolve, reject) => {
+    const child = spawn(install.command, install.args, { stdio: "ignore", detached: false });
+    child.on("error", reject);
+    child.on("exit", (code) => code === 0
+      ? resolve()
+      : reject(new Error(`OpenCode installer exited with code ${code ?? "unknown"}.`)));
+  });
+  return {
+    providerId: provider.id,
+    action: "install_runtime",
+    success: true,
+    message: "OpenCode was installed.",
     detail: install.detail,
   };
 }
@@ -592,6 +662,9 @@ export async function runDesktopAgentProviderSetup(
   const provider = findAgentProvider(providerId);
 
   if (input.action === "install_mcp_bridge") {
+    if (!provider.mcpTargetId) {
+      throw new Error(`${provider.name} embeds its LetAgents bridge and has no external MCP installation target.`);
+    }
     if (!input.confirmed) {
       return providerSetupConfirmationResult(provider, input.action);
     }
@@ -608,11 +681,11 @@ export async function runDesktopAgentProviderSetup(
     };
   }
 
-  if (
-    input.action === "install_runtime" &&
-    (provider.id === "codex" || provider.id === "open-model")
-  ) {
+  if (input.action === "install_runtime" && provider.id === "codex") {
     return installCodexRuntime(input.confirmed, provider);
+  }
+  if (input.action === "install_runtime" && provider.id === "open-model") {
+    return installOpenCodeRuntime(input.confirmed, provider);
   }
 
   throw new Error(`${provider.name} does not support ${input.action}.`);

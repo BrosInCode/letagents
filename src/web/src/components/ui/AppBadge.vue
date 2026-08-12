@@ -41,39 +41,39 @@ withDefaults(defineProps<{
 
 /* Variants */
 .badge--default {
-  background: rgba(255, 255, 255, 0.06);
-  color: var(--text-muted, #a1a1aa);
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: var(--accent-dim);
+  color: var(--text-secondary);
+  border: 1px solid var(--border-strong);
 }
 
 .badge--success {
-  background: rgba(34, 197, 94, 0.12);
-  color: var(--green-text, #4ade80);
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: var(--green-dim);
+  color: var(--green-text);
+  border: 1px solid color-mix(in srgb, var(--green) 28%, var(--border));
 }
 
 .badge--warning {
-  background: rgba(234, 179, 8, 0.12);
-  color: #facc15;
-  border: 1px solid rgba(234, 179, 8, 0.2);
+  background: var(--amber-dim);
+  color: var(--amber-text);
+  border: 1px solid color-mix(in srgb, var(--amber) 30%, var(--border));
 }
 
 .badge--error {
-  background: rgba(239, 68, 68, 0.12);
-  color: #f87171;
-  border: 1px solid rgba(239, 68, 68, 0.2);
+  background: var(--red-dim);
+  color: var(--red-text);
+  border: 1px solid color-mix(in srgb, var(--red) 30%, var(--border));
 }
 
 .badge--info {
-  background: rgba(59, 130, 246, 0.12);
-  color: #60a5fa;
-  border: 1px solid rgba(59, 130, 246, 0.2);
+  background: var(--blue-dim);
+  color: var(--blue-text);
+  border: 1px solid color-mix(in srgb, var(--blue) 30%, var(--border));
 }
 
 .badge--accent {
-  background: rgba(168, 85, 247, 0.12);
-  color: #c084fc;
-  border: 1px solid rgba(168, 85, 247, 0.2);
+  background: color-mix(in srgb, var(--task-assigned) 10%, transparent);
+  color: color-mix(in srgb, var(--task-assigned) 76%, var(--text));
+  border: 1px solid color-mix(in srgb, var(--task-assigned) 30%, var(--border));
 }
 
 /* Dot indicator */

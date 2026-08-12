@@ -3,8 +3,46 @@ import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
+import {
+  type ActivationIdentity,
+} from "../../shared/activation-routing.js";
+import {
+  ensureLocalThreadRoutingProjectionSchemaAsync,
+  getLocalThreadRoutingAgentKeysForRoots,
+  projectLocalThreadRoutingMessage,
+  runLocalSqliteWriteTransactionAsync,
+  scheduleLocalThreadRoutingBackfill,
+} from "../../../shared/sqlite-thread-routing.mjs";
+import {
+  MESSAGE_SENDER_MAX_CODE_POINTS,
+  MESSAGE_SENDER_MAX_UTF8_BYTES,
+  POSTGRES_INTEGER_MAX,
+  isMessageSenderWithinBounds,
+  parseAccountAgentRoutingEnvelope,
+  parsePositivePgIntegerScopedId,
+  type ParsedAccountAgentRouting,
+} from "../../../shared/message-contracts.mjs";
+
+const localImportedRoutingAuthority = Symbol("localImportedRoutingAuthority");
+
+export function getLocalImportedRoutingAuthority(message: unknown): {
+  routing: ParsedAccountAgentRouting;
+  readerKey: string | null;
+} | null {
+  if (!message || typeof message !== "object") return null;
+  return (message as Record<PropertyKey, unknown>)[localImportedRoutingAuthority] as {
+    routing: ParsedAccountAgentRouting;
+    readerKey: string | null;
+  } | null ?? null;
+}
+
 export type LocalChatMessage = {
   id: string;
+  agent_identity: {
+    actor_label: string;
+    agent_key: string;
+    agent_session_id: string | null;
+  } | null;
   sender: string;
   text: string;
   agent_prompt_kind: string | null;
@@ -74,6 +112,7 @@ type SqliteStatement = {
 type SqliteDatabase = {
   exec: (sql: string) => void;
   prepare: (sql: string) => SqliteStatement;
+  close?: () => void;
 };
 
 type LocalMessageRow = {
@@ -85,6 +124,12 @@ type LocalMessageRow = {
   text: string;
   agent_prompt_kind: string | null;
   source: string | null;
+  publisher_agent_key: string | null;
+  publisher_agent_session_id: string | null;
+  account_agent_routing_json: string | null;
+  account_agent_routing_reader_key: string | null;
+  control_authorized: number | null;
+  synced_cloud_id: string | null;
   timestamp: string;
   sync_key: string | null;
   sync_started_at: string | null;
@@ -108,6 +153,8 @@ type LocalChatInput = {
   agent_prompt_kind?: string | null;
   reply_to?: string | null;
   thread_root_id?: string | null;
+  publisher_agent_key?: string | null;
+  publisher_agent_session_id?: string | null;
 };
 
 const require = createRequire(import.meta.url);
@@ -118,6 +165,17 @@ const localChatDatabasePath =
   process.env.LETAGENTS_LOCAL_CHAT_DB?.trim() ||
   join(homedir(), ".letagents", "local-chat.sqlite");
 let db: SqliteDatabase | null = null;
+let dbInitialization: Promise<SqliteDatabase> | null = null;
+let databaseInitializationObserverForTest: (() => void) | null = null;
+let schemaInitializationObserverForTest: (() => void) | null = null;
+
+export function setLocalChatInitializationObserversForTest(observers: {
+  database?: (() => void) | null;
+  schema?: (() => void) | null;
+} | null): void {
+  databaseInitializationObserverForTest = observers?.database ?? null;
+  schemaInitializationObserverForTest = observers?.schema ?? null;
+}
 
 const validLocalTaskTransitions: Record<string, string[]> = {
   proposed: ["accepted", "cancelled"],
@@ -136,11 +194,7 @@ function formatMessageId(number: number): string {
 }
 
 function parseMessageNumber(messageId?: string | null): number | null {
-  if (!messageId) return null;
-  const match = /^msg_(\d+)$/.exec(messageId.trim());
-  if (!match) return null;
-  const parsed = Number(match[1]);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  return parsePositivePgIntegerScopedId(messageId, "msg");
 }
 
 function clampLimit(limit?: number): number {
@@ -165,6 +219,26 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
     agent_prompt_kind:
       typeof row.agent_prompt_kind === "string" ? row.agent_prompt_kind : null,
     source: typeof row.source === "string" ? row.source : null,
+    publisher_agent_key:
+      typeof row.publisher_agent_key === "string" ? row.publisher_agent_key : null,
+    publisher_agent_session_id:
+      typeof row.publisher_agent_session_id === "string"
+        ? row.publisher_agent_session_id
+        : null,
+    account_agent_routing_json:
+      typeof row.account_agent_routing_json === "string"
+        ? row.account_agent_routing_json
+        : null,
+    account_agent_routing_reader_key:
+      typeof row.account_agent_routing_reader_key === "string"
+        ? row.account_agent_routing_reader_key
+        : null,
+    control_authorized:
+      row.control_authorized === null || row.control_authorized === undefined
+        ? null
+        : Number(row.control_authorized),
+    synced_cloud_id:
+      typeof row.synced_cloud_id === "string" ? row.synced_cloud_id : null,
     timestamp: String(row.timestamp || ""),
     sync_key: typeof row.sync_key === "string" ? row.sync_key : null,
     sync_started_at:
@@ -203,7 +277,11 @@ function mapAttachmentRow(row: Record<string, unknown>): LocalAttachmentRow {
 function visibleMessageClause(includePromptOnly?: boolean): string {
   return includePromptOnly
     ? "1 = 1"
-    : "NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')";
+    : "(agent_prompt_kind IS NULL OR agent_prompt_kind <> 'auto' OR TRIM(text) <> '')";
+}
+
+export async function ensureLocalThreadRoutingProjection(database: SqliteDatabase): Promise<void> {
+  await ensureLocalThreadRoutingProjectionSchemaAsync(database);
 }
 
 function toMessage(
@@ -211,8 +289,15 @@ function toMessage(
   replyTo?: LocalMessageRow | null,
   attachments: LocalAttachmentRow[] = [],
 ): LocalChatMessage {
-  return {
+  const message: LocalChatMessage = {
     id: formatMessageId(row.number),
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id,
+        }
+      : null,
     sender: row.sender,
     text: row.text,
     agent_prompt_kind: row.agent_prompt_kind,
@@ -240,19 +325,43 @@ function toMessage(
         }
       : null,
   };
+  const importedCloudProvenance = Boolean(row.synced_cloud_id && !row.sync_key);
+  if (row.account_agent_routing_json || importedCloudProvenance) {
+    let routing: ParsedAccountAgentRouting = { version: 1, authority: "invalid" };
+    if (row.account_agent_routing_json) {
+      try {
+        routing = parseAccountAgentRoutingEnvelope(
+          JSON.parse(row.account_agent_routing_json),
+        ) ?? { version: 1, authority: "invalid" };
+      } catch {
+        // Present malformed imported authority is explicit invalid authority.
+      }
+    }
+    Object.defineProperty(message, localImportedRoutingAuthority, {
+      value: {
+        routing,
+        readerKey: row.account_agent_routing_reader_key,
+      },
+      enumerable: false,
+    });
+  }
+  return message;
 }
 
-async function getDb(): Promise<SqliteDatabase> {
-  if (db) return db;
+async function initializeDb(): Promise<SqliteDatabase> {
   await mkdir(dirname(localChatDatabasePath), { recursive: true });
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => SqliteDatabase;
   };
-  db = new DatabaseSync(localChatDatabasePath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 5000");
-  db.exec(`
+  databaseInitializationObserverForTest?.();
+  const database = new DatabaseSync(localChatDatabasePath);
+  try {
+    schemaInitializationObserverForTest?.();
+    database.exec("PRAGMA journal_mode = WAL");
+    database.exec("PRAGMA foreign_keys = ON");
+    database.exec("PRAGMA busy_timeout = 5000");
+    await runLocalSqliteWriteTransactionAsync(database, () => {
+      database.exec(`
     CREATE TABLE IF NOT EXISTS local_chat_room_sequences (
       room_id TEXT PRIMARY KEY,
       next_number INTEGER NOT NULL
@@ -266,6 +375,11 @@ async function getDb(): Promise<SqliteDatabase> {
       text TEXT NOT NULL,
       agent_prompt_kind TEXT,
       source TEXT,
+      publisher_agent_key TEXT,
+      publisher_agent_session_id TEXT,
+      account_agent_routing_json TEXT,
+      account_agent_routing_reader_key TEXT,
+      control_authorized INTEGER,
       timestamp TEXT NOT NULL,
       synced_cloud_id TEXT,
       synced_at TEXT,
@@ -335,23 +449,28 @@ async function getDb(): Promise<SqliteDatabase> {
       PRIMARY KEY (room_id, task_id)
     );
   `);
-  addColumnIfMissing(db, "local_chat_messages", "sync_key", "TEXT");
-  addColumnIfMissing(db, "local_chat_messages", "sync_started_at", "TEXT");
-  addColumnIfMissing(db, "local_chat_messages", "thread_root_number", "INTEGER");
-  addColumnIfMissing(db, "local_rooms", "pinned_at", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "assignee_agent_key", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "assignee_agent_instance_id", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "assignee_agent_session_id", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "workflow_artifacts_json", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "workflow_refs_json", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "sync_started_at", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "sync_dirty", "INTEGER NOT NULL DEFAULT 0");
-  addColumnIfMissing(db, "local_tasks", "review_lease_id", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "review_holder_label", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "review_agent_key", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "review_agent_session_id", "TEXT");
-  addColumnIfMissing(db, "local_tasks", "review_updated_at", "TEXT");
-  db.exec(`
+      addColumnIfMissing(database, "local_chat_messages", "sync_key", "TEXT");
+      addColumnIfMissing(database, "local_chat_messages", "sync_started_at", "TEXT");
+      addColumnIfMissing(database, "local_chat_messages", "thread_root_number", "INTEGER");
+      addColumnIfMissing(database, "local_chat_messages", "publisher_agent_key", "TEXT");
+      addColumnIfMissing(database, "local_chat_messages", "publisher_agent_session_id", "TEXT");
+      addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_json", "TEXT");
+      addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_reader_key", "TEXT");
+      addColumnIfMissing(database, "local_chat_messages", "control_authorized", "INTEGER");
+      addColumnIfMissing(database, "local_rooms", "pinned_at", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "assignee_agent_key", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "assignee_agent_instance_id", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "assignee_agent_session_id", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "workflow_artifacts_json", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "workflow_refs_json", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "sync_started_at", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "sync_dirty", "INTEGER NOT NULL DEFAULT 0");
+      addColumnIfMissing(database, "local_tasks", "review_lease_id", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "review_holder_label", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "review_agent_key", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "review_agent_session_id", "TEXT");
+      addColumnIfMissing(database, "local_tasks", "review_updated_at", "TEXT");
+      database.exec(`
     CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
       ON local_chat_messages (room_id, sync_key)
       WHERE sync_key IS NOT NULL;
@@ -359,8 +478,27 @@ async function getDb(): Promise<SqliteDatabase> {
       ON local_chat_messages (room_id, sync_started_at);
     CREATE INDEX IF NOT EXISTS local_chat_messages_thread_root_idx
       ON local_chat_messages (room_id, thread_root_number);
-  `);
-  return db;
+      `);
+    });
+    await ensureLocalThreadRoutingProjection(database);
+    scheduleLocalThreadRoutingBackfill(database);
+    return database;
+  } catch (error) {
+    database.close?.();
+    throw error;
+  }
+}
+
+async function getDb(): Promise<SqliteDatabase> {
+  if (db) return db;
+  dbInitialization ??= initializeDb();
+  try {
+    const initialized = await dbInitialization;
+    db = initialized;
+    return initialized;
+  } finally {
+    dbInitialization = null;
+  }
 }
 
 function addColumnIfMissing(
@@ -461,7 +599,7 @@ function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): n
     .prepare("SELECT next_number FROM local_chat_room_sequences WHERE room_id = ?")
     .get(roomId);
   const number = Number(row?.next_number || 0);
-  if (!Number.isInteger(number) || number <= 0) {
+  if (!Number.isInteger(number) || number <= 0 || number > POSTGRES_INTEGER_MAX) {
     throw new Error("Local chat message sequence could not be allocated.");
   }
   database
@@ -586,6 +724,11 @@ export async function addLocalChatMessage(
   const sender = input.sender.trim();
   if (!trimmedRoomId) throw new Error("No room is available for this request.");
   if (!sender) throw new Error("Message sender is required.");
+  if (!isMessageSenderWithinBounds(sender)) {
+    throw new Error(
+      `Message sender must not exceed ${MESSAGE_SENDER_MAX_CODE_POINTS} characters or ${MESSAGE_SENDER_MAX_UTF8_BYTES} UTF-8 bytes.`,
+    );
+  }
 
   const database = await getDb();
   const replyToNumber = parseMessageNumber(input.reply_to);
@@ -618,11 +761,9 @@ export async function addLocalChatMessage(
   }
 
   const timestamp = new Date().toISOString();
-  let row: LocalMessageRow;
-  beginImmediate(database);
-  try {
+  const row = await runLocalSqliteWriteTransactionAsync(database, () => {
     const number = allocateLocalMessageNumber(database, trimmedRoomId);
-    row = {
+    const insertedRow: LocalMessageRow = {
       room_id: trimmedRoomId,
       number,
       reply_to_number: replyToNumber,
@@ -631,6 +772,12 @@ export async function addLocalChatMessage(
       text: input.text,
       agent_prompt_kind: input.agent_prompt_kind || null,
       source: input.source || null,
+      publisher_agent_key: input.publisher_agent_key?.trim() || null,
+      publisher_agent_session_id: input.publisher_agent_session_id?.trim() || null,
+      account_agent_routing_json: null,
+      account_agent_routing_reader_key: null,
+      control_authorized: null,
+      synced_cloud_id: null,
       timestamp,
       sync_key: null,
       sync_started_at: null,
@@ -640,31 +787,56 @@ export async function addLocalChatMessage(
       .prepare(`
         INSERT INTO local_chat_messages (
           room_id, number, reply_to_number, thread_root_number, sender, text, agent_prompt_kind, source,
+          publisher_agent_key, publisher_agent_session_id,
           timestamp, synced_cloud_id, synced_at, sync_key, sync_started_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
       `)
       .run(
-        row.room_id,
-        row.number,
-        row.reply_to_number,
-        row.thread_root_number,
-        row.sender,
-        row.text,
-        row.agent_prompt_kind,
-        row.source,
-        row.timestamp,
+        insertedRow.room_id,
+        insertedRow.number,
+        insertedRow.reply_to_number,
+        insertedRow.thread_root_number,
+        insertedRow.sender,
+        insertedRow.text,
+        insertedRow.agent_prompt_kind,
+        insertedRow.source,
+        insertedRow.publisher_agent_key,
+        insertedRow.publisher_agent_session_id,
+        insertedRow.timestamp,
       );
-    database.exec("COMMIT");
-  } catch (error) {
-    rollback(database);
-    throw error;
-  }
+    projectLocalThreadRoutingMessage(database, insertedRow);
+    return insertedRow;
+  });
 
   return {
     room_id: trimmedRoomId,
     ...toMessage(row, replyTarget),
   };
+}
+
+export async function getLocalChatThreadRoutingMembership(
+  roomId: string,
+  rootMessageIds: readonly string[],
+  identity: ActivationIdentity,
+  activeIdentities: readonly ActivationIdentity[] = [identity],
+): Promise<Set<string>> {
+  const rootNumbers = Array.from(new Set(
+    rootMessageIds
+      .map((rootId) => parseMessageNumber(rootId))
+      .filter((value): value is number => value !== null),
+  ));
+  if (rootNumbers.length === 0) return new Set();
+  const database = await getDb();
+  const keysByRoot = await getLocalThreadRoutingAgentKeysForRoots(
+    database,
+    roomId,
+    rootNumbers,
+    activeIdentities,
+  );
+  return new Set([...keysByRoot]
+    .filter(([, keys]) => keys.has(identity.agent_key))
+    .map(([rootNumber]) => formatMessageId(rootNumber)));
 }
 
 export async function getLocalChatMessages(
@@ -691,6 +863,34 @@ export async function getLocalChatMessages(
     .map(mapRow);
   const hasMore = rows.length > limit;
   const bounded = hasMore ? rows.slice(0, limit) : rows;
+  return {
+    room_id: roomId,
+    messages: await hydrateRows(database, bounded),
+    has_more: hasMore,
+  };
+}
+
+export async function getLatestLocalChatMessages(
+  roomId: string,
+  options?: {
+    limit?: number;
+    include_prompt_only?: boolean;
+  },
+): Promise<LocalChatMessagePage> {
+  const limit = clampLimit(options?.limit);
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      SELECT * FROM local_chat_messages
+      WHERE room_id = ?
+        AND ${visibleMessageClause(options?.include_prompt_only)}
+      ORDER BY number DESC
+      LIMIT ?
+    `)
+    .all(roomId, limit + 1)
+    .map(mapRow);
+  const hasMore = rows.length > limit;
+  const bounded = (hasMore ? rows.slice(0, limit) : rows).reverse();
   return {
     room_id: roomId,
     messages: await hydrateRows(database, bounded),
@@ -877,6 +1077,54 @@ export async function listLocalTasks(
     .all(...params)
     .map(mapTaskRow);
   return { tasks, has_more: false };
+}
+
+export async function listLocalActiveTaskOwnerLeases(
+  roomId: string,
+): Promise<Array<{
+  kind: "work";
+  status: "active";
+  actor_label: string;
+  agent_key: string;
+  agent_instance_id: string | null;
+  agent_session_id: string | null;
+}>> {
+  const database = await getDb();
+  const rows = database
+    .prepare(`
+      SELECT
+        MIN(COALESCE(NULLIF(TRIM(assignee), ''), assignee_agent_key)) AS actor_label,
+        assignee_agent_key,
+        assignee_agent_instance_id,
+        assignee_agent_session_id
+      FROM local_tasks
+      WHERE room_id = ?
+        AND status IN ('assigned', 'in_progress', 'blocked', 'in_review')
+        AND assignee_agent_key IS NOT NULL
+        AND TRIM(assignee_agent_key) <> ''
+      GROUP BY CASE
+        WHEN NULLIF(TRIM(assignee_agent_session_id), '') IS NOT NULL
+          THEN 'session:' || TRIM(assignee_agent_session_id)
+        WHEN NULLIF(TRIM(assignee_agent_instance_id), '') IS NOT NULL
+          THEN 'instance:' || TRIM(assignee_agent_key) || ':' || TRIM(assignee_agent_instance_id)
+        ELSE 'agent:' || TRIM(assignee_agent_key)
+      END
+      ORDER BY MIN(created_at) ASC
+      LIMIT 2
+    `)
+    .all(roomId);
+  return rows.map((row) => ({
+    kind: "work" as const,
+    status: "active" as const,
+    actor_label: String(row.actor_label || row.assignee_agent_key || ""),
+    agent_key: String(row.assignee_agent_key || ""),
+    agent_instance_id: typeof row.assignee_agent_instance_id === "string"
+      ? row.assignee_agent_instance_id
+      : null,
+    agent_session_id: typeof row.assignee_agent_session_id === "string"
+      ? row.assignee_agent_session_id
+      : null,
+  }));
 }
 
 export async function getLocalTask(

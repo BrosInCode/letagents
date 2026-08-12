@@ -1,22 +1,31 @@
-import { createRequire } from "node:module";
 import { randomUUID } from "node:crypto";
-import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 
-import { localChatDatabasePath } from "../../chat-storage/settings.js";
+import {
+  ensureLocalThreadRoutingProjectionSchemaAsync,
+  getLocalThreadRoutingAgentKeysForRoots,
+  invalidateLocalThreadRoutingRoots,
+  projectLocalThreadRoutingMessage,
+  runLocalSqliteWriteTransactionAsync,
+  scheduleLocalThreadRoutingBackfill,
+  scheduleLocalThreadRoutingRootsRepair,
+} from "../../../../../../shared/sqlite-thread-routing.mjs";
+import {
+  MESSAGE_SENDER_MAX_CODE_POINTS,
+  MESSAGE_SENDER_MAX_UTF8_BYTES,
+  POSTGRES_INTEGER_MAX,
+  isMessageSenderWithinBounds,
+  parsePositivePgIntegerScopedId,
+} from "../../../../../../shared/message-contracts.mjs";
+
 import type { RoomMessageAttachmentPayload } from "../../attachments/mappers.js";
 import type { RoomMessagePayload } from "./mappers.js";
-
-type SqliteStatement = {
-  all: (...params: unknown[]) => Record<string, unknown>[];
-  get: (...params: unknown[]) => Record<string, unknown> | undefined;
-  run: (...params: unknown[]) => unknown;
-};
-
-type SqliteDatabase = {
-  exec: (sql: string) => void;
-  prepare: (sql: string) => SqliteStatement;
-};
+import {
+  addColumnIfMissing,
+  beginImmediate,
+  getLocalChatDatabase,
+  rollback,
+  type SqliteDatabase,
+} from "../local-db.js";
 
 type LocalMessageRow = {
   room_id: string;
@@ -27,6 +36,11 @@ type LocalMessageRow = {
   text: string;
   agent_prompt_kind: string | null;
   source: string | null;
+  publisher_agent_key: string | null;
+  publisher_agent_session_id: string | null;
+  account_agent_routing_json: string | null;
+  account_agent_routing_reader_key: string | null;
+  control_authorized: number | null;
   timestamp: string;
   synced_cloud_id: string | null;
   synced_at: string | null;
@@ -34,7 +48,7 @@ type LocalMessageRow = {
   sync_started_at: string | null;
 };
 
-type LocalAttachmentRow = {
+export type LocalAttachmentRow = {
   attachment_id: string;
   file_name: string | null;
   mime_type: string | null;
@@ -77,6 +91,10 @@ export type LocalChatMessageInput = {
   thread_root_id?: string | null;
   attachments?: RoomMessageAttachmentPayload[];
   readerKey?: string | null;
+  idempotency_key?: string | null;
+  publisher_agent_key?: string | null;
+  publisher_agent_session_id?: string | null;
+  control_authorized?: boolean | null;
 };
 
 export type LocalSyncMessagePayload = RoomMessagePayload & {
@@ -87,21 +105,24 @@ type LocalReaderOptions = {
   readerKey?: string | null;
 };
 
-const require = createRequire(import.meta.url);
-let db: SqliteDatabase | null = null;
-let initialized = false;
 const legacyLocalThreadReaderKey = "local:legacy";
+const LOCAL_THREAD_DISPLAY_PARTICIPANT_LIMIT = 50;
+let schemaInitialized = false;
+let schemaInitialization: Promise<void> | null = null;
+let schemaInitializationObserverForTest: (() => void) | null = null;
+
+export function setLocalMessageSchemaInitializationObserverForTest(
+  observer: (() => void) | null,
+): void {
+  schemaInitializationObserverForTest = observer;
+}
 
 function formatMessageId(number: number): string {
   return `msg_${number}`;
 }
 
 function parseMessageNumber(messageId?: string | null): number | null {
-  if (!messageId) return null;
-  const match = /^msg_(\d+)$/.exec(messageId.trim());
-  if (!match) return null;
-  const parsed = Number(match[1]);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
+  return parsePositivePgIntegerScopedId(messageId, "msg");
 }
 
 function clampLimit(limit?: number): number {
@@ -110,17 +131,12 @@ function clampLimit(limit?: number): number {
 }
 
 async function getDb(): Promise<SqliteDatabase> {
-  if (db) return db;
-  await mkdir(dirname(localChatDatabasePath), { recursive: true });
-  const { DatabaseSync } = require("node:sqlite") as {
-    DatabaseSync: new (path: string) => SqliteDatabase;
-  };
-  db = new DatabaseSync(localChatDatabasePath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 5000");
-  if (!initialized) {
-    db.exec(`
+  const database = await getLocalChatDatabase();
+  if (!schemaInitialized) {
+    schemaInitialization ??= (async () => {
+      schemaInitializationObserverForTest?.();
+      await runLocalSqliteWriteTransactionAsync(database, () => {
+        database.exec(`
       CREATE TABLE IF NOT EXISTS local_chat_room_sequences (
         room_id TEXT PRIMARY KEY,
         next_number INTEGER NOT NULL
@@ -134,6 +150,11 @@ async function getDb(): Promise<SqliteDatabase> {
         text TEXT NOT NULL,
         agent_prompt_kind TEXT,
         source TEXT,
+        publisher_agent_key TEXT,
+        publisher_agent_session_id TEXT,
+        account_agent_routing_json TEXT,
+        account_agent_routing_reader_key TEXT,
+        control_authorized INTEGER,
         timestamp TEXT NOT NULL,
         synced_cloud_id TEXT,
         synced_at TEXT,
@@ -170,11 +191,16 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE INDEX IF NOT EXISTS local_chat_attachments_message_idx
         ON local_chat_attachments (room_id, message_number);
     `);
-    addColumnIfMissing(db, "local_chat_messages", "thread_root_number", "INTEGER");
-    addColumnIfMissing(db, "local_chat_messages", "sync_key", "TEXT");
-    addColumnIfMissing(db, "local_chat_messages", "sync_started_at", "TEXT");
-    ensureLocalThreadReadsSchema(db);
-    db.exec(`
+        addColumnIfMissing(database, "local_chat_messages", "thread_root_number", "INTEGER");
+        addColumnIfMissing(database, "local_chat_messages", "sync_key", "TEXT");
+        addColumnIfMissing(database, "local_chat_messages", "sync_started_at", "TEXT");
+        addColumnIfMissing(database, "local_chat_messages", "publisher_agent_key", "TEXT");
+        addColumnIfMissing(database, "local_chat_messages", "publisher_agent_session_id", "TEXT");
+        addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_json", "TEXT");
+        addColumnIfMissing(database, "local_chat_messages", "account_agent_routing_reader_key", "TEXT");
+        addColumnIfMissing(database, "local_chat_messages", "control_authorized", "INTEGER");
+        ensureLocalThreadReadsSchema(database);
+        database.exec(`
       CREATE UNIQUE INDEX IF NOT EXISTS local_chat_messages_sync_key_idx
         ON local_chat_messages (room_id, sync_key)
         WHERE sync_key IS NOT NULL;
@@ -187,25 +213,19 @@ async function getDb(): Promise<SqliteDatabase> {
         ON local_chat_messages (room_id, thread_root_number);
       CREATE INDEX IF NOT EXISTS local_chat_thread_reads_reader_idx
         ON local_chat_thread_reads (reader_key);
-    `);
-    initialized = true;
-  }
-  return db;
-}
-
-function addColumnIfMissing(
-  database: SqliteDatabase,
-  tableName: string,
-  columnName: string,
-  definition: string,
-): void {
-  try {
-    database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
-  } catch (error) {
-    if (!String(error).toLowerCase().includes("duplicate column")) {
-      throw error;
+        `);
+      });
+      await ensureLocalThreadRoutingProjectionSchemaAsync(database);
+      scheduleLocalThreadRoutingBackfill(database);
+      schemaInitialized = true;
+    })();
+    try {
+      await schemaInitialization;
+    } finally {
+      schemaInitialization = null;
     }
   }
+  return database;
 }
 
 function ensureLocalThreadReadsSchema(database: SqliteDatabase): void {
@@ -255,6 +275,20 @@ function mapRow(row: Record<string, unknown>): LocalMessageRow {
     agent_prompt_kind:
       typeof row.agent_prompt_kind === "string" ? row.agent_prompt_kind : null,
     source: typeof row.source === "string" ? row.source : null,
+    publisher_agent_key:
+      typeof row.publisher_agent_key === "string" ? row.publisher_agent_key : null,
+    publisher_agent_session_id:
+      typeof row.publisher_agent_session_id === "string" ? row.publisher_agent_session_id : null,
+    account_agent_routing_json:
+      typeof row.account_agent_routing_json === "string" ? row.account_agent_routing_json : null,
+    account_agent_routing_reader_key:
+      typeof row.account_agent_routing_reader_key === "string"
+        ? row.account_agent_routing_reader_key
+        : null,
+    control_authorized:
+      row.control_authorized === null || row.control_authorized === undefined
+        ? null
+        : Number(row.control_authorized),
     timestamp: String(row.timestamp || ""),
     synced_cloud_id:
       typeof row.synced_cloud_id === "string" ? row.synced_cloud_id : null,
@@ -302,9 +336,49 @@ function toMessagePayload(
   replyTo?: LocalMessageRow | null,
   attachments: LocalAttachmentRow[] = [],
   thread?: RoomMessagePayload["thread"],
+  readerKey?: string | null,
 ): RoomMessagePayload {
+  const importedCloudProvenance = Boolean(row.synced_cloud_id && !row.sync_key);
+  let importedAccountAgentRouting: RoomMessagePayload["account_agent_routing"];
+  if (row.account_agent_routing_json) {
+    const routingAudienceMatches = Boolean(
+      row.account_agent_routing_reader_key
+      && row.account_agent_routing_reader_key === normalizeReaderKey(readerKey),
+    );
+    try {
+      importedAccountAgentRouting = routingAudienceMatches
+        ? JSON.parse(row.account_agent_routing_json) as RoomMessagePayload["account_agent_routing"]
+        : { version: 1, authority: "invalid" };
+    } catch {
+      importedAccountAgentRouting = { version: 1, authority: "invalid" };
+    }
+  } else if (importedCloudProvenance) {
+    // Cloud provenance without an audience-bound envelope is an old/partial
+    // response. Never reinterpret it as mutable local legacy authority.
+    importedAccountAgentRouting = { version: 1, authority: "invalid" };
+  }
+  const importedControlAudienceMatches = Boolean(
+    importedCloudProvenance
+    && row.account_agent_routing_reader_key
+    && row.account_agent_routing_reader_key === normalizeReaderKey(readerKey),
+  );
   return {
     id: formatMessageId(row.number),
+    agent_identity: row.publisher_agent_key
+      ? {
+          actor_label: row.sender,
+          agent_key: row.publisher_agent_key,
+          agent_session_id: row.publisher_agent_session_id,
+        }
+      : null,
+    local_control_authorized: row.control_authorized === null
+      ? !importedCloudProvenance
+        && row.source === "browser"
+        && !row.publisher_agent_key
+      : importedCloudProvenance
+        ? importedControlAudienceMatches && row.control_authorized === 1
+        : row.control_authorized === 1,
+    account_agent_routing: importedAccountAgentRouting,
     sender: row.sender,
     text: row.text,
     attachments: attachments.map((attachment) => ({
@@ -330,6 +404,13 @@ function toMessagePayload(
           text: replyTo.text,
           source: replyTo.source,
           timestamp: replyTo.timestamp,
+          agent_identity: replyTo.publisher_agent_key
+            ? {
+                actor_label: replyTo.sender,
+                agent_key: replyTo.publisher_agent_key,
+                agent_session_id: replyTo.publisher_agent_session_id,
+              }
+            : null,
         }
       : null,
   };
@@ -339,7 +420,7 @@ function visibleMessageClause(includePromptOnly?: boolean, alias?: string): stri
   const prefix = alias ? `${alias}.` : "";
   return includePromptOnly
     ? "1 = 1"
-    : `NOT (${prefix}agent_prompt_kind = 'auto' AND TRIM(${prefix}text) = '')`;
+    : `(${prefix}agent_prompt_kind IS NULL OR ${prefix}agent_prompt_kind <> 'auto' OR TRIM(${prefix}text) <> '')`;
 }
 
 async function hydrateMessageRows(
@@ -398,6 +479,7 @@ async function hydrateMessageRows(
       row.reply_to_number ? replies.get(row.reply_to_number) ?? null : null,
       attachmentsByMessageNumber.get(row.number) || [],
       thread && (Number(thread.reply_count || 0) > 0 || row.thread_root_number) ? thread : null,
+      options.readerKey,
     );
   });
 }
@@ -440,6 +522,9 @@ function buildLocalThreadSummaries(
       ? replies.length
       : replies.filter((reply) => reply.number > lastReadNumber).length;
     const latestReply = replies.at(-1) ?? null;
+    // The display payload is bounded independently from routing membership.
+    const allParticipants = buildLocalThreadParticipants(root, replies);
+    const participants = allParticipants.slice(0, LOCAL_THREAD_DISPLAY_PARTICIPANT_LIMIT);
     summaries.set(rootNumber, {
       root_message_id: formatMessageId(rootNumber),
       reply_count: replies.length,
@@ -454,7 +539,9 @@ function buildLocalThreadSummaries(
             timestamp: latestReply.timestamp,
           }
         : null,
-      participants: buildLocalThreadParticipants(root, replies),
+      participants,
+      participant_count: allParticipants.length,
+      participants_truncated: participants.length < allParticipants.length,
       last_read_message_id: lastReadNumber ? formatMessageId(lastReadNumber) : null,
     });
   }
@@ -493,7 +580,7 @@ function getLocalThreadReadRow(
 function buildLocalThreadParticipants(
   root: LocalMessageRow,
   replies: LocalMessageRow[],
-): NonNullable<RoomMessagePayload["thread"]>["participants"] {
+): NonNullable<NonNullable<RoomMessagePayload["thread"]>["participants"]> {
   const participants = new Map<string, {
     sender: string;
     source: string | null;
@@ -529,18 +616,6 @@ function syncKeyForMessage(roomId: string, number: number): string {
   return `local-chat:${roomId}:${number}`;
 }
 
-function beginImmediate(database: SqliteDatabase): void {
-  database.exec("BEGIN IMMEDIATE");
-}
-
-function rollback(database: SqliteDatabase): void {
-  try {
-    database.exec("ROLLBACK");
-  } catch {
-    // The transaction may already be closed by SQLite after an error.
-  }
-}
-
 function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): number {
   database
     .prepare(`
@@ -555,7 +630,7 @@ function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): n
     .prepare("SELECT next_number FROM local_chat_room_sequences WHERE room_id = ?")
     .get(roomId);
   const number = Number(row?.next_number || 0);
-  if (!Number.isInteger(number) || number <= 0) {
+  if (!Number.isInteger(number) || number <= 0 || number > POSTGRES_INTEGER_MAX) {
     throw new Error("Local chat message sequence could not be allocated.");
   }
   database
@@ -573,6 +648,11 @@ export async function addLocalChatMessage(
   const text = input.text;
   if (!trimmedRoomId) throw new Error("Choose a room before sending a message.");
   if (!sender) throw new Error("Message sender is required.");
+  if (!isMessageSenderWithinBounds(sender)) {
+    throw new Error(
+      `Message sender must not exceed ${MESSAGE_SENDER_MAX_CODE_POINTS} characters or ${MESSAGE_SENDER_MAX_UTF8_BYTES} UTF-8 bytes.`,
+    );
+  }
 
   const database = await getDb();
   const replyToNumber = parseMessageNumber(input.reply_to);
@@ -606,11 +686,18 @@ export async function addLocalChatMessage(
 
   const timestamp = new Date().toISOString();
   const attachmentRows = (input.attachments || []).map(normalizeAttachmentPayload);
-  let row: LocalMessageRow;
-  beginImmediate(database);
-  try {
+  const row = await runLocalSqliteWriteTransactionAsync(database, () => {
+    const idempotencyKey = input.idempotency_key?.trim() || null;
+    const existing = idempotencyKey
+      ? database
+        .prepare("SELECT * FROM local_chat_messages WHERE room_id = ? AND sync_key = ?")
+        .get(trimmedRoomId, idempotencyKey)
+      : null;
+    if (existing) {
+      return mapRow(existing);
+    }
     const number = allocateLocalMessageNumber(database, trimmedRoomId);
-    row = {
+    const insertedRow: LocalMessageRow = {
       room_id: trimmedRoomId,
       number,
       reply_to_number: replyToNumber,
@@ -619,10 +706,20 @@ export async function addLocalChatMessage(
       text,
       agent_prompt_kind: input.agent_prompt_kind || null,
       source: input.source || null,
+      publisher_agent_key: input.publisher_agent_key?.trim() || null,
+      publisher_agent_session_id: input.publisher_agent_session_id?.trim() || null,
+      account_agent_routing_json: null,
+      account_agent_routing_reader_key: null,
+      control_authorized: input.control_authorized === undefined
+        || input.control_authorized === null
+        ? input.source === "browser" && !input.publisher_agent_key?.trim()
+          ? 1
+          : 0
+        : input.control_authorized ? 1 : 0,
       timestamp,
       synced_cloud_id: null,
       synced_at: null,
-      sync_key: null,
+      sync_key: idempotencyKey,
       sync_started_at: null,
     };
 
@@ -630,21 +727,28 @@ export async function addLocalChatMessage(
       .prepare(`
         INSERT INTO local_chat_messages (
           room_id, number, reply_to_number, thread_root_number, sender, text, agent_prompt_kind, source,
+          publisher_agent_key, publisher_agent_session_id, account_agent_routing_json,
+          account_agent_routing_reader_key, control_authorized,
           timestamp, synced_cloud_id, synced_at, sync_key, sync_started_at
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, NULL, NULL, ?, NULL)
       `)
       .run(
-        row.room_id,
-        row.number,
-        row.reply_to_number,
-        row.thread_root_number,
-        row.sender,
-        row.text,
-        row.agent_prompt_kind,
-        row.source,
-        row.timestamp,
+        insertedRow.room_id,
+        insertedRow.number,
+        insertedRow.reply_to_number,
+        insertedRow.thread_root_number,
+        insertedRow.sender,
+        insertedRow.text,
+        insertedRow.agent_prompt_kind,
+        insertedRow.source,
+        insertedRow.publisher_agent_key,
+        insertedRow.publisher_agent_session_id,
+        insertedRow.control_authorized,
+        insertedRow.timestamp,
+        insertedRow.sync_key,
       );
+    projectLocalThreadRoutingMessage(database, insertedRow);
     for (const attachment of attachmentRows) {
       database
         .prepare(`
@@ -655,8 +759,8 @@ export async function addLocalChatMessage(
           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `)
         .run(
-          row.room_id,
-          row.number,
+          insertedRow.room_id,
+          insertedRow.number,
           attachment.attachment_id,
           attachment.file_name,
           attachment.mime_type,
@@ -665,14 +769,11 @@ export async function addLocalChatMessage(
           attachment.download_url || attachment.url || null,
           attachment.data_url || null,
           attachment.content_base64 || null,
-          row.timestamp,
+          insertedRow.timestamp,
         );
     }
-    database.exec("COMMIT");
-  } catch (error) {
-    rollback(database);
-    throw error;
-  }
+    return insertedRow;
+  });
 
   return (await hydrateMessageRows(database, [row], { readerKey: input.readerKey }))[0]!;
 }
@@ -1101,6 +1202,52 @@ export async function markLocalMessageThreadRead(
   return buildLocalThreadSummaries(database, roomId, [rootNumber], options).get(rootNumber) ?? null;
 }
 
+/** Resolve exact local-thread membership without expanding display participants. */
+export async function getLocalChatThreadRoutingAgentKeys(
+  roomId: string,
+  rootMessageId: string,
+  identities: readonly {
+    agentKey?: string | null;
+    actorLabel?: string | null;
+    displayName?: string | null;
+  }[],
+): Promise<Set<string>> {
+  return (await getLocalChatThreadRoutingAgentKeysForRoots(
+    roomId,
+    [rootMessageId],
+    identities,
+  )).get(rootMessageId) ?? new Set();
+}
+
+/** Batch variant used by local poll pages so routing never becomes N+1. */
+export async function getLocalChatThreadRoutingAgentKeysForRoots(
+  roomId: string,
+  rootMessageIds: readonly string[],
+  identities: readonly {
+    agentKey?: string | null;
+    actorLabel?: string | null;
+    displayName?: string | null;
+  }[],
+): Promise<Map<string, Set<string>>> {
+  const rootIdsByNumber = new Map<number, string>();
+  for (const rootMessageId of rootMessageIds) {
+    const rootNumber = parseMessageNumber(rootMessageId);
+    if (rootNumber) rootIdsByNumber.set(rootNumber, formatMessageId(rootNumber));
+  }
+  if (rootIdsByNumber.size === 0 || identities.length === 0) return new Map();
+  const database = await getDb();
+  const matchedNumbers = await getLocalThreadRoutingAgentKeysForRoots(
+    database,
+    roomId,
+    [...rootIdsByNumber.keys()],
+    identities,
+  );
+  return new Map([...matchedNumbers].map(([rootNumber, keys]) => [
+    rootIdsByNumber.get(rootNumber) ?? formatMessageId(rootNumber),
+    keys,
+  ]));
+}
+
 function getLocalVisibleMessageRow(
   database: SqliteDatabase,
   roomId: string,
@@ -1126,15 +1273,14 @@ export async function claimUnsyncedLocalChatMessages(
 ): Promise<LocalSyncMessagePayload[]> {
   const database = await getDb();
   const syncStartedAt = `${new Date().toISOString()}#${randomUUID()}`;
-  beginImmediate(database);
-  try {
+  await runLocalSqliteWriteTransactionAsync(database, () => {
     const candidates = database
       .prepare(`
         SELECT number
         FROM local_chat_messages
         WHERE room_id = ?
           AND synced_cloud_id IS NULL
-          AND NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')
+          AND ${visibleMessageClause(false)}
           AND (sync_started_at IS NULL OR sync_started_at < ?)
         ORDER BY number ASC
       `)
@@ -1153,11 +1299,7 @@ export async function claimUnsyncedLocalChatMessages(
         `)
         .run(syncKeyForMessage(roomId, number), syncStartedAt, roomId, number);
     }
-    database.exec("COMMIT");
-  } catch (error) {
-    rollback(database);
-    throw error;
-  }
+  });
 
   const rows = database
     .prepare(`
@@ -1166,7 +1308,7 @@ export async function claimUnsyncedLocalChatMessages(
         AND synced_cloud_id IS NULL
         AND sync_started_at = ?
         AND sync_key IS NOT NULL
-        AND NOT (agent_prompt_kind = 'auto' AND TRIM(text) = '')
+        AND ${visibleMessageClause(false)}
       ORDER BY number ASC
     `)
     .all(roomId, syncStartedAt)
@@ -1195,10 +1337,17 @@ export async function markLocalChatMessageSynced(input: {
   database
     .prepare(`
       UPDATE local_chat_messages
-      SET synced_cloud_id = ?, synced_at = ?, sync_started_at = NULL
+      SET synced_cloud_id = ?, synced_at = ?, sync_started_at = NULL,
+          sync_key = COALESCE(sync_key, ?)
       WHERE room_id = ? AND number = ?
     `)
-    .run(input.cloudMessageId, new Date().toISOString(), input.roomId, localNumber);
+    .run(
+      input.cloudMessageId,
+      new Date().toISOString(),
+      syncKeyForMessage(input.roomId, localNumber),
+      input.roomId,
+      localNumber,
+    );
 }
 
 export async function importLocalChatMessages(
@@ -1209,6 +1358,7 @@ export async function importLocalChatMessages(
   const trimmedRoomId = roomId.trim();
   if (!trimmedRoomId || messages.length === 0) return;
   const database = await getDb();
+  const routingReaderKey = options.readerKey?.trim() || null;
   const sortedMessages = [...messages].sort(
     (left, right) =>
       Date.parse(left.timestamp || "") - Date.parse(right.timestamp || ""),
@@ -1227,12 +1377,30 @@ export async function importLocalChatMessages(
     }
   }
 
-  beginImmediate(database);
-  try {
+  const rootsToRebuild = new Set<number>();
+
+  await runLocalSqliteWriteTransactionAsync(database, () => {
+    // Allocate every cloud id before resolving edges. Thread pages may arrive
+    // reply-first when timestamps are equal, so parent lookup cannot depend on
+    // input order.
     for (const message of sortedMessages) {
       if (!message.id || cloudIdToNumber.has(message.id)) continue;
-      const number = allocateLocalMessageNumber(database, trimmedRoomId);
-      cloudIdToNumber.set(message.id, number);
+      cloudIdToNumber.set(message.id, allocateLocalMessageNumber(database, trimmedRoomId));
+    }
+    const insertedNumbers = new Set<number>();
+    for (const message of sortedMessages) {
+      if (!message.id) continue;
+      const publisherAgentKey = message.agent_identity?.agent_key?.trim() || null;
+      const publisherAgentSessionId = message.agent_identity?.agent_session_id?.trim() || null;
+      const accountAgentRoutingJson = message.account_agent_routing
+        ? JSON.stringify(message.account_agent_routing)
+        : null;
+      const importedControlAuthorized = typeof message.account_agent_routing?.control_authorized === "boolean"
+        ? message.account_agent_routing.control_authorized ? 1 : 0
+        : null;
+      const controlAuthorized = importedControlAuthorized ?? 0;
+      const existingNumber = cloudIdToNumber.get(message.id);
+      if (!existingNumber) continue;
       const replyCloudId =
         typeof message.reply_to?.id === "string" ? message.reply_to.id : null;
       const replyNumber = replyCloudId
@@ -1243,13 +1411,60 @@ export async function importLocalChatMessages(
       const threadRootNumber = threadRootCloudId
         ? cloudIdToNumber.get(threadRootCloudId) || replyNumber
         : replyNumber;
+      const existing = database
+        .prepare(`SELECT * FROM local_chat_messages WHERE room_id = ? AND number = ?`)
+        .get(trimmedRoomId, existingNumber);
+      if (existing) {
+          const existingRow = mapRow(existing);
+          const changesPublisherAuthority = Boolean(publisherAgentKey || publisherAgentSessionId)
+            && (existingRow.publisher_agent_key !== publisherAgentKey
+              || existingRow.publisher_agent_session_id !== publisherAgentSessionId);
+          const nextThreadRootNumber = threadRootNumber && threadRootNumber !== existingNumber
+            ? threadRootNumber
+            : null;
+          const changesThreadEdges = existingRow.reply_to_number !== replyNumber
+            || existingRow.thread_root_number !== nextThreadRootNumber;
+          database.prepare(`
+            UPDATE local_chat_messages
+               SET reply_to_number = ?,
+                   thread_root_number = ?,
+                   publisher_agent_key = COALESCE(?, publisher_agent_key),
+                   publisher_agent_session_id = COALESCE(?, publisher_agent_session_id),
+                   account_agent_routing_json = COALESCE(?, account_agent_routing_json),
+                   account_agent_routing_reader_key = CASE
+                     WHEN ? IS NOT NULL THEN ?
+                     ELSE account_agent_routing_reader_key
+                   END,
+                   control_authorized = COALESCE(?, control_authorized)
+             WHERE room_id = ? AND number = ?
+          `).run(
+            replyNumber,
+            nextThreadRootNumber,
+            publisherAgentKey,
+            publisherAgentSessionId,
+            accountAgentRoutingJson,
+            accountAgentRoutingJson,
+            routingReaderKey,
+            importedControlAuthorized,
+            trimmedRoomId,
+            existingNumber,
+          );
+          if (changesPublisherAuthority || changesThreadEdges) {
+            rootsToRebuild.add(existingRow.thread_root_number ?? existingRow.number);
+            rootsToRebuild.add(nextThreadRootNumber ?? existingNumber);
+          }
+        continue;
+      }
+      const number = existingNumber;
       database
         .prepare(`
           INSERT INTO local_chat_messages (
             room_id, number, reply_to_number, thread_root_number, sender, text, agent_prompt_kind, source,
+            publisher_agent_key, publisher_agent_session_id, account_agent_routing_json,
+            account_agent_routing_reader_key, control_authorized,
             timestamp, synced_cloud_id, synced_at, sync_key, sync_started_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL)
           ON CONFLICT(room_id, number) DO NOTHING
         `)
         .run(
@@ -1261,10 +1476,16 @@ export async function importLocalChatMessages(
           message.text || "",
           message.agent_prompt_kind || null,
           message.source || null,
+          publisherAgentKey,
+          publisherAgentSessionId,
+          accountAgentRoutingJson,
+          accountAgentRoutingJson ? routingReaderKey : null,
+          controlAuthorized,
           message.timestamp || new Date().toISOString(),
           message.id,
           new Date().toISOString(),
         );
+      insertedNumbers.add(number);
       for (const attachment of message.attachments || []) {
         database
           .prepare(`
@@ -1290,12 +1511,26 @@ export async function importLocalChatMessages(
           );
       }
     }
+    invalidateLocalThreadRoutingRoots(database, trimmedRoomId, [...rootsToRebuild]);
+    const rowsToProject = database.prepare(`
+      SELECT * FROM local_chat_messages
+       WHERE room_id = ?
+         AND number IN (SELECT CAST(value AS INTEGER) FROM json_each(?))
+       ORDER BY CASE WHEN thread_root_number IS NULL THEN 0 ELSE 1 END, number
+    `).all(
+      trimmedRoomId,
+      JSON.stringify([...insertedNumbers]),
+    );
+    for (const row of rowsToProject) {
+      const messageRow = mapRow(row);
+      const rootNumber = messageRow.thread_root_number ?? messageRow.number;
+      if (!rootsToRebuild.has(rootNumber)) {
+        projectLocalThreadRoutingMessage(database, messageRow);
+      }
+    }
     seedImportedThreadReads(database, trimmedRoomId, sortedMessages, cloudIdToNumber, options);
-    database.exec("COMMIT");
-  } catch (error) {
-    rollback(database);
-    throw error;
-  }
+  });
+  scheduleLocalThreadRoutingRootsRepair(database, trimmedRoomId, [...rootsToRebuild]);
 }
 
 function seedImportedThreadReads(
@@ -1345,4 +1580,24 @@ export async function getSyncedCloudMessageId(input: {
     `)
     .get(input.roomId, localNumber);
   return typeof row?.synced_cloud_id === "string" ? row.synced_cloud_id : null;
+}
+
+export async function getLocalChatMessageAttachment(
+  roomId: string,
+  messageId: string,
+  attachmentId: string,
+): Promise<LocalAttachmentRow | null> {
+  const messageNumber = parseMessageNumber(messageId);
+  const trimmedAttachmentId = attachmentId.trim();
+  if (!messageNumber || !trimmedAttachmentId) {
+    return null;
+  }
+  const database = await getDb();
+  const row = database
+    .prepare(`
+      SELECT * FROM local_chat_attachments
+      WHERE room_id = ? AND message_number = ? AND attachment_id = ?
+    `)
+    .get(roomId, messageNumber, trimmedAttachmentId) as Record<string, unknown> | undefined;
+  return row ? mapAttachmentRow(row) : null;
 }

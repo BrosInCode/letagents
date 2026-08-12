@@ -51,6 +51,9 @@ export const CONTEXT_FILE_BLOCKED = "context.file_blocked" as const;
 export const CONTEXT_SECRET_REDACTED = "context.secret_redacted" as const;
 export const CONTEXT_SCOPE_DENIED = "context.scope_denied" as const;
 export const CONTEXT_BASE_BRANCH_CHANGED = "context.base_branch_changed" as const;
+export const CONTEXT_ACCESS_REQUESTED = "context.access_requested" as const;
+export const CONTEXT_ACCESS_APPROVED = "context.access_approved" as const;
+export const CONTEXT_ACCESS_DENIED = "context.access_denied" as const;
 
 // ===== Search events =====
 export const SEARCH_RUN = "search.run" as const;
@@ -118,6 +121,9 @@ export type RentalActivityEventType =
   | typeof CONTEXT_SECRET_REDACTED
   | typeof CONTEXT_SCOPE_DENIED
   | typeof CONTEXT_BASE_BRANCH_CHANGED
+  | typeof CONTEXT_ACCESS_REQUESTED
+  | typeof CONTEXT_ACCESS_APPROVED
+  | typeof CONTEXT_ACCESS_DENIED
   | typeof SEARCH_RUN
   | typeof COMMAND_REQUESTED
   | typeof COMMAND_ALLOWED
@@ -173,6 +179,9 @@ export const ALL_ACTIVITY_EVENT_TYPES: readonly RentalActivityEventType[] = [
   CONTEXT_SECRET_REDACTED,
   CONTEXT_SCOPE_DENIED,
   CONTEXT_BASE_BRANCH_CHANGED,
+  CONTEXT_ACCESS_REQUESTED,
+  CONTEXT_ACCESS_APPROVED,
+  CONTEXT_ACCESS_DENIED,
   SEARCH_RUN,
   COMMAND_REQUESTED,
   COMMAND_ALLOWED,
@@ -251,6 +260,9 @@ export const AUTO_VERIFIED_EVENT_TYPES: ReadonlySet<RentalActivityEventType> =
     CONTEXT_SECRET_REDACTED,
     CONTEXT_SCOPE_DENIED,
     CONTEXT_BASE_BRANCH_CHANGED,
+    CONTEXT_ACCESS_REQUESTED,
+    CONTEXT_ACCESS_APPROVED,
+    CONTEXT_ACCESS_DENIED,
     SEARCH_RUN,
     COMMAND_REQUESTED,
     COMMAND_ALLOWED,

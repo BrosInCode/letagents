@@ -1,18 +1,32 @@
-import { ref, watch, type Ref } from "vue";
-import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
+import { onBeforeUnmount, ref, watch, type Ref } from "vue";
+import type { DesktopNotificationStatus, DesktopRoomMessage } from "../../../../../../electron/ipc-types";
 import {
   readLiquidGlassEnabled,
   readNotificationPermission,
   readNotificationsEnabled,
   readSoundEnabled,
 } from "./preferences";
+import { playRoomInteractionSound } from "./roomSounds";
 
 export function useDesktopRoomPreferences() {
   const soundEnabled = ref(readSoundEnabled());
   const notificationsEnabled = ref(readNotificationsEnabled());
+  const nativeNotificationsActive = ref(false);
   const liquidGlassEnabled = ref(readLiquidGlassEnabled());
   const notificationPermission = ref<NotificationPermission | "unsupported">(readNotificationPermission());
-  let audioContext: AudioContext | null = null;
+
+  function applyNotificationStatus(status: DesktopNotificationStatus): void {
+    notificationsEnabled.value = status.enabled;
+    nativeNotificationsActive.value = status.nativeRegistered;
+    if (status.nativeSupported) {
+      notificationPermission.value = readNotificationPermission();
+    }
+    window.localStorage.setItem("letagents-desktop:notifications", status.enabled ? "on" : "off");
+  }
+
+  void window.letagentsDesktop.notifications?.getStatus?.().then(applyNotificationStatus).catch(() => undefined);
+  const unsubscribeNotificationStatus = window.letagentsDesktop.notifications?.onStatusChanged?.(applyNotificationStatus) || null;
+  onBeforeUnmount(() => unsubscribeNotificationStatus?.());
 
   function toggleSound(): void {
     soundEnabled.value = !soundEnabled.value;
@@ -21,16 +35,30 @@ export function useDesktopRoomPreferences() {
   }
 
   async function toggleNotifications(): Promise<void> {
+    const nativeBridge = window.letagentsDesktop.notifications;
+    const enabling = !notificationsEnabled.value;
+    if (enabling && typeof Notification !== "undefined" && Notification.permission === "default") {
+      notificationPermission.value = await Notification.requestPermission();
+    }
+    if (enabling && notificationPermission.value !== "granted") {
+      notificationsEnabled.value = false;
+      window.localStorage.setItem("letagents-desktop:notifications", "off");
+      if (nativeBridge?.setEnabled) await nativeBridge.setEnabled(false);
+      return;
+    }
+    if (nativeBridge?.setEnabled) {
+      const status = await nativeBridge.setEnabled(enabling);
+      applyNotificationStatus(status);
+      if (status.nativeSupported) {
+        return;
+      }
+    }
     if (typeof Notification === "undefined") {
       notificationPermission.value = "unsupported";
       return;
     }
-    if (!notificationsEnabled.value && Notification.permission === "default") {
-      notificationPermission.value = await Notification.requestPermission();
-    } else {
-      notificationPermission.value = Notification.permission;
-    }
-    notificationsEnabled.value = !notificationsEnabled.value && notificationPermission.value === "granted";
+    notificationPermission.value = Notification.permission;
+    notificationsEnabled.value = enabling && notificationPermission.value === "granted";
     window.localStorage.setItem("letagents-desktop:notifications", notificationsEnabled.value ? "on" : "off");
   }
 
@@ -42,30 +70,14 @@ export function useDesktopRoomPreferences() {
   function playRoomSound(kind: "send" | "notification"): void {
     if (!soundEnabled.value) return;
     try {
-      const AudioContextCtor =
-        window.AudioContext
-        || (window as typeof window & { webkitAudioContext?: typeof AudioContext }).webkitAudioContext;
-      if (!AudioContextCtor) return;
-      if (!audioContext) audioContext = new AudioContextCtor();
-      const oscillator = audioContext.createOscillator();
-      const gain = audioContext.createGain();
-      oscillator.connect(gain);
-      gain.connect(audioContext.destination);
-      const now = audioContext.currentTime;
-      const startFrequency = kind === "send" ? 740 : 880;
-      const endFrequency = kind === "send" ? 980 : 660;
-      oscillator.frequency.setValueAtTime(startFrequency, now);
-      oscillator.frequency.setValueAtTime(endFrequency, now + 0.07);
-      gain.gain.setValueAtTime(0.09, now);
-      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
-      oscillator.start(now);
-      oscillator.stop(now + 0.2);
+      playRoomInteractionSound(kind);
     } catch {
       // Audio can be unavailable before a user gesture; the toggle will retry later.
     }
   }
 
   function showRoomNotification(message: DesktopRoomMessage, roomDisplayName: string): void {
+    if (nativeNotificationsActive.value) return;
     if (!notificationsEnabled.value || typeof Notification === "undefined" || Notification.permission !== "granted") return;
     if (document.visibilityState === "visible" && document.hasFocus()) return;
     const sender = message.sender.split("|")[0]?.trim() || "LetAgents";

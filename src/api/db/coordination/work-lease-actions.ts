@@ -7,11 +7,13 @@ import {
 import { db } from "../client.js";
 import { room_agent_delivery_sessions, task_leases, tasks } from "../schema.js";
 import { toTask, toTaskLease } from "../mappers.js";
+import { assertConsumeBoardIntentApproval } from "./board-intents.js";
 import {
   resolveTaskAssignmentState,
   type TaskAssignmentPatch,
 } from "../task-assignment.js";
 import type {
+  BoardIntentConsumptionInput,
   Task,
   TaskLease,
   TaskLeaseKind,
@@ -34,9 +36,16 @@ export async function applyTaskWorkLeaseAction(input: {
   room_id: string;
   task_id: string;
   active_lease_id: string;
+  // The lease epoch the caller observed when it resolved the active lease. The
+  // destructive UPDATE CASes on it, so a fenced rebind (plan §4.5) that commits
+  // between the caller's read and this write bumps the epoch and this action
+  // matches 0 rows — a stale predecessor cannot release/revoke the successor's
+  // lease even after it has authenticated. Optional for legacy callers.
+  expected_lease_epoch?: number | null;
   disposition_status: "released" | "revoked";
   disposition_reason?: string | null;
   task_updates: TaskAssignmentPatch;
+  board_intent_approval?: BoardIntentConsumptionInput | null;
   new_lease?: {
     agent_key: string;
     actor_label: string;
@@ -127,6 +136,9 @@ export async function applyTaskWorkLeaseAction(input: {
           eq(task_leases.id, input.active_lease_id),
           eq(task_leases.kind, "work" as TaskLeaseKind),
           eq(task_leases.status, "active" as TaskLeaseStatus),
+          ...(typeof input.expected_lease_epoch === "number"
+            ? [eq(task_leases.epoch, input.expected_lease_epoch)]
+            : []),
           sql`(${task_leases.expires_at} IS NULL OR ${task_leases.expires_at} > ${now})`
         )
       )
@@ -151,6 +163,10 @@ export async function applyTaskWorkLeaseAction(input: {
 
     if (!updatedTaskRow) {
       return actionConflict("task_not_found");
+    }
+
+    if (input.board_intent_approval) {
+      await assertConsumeBoardIntentApproval(input.board_intent_approval, tx);
     }
 
     let newLeaseRow: TaskLeaseRow | null = null;

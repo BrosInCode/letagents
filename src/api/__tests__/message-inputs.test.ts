@@ -4,11 +4,13 @@ import test from "node:test";
 import type { Request } from "express";
 
 import {
+  parseCreateMessageBody,
   parseOptionalAgentPromptKind,
   parseOptionalReplyToMessageId,
   parseOptionalThreadRootMessageId,
   shouldIncludePromptOnlyMessages,
 } from "../messages/inputs.js";
+import { RequestValidationError } from "../validation-error.js";
 
 function requestWithQuery(query: Request["query"]): Request {
   return { query } as Request;
@@ -57,6 +59,12 @@ test("parseOptionalReplyToMessageId rejects malformed reply targets", () => {
     () => parseOptionalReplyToMessageId(42),
     /reply_to must be a valid message id/
   );
+  for (const invalid of ["msg_0", "msg_01", "msg_2147483648", "msg_9007199254740993"]) {
+    assert.throws(
+      () => parseOptionalReplyToMessageId(invalid),
+      /reply_to must be a valid message id/,
+    );
+  }
 });
 
 test("parseOptionalThreadRootMessageId trims and validates message ids", () => {
@@ -88,4 +96,46 @@ test("shouldIncludePromptOnlyMessages accepts true-ish query strings only", () =
     shouldIncludePromptOnlyMessages(requestWithQuery({ include_prompt_only: ["true"] })),
     false
   );
+});
+
+test("parseCreateMessageBody passes through well-formed bodies", () => {
+  const body = parseCreateMessageBody({
+    sender: "EmmyMay",
+    text: "hello",
+    reply_to: "msg_3",
+    thread_root_id: "msg_1",
+    attachments: ["upl_0123456789abcdef"],
+    client_message_id: "client-1",
+  });
+  assert.equal(body.sender, "EmmyMay");
+  assert.equal(body.text, "hello");
+  assert.equal(body.reply_to, "msg_3");
+  assert.equal(body.thread_root_id, "msg_1");
+  assert.equal(body.client_message_id, "client-1");
+  assert.equal(body.agent_session_id, null);
+});
+
+test("parseCreateMessageBody rejects non-object bodies", () => {
+  for (const value of [undefined, null, "text", 42, ["sender"]]) {
+    assert.throws(() => parseCreateMessageBody(value), RequestValidationError);
+  }
+});
+
+test("parseCreateMessageBody rejects non-string scalar fields", () => {
+  assert.throws(() => parseCreateMessageBody({ sender: 42, text: "hi" }), /sender must be a string/);
+  assert.throws(() => parseCreateMessageBody({ sender: "a", text: { nested: true } }), /text must be a string/);
+  assert.throws(
+    () => parseCreateMessageBody({ sender: "a", text: "hi", client_message_id: 9 }),
+    /client_message_id must be a string/,
+  );
+  assert.throws(
+    () => parseCreateMessageBody({ sender: "a", text: "hi", agent_session_id: 9 }),
+    /agent_session_id must be a string/,
+  );
+});
+
+test("parseCreateMessageBody treats null and missing optional fields as absent", () => {
+  const body = parseCreateMessageBody({ sender: null, text: "hi", client_message_id: null });
+  assert.equal(body.sender, null);
+  assert.equal(body.client_message_id, null);
 });

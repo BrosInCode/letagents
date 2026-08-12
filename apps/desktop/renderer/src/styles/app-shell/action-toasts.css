@@ -1,0 +1,37 @@
+.desktop-action-toasts {
+  position: fixed;
+  z-index: 160;
+  bottom: 18px;
+  left: 18px;
+  display: grid;
+  gap: 8px;
+  max-width: 340px;
+  /* The live region stays mounted while empty; it must not swallow clicks. */
+  pointer-events: none;
+}
+
+.desktop-action-toast {
+  color-scheme: dark;
+  pointer-events: auto;
+  padding: 10px 14px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(18, 18, 18, 0.98);
+  box-shadow: 0 18px 54px rgba(0, 0, 0, 0.38);
+  backdrop-filter: blur(18px);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font: inherit;
+  font-size: 0.82rem;
+  font-weight: 700;
+  text-align: left;
+}
+
+.desktop-action-toast[data-state="success"] {
+  border-color: rgba(94, 200, 141, 0.32);
+}
+
+.desktop-action-toast[data-state="error"] {
+  border-color: rgba(239, 68, 68, 0.4);
+  color: rgb(243, 141, 141);
+}

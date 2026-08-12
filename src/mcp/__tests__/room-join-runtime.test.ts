@@ -21,6 +21,7 @@ const {
   registerManagedAgentProvider,
   resetManagedAgentProvidersForTest,
 } = await import("../managed-agent-providers.js");
+const { shutdownRuntime } = await import("../server/runtime/room-state.js");
 
 test.after(() => {
   globalThis.fetch = originalFetch;
@@ -28,6 +29,7 @@ test.after(() => {
 });
 
 test.afterEach(() => {
+  shutdownRuntime();
   resetManagedAgentProvidersForTest();
 });
 

@@ -1,21 +1,67 @@
 import type {
+  DesktopAgentPresence,
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
+  DesktopRentalRequest,
   DesktopRoomMessage,
   DesktopRoomMessageThreadSummary,
   DesktopRoomThreadInboxPage,
+  DesktopSnapshotSourceKey,
+  DesktopSnapshotSourceStates,
   DesktopTaskSummary,
 } from "../../../../../../electron/ipc-types";
 import { presentDesktopGitHubEvent } from "../room-events/presenter";
 
 export type DesktopInboxFilter = "actionable" | "all";
 
+/**
+ * Snapshot sources that actually feed the inbox, with the label shown in the
+ * degraded banner. Must match what `buildDesktopInboxItems` consumes: tasks,
+ * GitHub events, reasoning sessions, and presence (offline-agent rows). A
+ * failure in any of these means the inbox may be missing items, so it must not
+ * be presented as a clean empty inbox. NB: snapshot `messages` is NOT an inbox
+ * source (threads load separately), so it is intentionally absent; a thread
+ * load failure is surfaced by the inbox's own error banner, not here.
+ */
+const INBOX_SOURCE_LABELS: ReadonlyArray<[DesktopSnapshotSourceKey, string]> = [
+  ["tasks", "Tasks"],
+  ["githubEvents", "GitHub checks"],
+  ["reasoning", "Agent sessions"],
+  ["presence", "Agents"],
+];
+
+export interface DesktopInboxDegradation {
+  degraded: boolean;
+  /** Human-readable labels of the inbox sources that failed to load. */
+  sources: string[];
+}
+
+/**
+ * Derive whether the inbox is showing a partial view because one or more of its
+ * snapshot-backed sources failed to load. When degraded, the UI shows a "some
+ * sources unavailable" affordance instead of a false-empty state. Thread-inbox
+ * load failures are handled separately by the inbox error banner.
+ */
+export function deriveInboxDegradation(
+  sourceStates: DesktopSnapshotSourceStates | null | undefined,
+): DesktopInboxDegradation {
+  const sources: string[] = [];
+  if (sourceStates) {
+    for (const [key, label] of INBOX_SOURCE_LABELS) {
+      if (sourceStates[key]?.status === "error") sources.push(label);
+    }
+  }
+  return { degraded: sources.length > 0, sources };
+}
+
 export type DesktopInboxItemKind =
   | "thread"
   | "task_review"
   | "task_blocked"
   | "github_failure"
-  | "agent_blocked";
+  | "agent_blocked"
+  | "agent_offline"
+  | "rental_request";
 
 export type DesktopInboxActivityTone = "new" | "neutral" | "danger" | "success" | "warning";
 
@@ -59,6 +105,14 @@ export type DesktopInboxItem =
   | (DesktopInboxItemBase & {
       kind: "agent_blocked";
       session: DesktopReasoningSession;
+    })
+  | (DesktopInboxItemBase & {
+      kind: "agent_offline";
+      presence: DesktopAgentPresence;
+    })
+  | (DesktopInboxItemBase & {
+      kind: "rental_request";
+      request: DesktopRentalRequest;
     });
 
 export interface BuildDesktopInboxItemsInput {
@@ -67,6 +121,8 @@ export interface BuildDesktopInboxItemsInput {
   tasks: readonly DesktopTaskSummary[];
   githubEvents: readonly DesktopGitHubRoomEvent[];
   reasoningSessions: readonly DesktopReasoningSession[];
+  presence?: readonly DesktopAgentPresence[];
+  rentalRequests?: readonly DesktopRentalRequest[];
   fallbackRepository?: string | null;
 }
 
@@ -76,11 +132,31 @@ export function buildDesktopInboxItems(input: BuildDesktopInboxItemsInput): Desk
     ...taskInboxItems(input.tasks),
     ...githubFailureInboxItems(input.githubEvents, input.fallbackRepository ?? null),
     ...agentBlockedInboxItems(input.reasoningSessions),
+    ...agentOfflineInboxItems(input.presence || []),
+    ...rentalRequestInboxItems(input.rentalRequests || []),
   ];
 
   return items
     .filter((item) => input.filter === "all" || item.actionable)
     .sort(compareInboxItems);
+}
+
+function rentalRequestInboxItems(requests: readonly DesktopRentalRequest[]): DesktopInboxItem[] {
+  return requests
+    .filter((request) => request.status === "pending")
+    .map((request) => ({
+      id: `rental-request:${request.id}`,
+      kind: "rental_request" as const,
+      title: `${request.renterDisplayName || "Someone"} wants to rent your agent`,
+      preview: request.taskTitle,
+      context: "Renting · account",
+      timestamp: request.createdAt || request.updatedAt,
+      firstSeenTimestamp: request.createdAt || request.updatedAt,
+      occurrenceCount: 1,
+      actionable: true,
+      activity: [{ id: `rental:${request.id}`, label: "Rental request received", description: request.taskPrompt, timestamp: request.createdAt, tone: "new" }],
+      request,
+    }));
 }
 
 export function desktopInboxItemFingerprint(item: DesktopInboxItem): string {
@@ -201,6 +277,34 @@ function agentBlockedInboxItems(
       actionable: true,
       activity: reasoningActivity(session),
       session,
+    }));
+}
+
+function agentOfflineInboxItems(
+  presence: readonly DesktopAgentPresence[],
+): DesktopInboxItem[] {
+  return presence
+    .filter((entry) => entry.sessionKind === "worker" && entry.activityState === "offline")
+    .map((entry) => ({
+      id: `agent-offline:${entry.actorLabel}`,
+      kind: "agent_offline" as const,
+      title: entry.displayName || entry.actorLabel,
+      preview: entry.statusText?.trim() || "Agent is unreachable and may have crashed",
+      context: entry.ownerLabel ? `${entry.ownerLabel}'s agent` : null,
+      timestamp: entry.lastHeartbeatAt || null,
+      firstSeenTimestamp: entry.lastHeartbeatAt || null,
+      occurrenceCount: 1,
+      actionable: true,
+      activity: [
+        {
+          id: `agent-offline:${entry.actorLabel}`,
+          label: "Agent went offline",
+          description: entry.statusText?.trim() || null,
+          timestamp: entry.lastHeartbeatAt || null,
+          tone: "danger" as const,
+        },
+      ],
+      presence: entry,
     }));
 }
 

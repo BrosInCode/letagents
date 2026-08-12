@@ -1,5 +1,4 @@
 import type {
-  DesktopRentalContextApproval,
   DesktopRentalIdeKind,
   DesktopRentalListing,
   DesktopRentalListingInput,
@@ -101,7 +100,7 @@ export function buildStubListing(
 export function buildEmptyProviderDashboard(): DesktopRentalProviderDashboard {
   return {
     listings: [],
-    activeSessions: [],
+    capacitySessions: [],
     pendingRequests: [],
     readiness: buildReadiness("unknown"),
     quotaSnapshots: [],
@@ -142,9 +141,13 @@ export function buildStubSession(
     taskPrompt: input.taskPrompt ?? "",
     mode: input.mode ?? "scoped",
     continuityMode: input.continuityMode ?? "smart_handoff",
+    roomHistoryAccess: null,
     continuityIngestDepth: input.continuityIngestDepth ?? "tier_1",
     continuityPackId: null,
     status,
+    launchState: null,
+    launchErrorCode: null,
+    launchErrorMessage: null,
     approvedScope: input.approvedScope ?? {
       includePaths: [],
       excludePaths: [],
@@ -245,25 +248,5 @@ export function buildStubPatch(
     prUrl: null,
     createdAt: null,
     updatedAt: now(),
-  };
-}
-
-export function buildStubContextApproval(
-  sessionId: string,
-  id: string,
-  status: DesktopRentalContextApproval["status"],
-): DesktopRentalContextApproval {
-  return {
-    id,
-    sessionId,
-    requestType: "read_file",
-    status,
-    path: null,
-    reason: null,
-    redactionCount: 0,
-    requestedBy: null,
-    decidedBy: null,
-    createdAt: null,
-    decidedAt: status === "pending" ? null : now(),
   };
 }

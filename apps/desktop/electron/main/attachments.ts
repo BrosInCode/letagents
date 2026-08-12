@@ -1,4 +1,4 @@
-import { dialog } from "electron";
+import electron from "electron";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { randomUUID } from "node:crypto";
@@ -19,6 +19,8 @@ import {
 } from "./rooms/local-store.js";
 import { apiUrl } from "./paths.js";
 import { focusMainWindow } from "./window.js";
+
+const { dialog } = electron as typeof import("electron");
 
 export {
   mapRoomMessageAttachmentPayload,
@@ -169,7 +171,7 @@ async function stageDesktopAttachmentFile(
   );
 }
 
-async function stageDesktopAttachmentBuffer(
+export async function stageDesktopAttachmentBuffer(
   roomIdentifier: string,
   fileBuffer: Buffer,
   fileName: string,

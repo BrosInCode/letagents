@@ -5,6 +5,7 @@ import {
   createFocusRoomForTask,
   getTaskById,
   getTaskOwnershipState,
+  LeaseFenceStaleError,
 } from "../../../db.js";
 import {
   respondWithBadRequest,
@@ -15,7 +16,10 @@ import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
 } from "../../../tasks/ownership.js";
-import { resolveOwnerTokenWorkerWriteIdentity } from "./request-identity.js";
+import {
+  isDesktopHumanWrite,
+  resolveOwnerTokenWorkerWriteIdentity,
+} from "./request-identity.js";
 import type { RoomTaskRouteDeps } from "./types.js";
 
 export function registerTaskFocusRoomRoute(
@@ -42,6 +46,7 @@ export function registerTaskFocusRoomRoute(
     }
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody);
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -59,18 +64,20 @@ export function registerTaskFocusRoomRoute(
         return;
       }
 
-      const coordination = await deps.enforceTaskCoordinationMutation({
-        req,
-        projectId: project.id,
-        task,
-        taskOwnership,
-        updates: {},
-        forcedMutation: { mutation: "focus_room_open", leaseKind: "work" },
-        actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
-        actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
-        actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
-        actorSessionId: workerIdentity?.agent_session_id ?? null,
-      });
+      const coordination = desktopHumanWrite
+        ? { kind: "allow" as const, leaseFence: null }
+        : await deps.enforceTaskCoordinationMutation({
+            req,
+            projectId: project.id,
+            task,
+            taskOwnership,
+            updates: {},
+            forcedMutation: { mutation: "focus_room_open", leaseKind: "work" },
+            actorLabel: workerIdentity?.actor_label ?? normalizeTaskActorLabel(requestBody.actor_label),
+            actorKey: workerIdentity?.agent_key ?? normalizeTaskActorKey(requestBody.actor_key),
+            actorInstanceId: workerIdentity?.agent_instance_id ?? deps.normalizeOptionalString(requestBody.actor_instance_id),
+            actorSessionId: workerIdentity?.agent_session_id ?? null,
+          });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
@@ -78,6 +85,7 @@ export function registerTaskFocusRoomRoute(
 
       const result = await createFocusRoomForTask(project.id, taskId, {
         displayName: display_name,
+        leaseFence: coordination.leaseFence ?? null,
       });
       if (!result) {
         res.status(404).json({ error: "Task not found" });
@@ -115,6 +123,10 @@ export function registerTaskFocusRoomRoute(
         }),
       });
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "POST /rooms/:room_id/tasks/:task_id/focus-room",

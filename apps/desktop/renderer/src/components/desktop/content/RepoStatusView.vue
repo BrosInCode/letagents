@@ -19,7 +19,14 @@
       <article class="surface-row">
         <div>
           <p class="surface-title">Current branch</p>
-          <p class="surface-subtitle">{{ repoStatus.branch || "No active branch" }}</p>
+          <p class="surface-subtitle">{{ currentBranchLabel }}</p>
+        </div>
+      </article>
+
+      <article class="surface-row">
+        <div>
+          <p class="surface-title">Workspace state</p>
+          <p class="surface-subtitle">{{ workspaceStateLabel }}</p>
         </div>
       </article>
     </div>
@@ -59,9 +66,40 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
 import type { RepoStatus } from "../../../../../electron/ipc-types";
+import { repoBranchLabel, repoWorkspaceSummary } from "../../../domain/repo-status";
 
-defineProps<{
+const props = defineProps<{
   repoStatus: RepoStatus;
 }>();
+
+const currentBranchLabel = computed(() => repoBranchLabel(props.repoStatus));
+
+const workspaceStateLabel = computed(() => repoWorkspaceSummary(props.repoStatus, {
+  plainFolderLabel: "Plain local folder",
+}));
 </script>
+
+<style scoped>
+/* RepoStatusView is embedded inside a detail pane, not shown as a full page,
+   so the shared full-width hero sizing is scaled down to pane proportions. */
+.surface-page {
+  gap: 10px;
+}
+
+.surface-intro {
+  padding: 0;
+}
+
+.surface-intro h3 {
+  font-size: 1.05rem;
+  line-height: 1.25;
+  letter-spacing: -0.01em;
+  max-width: none;
+}
+
+.surface-intro p {
+  max-width: none;
+}
+</style>

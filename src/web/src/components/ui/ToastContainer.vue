@@ -5,6 +5,9 @@
         v-for="toast in toasts"
         :key="toast.id"
         :class="['toast', `toast--${toast.type}`]"
+        :role="toast.type === 'error' ? 'alert' : 'status'"
+        :aria-live="toast.type === 'error' ? 'assertive' : 'polite'"
+        aria-atomic="true"
         @click="dismiss(toast.id)"
       >
         {{ toast.message }}
@@ -45,21 +48,21 @@ const { toasts, dismiss } = useToast()
 }
 
 .toast--success {
-  background: rgba(34, 197, 94, 0.15);
-  border: 1px solid rgba(34, 197, 94, 0.2);
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--green));
+  border: 1px solid color-mix(in srgb, var(--green) 46%, var(--border-strong));
   color: var(--green-text);
 }
 
 .toast--error {
-  background: rgba(239, 68, 68, 0.15);
-  border: 1px solid rgba(239, 68, 68, 0.2);
-  color: #f87171;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--red));
+  border: 1px solid color-mix(in srgb, var(--red) 46%, var(--border-strong));
+  color: var(--red-text);
 }
 
 .toast--info {
-  background: rgba(59, 130, 246, 0.15);
-  border: 1px solid rgba(59, 130, 246, 0.2);
-  color: #60a5fa;
+  background: color-mix(in srgb, var(--bg-elevated) 88%, var(--blue));
+  border: 1px solid color-mix(in srgb, var(--blue) 46%, var(--border-strong));
+  color: var(--blue-text);
 }
 
 /* Transitions */

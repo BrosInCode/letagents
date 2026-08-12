@@ -78,14 +78,23 @@
               >
                 App default
               </button>
-              <button
-                type="button"
-                :data-active="storage.overrideMode === 'cloud'"
-                :disabled="storageBusy"
-                @click="$emit('set-room-storage-mode', 'cloud')"
+              <span
+                class="desktop-room-storage-choice"
+                :class="{ 'is-unavailable': cloudStorageUnavailableReason }"
+                :title="cloudStorageUnavailableReason || undefined"
+                :tabindex="cloudStorageUnavailableReason ? 0 : undefined"
+                :aria-label="cloudStorageUnavailableReason || undefined"
               >
-                Cloud
-              </button>
+                <button
+                  type="button"
+                  data-testid="desktop-room-storage-cloud"
+                  :data-active="!cloudStorageUnavailableReason && storage.overrideMode === 'cloud'"
+                  :disabled="storageBusy || Boolean(cloudStorageUnavailableReason)"
+                  @click="$emit('set-room-storage-mode', 'cloud')"
+                >
+                  Cloud
+                </button>
+              </span>
               <button
                 type="button"
                 :data-active="storage.effectiveMode === 'local'"
@@ -144,7 +153,7 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Notifications</strong>
+              <strong>Desktop notifications</strong>
               <small>{{ notificationDescription }}</small>
             </span>
             <span class="desktop-room-status-chip" :data-state="notificationShortLabel.toLowerCase()">{{ notificationShortLabel }}</span>
@@ -180,8 +189,8 @@
               </svg>
             </span>
             <span class="desktop-room-property-copy">
-              <strong>Events tab</strong>
-              <small>{{ githubEventsVisible ? "Show GitHub activity in its own tab." : "Keep GitHub activity out of the tab bar." }}</small>
+              <strong>Events in chat</strong>
+              <small>{{ githubEventsVisible ? "GitHub events also appear in Chat." : "Keep GitHub events in the Events tab." }}</small>
             </span>
             <span class="desktop-room-toggle" :data-active="githubEventsVisible">
               <span />
@@ -304,8 +313,18 @@ const notificationShortLabel = computed(() => {
   return "Off";
 });
 
+const localGitRoom = computed(() => isLocalGitRoom(props.room));
+const cloudStorageUnavailableReason = computed(() =>
+  localGitRoom.value
+    ? "No Git provider is attached to this room. Add an origin remote, then reopen the repository to use Cloud."
+    : null,
+);
+
 const storageDescription = computed(() => {
   if (props.storage.effectiveMode === "local") {
+    if (localGitRoom.value) {
+      return "This local Git Room needs a provider-backed remote before it can use cloud storage.";
+    }
     const target = props.storage.localRoom?.cloudRoomIdentifier;
     return target
       ? `Messages and tasks stay local until published to ${target}.`
@@ -327,9 +346,9 @@ function selectLocalStorage(): void {
 
 const notificationDescription = computed(() => {
   if (props.notificationPermission === "unsupported") return "Desktop alerts are unavailable in this environment.";
-  if (props.notificationsEnabled) return "Desktop alerts can notify you about new room messages.";
+  if (props.notificationsEnabled) return "Desktop alerts are enabled for every joined room.";
   if (props.notificationPermission === "denied") return "Notifications are blocked by the system permission.";
-  return "Ask before showing desktop alerts for this room.";
+  return "Turn on desktop alerts for all joined rooms.";
 });
 
 const githubDotState = computed(() => {
@@ -383,7 +402,6 @@ const githubFriendlyError = computed(() => {
   return props.githubError;
 });
 
-const localGitRoom = computed(() => isLocalGitRoom(props.room));
 const canPublishLocalRoom = computed(() =>
   props.storage.effectiveMode === "local" && !localGitRoom.value
 );

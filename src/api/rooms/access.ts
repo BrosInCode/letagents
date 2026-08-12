@@ -18,8 +18,14 @@ import {
   sanitizeRedirectPath,
   type AuthenticatedRequest,
 } from "../http/helpers.js";
+import { resolveRequestAuth } from "../request/auth.js";
 
-type RequestAccount = SessionAccount | OwnerTokenAccount | null | undefined;
+export type RoomAccessAccount = Pick<
+  SessionAccount | OwnerTokenAccount,
+  "account_id" | "provider" | "login" | "provider_access_token"
+>;
+
+type RequestAccount = RoomAccessAccount | null | undefined;
 
 export type RoomRole = "admin" | "participant" | "anonymous";
 
@@ -43,6 +49,7 @@ export interface ProjectRepoAccessDeps {
   resolveRepoRoomAccessDecision(input: {
     roomName: string;
     sessionAccount: RequestAccount;
+    freshCollaboratorCheck?: boolean;
   }): Promise<RepoRoomAccessDecision>;
 }
 
@@ -56,6 +63,20 @@ export function getProjectAccessRoomId(project: Project): string {
 
 export function isRepoBackedProject(project: Project): boolean {
   return isRepoBackedRoomId(getProjectAccessRoomId(project));
+}
+
+const requestRepoAccessRoomNames = new WeakMap<AuthenticatedRequest, string>();
+const requestUsesRepoAuthorization = new WeakMap<AuthenticatedRequest, boolean>();
+
+/** Reuses the entry check's canonical cache key; falls back for worker paths. */
+export async function resolveRequestProjectRepoAccessRoomName(
+  req: AuthenticatedRequest,
+  project: Project,
+): Promise<string> {
+  const resolved = requestRepoAccessRoomNames.get(req);
+  if (resolved) return resolved;
+  const target = await resolveProjectRepoAccessTarget(project, { getGitRoomBindingForRoom });
+  return target?.repoRoomName ?? getProjectAccessRoomId(project);
 }
 
 function gitRoomBindingRepoRoomName(binding: GitRoomBinding): string | null {
@@ -161,6 +182,7 @@ export function replyRepoRoomAccessDecision(
 export async function resolveRepoRoomAccessDecision(input: {
   roomName: string;
   sessionAccount: RequestAccount;
+  freshCollaboratorCheck?: boolean;
 }): Promise<RepoRoomAccessDecision> {
   if (!isRepoBackedRoomId(input.roomName)) {
     return { kind: "allow" };
@@ -172,6 +194,7 @@ export async function resolveRepoRoomAccessDecision(input: {
 export async function resolveProjectRepoRoomAccessDecision(input: {
   project: Project;
   sessionAccount: RequestAccount;
+  freshCollaboratorCheck?: boolean;
 }, deps: ProjectRepoAccessDeps = {
   getGitRoomBindingForRoom,
   resolveRepoRoomAccessDecision,
@@ -195,6 +218,7 @@ export async function resolveProjectRepoRoomAccessDecision(input: {
     decision: await deps.resolveRepoRoomAccessDecision({
       roomName: target.repoRoomName,
       sessionAccount: input.sessionAccount,
+      freshCollaboratorCheck: input.freshCollaboratorCheck,
     }),
   };
 }
@@ -266,6 +290,10 @@ export async function requireAdmin(
   res: Response,
   project: Project
 ): Promise<boolean> {
+  if (req.authKind === "agent_session") {
+    res.status(403).json({ error: "Worker bearers cannot perform owner or admin actions." });
+    return false;
+  }
   if (!req.sessionAccount) {
     res.status(401).json({ error: "Authentication required" });
     return false;
@@ -285,6 +313,10 @@ export async function requireGitRoomAdmin(
   res: Response,
   project: Project
 ): Promise<boolean> {
+  if (req.authKind === "agent_session") {
+    res.status(403).json({ error: "Worker bearers cannot perform owner or admin actions." });
+    return false;
+  }
   if (!req.sessionAccount) {
     res.status(401).json({ error: "Authentication required" });
     return false;
@@ -299,11 +331,24 @@ export async function requireGitRoomAdmin(
   return true;
 }
 
+function resolveScopedWorkerParticipation(
+  req: AuthenticatedRequest,
+  res: Response,
+  project: Project,
+): boolean | null {
+  if (req.authKind !== "agent_session") return null;
+  if (req.agentSession?.room_id === project.id) return true;
+  res.status(403).json({ error: "Worker bearer is scoped to a different room." });
+  return false;
+}
+
 export async function requireParticipant(
   req: AuthenticatedRequest,
   res: Response,
   project: Project
 ): Promise<boolean> {
+  const workerParticipation = resolveScopedWorkerParticipation(req, res, project);
+  if (workerParticipation !== null) return workerParticipation;
   if (!isRepoBackedProject(project)) {
     return true;
   }
@@ -323,12 +368,27 @@ export async function requireParticipant(
 export async function requireGitRoomParticipant(
   req: AuthenticatedRequest,
   res: Response,
-  project: Project
+  project: Project,
+  options: { freshCollaboratorCheck?: boolean } = {}
 ): Promise<boolean> {
+  // Worker bearers are already authenticated, capability-checked, and scoped
+  // to one exact room by the request middleware. They intentionally have no
+  // human session account, so sending them through the GitHub collaborator
+  // check would misclassify a valid worker as an anonymous user and return
+  // 401 for Git-backed Focus rooms.
+  const workerParticipation = resolveScopedWorkerParticipation(req, res, project);
+  if (workerParticipation !== null) return workerParticipation;
+
   const accessDecision = await resolveProjectRepoRoomAccessDecision({
     project,
     sessionAccount: req.sessionAccount,
+    freshCollaboratorCheck: options.freshCollaboratorCheck,
   });
+  requestRepoAccessRoomNames.set(
+    req,
+    accessDecision.repoRoomName ?? getProjectAccessRoomId(project),
+  );
+  requestUsesRepoAuthorization.set(req, accessDecision.isRepoBacked);
 
   if (!accessDecision.isRepoBacked || accessDecision.decision.kind === "allow") {
     return true;
@@ -339,6 +399,28 @@ export async function requireGitRoomParticipant(
     accessDecision.roomName ?? getProjectAccessRoomId(project),
     accessDecision.decision
   );
+}
+
+/**
+ * Re-resolves the exact bearer/cookie and bypasses collaborator caches for a
+ * live delivery lease. It has no Response side effects, so it is safe after
+ * SSE headers have already been committed.
+ */
+export async function reauthorizeGitRoomParticipant(
+  req: AuthenticatedRequest,
+  project: Project,
+): Promise<boolean> {
+  if (requestUsesRepoAuthorization.get(req) === false) return true;
+  const fresh = await resolveRequestAuth(req);
+  if (fresh.authKind === "agent_session") {
+    return fresh.agentSession?.room_id === project.id;
+  }
+  const accessDecision = await resolveProjectRepoRoomAccessDecision({
+    project,
+    sessionAccount: fresh.account,
+    freshCollaboratorCheck: true,
+  });
+  return !accessDecision.isRepoBacked || accessDecision.decision.kind === "allow";
 }
 
 export async function resolveProjectRoomEntryDecision(input: {

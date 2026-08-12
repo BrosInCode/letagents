@@ -42,7 +42,7 @@ export function cursorPermissionProfileRuntimeLine(
 ): string {
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
-      return "Runtime mode: Cursor sandboxed write. Cursor is launched with --force and --sandbox enabled; selected MCP tools still follow the chosen MCP policy.";
+      return "Runtime mode: Cursor sandboxed write. Cursor is launched with --force and --sandbox enabled; exposed MCP tools remain governed separately by the runtime.";
     case "full_access":
       return "Runtime mode: Cursor full access. Cursor is launched with --force and --sandbox disabled.";
     case "ask_before_write":
@@ -60,13 +60,15 @@ export function cursorPermissionProfileInstructionLines(
       return [
         "- You may edit files and run local commands when the room event requires implementation work.",
         "- Keep changes scoped to the selected repository/workspace and respect Cursor sandbox failures instead of trying to bypass them.",
-        "- The Cursor sandbox does not prove that external MCP tools are sandboxed; use only MCP tools allowed by the selected MCP policy and the human's request.",
+        "- LetAgents carries ordinary nonignored file edits back after the turn. Do not create commits, switch branches, or rely on ignored build output being persisted.",
+        "- The Cursor sandbox does not prove that MCP tools are sandboxed; use only tools exposed by this runtime and allowed by the human's request.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
     case "full_access":
       return [
         "- You may edit files and run local commands when the room event requires implementation work.",
-        "- Keep changes scoped to the selected repository/workspace unless the human explicitly asks for broader local changes.",
+        "- Keep all local changes inside the selected repository/workspace. If broader changes are needed, explain the boundary instead of trying to bypass it.",
+        "- LetAgents carries ordinary nonignored file edits back after the turn. Do not create commits, switch branches, or rely on ignored build output being persisted.",
         "- Avoid destructive commands, secrets, keychains, global config, and LetAgents local state unless the human explicitly asks.",
       ];
     default:
@@ -92,14 +94,23 @@ export function cursorPermissionProfileStartMessage(
 
 export function cursorPermissionProfileReadyDetail(
   profileId: DesktopManagedAgentPermissionProfileId | null | undefined,
+  supervised = false,
 ): string {
   switch (normalizeCursorPermissionProfileId(profileId)) {
     case "sandboxed_write":
+      if (supervised) {
+        return "Cursor works in a private per-turn Git workspace with its native sandbox enabled. LetAgents carries conflict-checked, nonignored file edits back after the turn; ignored dependencies remain read-only and Git history is not changed.";
+      }
       return "Cursor will run with --force and Cursor sandbox enabled for write-capable local work. Selected MCP tools still follow the chosen MCP policy.";
     case "full_access":
+      if (supervised) {
+        return "Cursor works in a private per-turn Git workspace with its inner sandbox disabled for tool compatibility. Direct host writes remain blocked; LetAgents carries conflict-checked, nonignored file edits back without changing Git history.";
+      }
       return "Cursor will run with --force and Cursor sandbox disabled for trusted local work. Selected MCP tools still follow the chosen MCP policy.";
     default:
-      return "Cursor will run in ask mode for read-only local analysis.";
+      return supervised
+        ? "Cursor can inspect the selected workspace but cannot edit it."
+        : "Cursor will run in ask mode for read-only local analysis.";
   }
 }
 

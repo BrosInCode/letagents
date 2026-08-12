@@ -1,14 +1,12 @@
 import { userInfo } from "os";
 
-import {
-  getStoredAuth,
-  type StoredAccount,
-} from "../../../local-state.js";
+import type { StoredAccount } from "../../../local-state.js";
 import { normalizeSlugSegment } from "../../../../shared/codenames.js";
 import {
   apiCall,
   getLetagentsToken,
 } from "../api.js";
+import { requireValidWorkerBearerRuntime } from "../worker-bearer.js";
 import {
   getAuthenticatedAccountCache,
   setAuthenticatedAccountCache,
@@ -38,6 +36,9 @@ export async function getAuthenticatedAgentDirectory(): Promise<{
   account: AuthenticatedAccountLookup;
   agents: AuthenticatedAgentLookup[];
 } | null> {
+  if (requireValidWorkerBearerRuntime().mode !== "owner") {
+    return null;
+  }
   try {
     const result = await apiCall<{
       account?: AuthenticatedAccountLookup;
@@ -64,6 +65,9 @@ export async function getAuthenticatedAgentDirectory(): Promise<{
 }
 
 async function getAuthenticatedAccountProfile(): Promise<StoredAccount | null> {
+  if (requireValidWorkerBearerRuntime().mode !== "owner") {
+    return null;
+  }
   const envToken = (process.env.LETAGENTS_TOKEN || "").trim();
   const cache = getAuthenticatedAccountCache();
   if (envToken) {
@@ -79,13 +83,14 @@ async function getAuthenticatedAccountProfile(): Promise<StoredAccount | null> {
     return directory?.account?.login?.trim() ? directory.account : null;
   }
 
+  const { getStoredAuth } = await import("../../../local-state.js");
   const storedAccount = getStoredAuth()?.account;
   if (storedAccount?.login?.trim()) {
     setAuthenticatedAccountCache(storedAccount, "stored", null);
     return storedAccount;
   }
 
-  if (!getLetagentsToken()) {
+  if (!await getLetagentsToken()) {
     setAuthenticatedAccountCache(undefined, null, null);
     return null;
   }

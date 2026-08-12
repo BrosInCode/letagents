@@ -198,12 +198,37 @@ export class RentalApiClient {
     return this.request<unknown>("GET", "/api/rental/provider/readiness");
   }
 
+  marketplace(): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>("GET", "/api/rental/providers");
+  }
+
+  registerProviderHost(input: Record<string, unknown>): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>("POST", "/api/rental/provider/hosts/register", input);
+  }
+
+  heartbeatProviderHost(hostId: string, input: Record<string, unknown>): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/provider/hosts/${encodeURIComponent(hostId)}/heartbeat`,
+      input,
+    );
+  }
+
   // -------------------------------------------------------------------------
   // Sessions — provider requests + renter create + lifecycle
   // -------------------------------------------------------------------------
 
   listProviderRequests(): Promise<RentalApiResult<unknown>> {
     return this.request<unknown>("GET", "/api/rental/provider/requests");
+  }
+
+  listProviderSessions(hostId?: string | null, installationId?: string | null): Promise<RentalApiResult<unknown>> {
+    const normalizedHostId = hostId?.trim() || "";
+    const normalizedInstallationId = installationId?.trim() || "";
+    const query = normalizedHostId && normalizedInstallationId
+      ? `?hostId=${encodeURIComponent(normalizedHostId)}&installationId=${encodeURIComponent(normalizedInstallationId)}`
+      : "";
+    return this.request<unknown>("GET", `/api/rental/provider/sessions${query}`);
   }
 
   acceptRequest(
@@ -215,6 +240,33 @@ export class RentalApiClient {
       `/api/rental/provider/sessions/${encodeURIComponent(sessionId)}/accept`,
       body,
     );
+  }
+
+  requestLaunchAuthority(
+    sessionId: string,
+    input: Record<string, unknown>,
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/provider/sessions/${encodeURIComponent(sessionId)}/launch-authority`,
+      input,
+    );
+  }
+
+  acknowledgeLaunch(
+    sessionId: string,
+    input: Record<string, unknown>,
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/provider/sessions/${encodeURIComponent(sessionId)}/launch-ack`,
+      input,
+    );
+  }
+
+  providerEvents(after?: string | null): Promise<RentalApiResult<unknown>> {
+    const query = after?.trim() ? `?after=${encodeURIComponent(after.trim())}` : "";
+    return this.request<unknown>("GET", `/api/rental/provider/events${query}`);
   }
 
   declineRequest(
@@ -246,6 +298,17 @@ export class RentalApiClient {
     return this.request<unknown>(
       "POST",
       `/api/rental/sessions/${encodeURIComponent(sessionId)}/cancel`,
+      body,
+    );
+  }
+
+  completeSession(
+    sessionId: string,
+    body: Record<string, unknown> = {},
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/complete`,
       body,
     );
   }
@@ -323,6 +386,46 @@ export class RentalApiClient {
       "POST",
       `/api/rental/sessions/${encodeURIComponent(sessionId)}/patches/${encodeURIComponent(patchId)}/request-changes`,
       body,
+    );
+  }
+
+  // -------------------------------------------------------------------------
+  // Context access requests + exposure ledger — renter trust surfaces
+  // -------------------------------------------------------------------------
+
+  getExposures(sessionId: string): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "GET",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/exposures`,
+    );
+  }
+
+  getContextRequests(sessionId: string): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "GET",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/context-requests`,
+    );
+  }
+
+  approveContextRequest(
+    sessionId: string,
+    requestId: string,
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/context-requests/${encodeURIComponent(requestId)}/approve`,
+      {},
+    );
+  }
+
+  denyContextRequest(
+    sessionId: string,
+    requestId: string,
+  ): Promise<RentalApiResult<unknown>> {
+    return this.request<unknown>(
+      "POST",
+      `/api/rental/sessions/${encodeURIComponent(sessionId)}/context-requests/${encodeURIComponent(requestId)}/deny`,
+      {},
     );
   }
 

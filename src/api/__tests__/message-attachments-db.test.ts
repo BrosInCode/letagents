@@ -22,6 +22,8 @@ const createProjectWithName = dbModule?.createProjectWithName;
 const getMessageAttachment = dbModule?.getMessageAttachment;
 const getMessageAttachmentUpload = dbModule?.getMessageAttachmentUpload;
 const getMessages = dbModule?.getMessages;
+const getMessageThread = dbModule?.getMessageThread;
+const getMessageThreads = dbModule?.getMessageThreads;
 
 async function resetDatabase(): Promise<void> {
   if (!db || !pool) {
@@ -155,4 +157,68 @@ test(
     assert.equal(retried.message.thread?.reply_count, 1);
     assert.equal(retried.message.thread?.latest_reply?.id, created.message.id);
   }
+);
+
+test(
+  "attachment-only messages with NULL prompt kind survive history and thread summaries",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed attachment tests" : false,
+  },
+  async () => {
+    if (
+      !addMessage ||
+      !createMessageAttachmentUpload ||
+      !createProjectWithName ||
+      !getMessages ||
+      !getMessageThread ||
+      !getMessageThreads
+    ) {
+      throw new Error("DB-backed attachment tests require TEST_DB_URL");
+    }
+
+    const room = await createProjectWithName("attachment-only-visibility-room");
+    await createMessageAttachmentUpload({
+      upload_id: "upl_attachment_only_visibility",
+      room_id: room.id,
+      filename: "notes.txt",
+      content_type: "text/plain",
+      byte_size: 5,
+      storage_provider: "s3",
+      bucket: "letagents-test",
+      object_key: "rooms/attachment-only-visibility-room/notes.txt",
+      expires_at: new Date(Date.now() + 60_000).toISOString(),
+    });
+
+    const attachmentOnly = await addMessage(room.id, "human", "", {
+      source: "browser",
+      attachments: [{ upload_id: "upl_attachment_only_visibility" }],
+    });
+    const attachmentReply = await addMessage(room.id, "agent", "", {
+      source: "agent",
+      reply_to_message_id: attachmentOnly.id,
+      thread_root_message_id: attachmentOnly.id,
+    });
+    const hiddenPrompt = await addMessage(room.id, "agent", "", {
+      source: "agent",
+      agent_prompt_kind: "auto",
+    });
+
+    const history = await getMessages(room.id);
+    assert.deepEqual(history.messages.map((message) => message.id), [
+      attachmentOnly.id,
+      attachmentReply.id,
+    ]);
+    assert.equal(history.messages[0]?.attachments[0]?.filename, "notes.txt");
+    assert.equal(history.messages.some((message) => message.id === hiddenPrompt.id), false);
+
+    const thread = await getMessageThread(room.id, attachmentOnly.id);
+    assert.deepEqual(thread?.replies.map((message) => message.id), [attachmentReply.id]);
+    assert.equal(thread?.summary.reply_count, 1);
+    assert.equal(thread?.summary.latest_reply?.id, attachmentReply.id);
+
+    const inbox = await getMessageThreads(room.id);
+    assert.deepEqual(inbox.threads.map((item) => item.root.id), [attachmentOnly.id]);
+    assert.equal(inbox.threads[0]?.summary.latest_reply?.id, attachmentReply.id);
+  },
 );

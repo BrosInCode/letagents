@@ -1,1028 +1,224 @@
 <template>
   <Teleport to="body">
-    <div
-      v-if="open"
-      class="desktop-add-agent-backdrop"
-      data-testid="desktop-add-agent-modal"
-      @click.self="emit('close')"
-    >
-      <section
-        ref="dialogElement"
-        class="desktop-add-agent-modal"
-        role="dialog"
-        aria-modal="true"
-        aria-labelledby="desktop-add-agent-title"
-        tabindex="-1"
-        @keydown.esc.prevent="emit('close')"
-        @keydown.tab="handleDialogTab"
+    <Transition name="desktop-add-agent-dialog" @after-leave="handleAfterLeave">
+      <div
+        v-if="open"
+        class="desktop-add-agent-backdrop"
+        data-testid="desktop-add-agent-modal"
+        @click.self="emit('close')"
       >
-        <header class="desktop-add-agent-header">
-          <div>
-            <span>Add agent</span>
-            <h3 id="desktop-add-agent-title">Bring an agent into this room</h3>
-            <p>
-              Choose a provider, then complete any setup needed before it can join
-              <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
-            </p>
-          </div>
-          <button
-            class="desktop-modal-close"
-            type="button"
-            aria-label="Close add agent dialog"
-            @click="emit('close')"
-          >
-            <X aria-hidden="true" />
-          </button>
-        </header>
-
-        <div class="desktop-add-agent-body">
-          <section class="desktop-add-agent-providers" aria-label="Agent providers">
+        <section
+          ref="dialogElement"
+          class="desktop-add-agent-modal"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="desktop-add-agent-title"
+          tabindex="-1"
+          @keydown.esc.prevent="emit('close')"
+          @keydown.tab="handleDialogTab"
+        >
+          <header class="desktop-add-agent-header">
+            <div>
+              <span>Add agent</span>
+              <h3 id="desktop-add-agent-title">Bring an agent into this room</h3>
+              <p>
+                Choose a provider, confirm its setup, then start it in
+                <strong data-testid="desktop-add-agent-room-label">{{ roomLabel }}</strong>.
+              </p>
+            </div>
             <button
-              v-for="provider in providers"
-              :key="provider.id"
-              class="desktop-add-agent-provider"
+              class="desktop-modal-close"
               type="button"
-              :data-selected="provider.id === selectedProviderId"
-              :data-testid="`desktop-add-agent-provider-${provider.id}`"
-              @click="selectProvider(provider.id)"
+              aria-label="Close add agent dialog"
+              @click="emit('close')"
             >
-              <span class="desktop-add-agent-provider-icon" aria-hidden="true">
-                <McpHarnessIcon :target-id="provider.mcpTargetId" />
-              </span>
-              <span>
-                <strong>{{ provider.name }}</strong>
-                <small>{{ provider.description }}</small>
-              </span>
+              <X aria-hidden="true" />
             </button>
-          </section>
-
-          <section class="desktop-add-agent-status" :data-state="preflight?.status || 'loading'">
-            <div class="desktop-add-agent-status-header">
-              <div>
-                <span>{{ selectedProvider?.name || "Provider" }}</span>
-                <h4>{{ statusTitle }}</h4>
-              </div>
-              <button type="button" :disabled="loadingPreflight || !selectedProviderId" @click="runPreflight">
-                {{ loadingPreflight ? "Checking..." : "Check again" }}
-              </button>
-            </div>
-
-            <p v-if="preflight?.detail">{{ preflight.detail }}</p>
-            <p v-else-if="loadError">{{ loadError }}</p>
-            <p v-else>Checking provider readiness...</p>
-
-            <dl class="desktop-add-agent-checks">
-              <div>
-                <dt>Agent app</dt>
-                <dd>{{ runtimeLabel }}</dd>
-              </div>
-              <div>
-                <dt>LetAgents connection</dt>
-                <dd>{{ bridgeLabel }}</dd>
-              </div>
-              <div>
-                <dt>Project folder</dt>
-                <dd>{{ repoLabel }}</dd>
-              </div>
-            </dl>
-
-            <section
-              v-if="preflight?.nextAction === 'authenticate' && authCommand"
-              class="desktop-add-agent-auth-command"
-              aria-label="Agent sign-in command"
+          </header>
+          <div class="desktop-add-agent-body">
+            <AddAgentProviderRail
+              :providers="providers"
+              :selected-provider-id="selectedProviderId"
+              @select="selectProvider"
+            />
+            <AddAgentSetupStatus
+              :provider-name="selectedProvider?.name || null"
+              :preflight="preflight"
+              :loading="loadingProviders || loadingPreflight"
+              :error="loadError"
+              :status-title="statusTitle"
+              :status-description="statusDescription"
+              :status-label="preflightStatusLabel"
+              :runtime-label="runtimeLabel"
+              :bridge-label="bridgeLabel"
+              :repo-label="repoLabel"
+              :show-worktrees="showWorktreePicker"
+              :worktrees="matchingWorktrees"
+              :worktree-description="worktreePickerDescription"
+              :auth-command="authCommand"
+              @refresh="retryProviderSetup"
+              @choose-worktree="chooseWorktree"
             >
-              <span>Sign-in command</span>
-              <code>{{ authCommand }}</code>
-            </section>
-
-            <section
+            <AddAgentOpenModelSettings
               v-if="showOpenModelConfig"
-              class="desktop-add-agent-open-model-config"
-              data-testid="desktop-add-agent-open-model-config"
-              aria-label="Open model configuration"
-            >
-              <span>Model endpoint</span>
-              <label>
-                <small>Endpoint URL (OpenAI Responses-compatible)</small>
-                <input
-                  v-model="openModelBaseUrl"
-                  type="url"
-                  placeholder="https://openrouter.ai/api/v1"
-                  data-testid="desktop-add-agent-open-model-base-url"
-                />
-              </label>
-              <label>
-                <small>Model</small>
-                <input
-                  v-model="openModelModel"
-                  type="text"
-                  placeholder="qwen/qwen3-coder"
-                  data-testid="desktop-add-agent-open-model-model"
-                />
-              </label>
-              <label>
-                <small>API key {{ openModelStatus?.hasApiKey ? "(saved - paste to replace)" : "(optional for local endpoints)" }}</small>
-                <input
-                  v-model="openModelApiKey"
-                  type="password"
-                  autocomplete="off"
-                  :placeholder="openModelStatus?.hasApiKey ? '••••••••' : 'sk-or-...'"
-                  data-testid="desktop-add-agent-open-model-api-key"
-                />
-              </label>
-              <div class="desktop-add-agent-open-model-config-actions">
-                <button
-                  type="button"
-                  :disabled="savingOpenModelSettings"
-                  data-testid="desktop-add-agent-open-model-save"
-                  @click="saveOpenModelSettings"
-                >
-                  {{ savingOpenModelSettings ? "Saving..." : "Save model settings" }}
-                </button>
-                <button
-                  v-if="openModelStatus?.hasApiKey"
-                  type="button"
-                  :disabled="savingOpenModelSettings"
-                  @click="clearOpenModelApiKey"
-                >
-                  Clear saved key
-                </button>
-              </div>
-              <p v-if="openModelStatus?.error">{{ openModelStatus.error }}</p>
-            </section>
+              v-model:base-url="openModelBaseUrl"
+              v-model:model="openModelModel"
+              v-model:api-key="openModelApiKey"
+              :has-api-key="Boolean(openModelStatus?.hasApiKey)"
+              :saving="savingOpenModelSettings"
+              :error="openModelError"
+              @save="saveOpenModelSettings"
+              @clear-key="clearOpenModelApiKey"
+            />
+            <AddAgentModelSettings
+              v-if="showModelSelector"
+              :loading="loadingProviderModels"
+              :model-choice="selectedModelChoice"
+              :model-options="modelSelectOptions"
+              :custom="selectedModelMode === 'custom'"
+              :custom-model-id="customModelId"
+              :model-description="modelSelectorDescription"
+              :show-effort="showEffortSelector"
+              :effort="selectedEffort"
+              :effort-options="effortSelectOptions"
+              :effort-description="effortSelectorDescription"
+              :catalog-label="providerModelCatalogLabel"
+              :catalog-error="providerModelCatalogIsError"
+              @refresh="refreshProviderModels"
+              @update:model-choice="handleModelChoiceValue"
+              @update:custom-model-id="customModelId = $event"
+              @update:effort="handleEffortValue"
+            />
+            <AddAgentRuntimeSettings
+              :provider="selectedProvider"
+              :launch-mode="launchMode"
+              :lifecycle-description="lifecycleDescription"
+              :charter="supervisedCharter"
+              :show-delivery="showDeliverySelector"
+              :delivery-mode="deliveryMode"
+              :delivery-description="deliveryModeDescription"
+              :permission-profiles="selectedPermissionProfiles"
+              :selected-permission-profile="selectedPermissionProfile"
+              :show-cursor-policy="showCursorMcpPolicySelector"
+              :cursor-policy="selectedCursorMcpPolicy"
+              :cursor-policy-description="selectedCursorMcpPolicyDescription"
+              :external-prompt="externalJoinPrompt"
+              :copying-external-prompt="copyingExternalPrompt"
+              @update:launch-mode="launchMode = $event"
+              @update:charter="supervisedCharter = $event"
+              @update:delivery-mode="deliveryMode = $event"
+              @select-permission="selectPermissionProfile"
+              @update:cursor-policy="selectedCursorMcpPolicy = $event"
+              @copy-external-prompt="copyExternalJoinPrompt"
+            />
+            <AddAgentManagedSessions
+              :room-identifier="roomIdentifier"
+              :provider-id="selectedProviderId"
+              :room-git-room="roomGitRoom"
+            />
+            <AddAgentSupervisedLaunch
+              :controller="supervisedUi"
+            />
 
-            <section
-              v-if="showDeliverySelector"
-              class="desktop-add-agent-delivery"
-              aria-label="Agent delivery mode"
-            >
-              <span>Delivery</span>
-              <div>
-                <button
-                  type="button"
-                  :data-selected="deliveryMode === 'mcp_polling'"
-                  @click="deliveryMode = 'mcp_polling'"
-                >
-                  From the agent app
-                </button>
-                <button
-                  type="button"
-                  :data-selected="deliveryMode === 'desktop_events'"
-                  @click="deliveryMode = 'desktop_events'"
-                >
-                  From this desktop app
-                </button>
-              </div>
-              <p>{{ deliveryModeDescription }}</p>
-            </section>
+            <AddAgentFeedback v-if="setupMessage" :message="setupMessage" :tone="setupMessageTone" />
 
-            <section
-              v-if="selectedProvider?.capabilities.includes('desktop_managed_runtime') && selectedPermissionProfiles.length"
-              class="desktop-add-agent-permissions"
-              aria-label="Agent permissions"
-            >
-              <span>Permissions</span>
-              <div class="desktop-add-agent-permission-options">
-                <button
-                  v-for="profile in selectedPermissionProfiles"
-                  :key="profile.id"
-                  type="button"
-                  :data-selected="profile.id === selectedPermissionProfile?.id"
-                  :data-state="profile.status"
-                  :disabled="profile.status !== 'available'"
-                  @click="selectPermissionProfile(profile)"
-                >
-                  <span class="desktop-add-agent-permission-option-title">
-                    <strong>{{ profile.label }}</strong>
-                    <em :data-risk="profile.risk">{{ profile.risk }}</em>
-                  </span>
-                  <small>{{ permissionProfileOptionSummary(profile) }}</small>
-                </button>
-              </div>
-              <p v-if="selectedPermissionProfile">{{ permissionProfileSummary(selectedPermissionProfile) }}</p>
-            </section>
+            <AddAgentActionBar
+              :room-identifier="roomIdentifier"
+              :provider-id="selectedProviderId"
+              :provider="selectedProvider"
+              :preflight="preflight"
+              :permission-profile="selectedPermissionProfile"
+              :launch-mode="launchMode"
+              :setup-busy="setupBusy"
+        :setup-action-label="preflight?.nextAction === 'install_runtime' || preflight?.nextAction === 'install_mcp_bridge'
+          ? setupActionButtonText(preflight.nextAction)
+          : ''"
+              :copying-auth-command="copyingAuthCommand"
+              :can-create-worktree="canCreateWorktree"
+              :matching-worktree-count="matchingWorktrees.length"
+              :creating-worktree="creatingWorktree"
+              :create-worktree-label="createWorktreeButtonLabel"
+              :can-start-base="canStartManagedAgent"
+              :starting-agent="startingAgent"
+              :setup-confirmation-active="Boolean(activeSetupConfirmation)"
+              :external-instruction="isExternalMcpProviderReady(selectedProvider, preflight)
+                ? externalMcpProviderInstruction(selectedProvider)
+                : null"
+              :permission-warning="selectedPermissionProfileWarning"
+              :supervised="supervisedUi"
+              :charter-missing="launchMode === 'supervised' && !supervisedCharter.trim()"
+              @setup-action="runSetupAction"
+              @copy-auth-command="copyAgentAuthCommand"
+              @choose-repo="emit('choose-repo')"
+              @create-worktree="createWorktree"
+              @start="startManagedAgent"
+              @recover-launch="handleRecoverSupervisedLaunch"
+            />
 
-            <section
-              v-if="showCursorMcpPolicySelector"
-              class="desktop-add-agent-delivery"
-              aria-label="Cursor MCP tools"
-            >
-              <span>MCP tools</span>
-              <div>
-                <button
-                  v-for="option in cursorMcpPolicyOptions"
-                  :key="option.id"
-                  type="button"
-                  :data-selected="selectedCursorMcpPolicy === option.id"
-                  :data-testid="`desktop-add-agent-cursor-mcp-${option.id}`"
-                  @click="selectedCursorMcpPolicy = option.id"
-                >
-                  {{ option.label }}
-                </button>
-              </div>
-              <p>{{ selectedCursorMcpPolicyDescription }}</p>
-            </section>
-
-            <section
-              v-if="externalJoinPrompt"
-              class="desktop-add-agent-external-prompt"
-              data-testid="desktop-add-agent-external-prompt"
-              aria-label="External agent join prompt"
-            >
-              <div class="desktop-add-agent-external-prompt-intro">
-                <div>
-                  <span>External agent setup</span>
-                  <p>
-                    Copy these instructions into {{ selectedProvider?.name || "the provider" }} so it can join the
-                    correct room, use a readable agent name, and keep listening for work.
-                  </p>
-                </div>
-                <button
-                  type="button"
-                  :disabled="copyingExternalPrompt"
-                  @click="copyExternalJoinPrompt"
-                >
-                  {{ copyingExternalPrompt ? "Copying..." : "Copy agent instructions" }}
-                </button>
-              </div>
-              <details class="desktop-add-agent-external-prompt-details">
-                <summary>Show full instructions</summary>
-                <pre><code>{{ externalJoinPrompt }}</code></pre>
-              </details>
-            </section>
-
-            <section v-if="activeManagedSessions.length" class="desktop-add-agent-managed-sessions">
-              <article
-                v-for="session in activeManagedSessions"
-                :key="session.id"
-                class="desktop-add-agent-managed-session"
-              >
-                <span>{{ session.deliveryMode === "desktop_events" ? "From this desktop app" : "From the agent app" }}</span>
-                <strong>{{ managedAgentSessionDisplayName(session) }}</strong>
-                <small>
-                  {{ managedAgentSessionDetail(session) }}
-                </small>
-                <div class="desktop-add-agent-managed-session-actions">
-                  <button
-                    type="button"
-                    class="desktop-add-agent-managed-session-danger"
-                    :disabled="!session.canStop || Boolean(stoppingSessionId)"
-                    @click="stopManagedAgent(session.id)"
-                  >
-                    {{ stoppingSessionId === session.id ? "Stopping..." : "Stop agent" }}
-                  </button>
-                </div>
-              </article>
-            </section>
-
-            <div class="desktop-add-agent-actions">
-              <button
-                v-if="preflight?.nextAction === 'install_runtime'"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="setupBusy"
-                @click="runSetupAction('install_runtime')"
-              >
-                {{ setupActionButtonText("install_runtime") }}
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'install_mcp_bridge'"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="setupBusy"
-                @click="runSetupAction('install_mcp_bridge')"
-              >
-                {{ setupActionButtonText("install_mcp_bridge") }}
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'authenticate'"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="copyingAuthCommand"
-                @click="copyAgentAuthCommand"
-              >
-                {{ copyingAuthCommand ? "Copying..." : "Copy sign-in command" }}
-              </button>
-
-              <button
-                v-else-if="preflight?.nextAction === 'choose_repo'"
-                type="button"
-                class="desktop-add-agent-primary"
-                @click="emit('choose-repo')"
-              >
-                Choose project folder
-              </button>
-
-              <button
-                v-else-if="hasDesktopManagedRuntime(selectedProvider)"
-                type="button"
-                class="desktop-add-agent-primary"
-                :disabled="!canStartManagedAgent || startingAgent"
-                @click="startManagedAgent"
-              >
-                {{ managedAgentStartButtonLabel }}
-              </button>
-
-              <span v-if="activeSetupConfirmation" class="desktop-add-agent-confirmation">
-                Review this action, then confirm to continue.
-              </span>
-              <span v-else-if="isExternalMcpProviderReady(selectedProvider, preflight)" class="desktop-add-agent-confirmation">
-                {{ externalMcpProviderInstruction(selectedProvider) }}
-              </span>
-              <span v-else-if="selectedPermissionProfileWarning" class="desktop-add-agent-confirmation">
-                {{ selectedPermissionProfileWarning }}
-              </span>
-              <span v-else-if="activeManagedSessions.length" class="desktop-add-agent-confirmation">
-                Each start creates a separate local agent session.
-              </span>
-              <span
-                v-else-if="preflight?.status === 'ready' && hasDesktopManagedRuntime(selectedProvider)"
-                class="desktop-add-agent-confirmation"
-              >
-                Starts a {{ selectedProvider?.name || "local" }} agent for this room.
-              </span>
-            </div>
-
-            <p v-if="setupMessage" class="desktop-add-agent-feedback">{{ setupMessage }}</p>
-          </section>
-        </div>
-      </section>
-    </div>
+            </AddAgentSetupStatus>
+          </div>
+        </section>
+      </div>
+    </Transition>
   </Teleport>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, ref, watch } from "vue";
 import { X } from "@lucide/vue";
-import type {
-  DesktopAgentProvider,
-  DesktopAgentProviderId,
-  DesktopAgentProviderPreflight,
-  DesktopAgentProviderSetupAction,
-  DesktopCursorMcpPolicy,
-  DesktopManagedAgentDeliveryMode,
-  DesktopManagedAgentPermissionProfile,
-  DesktopManagedAgentPermissionProfileId,
-  DesktopManagedAgentSession,
-  DesktopOpenModelSettingsStatus,
-} from "../../../../../electron/ipc-types";
+import { nextTick, ref, watch } from "vue";
+import AddAgentManagedSessions from "./add-agent/AddAgentManagedSessions.vue";
+import AddAgentActionBar from "./add-agent/AddAgentActionBar.vue";
+import AddAgentProviderRail from "./add-agent/AddAgentProviderRail.vue";
+import AddAgentSetupStatus from "./add-agent/AddAgentSetupStatus.vue";
+import AddAgentOpenModelSettings from "./add-agent/AddAgentOpenModelSettings.vue";
+import AddAgentModelSettings from "./add-agent/AddAgentModelSettings.vue";
+import AddAgentRuntimeSettings from "./add-agent/AddAgentRuntimeSettings.vue";
+import AddAgentSupervisedLaunch from "./add-agent/AddAgentSupervisedLaunch.vue";
+import AddAgentFeedback from "./add-agent/AddAgentFeedback.vue";
 import {
-  agentSetupActionButtonLabel,
-  agentSetupConfirmationMessage,
-  agentAuthCommand,
-  agentProviderNeedsDesktopRepo,
-  cursorMcpPolicyDescription,
-  cursorMcpPolicyLabel,
-  cursorMcpPolicyOptions,
-  defaultCursorMcpPolicy,
-  externalMcpProviderJoinPrompt,
+  useAddAgentController,
+  type AddAgentModalEmit,
+  type AddAgentModalEvents,
+  type AddAgentModalProps,
+} from "./add-agent/useAddAgentController";
+import {
   externalMcpProviderInstruction,
-  hasDesktopManagedRuntime,
-  isAgentSetupConfirmationActive,
   isExternalMcpProviderReady,
-  isVisibleManagedAgentSession,
-  managedAgentRepoDetail,
-  managedAgentPermissionProfileLabel,
-  managedAgentPermissionProfileSelectionForProvider,
-  managedAgentPermissionProfileStatusLabel,
-  managedAgentPermissionProfileSummary,
-  managedAgentSessionDisplayName,
-  managedAgentSessionMatchesRoom,
-  managedAgentSessionStatusLabel,
-  managedAgentStopResultMessage,
-  shouldShowCursorMcpPolicySelector,
-  shouldShowDeliveryModeSelector,
-  shouldShowOpenModelConfig,
-  type AgentSetupConfirmation,
 } from "../../../domain/managed-agents";
-import McpHarnessIcon from "../setup/McpHarnessIcon.vue";
 import {
   currentFocusableElement,
   restoreFocus,
   trapFocusInDialog,
 } from "./modal-focus";
 
-const props = defineProps<{
-  open: boolean;
-  roomIdentifier: string;
-  roomDisplayName: string | null;
-  repoRootPath: string | null;
-  managedSessions: DesktopManagedAgentSession[];
-}>();
-
-const emit = defineEmits<{
-  close: [];
-  "choose-repo": [];
-  "managed-sessions-updated": [sessions: DesktopManagedAgentSession[]];
-  "managed-session-started": [session: DesktopManagedAgentSession];
-}>();
-
-const providers = ref<DesktopAgentProvider[]>([]);
-const selectedProviderId = ref<DesktopAgentProviderId | null>(null);
-const preflight = ref<DesktopAgentProviderPreflight | null>(null);
-const loadingProviders = ref(false);
-const loadingPreflight = ref(false);
-const setupBusy = ref(false);
-const startingAgent = ref(false);
-const stoppingSessionId = ref<string | null>(null);
-const copyingAuthCommand = ref(false);
-const copyingExternalPrompt = ref(false);
-const setupConfirmation = ref<AgentSetupConfirmation | null>(null);
-const loadError = ref<string | null>(null);
-const setupMessage = ref<string | null>(null);
-const deliveryMode = ref<DesktopManagedAgentDeliveryMode>("desktop_events");
-const selectedCursorMcpPolicy = ref<DesktopCursorMcpPolicy>(defaultCursorMcpPolicy);
-const openModelStatus = ref<DesktopOpenModelSettingsStatus | null>(null);
-const openModelBaseUrl = ref("");
-const openModelModel = ref("");
-const openModelApiKey = ref("");
-const savingOpenModelSettings = ref(false);
-const selectedPermissionProfileId = ref<DesktopManagedAgentPermissionProfileId | null>(null);
-const selectedPermissionProfileIdsByProvider = ref<
-  Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>
->({});
+const props = defineProps<AddAgentModalProps>();
+const emit = defineEmits<AddAgentModalEvents>();
 const dialogElement = ref<HTMLElement | null>(null);
 let previousFocusElement: HTMLElement | null = null;
-let preflightRequestId = 0;
-let modalStateVersion = 0;
-let managedSessionRefreshTimer: number | null = null;
 
-const selectedProvider = computed(() =>
-  providers.value.find((provider) => provider.id === selectedProviderId.value) || null
-);
-
-const activeManagedSessions = computed(() =>
-  props.managedSessions.filter((session) =>
-    session.providerId === selectedProviderId.value
-    && managedAgentSessionMatchesRoom(session, props.roomIdentifier)
-    && isVisibleManagedAgentSession(session)
-  )
-);
-
-const selectedPermissionProfiles = computed(() => selectedProvider.value?.permissionProfiles ?? []);
-const selectedPermissionProfile = computed(() =>
-  selectedPermissionProfiles.value.find((profile) => profile.id === selectedPermissionProfileId.value) ??
-  selectedPermissionProfiles.value.find((profile) => profile.id === selectedProvider.value?.defaultPermissionProfileId) ??
-  selectedPermissionProfiles.value.find((profile) => profile.status === "available") ??
-  selectedPermissionProfiles.value[0] ??
-  null
-);
-const canStartManagedAgent = computed(() =>
-  Boolean(
-    preflight.value?.canStart &&
-    !loadingPreflight.value &&
-    (
-      !selectedPermissionProfiles.value.length ||
-      selectedPermissionProfile.value?.status === "available"
-    )
-  )
-);
-const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
-const roomLabel = computed(() => props.roomDisplayName?.trim() || props.roomIdentifier);
-const externalJoinPrompt = computed(() =>
-  isExternalMcpProviderReady(selectedProvider.value, preflight.value)
-    ? externalMcpProviderJoinPrompt(selectedProvider.value, props.roomIdentifier, props.repoRootPath)
-    : null
-);
-
-const activeSetupConfirmation = computed(() => {
-  const nextAction = preflight.value?.nextAction;
-  if (nextAction !== "install_runtime" && nextAction !== "install_mcp_bridge") {
-    return null;
+watch(() => props.open, (open) => {
+  if (open) {
+    previousFocusElement = currentFocusableElement();
+    void nextTick(() => dialogElement.value?.focus());
   }
-  return isAgentSetupConfirmationActive(setupConfirmation.value, selectedProviderId.value, nextAction)
-    ? setupConfirmation.value
-    : null;
-});
+}, { immediate: true });
 
-const statusTitle = computed(() => {
-  if (loadingProviders.value || loadingPreflight.value) return "Checking setup";
-  if (loadError.value) return "Provider check failed";
-  if (!preflight.value) return "Choose a provider";
-  return preflight.value.message;
-});
-
-const runtimeLabel = computed(() => {
-  if (preflight.value?.version) return preflight.value.version;
-  if (preflight.value?.status === "missing_runtime") return "Missing";
-  if (selectedProvider.value?.capabilities.includes("desktop_managed_runtime")) return "Required";
-  return "External app";
-});
-
-const bridgeLabel = computed(() => {
-  if (preflight.value?.mcpStatus === "installed") return "Installed";
-  if (preflight.value?.mcpStatus === "needs_attention") return "Needs repair";
-  if (preflight.value?.mcpStatus === "not_installed") return "Not installed";
-  return "Unknown";
-});
-
-const repoLabel = computed(() => {
-  if (!agentProviderNeedsDesktopRepo(selectedProvider.value)) {
-    return "Handled by provider app";
-  }
-  return props.repoRootPath || "Required before local agents can start";
-});
-
-const deliveryModeDescription = computed(() =>
-  deliveryMode.value === "desktop_events"
-    ? "This desktop app sends room updates to the local agent."
-    : "The agent app joins the room through its LetAgents connection."
-);
-
-const showCursorMcpPolicySelector = computed(() =>
-  shouldShowCursorMcpPolicySelector(selectedProvider.value)
-);
-
-const showDeliverySelector = computed(() =>
-  shouldShowDeliveryModeSelector(selectedProvider.value)
-);
-
-const showOpenModelConfig = computed(() =>
-  shouldShowOpenModelConfig(selectedProvider.value)
-);
-
-const selectedCursorMcpPolicyDescription = computed(() =>
-  cursorMcpPolicyDescription(selectedCursorMcpPolicy.value)
-);
-
-const managedAgentStartButtonLabel = computed(() => {
-  if (startingAgent.value) return "Starting...";
-  if (!hasDesktopManagedRuntime(selectedProvider.value)) return "Start agent";
-  const providerName = selectedProvider.value?.name?.trim() || "agent";
-  const profileLabel = selectedPermissionProfile.value?.label?.trim();
-  const prefix = activeManagedSessions.value.length ? "Start another" : "Start";
-  return profileLabel
-    ? `${prefix} ${providerName} - ${profileLabel}`
-    : `${prefix} ${providerName}`;
-});
-
-const selectedPermissionProfileWarning = computed(() => {
-  if (!hasDesktopManagedRuntime(selectedProvider.value)) {
-    return null;
-  }
-  const profile = selectedPermissionProfile.value;
-  if (!profile || profile.status !== "available") {
-    return null;
-  }
-  const providerName = selectedProvider.value?.name?.trim() || "this agent";
-  if (profile.risk === "high") {
-    return `${profile.label} gives ${providerName} broad write and shell access. Use only with trusted repos and MCPs.`;
-  }
-  if (
-    selectedProviderId.value === "cursor" &&
-    profile.id === "sandboxed_write" &&
-    selectedCursorMcpPolicy.value !== "none"
-  ) {
-    return "Sandboxed writes still allow the selected Cursor MCP tools.";
-  }
-  return null;
-});
-
-watch(
-  () => props.open,
-  (open) => {
-    if (open) {
-      previousFocusElement = currentFocusableElement();
-      void loadProviders();
-      void loadManagedSessions();
-      startManagedSessionRefreshTimer();
-      void nextTick(() => dialogElement.value?.focus());
-    } else {
-      resetTransientState();
-      stopManagedSessionRefreshTimer();
-      restoreFocus(previousFocusElement);
-      previousFocusElement = null;
-    }
-  },
-  { immediate: true },
-);
-
-watch(
-  () => [selectedProviderId.value, props.repoRootPath, props.roomIdentifier] as const,
-  () => {
-    if (props.open && selectedProviderId.value) {
-      void runPreflight();
-      void loadManagedSessions();
-      void loadOpenModelSettings();
-    }
-  },
-);
-
-watch(
-  () => [selectedCursorMcpPolicy.value, selectedPermissionProfileId.value] as const,
-  () => {
-    if (props.open && selectedProviderId.value) {
-      preflight.value = null;
-      void runPreflight();
-    }
-  },
-);
-
-onBeforeUnmount(() => {
-  stopManagedSessionRefreshTimer();
-});
-
-async function loadManagedSessions(options: { quiet?: boolean } = {}): Promise<void> {
-  if (!props.open) return;
-  const requestVersion = modalStateVersion;
-  try {
-    const sessions = await window.letagentsDesktop.workers.listManagedAgentSessions(props.roomIdentifier);
-    if (!isCurrentModalState(requestVersion)) return;
-    emit("managed-sessions-updated", sessions);
-  } catch (error) {
-    if (!isCurrentModalState(requestVersion)) return;
-    if (!options.quiet) {
-      setupMessage.value = error instanceof Error ? error.message : "Could not load managed agent sessions.";
-    }
-  }
-}
-
-async function loadProviders(): Promise<void> {
-  if (!props.open || loadingProviders.value) return;
-  const requestVersion = modalStateVersion;
-  loadingProviders.value = true;
-  loadError.value = null;
-  try {
-    const nextProviders = await window.letagentsDesktop.workers.listAgentProviders();
-    if (!isCurrentModalState(requestVersion)) return;
-    providers.value = nextProviders;
-    await loadManagedSessions();
-    if (!isCurrentModalState(requestVersion)) return;
-    selectedProviderId.value = selectedProviderId.value
-      && providers.value.some((provider) => provider.id === selectedProviderId.value)
-      ? selectedProviderId.value
-      : providers.value.find((provider) => provider.id === "codex")?.id || providers.value[0]?.id || null;
-    syncPermissionProfileSelection();
-    if (selectedProviderId.value) {
-      void loadOpenModelSettings();
-      await runPreflight();
-    }
-  } catch (error) {
-    if (!isCurrentModalState(requestVersion)) return;
-    loadError.value = error instanceof Error ? error.message : "Could not load agent providers.";
-  } finally {
-    if (isCurrentModalState(requestVersion)) {
-      loadingProviders.value = false;
-    }
-  }
-}
-
-async function startManagedAgent(): Promise<void> {
-  if (!selectedProviderId.value || !props.repoRootPath || startingAgent.value) return;
-  if (!hasDesktopManagedRuntime(selectedProvider.value)) return;
-  const requestVersion = modalStateVersion;
-  startingAgent.value = true;
-  setupMessage.value = null;
-  startManagedSessionRefreshTimer(1_000);
-  try {
-    const result = await window.letagentsDesktop.workers.startManagedAgent({
-      providerId: selectedProviderId.value,
-      roomIdentifier: props.roomIdentifier,
-      roomDisplayName: props.roomDisplayName,
-      repoRootPath: props.repoRootPath,
-      deliveryMode: deliveryMode.value,
-      permissionProfileId: selectedPermissionProfile.value?.id ?? null,
-      cursorMcpPolicy: selectedProviderId.value === "cursor" ? selectedCursorMcpPolicy.value : null,
-    });
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = result.message;
-    upsertManagedSession(result.session);
-    emit("managed-session-started", result.session);
-    await loadManagedSessions();
-    await runPreflight();
-  } catch (error) {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = error instanceof Error ? error.message : "Could not start this agent.";
-  } finally {
-    if (isCurrentModalState(requestVersion)) {
-      startingAgent.value = false;
-      startManagedSessionRefreshTimer();
-    }
-  }
-}
-
-async function stopManagedAgent(sessionId: string): Promise<void> {
-  if (stoppingSessionId.value) return;
-  const requestVersion = modalStateVersion;
-  stoppingSessionId.value = sessionId;
-  setupMessage.value = "Stopping local agent...";
-  try {
-    const session = await window.letagentsDesktop.workers.stopManagedAgent({
-      sessionId,
-      stopMode: "worker",
-    });
-    if (!isCurrentModalState(requestVersion)) return;
-    if (session) {
-      setupMessage.value = managedAgentStopResultMessage(session);
-      upsertManagedSession(session);
-    }
-    await loadManagedSessions();
-  } catch (error) {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = error instanceof Error ? error.message : "Could not stop this agent.";
-  } finally {
-    if (isCurrentModalState(requestVersion)) {
-      stoppingSessionId.value = null;
-    }
-  }
-}
-
-async function loadOpenModelSettings(): Promise<void> {
-  if (!showOpenModelConfig.value) return;
-  const requestVersion = modalStateVersion;
-  try {
-    const status = await window.letagentsDesktop.openModel.getSettingsStatus();
-    if (!isCurrentModalState(requestVersion)) return;
-    openModelStatus.value = status;
-    openModelBaseUrl.value = status.baseUrl;
-    openModelModel.value = status.model;
-  } catch (error) {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = error instanceof Error ? error.message : "Could not load open model settings.";
-  }
-}
-
-async function applyOpenModelSettings(input: {
-  baseUrl?: string | null;
-  model?: string | null;
-  apiKey?: string | null;
-}): Promise<void> {
-  if (savingOpenModelSettings.value) return;
-  const requestVersion = modalStateVersion;
-  savingOpenModelSettings.value = true;
-  setupMessage.value = null;
-  try {
-    const status = await window.letagentsDesktop.openModel.saveSettings(input);
-    if (!isCurrentModalState(requestVersion)) return;
-    openModelStatus.value = status;
-    openModelBaseUrl.value = status.baseUrl;
-    openModelModel.value = status.model;
-    openModelApiKey.value = "";
-    setupMessage.value = "Model settings saved.";
-    await runPreflight();
-  } catch (error) {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = error instanceof Error ? error.message : "Could not save model settings.";
-  } finally {
-    if (isCurrentModalState(requestVersion)) {
-      savingOpenModelSettings.value = false;
-    }
-  }
-}
-
-function saveOpenModelSettings(): Promise<void> {
-  const apiKey = openModelApiKey.value.trim();
-  return applyOpenModelSettings({
-    baseUrl: openModelBaseUrl.value.trim() || null,
-    model: openModelModel.value.trim() || null,
-    ...(apiKey ? { apiKey } : {}),
-  });
-}
-
-function clearOpenModelApiKey(): Promise<void> {
-  return applyOpenModelSettings({ apiKey: null });
-}
-
-function selectProvider(providerId: DesktopAgentProviderId): void {
-  modalStateVersion += 1;
-  selectedProviderId.value = providerId;
-  syncPermissionProfileSelection();
-  preflight.value = null;
-  preflightRequestId += 1;
-  loadingPreflight.value = false;
-  setupBusy.value = false;
-  startingAgent.value = false;
-  stoppingSessionId.value = null;
-  copyingAuthCommand.value = false;
-  copyingExternalPrompt.value = false;
-  setupConfirmation.value = null;
-  setupMessage.value = null;
-}
-
-function syncPermissionProfileSelection(): void {
-  const nextId = managedAgentPermissionProfileSelectionForProvider(
-    selectedProvider.value,
-    selectedPermissionProfileIdsByProvider.value,
-  );
-  selectedPermissionProfileId.value = nextId;
-  if (selectedProviderId.value && nextId) {
-    selectedPermissionProfileIdsByProvider.value = {
-      ...selectedPermissionProfileIdsByProvider.value,
-      [selectedProviderId.value]: nextId,
-    };
-  }
-}
-
-function selectPermissionProfile(profile: DesktopManagedAgentPermissionProfile): void {
-  if (profile.status !== "available") return;
-  selectedPermissionProfileId.value = profile.id;
-  if (selectedProviderId.value) {
-    selectedPermissionProfileIdsByProvider.value = {
-      ...selectedPermissionProfileIdsByProvider.value,
-      [selectedProviderId.value]: profile.id,
-    };
-  }
-}
-
-function permissionProfileSummary(profile: DesktopManagedAgentPermissionProfile): string {
-  return managedAgentPermissionProfileSummary(profile);
-}
-
-function permissionProfileOptionSummary(profile: DesktopManagedAgentPermissionProfile): string {
-  if (profile.status === "available") {
-    return profile.description;
-  }
-  return `${managedAgentPermissionProfileStatusLabel(profile.status)} - ${profile.detail || profile.description}`;
-}
-
-function managedAgentSessionDetail(session: DesktopManagedAgentSession): string {
-  return [
-    managedAgentSessionStatusLabel(session),
-    managedAgentPermissionProfileLabel(session),
-    session.providerId === "cursor" ? cursorMcpPolicyLabel(session.cursorMcpPolicy) : null,
-    session.providerId === "open-model" ? session.model || null : null,
-    managedAgentRepoDetail(session),
-  ].filter(Boolean).join(" - ");
-}
-
-function resetTransientState(): void {
-  modalStateVersion += 1;
-  preflightRequestId += 1;
-  loadingProviders.value = false;
-  loadingPreflight.value = false;
-  setupBusy.value = false;
-  startingAgent.value = false;
-  stoppingSessionId.value = null;
-  copyingAuthCommand.value = false;
-  copyingExternalPrompt.value = false;
-  setupConfirmation.value = null;
-  setupMessage.value = null;
-  loadError.value = null;
-  openModelApiKey.value = "";
-  savingOpenModelSettings.value = false;
-}
-
-function upsertManagedSession(session: DesktopManagedAgentSession): void {
-  emit("managed-sessions-updated", [
-    session,
-    ...props.managedSessions.filter((entry) => entry.id !== session.id),
-  ]);
-}
-
-function startManagedSessionRefreshTimer(intervalMs = 4_000): void {
-  stopManagedSessionRefreshTimer();
-  managedSessionRefreshTimer = window.setInterval(() => {
-    void loadManagedSessions({ quiet: true });
-  }, intervalMs);
-}
-
-function stopManagedSessionRefreshTimer(): void {
-  if (managedSessionRefreshTimer !== null) {
-    window.clearInterval(managedSessionRefreshTimer);
-    managedSessionRefreshTimer = null;
-  }
-}
-
-function isCurrentModalState(version: number): boolean {
-  return props.open && version === modalStateVersion;
+function handleAfterLeave(): void {
+  if (props.open) return;
+  restoreFocus(previousFocusElement);
+  previousFocusElement = null;
 }
 
 function handleDialogTab(event: KeyboardEvent): void {
   trapFocusInDialog(event, dialogElement.value);
 }
 
-async function runPreflight(): Promise<void> {
-  if (!selectedProviderId.value) return;
-  const requestProviderId = selectedProviderId.value;
-  const requestVersion = modalStateVersion;
-  const requestId = ++preflightRequestId;
-  loadingPreflight.value = true;
-  loadError.value = null;
-  setupConfirmation.value = null;
-  try {
-    const result = await window.letagentsDesktop.workers.runAgentProviderPreflight(
-      requestProviderId,
-      {
-        roomIdentifier: props.roomIdentifier,
-        repoRootPath: props.repoRootPath,
-        permissionProfileId: selectedPermissionProfile.value?.id ?? null,
-        cursorMcpPolicy: requestProviderId === "cursor" ? selectedCursorMcpPolicy.value : null,
-      },
-    );
-    if (
-      isCurrentModalState(requestVersion) &&
-      requestId === preflightRequestId &&
-      selectedProviderId.value === requestProviderId
-    ) {
-      preflight.value = result;
-    }
-  } catch (error) {
-    if (
-      isCurrentModalState(requestVersion) &&
-      requestId === preflightRequestId &&
-      selectedProviderId.value === requestProviderId
-    ) {
-      loadError.value = error instanceof Error ? error.message : "Could not check provider readiness.";
-    }
-  } finally {
-    if (isCurrentModalState(requestVersion) && requestId === preflightRequestId) {
-      loadingPreflight.value = false;
-    }
-  }
+async function handleRecoverSupervisedLaunch(): Promise<void> {
+  await supervisedUi.launch.recoverDetectedLaunch();
+  if (supervisedUi.launch.recoveryCandidate.value) return;
+  await nextTick();
+  dialogElement.value?.querySelector<HTMLElement>('[data-testid="desktop-add-agent-supervised-runtime"], [data-testid="desktop-add-agent-supervised-lookup-error"]')?.focus();
 }
 
-async function runSetupAction(action: DesktopAgentProviderSetupAction): Promise<void> {
-  if (!selectedProviderId.value) return;
-  const providerId = selectedProviderId.value;
-  if (!isAgentSetupConfirmationActive(setupConfirmation.value, providerId, action)) {
-    setupConfirmation.value = { providerId, action };
-    setupMessage.value = agentSetupConfirmationMessage(action, selectedProvider.value);
-    return;
-  }
-
-  setupBusy.value = true;
-  setupMessage.value = null;
-  const requestVersion = modalStateVersion;
-  try {
-    const result = await window.letagentsDesktop.workers.runAgentProviderSetup(
-      providerId,
-      {
-        action,
-        confirmed: true,
-        roomIdentifier: props.roomIdentifier,
-        repoRootPath: props.repoRootPath,
-      },
-    );
-    if (!isCurrentModalState(requestVersion) || selectedProviderId.value !== providerId) return;
-    setupMessage.value = result.message;
-    setupConfirmation.value = null;
-    await runPreflight();
-  } catch (error) {
-    if (!isCurrentModalState(requestVersion) || selectedProviderId.value !== providerId) return;
-    setupMessage.value = error instanceof Error ? error.message : "Setup action failed.";
-  } finally {
-    if (isCurrentModalState(requestVersion) && selectedProviderId.value === providerId) {
-      setupBusy.value = false;
-    }
-  }
-}
-
-function setupActionButtonText(action: DesktopAgentProviderSetupAction): string {
-  return agentSetupActionButtonLabel(
-    action,
-    selectedProvider.value,
-    isAgentSetupConfirmationActive(setupConfirmation.value, selectedProviderId.value, action),
-    setupBusy.value,
-  );
-}
-
-async function copyAgentAuthCommand(): Promise<void> {
-  const command = authCommand.value;
-  if (!command || copyingAuthCommand.value) return;
-
-  const requestVersion = modalStateVersion;
-  copyingAuthCommand.value = true;
-  setupMessage.value = null;
-  try {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error("Clipboard is unavailable.");
-    }
-    await navigator.clipboard.writeText(command);
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = `Copied: ${command}`;
-  } catch {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = `Clipboard unavailable. Run: ${command}`;
-  } finally {
-    if (isCurrentModalState(requestVersion)) {
-      copyingAuthCommand.value = false;
-    }
-  }
-}
-
-async function copyExternalJoinPrompt(): Promise<void> {
-  const prompt = externalJoinPrompt.value;
-  if (!prompt || copyingExternalPrompt.value) return;
-
-  const requestVersion = modalStateVersion;
-  copyingExternalPrompt.value = true;
-  setupMessage.value = null;
-  try {
-    if (!navigator.clipboard?.writeText) {
-      throw new Error("Clipboard is unavailable.");
-    }
-    await navigator.clipboard.writeText(prompt);
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = "Copied the agent join prompt.";
-  } catch {
-    if (!isCurrentModalState(requestVersion)) return;
-    setupMessage.value = "Clipboard unavailable. Open Show full instructions, then copy the prompt manually.";
-  } finally {
-    if (isCurrentModalState(requestVersion)) {
-      copyingExternalPrompt.value = false;
-    }
-  }
-}
+const { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, showDeliverySelector, deliveryMode, deliveryModeDescription, selectedPermissionProfiles, selectedPermissionProfile, showCursorMcpPolicySelector, selectedCursorMcpPolicy, selectedCursorMcpPolicyDescription, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, createWorktree, startManagedAgent } = useAddAgentController(props, emit as AddAgentModalEmit);
 </script>

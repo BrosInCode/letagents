@@ -13,9 +13,11 @@ import {
   isLowSignalGitHubCheckMessage,
 } from "../desktop-chat-message/github-event";
 import { roomTimelineMessages } from "../room-chat/thread-utils";
+import { desktopIpc } from "../../../../ipc/index.js";
 
 const messageHistoryPageSize = 150;
 const maxAutoHistoryBackfillPages = 5;
+const maxExplicitMessageRevealPages = 5;
 
 export function useDesktopRoomMessages(options: {
   room: Readonly<Ref<DesktopRoomInfo>>;
@@ -109,7 +111,7 @@ export function useDesktopRoomMessages(options: {
     sendingMessage.value = true;
     sendError.value = null;
     try {
-      const result = await window.letagentsDesktop.room.sendMessage(
+      const result = await desktopIpc.room.sendMessage(
         options.room.value.identifier,
         trimmedText,
         replyTo,
@@ -128,7 +130,7 @@ export function useDesktopRoomMessages(options: {
   }
 
   async function discardAttachment(uploadId: string): Promise<void> {
-    await window.letagentsDesktop.room.discardAttachment(options.room.value.identifier, uploadId);
+    await desktopIpc.room.discardAttachment(options.room.value.identifier, uploadId);
   }
 
   async function loadOlderMessages(): Promise<void> {
@@ -142,7 +144,7 @@ export function useDesktopRoomMessages(options: {
 
     loadingOlderMessages.value = true;
     try {
-      const page = await window.letagentsDesktop.room.getMessagesBefore(
+      const page = await desktopIpc.room.getMessagesBefore(
         roomIdentifier,
         firstMessageId,
         messageHistoryPageSize
@@ -160,6 +162,22 @@ export function useDesktopRoomMessages(options: {
     }
   }
 
+  /**
+   * Reveal an explicit causal link without unboundedly walking room history.
+   * A false result is intentionally surfaced by the App shell rather than
+   * silently leaving a link that appears to have worked.
+   */
+  async function revealMessage(messageId: string): Promise<boolean> {
+    const targetId = messageId.trim();
+    if (!targetId) return false;
+    for (let page = 0; page <= maxExplicitMessageRevealPages; page += 1) {
+      if (visibleMessages.value.some((message) => message.id === targetId)) return true;
+      if (!hasOlderMessages.value || loadingOlderMessages.value) return false;
+      await loadOlderMessages();
+    }
+    return visibleMessages.value.some((message) => message.id === targetId);
+  }
+
   return {
     sendingMessage,
     sendError,
@@ -174,6 +192,7 @@ export function useDesktopRoomMessages(options: {
     sendRoomMessage,
     discardAttachment,
     loadOlderMessages,
+    revealMessage,
   };
 }
 

@@ -3,15 +3,26 @@ import type { Express } from "express";
 import { upsertAccountRoomRecent } from "../account-room-membership.js";
 import {
   assignProjectAdminIfRoomHasNoAdmins,
+  concludeFocusRoom,
+  getGitHubAppInstallationById,
+  getGitHubAppRepositoryByRoomId,
+  getGitHubRoomEvents,
   getGitRoomBindingForRoom,
   getGitRoomBindingsForRooms,
+  getFocusRoomByKey,
   getProjectById,
+  getActiveTaskLeases,
   getRoomSharedArtifactByIdentityKey,
   getRoomSharedArtifacts,
+  getTaskById,
+  getTaskOwnershipState,
   linkRoomSharedArtifactToTask,
+  publishWorkerArtifactFenced,
   updateProjectDisplayName,
+  updateTask,
   upsertRoomSharedArtifact,
 } from "../db.js";
+import { fetchPullRequestUnifiedDiff } from "../github/pull-request-diff.js";
 import { toGitHubWebhookId } from "../github/app-sync.js";
 import {
   getProjectAccessRoomId,
@@ -22,6 +33,7 @@ import {
   requireGitRoomParticipant as requireParticipant,
   resolveGitHubRoomEntryDecision,
   resolveGitRoomProjectRole as resolveProjectRole,
+  resolveRequestProjectRepoAccessRoomName,
   resolveProjectRepoRoomAccessDecision,
   resolveProjectRoomEntryDecision,
   resolveRepoRoomAccessDecision,
@@ -41,6 +53,7 @@ import {
   formatFocusRoomConclusionMessage,
   toRoomResponse,
 } from "../rooms/formatting.js";
+import { requireWorkerRequestAgentIdentity } from "../request/agent-identity.js";
 import { resolveRequestAuth } from "../request/auth.js";
 import { registerAccountRoomRoutes } from "../routes/account/rooms.js";
 import {
@@ -56,6 +69,8 @@ import {
   type GitHubWebhookRouteDeps,
 } from "../routes/github/webhooks.js";
 import { registerHealthRoutes } from "../routes/system/health.js";
+import { registerDesktopPushRoutes } from "../routes/desktop-push.js";
+import { registerDesktopDownloadRoutes } from "../releases/desktop-download.js";
 import {
   registerLegacyProjectRoutes,
   type LegacyProjectRouteDeps,
@@ -72,6 +87,7 @@ import { registerRentalInternalRoutes } from "../routes/rental/internal/index.js
 import {
   registerRentalProviderRoutes,
 } from "../routes/rental/provider.js";
+import { registerRentalProviderHostRoutes } from "../routes/rental/provider-hosts.js";
 import {
   buildInMemoryListingsRateLimiter,
   registerRentalRenterRoutes,
@@ -80,6 +96,14 @@ import {
   registerRoomArtifactRoutes,
   type RoomArtifactRouteDeps,
 } from "../routes/rooms/artifacts.js";
+import {
+  registerRoomPullRequestDiffRoutes,
+  type RoomPullRequestDiffRouteDeps,
+} from "../routes/rooms/pull-request-diff.js";
+import {
+  registerRoomBoardRoutes,
+  type RoomBoardRouteDeps,
+} from "../routes/rooms/board.js";
 import {
   registerRoomEntryRoutes,
   type RoomEntryRouteDeps,
@@ -116,6 +140,7 @@ import {
   registerRoomTaskRoutes,
   type RoomTaskRouteDeps,
 } from "../routes/rooms/tasks/index.js";
+import { registerSupervisorHostGrantRoutes } from "../routes/supervisor-host-grants.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import {
   createListing,
@@ -132,8 +157,11 @@ import {
   cancelSession,
   getSessionById,
   listProviderRequests,
+  listProviderSessions,
 } from "../rental/sessions.js";
 import { provisionRentalRoomForProvider } from "../rental/room-projection.js";
+import { publicRentalProviders } from "../rental/provider-hosts.js";
+import { rentalActivityEvents } from "../rental/activity-emitter.js";
 import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
@@ -145,9 +173,20 @@ import {
   emitProjectMessage,
 } from "./events.js";
 import {
+  roomEventBridgeLossEvents,
+  setRoomEventBridgeInterestPredicate,
+} from "./event-bridge.js";
+import { messageInfoEvents } from "./message-info-events.js";
+import { createRoomEventBroker, type RoomEventBroker } from "./room-event-broker.js";
+import {
+  createRoomMessageOverlayBatcher,
+  type RoomMessageOverlayBatcher,
+} from "./room-message-overlays.js";
+import {
   emitTaskLifecycleStatusMessage,
   enforceFocusParentBoardWriteIsolation,
   enforceTaskAdmissionCoordination,
+  enforceTaskAdmissionPreconditions,
   enforceTaskCoordinationMutation,
   isTrustedAgentCreator,
   maybeEmitStaleWorkPrompt,
@@ -157,7 +196,36 @@ import {
   validateOwnerTokenTaskActorKey,
 } from "./room-services.js";
 
+let sharedRoomEventBroker: RoomEventBroker | null = null;
+let sharedRoomMessageOverlayBatcher: RoomMessageOverlayBatcher | null = null;
+
+function getRoomEventBroker(): RoomEventBroker {
+  sharedRoomEventBroker ??= createRoomEventBroker({
+    messageEvents,
+    taskEvents,
+    githubRoomEvents,
+    reasoningEvents,
+    artifactEvents,
+    rentalActivityEvents,
+    messageInfoEvents,
+    bridgeLossEvents: roomEventBridgeLossEvents,
+  });
+  setRoomEventBridgeInterestPredicate((roomId) => sharedRoomEventBroker?.hasInterest(roomId) ?? false);
+  return sharedRoomEventBroker;
+}
+
+export function closeApiRouteEventBroker(): void {
+  sharedRoomEventBroker?.close();
+  sharedRoomEventBroker = null;
+  sharedRoomMessageOverlayBatcher?.close();
+  sharedRoomMessageOverlayBatcher = null;
+  setRoomEventBridgeInterestPredicate(null);
+}
+
 export function registerApiRoutes(app: Express): void {
+  const roomEventBroker = getRoomEventBroker();
+  sharedRoomMessageOverlayBatcher ??= createRoomMessageOverlayBatcher();
+  const roomMessageOverlayBatcher = sharedRoomMessageOverlayBatcher;
   const roomEntryRouteDeps = {
     getProjectById,
     getGitRoomBindingForRoom,
@@ -167,6 +235,7 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomEntryRouteDeps;
 
   registerWebRoutes(app);
+  registerDesktopDownloadRoutes(app);
 
   registerRoomEntryRoutes(app, roomEntryRouteDeps);
 
@@ -195,7 +264,9 @@ export function registerApiRoutes(app: Express): void {
   } satisfies LegacyProjectRouteDeps;
 
   const legacyProjectMessageRouteDeps = {
-    messageEvents,
+    roomEventBroker,
+    roomMessageOverlayBatcher,
+    resolveRequestProjectRepoAccessRoomName,
     resolveCanonicalRoomRequestId,
     requireParticipant,
     parseOptionalAgentPromptKind,
@@ -226,11 +297,9 @@ export function registerApiRoutes(app: Express): void {
   } satisfies LegacyProjectTaskRouteDeps;
 
   const roomMessageRouteDeps = {
-    artifactEvents,
-    githubRoomEvents,
-    messageEvents,
-    taskEvents,
-    reasoningEvents,
+    roomEventBroker,
+    roomMessageOverlayBatcher,
+    resolveRequestProjectRepoAccessRoomName,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireParticipant,
@@ -250,6 +319,7 @@ export function registerApiRoutes(app: Express): void {
     requireParticipant,
     rememberAgentRoomParticipant,
     maybeEmitStaleWorkPrompt,
+    emitProjectMessage,
   } satisfies RoomPresenceRouteDeps;
 
   const roomReasoningRouteDeps = {
@@ -260,6 +330,10 @@ export function registerApiRoutes(app: Express): void {
   } satisfies RoomReasoningRouteDeps;
 
   const roomFocusRouteDeps = {
+    getFocusRoomByKey,
+    getTaskById,
+    getTaskOwnershipState,
+    concludeFocusRoom,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
@@ -280,6 +354,9 @@ export function registerApiRoutes(app: Express): void {
 
   const roomTaskRouteDeps = {
     taskEvents,
+    getTaskById,
+    getTaskOwnershipState,
+    updateTask,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireAdmin,
@@ -314,11 +391,39 @@ export function registerApiRoutes(app: Express): void {
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireParticipant,
+    getActiveTaskLeases,
     getRoomSharedArtifactByIdentityKey,
     getRoomSharedArtifacts,
     linkRoomSharedArtifactToTask,
+    publishWorkerArtifactFenced,
+    requireWorkerRequestAgentIdentity,
     upsertRoomSharedArtifact,
   } satisfies RoomArtifactRouteDeps;
+
+  const roomPullRequestDiffRouteDeps = {
+    resolveCanonicalRoomRequestId,
+    resolveRoomOrReply,
+    requireParticipant,
+    getGitHubAppRepositoryByRoomId,
+    getGitHubAppInstallationById,
+    getGitHubRoomEvents,
+    fetchPullRequestUnifiedDiff,
+  } satisfies RoomPullRequestDiffRouteDeps;
+
+  const roomBoardRouteDeps = {
+    resolveCanonicalRoomRequestId,
+    resolveRoomOrReply,
+    requireAdmin,
+    requireParticipant,
+    normalizeOptionalString,
+    emitProjectMessage,
+    enforceFocusParentBoardWriteIsolation: ({ req, targetProject }) =>
+      enforceFocusParentBoardWriteIsolation({
+        req,
+        targetProjectId: targetProject.id,
+      }),
+    enforceTaskCreateBoardIntentAdmission: enforceTaskAdmissionPreconditions,
+  } satisfies RoomBoardRouteDeps;
 
   const roomMetadataRouteDeps = {
     resolveCanonicalRoomRequestId,
@@ -363,6 +468,7 @@ export function registerApiRoutes(app: Express): void {
 
   registerAuthRoutes(app);
   registerAccountRoomRoutes(app);
+  registerDesktopPushRoutes(app);
 
   registerGitHubIntegrationRoutes(app, githubIntegrationRouteDeps);
 
@@ -375,11 +481,14 @@ export function registerApiRoutes(app: Express): void {
   registerRoomJoinRoutes(app, roomJoinRouteDeps);
   registerRoomMessageRoutes(app, roomMessageRouteDeps);
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
+  registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
   registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
   registerRoomFocusRoutes(app, roomFocusRouteDeps);
   registerRoomTaskRoutes(app, roomTaskRouteDeps);
+  registerRoomBoardRoutes(app, roomBoardRouteDeps);
   registerRoomEventRoutes(app, roomEventRouteDeps);
   registerRoomArtifactRoutes(app, roomArtifactRouteDeps);
+  registerRoomPullRequestDiffRoutes(app, roomPullRequestDiffRouteDeps);
   registerRoomMetadataRoutes(app, roomMetadataRouteDeps);
   registerRentalProviderRoutes(app, {
     createListing,
@@ -391,13 +500,22 @@ export function registerApiRoutes(app: Express): void {
     declineSession,
     provisionSession: provisionRentalRoomForProvider,
     listProviderRequests,
+    listProviderSessions,
   });
+  registerRentalProviderHostRoutes(app);
   registerRentalInternalRoutes(app);
   registerRentalRenterRoutes(app, {
     publicListings,
+    publicProviders: publicRentalProviders,
     shouldAllowListingsQuery: buildInMemoryListingsRateLimiter(),
     createSession,
     getSessionById,
     cancelSession,
+    resolveAuthorizedTargetRoom: async (req, res, roomId) => {
+      const canonicalRoomId = await resolveCanonicalRoomRequestId(roomId);
+      const room = await resolveRoomOrReply(canonicalRoomId, res);
+      if (!room || !(await requireParticipant(req, res, room))) return null;
+      return room.id;
+    },
   });
 }

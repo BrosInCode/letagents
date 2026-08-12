@@ -2,6 +2,7 @@ import type { Component } from "vue";
 
 export type SettingsPaneId =
   | "account:profile"
+  | "account:renting"
   | "rooms:defaults"
   | "rooms:left"
   | "rooms:danger"
@@ -10,7 +11,9 @@ export type SettingsPaneId =
   | "storage:database"
   | "system:setup"
   | "system:app-agent"
+  | "system:supervisor"
   | "system:runtime"
+  | "system:updates"
   | "system:mcp"
   | "system:agents"
   | "system:diagnostics";
@@ -26,3 +29,8 @@ export interface SettingsNavGroup {
   label: string;
   items: SettingsNavItem[];
 }
+
+export type SettingsFeedback = {
+  message: string;
+  state: "error" | "info" | "success";
+};

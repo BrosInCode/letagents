@@ -1,6 +1,7 @@
 <template>
   <article
     class="room-chat-message"
+    tabindex="-1"
     :class="{
       'is-system-message': isSystem,
       'is-github-message': Boolean(githubEvent),
@@ -8,10 +9,17 @@
       'is-search-active': searchActive,
       'is-active-thread-root': activeThreadRoot,
       'is-compact-continuation': compactWithPrevious,
+      'is-ambient-system-message': isAmbientSystem,
+      'is-arriving': animateArrival,
+      'is-thread-context': context !== 'timeline',
+      'is-thread-root-context': context === 'thread-root',
+      'is-thread-reply-context': context === 'thread-reply',
     }"
+    :style="{ '--message-accent': senderColor }"
     :data-owner-kind="ownerKind"
     :data-message-id="message.id"
-    :data-testid="`room-message-${message.id}`"
+    :data-thread-message-id="threadMessageId || undefined"
+    :data-testid="testId || `room-message-${message.id}`"
     @contextmenu="openContextMenu"
     @pointerup="handleSelectionPointerUp"
   >
@@ -35,9 +43,11 @@
           </button>
           <strong v-else>{{ displayName }}</strong>
           <span v-if="ownerAttribution" class="room-message-owner">{{ ownerAttribution }}</span>
-          <span v-if="ideLabel" class="room-message-ide" :data-ide="ideLabel.toLowerCase()">
-            {{ ideLabel }}
-          </span>
+          <ProviderBadge
+            v-if="ideLabel"
+            :label="ideLabel"
+            :agent-key="message.agentIdentity?.agentKey"
+          />
         </div>
         <div class="room-message-meta-tail">
           <button
@@ -62,14 +72,15 @@
           <button
             class="room-message-reply-action room-message-thread-action"
             type="button"
-            title="Reply in thread"
-            aria-label="Reply in thread"
-            @click="$emit('open-thread', message.id)"
+            :title="tertiaryActionLabel"
+            :aria-label="tertiaryActionLabel"
+            @click="handleTertiaryAction"
           >
-            <MessageSquare :size="14" aria-hidden="true" />
+            <LocateFixed v-if="context !== 'timeline'" :size="14" aria-hidden="true" />
+            <MessageSquare v-else :size="14" aria-hidden="true" />
           </button>
-          <span class="room-message-provenance" :data-kind="ownerKind">
-            {{ ownerKind }}
+          <span v-if="provenanceLabel" class="room-message-provenance" :data-kind="ownerKind">
+            {{ provenanceLabel }}
           </span>
           <time :datetime="message.timestamp">{{ formattedTime }}</time>
         </div>
@@ -90,7 +101,9 @@
         <DesktopGitHubEventCard
           v-if="githubEvent"
           :event="githubEvent"
+          :task-link-enabled="Boolean(githubEvent.taskId && taskReferenceIds?.has(githubEvent.taskId))"
           @open-event="$emit('open-github-event', $event)"
+          @open-task="$emit('open-task', $event)"
         />
 
         <DesktopLongMessageContent
@@ -98,6 +111,8 @@
           :text="message.text || 'No message body.'"
           :html="renderedText"
           :message-id="message.id"
+          @message-reference-click="$emit('scroll-to-message', $event)"
+          @task-reference-click="$emit('open-task', $event)"
         />
 
         <DesktopMessageAttachments
@@ -108,8 +123,69 @@
         />
       </div>
 
+      <ul
+        v-if="visibleDeliveryReceipts.length"
+        class="room-message-delivery-receipts"
+        aria-label="Agent response status"
+        aria-live="polite"
+      >
+        <li
+          v-for="receipt in visibleDeliveryReceipts"
+          :key="receipt.agentId"
+          :data-state="receipt.state"
+          :aria-label="receiptLabel(receipt)"
+        >
+          <span class="room-message-delivery-indicator" aria-hidden="true">
+            <span v-if="receiptIsAnimated(receipt.state)" class="room-message-delivery-dots">
+              <i></i><i></i><i></i>
+            </span>
+            <CircleAlert v-else-if="receiptNeedsAttention(receipt.state)" :size="14" />
+            <Check v-else :size="14" />
+          </span>
+          <strong>{{ receipt.agentName }}</strong>
+          <small v-if="receiptStateLabel(receipt)">{{ receiptStateLabel(receipt) }}</small>
+          <button
+            v-if="receipt.state === 'queued_behind_blocked' && receipt.blockedByMessageId"
+            type="button"
+            class="room-message-delivery-link"
+            @click="$emit('scroll-to-message', receipt.blockedByMessageId)"
+          >
+            View earlier message
+          </button>
+          <template
+            v-if="receipt.state === 'blocked'
+              && receipt.failureCode === 'provider_continuation_missing'
+              && receipt.attemptCount === 0
+              && !receipt.providerTurnId"
+          >
+            <button
+              type="button"
+              :disabled="!continuationRepairAvailable || restoringReceipt(receipt.agentId)"
+              :aria-label="continuationRepairAvailable ? `Restore conversation for ${receipt.agentName}` : `Conversation restoration for ${receipt.agentName} is unavailable`"
+              @click="continuationRepairAvailable && !restoringReceipt(receipt.agentId) && $emit('restore-conversation', receipt.agentId, message.id)"
+            >{{ restoringReceipt(receipt.agentId) ? "Restoring…" : "Restore and retry" }}</button>
+            <button
+              type="button"
+              :disabled="!roomDeliverySkipAvailable || skippingReceipt(receipt.agentId)"
+              :aria-label="roomDeliverySkipAvailable ? `Skip blocked message for ${receipt.agentName}` : `Skip message for ${receipt.agentName} is unavailable`"
+              @click="roomDeliverySkipAvailable && !skippingReceipt(receipt.agentId) && $emit('skip-delivery', receipt.agentId, message.id)"
+            >{{ skippingReceipt(receipt.agentId) ? "Skipping…" : "Skip message" }}</button>
+          </template>
+          <template v-else-if="receipt.state === 'blocked'">
+            <button
+              type="button"
+              :disabled="!deliveryRecoveryAvailable || retryingReceipt(receipt.agentId)"
+              :aria-label="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) ? `Retry delivery for ${receipt.agentName}` : `Retry delivery for ${receipt.agentName} is unavailable`"
+              :title="deliveryRecoveryAvailable ? 'Retry delivery' : 'Retry will be available when delivery recovery is connected'"
+              @click="deliveryRecoveryAvailable && !retryingReceipt(receipt.agentId) && $emit('retry-delivery', receipt.agentId, message.id)"
+            >{{ retryingReceipt(receipt.agentId) ? "Retrying…" : deliveryRecoveryAvailable ? "Retry" : "Retry unavailable" }}</button>
+            <small v-if="!deliveryRecoveryAvailable">Retry will be available when delivery recovery is connected.</small>
+          </template>
+        </li>
+      </ul>
+
       <button
-        v-if="threadIndicatorVisible"
+        v-if="context === 'timeline' && threadIndicatorVisible"
         class="room-thread-marker"
         :class="{ 'is-active': activeThreadRoot }"
         type="button"
@@ -141,29 +217,47 @@
       </button>
     </div>
 
-    <div
-      v-if="contextMenuOpen"
-      class="room-message-context-menu"
-      :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
-      role="menu"
-      data-testid="room-message-context-menu"
-      @keydown.down.prevent="focusContextMenuItem(1)"
-      @keydown.up.prevent="focusContextMenuItem(-1)"
-      @pointerdown.stop
-      @contextmenu.prevent.stop
-    >
-      <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
-        <span>Copy message</span>
-      </button>
-      <button type="button" role="menuitem" @click="quoteReplyFromContext">
-        <span>Quote reply</span>
-      </button>
-      <button type="button" role="menuitem" @click="openThreadFromContext">
-        <span>Reply in thread</span>
-      </button>
-    </div>
-
     <Teleport to="body">
+      <div
+        v-if="contextMenuOpen"
+        class="room-message-context-menu"
+        :style="{ left: `${contextMenuPosition.x}px`, top: `${contextMenuPosition.y}px` }"
+        role="menu"
+        data-testid="room-message-context-menu"
+        @keydown.down.prevent="focusContextMenuItem(1)"
+        @keydown.up.prevent="focusContextMenuItem(-1)"
+        @pointerdown.stop
+        @contextmenu.prevent.stop
+      >
+        <template v-if="contextLinkHref">
+          <button ref="firstContextMenuButton" type="button" role="menuitem" @click="openLinkFromContext">
+            <span>Open link in browser</span>
+          </button>
+          <button type="button" role="menuitem" @click="copyLinkFromContext">
+            <span>Copy link</span>
+          </button>
+          <div class="room-message-context-menu-separator" role="separator" />
+          <button type="button" role="menuitem" @click="messageInfoFromContext">
+            <span>Message info</span>
+          </button>
+        </template>
+        <template v-else>
+          <button ref="firstContextMenuButton" type="button" role="menuitem" @click="copyFromContext">
+            <span>Copy message</span>
+          </button>
+          <button type="button" role="menuitem" @click="quoteReplyFromContext">
+            <span>Quote reply</span>
+          </button>
+          <button type="button" role="menuitem" @click="tertiaryActionFromContext">
+            <span>{{ tertiaryActionLabel }}</span>
+          </button>
+          <div class="room-message-context-menu-separator" role="separator" />
+          <button type="button" role="menuitem" @click="messageInfoFromContext">
+            <span>Message info</span>
+          </button>
+        </template>
+      </div>
+
       <div
         v-if="selectionPopoverOpen"
         class="room-selection-popover"
@@ -172,7 +266,7 @@
         @pointerdown.stop.prevent
       >
         <button type="button" @click="addSelectionToChat">
-          Add to chat
+          {{ selectionActionLabel }}
         </button>
       </div>
     </Teleport>
@@ -181,32 +275,76 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, ref } from "vue";
-import { Check, Copy, CornerUpLeft, MessageSquare } from "@lucide/vue";
+import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } from "@lucide/vue";
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
+import { desktopIpc } from "../../../ipc/index.js";
+import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
+import ProviderBadge from "./desktop-chat-message/ProviderBadge.vue";
 import {
   getSenderColor,
   parseSenderIdentity,
+  resolveOwnerAttribution,
 } from "./desktop-chat-message/identity";
 import { parseGitHubEvent } from "./desktop-chat-message/github-event";
 import {
+  restoreContextMenuFocus,
+  shouldRestoreContextMenuFocus,
+  type ContextMenuCloseReason,
+} from "./desktop-chat-message/context-menu-focus";
+import {
   formatTimestamp,
   renderMessageText,
+  isAmbientSystemMessage,
+  stripStatusPrefix,
   truncate,
 } from "./desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import type { ThreadIndicatorSummary } from "./room-chat/thread-utils";
 import DesktopLongMessageContent from "./DesktopLongMessageContent.vue";
 
-const props = defineProps<{
+const props = withDefaults(defineProps<{
   message: DesktopRoomMessage;
   compactWithPrevious?: boolean;
   threadSummary: ThreadIndicatorSummary;
   activeThreadRoot: boolean;
   highlightQuery: string;
+  messageReferenceIds?: ReadonlySet<string>;
+  taskReferenceIds?: ReadonlySet<string>;
   searchActive: boolean;
-}>();
+  animateArrival?: boolean;
+  context?: "timeline" | "thread-root" | "thread-reply";
+  threadMessageId?: string;
+  testId?: string;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
+  deliveryRecoveryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
+  deliveryRetryKeys?: ReadonlySet<string>;
+  continuationRepairKeys?: ReadonlySet<string>;
+  roomDeliverySkipKeys?: ReadonlySet<string>;
+  providerLabel?: string | null;
+}>(), {
+  context: "timeline",
+  deliveryReceipts: () => [],
+  deliveryRecoveryAvailable: false,
+  continuationRepairAvailable: false,
+  roomDeliverySkipAvailable: false,
+});
+
+function retryingReceipt(agentId: string): boolean {
+  return props.deliveryRetryKeys?.has(`${agentId}:${props.message.id}`) === true;
+}
+
+function restoringReceipt(agentId: string): boolean {
+  return props.continuationRepairKeys?.has(`${agentId}:${props.message.id}`) === true;
+}
+
+function skippingReceipt(agentId: string): boolean {
+  return props.roomDeliverySkipKeys?.has(`${agentId}:${props.message.id}`) === true;
+}
 
 const emit = defineEmits<{
   "quote-reply": [messageId: string];
@@ -215,23 +353,90 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-agent": [target: AgentModalTarget];
   "open-github-event": [url: string];
+  "open-task": [taskId: string];
   "quote-selection": [messageId: string, text: string];
+  "jump-to-thread-root": [messageId: string];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
+  "restore-conversation": [agentId: string, sourceMessageId: string];
+  "skip-delivery": [agentId: string, sourceMessageId: string];
+  "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
 }>();
+
+const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((receipt) => [
+  "retryable",
+  "result_recovery",
+  "blocked",
+  "acknowledged_no_reply",
+  "cancelled_by_room_move",
+  "cancelled_by_user",
+  "restoring_conversation",
+  "queued_behind_blocked",
+].includes(receipt.state)));
+
+function receiptIsAnimated(state: string): boolean {
+  return ["pending", "dispatching", "awaiting_result", "publishing", "retryable", "result_recovery", "restoring_conversation"].includes(state);
+}
+
+function receiptNeedsAttention(state: string): boolean {
+  return state === "blocked" || state === "queued_behind_blocked";
+}
+
+function receiptStateLabel(receipt: { state: string; terminalReason: string | null }): string {
+  if (receipt.terminalReason === "upgrade_authority_unavailable") return "Retired during safety upgrade";
+  const state = receipt.state;
+  if (state === "retryable") return "Retrying";
+  if (state === "result_recovery") return "Recovering reply";
+  if (state === "restoring_conversation") return "Restoring conversation";
+  if (state === "blocked") return "Needs attention";
+  if (state === "queued_behind_blocked") return "Queued behind an issue";
+  if (state === "acknowledged_no_reply") return "Read · no reply";
+  if (state === "cancelled_by_room_move") return "Moved rooms";
+  if (state === "cancelled_by_user") return "Skipped";
+  return "";
+}
+
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null }): string {
+  if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
+  if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
+  if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
+  if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
+  if (receipt.state === "acknowledged") return `${receipt.agentName} replied`;
+  if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
+  if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
+  if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
+  if (receipt.state === "restoring_conversation") return `${receipt.agentName} is restoring its private conversation`;
+  if (receipt.state === "blocked") return `${receipt.agentName} needs attention`;
+  if (receipt.state === "cancelled_by_room_move") return `${receipt.agentName} moved to another room before handling this`;
+  if (receipt.state === "cancelled_by_user") return `You skipped this message for ${receipt.agentName}`;
+  if (receipt.state === "queued_behind_blocked") return `Waiting — ${receipt.agentName} needs attention on ${receipt.blockedByMessageId || "an earlier message"}`;
+  return `Waiting for ${receipt.agentName}`;
+}
 
 const contextMenuOpen = ref(false);
 const contextMenuPosition = ref({ x: 0, y: 0 });
 const firstContextMenuButton = ref<HTMLButtonElement | null>(null);
-const copied = ref(false);
+const contextMenuInvoker = ref<HTMLElement | null>(null);
+// When the right-click landed on an external web link, the menu shows link
+// actions ("Open link in browser" / "Copy link") instead of message actions.
+const contextLinkHref = ref<string | null>(null);
+const { copied, copy: copyToClipboard } = useCopyIndicator(1400);
 const selectionPopoverOpen = ref(false);
 const selectionPopoverPosition = ref({ x: 0, y: 0 });
 const selectedQuoteText = ref("");
-let copyResetTimeout: number | null = null;
 let selectionOutsideListenerActive = false;
 const identity = computed(() => parseSenderIdentity(props.message));
 const displayName = computed(() => props.message.agentIdentity?.displayName || identity.value.displayName);
-const ownerAttribution = computed(() => props.message.agentIdentity?.ownerAttribution || identity.value.ownerAttribution);
-const ideLabel = computed(() => props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
+const ownerAttribution = computed(() => resolveOwnerAttribution({
+  ownerAttribution: props.message.agentIdentity?.ownerAttribution,
+  ownerLabel: props.message.agentIdentity?.ownerLabel,
+  actorLabel: props.message.agentIdentity?.actorLabel || props.message.actorLabel,
+  sender: props.message.sender,
+}));
+const ideLabel = computed(() => props.providerLabel || props.message.agentIdentity?.ideLabel || identity.value.ideLabel);
 const isSystem = computed(() => ["system", "letagents"].includes(props.message.sender.toLowerCase()));
+const isAmbientSystem = computed(() =>
+  isAmbientSystemMessage(props.message.sender, props.message.text || "")
+);
 const githubEvent = computed(() => parseGitHubEvent(props.message));
 const senderColor = computed(() => getSenderColor(props.message.sender, props.message.source));
 const ownerKind = computed(() => {
@@ -241,13 +446,26 @@ const ownerKind = computed(() => {
   if (props.message.source === "browser") return "human";
   return "room";
 });
+const provenanceLabel = computed(() =>
+  ownerKind.value === "agent" && ownerAttribution.value ? null : ownerKind.value
+);
 const replyDisplayName = computed(() =>
   props.message.replyTo ? parseSenderIdentity(props.message.replyTo).displayName : "unknown"
 );
 const replyPreviewText = computed(() => truncate((props.message.replyTo?.text || "").replace(/\s+/g, " ").trim(), 160));
 const formattedTime = computed(() => formatTimestamp(props.message.timestamp));
-const renderedText = computed(() => renderMessageText(props.message.text || "No message body.", props.highlightQuery));
+const renderedText = computed(() => {
+  const text = props.message.text || "No message body.";
+  return renderMessageText(
+    isAmbientSystem.value ? stripStatusPrefix(text) : text,
+    props.highlightQuery,
+    props.messageReferenceIds,
+    props.taskReferenceIds,
+  );
+});
 const copyButtonTitle = computed(() => copied.value ? "Copied" : "Copy message");
+const tertiaryActionLabel = computed(() => props.context === "timeline" ? "Reply in thread" : "Jump to root");
+const selectionActionLabel = computed(() => props.context === "timeline" ? "Add to chat" : "Add to thread");
 const threadIndicatorVisible = computed(() =>
   props.threadSummary.count > 0 || props.threadSummary.hasPartialHistory || props.threadSummary.loadingEarlier
 );
@@ -270,6 +488,9 @@ const threadMarkerAriaLabel = computed(() => {
   return `${threadMarkerCountLabel.value}${unread}. Open thread.`;
 });
 const agentModalTarget = computed<AgentModalTarget>(() => ({
+  messageId: props.message.id,
+  clientMessageId: props.message.clientMessageId ?? null,
+  messageSource: props.message.source ?? null,
   actorLabel: props.message.actorLabel || props.message.agentIdentity?.actorLabel || props.message.sender,
   displayName: displayName.value,
   ownerAttribution: ownerAttribution.value,
@@ -289,13 +510,27 @@ function participantInitials(value: string): string {
 }
 
 function openContextMenu(event: MouseEvent): void {
-  if (shouldUseNativeContextMenu(event)) {
+  const target = event.target instanceof HTMLElement ? event.target : null;
+  const linkHref = resolveExternalWebHref(
+    target?.closest("a[href]")?.getAttribute("href"),
+    window.location.href,
+  );
+  // External web links get the app menu with link actions. Everything else on
+  // an interactive/editable element (inputs, buttons, non-web anchors) keeps
+  // the platform's native menu.
+  if (!linkHref && shouldUseNativeContextMenu(event)) {
     return;
   }
   event.preventDefault();
+  const article = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+  contextLinkHref.value = linkHref;
+  contextMenuInvoker.value = target?.closest<HTMLElement>("button, a, [tabindex]") || article;
   closeSelectionPopover();
   const menuWidth = 180;
-  const menuHeight = 122;
+  // Link variant: 3 rows + separator; message variant: 4 rows + separator.
+  // The estimate must cover the tallest variant or the last row ("Message
+  // info") clips below the viewport near the bottom edge.
+  const menuHeight = linkHref ? 140 : 176;
   contextMenuPosition.value = {
     x: Math.max(8, Math.min(event.clientX, window.innerWidth - menuWidth - 8)),
     y: Math.max(8, Math.min(event.clientY, window.innerHeight - menuHeight - 8)),
@@ -303,7 +538,7 @@ function openContextMenu(event: MouseEvent): void {
   contextMenuOpen.value = true;
   void nextTick(() => firstContextMenuButton.value?.focus());
   window.setTimeout(() => {
-    window.addEventListener("pointerdown", closeContextMenu, { once: true });
+    window.addEventListener("pointerdown", closeContextMenuFromOutside, { once: true });
     window.addEventListener("keydown", handleContextMenuKeydown);
   }, 0);
 }
@@ -313,13 +548,24 @@ function shouldUseNativeContextMenu(event: MouseEvent): boolean {
   return Boolean(target?.closest("a, button, input, textarea, select, [contenteditable='true']"));
 }
 
-function closeContextMenu(): void {
+function closeContextMenu(reason: ContextMenuCloseReason): void {
   contextMenuOpen.value = false;
   window.removeEventListener("keydown", handleContextMenuKeydown);
+  window.removeEventListener("pointerdown", closeContextMenuFromOutside);
+  if (shouldRestoreContextMenuFocus(reason)) {
+    const invoker = contextMenuInvoker.value;
+    void nextTick(() => restoreContextMenuFocus(invoker));
+  }
+  contextMenuInvoker.value = null;
+  contextLinkHref.value = null;
+}
+
+function closeContextMenuFromOutside(): void {
+  closeContextMenu("outside");
 }
 
 function handleContextMenuKeydown(event: KeyboardEvent): void {
-  if (event.key === "Escape") closeContextMenu();
+  if (event.key === "Escape") closeContextMenu("escape");
 }
 
 function focusContextMenuItem(direction: 1 | -1): void {
@@ -331,41 +577,55 @@ function focusContextMenuItem(direction: 1 | -1): void {
 }
 
 function quoteReplyFromContext(): void {
-  closeContextMenu();
+  closeContextMenu("action");
   emit("quote-reply", props.message.id);
 }
 
-function openThreadFromContext(): void {
-  closeContextMenu();
-  emit("open-thread", props.message.id);
+function tertiaryActionFromContext(): void {
+  closeContextMenu("action");
+  handleTertiaryAction();
+}
+
+function handleTertiaryAction(): void {
+  if (props.context === "timeline") {
+    emit("open-thread", props.message.id);
+    return;
+  }
+  emit("jump-to-thread-root", props.message.id);
+}
+
+function messageInfoFromContext(): void {
+  closeContextMenu("action");
+  emit("message-info", props.message.id, props.context);
 }
 
 async function copyFromContext(): Promise<void> {
-  closeContextMenu();
+  closeContextMenu("copy");
   await copyMessage();
+}
+
+async function openLinkFromContext(): Promise<void> {
+  const href = contextLinkHref.value;
+  closeContextMenu("action");
+  if (!href) return;
+  try {
+    await desktopIpc.app?.openExternalUrl?.(href);
+  } catch {
+    // Opening the system browser is best-effort; a stale bridge or a rejected
+    // shell.openExternal shouldn't surface as an unhandled rejection.
+  }
+}
+
+async function copyLinkFromContext(): Promise<void> {
+  const href = contextLinkHref.value;
+  closeContextMenu("copy");
+  if (href) await copyToClipboard(href);
 }
 
 async function copyMessage(): Promise<void> {
   const text = messageCopyText();
   if (!text) return;
-  const clipboard = navigator.clipboard;
-  if (!clipboard?.writeText) {
-    copied.value = false;
-    return;
-  }
-  try {
-    await clipboard.writeText(text);
-    copied.value = true;
-    if (copyResetTimeout !== null) {
-      window.clearTimeout(copyResetTimeout);
-    }
-    copyResetTimeout = window.setTimeout(() => {
-      copied.value = false;
-      copyResetTimeout = null;
-    }, 1400);
-  } catch {
-    copied.value = false;
-  }
+  await copyToClipboard(text);
 }
 
 function messageCopyText(): string {
@@ -468,10 +728,8 @@ function normalizedSelectedText(selection: Selection | null): string {
 
 onBeforeUnmount(() => {
   window.removeEventListener("keydown", handleContextMenuKeydown);
+  window.removeEventListener("pointerdown", closeContextMenuFromOutside);
   removeSelectionOutsidePointerListener();
   window.removeEventListener("keydown", handleSelectionKeydown);
-  if (copyResetTimeout !== null) {
-    window.clearTimeout(copyResetTimeout);
-  }
 });
 </script>

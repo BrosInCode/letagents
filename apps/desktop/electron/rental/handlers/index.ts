@@ -1,6 +1,7 @@
 import { RenterTriggerRuntime } from "../renter-trigger.js";
 import { registerActivityHandlers } from "./activity.js";
 import { registerListingHandlers } from "./listings.js";
+import { registerMarketplaceHandlers } from "./marketplace.js";
 import { registerQuotaHandlers } from "./quota.js";
 import { registerSessionHandlers } from "./sessions.js";
 import {
@@ -17,9 +18,10 @@ export type {
 } from "./types.js";
 
 export function isRentEnabled(): boolean {
-  return /^(1|true|yes)$/i.test(
-    process.env.LETAGENTS_RENT_ENABLED?.trim() ?? "",
-  );
+  // Rollout authority belongs to the server. Packaged desktop processes do
+  // not inherit server environment variables, so a local flag can only create
+  // a split-brain UI that is enabled in production and disabled on the Mac.
+  return true;
 }
 
 export function registerDesktopRentalIpcHandlers(
@@ -30,6 +32,8 @@ export function registerDesktopRentalIpcHandlers(
   const context: RentalIpcRegistrationContext = {
     renterTriggerRuntime: options.renterTriggerRuntime ?? new RenterTriggerRuntime(),
     apiClient: options.apiClient ?? null,
+    launchCoordinator: options.launchCoordinator ?? null,
+    providerHostManager: options.providerHostManager ?? null,
   };
 
   const register = (channel: string, handler: RentalIpcHandler) => {
@@ -40,6 +44,7 @@ export function registerDesktopRentalIpcHandlers(
   };
 
   registerListingHandlers(register, context);
+  registerMarketplaceHandlers(register, context);
   registerSessionHandlers(register, context);
   registerActivityHandlers(register, context);
   registerQuotaHandlers(register, context);

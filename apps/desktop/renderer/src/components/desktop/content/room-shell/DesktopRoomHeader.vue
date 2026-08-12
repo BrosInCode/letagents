@@ -16,17 +16,9 @@
         </svg>
       </button>
       <div class="desktop-room-heading">
-        <h3 class="desktop-room-title">
-          <span class="desktop-room-title-text">{{ room.displayName }}</span>
+        <h3 class="desktop-room-title" :title="room.displayName">
+          <span class="desktop-room-title-text">{{ headerDisplayName }}</span>
         </h3>
-        <div v-if="room.gitRoom" class="desktop-room-git-meta" :aria-label="gitRoomHeaderLabel">
-          <span class="desktop-room-git-item desktop-room-git-ref" :title="gitRoomRefTitle">
-            <GitPullRequest v-if="room.gitRoom.ref.type === 'pull_request'" :size="13" aria-hidden="true" />
-            <Tag v-else-if="room.gitRoom.ref.type === 'tag'" :size="13" aria-hidden="true" />
-            <GitBranch v-else :size="13" aria-hidden="true" />
-            <span>{{ gitRoomRefLabel }}</span>
-          </span>
-        </div>
         <div v-if="room.code || storage.effectiveMode === 'local'" class="desktop-room-badges">
           <span
             v-if="storage.effectiveMode === 'local'"
@@ -187,9 +179,8 @@
 </template>
 
 <script setup lang="ts">
-import { GitBranch, GitPullRequest, Tag } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
-import type { DesktopGitRoomInfo, DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
+import type { DesktopRoomInfo, DesktopRoomStorageState } from "../../../../../../electron/ipc-types";
 import DesktopStatusIndicator from "../../controls/DesktopStatusIndicator.vue";
 import type { SidebarMode } from "../../types";
 import type { RoomTab, RoomTabId } from "./types";
@@ -215,43 +206,9 @@ const overflowMenuOpen = ref(false);
 const overflowMenuRoot = ref<HTMLElement | null>(null);
 const pendingOverflowAction = ref<"find" | "settings" | null>(null);
 
-const gitRoomRefLabel = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  return gitRoom ? gitRoomRefDisplayLabel(gitRoom) : "";
-});
-
-const gitRoomRefTitle = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  if (!gitRoom) return "";
-  const type = gitRoom.ref.type.replace("_", " ");
-  if (gitRoom.ref.name && gitRoom.ref.headRepository?.fullName) {
-    return `${type}: ${gitRoom.ref.headRepository.fullName}:${gitRoom.ref.name}`;
-  }
-  return gitRoom.ref.name ? `${type}: ${gitRoom.ref.name}` : type;
-});
-
-const gitRoomHeaderLabel = computed(() => {
-  const gitRoom = props.room.gitRoom;
-  if (!gitRoom) return "";
-  const branch = gitRoomRefLabel.value;
-  const type = gitRoom.ref.type.replace("_", " ");
-  return branch ? `Git ${type} ${branch}` : `Git ${type}`;
-});
-
-function gitRoomRefDisplayLabel(gitRoom: DesktopGitRoomInfo): string {
-  const ref = gitRoom.ref;
-  if (
-    ref.name
-    && ref.headRepository?.fullName
-    && ref.headRepository.fullName !== gitRoom.repository.fullName
-  ) {
-    return `${ref.headRepository.owner}:${ref.name}`;
-  }
-  if (ref.name) return ref.name;
-  if (ref.defaultBranch) return ref.defaultBranch;
-  if (ref.type === "default_branch") return "default";
-  return ref.type.replace("_", " ");
-}
+const headerDisplayName = computed(() =>
+  compactRoomDisplayName(props.room.displayName)
+);
 
 onMounted(() => {
   document.addEventListener("pointerdown", handleDocumentPointerDown);
@@ -299,11 +256,42 @@ function tabAriaLabel(tab: RoomTab): string {
   return parts.join(", ");
 }
 
+function compactRoomDisplayName(displayName: string): string {
+  const normalized = displayName.trim();
+  const branchPrefix = "Branch: ";
+  if (normalized.startsWith(branchPrefix)) {
+    return `${branchPrefix}${compactBranchName(normalized.slice(branchPrefix.length), 28)}`;
+  }
+  return compactMiddle(normalized, 36);
+}
+
+function compactBranchName(branchName: string, maxLength: number): string {
+  const normalized = branchName.trim();
+  if (normalized.length <= maxLength) return normalized;
+  const slashIndex = normalized.indexOf("/");
+  if (slashIndex > 0) {
+    const namespace = normalized.slice(0, slashIndex);
+    const suffixBudget = maxLength - namespace.length - 4;
+    if (suffixBudget > 8) {
+      return `${namespace}/${normalized.slice(slashIndex + 1, slashIndex + 1 + suffixBudget)}...`;
+    }
+  }
+  return compactMiddle(normalized, maxLength);
+}
+
+function compactMiddle(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  if (maxLength <= 3) return value.slice(0, maxLength);
+  const leftLength = Math.ceil((maxLength - 3) / 2);
+  const rightLength = Math.floor((maxLength - 3) / 2);
+  return `${value.slice(0, leftLength)}...${value.slice(-rightLength)}`;
+}
+
 function handleDocumentPointerDown(event: PointerEvent): void {
-  if (!overflowMenuOpen.value) return;
   const target = event.target;
   if (!(target instanceof Node)) return;
-  if (overflowMenuRoot.value?.contains(target)) return;
-  closeOverflowMenu();
+  if (overflowMenuOpen.value && !overflowMenuRoot.value?.contains(target)) {
+    closeOverflowMenu();
+  }
 }
 </script>

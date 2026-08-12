@@ -13,10 +13,12 @@
         :isLoadingOlderMessages="isLoadingOlderMessages"
         :searchQuery="searchQuery"
         :stalePromptTaskStates="stalePromptTaskStates"
+        :taskReferenceIds="taskReferenceIds"
         @loadOlder="emit('loadOlder')"
         @reply="emit('reply', $event)"
         @openImageViewer="emit('openImageViewer', $event)"
         @toggleStalePromptMute="emit('toggleStalePromptMute', $event)"
+        @openTask="emit('openTask', $event)"
       />
 
       <GitHubEventFeed
@@ -39,8 +41,10 @@
         :presence="boardHandoffPresence"
         :canManageLeases="room?.role === 'admin'"
         :taskGithubStatus="taskGithubStatus"
+        :selectedTaskId="selectedBoardTaskId"
+        :roomIdentifier="room?.identifier || null"
         @addTask="emit('addTask', $event)"
-        @updateTask="emitUpdateTask"
+        @updateTask="emit('updateTask', $event)"
         @leaseAction="emit('leaseAction', $event)"
         @reviewLeaseAction="emit('reviewLeaseAction', $event)"
         @focusTask="emit('focusTask', $event)"
@@ -132,9 +136,10 @@ import type {
   RoomTab,
   TaskLeaseActionPayload,
   TaskReviewLeaseActionPayload,
+  TaskStatusUpdatePayload,
 } from './types'
 
-defineProps<{
+const props = defineProps<{
   activeTab: RoomTab
   tabTransitionName: string
   messages: readonly RoomMessage[]
@@ -171,6 +176,7 @@ defineProps<{
   creatingAdHocFocusRoom: boolean
   sharingFocusResult: boolean
   updatingFocusSettings: boolean
+  selectedBoardTaskId: string | null
   loadActivityHistory?: (options?: {
     query?: string
     page?: number
@@ -187,7 +193,7 @@ const emit = defineEmits<{
   openImageViewer: [imageId: string]
   toggleStalePromptMute: [payload: { taskId: string; muted: boolean; promptTimestamp: string }]
   addTask: [title: string]
-  updateTask: [taskId: string, updates: { status: string }]
+  updateTask: [payload: TaskStatusUpdatePayload]
   leaseAction: [payload: TaskLeaseActionPayload]
   reviewLeaseAction: [payload: TaskReviewLeaseActionPayload]
   focusTask: [taskId: string]
@@ -197,14 +203,14 @@ const emit = defineEmits<{
   openParentRoom: []
   shareResults: [summary: string, details: FocusRoomConclusionDetails | null]
   updateFocusSettings: [focusKey: string, settings: FocusRoomSettings]
+  openTask: [taskId: string]
 }>()
 
 const messageListRef = ref<InstanceType<typeof MessageList> | null>(null)
 const matchCount = computed(() => messageListRef.value?.matchCount ?? 0)
-
-function emitUpdateTask(taskId: string, updates: { status: string }) {
-  emit('updateTask', taskId, updates)
-}
+const taskReferenceIds = computed<ReadonlySet<string>>(() =>
+  new Set(props.tasks.map(task => task.id))
+)
 
 function emitShareResults(summary: string, details: FocusRoomConclusionDetails | null) {
   emit('shareResults', summary, details)

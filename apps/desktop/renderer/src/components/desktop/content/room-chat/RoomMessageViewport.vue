@@ -29,24 +29,40 @@
           :thread-summary="threadIndicatorSummary(entry.message)"
           :active-thread-root="entry.message.id === activeThreadParentId"
           :highlight-query="searchQuery"
+          :message-reference-ids="messageReferenceIds"
+          :task-reference-ids="taskReferenceIds"
           :search-active="entry.message.id === activeSearchMessageId"
+          :animate-arrival="arrivingMessageIds.has(entry.message.id)"
+          :delivery-receipts="deliveryReceiptsByMessage[entry.message.id] || []"
+          :delivery-recovery-available="deliveryRecoveryAvailable"
+          :continuation-repair-available="continuationRepairAvailable"
+          :room-delivery-skip-available="roomDeliverySkipAvailable"
+          :delivery-retry-keys="deliveryRetryKeys"
+          :continuation-repair-keys="continuationRepairKeys"
+          :room-delivery-skip-keys="roomDeliverySkipKeys"
+          :provider-label="resolveMessageProviderLabel(entry.message, participants, presence, supervisorEntries)"
           @quote-reply="$emit('quote-reply', $event)"
+          @message-info="(messageId, context) => $emit('message-info', messageId, context)"
           @quote-selection="(messageId, text) => $emit('quote-selection', messageId, text)"
           @open-thread="$emit('open-thread', $event)"
-          @scroll-to-message="scrollToMessage"
+          @scroll-to-message="revealOrScrollToMessage"
           @open-image="$emit('open-image', $event)"
           @open-agent="$emit('open-agent', $event)"
           @open-github-event="$emit('open-github-event', $event)"
+          @open-task="$emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => $emit('retry-delivery', agentId, sourceMessageId)"
+          @restore-conversation="(agentId, sourceMessageId) => $emit('restore-conversation', agentId, sourceMessageId)"
+          @skip-delivery="(agentId, sourceMessageId) => $emit('skip-delivery', agentId, sourceMessageId)"
         />
       </template>
 
       <div
-        v-if="localAgentWork.length && !roomLoading"
+        v-if="displayedAgentWork.length && !roomLoading"
         class="room-local-agent-work-list"
         data-testid="room-local-agent-work-list"
       >
         <article
-          v-for="work in localAgentWork"
+          v-for="work in collapsedAgentWork.visible"
           :key="work.id"
           class="room-local-agent-work"
           data-testid="room-local-agent-work"
@@ -54,7 +70,7 @@
           <span class="room-local-agent-work-pulse" aria-hidden="true"></span>
           <div>
             <strong>{{ work.displayName }}</strong>
-            <span>{{ work.summary }}</span>
+            <span data-testid="room-local-agent-work-echo">{{ work.summary }}</span>
           </div>
           <span class="room-local-agent-work-dots" aria-hidden="true">
             <i></i>
@@ -62,6 +78,14 @@
             <i></i>
           </span>
         </article>
+        <p
+          v-if="collapsedAgentWork.hiddenCount > 0"
+          class="room-local-agent-work-overflow"
+          data-testid="room-local-agent-work-overflow"
+          aria-live="polite"
+        >
+          +{{ collapsedAgentWork.hiddenCount }} more {{ collapsedAgentWork.hiddenCount === 1 ? "agent" : "agents" }} working
+        </p>
       </div>
 
       <div v-if="roomLoading" class="room-loading-state" data-testid="room-chat-loading" aria-label="Loading room messages">
@@ -80,7 +104,7 @@
         </div>
       </div>
 
-      <article v-else-if="!messages.length && !localAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
+      <article v-else-if="!messages.length && !displayedAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
         <h3>{{ emptyStateTitle }}</h3>
         <p>{{ emptyStateDescription }}</p>
       </article>
@@ -120,13 +144,27 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
-import type { DesktopRoomMessage } from "../../../../../../electron/ipc-types";
-import type { ManagedAgentWorkIndicator } from "../../../../domain/managed-agents";
+import type {
+  DesktopAgentPresence,
+  DesktopParticipantSummary,
+  DesktopRoomMessage,
+  DesktopSupervisorManifestEntry,
+} from "../../../../../../electron/ipc-types";
+import {
+  WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
+  coalesceWorkIndicatorEchoes,
+  collapseWorkIndicators,
+  workIndicatorSupersededByAgentMessage,
+  type ManagedAgentWorkIndicator,
+  type WorkIndicatorEchoState,
+} from "../../../../domain/managed-agents";
 import DesktopChatMessage from "../DesktopChatMessage.vue";
 import { parseSenderIdentity } from "../desktop-chat-message/identity";
 import { truncate } from "../desktop-chat-message/message-rendering";
 import type { AgentModalTarget } from "../desktop-chat-message/types";
 import { compareRoomMessages } from "../room-shell/messages";
+import { resolveMessageProviderLabel } from "../../../../domain/agent-provider";
+import { getAppendedMessageIds } from "./message-arrival";
 import { buildThreadIndicatorSummary, buildThreadSummaries, threadParentId, threadQuotePreview } from "./thread-utils";
 import { buildMessageTimelineEntries } from "./timeline";
 
@@ -154,11 +192,22 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  participants?: DesktopParticipantSummary[];
+  presence?: DesktopAgentPresence[];
+  supervisorEntries?: DesktopSupervisorManifestEntry[];
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
+  deliveryRecoveryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
+  deliveryRetryKeys?: ReadonlySet<string>;
+  continuationRepairKeys?: ReadonlySet<string>;
+  roomDeliverySkipKeys?: ReadonlySet<string>;
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubActivityAvailable: boolean;
   roomLoading: boolean;
   searchQuery: string;
+  taskReferenceIds: ReadonlySet<string>;
   initialScrollTop?: number | null;
 }>();
 
@@ -168,9 +217,15 @@ const emit = defineEmits<{
   "open-image": [imageId: string];
   "open-thread": [messageId: string];
   "quote-reply": [messageId: string];
+  "message-info": [messageId: string, context: "timeline" | "thread-root" | "thread-reply"];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
+  "restore-conversation": [agentId: string, sourceMessageId: string];
+  "skip-delivery": [agentId: string, sourceMessageId: string];
+  "reveal-message": [messageId: string];
   "quote-selection": [messageId: string, text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
+  "open-task": [taskId: string];
 }>();
 
 const emptyStateTitle = computed(() => {
@@ -196,6 +251,8 @@ const unreadCount = ref(0);
 const isScrolledFarUp = ref(false);
 const threadActivityNotice = ref<ThreadActivityNotice | null>(null);
 const autoViewportBackfillCount = ref(0);
+const arrivingMessageIds = ref<ReadonlySet<string>>(new Set());
+const arrivalTimers = new Map<string, number>();
 let isScrolledToBottom = false;
 let hasAppliedInitialScroll = false;
 let shouldRestoreInitialScroll = hasInitialScrollPosition();
@@ -210,10 +267,18 @@ let suppressNextThreadActivityNotice = false;
 
 const threadSummaries = computed(() => buildThreadSummaries(props.threadMessages));
 const timelineEntries = computed(() => buildMessageTimelineEntries(props.messages));
+const messageReferenceIds = computed(() =>
+  new Set(props.messages.map((message) => message.id))
+);
 
 watch(
   () => props.messages,
   async (newMessages, oldMessages) => {
+    const appendedIds = getAppendedMessageIds(
+      (oldMessages || []).map((message) => message.id),
+      newMessages.map((message) => message.id),
+    );
+    markMessagesArriving(appendedIds);
     const previousScrollHeight = messagesElement.value?.scrollHeight || 0;
     const oldFirstId = oldMessages?.[0]?.id;
     const oldLastId = oldMessages?.[oldMessages.length - 1]?.id;
@@ -277,8 +342,51 @@ watch(
   { immediate: true },
 );
 
+// Rate-limit the live echo text: an entry's summary changes at most once per
+// WORK_INDICATOR_ECHO_MIN_INTERVAL_MS. State persists across polls; a trailing
+// timer flushes any summary held back inside the window so the latest value
+// still surfaces if native updates stop arriving.
+let echoState: WorkIndicatorEchoState = {};
+let echoFlushTimer: number | null = null;
+const displayedAgentWork = ref<ManagedAgentWorkIndicator[]>([]);
+const currentLocalAgentWork = computed(() => {
+  // Public room order is the causal clock here. Provider activity timestamps
+  // come from the local host while message timestamps come from the server, so
+  // comparing them can suppress a genuinely new turn when the clocks differ.
+  const visibleMessages = [...props.messages, ...props.threadMessages].sort(compareRoomMessages);
+  return props.localAgentWork.filter((work) => !workIndicatorSupersededByAgentMessage(work, visibleMessages));
+});
+
+function applyEchoCoalescing(): void {
+  const { state, indicators, hasPending } = coalesceWorkIndicatorEchoes(
+    echoState,
+    currentLocalAgentWork.value,
+    Date.now(),
+    WORK_INDICATOR_ECHO_MIN_INTERVAL_MS,
+  );
+  echoState = state;
+  displayedAgentWork.value = indicators;
+  if (echoFlushTimer !== null) {
+    window.clearTimeout(echoFlushTimer);
+    echoFlushTimer = null;
+  }
+  if (hasPending) {
+    echoFlushTimer = window.setTimeout(applyEchoCoalescing, WORK_INDICATOR_ECHO_MIN_INTERVAL_MS);
+  }
+}
+
 watch(
-  () => props.localAgentWork.map((work) => `${work.id}:${work.summary}`).join("|"),
+  currentLocalAgentWork,
+  () => applyEchoCoalescing(),
+  { immediate: true, deep: true },
+);
+
+const collapsedAgentWork = computed(() => collapseWorkIndicators(displayedAgentWork.value));
+
+watch(
+  // Key off the rate-limited displayed set (not raw props) so scroll effects
+  // share the coalesced echo cadence instead of firing on every native event.
+  () => displayedAgentWork.value.map((work) => `${work.id}:${work.summary}`).join("|"),
   async (nextKey, previousKey) => {
     if (nextKey === previousKey) {
       return;
@@ -399,6 +507,7 @@ watch(
 watch(
   () => props.roomIdentifier,
   () => {
+    clearMessageArrivals();
     unreadCount.value = 0;
     threadActivityNotice.value = null;
     isScrolledFarUp.value = false;
@@ -450,11 +559,39 @@ onActivated(() => {
 });
 
 onBeforeUnmount(() => {
+  clearMessageArrivals();
   cancelAutoFillViewport();
   cancelLayoutAnchorRestore();
   rememberScrollAnchor();
   emitScrollPosition();
+  if (echoFlushTimer !== null) {
+    window.clearTimeout(echoFlushTimer);
+    echoFlushTimer = null;
+  }
 });
+
+function markMessagesArriving(messageIds: readonly string[]): void {
+  if (!messageIds.length) return;
+  const nextIds = new Set(arrivingMessageIds.value);
+  for (const messageId of messageIds) {
+    nextIds.add(messageId);
+    const existingTimer = arrivalTimers.get(messageId);
+    if (existingTimer !== undefined) window.clearTimeout(existingTimer);
+    arrivalTimers.set(messageId, window.setTimeout(() => {
+      arrivalTimers.delete(messageId);
+      const remainingIds = new Set(arrivingMessageIds.value);
+      remainingIds.delete(messageId);
+      arrivingMessageIds.value = remainingIds;
+    }, 320));
+  }
+  arrivingMessageIds.value = nextIds;
+}
+
+function clearMessageArrivals(): void {
+  for (const timer of arrivalTimers.values()) window.clearTimeout(timer);
+  arrivalTimers.clear();
+  arrivingMessageIds.value = new Set();
+}
 
 function scheduleAutoFillViewport(): void {
   cancelAutoFillViewport();
@@ -721,13 +858,19 @@ function openThreadActivityNotice(): void {
   emit("open-thread", notice.parentId);
 }
 
-function scrollToMessage(messageId: string | null): void {
-  if (!messageId || !messagesElement.value) return;
+function revealOrScrollToMessage(messageId: string | null): void {
+  if (!messageId) return;
+  if (!scrollToMessage(messageId)) emit("reveal-message", messageId);
+}
+
+function scrollToMessage(messageId: string | null): boolean {
+  if (!messageId || !messagesElement.value) return false;
   const target = messagesElement.value.querySelector(`[data-testid="room-message-${messageId}"]`) as HTMLElement | null;
-  if (!target) return;
+  if (!target) return false;
   target.scrollIntoView({ behavior: "smooth", block: "center" });
   target.classList.add("jump-target");
   window.setTimeout(() => target.classList.remove("jump-target"), 1500);
+  return true;
 }
 
 function dismissThreadActivityNotice(): void {

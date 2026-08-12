@@ -1,21 +1,25 @@
 import type { DesktopTaskSummary } from "../../../electron/ipc-types";
 import { timestampValue } from "./time";
 
-const statusRanks: Record<string, number> = {
-  proposed: 1,
-  accepted: 2,
-  assigned: 3,
-  in_progress: 4,
-  blocked: 5,
-  in_review: 6,
-  merged: 7,
-  done: 8,
-  cancelled: 9,
-};
+export const TASK_STATUS_ORDER = [
+  "proposed",
+  "accepted",
+  "assigned",
+  "in_progress",
+  "blocked",
+  "in_review",
+  "merged",
+  "done",
+  "cancelled",
+] as const;
+
+const statusRanks = new Map<string, number>(
+  TASK_STATUS_ORDER.map((status, index) => [status, index + 1])
+);
 
 export function sortTasks(tasks: readonly DesktopTaskSummary[]): DesktopTaskSummary[] {
   return [...tasks].sort((left, right) => {
-    const statusDelta = (statusRanks[left.status] || 999) - (statusRanks[right.status] || 999);
+    const statusDelta = (statusRanks.get(left.status) || 999) - (statusRanks.get(right.status) || 999);
     if (statusDelta !== 0) return statusDelta;
     return timestampValue(right.updatedAt) - timestampValue(left.updatedAt);
   });

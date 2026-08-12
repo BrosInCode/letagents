@@ -3,6 +3,7 @@ import { inArray, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { id_sequences } from "./schema.js";
+import { parsePositivePgIntegerScopedId } from "../../shared/scoped-ids.js";
 
 export const DEFAULT_LIST_LIMIT = 200;
 
@@ -40,13 +41,7 @@ export function formatTaskId(number: number): string {
 }
 
 export function parseScopedId(id: string, prefix: string): number | null {
-  const match = new RegExp(`^${prefix}_(\\d+)$`).exec(id);
-  if (!match) {
-    return null;
-  }
-
-  const number = Number(match[1]);
-  return Number.isInteger(number) && number > 0 ? number : null;
+  return parsePositivePgIntegerScopedId(id, prefix);
 }
 
 export function hashToken(token: string): string {
@@ -55,8 +50,12 @@ export function hashToken(token: string): string {
 
 export const AUTH_STATE_TTL_MS = 15 * 60 * 1000;
 
-export async function nextPrefixedId(sequenceName: string, prefix: string): Promise<string> {
-  const [next] = await db
+export async function nextPrefixedId(
+  sequenceName: string,
+  prefix: string,
+  executor: RoomSequenceExecutor = db
+): Promise<string> {
+  const [next] = await executor
     .insert(id_sequences)
     .values({ name: sequenceName, value: 1 })
     .onConflictDoUpdate({
@@ -95,7 +94,7 @@ export function getRoomScopedSequenceNames(roomId: string): [string, string] {
   return [`messages:${roomId}`, `tasks:${roomId}`];
 }
 
-export function coordinationId(prefix: "tl" | "lock" | "ce"): string {
+export function coordinationId(prefix: "tl" | "lock" | "ce" | "bi" | "bm" | "tlra"): string {
   return `${prefix}_${crypto.randomUUID().replace(/-/g, "")}`;
 }
 

@@ -1,0 +1,394 @@
+name: Desktop release
+
+on:
+  push:
+    tags:
+      - "desktop-v*"
+  workflow_dispatch:
+
+concurrency:
+  group: desktop-release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build-macos:
+    name: macOS ${{ matrix.arch }}
+    runs-on: ${{ matrix.runner }}
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: arm64
+            runner: macos-15
+          - arch: x64
+            runner: macos-15-intel
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Validate release ref, version, and runner architecture
+        shell: bash
+        env:
+          EXPECTED_ARCH: ${{ matrix.arch }}
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          expected_tag="desktop-v${version}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Run this workflow from tag ${expected_tag}; received ${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+          actual_arch=$(node -p "process.arch")
+          if [[ "${actual_arch}" != "${EXPECTED_ARCH}" ]]; then
+            echo "Runner architecture ${actual_arch} does not match matrix architecture ${EXPECTED_ARCH}." >&2
+            exit 1
+          fi
+          echo "DESKTOP_VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - name: Enforce dependency cooldown
+        run: npm run verify:dependency-age
+
+      - name: Test workflow supply-chain policy
+        run: npm run test:workflow-supply-chain
+
+      - name: Install dependencies without lifecycle scripts
+        run: |
+          npm ci --ignore-scripts
+          npm ci --ignore-scripts --prefix apps/desktop
+
+      - name: Verify dependency signatures
+        run: |
+          npm audit signatures
+          npm audit signatures --prefix apps/desktop
+
+      - name: Audit dependency advisories
+        run: |
+          npm audit --audit-level=low
+          npm audit --audit-level=low --prefix apps/desktop
+
+      - name: Run verified dependency lifecycle scripts
+        run: |
+          npm rebuild
+          npm rebuild --prefix apps/desktop
+          npm exec --prefix apps/desktop -- install-electron
+
+      - name: Install the locked OpenCode runtime
+        shell: bash
+        run: |
+          set -euo pipefail
+          opencode_version=$(node -p "require('./apps/desktop/package.json').letagentsRuntime.openCodeVersion")
+          npm install --global --prefix "${RUNNER_TEMP}/opencode" "opencode-ai@${opencode_version}"
+          echo "LETAGENTS_OPENCODE_BIN=${RUNNER_TEMP}/opencode/bin/opencode" >> "${GITHUB_ENV}"
+
+      - name: Import Developer ID certificate
+        shell: bash
+        env:
+          MACOS_CERTIFICATE_P12_BASE64: ${{ secrets.MACOS_CERTIFICATE_P12_BASE64 }}
+          MACOS_CERTIFICATE_PASSWORD: ${{ secrets.MACOS_CERTIFICATE_PASSWORD }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MACOS_CERTIFICATE_P12_BASE64}" || -z "${MACOS_CERTIFICATE_PASSWORD}" ]]; then
+            echo "MACOS_CERTIFICATE_P12_BASE64 and MACOS_CERTIFICATE_PASSWORD secrets are required." >&2
+            exit 1
+          fi
+          keychain_path="${RUNNER_TEMP}/letagents-signing.keychain-db"
+          certificate_path="${RUNNER_TEMP}/letagents-developer-id.p12"
+          keychain_password=$(openssl rand -hex 24)
+          printf '%s' "${MACOS_CERTIFICATE_P12_BASE64}" | openssl base64 -d -A -out "${certificate_path}"
+          security create-keychain -p "${keychain_password}" "${keychain_path}"
+          security set-keychain-settings -lut 21600 "${keychain_path}"
+          security unlock-keychain -p "${keychain_password}" "${keychain_path}"
+          security import "${certificate_path}" -k "${keychain_path}" -P "${MACOS_CERTIFICATE_PASSWORD}" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "${keychain_password}" "${keychain_path}"
+          security list-keychains -d user -s "${keychain_path}" login.keychain-db
+          echo "MACOS_RELEASE_KEYCHAIN=${keychain_path}" >> "${GITHUB_ENV}"
+
+      - name: Prepare App Store Connect API key
+        shell: bash
+        env:
+          APPLE_API_KEY_P8_BASE64: ${{ secrets.APPLE_API_KEY_P8_BASE64 }}
+          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${APPLE_API_KEY_P8_BASE64}" || -z "${APPLE_API_KEY_ID}" ]]; then
+            echo "APPLE_API_KEY_P8_BASE64 and APPLE_API_KEY_ID secrets are required." >&2
+            exit 1
+          fi
+          api_key_path="${RUNNER_TEMP}/AuthKey_${APPLE_API_KEY_ID}.p8"
+          printf '%s' "${APPLE_API_KEY_P8_BASE64}" | openssl base64 -d -A -out "${api_key_path}"
+          chmod 600 "${api_key_path}"
+          echo "MACOS_NOTARY_API_KEY=${api_key_path}" >> "${GITHUB_ENV}"
+
+      - name: Prepare Developer ID provisioning profile
+        shell: bash
+        env:
+          MACOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.MACOS_PROVISIONING_PROFILE_BASE64 }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${MACOS_PROVISIONING_PROFILE_BASE64}" ]]; then
+            echo "MACOS_PROVISIONING_PROFILE_BASE64 is required for APNs entitlement signing." >&2
+            exit 1
+          fi
+          provisioning_profile_path="${RUNNER_TEMP}/LetAgents.provisionprofile"
+          printf '%s' "${MACOS_PROVISIONING_PROFILE_BASE64}" | openssl base64 -d -A -out "${provisioning_profile_path}"
+          if [[ ! -s "${provisioning_profile_path}" ]]; then
+            echo "The decoded macOS provisioning profile is empty." >&2
+            exit 1
+          fi
+          chmod 600 "${provisioning_profile_path}"
+          echo "MACOS_PROVISIONING_PROFILE_PATH=${provisioning_profile_path}" >> "${GITHUB_ENV}"
+
+      - name: Build, sign, notarize, and package
+        env:
+          MACOS_SIGNING_IDENTITY: ${{ secrets.MACOS_SIGNING_IDENTITY }}
+          MACOS_NOTARY_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          MACOS_NOTARY_API_ISSUER: ${{ secrets.APPLE_API_ISSUER_ID }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ ! "${R2_PUBLIC_BASE_URL}" =~ ^https://[^/]+$ ]]; then
+            echo "R2_PUBLIC_BASE_URL must be an HTTPS origin without a trailing slash." >&2
+            exit 1
+          fi
+          export LETAGENTS_DESKTOP_RELEASE_BASE_URL="${R2_PUBLIC_BASE_URL}/desktop/v${DESKTOP_VERSION}/"
+          export LETAGENTS_DESKTOP_RELEASE_NOTES="LetAgents desktop ${DESKTOP_VERSION}"
+          npm --prefix apps/desktop run package:mac
+
+      - name: Attest installer and update provenance
+        if: ${{ github.event.repository.visibility == 'public' || vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true' }}
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
+        with:
+          subject-path: |
+            apps/desktop/release/artifacts/*.dmg
+            apps/desktop/release/artifacts/*.zip
+
+      - name: Report unavailable provenance attestation
+        if: ${{ github.event.repository.visibility != 'public' && vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION != 'true' }}
+        run: echo "::notice::GitHub artifact attestations are unavailable for this private repository on its current organization plan. Set ENABLE_DESKTOP_PROVENANCE_ATTESTATION=true when the plan supports private-repository attestations."
+
+      - name: Upload release artifacts to this workflow
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: desktop-release-${{ matrix.arch }}
+          path: apps/desktop/release/artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Remove signing keychain
+        if: always()
+        shell: bash
+        run: |
+          if [[ -n "${MACOS_RELEASE_KEYCHAIN:-}" && -f "${MACOS_RELEASE_KEYCHAIN}" ]]; then
+            security delete-keychain "${MACOS_RELEASE_KEYCHAIN}"
+          fi
+
+  publish:
+    name: Publish macOS release
+    needs: build-macos
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22"
+
+      - name: Validate release ref and version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          expected_tag="desktop-v${version}"
+          if [[ "${GITHUB_REF_TYPE}" != "tag" || "${GITHUB_REF_NAME}" != "${expected_tag}" ]]; then
+            echo "Run this workflow from tag ${expected_tag}; received ${GITHUB_REF_TYPE}:${GITHUB_REF_NAME}." >&2
+            exit 1
+          fi
+          echo "DESKTOP_VERSION=${version}" >> "${GITHUB_ENV}"
+
+      - name: Download both architecture artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: desktop-release-*
+          path: release-artifacts
+          merge-multiple: true
+
+      - name: Validate R2 release configuration
+        shell: bash
+        env:
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          R2_ACCOUNT_ID: ${{ vars.R2_ACCOUNT_ID }}
+          R2_BUCKET_NAME: ${{ vars.R2_BUCKET_NAME }}
+          R2_PUBLIC_BASE_URL: ${{ vars.R2_PUBLIC_BASE_URL }}
+        run: |
+          set -euo pipefail
+          for variable_name in R2_ACCESS_KEY_ID R2_SECRET_ACCESS_KEY R2_ACCOUNT_ID R2_BUCKET_NAME R2_PUBLIC_BASE_URL; do
+            if [[ -z "${!variable_name}" ]]; then
+              echo "${variable_name} is required for desktop release delivery." >&2
+              exit 1
+            fi
+          done
+          if [[ ! "${R2_ACCOUNT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
+            echo "R2_ACCOUNT_ID must be the 32-character Cloudflare account identifier." >&2
+            exit 1
+          fi
+          if [[ ! "${R2_PUBLIC_BASE_URL}" =~ ^https://[^/]+$ ]]; then
+            echo "R2_PUBLIC_BASE_URL must be an HTTPS origin without a trailing slash." >&2
+            exit 1
+          fi
+          aws --version
+          echo "R2_ENDPOINT_URL=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> "${GITHUB_ENV}"
+          echo "R2_BUCKET_NAME=${R2_BUCKET_NAME}" >> "${GITHUB_ENV}"
+          echo "R2_PUBLIC_BASE_URL=${R2_PUBLIC_BASE_URL}" >> "${GITHUB_ENV}"
+
+      - name: Publish immutable versioned artifacts to R2
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(release-artifacts/*)
+          if [[ ${#artifacts[@]} -eq 0 ]]; then
+            echo "No desktop release artifacts were downloaded." >&2
+            exit 1
+          fi
+
+          for artifact in "${artifacts[@]}"; do
+            artifact_name=$(basename "${artifact}")
+            object_key="desktop/v${DESKTOP_VERSION}/${artifact_name}"
+            local_sha256=$(sha256sum "${artifact}" | awk '{print $1}')
+            existing_key=$(aws s3api list-objects-v2 \
+              --endpoint-url "${R2_ENDPOINT_URL}" \
+              --bucket "${R2_BUCKET_NAME}" \
+              --prefix "${object_key}" \
+              --query "Contents[?Key=='${object_key}'].Key | [0]" \
+              --output text)
+
+            if [[ -n "${existing_key}" && "${existing_key}" != "None" ]]; then
+              remote_sha256=$(aws s3api head-object \
+                --endpoint-url "${R2_ENDPOINT_URL}" \
+                --bucket "${R2_BUCKET_NAME}" \
+                --key "${object_key}" \
+                --query 'Metadata.sha256' \
+                --output text)
+              if [[ "${remote_sha256}" != "${local_sha256}" ]]; then
+                echo "Immutable R2 object ${object_key} already exists with different bytes." >&2
+                exit 1
+              fi
+              echo "Verified existing immutable R2 object ${object_key}."
+              continue
+            fi
+
+            case "${artifact_name}" in
+              *.dmg) content_type="application/x-apple-diskimage" ;;
+              *.zip) content_type="application/zip" ;;
+              *.blockmap) content_type="application/octet-stream" ;;
+              *.json) content_type="application/json" ;;
+              *.yml) content_type="application/yaml" ;;
+              *.sha256) content_type="text/plain" ;;
+              *) content_type="application/octet-stream" ;;
+            esac
+            aws s3 cp "${artifact}" "s3://${R2_BUCKET_NAME}/${object_key}" \
+              --endpoint-url "${R2_ENDPOINT_URL}" \
+              --cache-control "public,max-age=31536000,immutable" \
+              --content-type "${content_type}" \
+              --metadata "sha256=${local_sha256}" \
+              --no-progress
+          done
+
+      - name: Publish immutable versioned release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          artifacts=(release-artifacts/*)
+          if [[ ${#artifacts[@]} -eq 0 ]]; then
+            echo "No desktop release artifacts were downloaded." >&2
+            exit 1
+          fi
+          if gh release view "${GITHUB_REF_NAME}" >/dev/null 2>&1; then
+            is_draft=$(gh release view "${GITHUB_REF_NAME}" --json isDraft --jq '.isDraft')
+            if [[ "${is_draft}" == "true" ]]; then
+              gh release upload "${GITHUB_REF_NAME}" "${artifacts[@]}" --clobber
+              gh release edit "${GITHUB_REF_NAME}" --draft=false --prerelease --latest=false
+            else
+              remote_assets=$(gh release view "${GITHUB_REF_NAME}" --json assets --jq '.assets[].name')
+              for artifact in "${artifacts[@]}"; do
+                artifact_name=$(basename "${artifact}")
+                if ! grep -Fqx "${artifact_name}" <<<"${remote_assets}"; then
+                  echo "Published release ${GITHUB_REF_NAME} is missing immutable asset ${artifact_name}." >&2
+                  exit 1
+                fi
+              done
+              echo "Release ${GITHUB_REF_NAME} is already published; leaving its immutable assets unchanged."
+            fi
+          else
+            gh release create "${GITHUB_REF_NAME}" "${artifacts[@]}" \
+              --draft \
+              --prerelease \
+              --generate-notes \
+              --verify-tag \
+              --latest=false \
+              --title "LetAgents desktop ${DESKTOP_VERSION}"
+            gh release edit "${GITHUB_REF_NAME}" --draft=false --prerelease --latest=false
+          fi
+
+      - name: Advance public architecture-specific update feeds
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          for arch in arm64 x64; do
+            for feed_spec in \
+              "RELEASES-${arch}.json|RELEASES.json|application/json" \
+              "latest-mac-${arch}.yml|latest-mac.yml|application/yaml"; do
+              IFS='|' read -r source_name public_name content_type <<<"${feed_spec}"
+              source_manifest="release-artifacts/${source_name}"
+              if [[ ! -s "${source_manifest}" ]]; then
+                echo "Missing update manifest ${source_manifest}." >&2
+                exit 1
+              fi
+              feed_key="desktop/feeds/${arch}/${public_name}"
+              manifest_sha256=$(sha256sum "${source_manifest}" | awk '{print $1}')
+              aws s3 cp "${source_manifest}" "s3://${R2_BUCKET_NAME}/${feed_key}" \
+                --endpoint-url "${R2_ENDPOINT_URL}" \
+                --cache-control "public,max-age=60,must-revalidate" \
+                --content-type "${content_type}" \
+                --metadata "sha256=${manifest_sha256}" \
+                --no-progress
+              remote_sha256=$(aws s3api head-object \
+                --endpoint-url "${R2_ENDPOINT_URL}" \
+                --bucket "${R2_BUCKET_NAME}" \
+                --key "${feed_key}" \
+                --query 'Metadata.sha256' \
+                --output text)
+              if [[ "${remote_sha256}" != "${manifest_sha256}" ]]; then
+                echo "R2 update feed verification failed for ${arch}/${public_name}." >&2
+                exit 1
+              fi
+              echo "Published ${R2_PUBLIC_BASE_URL}/${feed_key}."
+            done
+          done

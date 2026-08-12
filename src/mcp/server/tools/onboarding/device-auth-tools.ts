@@ -22,6 +22,7 @@ import {
   type StoredAccount,
 } from "../../runtime.js";
 import { jsonTextResponse } from "./responses.js";
+import { workerModeDisabledToolResult } from "../../runtime/worker-bearer.js";
 
 export function registerDeviceAuthTools(server: McpServer): void {
   registerStartDeviceAuthTool(server);
@@ -44,6 +45,8 @@ function registerStartDeviceAuthTool(server: McpServer): void {
         .describe("If true, replaces any existing pending device auth request."),
     },
     async ({ room_id, force }) => {
+      const disabled = workerModeDisabledToolResult();
+      if (disabled) return jsonTextResponse(disabled);
       const existing = getPendingDeviceAuth();
       if (existing && !force) {
         return jsonTextResponse({
@@ -100,6 +103,8 @@ function registerPollDeviceAuthTool(server: McpServer): void {
         .describe("If true, tries to join the room immediately after the auth succeeds."),
     },
     async ({ request_id, room_id, auto_join }) => {
+      const disabled = workerModeDisabledToolResult();
+      if (disabled) return jsonTextResponse(disabled);
       const pendingAuth = request_id
         ? getPendingDeviceAuth()?.request_id === request_id
           ? getPendingDeviceAuth()
@@ -208,6 +213,8 @@ function registerClearSavedAuthTool(server: McpServer): void {
     "Clear any locally saved LetAgents auth token and pending device auth request.",
     {},
     async () => {
+      const disabled = workerModeDisabledToolResult();
+      if (disabled) return jsonTextResponse(disabled);
       clearPendingDeviceAuth();
       clearStoredAuth();
       clearAuthenticatedAccountCache();

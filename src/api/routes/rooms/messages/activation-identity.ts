@@ -18,7 +18,10 @@ export async function resolveMessageActivationIdentity(
 ): Promise<ResolvedRequestAgentIdentity | null> {
   const agentSessionId = getOptionalHeaderString(req, LETAGENTS_AGENT_SESSION_ID_HEADER);
   const agentSessionToken = getOptionalHeaderString(req, LETAGENTS_AGENT_SESSION_TOKEN_HEADER);
-  if (!agentSessionId || !agentSessionToken) {
+  if (Boolean(agentSessionId) !== Boolean(agentSessionToken)) {
+    return null;
+  }
+  if (!agentSessionId && req.authKind !== "agent_session") {
     return null;
   }
 
@@ -26,8 +29,10 @@ export async function resolveMessageActivationIdentity(
   const identity = await resolveRequestAgentIdentity({
     req,
     room_id: roomId,
-    agent_session_id: agentSessionId,
-    agent_session_token: agentSessionToken,
+    ...(agentSessionId && agentSessionToken ? {
+      agent_session_id: agentSessionId,
+      agent_session_token: agentSessionToken,
+    } : {}),
   });
 
   return identity?.session_kind === "worker" ? identity : null;

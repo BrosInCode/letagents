@@ -1,8 +1,14 @@
-import type { DesktopRoomStreamEvent } from "../../ipc-types.js";
-import { shouldDeliverRoomStreamEventToSession } from "./codex-event-routing.js";
+import type { DesktopManagedAgentSession, DesktopRoomStreamEvent } from "../../ipc-types.js";
+import {
+  canDeliverCodexStopControlToManagedAgent,
+  isOwnRoomStreamEventForManagedAgentAmongWorkers,
+  isStopPhraseRoomStreamEvent,
+  resolveCodexRoomStreamEventRecipients,
+} from "./codex-event-routing.js";
 import {
   bindCodexLiveSessionToWorker,
   listDesktopManagedCodexLiveSessions,
+  toPublicManagedAgentSession,
   type DesktopCodexLiveSessionState,
 } from "./state.js";
 
@@ -14,8 +20,28 @@ export function isManagedRoomStreamEvent(event: DesktopRoomStreamEvent): event i
 
 export function listDeliverableCodexSessionsForRoomStreamEvent(
   event: ManagedRoomEvent,
+  roomSessions?: readonly DesktopManagedAgentSession[],
+  populationComplete = true,
 ): DesktopCodexLiveSessionState[] {
-  return listDesktopManagedCodexLiveSessions(event.roomIdentifier)
+  const codexSessions = listDesktopManagedCodexLiveSessions(event.roomIdentifier)
     .map((session) => bindCodexLiveSessionToWorker(session))
-    .filter((session) => shouldDeliverRoomStreamEventToSession(session, event));
+    .filter((session) => !session.provider_id || session.provider_id === "codex");
+  const publicCodexSessions = codexSessions.map(toPublicManagedAgentSession);
+  const ambiguityPopulation = roomSessions ?? publicCodexSessions;
+  const resolvedCodexIds = new Set(resolveCodexRoomStreamEventRecipients(
+    ambiguityPopulation,
+    event,
+    populationComplete,
+  ).map((session) => session.id));
+
+  return codexSessions.filter((session) =>
+    resolvedCodexIds.has(session.session_id) ||
+      (isStopPhraseRoomStreamEvent(session, event) &&
+        canDeliverCodexStopControlToManagedAgent(toPublicManagedAgentSession(session)) &&
+        !isOwnRoomStreamEventForManagedAgentAmongWorkers(
+          toPublicManagedAgentSession(session),
+          ambiguityPopulation,
+          event,
+        ))
+  );
 }

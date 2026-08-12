@@ -1,6 +1,7 @@
 import type {
   DesktopActivityEntry,
   DesktopAgentPresence,
+  DesktopBoardSettingsSummary,
   DesktopFocusActivityScope,
   DesktopFocusGitHubEventRouting,
   DesktopFocusParentVisibility,
@@ -42,8 +43,10 @@ export function mapSnapshotData(data: RoomSnapshotData) {
     reasoningSessions: mapReasoningSessions(data.reasoningData),
     recentActivity: mapRecentActivity(data.activityHistoryData),
     roomArtifacts: mapRoomArtifacts(data.roomArtifactsData),
+    boardSettings: mapBoardSettings(data.boardSettingsData),
     messages: mapMessages(data.messagesData),
     githubEvents: mapGitHubEvents(data.githubEventsData),
+    sourceStates: data.sourceStates,
   };
 }
 
@@ -53,7 +56,7 @@ function mapGitHubEvents(
   return data ? mapGitHubEventsPayload(data.room_id || "", data) : null;
 }
 
-function mapFocusRooms(data: FocusRoomsResponse): DesktopFocusRoomInfo[] {
+export function mapFocusRooms(data: FocusRoomsResponse): DesktopFocusRoomInfo[] {
   return (data.focus_rooms || []).map(mapDesktopFocusRoomPayload);
 }
 
@@ -160,7 +163,7 @@ function mapTasks(
   return (data.tasks || []).map(mapDesktopTaskSummaryPayload);
 }
 
-function mapParticipants(data: ParticipantsResponse): DesktopParticipantSummary[] {
+export function mapParticipants(data: ParticipantsResponse): DesktopParticipantSummary[] {
   return (data.participants || []).map((participant) => ({
     participantKey: participant.participant_key,
     kind: participant.kind,
@@ -179,7 +182,7 @@ function mapParticipants(data: ParticipantsResponse): DesktopParticipantSummary[
   }));
 }
 
-function mapPresence(data: PresenceResponse): DesktopAgentPresence[] {
+export function mapPresence(data: PresenceResponse): DesktopAgentPresence[] {
   return (data.presence || []).map((entry) => ({
     roomId: entry.room_id,
     actorLabel: entry.actor_label,
@@ -233,7 +236,7 @@ function mapReasoningSessions(data: ReasoningResponse): DesktopReasoningSession[
     });
 }
 
-function mapRecentActivity(data: ActivityHistoryResponse): DesktopActivityEntry[] {
+export function mapRecentActivity(data: ActivityHistoryResponse): DesktopActivityEntry[] {
   return (data.entries || []).map((entry) => ({
     id: entry.id,
     room: entry.room
@@ -288,31 +291,13 @@ function mapMessages(data: MessagesResponse): DesktopRoomMessage[] {
     .map(mapRoomMessagePayload);
 }
 
-function mapRoomArtifacts(
+export function mapRoomArtifacts(
   data: RoomSnapshotData["roomArtifactsData"],
 ): DesktopRoomSharedArtifact[] {
   return (data.artifacts || [])
     .flatMap((artifact): DesktopRoomSharedArtifact[] => {
-      const kind = normalizeArtifactKind(artifact.kind);
-      if (!artifact.identity_key || !artifact.room_id || !kind) return [];
-      return [{
-        roomId: artifact.room_id,
-        identityKey: artifact.identity_key,
-        provider: normalizeArtifactProvider(artifact.provider),
-        kind,
-        artifactId: artifact.artifact_id || null,
-        artifactNumber: typeof artifact.artifact_number === "number" ? artifact.artifact_number : null,
-        title: artifact.title || null,
-        url: artifact.url || null,
-        ref: artifact.ref || null,
-        state: artifact.state || null,
-        source: normalizeArtifactSource(artifact.source),
-        firstSeenAt: artifact.first_seen_at || "",
-        updatedAt: artifact.updated_at || artifact.first_seen_at || "",
-        linkedTaskIds: Array.isArray(artifact.linked_task_ids)
-          ? artifact.linked_task_ids.filter((taskId): taskId is string => typeof taskId === "string")
-          : [],
-      }];
+      const mapped = mapRoomArtifactPayload(artifact);
+      return mapped ? [mapped] : [];
     })
     .sort((left, right) => {
       const leftTime = Date.parse(left.updatedAt || left.firstSeenAt || "");
@@ -324,8 +309,35 @@ function mapRoomArtifacts(
     });
 }
 
+export function mapRoomArtifactPayload(
+  artifact: NonNullable<RoomSnapshotData["roomArtifactsData"]["artifacts"]>[number] | null | undefined,
+): DesktopRoomSharedArtifact | null {
+  if (!artifact) return null;
+  const kind = normalizeArtifactKind(artifact.kind);
+  if (!artifact.identity_key || !artifact.room_id || !kind) return null;
+  return {
+    roomId: artifact.room_id,
+    identityKey: artifact.identity_key,
+    provider: normalizeArtifactProvider(artifact.provider),
+    kind,
+    artifactId: artifact.artifact_id || null,
+    artifactNumber: typeof artifact.artifact_number === "number" ? artifact.artifact_number : null,
+    title: artifact.title || null,
+    url: artifact.url || null,
+    ref: artifact.ref || null,
+    state: artifact.state || null,
+    detail: artifact.detail ?? null,
+    source: normalizeArtifactSource(artifact.source),
+    firstSeenAt: artifact.first_seen_at || "",
+    updatedAt: artifact.updated_at || artifact.first_seen_at || "",
+    linkedTaskIds: Array.isArray(artifact.linked_task_ids)
+      ? artifact.linked_task_ids.filter((taskId): taskId is string => typeof taskId === "string")
+      : [],
+  };
+}
+
 function normalizeArtifactProvider(value: unknown): DesktopRoomSharedArtifact["provider"] {
-  return value === "github" || value === "gitlab" || value === "bitbucket"
+  return value === "git" || value === "github" || value === "gitlab" || value === "bitbucket"
     ? value
     : "unknown";
 }
@@ -333,6 +345,9 @@ function normalizeArtifactProvider(value: unknown): DesktopRoomSharedArtifact["p
 function normalizeArtifactKind(value: unknown): DesktopRoomSharedArtifact["kind"] | null {
   return value === "issue"
     || value === "branch"
+    || value === "commit"
+    || value === "diff"
+    || value === "change_summary"
     || value === "pull_request"
     || value === "merge_request"
     || value === "review"
@@ -346,4 +361,45 @@ function normalizeArtifactSource(value: unknown): DesktopRoomSharedArtifact["sou
   return value === "task_workflow_artifact" || value === "github_event" || value === "manual"
     ? value
     : "manual";
+}
+
+export function mapBoardSettings(
+  data: RoomSnapshotData["boardSettingsData"],
+): DesktopBoardSettingsSummary {
+  const activeManager = data.active_manager;
+  const pendingIntentCount = Number(data.pending_intent_count ?? 0);
+  return {
+    managerMode: normalizeBoardManagerMode(data.settings?.manager_mode),
+    activeManager: activeManager
+      && activeManager.agent_session_id
+      && activeManager.agent_key
+      && activeManager.actor_label
+      ? {
+          agentSessionId: activeManager.agent_session_id,
+          agentKey: activeManager.agent_key,
+          actorLabel: activeManager.actor_label,
+          runtimeSource: normalizeBoardManagerRuntimeSource(activeManager.runtime_source),
+        }
+      : null,
+    pendingIntentCount: Number.isFinite(pendingIntentCount)
+      ? Math.max(0, pendingIntentCount)
+      : 0,
+  };
+}
+
+function normalizeBoardManagerMode(value: unknown): DesktopBoardSettingsSummary["managerMode"] {
+  return value === "off" || value === "intent_required" || value === "manager_optional"
+    ? value
+    : "manager_optional";
+}
+
+function normalizeBoardManagerRuntimeSource(
+  value: unknown,
+): NonNullable<DesktopBoardSettingsSummary["activeManager"]>["runtimeSource"] {
+  return value === "desktop_managed"
+    || value === "open_model"
+    || value === "external"
+    || value === "unknown"
+    ? value
+    : "unknown";
 }

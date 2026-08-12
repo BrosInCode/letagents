@@ -1,4 +1,6 @@
 .app-main {
+  grid-column: 2;
+  min-width: 0;
   grid-template-rows: auto minmax(0, 1fr);
   align-content: start;
   gap: 26px;

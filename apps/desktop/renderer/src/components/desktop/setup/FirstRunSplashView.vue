@@ -1,12 +1,9 @@
 <template>
   <main class="desktop-launch-splash" data-testid="desktop-first-run-splash">
-    <div class="desktop-launch-splash-inner">
-      <span class="desktop-launch-logo-shell" aria-hidden="true">
-        <LetAgentsLogoMark />
-      </span>
-      <strong>LetAgents</strong>
-      <small>Checking setup...</small>
-    </div>
+    <span class="desktop-launch-logo" role="status" aria-live="polite">
+      <LetAgentsLogoMark />
+      <span class="sr-only">LetAgents is starting</span>
+    </span>
   </main>
 </template>
 

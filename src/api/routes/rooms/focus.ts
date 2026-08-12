@@ -10,7 +10,9 @@ import {
   getFocusRoomsForParent,
   getTaskById,
   getTaskOwnershipState,
+  LeaseFenceStaleError,
   updateFocusRoomSettings,
+  type LeaseFence,
   type Project,
   type Task,
 } from "../../db.js";
@@ -25,31 +27,31 @@ import {
 } from "../../focus-rooms/settings.js";
 import {
   normalizeFocusRoomConclusionDetails,
+  QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY,
   type FocusRoomConclusionDetails,
 } from "../../focus-rooms/conclusion.js";
 import { normalizeRoomId } from "../../rooms/routing.js";
 import {
-  requireWorkerRequestAgentIdentity,
-  type ResolvedRequestAgentIdentity,
-} from "../../request/agent-identity.js";
-import {
   normalizeTaskActorKey,
   normalizeTaskActorLabel,
 } from "../../tasks/ownership.js";
+import {
+  isDesktopHumanWrite,
+  resolveOwnerTokenWorkerWriteIdentity,
+} from "./tasks/request-identity.js";
 
 type RoomRole = "admin" | "participant" | "anonymous";
 type TaskOwnershipState = NonNullable<Awaited<ReturnType<typeof getTaskOwnershipState>>>;
 
 type FocusConclusionGuardDecision =
-  | { kind: "allow" }
+  | { kind: "allow"; leaseFence?: LeaseFence | null }
   | { kind: "deny"; code: string; error: string };
 
-type OwnerTokenWorkerWriteIdentity =
-  | { kind: "not_owner_token" }
-  | { kind: "worker"; identity: ResolvedRequestAgentIdentity }
-  | { kind: "responded" };
-
 export interface RoomFocusRouteDeps {
+  getFocusRoomByKey: typeof getFocusRoomByKey;
+  getTaskById: typeof getTaskById;
+  getTaskOwnershipState: typeof getTaskOwnershipState;
+  concludeFocusRoom: typeof concludeFocusRoom;
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(
     roomId: string,
@@ -98,29 +100,6 @@ export interface RoomFocusRouteDeps {
     summary: string;
     details?: FocusRoomConclusionDetails | null;
   }): string;
-}
-
-async function resolveOwnerTokenWorkerWriteIdentity(input: {
-  req: AuthenticatedRequest;
-  res: Response;
-  room_id: string;
-  body: Record<string, unknown>;
-}): Promise<OwnerTokenWorkerWriteIdentity> {
-  if (input.req.authKind !== "owner_token") {
-    return { kind: "not_owner_token" };
-  }
-
-  const result = await requireWorkerRequestAgentIdentity({
-    req: input.req,
-    body: input.body,
-    room_id: input.room_id,
-  });
-  if (!result.ok) {
-    input.res.status(result.status).json({ error: result.error });
-    return { kind: "responded" };
-  }
-
-  return { kind: "worker", identity: result.identity };
 }
 
 function toFocusRoomResponseOptions(input: {
@@ -185,7 +164,7 @@ export function registerRoomFocusRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const focusRoom = await getFocusRoomByKey(project.id, focusKey);
+    const focusRoom = await deps.getFocusRoomByKey(project.id, focusKey);
     if (!focusRoom) {
       res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
       return;
@@ -358,6 +337,7 @@ export function registerRoomFocusRoutes(
     if (!(await deps.requireParticipant(req, res, project))) return;
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
+    const desktopHumanWrite = isDesktopHumanWrite(req, requestBody);
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
@@ -366,28 +346,35 @@ export function registerRoomFocusRoutes(
     });
     if (workerWriteIdentity.kind === "responded") return;
     const workerIdentity = workerWriteIdentity.kind === "worker" ? workerWriteIdentity.identity : null;
+    const quickClose = desktopHumanWrite && requestBody.quick_close === true;
     const { summary } = requestBody as { summary?: unknown };
-    if (typeof summary !== "string" || !summary.trim()) {
+    if (!quickClose && (typeof summary !== "string" || !summary.trim())) {
       res.status(400).json({ error: "summary is required" });
       return;
     }
+    const conclusionSummary = quickClose
+      ? QUICK_FOCUS_ROOM_CONCLUSION_SUMMARY
+      : (summary as string).trim();
 
     try {
-      const focusRoom = await getFocusRoomByKey(project.id, focusKey);
+      const focusRoom = await deps.getFocusRoomByKey(project.id, focusKey);
       if (!focusRoom) {
         res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
         return;
       }
 
-      const conclusionDetails = normalizeFocusRoomConclusionDetails(
-        requestBody.conclusion_details,
-        { required: Boolean(focusRoom.source_task_id && focusRoom.focus_status !== "concluded") }
-      );
+      const conclusionDetails = quickClose
+        ? null
+        : normalizeFocusRoomConclusionDetails(
+            requestBody.conclusion_details,
+            { required: Boolean(focusRoom.source_task_id && focusRoom.focus_status !== "concluded") }
+          );
 
+      let conclusionLeaseFence: LeaseFence | null = null;
       if (focusRoom.source_task_id) {
-        const task = await getTaskById(project.id, focusRoom.source_task_id);
-        const taskOwnership = await getTaskOwnershipState(project.id, focusRoom.source_task_id);
-        if (task && taskOwnership) {
+        const task = await deps.getTaskById(project.id, focusRoom.source_task_id);
+        const taskOwnership = await deps.getTaskOwnershipState(project.id, focusRoom.source_task_id);
+        if (task && taskOwnership && !desktopHumanWrite) {
           const coordination = await deps.enforceFocusRoomConclusion({
             req,
             projectId: project.id,
@@ -402,10 +389,17 @@ export function registerRoomFocusRoutes(
             res.status(409).json({ error: coordination.error, code: coordination.code });
             return;
           }
+          conclusionLeaseFence = coordination.leaseFence ?? null;
         }
       }
 
-      const result = await concludeFocusRoom(project.id, focusKey, summary, conclusionDetails);
+      const result = await deps.concludeFocusRoom(
+        project.id,
+        focusKey,
+        conclusionSummary,
+        conclusionDetails,
+        conclusionLeaseFence,
+      );
       if (!result) {
         res.status(404).json({ error: "Focus Room not found", code: "ROOM_NOT_FOUND" });
         return;
@@ -426,7 +420,7 @@ export function registerRoomFocusRoutes(
             deps.formatFocusRoomConclusionMessage({
               focusRoom: result.room,
               task: result.task,
-              summary: result.room.conclusion_summary || summary.trim(),
+              summary: result.room.conclusion_summary || conclusionSummary,
               details: result.room.conclusion_details,
             })
           )
@@ -446,6 +440,10 @@ export function registerRoomFocusRoutes(
         })),
       });
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "POST /rooms/:room_id/focus/:focus_key/conclude",

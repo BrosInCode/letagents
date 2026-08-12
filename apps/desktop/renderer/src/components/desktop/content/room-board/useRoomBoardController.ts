@@ -5,11 +5,11 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../../electron/ipc-types";
-import { sortTasks } from "../../../../domain/tasks";
-import { normalizeRoom, readableStatus } from "./formatters";
+import { findLocalRoomWorker } from "./board-workers";
 import { parseReviewCandidateValue, reviewAssignmentCandidates as getReviewAssignmentCandidates } from "./review-candidates";
 import { reviewLeases, shouldShowReviewPanel, workLease } from "./task-state";
-import type { TaskAction, TaskGroup } from "./types";
+import type { TaskAction } from "./types";
+import { desktopIpc } from "../../../../ipc/index.js";
 
 interface RoomBoardControllerProps {
   roomIdentifier: string;
@@ -23,8 +23,6 @@ type RoomBoardEmit = {
   (event: "refresh-room"): void;
 };
 
-const STATUS_ORDER = ["proposed", "accepted", "assigned", "in_progress", "blocked", "in_review", "merged", "done", "cancelled"];
-
 export function useRoomBoardController(
   props: RoomBoardControllerProps,
   emit: RoomBoardEmit
@@ -32,52 +30,21 @@ export function useRoomBoardController(
   const busyAction = ref<string | null>(null);
   const errorMessage = ref<string | null>(null);
   const selectedReviewerByTask = ref<Record<string, string>>({});
-  const collapsedGroups = ref(new Set<string>());
 
   const localWorker = computed(() =>
-    props.workers.find((worker) =>
-      worker.agentSessionId
-      && normalizeRoom(worker.roomId) === normalizeRoom(props.roomIdentifier)
-      && ["connected", "away"].includes(worker.state)
-    ) || null
+    findLocalRoomWorker(props.workers, props.roomIdentifier)
   );
-
-  const groupedTasks = computed<TaskGroup[]>(() => {
-    const groups = new Map<string, DesktopTaskSummary[]>();
-    for (const task of sortTasks(props.tasks)) {
-      const status = task.status || "proposed";
-      if (!groups.has(status)) groups.set(status, []);
-      groups.get(status)?.push(task);
-    }
-    return STATUS_ORDER
-      .filter((status) => groups.has(status))
-      .map((status) => ({
-        status,
-        label: readableStatus(status),
-        tasks: groups.get(status) || [],
-      }));
-  });
 
   async function addTask(input: DesktopTaskCreateInput): Promise<boolean> {
     const title = input.title.trim();
     if (!title) return false;
     return runBoardMutation("add", async () => {
-      const result = await window.letagentsDesktop.room.addTask(props.roomIdentifier, {
+      const result = await desktopIpc.room.addTask(props.roomIdentifier, {
         title,
         description: input.description?.trim() || null,
       });
       return result.task;
     });
-  }
-
-  function toggleGroup(status: string): void {
-    const next = new Set(collapsedGroups.value);
-    if (next.has(status)) {
-      next.delete(status);
-    } else {
-      next.add(status);
-    }
-    collapsedGroups.value = next;
   }
 
   function actionsFor(task: DesktopTaskSummary): TaskAction[] {
@@ -132,7 +99,7 @@ export function useRoomBoardController(
         label: "Release worker",
         busyLabel: "Releasing...",
         tone: "neutral",
-        run: async (nextTask) => (await window.letagentsDesktop.room.updateTaskLease(props.roomIdentifier, nextTask.id, {
+        run: async (nextTask) => (await desktopIpc.room.updateTaskLease(props.roomIdentifier, nextTask.id, {
           action: "release",
           lease_id: work.id,
           reason: `Released work lease for ${nextTask.id} from desktop board.`,
@@ -147,13 +114,13 @@ export function useRoomBoardController(
         tone: "neutral",
         run: async (nextTask) => {
           if (workerReviewsTask) {
-            return (await window.letagentsDesktop.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
+            return (await desktopIpc.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
               action: "release",
               lease_id: review.id,
               reason: `Released board review authority for ${nextTask.id} from desktop board.`,
             })).task;
           }
-          return (await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, nextTask.id, {
+          return (await desktopIpc.room.updateTaskReviewLease(props.roomIdentifier, nextTask.id, {
             action: "release",
             lease_id: review.id,
             reason: `Released board review authority for ${nextTask.id} from desktop board.`,
@@ -167,7 +134,7 @@ export function useRoomBoardController(
         label: "Claim review",
         busyLabel: "Claiming...",
         tone: "primary",
-        run: async (nextTask) => (await window.letagentsDesktop.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
+        run: async (nextTask) => (await desktopIpc.room.runTaskReviewWorkerAction(props.roomIdentifier, nextTask.id, {
           action: "claim",
           reason: `Claimed board review authority for ${nextTask.id} from desktop board.`,
         })).task,
@@ -184,6 +151,10 @@ export function useRoomBoardController(
     };
   }
 
+  function clearError(): void {
+    errorMessage.value = null;
+  }
+
   function reviewAssignmentCandidates(task: DesktopTaskSummary): DesktopAgentPresence[] {
     return getReviewAssignmentCandidates(task, props.presence);
   }
@@ -196,7 +167,7 @@ export function useRoomBoardController(
     const selected = parseReviewCandidateValue(selectedReviewerByTask.value[task.id] || "");
     if (!selected) return;
     await runBoardMutation(`${task.id}:assign-review`, async () => {
-      const result = await window.letagentsDesktop.room.updateTaskReviewLease(props.roomIdentifier, task.id, {
+      const result = await desktopIpc.room.updateTaskReviewLease(props.roomIdentifier, task.id, {
         action: "assign",
         target_actor_key: selected.agentKey,
         target_actor_instance_id: selected.agentInstanceId,
@@ -239,7 +210,7 @@ export function useRoomBoardController(
       busyLabel,
       tone,
       targetStatus: draggable ? status : undefined,
-      run: async (task) => (await window.letagentsDesktop.room.updateTask(props.roomIdentifier, task.id, { status })).task,
+      run: async (task) => (await desktopIpc.room.updateTask(props.roomIdentifier, task.id, { status })).task,
     };
   }
 
@@ -268,7 +239,7 @@ export function useRoomBoardController(
       busyLabel: busyLabelByAction[action],
       tone,
       targetStatus: targetStatusByAction[action],
-      run: async (task) => (await window.letagentsDesktop.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,
+      run: async (task) => (await desktopIpc.room.runTaskWorkerAction(props.roomIdentifier, task.id, { action })).task,
     };
   }
 
@@ -281,13 +252,11 @@ export function useRoomBoardController(
     addTask,
     assignReview,
     busyAction,
-    collapsedGroups,
+    clearError,
     errorMessage,
-    groupedTasks,
     reviewAssignmentCandidates,
     runTaskAction,
     selectedReviewerByTask,
     setSelectedReviewer,
-    toggleGroup,
   };
 }

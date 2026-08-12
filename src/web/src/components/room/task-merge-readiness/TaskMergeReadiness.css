@@ -1,12 +1,13 @@
 .task-merge-readiness {
+  --readiness-accent: var(--text-tertiary);
+  --readiness-soft: var(--accent-dim);
+  --readiness-text: var(--text-secondary);
   position: relative;
   margin-top: 10px;
   padding: 10px 11px;
-  border: 1px solid rgba(148, 163, 184, 0.16);
-  border-radius: 12px;
-  background:
-    linear-gradient(135deg, rgba(255, 255, 255, 0.055), rgba(255, 255, 255, 0.018)),
-    rgba(15, 23, 42, 0.3);
+  border: 1px solid color-mix(in srgb, var(--readiness-accent) 26%, var(--border));
+  border-radius: var(--radius-lg);
+  background: var(--bg-card);
   animation: readiness-enter 180ms ease-out both;
   overflow: hidden;
 }
@@ -16,38 +17,38 @@
   position: absolute;
   inset: 0 auto 0 0;
   width: 3px;
-  background: var(--readiness-accent, #94a3b8);
+  background: var(--readiness-accent);
   opacity: 0.85;
 }
 
 .task-merge-readiness[data-tone="ready"] {
-  --readiness-accent: #34d399;
-  --readiness-soft: rgba(52, 211, 153, 0.12);
-  --readiness-text: #86efac;
+  --readiness-accent: var(--task-merged);
+  --readiness-soft: color-mix(in srgb, var(--task-merged) 10%, transparent);
+  --readiness-text: color-mix(in srgb, var(--task-merged) 76%, var(--text));
 }
 
 .task-merge-readiness[data-tone="blocked"] {
-  --readiness-accent: #f87171;
-  --readiness-soft: rgba(248, 113, 113, 0.12);
-  --readiness-text: #fca5a5;
+  --readiness-accent: var(--task-blocked);
+  --readiness-soft: color-mix(in srgb, var(--task-blocked) 10%, transparent);
+  --readiness-text: color-mix(in srgb, var(--task-blocked) 76%, var(--text));
 }
 
 .task-merge-readiness[data-tone="pending"] {
-  --readiness-accent: #f59e0b;
-  --readiness-soft: rgba(245, 158, 11, 0.12);
-  --readiness-text: #fbbf24;
+  --readiness-accent: var(--task-in-progress);
+  --readiness-soft: color-mix(in srgb, var(--task-in-progress) 10%, transparent);
+  --readiness-text: color-mix(in srgb, var(--task-in-progress) 76%, var(--text));
 }
 
 .task-merge-readiness[data-tone="merged"] {
-  --readiness-accent: #60a5fa;
-  --readiness-soft: rgba(96, 165, 250, 0.12);
-  --readiness-text: #93c5fd;
+  --readiness-accent: var(--task-accepted);
+  --readiness-soft: color-mix(in srgb, var(--task-accepted) 10%, transparent);
+  --readiness-text: color-mix(in srgb, var(--task-accepted) 76%, var(--text));
 }
 
 .task-merge-readiness[data-tone="neutral"] {
-  --readiness-accent: #94a3b8;
-  --readiness-soft: rgba(148, 163, 184, 0.12);
-  --readiness-text: #cbd5e1;
+  --readiness-accent: var(--text-tertiary);
+  --readiness-soft: var(--accent-dim);
+  --readiness-text: var(--text-secondary);
 }
 
 .merge-readiness-topline {
@@ -63,7 +64,7 @@
   align-items: center;
   min-width: 0;
   gap: 7px;
-  color: var(--readiness-text, #cbd5e1);
+  color: var(--readiness-text);
   font-size: 0.72rem;
   font-weight: 800;
   letter-spacing: 0.045em;
@@ -74,8 +75,7 @@
   width: 8px;
   height: 8px;
   border-radius: 999px;
-  background: var(--readiness-accent, #94a3b8);
-  box-shadow: 0 0 16px var(--readiness-accent, #94a3b8);
+  background: var(--readiness-accent);
 }
 
 .merge-readiness-link {
@@ -83,25 +83,29 @@
   align-items: center;
   flex-shrink: 0;
   padding: 3px 7px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border-strong);
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.04);
-  color: var(--text-secondary, #d4d4d8);
+  background: var(--accent-dim);
+  color: var(--text-secondary);
   font-size: 0.68rem;
   font-weight: 700;
   text-decoration: none;
-  transition: transform 140ms ease, border-color 140ms ease, background 140ms ease;
+  transition: border-color var(--duration-fast) ease, background var(--duration-fast) ease;
 }
 
 .merge-readiness-link:hover {
-  transform: translateY(-1px);
-  border-color: rgba(255, 255, 255, 0.18);
-  background: rgba(255, 255, 255, 0.075);
+  border-color: var(--border-accent);
+  background: var(--accent-hover);
+}
+
+.merge-readiness-link:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
 }
 
 .merge-readiness-summary {
   margin: 0 0 9px;
-  color: var(--text-secondary, #d4d4d8);
+  color: var(--text-secondary);
   font-size: 0.75rem;
   line-height: 1.45;
 }
@@ -115,9 +119,9 @@
 .merge-readiness-signal {
   min-width: 0;
   padding: 7px 8px;
-  border: 1px solid rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border);
   border-radius: 9px;
-  background: rgba(0, 0, 0, 0.16);
+  background: var(--accent-dim);
 }
 
 .signal-value,
@@ -129,14 +133,14 @@
 }
 
 .signal-value {
-  color: var(--text-primary, #ffffff);
+  color: var(--text);
   font-size: 0.72rem;
   font-weight: 700;
 }
 
 .signal-label {
   margin-top: 2px;
-  color: var(--text-tertiary, #a1a1aa);
+  color: var(--text-tertiary);
   font-size: 0.62rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -154,7 +158,7 @@
 .merge-readiness-blockers li {
   position: relative;
   padding-left: 13px;
-  color: var(--text-secondary, #d4d4d8);
+  color: var(--text-secondary);
   font-size: 0.7rem;
   line-height: 1.35;
 }
@@ -167,7 +171,7 @@
   width: 5px;
   height: 5px;
   border-radius: 999px;
-  background: var(--readiness-accent, #94a3b8);
+  background: var(--readiness-accent);
 }
 
 .merge-readiness-reviews {
@@ -180,25 +184,25 @@
 .merge-review-chip {
   padding: 3px 7px;
   border-radius: 999px;
-  background: rgba(113, 113, 122, 0.12);
-  color: var(--muted, #a1a1aa);
+  background: var(--accent-dim);
+  color: var(--text-secondary);
   font-size: 0.64rem;
   font-weight: 700;
 }
 
 .merge-review-chip[data-state="approved"] {
-  background: rgba(34, 197, 94, 0.12);
-  color: #86efac;
+  background: var(--green-dim);
+  color: var(--green-text);
 }
 
 .merge-review-chip[data-state="changes_requested"] {
-  background: rgba(248, 113, 113, 0.12);
-  color: #fca5a5;
+  background: var(--red-dim);
+  color: var(--red-text);
 }
 
 .merge-review-chip[data-state="commented"] {
-  background: rgba(96, 165, 250, 0.1);
-  color: #93c5fd;
+  background: var(--blue-dim);
+  color: var(--blue-text);
 }
 
 @keyframes readiness-enter {
@@ -221,5 +225,10 @@
 
   .merge-readiness-signals {
     grid-template-columns: 1fr;
+  }
+
+  .merge-readiness-link {
+    min-height: 44px;
+    padding-inline: 12px;
   }
 }

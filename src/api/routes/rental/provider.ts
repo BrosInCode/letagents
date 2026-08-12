@@ -29,6 +29,7 @@ import type {
   RentalRoomResult,
 } from "../../rental/room-projection.js";
 import { projectProviderReadiness } from "../../rental/provider-readiness.js";
+import type { RentalLaunchSelection } from "../../rental/sessions/transitions.js";
 
 export interface RentalProviderRouteDeps {
   createListing(input: CreateListingInput): Promise<RentalListing>;
@@ -49,7 +50,8 @@ export interface RentalProviderRouteDeps {
   // Session management (p1.3)
   acceptSession(
     sessionId: string,
-    providerAccountId: string
+    providerAccountId: string,
+    launch?: RentalLaunchSelection,
   ): Promise<unknown | null>;
   declineSession(
     sessionId: string,
@@ -59,6 +61,7 @@ export interface RentalProviderRouteDeps {
     input: ProvisionRentalRoomForProviderInput,
   ): Promise<RentalRoomResult | null>;
   listProviderRequests(providerAccountId: string): Promise<unknown[]>;
+  listProviderSessions(providerAccountId: string, hostId?: string | null, installationId?: string | null): Promise<unknown[]>;
 }
 
 export function isRentEnabled(): boolean {
@@ -87,6 +90,12 @@ function requireProviderAccountId(
   return sa.account_id;
 }
 
+export function projectRentalProviderRequest(request: Record<string, unknown>): Record<string, unknown> {
+  return request.request_expires_at
+    ? { ...request, expires_at: request.request_expires_at }
+    : request;
+}
+
 export function registerRentalProviderRoutes(
   app: Express,
   deps: RentalProviderRouteDeps
@@ -97,8 +106,9 @@ export function registerRentalProviderRoutes(
     const accountId = requireProviderAccountId(req, res);
     if (!accountId) return;
 
-    const { displayName, ideKind, modelLabel, quotaLaneId, quotaLaneLabel, supportedModes, defaultLrtLimit, defaultTimeLimitMinutes, manualAcceptRequired } = req.body as {
+    const { displayName, providerHostId, ideKind, modelLabel, quotaLaneId, quotaLaneLabel, supportedModes, defaultLrtLimit, defaultTimeLimitMinutes, manualAcceptRequired, maxConcurrentSessions } = req.body as {
       displayName?: string;
+      providerHostId?: string | null;
       ideKind?: string;
       modelLabel?: string | null;
       quotaLaneId?: string | null;
@@ -107,6 +117,7 @@ export function registerRentalProviderRoutes(
       defaultLrtLimit?: number | null;
       defaultTimeLimitMinutes?: number | null;
       manualAcceptRequired?: boolean;
+      maxConcurrentSessions?: number | null;
     };
 
     if (!displayName || typeof displayName !== "string" || !displayName.trim()) {
@@ -117,10 +128,19 @@ export function registerRentalProviderRoutes(
       res.status(400).json({ error: "ideKind is required" });
       return;
     }
+    if (
+      maxConcurrentSessions !== undefined
+      && maxConcurrentSessions !== null
+      && (!Number.isInteger(maxConcurrentSessions) || maxConcurrentSessions < 1)
+    ) {
+      res.status(400).json({ error: "maxConcurrentSessions must be a positive integer" });
+      return;
+    }
 
     try {
       const listing = await deps.createListing({
         providerAccountId: accountId,
+        providerHostId,
         displayName: displayName.trim(),
         ideKind: ideKind.trim(),
         modelLabel,
@@ -130,9 +150,14 @@ export function registerRentalProviderRoutes(
         defaultLrtLimit,
         defaultTimeLimitMinutes,
         manualAcceptRequired,
+        maxConcurrentSessions,
       });
       res.status(201).json(listing);
     } catch (error) {
+      if (error instanceof Error && error.message === "provider_host_not_owned") {
+        res.status(403).json({ error: error.message });
+        return;
+      }
       res.status(500).json({ error: "Failed to create listing" });
     }
   });
@@ -160,6 +185,7 @@ export function registerRentalProviderRoutes(
     const listingId = req.params.id as string;
     const input = req.body as {
       displayName?: string;
+      providerHostId?: string | null;
       modelLabel?: string | null;
       quotaLaneId?: string | null;
       quotaLaneLabel?: string | null;
@@ -167,6 +193,7 @@ export function registerRentalProviderRoutes(
       defaultLrtLimit?: number | null;
       defaultTimeLimitMinutes?: number | null;
       manualAcceptRequired?: boolean;
+      maxConcurrentSessions?: number | null;
     };
 
     try {
@@ -178,6 +205,14 @@ export function registerRentalProviderRoutes(
         }
         input.displayName = input.displayName.trim();
       }
+      if (
+        input.maxConcurrentSessions !== undefined
+        && input.maxConcurrentSessions !== null
+        && (!Number.isInteger(input.maxConcurrentSessions) || input.maxConcurrentSessions < 1)
+      ) {
+        res.status(400).json({ error: "maxConcurrentSessions must be a positive integer" });
+        return;
+      }
 
       const listing = await deps.updateListing(listingId, accountId, input);
       if (!listing) {
@@ -186,6 +221,10 @@ export function registerRentalProviderRoutes(
       }
       res.json(listing);
     } catch (error) {
+      if (error instanceof Error && error.message === "provider_host_not_owned") {
+        res.status(403).json({ error: error.message });
+        return;
+      }
       res.status(500).json({ error: "Failed to update listing" });
     }
   });
@@ -255,11 +294,50 @@ export function registerRentalProviderRoutes(
 
       try {
         const requests = await deps.listProviderRequests(accountId);
-        res.json(requests);
+        res.json(requests.map((request) => projectRentalProviderRequest(request as Record<string, unknown>)));
       } catch (error) {
         res.status(500).json({ error: "Failed to list requests" });
       }
     }
+  );
+
+  // POST /api/rental/provider/sessions/:id/accept — accept a session request
+  app.get(
+    "/api/rental/provider/sessions",
+    async (req: AuthenticatedRequest, res: Response) => {
+      if (!requireRentEnabled(res)) return;
+      const accountId = requireProviderAccountId(req, res);
+      if (!accountId) return;
+      const hostId = typeof req.query.hostId === "string"
+        ? req.query.hostId.trim()
+        : typeof req.query.host_id === "string"
+          ? req.query.host_id.trim()
+          : "";
+      const installationId = typeof req.query.installationId === "string"
+        ? req.query.installationId.trim()
+        : typeof req.query.installation_id === "string"
+          ? req.query.installation_id.trim()
+          : "";
+      if (hostId.length > 160 || installationId.length > 160
+        || /[\u0000-\u001f\u007f]/.test(hostId)
+        || /[\u0000-\u001f\u007f]/.test(installationId)) {
+        res.status(400).json({ error: "invalid_host_identity" });
+        return;
+      }
+      if (Boolean(hostId) !== Boolean(installationId)) {
+        res.status(400).json({ error: "hostId and installationId are required together" });
+        return;
+      }
+      try {
+        res.json({ sessions: await deps.listProviderSessions(
+          accountId,
+          hostId || undefined,
+          installationId || undefined,
+        ) });
+      } catch {
+        res.status(500).json({ error: "Failed to list provider sessions" });
+      }
+    },
   );
 
   // POST /api/rental/provider/sessions/:id/accept — accept a session request
@@ -271,9 +349,42 @@ export function registerRentalProviderRoutes(
       if (!accountId) return;
 
       try {
+        const hostId = typeof req.body?.hostId === "string"
+          ? req.body.hostId.trim()
+          : typeof req.body?.host_id === "string"
+            ? req.body.host_id.trim()
+            : "";
+        const installationId = typeof req.body?.installationId === "string"
+          ? req.body.installationId.trim()
+          : typeof req.body?.installation_id === "string"
+            ? req.body.installation_id.trim()
+            : "";
+        const runtimeBody = req.body?.runtime as Record<string, unknown> | undefined;
+        let launch: RentalLaunchSelection | undefined;
+        if (hostId || installationId || runtimeBody) {
+          const kind = typeof runtimeBody?.kind === "string" ? runtimeBody.kind.trim() : "";
+          if (!hostId || !installationId || !kind) {
+            res.status(400).json({ error: "hostId, installationId, and runtime.kind are required together" });
+            return;
+          }
+          launch = {
+            hostId,
+            installationId,
+            runtime: {
+              kind,
+              ...(typeof runtimeBody?.modelLabel === "string" && runtimeBody.modelLabel.trim()
+                ? { modelLabel: runtimeBody.modelLabel.trim() }
+                : {}),
+              ...(typeof runtimeBody?.permissionProfileId === "string" && runtimeBody.permissionProfileId.trim()
+                ? { permissionProfileId: runtimeBody.permissionProfileId.trim() }
+                : {}),
+            },
+          };
+        }
         const session = await deps.acceptSession(
           req.params.id as string,
-          accountId
+          accountId,
+          launch,
         );
         if (!session) {
           res.status(404).json({ error: "session_not_found" });
@@ -286,6 +397,17 @@ export function registerRentalProviderRoutes(
         if (
           message.startsWith("invalid_transition")
           || message.startsWith("quota_lease_")
+          || message === "listing_at_capacity"
+          || message === "provider_host_at_capacity"
+          || message === "provider_host_unavailable"
+          || message === "listing_host_mismatch"
+          || message === "runtime_unavailable"
+          || message === "permission_profile_unavailable"
+          || message === "unsafe_rental_runtime_profile"
+          || message === "accept_selection_mismatch"
+          || message === "launch_selection_required"
+          || message === "request_expired"
+          || message === "accept_fence_lost"
         ) {
           res.status(409).json({ error: message });
           return;
@@ -314,13 +436,9 @@ export function registerRentalProviderRoutes(
       }
 
       const account = req.sessionAccount;
-      const providerDisplayName = typeof req.body?.providerDisplayName === "string"
-        && req.body.providerDisplayName.trim()
-        ? req.body.providerDisplayName.trim()
-        : typeof req.body?.provider_display_name === "string"
-          && req.body.provider_display_name.trim()
-          ? req.body.provider_display_name.trim()
-          : account?.display_name || account?.login || "Rental Agent";
+      // Participant identity is owner-authenticated account data. Never let a
+      // provider-controlled request body forge an arbitrary room participant.
+      const providerDisplayName = account?.display_name || account?.login || "Rental Agent";
 
       try {
         const result = await deps.provisionSession({
@@ -369,7 +487,7 @@ export function registerRentalProviderRoutes(
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "unknown_error";
-        if (message.startsWith("invalid_transition")) {
+        if (message.startsWith("invalid_transition") || message === "transition_fence_lost") {
           res.status(409).json({ error: message });
           return;
         }

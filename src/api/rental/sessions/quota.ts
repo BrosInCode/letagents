@@ -10,6 +10,7 @@ import {
   type AcquireLeaseFailure,
   type QuotaLeaseOrchestratorDeps,
 } from "../quota-lease-orchestrator.js";
+import { laneCapacity } from "../quota-lease.js";
 import type {
   QuotaLane,
   QuotaLease,
@@ -44,6 +45,7 @@ type SessionLeaseInput = Pick<RentalSessionRow, "id" | "room_id">;
 
 type ListingLeaseInput = Pick<
   RentalListingRow,
+  | "provider_account_id"
   | "ide_kind"
   | "model_label"
   | "quota_lane_id"
@@ -51,6 +53,7 @@ type ListingLeaseInput = Pick<
   | "last_native_quota_snapshot"
   | "last_quota_reset_at"
   | "meter_confidence"
+  | "max_concurrent_sessions"
 >;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -86,6 +89,7 @@ export function buildQuotaLeaseInput(
   roomId: string | null;
   lane: QuotaLane;
   snapshot: QuotaLeaseSnapshot;
+  laneCapacity: number;
 } {
   const rawSnapshot = isRecord(listing.last_native_quota_snapshot)
     ? listing.last_native_quota_snapshot as Partial<NativeQuotaSnapshot>
@@ -93,6 +97,9 @@ export function buildQuotaLeaseInput(
   const rawResetAt = stringOrNull(rawSnapshot?.nativeResetAt)
     ?? listing.last_quota_reset_at?.toISOString()
     ?? null;
+  const confidence = confidenceOrUnknown(
+    rawSnapshot?.confidence ?? listing.meter_confidence,
+  );
 
   return {
     sessionId: session.id,
@@ -101,14 +108,26 @@ export function buildQuotaLeaseInput(
       provider: listing.ide_kind,
       model: listing.model_label ?? null,
       quotaLaneId: listing.quota_lane_id ?? null,
+      // Scope the lane to its owner: different providers listing the
+      // same ide_kind/model draw on independent quotas and must not
+      // contend for one global lane.
+      providerAccountId: listing.provider_account_id ?? null,
     },
     snapshot: {
       nativeUnit: unitOrUnknown(rawSnapshot?.nativeUnit ?? listing.native_quota_unit),
       nativeRemaining: finiteNumberOrNull(rawSnapshot?.nativeRemaining),
       nativeResetAt: rawResetAt,
-      confidence: confidenceOrUnknown(rawSnapshot?.confidence ?? listing.meter_confidence),
+      confidence,
       observedAt: stringOrNull(rawSnapshot?.observedAt) ?? nowIso,
     },
+    // Capacity is unlocked only when BOTH the vetted listing enum
+    // column and the (provider-attested) snapshot confidence are exact
+    // — the snapshot alone cannot raise concurrency.
+    laneCapacity: laneCapacity(
+      listing.max_concurrent_sessions,
+      confidenceOrUnknown(listing.meter_confidence),
+      confidence,
+    ),
   };
 }
 

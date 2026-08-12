@@ -21,6 +21,30 @@ export function taskDetailRoomPath(roomId: string, taskId: string): string {
   return `${taskCollectionRoomPath(roomId)}/${encodeURIComponent(taskId)}`;
 }
 
+export function boardSettingsRoomPath(roomId: string): string {
+  return `/rooms/${encodeRoomIdPath(roomId)}/board-settings`;
+}
+
+export function boardManagersRoomPath(roomId: string): string {
+  return `/rooms/${encodeRoomIdPath(roomId)}/board-managers`;
+}
+
+export function activeBoardManagerRoomPath(roomId: string): string {
+  return `${boardManagersRoomPath(roomId)}/active`;
+}
+
+export function boardIntentsRoomPath(roomId: string): string {
+  return `/rooms/${encodeRoomIdPath(roomId)}/board-intents`;
+}
+
+export function boardIntentDecisionRoomPath(
+  roomId: string,
+  intentId: string,
+  decision: "approve" | "deny"
+): string {
+  return `${boardIntentsRoomPath(roomId)}/${encodeURIComponent(intentId)}/${decision}`;
+}
+
 export function taskCollectionProjectPath(projectId: string): string {
   return `/projects/${encodeURIComponent(projectId)}/tasks`;
 }
@@ -76,6 +100,10 @@ export async function listTasks(target: TaskToolTarget, queryString: string) {
     room_path: (roomId) => `${taskCollectionRoomPath(roomId)}${queryString ? `?${queryString}` : ""}`,
     project_path: (projectId) => `${taskCollectionProjectPath(projectId)}${queryString ? `?${queryString}` : ""}`,
   });
+}
+
+export async function getCanonicalTask(roomId: string, taskId: string) {
+  return apiCall(taskDetailRoomPath(roomId, taskId));
 }
 
 export async function patchTask(target: TaskToolTarget, taskId: string, body: Record<string, unknown>) {
@@ -206,6 +234,54 @@ export async function postCanonicalTaskAction<T>(
 
   const { cloudRoomId } = await resolveLocalRoomStorageIdentifiers(roomId);
   return apiCall<T>(`${taskDetailRoomPath(cloudRoomId || roomId, taskId)}/${actionPath}`, {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getBoardSettings(roomId: string) {
+  return apiCall(boardSettingsRoomPath(roomId));
+}
+
+export async function patchBoardSettings(roomId: string, body: Record<string, unknown>) {
+  return apiCall(boardSettingsRoomPath(roomId), {
+    method: "PATCH",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function postBoardManager(roomId: string, body: Record<string, unknown>) {
+  return apiCall(boardManagersRoomPath(roomId), {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function deleteActiveBoardManager(roomId: string, body: Record<string, unknown>) {
+  return apiCall(activeBoardManagerRoomPath(roomId), {
+    method: "DELETE",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function getBoardIntents(roomId: string, queryString: string) {
+  return apiCall(`${boardIntentsRoomPath(roomId)}${queryString ? `?${queryString}` : ""}`);
+}
+
+export async function postBoardIntent(roomId: string, body: Record<string, unknown>) {
+  return apiCall(boardIntentsRoomPath(roomId), {
+    method: "POST",
+    body: JSON.stringify(body),
+  });
+}
+
+export async function postBoardIntentDecision(
+  roomId: string,
+  intentId: string,
+  decision: "approve" | "deny",
+  body: Record<string, unknown>
+) {
+  return apiCall(boardIntentDecisionRoomPath(roomId, intentId, decision), {
     method: "POST",
     body: JSON.stringify(body),
   });

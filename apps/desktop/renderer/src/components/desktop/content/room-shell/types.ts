@@ -1,4 +1,4 @@
-export type RoomTabId = "chat" | "inbox" | "events" | "board" | "activity" | "rooms" | "rent";
+export type RoomTabId = "chat" | "inbox" | "events" | "board" | "activity" | "rooms";
 
 export interface RoomTabIndicator {
   label: string;

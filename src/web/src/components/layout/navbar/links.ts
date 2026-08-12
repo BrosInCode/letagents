@@ -4,6 +4,7 @@ export type NavbarRouteLink = {
 }
 
 export const NAV_SECTION_LINKS: NavbarRouteLink[] = [
+  { to: '/#download-mac', label: 'Mac Beta' },
   { to: '/#setup', label: 'Setup' },
   { to: '/#features', label: 'Features' },
 ]

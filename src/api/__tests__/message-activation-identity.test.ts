@@ -84,3 +84,20 @@ test("resolveMessageActivationIdentity ignores requests without session headers"
   assert.equal(identity, null);
   assert.equal(called, false);
 });
+
+test("resolveMessageActivationIdentity accepts an authenticated worker bearer without duplicate headers", async () => {
+  const req = {
+    ...requestWithHeaders({}),
+    authKind: "agent_session",
+  } as AuthenticatedRequest;
+  const calls: unknown[] = [];
+  const identity = await resolveMessageActivationIdentity(req, "room_1", {
+    resolveRequestAgentIdentity: async (input) => {
+      calls.push(input);
+      return workerIdentity;
+    },
+  });
+
+  assert.equal(identity, workerIdentity);
+  assert.deepEqual(calls, [{ req, room_id: "room_1" }]);
+});

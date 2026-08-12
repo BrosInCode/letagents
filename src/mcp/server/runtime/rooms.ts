@@ -42,6 +42,7 @@ import {
   toRoomState,
   type RoomState,
 } from "./room-state.js";
+import { isSupervisedBoundedTurn, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 
 export type JoinSessionMode = "live" | "current";
 
@@ -90,6 +91,9 @@ export async function joinRoomIdentifier(
   room: RoomState;
   response: Record<string, unknown>;
 }> {
+  if (isSupervisedBoundedTurn()) {
+    throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
+  }
   const roomId = joinedVia === "join_code" ? normalizeInviteCode(identifier) : identifier.trim();
 
   if (joinedVia !== "join_code" && await isLocalRoomStorageEnabled(roomId)) {
@@ -293,6 +297,9 @@ export async function createInviteRoom(): Promise<{
   room: RoomState;
   response: Record<string, unknown>;
 }> {
+  if (isSupervisedBoundedTurn()) {
+    throw new Error("Room joins and creation are disabled during a daemon-supervised bounded turn.");
+  }
   const project = await apiCall<Record<string, unknown>>("/projects", { method: "POST" });
   const roomId =
     typeof project.code === "string"
@@ -383,8 +390,74 @@ export async function joinNamedRoom(
   });
 }
 
+function bindWorkerRoomFromContext(): { room: RoomState; source: string } | null {
+  const configRoom = getRoomFromConfig();
+  if (configRoom) {
+    const gitContext = buildActiveGitRoomContext({
+      repoRoom: configRoom,
+      currentBranch: getGitCurrentBranch(),
+      defaultBranch: getGitDefaultBranch(),
+    });
+    const roomId = gitContext.activeRoom ?? configRoom;
+    return {
+      room: rememberRoom(toRoomState({
+        room_id: roomId,
+        display_name: roomId,
+        joined_via: "config",
+      })),
+      source: ".letagents.json",
+    };
+  }
+
+  const gitContext = getGitRoomContext();
+  if (gitContext.activeRoom) {
+    return {
+      room: rememberRoom(toRoomState({
+        room_id: gitContext.activeRoom,
+        display_name: gitContext.activeRoom,
+        joined_via: "git-remote",
+      })),
+      source: "git remote",
+    };
+  }
+
+  const savedCurrentRoom = getStoredCurrentRoom();
+  if (!savedCurrentRoom) {
+    return null;
+  }
+  return {
+    room: rememberRoom(toRoomState({
+      room_id: savedCurrentRoom.room_id,
+      project_id: savedCurrentRoom.project_id,
+      code: savedCurrentRoom.code,
+      display_name: savedCurrentRoom.display_name,
+      git_room: savedCurrentRoom.git_room,
+      joined_via: savedCurrentRoom.joined_via,
+    })),
+    source: "saved local room state",
+  };
+}
+
 export async function autoJoinFromContext(): Promise<void> {
   try {
+    const workerRuntime = requireValidWorkerBearerRuntime();
+    if (workerRuntime.mode === "supervised") {
+      // The exact room may change after a durable daemon-owned room move.
+      // Bind it per tool effect from the supervisor response, never from
+      // ambient repository, persisted state, or launch-time environment.
+      console.error("ℹ️ Daemon-supervised bounded turn leaves room selection to its exact supervisor context.");
+      return;
+    }
+    if (workerRuntime.mode === "worker") {
+      const bound = bindWorkerRoomFromContext();
+      if (bound) {
+        console.error(`🏠 Bound worker bearer to room '${bound.room.room_id}' (from ${bound.source}; no join/create request).`);
+      } else {
+        console.error("ℹ️ Worker bearer has no .letagents.json, git remote, or saved room to bind locally.");
+      }
+      return;
+    }
+
     const configRoom = getRoomFromConfig();
     if (configRoom) {
       const gitContext = buildActiveGitRoomContext({

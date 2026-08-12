@@ -1,0 +1,75 @@
+{
+  "minimumAgeDays": 7,
+  "exceptions": [
+    {
+      "name": "cuelume",
+      "version": "0.1.0",
+      "reason": "Intentional early adoption after tarball review and Codex Security scan 13f36e57-0cac-4a6c-8def-50cd6fc036a1. Re-scan before changing this version."
+    },
+    {
+      "name": "@hono/node-server",
+      "version": "2.0.10",
+      "reason": "Exact patched release required to remediate GHSA-9mqv-5hh9-4cgg before the normal cooldown expires; registry signatures and the full test suite are verified in CI."
+    },
+    {
+      "name": "electron",
+      "version": "42.8.1",
+      "reason": "Exact patched release required to remediate GHSA-r4w5-6pfg-jxp5 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-11 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "fast-uri",
+      "version": "3.1.5",
+      "reason": "Exact patched release required to remediate GHSA-7p8r-x3mc-p8w7 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI."
+    },
+    {
+      "name": "hono",
+      "version": "4.12.34",
+      "reason": "Exact patched release required to remediate GHSA-8j4g-w8fx-2239 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI."
+    },
+    {
+      "name": "brace-expansion",
+      "version": "5.0.9",
+      "reason": "Exact patched release required to remediate GHSA-rgw5-rvv9-x895 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-06 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "nanoid",
+      "version": "3.3.17",
+      "reason": "Exact patched release required to remediate GHSA-2v37-7h3g-55p8 (pinned via src/web overrides over vite/postcss) before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-10 when the cooldown is naturally satisfied."
+    },
+    {
+      "name": "@typescript-eslint/parser",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/project-service",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/scope-manager",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/tsconfig-utils",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/types",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/typescript-estree",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    },
+    {
+      "name": "@typescript-eslint/visitor-keys",
+      "version": "8.63.0",
+      "reason": "Grandfathered from the staging lockfile when the seven-day cooldown gate was introduced."
+    }
+  ]
+}

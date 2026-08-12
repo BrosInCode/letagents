@@ -25,6 +25,32 @@ export function latestReasoningSessionForTarget(
     )[0] || null;
 }
 
+/**
+ * Inspector parity without presentation-label identity joins. When both
+ * durable identifiers are present, the same reasoning stream must satisfy
+ * both of them.
+ */
+export function latestReasoningSessionForExactIdentity(
+  identity: Pick<ReasoningAgentTarget, "agentSessionId" | "agentKey">,
+  sessions: readonly DesktopReasoningSession[],
+): DesktopReasoningSession | null {
+  const sessionId = normalizeAgentKey(identity.agentSessionId);
+  const agentKey = specificAgentKey(identity.agentKey);
+  if (!sessionId && !agentKey) return null;
+  return sessions
+    .filter((session) => {
+      const sessionIdMatches = !sessionId
+        || normalizeAgentKey(session.agentSessionId) === sessionId;
+      const keyMatches = !agentKey
+        || specificAgentKey(session.agentKey) === agentKey;
+      return sessionIdMatches && keyMatches;
+    })
+    .sort((left, right) =>
+      timestampValue(right.updatedAt || right.createdAt) - timestampValue(left.updatedAt || left.createdAt)
+      || String(right.id).localeCompare(String(left.id))
+    )[0] || null;
+}
+
 export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[] {
   return [
     target.actorLabel,
@@ -38,6 +64,7 @@ export function reasoningAgentTargetKeys(target: ReasoningAgentTarget): string[]
 
 export function reasoningSessionAgentKeys(session: DesktopReasoningSession): string[] {
   return [
+    session.agentSessionId,
     session.actorLabel,
     actorDisplayNameKey(session.actorLabel),
     specificAgentKey(session.agentKey),
@@ -118,4 +145,98 @@ function specificAgentKey(value: string | null | undefined): string {
     return "";
   }
   return normalized;
+}
+
+export type ReasoningStreamState = "live" | "recent" | "snapshot" | "blocked";
+
+export interface ReasoningStreamInput {
+  status?: string | null;
+  summary?: string | null;
+  checking?: string | null;
+  nextAction?: string | null;
+  /** ISO timestamp of the session's last update; paired with `now`, enables staleness decay. */
+  updatedAt?: string | null;
+  /** Current time in ms. When supplied, a stale "live" stream decays to "recent". */
+  now?: number | null;
+  /** Silence window in ms after which a "live" stream is treated as no longer active. */
+  staleAfterMs?: number;
+}
+
+export interface ReasoningStreamClassification {
+  state: ReasoningStreamState;
+  label: string;
+  description: string;
+  isCodexReasoningSummary: boolean;
+  isCodexSnapshot: boolean;
+}
+
+// A "live" stream with no update within this window is treated as no longer
+// active and decays to the "recent" freshness state. 3 minutes: Codex reasoning
+// streams refresh every few seconds, so this stays unambiguous while giving a
+// legitimately slow turn (a long build or test run) room before it reads stale.
+const DEFAULT_STALE_AFTER_MS = 180_000;
+
+/**
+ * Classify a reasoning stream's freshness state, pill label, and tooltip.
+ *
+ * Precedence is deliberate: an explicit `blocked` status is authoritative and
+ * outranks the Codex reasoning-summary text heuristic. Codex reasoning streams
+ * don't always carry a clean status, so the heuristic infers "live thinking"
+ * from the text — but when the provider does report `blocked`, that must win,
+ * otherwise a blocked session whose text happens to match renders the green
+ * "live" state (and a "Live thinking" pill) around a red Blocker field.
+ */
+export function classifyReasoningStream(input: ReasoningStreamInput): ReasoningStreamClassification {
+  const status = String(input.status || "").trim();
+  const normalizedStatus = status.toLowerCase();
+  const text = [input.summary, input.checking, input.nextAction].join(" ").toLowerCase();
+  const isCodexReasoningSummary =
+    text.includes("readable reasoning") || text.includes("reasoning summary");
+  const isCodexSnapshot = !isCodexReasoningSummary
+    && (text.includes("codex_app_server")
+      || text.includes("app-server snapshot")
+      || text.includes("snapshot-derived"));
+
+  let state: ReasoningStreamState;
+  if (normalizedStatus === "blocked") state = "blocked";
+  else if (isCodexReasoningSummary) state = "live";
+  else if (isCodexSnapshot) state = "snapshot";
+  else if (normalizedStatus === "working" || normalizedStatus === "reviewing") state = "live";
+  else state = "recent";
+
+  let label: string;
+  if (normalizedStatus === "blocked") label = titleizeReasoningStatus(status);
+  else if (isCodexReasoningSummary) label = "Live thinking";
+  else if (isCodexSnapshot) label = "Snapshot";
+  else label = status ? titleizeReasoningStatus(status) : "Reasoning";
+
+  let description: string;
+  if (normalizedStatus === "blocked") description = label;
+  else if (isCodexReasoningSummary) description = "Readable Codex reasoning summary stream";
+  else if (isCodexSnapshot) description = "Codex app-server snapshot";
+  else description = label;
+
+  // Staleness decay: a "live" stream that has gone quiet is no longer active
+  // *right now*, so demote it to "recent". This is the backstop for a completed
+  // session whose text still trips the heuristic, and for a worker that dies
+  // mid-`working` with no terminal update — both would otherwise claim "Live
+  // thinking" forever. Only evaluated when a clock is supplied; `blocked` and
+  // already-quiet states never decay (state must be "live" to reach here).
+  if (state === "live" && typeof input.now === "number") {
+    const updatedAtMs = timestampValue(input.updatedAt ?? null);
+    const staleAfterMs = input.staleAfterMs ?? DEFAULT_STALE_AFTER_MS;
+    if (updatedAtMs > 0 && input.now - updatedAtMs > staleAfterMs) {
+      // "Stale", not "Idle": a live-claiming stream that went silent is
+      // possibly dead, which must not glance-alias the healthy `idle` status.
+      state = "recent";
+      label = "Stale";
+      description = "No reasoning updates recently";
+    }
+  }
+
+  return { state, label, description, isCodexReasoningSummary, isCodexSnapshot };
+}
+
+function titleizeReasoningStatus(status: string): string {
+  return status.replace(/[_-]+/g, " ").replace(/\b\w/g, (character) => character.toUpperCase());
 }

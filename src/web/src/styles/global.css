@@ -25,12 +25,27 @@
 
   --blue:            #3b82f6;
   --blue-dim:        rgba(59, 130, 246, 0.1);
+  --blue-text:       #60a5fa;
 
   --amber:           #f59e0b;
   --amber-dim:       rgba(245, 158, 11, 0.1);
+  --amber-text:      #fbbf24;
 
   --red:             #ef4444;
   --red-dim:         rgba(239, 68, 68, 0.1);
+  --red-text:        #f87171;
+  --board-muted:     #8d8d97;
+
+  /* Task lifecycle accents */
+  --task-proposed:    #71717a;
+  --task-accepted:    #60a5fa;
+  --task-assigned:    #a855f7;
+  --task-in-progress: #fbbf24;
+  --task-blocked:     #f87171;
+  --task-in-review:   #38bdf8;
+  --task-merged:      #34d399;
+  --task-done:        #22c55e;
+  --task-cancelled:   #64748b;
 
   /* Typography */
   --font-sans:       'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
@@ -99,6 +114,22 @@
   --accent-dim:      rgba(0, 0, 0, 0.03);
   --accent-hover:    rgba(0, 0, 0, 0.06);
   --accent-active:   rgba(0, 0, 0, 0.1);
+
+  --green-text:      #15803d;
+  --blue-text:       #1d4ed8;
+  --amber-text:      #92400e;
+  --red-text:        #b91c1c;
+  --board-muted:     #71717a;
+
+  --task-proposed:    #71717a;
+  --task-accepted:    #2563eb;
+  --task-assigned:    #7c3aed;
+  --task-in-progress: #a16207;
+  --task-blocked:     #dc2626;
+  --task-in-review:   #0369a1;
+  --task-merged:      #047857;
+  --task-done:        #15803d;
+  --task-cancelled:   #64748b;
 
   --shadow-sm:  0 1px 2px rgba(0, 0, 0, 0.06);
   --shadow-md:  0 4px 12px rgba(0, 0, 0, 0.08);

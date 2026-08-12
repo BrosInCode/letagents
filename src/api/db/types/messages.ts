@@ -2,6 +2,7 @@ import type { AgentPromptKind } from "../../../shared/room-agent-prompts.js";
 
 export interface Message {
   id: string;
+  agent_identity: MessageAgentIdentity | null;
   sender: string;
   text: string;
   agent_prompt_kind: AgentPromptKind | null;
@@ -12,6 +13,54 @@ export interface Message {
   thread: MessageThreadSummary | null;
   reply_to: MessageReplyReference | null;
   attachments: MessageAttachment[];
+  /** Account-scoped desktop dispatch metadata; omitted from shared events. */
+  account_agent_routing?: MessageAccountAgentRouting | null;
+}
+
+/** Exact prompt-only receipt audience, scoped by account and generation. */
+export interface MessageRecipientAgentTarget {
+  agent_key: string;
+  agent_session_id: string;
+  owner_account_id: string;
+  /** Present only after the captured generation ended and one same-owner successor remains. */
+  successor_agent_session_id?: string;
+}
+
+export type MessageAccountAgentRouting =
+  | {
+      version: 1;
+      authority: "receipts";
+      recipient_agent_keys: string[];
+      /**
+       * Exact receipt targets disambiguate overlapping durable-key rotations.
+       * A successor is present only when the server proved that the captured
+       * session ended and exactly one same-owner session now owns the key.
+       */
+      recipient_agent_sessions?: Array<{
+        agent_key: string;
+        agent_session_id: string;
+        successor_agent_session_id?: string;
+        activation_reason?: string;
+      }>;
+      control_authorized: boolean;
+    }
+  | {
+      version: 1;
+      authority: "legacy";
+      recipient_agent_keys: string[];
+      /** Present-empty is authoritative; clients must not re-run local aliases. */
+      recipient_agent_sessions: Array<{
+        agent_key: string;
+        agent_session_id: string;
+        activation_reason: string;
+      }>;
+      control_authorized: boolean;
+    };
+
+export interface MessageAgentIdentity {
+  actor_label: string;
+  agent_key: string;
+  agent_session_id: string | null;
 }
 
 export interface MessageReplyReference {
@@ -20,6 +69,7 @@ export interface MessageReplyReference {
   text: string;
   source: string | null;
   timestamp: string;
+  agent_identity: MessageAgentIdentity | null;
 }
 
 export interface MessageThreadParticipant {
@@ -36,6 +86,8 @@ export interface MessageThreadSummary {
   has_unread: boolean;
   latest_reply: MessageReplyReference | null;
   participants: MessageThreadParticipant[];
+  participant_count: number;
+  participants_truncated: boolean;
   last_read_message_id: string | null;
 }
 
@@ -82,7 +134,60 @@ export interface MessageRow {
   agent_prompt_kind: string | null;
   source: string | null;
   client_message_id: string | null;
+  publisher_agent_key: string | null;
+  publisher_agent_session_id: string | null;
+  publisher_account_id: string | null;
+  routing_snapshot_version: number | null;
   timestamp: string;
+}
+
+export interface MessageAgentReceiptRow {
+  id: string;
+  message_room_id: string;
+  message_number: number;
+  room_id: string;
+  agent_session_id: string;
+  agent_key: string;
+  actor_label: string;
+  activation_reason: string;
+  receipt_state: string;
+  reply_message_number: number | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageAgentReceiptEventRow {
+  id: string;
+  receipt_id: string;
+  message_room_id: string;
+  message_number: number;
+  from_state: string | null;
+  to_state: string;
+  actor_session_id: string | null;
+  timestamp: string;
+}
+
+export interface RoomAgentObservationSpanRow {
+  id: string;
+  room_id: string;
+  agent_session_id: string;
+  agent_key: string;
+  first_message_sequence: number;
+  last_message_sequence: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MessageHumanReadRangeRow {
+  id: string;
+  room_id: string;
+  account_id: string;
+  scope_kind: string;
+  thread_root_number: number | null;
+  first_message_sequence: number;
+  last_message_sequence: number;
+  client_batch_id: string;
+  created_at: string;
 }
 
 export interface MessageThreadReadRow {
@@ -90,6 +195,7 @@ export interface MessageThreadReadRow {
   thread_root_number: number;
   account_id: string;
   last_read_message_number: number;
+  last_read_reply_count: number;
   read_at: string;
 }
 

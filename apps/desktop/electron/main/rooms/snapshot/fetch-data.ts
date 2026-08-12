@@ -1,4 +1,5 @@
 import { apiFetch } from "../../auth.js";
+import type { DesktopSnapshotSourceState } from "../../../ipc-types.js";
 import {
   cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,
@@ -6,9 +7,11 @@ import {
 } from "../local-store.js";
 import { roomMessageHistoryPageSize } from "../../paths.js";
 import type { GitHubEventsResponse } from "../events.js";
+import { getLocalRoomArtifacts } from "../artifacts/local-store.js";
 import { getLatestLocalChatMessages } from "../messages/local-store.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import { resolveLocalThreadReaderKey } from "../messages/thread-reader.js";
+import { drainPaginatedTaskPages, type PaginatedTaskPage } from "./task-pagination.js";
 import type {
   ActivityHistoryResponse,
   FocusRoomsResponse,
@@ -18,6 +21,13 @@ import type {
   ReasoningResponse,
   RoomSnapshotData,
 } from "./payloads.js";
+
+const taskPageSize = 200;
+const desktopMessageOverlayHeaders = { "X-LetAgents-Desktop-Client": "1" };
+
+type TaskPageResponse = PaginatedTaskPage<
+  NonNullable<RoomSnapshotData["tasksData"]["tasks"]>[number]
+>;
 
 type ThreadPageResponse = {
   root?: RoomMessagePayload | null;
@@ -33,64 +43,174 @@ export async function fetchRoomSnapshotData(
   const apiRoomIdentifier = cloudRoomIdentifierForStorage(storage, roomIdentifier);
   const localRoomIdentifier = localRoomIdentifierForStorage(storage, roomIdentifier);
   const [
-    focusRoomsData,
-    tasksData,
-    participantsData,
-    presenceData,
-    reasoningData,
-    activityHistoryData,
-    roomArtifactsData,
-    messagesData,
-    githubEventsData,
+    focusRooms,
+    tasks,
+    participants,
+    presence,
+    reasoning,
+    activityHistory,
+    roomArtifacts,
+    boardSettings,
+    messages,
+    githubEvents,
   ] = await Promise.all([
-    apiFetch<FocusRoomsResponse>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/focus-rooms`,
-    ).catch(() => ({ focus_rooms: [] })),
-    apiFetch<RoomSnapshotData["tasksData"]>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/tasks`,
-    ).catch(() => ({ tasks: [] })),
-    apiFetch<ParticipantsResponse>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/participants`,
-    ).catch(() => ({ participants: [], hidden_count: 0 })),
-    apiFetch<PresenceResponse>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/presence?limit=100&scope=snapshot`,
-    ).catch(() => ({ presence: [] })),
-    apiFetch<ReasoningResponse>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/reasoning-sessions`,
-    ).catch(() => ({ sessions: [], reasoning_sessions: [] })),
-    apiFetch<ActivityHistoryResponse>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/activity-history?page_size=50`,
-    ).catch(() => ({ entries: [] })),
-    apiFetch<RoomSnapshotData["roomArtifactsData"]>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/artifacts?limit=100`,
-    ).catch(() => ({ artifacts: [] })),
-    !options.forceCloudMessages && storage.effectiveMode === "local"
-      ? getLatestLocalChatMessages(localRoomIdentifier, {
-          limit: roomMessageHistoryPageSize,
-          readerKey: await resolveLocalThreadReaderKey(),
-        }).then((page) => ({ messages: page.messages }))
-      : apiFetch<MessagesResponse>(
-          `/rooms/${encodeURIComponent(apiRoomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
-        )
-          .then((page) => expandMessagesWithThreadAncestors(apiRoomIdentifier, page.messages || []))
-          .then((messages) => ({ messages }))
-          .catch(() => ({ messages: [] })),
-    apiFetch<GitHubEventsResponse>(
-      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/events?limit=100`,
-    ).catch(() => null),
+    loadFocusRooms(apiRoomIdentifier),
+    loadSource(
+      fetchAllCloudTasks(apiRoomIdentifier),
+      { tasks: [] } as RoomSnapshotData["tasksData"],
+    ),
+    loadParticipants(apiRoomIdentifier),
+    loadPresence(apiRoomIdentifier),
+    loadSource(
+      apiFetch<ReasoningResponse>(
+        `/rooms/${encodeURIComponent(apiRoomIdentifier)}/reasoning-sessions`,
+      ),
+      { sessions: [], reasoning_sessions: [] } as ReasoningResponse,
+    ),
+    loadActivityHistory(apiRoomIdentifier),
+    loadSource(
+      storage.effectiveMode === "local"
+        ? getLocalRoomArtifacts(localRoomIdentifier, { limit: 100 })
+        : apiFetch<RoomSnapshotData["roomArtifactsData"]>(
+            `/rooms/${encodeURIComponent(apiRoomIdentifier)}/artifacts?limit=100`,
+          ),
+      { artifacts: [] } as RoomSnapshotData["roomArtifactsData"],
+    ),
+    loadBoardSettings(apiRoomIdentifier),
+    loadSource(
+      !options.forceCloudMessages && storage.effectiveMode === "local"
+        ? getLatestLocalChatMessages(localRoomIdentifier, {
+            limit: roomMessageHistoryPageSize,
+            readerKey: await resolveLocalThreadReaderKey(),
+          }).then((page) => ({ messages: page.messages }))
+        : apiFetch<MessagesResponse>(
+            `/rooms/${encodeURIComponent(apiRoomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
+            { headers: desktopMessageOverlayHeaders },
+          )
+            .then((page) => expandMessagesWithThreadAncestors(apiRoomIdentifier, page.messages || []))
+            .then((messages) => ({ messages })),
+      { messages: [] } as MessagesResponse,
+    ),
+    loadSource<GitHubEventsResponse | null>(
+      apiFetch<GitHubEventsResponse>(
+        `/rooms/${encodeURIComponent(apiRoomIdentifier)}/events?limit=100`,
+      ),
+      null,
+    ),
   ]);
 
   return {
-    focusRoomsData,
-    tasksData,
-    participantsData,
-    presenceData,
-    reasoningData,
-    activityHistoryData,
-    roomArtifactsData,
-    messagesData,
-    githubEventsData,
+    focusRoomsData: focusRooms.data,
+    tasksData: tasks.data,
+    participantsData: participants.data,
+    presenceData: presence.data,
+    reasoningData: reasoning.data,
+    activityHistoryData: activityHistory.data,
+    roomArtifactsData: roomArtifacts.data,
+    boardSettingsData: boardSettings.data,
+    messagesData: messages.data,
+    githubEventsData: githubEvents.data,
+    sourceStates: {
+      focusRooms: focusRooms.state,
+      tasks: tasks.state,
+      participants: participants.state,
+      presence: presence.state,
+      reasoning: reasoning.state,
+      activityHistory: activityHistory.state,
+      roomArtifacts: roomArtifacts.state,
+      boardSettings: boardSettings.state,
+      messages: messages.state,
+      githubEvents: githubEvents.state,
+    },
   };
+}
+
+/**
+ * Await a single snapshot source. On success returns its data and a "ready"
+ * state; on failure returns the provided fallback data and an "error" state
+ * carrying the failure message, so one failed source degrades gracefully
+ * instead of blanking the whole snapshot or rejecting the batch.
+ */
+export async function loadSource<T>(
+  promise: Promise<T>,
+  fallback: T,
+): Promise<{ data: T; state: DesktopSnapshotSourceState }> {
+  try {
+    const data = await promise;
+    return { data, state: { status: "ready", error: null } };
+  } catch (error) {
+    return {
+      data: fallback,
+      state: {
+        status: "error",
+        error: error instanceof Error ? error.message : String(error),
+      },
+    };
+  }
+}
+
+/**
+ * Poll-only source loaders — the sections the server pushes no events for, so
+ * they must be re-polled on a cadence. Extracted so both the full snapshot
+ * fetch and the lighter periodic metadata fetch share the exact same request
+ * URLs, fallbacks, and `loadSource` graceful-degradation semantics.
+ */
+export function loadFocusRooms(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<FocusRoomsResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/focus-rooms`,
+    ),
+    { focus_rooms: [] } as FocusRoomsResponse,
+  );
+}
+
+export function loadParticipants(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<ParticipantsResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/participants`,
+    ),
+    { participants: [], hidden_count: 0 } as ParticipantsResponse,
+  );
+}
+
+export function loadPresence(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<PresenceResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/presence?limit=100&scope=snapshot`,
+    ),
+    { presence: [] } as PresenceResponse,
+  );
+}
+
+export function loadActivityHistory(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<ActivityHistoryResponse>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/activity-history?page_size=50`,
+    ),
+    { entries: [] } as ActivityHistoryResponse,
+  );
+}
+
+export function loadBoardSettings(apiRoomIdentifier: string) {
+  return loadSource(
+    apiFetch<RoomSnapshotData["boardSettingsData"]>(
+      `/rooms/${encodeURIComponent(apiRoomIdentifier)}/board-settings`,
+    ),
+    { pending_intent_count: 0 } as RoomSnapshotData["boardSettingsData"],
+  );
+}
+
+async function fetchAllCloudTasks(
+  roomIdentifier: string,
+): Promise<RoomSnapshotData["tasksData"]> {
+  const tasks = await drainPaginatedTaskPages(async (after) => {
+    const params = new URLSearchParams({ limit: String(taskPageSize) });
+    if (after) params.set("after", after);
+    return apiFetch<TaskPageResponse>(
+      `/rooms/${encodeURIComponent(roomIdentifier)}/tasks?${params.toString()}`,
+    );
+  });
+  return { tasks };
 }
 
 async function expandMessagesWithThreadAncestors(
@@ -127,6 +247,7 @@ async function fetchThreadUntilReferencesPresent(
     if (before) params.set("before", before);
     const page = await apiFetch<ThreadPageResponse>(
       `/rooms/${encodeURIComponent(roomIdentifier)}/messages/${encodeURIComponent(rootId)}/thread?${params.toString()}`,
+      { headers: desktopMessageOverlayHeaders },
     ).catch(() => null);
     if (!page) return;
     for (const message of [page.root, ...(page.replies || [])]) {

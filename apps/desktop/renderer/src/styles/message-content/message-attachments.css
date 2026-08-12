@@ -64,3 +64,153 @@
 .room-message-attachment small {
   color: var(--text-tertiary);
 }
+
+.managed-agent-change-card {
+  display: grid;
+  gap: 9px;
+  width: 100%;
+  padding: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.115);
+  border-radius: var(--radius-md);
+  background: rgba(255, 255, 255, 0.045);
+}
+
+.room-message-change-attachment {
+  width: min(100%, 520px);
+}
+
+.managed-agent-change-card header {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 10px;
+  align-items: center;
+}
+
+.managed-agent-change-card-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: var(--radius-sm);
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+}
+
+.managed-agent-change-card-icon svg {
+  width: 17px;
+  height: 17px;
+}
+
+.managed-agent-change-card header div {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.managed-agent-change-card header strong {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.86rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.managed-agent-change-card header small {
+  overflow: hidden;
+  color: var(--text-tertiary);
+  font-size: 0.76rem;
+  font-variant-numeric: tabular-nums;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.managed-agent-change-files {
+  display: grid;
+  gap: 5px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.managed-agent-change-files li {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 10px;
+  align-items: center;
+  min-height: 24px;
+}
+
+.managed-agent-change-files span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.managed-agent-change-files strong {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  color: var(--text-tertiary);
+  font-size: 0.74rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.managed-agent-change-files b {
+  color: #86efac;
+}
+
+.managed-agent-change-files .managed-agent-change-deletions {
+  color: #fb7185;
+}
+
+.managed-agent-change-files em {
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+  font-style: normal;
+}
+
+.managed-agent-change-card-empty,
+.managed-agent-change-card-error {
+  margin: 0;
+  color: var(--text-tertiary);
+  font-size: 0.75rem;
+  line-height: 1.35;
+  white-space: normal;
+}
+
+.managed-agent-change-card-error {
+  color: #fca5a5;
+}
+
+.managed-agent-change-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+}
+
+.managed-agent-change-show-files,
+.managed-agent-change-open-attachment,
+.managed-agent-change-retry {
+  min-height: 26px;
+  padding: 0 9px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.055);
+  color: var(--text-secondary);
+  font-size: 0.75rem;
+  font-weight: 700;
+  text-decoration: none;
+}
+
+.managed-agent-change-show-files,
+.managed-agent-change-retry {
+  cursor: pointer;
+}

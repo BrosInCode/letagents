@@ -4,7 +4,6 @@ import test from "node:test";
 import type {
   AgentIdentity,
   Task,
-  TaskLeaseKind,
   TaskOwnershipState,
 } from "../db.js";
 import type { AuthenticatedRequest } from "../http/helpers.js";
@@ -81,7 +80,6 @@ function lock(overrides: Partial<CoordinationLockLike> = {}): CoordinationLockLi
 
 function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {}) {
   const events: Array<Record<string, unknown>> = [];
-  const createdLeases: Array<Record<string, unknown>> = [];
   const workflowRefUpdates: Array<{
     roomId: string;
     leaseId: string;
@@ -104,32 +102,17 @@ function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {})
     getTasks: async () => ({ tasks, has_more: false }),
     getFocusRoomsForParent: async () => focusRooms,
     getActiveTaskLeases: async () => activeLeases,
-    createTaskLease: async (input) => {
-      createdLeases.push(input);
-      return lease({
-        id: "tl_created",
-        room_id: input.room_id,
-        task_id: input.task_id,
-        kind: input.kind as TaskLeaseKind,
-        agent_key: input.agent_key,
-        agent_instance_id: input.agent_instance_id ?? null,
-        actor_label: input.actor_label,
-        branch_ref: input.branch_ref ?? null,
-        pr_url: input.pr_url ?? null,
-        output_intent: input.output_intent ?? null,
-        expires_at: input.expires_at ?? null,
-      });
-    },
     updateTaskLeaseWorkflowRefs: async (roomId, leaseId, updates) => {
       workflowRefUpdates.push({ roomId, leaseId, updates });
     },
+    shouldRequireBoardIntent: async () => false,
+    verifyBoardIntentApproval: async () => ({ kind: "allow" as const }),
     ...overrides,
   };
 
   return {
     deps,
     events,
-    createdLeases,
     workflowRefUpdates,
     activeLeases,
     activeLocks,
@@ -137,6 +120,99 @@ function createHarness(overrides: Partial<TaskCoordinationEnforcementDeps> = {})
     focusRooms,
   };
 }
+
+test("enforceTaskAdmissionCoordination denies agent-created work when manager approval is required", async () => {
+  const harness = createHarness({
+    shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async () => ({
+      kind: "deny",
+      code: "board_intent_required",
+      error: "Board Manager approval is required for this board action.",
+    }),
+  });
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskAdmissionCoordination({
+    req: ownerReq(),
+    projectId: "focus_5",
+    title: "Make the board calmer",
+    description: "Reduce default board noise",
+    actorLabel,
+    actorKey,
+    actorInstanceId: "instance:dawn",
+    actorSessionId: "agent_session_1",
+  });
+
+  assert.deepEqual(result, {
+    kind: "deny",
+    code: "board_intent_required",
+    error: "Board Manager approval is required for this board action.",
+  });
+  assert.equal(harness.events.length, 1);
+  assert.equal(harness.events[0].event_type, "task_admit");
+  assert.equal(harness.events[0].decision, "deny");
+});
+
+test("enforceTaskCoordinationMutation returns approved board intent for claiming", async () => {
+  const approvalChecks: Array<Record<string, unknown>> = [];
+  const harness = createHarness({
+    shouldRequireBoardIntent: async () => true,
+    verifyBoardIntentApproval: async (input) => {
+      approvalChecks.push(input);
+      return { kind: "allow", intent: { id: "bi_approved" } };
+    },
+  });
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskCoordinationMutation({
+    req: ownerReq(),
+    projectId: "focus_5",
+    task: task({ status: "accepted" }),
+    taskOwnership: {
+      status: "accepted",
+      assignee: null,
+      assignee_agent_key: null,
+    } satisfies TaskOwnershipState,
+    updates: {
+      status: "assigned",
+      assignee: actorLabel,
+      assignee_agent_key: actorKey,
+    } as never,
+    actorLabel,
+    actorKey,
+    actorInstanceId: "instance:dawn",
+    actorSessionId: "agent_session_1",
+    boardIntentId: "bi_approved",
+    boardApprovalToken: "approval-token",
+  });
+
+  assert.deepEqual(result, {
+    kind: "allow",
+    boardIntentApproval: {
+      room_id: "focus_5",
+      action_type: "task_claim",
+      payload: {
+        task_id: "task_37",
+        status: "assigned",
+        assignee: actorLabel,
+        assignee_agent_key: actorKey,
+        pr_url: null,
+      },
+      intent_id: "bi_approved",
+      approval_token: "approval-token",
+    },
+    workLeaseCreation: {
+      agent_key: actorKey,
+      agent_instance_id: "instance:dawn",
+      actor_label: actorLabel,
+      branch_ref: "letagents/task_37/emmymay-dawnwinter",
+      created_by: actorLabel,
+      output_intent: "Task 114 follow-up",
+      agent_session_id: "agent_session_1",
+    },
+  });
+  assert.equal(approvalChecks.length, 1);
+});
 
 test("enforceTaskCoordinationMutation issues a work lease for the assigned actor", async () => {
   const harness = createHarness();
@@ -157,23 +233,21 @@ test("enforceTaskCoordinationMutation issues a work lease for the assigned actor
     actorInstanceId: "instance:dawn",
   });
 
-  assert.deepEqual(result, { kind: "allow" });
-  assert.equal(harness.createdLeases.length, 1);
-  assert.deepEqual(harness.createdLeases[0], {
-    room_id: "focus_5",
-    task_id: "task_37",
-    kind: "work",
-    agent_key: actorKey,
-    agent_instance_id: "instance:dawn",
-    actor_label: actorLabel,
-    branch_ref: "letagents/task_37/emmymay-dawnwinter",
-    created_by: actorLabel,
-    output_intent: "Task 114 follow-up",
+  assert.deepEqual(result, {
+    kind: "allow",
+    workLeaseCreation: {
+      agent_key: actorKey,
+      agent_instance_id: "instance:dawn",
+      actor_label: actorLabel,
+      branch_ref: "letagents/task_37/emmymay-dawnwinter",
+      created_by: actorLabel,
+      output_intent: "Task 114 follow-up",
+    },
   });
   assert.equal(harness.events.length, 1);
   assert.equal(harness.events[0].event_type, "task_update");
   assert.equal(harness.events[0].decision, "allow");
-  assert.equal(harness.events[0].lease_id, "tl_created");
+  assert.equal(harness.events[0].lease_id, null);
 });
 
 test("enforceTaskCoordinationMutation binds PR URLs to an existing work lease", async () => {
@@ -243,4 +317,53 @@ test("enforceTaskAdmissionCoordination records active room lock denials", async 
       lock_id: "lock_1",
     },
   ]);
+});
+
+test("enforceTaskAdmissionPreconditions records active room lock denials", async () => {
+  const harness = createHarness();
+  harness.activeLocks.push(lock());
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskAdmissionPreconditions({
+    projectId: "focus_5",
+    title: "New slice",
+    actorLabel,
+    actorKey,
+    actorInstanceId: null,
+  });
+
+  assert.deepEqual(result, {
+    kind: "deny",
+    code: "coordination_active_lock",
+    error: "Task admission is blocked by manager_pause lock lock_1.",
+  });
+  assert.equal(harness.events[0]?.event_type, "task_admit");
+  assert.equal(harness.events[0]?.decision, "deny");
+  assert.equal(harness.events[0]?.lock_id, "lock_1");
+});
+
+test("enforceTaskAdmissionPreconditions blocks duplicate task-create intents", async () => {
+  const harness = createHarness();
+  harness.tasks.push(task({
+    id: "task_41",
+    source_message_id: "msg_existing",
+    title: "Investigate board manager delivery",
+  }));
+  const service = createTaskCoordinationEnforcement(harness.deps);
+
+  const result = await service.enforceTaskAdmissionPreconditions({
+    projectId: "focus_5",
+    title: "Investigate board manager delivery",
+    sourceMessageId: "msg_existing",
+    actorLabel,
+    actorKey,
+    actorInstanceId: "instance:dawn",
+  });
+
+  assert.equal(result.kind, "deny");
+  assert.equal(result.code, "coordination_duplicate_work");
+  assert.match(result.error, /Duplicate work intent matched source_message on task_41/);
+  assert.equal(harness.events[0]?.event_type, "task_admit");
+  assert.equal(harness.events[0]?.decision, "deny");
+  assert.equal(harness.events[0]?.reason, result.error);
 });

@@ -81,3 +81,72 @@ describe("runWorkspaceCommand", () => {
     assert.match(result.error ?? "", /command_blocked/);
   });
 });
+
+// ---------------------------------------------------------------------------
+// Supply-chain rails
+// ---------------------------------------------------------------------------
+
+describe("runWorkspaceCommand supply-chain environment", () => {
+  it("commands run with offline package-manager rails and isolated home", async () => {
+    await fs.writeFile(
+      path.join(workspaceRoot, "env-rails.test.mjs"),
+      [
+        'import test from "node:test";',
+        'import assert from "node:assert/strict";',
+        'test("supply-chain env rails", () => {',
+        '  assert.equal(process.env.npm_config_offline, "true");',
+        '  assert.equal(process.env.COREPACK_ENABLE_NETWORK, "0");',
+        '  assert.equal(process.env.YARN_ENABLE_NETWORK, "false");',
+        '  assert.equal(process.env.CI, "1");',
+        '  assert.ok(process.env.HOME.includes(".letagents-command-home"));',
+        '  assert.ok(process.env.npm_config_cache.includes(".letagents-npm-cache"));',
+        "});",
+      ].join("\n"),
+    );
+
+    const result = await runWorkspaceCommand(makeDeps(), {
+      sessionId: "rsess_1",
+      argv: ["node", "--test", "env-rails.test.mjs"],
+    });
+    assert.equal(result.success, true, result.stderr ?? result.error);
+  });
+
+  it("npm exec never downloads an uncached package from the registry", async () => {
+    // The rail under test: offline mode + empty per-workspace cache
+    // means npm exec can never DOWNLOAD anything. The command may still
+    // succeed by resolving a host-global binary (npm checks global
+    // installs before the registry, and e.g. `npm i -g typescript` is
+    // common on dev machines) — that is host-admin-controlled code, not
+    // a registry fetch, so the assertion is outcome-agnostic: on
+    // failure it must be a cache miss (never a network fetch), and in
+    // both outcomes nothing may have been downloaded or installed.
+    const result = await runWorkspaceCommand(makeDeps(), {
+      sessionId: "rsess_1",
+      argv: ["npm", "exec", "tsc", "--", "--version"],
+      timeoutMs: 60_000,
+    });
+    if (!result.success) {
+      assert.match(
+        `${result.stderr ?? ""} ${result.stdout ?? ""} ${result.error ?? ""}`,
+        /ENOTCACHED|not found|could not determine executable/i,
+        "offline npm exec must fail as a cache miss, not a network error",
+      );
+    }
+    assert.ok(
+      !(await fs.stat(path.join(workspaceRoot, "node_modules"))
+        .then(() => true)
+        .catch(() => false)),
+      "no packages may be installed into the workspace",
+    );
+    const cacheContent = path.join(
+      workspaceRoot,
+      ".letagents-npm-cache",
+      "_cacache",
+      "content-v2",
+    );
+    assert.ok(
+      !(await fs.stat(cacheContent).then(() => true).catch(() => false)),
+      "nothing may be downloaded into the per-workspace npm cache",
+    );
+  });
+});

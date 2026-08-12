@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, notInArray } from "drizzle-orm";
 
 import { db } from "./client.js";
+import { acquireLeaseFenceTx, LeaseFenceStaleError, type LeaseFence } from "./coordination/lease-rebind.js";
 import { toRoomSharedArtifact, toRoomSharedArtifactTaskLink } from "./mappers.js";
 import { room_shared_artifact_tasks, room_shared_artifacts } from "./schema.js";
 import type {
@@ -9,6 +10,10 @@ import type {
   RoomSharedArtifactTaskLink,
 } from "./types.js";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
+
+// A drizzle transaction or the base client — lets a write run standalone or
+// enrolled in a caller's transaction (e.g. under a lease fence).
+type ArtifactWriteExecutor = Pick<typeof db, "insert" | "select" | "delete">;
 
 export function buildRoomSharedArtifactIdentityKey(
   artifact: Pick<TaskWorkflowArtifact, "provider" | "kind" | "url" | "id" | "number" | "ref" | "title">
@@ -59,6 +64,9 @@ export function preserveManualRoomSharedArtifactInput(input: {
       url: nextValue(artifact.url, existing.url),
       ref: nextValue(artifact.ref, existing.ref),
       state: nextValue(artifact.state, existing.state),
+      // detail is intentionally NOT preserved here — it is derived current-state
+      // data owned wholesale by each publish (see upsertRoomSharedArtifact), so a
+      // clean update (no detail) must clear a prior file list rather than keep it.
     },
   };
 }
@@ -67,21 +75,34 @@ export async function upsertRoomSharedArtifact(input: {
   room_id: string;
   artifact: TaskWorkflowArtifact;
   source?: RoomSharedArtifactSource;
-}): Promise<RoomSharedArtifact> {
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifact> {
   const now = new Date().toISOString();
   const identityKey = buildRoomSharedArtifactIdentityKey(input.artifact);
   const requestedSource = input.source ?? "task_workflow_artifact";
   const existingArtifact = await getRoomSharedArtifactByIdentityKey({
     room_id: input.room_id,
     identity_key: identityKey,
-  });
+  }, executor);
   const { artifact, source } = preserveManualRoomSharedArtifactInput({
     artifact: input.artifact,
     source: requestedSource,
     existing: existingArtifact,
   });
+  // Detail write action, computed in JS so null vs undefined is distinguishable:
+  //  - clear   : state === "clean" or explicit null  -> write null
+  //  - set     : a provided value                     -> write it
+  //  - preserve : omitted (undefined)                 -> leave the column untouched
+  // Preserve is implemented by OMITTING detail from the UPDATE set (not by reading
+  // the existing value and writing it back), which avoids a lost-update race.
+  const detailAction: "set" | "clear" | "preserve" =
+    input.artifact.state === "clean" || input.artifact.detail === null
+      ? "clear"
+      : input.artifact.detail !== undefined
+        ? "set"
+        : "preserve";
+  const detailValue = detailAction === "set" ? (input.artifact.detail ?? null) : null;
 
-  const [row] = await db
+  const [row] = await executor
     .insert(room_shared_artifacts)
     .values({
       room_id: input.room_id,
@@ -94,6 +115,7 @@ export async function upsertRoomSharedArtifact(input: {
       url: artifact.url ?? null,
       ref: artifact.ref ?? null,
       state: artifact.state ?? null,
+      detail: detailValue,
       source,
       first_seen_at: now,
       updated_at: now,
@@ -111,6 +133,8 @@ export async function upsertRoomSharedArtifact(input: {
         state: artifact.state ?? null,
         source,
         updated_at: now,
+        // Omitted entirely on "preserve" so the stored file list is left intact.
+        ...(detailAction !== "preserve" ? { detail: detailValue } : {}),
       },
     })
     .returning();
@@ -123,10 +147,10 @@ export async function linkRoomSharedArtifactToTask(input: {
   artifact_identity_key: string;
   task_id: string;
   source?: RoomSharedArtifactSource;
-}): Promise<RoomSharedArtifactTaskLink> {
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifactTaskLink> {
   const now = new Date().toISOString();
   const source = input.source ?? "task_workflow_artifact";
-  const [row] = await db
+  const [row] = await executor
     .insert(room_shared_artifact_tasks)
     .values({
       room_id: input.room_id,
@@ -152,11 +176,46 @@ export async function linkRoomSharedArtifactToTask(input: {
   return toRoomSharedArtifactTaskLink(row);
 }
 
+// Publish a worker's artifact and link it to the task it belongs to, ATOMICALLY
+// and fenced on the caller's held work lease (plan §4.5). The upsert and the
+// task link were previously two separate writes with no fence: a rebound-away
+// predecessor could bind an artifact to a task whose lease had already moved,
+// and a crash between the two left a dangling upsert. Both now run in one tx
+// that first re-validates the lease under the shared advisory lock, so a
+// concurrent rebind advances the epoch and the whole publish aborts with
+// LeaseFenceStaleError — no partial write, no stale binding.
+export async function publishWorkerArtifactFenced(input: {
+  leaseFence: LeaseFence;
+  room_id: string;
+  artifact: TaskWorkflowArtifact;
+  linked_task_id: string;
+  source?: RoomSharedArtifactSource;
+}): Promise<RoomSharedArtifact> {
+  return db.transaction(async (tx) => {
+    const held = await acquireLeaseFenceTx(tx, input.leaseFence);
+    if (!held) throw new LeaseFenceStaleError();
+    const artifact = await upsertRoomSharedArtifact(
+      { room_id: input.room_id, artifact: input.artifact, source: input.source },
+      tx
+    );
+    await linkRoomSharedArtifactToTask(
+      {
+        room_id: input.room_id,
+        artifact_identity_key: artifact.identity_key,
+        task_id: input.linked_task_id,
+        source: input.source,
+      },
+      tx
+    );
+    return artifact;
+  });
+}
+
 export async function getRoomSharedArtifactByIdentityKey(input: {
   room_id: string;
   identity_key: string;
-}): Promise<RoomSharedArtifact | null> {
-  const [artifact] = await db
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifact | null> {
+  const [artifact] = await executor
     .select()
     .from(room_shared_artifacts)
     .where(
@@ -171,7 +230,7 @@ export async function getRoomSharedArtifactByIdentityKey(input: {
     return null;
   }
 
-  const links = await db
+  const links = await executor
     .select()
     .from(room_shared_artifact_tasks)
     .where(
@@ -193,7 +252,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
   task_id: string;
   artifacts: TaskWorkflowArtifact[];
   source?: RoomSharedArtifactSource;
-}): Promise<RoomSharedArtifact[]> {
+}, executor: ArtifactWriteExecutor = db): Promise<RoomSharedArtifact[]> {
   const source = input.source ?? "task_workflow_artifact";
   const synced: RoomSharedArtifact[] = [];
   const identityKeys: string[] = [];
@@ -203,7 +262,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
       room_id: input.room_id,
       artifact,
       source,
-    });
+    }, executor);
     synced.push(sharedArtifact);
     identityKeys.push(sharedArtifact.identity_key);
     await linkRoomSharedArtifactToTask({
@@ -211,7 +270,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
       artifact_identity_key: sharedArtifact.identity_key,
       task_id: input.task_id,
       source,
-    });
+    }, executor);
   }
 
   const taskLinkConditions = [
@@ -219,7 +278,7 @@ export async function syncRoomSharedArtifactsForTask(input: {
     eq(room_shared_artifact_tasks.task_id, input.task_id),
     eq(room_shared_artifact_tasks.source, source),
   ];
-  await db
+  await executor
     .delete(room_shared_artifact_tasks)
     .where(
       identityKeys.length
