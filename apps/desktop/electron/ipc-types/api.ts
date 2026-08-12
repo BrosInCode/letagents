@@ -81,6 +81,7 @@ import type {
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
   DesktopRoomLiveMetadata,
+  DesktopRoomDeliveryRepair,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
@@ -172,6 +173,10 @@ export interface DesktopApi {
     ) => Promise<DesktopStagedAttachment[]>;
     discardAttachment: (roomIdentifier: string, uploadId: string) => Promise<void>;
     startStream: (roomIdentifier: string, afterMessageId?: string | null) => Promise<void>;
+    repairStreamDelivery?: (
+      roomIdentifier: string,
+      repair: DesktopRoomDeliveryRepair,
+    ) => Promise<void>;
     stopStream: (roomIdentifier?: string | null) => Promise<void>;
     onStreamEvent: (callback: (event: DesktopRoomStreamEvent) => void) => () => void;
     sendMessage: (

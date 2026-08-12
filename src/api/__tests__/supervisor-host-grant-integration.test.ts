@@ -23,6 +23,7 @@ const { registerHttpMiddleware } = await import("../http/middleware.js");
 const { registerSupervisorHostGrantRoutes, respondToStaleSupervisorGrantFence } = await import("../routes/supervisor-host-grants.js");
 const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
 const { requireGitRoomParticipant } = await import("../rooms/access.js");
+const { hashToken } = await import("../db/utils.js");
 
 async function reset() {
   if (!client) throw new Error("DB-backed supervisor tests require TEST_DB_URL");
@@ -146,6 +147,7 @@ test("daemon-excluded presence filters supervisor sessions before the result lim
     display_name: legacySession.display_name,
     owner_label: legacySession.owner_label,
     ide_label: legacySession.ide_label,
+    credential_fence: { kind: "session_token", token_hash: hashToken(legacySession.session_token) },
     transport: "long_poll",
   });
 
@@ -177,6 +179,7 @@ test("daemon-excluded presence filters supervisor sessions before the result lim
       display_name: daemonSession.display_name,
       owner_label: daemonSession.owner_label,
       ide_label: daemonSession.ide_label,
+      credential_fence: { kind: "session_token", token_hash: hashToken(daemonSession.session_token) },
       transport: "long_poll",
     });
     if (index === 0) {
@@ -258,6 +261,32 @@ test("idempotent supervisor worker creation rotates one session and revokes its 
   const first = recorder();
   await mint({ ...reqBase, body }, first);
   assert.equal(first.statusCode, 201);
+  const firstAuth = await resolveRequestAuth({
+    headers: { authorization: `Bearer ${(first.body as any).worker_bearer}` },
+  } as never);
+  assert.ok(firstAuth.agentSession);
+  const oldFence = {
+    kind: "bearer" as const,
+    bearer_id: firstAuth.agentSession!.bearer_id,
+    generation: firstAuth.agentSession!.bearer_generation,
+  };
+  const deliveryIdentity = {
+    room_id: room.id,
+    actor_label: firstAuth.agentSession!.actor_label,
+    agent_key: firstAuth.agentSession!.agent_key,
+    agent_instance_id: firstAuth.agentSession!.agent_instance_id,
+    agent_session_id: firstAuth.agentSession!.agent_session_id,
+    session_kind: "worker" as const,
+    runtime: firstAuth.agentSession!.runtime,
+    display_name: firstAuth.agentSession!.display_name,
+    owner_label: firstAuth.agentSession!.owner_label,
+    ide_label: firstAuth.agentSession!.ide_label,
+  };
+  await authDb!.upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat({
+    ...deliveryIdentity,
+    credential_fence: oldFence,
+    presence: { status: "working", status_text: "old supervisor bearer" },
+  });
   const second = recorder();
   await mint({ ...reqBase, body }, second);
   assert.equal(second.statusCode, 201);
@@ -265,8 +294,64 @@ test("idempotent supervisor worker creation rotates one session and revokes its 
   assert.notEqual((first.body as any).worker_bearer, (second.body as any).worker_bearer);
   assert.notEqual((first.body as any).worker_bearer_id, (second.body as any).worker_bearer_id);
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(first.body as any).worker_bearer}` } } as never)).authKind, null);
-  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${(second.body as any).worker_bearer}` } } as never)).authKind, "agent_session");
+  const secondAuth = await resolveRequestAuth({
+    headers: { authorization: `Bearer ${(second.body as any).worker_bearer}` },
+  } as never);
+  assert.equal(secondAuth.authKind, "agent_session");
+  assert.ok(secondAuth.agentSession);
   assert.equal((second.body as any).session_token, undefined);
+
+  const retired = await client!.pool.query<{
+    active_connection_count: number;
+    presence_count: number;
+  }>(`
+    SELECT
+      COALESCE(MAX(d.active_connection_count), 0)::int AS active_connection_count,
+      (SELECT COUNT(*)::int FROM room_agent_presence p
+        WHERE p.room_id = $1 AND p.agent_session_id = $2) AS presence_count
+    FROM room_agent_delivery_sessions d
+    WHERE d.room_id = $1 AND d.agent_session_id = $2
+  `, [room.id, firstAuth.agentSession!.agent_session_id]);
+  assert.deepEqual(retired.rows[0], { active_connection_count: 0, presence_count: 0 });
+
+  const newFence = {
+    kind: "bearer" as const,
+    bearer_id: secondAuth.agentSession!.bearer_id,
+    generation: secondAuth.agentSession!.bearer_generation,
+  };
+  await authDb!.upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat({
+    ...deliveryIdentity,
+    credential_fence: newFence,
+    presence: { status: "working", status_text: "new supervisor bearer" },
+  });
+  const [beforeOldCleanup] = await client!.db.select({
+    last_seen_at: schema!.room_agent_sessions.last_seen_at,
+  }).from(schema!.room_agent_sessions)
+    .where(eq(schema!.room_agent_sessions.session_id, firstAuth.agentSession!.agent_session_id))
+    .limit(1);
+  await authDb!.markRoomAgentDeliveryHeartbeat({
+    room_id: room.id,
+    actor_label: deliveryIdentity.actor_label,
+    agent_session_id: deliveryIdentity.agent_session_id,
+    credential_fence: oldFence,
+  });
+  assert.equal(await authDb!.markRoomAgentDeliveryDisconnected({
+    room_id: room.id,
+    actor_label: deliveryIdentity.actor_label,
+    agent_session_id: deliveryIdentity.agent_session_id,
+    credential_fence: oldFence,
+  }), null);
+  const [afterOldCleanup] = await client!.db.select({
+    last_seen_at: schema!.room_agent_sessions.last_seen_at,
+  }).from(schema!.room_agent_sessions)
+    .where(eq(schema!.room_agent_sessions.session_id, firstAuth.agentSession!.agent_session_id))
+    .limit(1);
+  assert.equal(afterOldCleanup.last_seen_at, beforeOldCleanup.last_seen_at,
+    "the retired process cannot refresh the stable replacement session");
+  const currentDelivery = (await authDb!.getRoomAgentDeliverySessions(room.id))
+    .find((delivery) => delivery.agent_session_id === deliveryIdentity.agent_session_id);
+  assert.equal(currentDelivery?.active_connection_count, 1,
+    "the retired process cleanup cannot decrement the replacement delivery lease");
 });
 
 test("supervisor worker end is idempotent after a committed response is lost", { skip: requiresDatabase }, async () => {

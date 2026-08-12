@@ -7,6 +7,11 @@ import {
   mergeMessages,
 } from './room/data.js'
 import { isVisibleRoomMessage } from './room/identity.js'
+import {
+  appendRoomMessage,
+  messages,
+  replaceRoomMessages,
+} from './room/state.js'
 import { isRepoBackedRoomId } from './roomGitHubEvents.js'
 import type { RoomInfo, RoomMessage } from './room/types.js'
 
@@ -97,4 +102,22 @@ test('web room visibility keeps attachment-only messages with a NULL prompt kind
   assert.equal(isVisibleRoomMessage(attachmentOnly), true)
   assert.equal(isVisibleRoomMessage(emptyPrompt), false)
   assert.deepEqual(mergeMessages([], [attachmentOnly, emptyPrompt]).map((message) => message.id), ['msg_1'])
+})
+
+test('live message append uses a maintained id index and repairs direct snapshot replacement', () => {
+  const makeMessage = (id: string): RoomMessage => ({
+    id,
+    sender: 'Human',
+    text: id,
+    agent_prompt_kind: null,
+    source: 'browser',
+    timestamp: '2026-07-13T12:00:00.000Z',
+  })
+  replaceRoomMessages([makeMessage('msg_1')])
+  assert.equal(appendRoomMessage(makeMessage('msg_1')), false)
+
+  // Preserve compatibility with legacy/tests that assign the exported ref.
+  messages.value = [makeMessage('msg_2')]
+  assert.equal(appendRoomMessage(makeMessage('msg_1')), true)
+  assert.deepEqual(messages.value.map((message) => message.id), ['msg_2', 'msg_1'])
 })

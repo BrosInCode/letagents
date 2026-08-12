@@ -18,6 +18,8 @@ function getDatabaseUrl(): string {
 
 export const pool = new Pool({
   connectionString: getDatabaseUrl(),
+  // Shutdown and broker publication must never wait forever for a new socket.
+  connectionTimeoutMillis: 5_000,
 });
 
 export const db = drizzle(pool, { schema });

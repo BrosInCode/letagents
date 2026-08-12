@@ -82,6 +82,7 @@ import type {
   DesktopFocusRoomSettingsPatch,
   DesktopRoomInfo,
   DesktopRoomLiveMetadata,
+  DesktopRoomDeliveryRepair,
   DesktopRoomMessagesPage,
   DesktopRoomSnapshot,
   DesktopRoomStreamEvent,
@@ -251,6 +252,7 @@ import {
   deliverDesktopRoomMessageToManagedAgents,
   emitRoomStreamEvent,
   getActiveRoomIdentifier,
+  repairDesktopRoomStreamManagedDelivery,
   startDesktopRoomStream,
   stopDesktopRoomStream,
 } from "./room-stream.js";
@@ -547,6 +549,14 @@ export function registerDesktopIpcHandlers(
       roomIdentifier: string,
       afterMessageId?: string | null,
     ): Promise<void> => startDesktopRoomStream(roomIdentifier, afterMessageId),
+  );
+  targetIpcMain.handle(
+    "desktop:room:repair-stream-delivery",
+    async (
+      _event,
+      roomIdentifier: string,
+      repair: DesktopRoomDeliveryRepair,
+    ): Promise<void> => repairDesktopRoomStreamManagedDelivery(roomIdentifier, repair),
   );
   targetIpcMain.handle(
     "desktop:room:stop-stream",

@@ -454,6 +454,13 @@ export interface DesktopRoomSnapshot {
   sourceStates: DesktopSnapshotSourceStates;
 }
 
+/** Durable snapshot deltas replayed only to managed agents after a live gap. */
+export interface DesktopRoomDeliveryRepair {
+  token: number;
+  messages: DesktopRoomMessage[];
+  tasks: DesktopTaskSummary[];
+}
+
 /**
  * Poll-only room metadata — the subset of a snapshot that the server pushes no
  * events for and must therefore be re-polled on a cadence: focus rooms,
@@ -586,11 +593,25 @@ export type DesktopRoomStreamEvent =
       gap?: boolean;
       /** True when this boundary came from the server room_sync handshake. */
       verified?: boolean;
+      /** Correlates an authoritative snapshot with a verified broker gap. */
+      deliveryRepairToken?: number;
     }
   | {
       type: "message";
       roomIdentifier: string;
       message: DesktopRoomMessage;
+    }
+  | {
+      /** Bounded authoritative tail used after a very large durable catch-up. */
+      type: "message_window";
+      roomIdentifier: string;
+      messages: DesktopRoomMessage[];
+    }
+  | {
+      /** One durable-history page, merged in one renderer pass. */
+      type: "message_batch";
+      roomIdentifier: string;
+      messages: DesktopRoomMessage[];
     }
   | {
       type: "task_update";

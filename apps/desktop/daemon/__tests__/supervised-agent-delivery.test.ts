@@ -1020,6 +1020,29 @@ test("silent messages advance the cursor but never enter FIFO, and paginated pol
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("a server-hidden prompt advances the durable daemon cursor without entering FIFO", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-hidden-prompt-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: "20" });
+    const after: Array<string | null> = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => {
+      throw new Error("a hidden prompt must not create paid work");
+    }), {
+      poll: async ({ afterMessageId }) => {
+        after.push(afterMessageId);
+        return { messages: [], last_observed_message_id: "21" };
+      },
+      publish: async () => {},
+    }, currentAuthority, 0);
+    await delivery.poll(agent);
+    assert.deepEqual(after, ["20"]);
+    assert.equal((await store.cursor(agent.agentId))?.last_observed_message_id, "21");
+    assert.deepEqual(await store.receipts(agent.agentId), []);
+    await delivery.fenceAndDrain(); await store.close();
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("a publish retry reuses the persisted terminal reply without rerunning the turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-"));
   try {

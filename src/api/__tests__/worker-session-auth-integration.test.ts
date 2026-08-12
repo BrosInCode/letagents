@@ -17,10 +17,12 @@ const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { registerRoomMessageRoutes } = await import("../routes/rooms/messages/index.js");
+const { createRoomEventBroker } = await import("../server/room-event-broker.js");
 const { registerRoomPresenceRoutes } = await import("../routes/rooms/presence/index.js");
 const { registerRoomReasoningRoutes } = await import("../routes/rooms/reasoning.js");
 const { registerRoomTaskRoutes } = await import("../routes/rooms/tasks/index.js");
 const { buildAgentActorLabel } = await import("../../shared/agent-identity.js");
+const { hashToken } = await import("../db/utils.js");
 const {
   LETAGENTS_AGENT_SESSION_ID_HEADER,
   LETAGENTS_AGENT_SESSION_TOKEN_HEADER,
@@ -32,12 +34,15 @@ const accounts = schemaModule?.accounts;
 const agents = schemaModule?.agents;
 const addMessage = dbModule?.addMessage;
 const createProjectWithName = dbModule?.createProjectWithName;
+const createFencedRoomAgentSession = dbModule?.createFencedRoomAgentSession;
 const createRoomAgentSession = dbModule?.createRoomAgentSession;
 const createTask = dbModule?.createTask;
 const createTaskLease = dbModule?.createTaskLease;
 const endRoomAgentSession = dbModule?.endRoomAgentSession;
 const getRoomAgentDeliverySessions = dbModule?.getRoomAgentDeliverySessions;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
+const markRoomAgentDeliveryHeartbeat = dbModule?.markRoomAgentDeliveryHeartbeat;
+const upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat = dbModule?.upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat;
 const updateTask = dbModule?.updateTask;
 
 const migrationsFolder = path.resolve(process.cwd(), "drizzle");
@@ -326,14 +331,22 @@ function registerRoutesForRoom(room: { id: string }): RouteHandlers {
   const messageEvents = new EventEmitter();
   const taskEvents = new EventEmitter();
   const reasoningEvents = new EventEmitter();
-
-  registerRoomMessageRoutes(app as never, {
+  const roomEventBroker = createRoomEventBroker({
     messageEvents,
     taskEvents,
     reasoningEvents,
+    githubRoomEvents: new EventEmitter(),
+    artifactEvents: new EventEmitter(),
+    rentalActivityEvents: new EventEmitter(),
+    messageInfoEvents: new EventEmitter(),
+  });
+
+  registerRoomMessageRoutes(app as never, {
+    roomEventBroker,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireParticipant,
+    reauthorizeGitRoomParticipant: async () => true,
     parseOptionalAgentPromptKind: () => null,
     parseOptionalReplyToMessageId: (value) => typeof value === "string" ? value.trim() || null : null,
     parseOptionalThreadRootMessageId: (value) => typeof value === "string" ? value.trim() || null : null,
@@ -399,6 +412,242 @@ async function invoke(
 }
 
 test(
+  "delivery connected writes reject a worker session that already ended",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room, ended } = await seedHarness();
+    if (!markRoomAgentDeliveryConnected) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    await assert.rejects(
+      markRoomAgentDeliveryConnected({
+        room_id: room.id,
+        actor_label: ended.actor_label,
+        agent_key: ended.agent_key,
+        agent_instance_id: ended.agent_instance_id,
+        agent_session_id: ended.session_id,
+        session_kind: "worker",
+        runtime: "codex",
+        display_name: ended.display_name,
+        owner_label: "EmmyMay",
+        ide_label: "Codex",
+        credential_fence: { kind: "session_token", token_hash: hashToken(ended.session_token) },
+        transport: "sse",
+      }),
+      { name: "InactiveRoomAgentDeliverySessionError" },
+    );
+  },
+);
+
+test(
+  "rotating a stable worker session id fences the predecessor credential at delivery commit",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room, worker } = await seedHarness();
+    if (!createFencedRoomAgentSession || !markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const deliveryInput = {
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_key: worker.agent_key,
+      agent_instance_id: worker.agent_instance_id,
+      agent_session_id: worker.session_id,
+      session_kind: "worker" as const,
+      runtime: worker.runtime,
+      display_name: worker.display_name,
+      owner_label: worker.owner_label,
+      ide_label: worker.ide_label,
+      transport: "sse" as const,
+    };
+    await markRoomAgentDeliveryConnected({
+      ...deliveryInput,
+      credential_fence: { kind: "session_token", token_hash: hashToken(worker.session_token) },
+    });
+    const [rotation, staleReopen] = await Promise.allSettled([
+      createFencedRoomAgentSession({
+        room_id: room.id,
+        session_kind: "worker",
+        runtime: worker.runtime,
+        actor_label: worker.actor_label,
+        agent_key: worker.agent_key,
+        agent_instance_id: worker.agent_instance_id,
+        display_name: worker.display_name,
+        owner_account_id: ownerAccount.id,
+        owner_label: worker.owner_label,
+        ide_label: worker.ide_label,
+      }, {
+        session_id: worker.session_id,
+        session_token: worker.session_token,
+      }),
+      markRoomAgentDeliveryConnected({
+        ...deliveryInput,
+        credential_fence: { kind: "session_token", token_hash: hashToken(worker.session_token) },
+      }),
+    ]);
+    assert.equal(rotation.status, "fulfilled");
+    if (rotation.status !== "fulfilled") throw rotation.reason;
+    const rotated = rotation.value;
+    assert.equal(rotated.session.session_id, worker.session_id);
+    assert.ok(
+      staleReopen.status === "fulfilled"
+      || (staleReopen.reason as { name?: string })?.name === "InactiveRoomAgentDeliverySessionError",
+    );
+    const afterRotation = await getRoomAgentDeliverySessions(room.id);
+    assert.equal(
+      afterRotation.find((delivery) => delivery.agent_session_id === worker.session_id)?.active_connection_count,
+      0,
+      "rotation retires a stale connection even when its reconnect raced on another DB connection",
+    );
+
+    await assert.rejects(markRoomAgentDeliveryConnected({
+      ...deliveryInput,
+      credential_fence: { kind: "session_token", token_hash: hashToken(worker.session_token) },
+    }), { name: "InactiveRoomAgentDeliverySessionError" });
+    await markRoomAgentDeliveryConnected({
+      ...deliveryInput,
+      credential_fence: {
+        kind: "session_token",
+        token_hash: hashToken(rotated.session.session_token),
+      },
+    });
+  },
+);
+
+test(
+  "an inactive credential heartbeat immediately retires only its durable delivery projection",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room, worker } = await seedHarness();
+    if (!markRoomAgentDeliveryConnected || !markRoomAgentDeliveryHeartbeat || !pool) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const credentialFence = {
+      kind: "session_token" as const,
+      token_hash: hashToken(worker.session_token),
+    };
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_key: worker.agent_key,
+      agent_instance_id: worker.agent_instance_id,
+      agent_session_id: worker.session_id,
+      session_kind: "worker",
+      runtime: worker.runtime,
+      display_name: worker.display_name,
+      owner_label: worker.owner_label,
+      ide_label: worker.ide_label,
+      credential_fence: credentialFence,
+      transport: "sse",
+    });
+
+    // Model natural expiry/revocation without running the normal retirement
+    // helper: the next exact-fingerprint heartbeat is the durable backstop.
+    await pool.query(
+      "UPDATE room_agent_sessions SET ended_at = NOW() WHERE room_id = $1 AND session_id = $2",
+      [room.id, worker.session_id],
+    );
+    assert.equal(await markRoomAgentDeliveryHeartbeat({
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_session_id: worker.session_id,
+      credential_fence: credentialFence,
+    }), false);
+
+    const projection = await pool.query<{ active_connection_count: number }>(`
+      SELECT active_connection_count
+      FROM room_agent_delivery_sessions
+      WHERE room_id = $1 AND agent_session_id = $2
+    `, [room.id, worker.session_id]);
+    assert.equal(projection.rows[0]?.active_connection_count, 0);
+  },
+);
+
+test(
+  "desktop presence heartbeat and credential rotation converge atomically",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room, worker } = await seedHarness();
+    if (!createFencedRoomAgentSession || !upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat || !pool) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const oldFence = { kind: "session_token" as const, token_hash: hashToken(worker.session_token) };
+    const heartbeatInput = {
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_key: worker.agent_key,
+      agent_instance_id: worker.agent_instance_id,
+      agent_session_id: worker.session_id,
+      session_kind: "worker" as const,
+      runtime: worker.runtime,
+      display_name: worker.display_name,
+      owner_label: worker.owner_label,
+      ide_label: worker.ide_label,
+      credential_fence: oldFence,
+      presence: {
+        status: "working" as const,
+        status_text: "old credential heartbeat",
+      },
+    };
+    await upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat(heartbeatInput);
+
+    // FOR SHARE credential validation is retained through both delivery and
+    // presence writes. Rotation either wins first (old heartbeat rejects) or
+    // waits, then retires both projections after the heartbeat commits.
+    const [rotation, staleHeartbeat] = await Promise.allSettled([
+      createFencedRoomAgentSession({
+        room_id: room.id,
+        session_kind: "worker",
+        runtime: worker.runtime,
+        actor_label: worker.actor_label,
+        agent_key: worker.agent_key,
+        agent_instance_id: worker.agent_instance_id,
+        display_name: worker.display_name,
+        owner_account_id: ownerAccount.id,
+        owner_label: worker.owner_label,
+        ide_label: worker.ide_label,
+      }, {
+        session_id: worker.session_id,
+        session_token: worker.session_token,
+      }),
+      upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat(heartbeatInput),
+    ]);
+    assert.equal(rotation.status, "fulfilled");
+    assert.ok(
+      staleHeartbeat.status === "fulfilled"
+      || (staleHeartbeat.reason as { name?: string })?.name === "InactiveRoomAgentDeliverySessionError",
+    );
+    const projections = await pool.query<{
+      active_connection_count: number;
+      presence_count: number;
+    }>(`
+      SELECT
+        COALESCE(MAX(d.active_connection_count), 0)::int AS active_connection_count,
+        (SELECT COUNT(*)::int FROM room_agent_presence p
+          WHERE p.room_id = $1 AND p.agent_session_id = $2) AS presence_count
+      FROM room_agent_delivery_sessions d
+      WHERE d.room_id = $1 AND d.agent_session_id = $2
+    `, [room.id, worker.session_id]);
+    assert.deepEqual(projections.rows[0], {
+      active_connection_count: 0,
+      presence_count: 0,
+    });
+  },
+);
+
+test(
   "agent session registration creates independent workers for reused MCP identity",
   {
     concurrency: false,
@@ -423,6 +672,7 @@ test(
       display_name: worker.display_name,
       owner_label: "EmmyMay",
       ide_label: "Codex",
+      credential_fence: { kind: "session_token", token_hash: hashToken(worker.session_token) },
       transport: "long_poll",
     });
     const registrationBody = {
@@ -982,6 +1232,7 @@ test(
       display_name: firstSession.display_name,
       owner_label: agentIdentity.owner_label,
       ide_label: "Agent",
+      credential_fence: { kind: "session_token", token_hash: hashToken(firstSession.session_token) },
       transport: "long_poll",
     });
     const firstPresence = await invoke(

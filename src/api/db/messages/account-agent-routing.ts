@@ -44,6 +44,8 @@ export type LegacyTarget = {
   activation_reason: string;
 };
 
+export type GlobalLegacyRoutingPlan = ReadonlyMap<number, readonly LegacyTarget[]>;
+
 export type BoundedActiveWorkLeaseOwner = {
   kind: "work";
   status: "active";
@@ -53,11 +55,52 @@ export type BoundedActiveWorkLeaseOwner = {
   agent_session_id: string | null;
 };
 
-export const MAX_ACCOUNT_ROUTING_ACCOUNTS = 1_000;
+// The account×message pair budget is the real public batch bound. PostgreSQL
+// receives the account set as one JSON recordset so global legacy authority is
+// resolved once rather than once per arbitrary 1,000-account transport chunk.
+export const MAX_ACCOUNT_ROUTING_ACCOUNTS = 100_000;
 export const MAX_ACCOUNT_ROUTING_PAIRS = 100_000;
 export const MAX_ACCOUNT_ROUTING_TARGETS = 100_000;
 export const MAX_ACCOUNT_ROUTING_TARGET_BYTES = 8 * 1024 * 1024;
 export const MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES = 8 * 1024 * 1024;
+export const MAX_ACCOUNT_ROUTING_ACCOUNT_ID_BYTES = 8 * 1024 * 1024;
+export const MAX_ACCOUNT_ROUTING_MESSAGE_ROWS = 1_000;
+
+/** Fetch the lightweight persisted fields needed to derive account overlays. */
+export async function getMessageAccountRoutingRows(
+  executor: AccountAgentRoutingExecutor,
+  roomId: string,
+  messageNumbersInput: readonly number[],
+): Promise<AccountRoutingMessageRow[]> {
+  const messageNumbers = [...new Set(messageNumbersInput.filter((value) =>
+    Number.isSafeInteger(value) && value > 0))];
+  if (messageNumbers.length === 0) return [];
+  if (messageNumbers.length > MAX_ACCOUNT_ROUTING_MESSAGE_ROWS) {
+    throw new RequestValidationError(
+      `Account routing row request exceeds ${MAX_ACCOUNT_ROUTING_MESSAGE_ROWS} messages.`,
+    );
+  }
+  return executor
+    .select({
+      number: messages.number,
+      thread_root_number: messages.thread_root_number,
+      routing_snapshot_version: messages.routing_snapshot_version,
+      publisher_account_id: messages.publisher_account_id,
+      publisher_agent_key: messages.publisher_agent_key,
+      reply_to_number: messages.reply_to_number,
+      sender: messages.sender,
+      source: messages.source,
+      text: messages.text,
+    })
+    .from(messages)
+    .where(and(
+      eq(messages.room_id, roomId),
+      sql`${messages.number} IN (
+        SELECT value::integer
+          FROM jsonb_array_elements_text(${JSON.stringify(messageNumbers)}::jsonb)
+      )`,
+    ));
+}
 
 export function createAccountRoutingTargetBudget(): (target: unknown) => void {
   let targetCount = 0;
@@ -170,6 +213,7 @@ export async function getMessageAccountAgentRoutings(
   roomId: string,
   accountIdsInput: readonly string[],
   messageRows: readonly AccountRoutingMessageRow[],
+  options: { legacyRoutingPlan?: GlobalLegacyRoutingPlan } = {},
 ): Promise<Map<string, Map<number, MessageAccountAgentRouting>>> {
   const accountIds = [...new Set(accountIdsInput.map((value) => value.trim()).filter(Boolean))];
   const uniqueRows = new Map(messageRows.map((row) => [row.number, row]));
@@ -182,11 +226,15 @@ export async function getMessageAccountAgentRoutings(
       "Account message-routing overlay batch exceeds its bounded account/message contract; split the broker batch.",
     );
   }
+  if (Buffer.byteLength(JSON.stringify(accountIds), "utf8") > MAX_ACCOUNT_ROUTING_ACCOUNT_ID_BYTES) {
+    throw new RequestValidationError(
+      "Account message-routing overlay batch exceeds its bounded account-id contract.",
+    );
+  }
   const consumeTargetBudget = createAccountRoutingTargetBudget();
 
   const accountSet = new Set(accountIds);
   const result = new Map<string, Map<number, MessageAccountAgentRouting>>();
-  let envelopeBytes = Buffer.byteLength(JSON.stringify({ roomId, accountIds }), "utf8");
   for (const accountId of accountIds) {
     const byMessage = new Map<number, MessageAccountAgentRouting>();
     for (const row of uniqueRows.values()) {
@@ -208,16 +256,6 @@ export async function getMessageAccountAgentRoutings(
             recipient_agent_sessions: [],
             control_authorized,
           };
-      envelopeBytes += Buffer.byteLength(JSON.stringify({
-        accountId,
-        messageNumber: row.number,
-        routing,
-      }), "utf8");
-      if (envelopeBytes > MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES) {
-        throw new RequestValidationError(
-          "Account message-routing overlay exceeds its bounded envelope contract; split the broker batch.",
-        );
-      }
       byMessage.set(row.number, routing);
     }
     result.set(accountId, byMessage);
@@ -232,6 +270,7 @@ export async function getMessageAccountAgentRoutings(
       message_number: number;
       agent_key: string;
       agent_session_id: string;
+      activation_reason: string;
       successor_agent_session_id: string | null;
     }>(sql`
       WITH requested_account AS (
@@ -247,6 +286,7 @@ export async function getMessageAccountAgentRoutings(
                receipt.message_number,
                receipt.agent_key,
                receipt.agent_session_id,
+               receipt.activation_reason,
                captured.ended_at
           FROM ${message_agent_receipts} AS receipt
           JOIN input_message ON input_message.message_number = receipt.message_number
@@ -280,6 +320,7 @@ export async function getMessageAccountAgentRoutings(
              owned_receipt.message_number,
              owned_receipt.agent_key,
              owned_receipt.agent_session_id,
+             owned_receipt.activation_reason,
              CASE WHEN owned_receipt.ended_at IS NOT NULL
                     THEN unique_live_successor.agent_session_id
                   ELSE NULL END AS successor_agent_session_id
@@ -300,6 +341,7 @@ export async function getMessageAccountAgentRoutings(
       const target = {
         agent_key: receipt.agent_key,
         agent_session_id: receipt.agent_session_id,
+        activation_reason: receipt.activation_reason,
         ...(receipt.successor_agent_session_id
           ? { successor_agent_session_id: receipt.successor_agent_session_id }
           : {}),
@@ -312,9 +354,10 @@ export async function getMessageAccountAgentRoutings(
 
   const legacyRows = [...uniqueRows.values()].filter((row) => row.routing_snapshot_version === null);
   if (legacyRows.length > 0) {
-    const legacyTargets = await resolveGlobalLegacyTargets(executor, roomId, legacyRows, {
-      ownerAccountIds: accountIds,
-    });
+    const legacyTargets = options.legacyRoutingPlan
+      ?? await resolveGlobalLegacyTargets(executor, roomId, legacyRows, {
+        ownerAccountIds: accountIds,
+      });
     for (const [messageNumber, targets] of legacyTargets) {
       for (const target of targets) {
         if (!accountSet.has(target.owner_account_id)) continue;
@@ -340,20 +383,11 @@ export async function getMessageAccountAgentRoutings(
         || left.agent_session_id.localeCompare(right.agent_session_id));
     }
   }
-  const finalEnvelopeBytes = Buffer.byteLength(JSON.stringify(
-    [...result].map(([account_id, byMessage]) => ({
-      account_id,
-      messages: [...byMessage].map(([message_number, routing]) => ({
-        message_number,
-        routing,
-      })),
-    })),
-  ), "utf8");
-  if (finalEnvelopeBytes > MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES) {
-    throw new RequestValidationError(
-      "Account message-routing overlay exceeds its bounded envelope contract; split the broker batch.",
-    );
-  }
+  // The result is an in-process lookup, not one serialized wire envelope: each
+  // subscriber receives only its own tiny overlay. Aggregate memory is bounded
+  // independently by account×message pairs, account-id bytes, target count,
+  // and target bytes; applying the single-message wire limit here made legal
+  // large subscriber sets impossible to hydrate.
   return result;
 }
 

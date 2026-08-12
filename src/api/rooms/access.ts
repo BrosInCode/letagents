@@ -18,6 +18,7 @@ import {
   sanitizeRedirectPath,
   type AuthenticatedRequest,
 } from "../http/helpers.js";
+import { resolveRequestAuth } from "../request/auth.js";
 
 export type RoomAccessAccount = Pick<
   SessionAccount | OwnerTokenAccount,
@@ -62,6 +63,20 @@ export function getProjectAccessRoomId(project: Project): string {
 
 export function isRepoBackedProject(project: Project): boolean {
   return isRepoBackedRoomId(getProjectAccessRoomId(project));
+}
+
+const requestRepoAccessRoomNames = new WeakMap<AuthenticatedRequest, string>();
+const requestUsesRepoAuthorization = new WeakMap<AuthenticatedRequest, boolean>();
+
+/** Reuses the entry check's canonical cache key; falls back for worker paths. */
+export async function resolveRequestProjectRepoAccessRoomName(
+  req: AuthenticatedRequest,
+  project: Project,
+): Promise<string> {
+  const resolved = requestRepoAccessRoomNames.get(req);
+  if (resolved) return resolved;
+  const target = await resolveProjectRepoAccessTarget(project, { getGitRoomBindingForRoom });
+  return target?.repoRoomName ?? getProjectAccessRoomId(project);
 }
 
 function gitRoomBindingRepoRoomName(binding: GitRoomBinding): string | null {
@@ -369,6 +384,11 @@ export async function requireGitRoomParticipant(
     sessionAccount: req.sessionAccount,
     freshCollaboratorCheck: options.freshCollaboratorCheck,
   });
+  requestRepoAccessRoomNames.set(
+    req,
+    accessDecision.repoRoomName ?? getProjectAccessRoomId(project),
+  );
+  requestUsesRepoAuthorization.set(req, accessDecision.isRepoBacked);
 
   if (!accessDecision.isRepoBacked || accessDecision.decision.kind === "allow") {
     return true;
@@ -379,6 +399,28 @@ export async function requireGitRoomParticipant(
     accessDecision.roomName ?? getProjectAccessRoomId(project),
     accessDecision.decision
   );
+}
+
+/**
+ * Re-resolves the exact bearer/cookie and bypasses collaborator caches for a
+ * live delivery lease. It has no Response side effects, so it is safe after
+ * SSE headers have already been committed.
+ */
+export async function reauthorizeGitRoomParticipant(
+  req: AuthenticatedRequest,
+  project: Project,
+): Promise<boolean> {
+  if (requestUsesRepoAuthorization.get(req) === false) return true;
+  const fresh = await resolveRequestAuth(req);
+  if (fresh.authKind === "agent_session") {
+    return fresh.agentSession?.room_id === project.id;
+  }
+  const accessDecision = await resolveProjectRepoRoomAccessDecision({
+    project,
+    sessionAccount: fresh.account,
+    freshCollaboratorCheck: true,
+  });
+  return !accessDecision.isRepoBacked || accessDecision.decision.kind === "allow";
 }
 
 export async function resolveProjectRoomEntryDecision(input: {

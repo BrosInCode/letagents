@@ -320,7 +320,7 @@ test("native activity accepts the scoped worker bearer without a legacy session 
   assert.equal((await invoke("agent_session_other")).statusCode, 403, "a bearer remains scoped to its own session");
 });
 
-test("native activity transfers rendered presence from an ended same-agent predecessor", { skip: requiresDatabase }, async () => {
+test("native activity reclaims rendered presence after an ended same-agent predecessor", { skip: requiresDatabase }, async () => {
   if (!recordNativeHarnessActivity || !endRoomAgentSession || !createRoomAgentSession || !room_agent_presence || !db) {
     throw new Error("missing DB harness");
   }
@@ -346,7 +346,8 @@ test("native activity transfers rendered presence from an ended same-agent prede
   await endRoomAgentSession({ session_id: predecessor.session_id });
   const [retainedPresence] = await db.select().from(room_agent_presence)
     .where(eq(room_agent_presence.agent_session_id, predecessor.session_id));
-  assert.ok(retainedPresence, "ending a session retains its last rendered presence for history");
+  assert.equal(retainedPresence, undefined,
+    "ending a credential retires its live presence projection transactionally");
 
   const successor = await createRoomAgentSession({
     room_id: room.id,

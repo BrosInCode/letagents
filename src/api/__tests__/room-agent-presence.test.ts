@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import crypto from "node:crypto";
 import path from "node:path";
 import test from "node:test";
 
@@ -16,6 +17,7 @@ const dbModule = testDatabaseUrl ? await import("../db.js") : null;
 const schemaModule = testDatabaseUrl ? await import("../db/schema.js") : null;
 const agentPresenceModule = await import("../../shared/agent-presence.js");
 const roomAgentActivityModule = await import("../../shared/room-agent-activity.js");
+const hashToken = (token: string) => crypto.createHash("sha256").update(token).digest("hex");
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -371,6 +373,7 @@ test(
       display_name: "DesktopPulse",
       owner_label: "DesktopOwner",
       ide_label: "Cursor",
+      credential_fence: { kind: "session_token", token_hash: hashToken(worker.session_token) },
     });
     await heartbeat();
     await heartbeat();

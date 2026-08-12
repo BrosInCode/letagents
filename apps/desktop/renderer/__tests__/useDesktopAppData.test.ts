@@ -15,6 +15,7 @@ import type {
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
   DesktopRoomMessage,
+  DesktopRoomDeliveryRepair,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopTaskSummary,
@@ -23,8 +24,28 @@ import type {
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../src/components/desktop/types";
-import { useDesktopAppData } from "../src/composables/useDesktopAppData";
+import {
+  buildRoomStreamDeliveryRepair,
+  useDesktopAppData,
+} from "../src/composables/useDesktopAppData";
 import type { RecentRootRoom } from "../src/domain/sidebar-rooms";
+
+it("builds managed-agent repairs only from authoritative snapshot deltas", () => {
+  const existingTask = { ...taskSummary("task_1"), updatedAt: "2026-08-11T10:00:00.000Z" };
+  const updatedTask = { ...existingTask, updatedAt: "2026-08-11T10:01:00.000Z" };
+  const repair = buildRoomStreamDeliveryRepair(
+    roomSnapshot("focus_a", {
+      messages: [roomMessage("msg_1", "existing")],
+      tasks: [existingTask],
+    }),
+    roomSnapshot("focus_a", {
+      messages: [roomMessage("msg_1", "existing"), roomMessage("msg_2", "missed target")],
+      tasks: [updatedTask, { ...taskSummary("task_2"), updatedAt: "2026-08-11T10:02:00.000Z" }],
+    }),
+  );
+  assert.deepEqual(repair.messages.map((message) => message.id), ["msg_2"]);
+  assert.deepEqual(repair.tasks.map((task) => task.id), ["task_1", "task_2"]);
+});
 
 describe("useDesktopAppData selected focus room snapshots", () => {
   it("shows an optimistic snapshot only for uncached focus room loads", async () => {
@@ -270,6 +291,190 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
     });
 
     assert.deepEqual(harness.getSnapshotRequests, ["focus_a"]);
+  });
+
+  it("hands authoritative gap deltas back to managed-agent delivery once", async () => {
+    const harness = createHarness();
+    const priorTask = { ...taskSummary("task_1"), updatedAt: "2026-08-11T10:00:00.000Z" };
+    harness.selectedSnapshot.value = roomSnapshot("focus_a", {
+      kind: "focus",
+      parentRoomId: "room_parent",
+      messages: [roomMessage("msg_1", "Existing")],
+      tasks: [priorTask],
+    });
+    const repairedSnapshot = roomSnapshot("focus_a", {
+      kind: "focus",
+      parentRoomId: "room_parent",
+      messages: [
+        roomMessage("msg_1", "Existing"),
+        roomMessage("msg_2", "Missed target"),
+      ],
+      tasks: [
+        { ...priorTask, updatedAt: "2026-08-11T10:01:00.000Z" },
+        { ...taskSummary("task_2"), updatedAt: "2026-08-11T10:02:00.000Z" },
+      ],
+    });
+    harness.nextSelectedSnapshot = Promise.resolve(harness.selectedSnapshot.value);
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.refreshSelectedSnapshot(harness.rootRoomSnapshot.value);
+      harness.deliveryRepairs.length = 0;
+      harness.nextSelectedSnapshot = Promise.resolve(repairedSnapshot);
+      harness.state.handleRoomStreamEvent({
+        type: "open",
+        roomIdentifier: "focus_a",
+        checkpoint: "msg_2",
+        gap: true,
+        verified: true,
+        deliveryRepairToken: 41,
+      });
+      await flushAsync();
+      await flushAsync();
+    });
+
+    assert.equal(harness.deliveryRepairs.length, 1);
+    assert.equal(harness.deliveryRepairs[0]?.roomIdentifier, "focus_a");
+    assert.equal(harness.deliveryRepairs[0]?.repair.token, 41);
+    assert.deepEqual(harness.deliveryRepairs[0]?.repair.messages.map((message) => message.id), ["msg_2"]);
+    assert.deepEqual(harness.deliveryRepairs[0]?.repair.tasks.map((task) => task.id), ["task_1", "task_2"]);
+  });
+
+  it("retries a rejected managed-agent handoff with the same baseline and token", async () => {
+    const harness = createHarness({ deliveryRepairRetryMs: 1 });
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
+    harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([
+      roomMessage("msg_1", "Existing"),
+      roomMessage("msg_2", "Missed target"),
+    ]));
+    harness.deliveryRepairFailures = 1;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.syncSelectedRoomStream("focus_a");
+      harness.state.handleRoomStreamEvent({
+        type: "open",
+        roomIdentifier: "focus_a",
+        gap: true,
+        verified: true,
+        deliveryRepairToken: 42,
+      });
+      await waitForDesktop(() => harness.deliveryRepairs.length === 2);
+    });
+
+    assert.deepEqual(
+      harness.deliveryRepairs.map(({ repair }) => ({
+        token: repair.token,
+        messages: repair.messages.map((message) => message.id),
+      })),
+      [
+        { token: 42, messages: ["msg_2"] },
+        { token: 42, messages: ["msg_2"] },
+      ],
+    );
+  });
+
+  it("retries a not-ready gap snapshot until its delivery sources recover", async () => {
+    const harness = createHarness({ deliveryRepairRetryMs: 5 });
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
+    const firstSnapshot = deferred<DesktopRoomSnapshot>();
+    harness.nextSelectedSnapshot = firstSnapshot.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.syncSelectedRoomStream("focus_a");
+      harness.state.handleRoomStreamEvent({
+        type: "open",
+        roomIdentifier: "focus_a",
+        gap: true,
+        verified: true,
+        deliveryRepairToken: 43,
+      });
+      await waitForDesktop(() => harness.getSnapshotRequests.length === 1);
+      firstSnapshot.resolve(nonReadySnapshot("focus_a", "unavailable"));
+      harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([
+        roomMessage("msg_1", "Existing"),
+        roomMessage("msg_2", "Recovered target"),
+      ]));
+      await waitForDesktop(() => harness.deliveryRepairs.length === 1);
+    });
+
+    assert.equal(harness.deliveryRepairs[0]?.repair.token, 43);
+    assert.deepEqual(
+      harness.deliveryRepairs[0]?.repair.messages.map((message) => message.id),
+      ["msg_2"],
+    );
+    assert.equal(harness.getSnapshotRequests.length, 2);
+  });
+
+  it("retries when the repair IPC appears after a same-room bridge upgrade", async () => {
+    const harness = createHarness({ deliveryRepairRetryMs: 5 });
+    harness.selectedSnapshot.value = focusSnapshot([roomMessage("msg_1", "Existing")]);
+    harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([
+      roomMessage("msg_1", "Existing"),
+      roomMessage("msg_2", "Recovered target"),
+    ]));
+    harness.repairStreamDeliveryAvailable = false;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.syncSelectedRoomStream("focus_a");
+      harness.state.handleRoomStreamEvent({
+        type: "open",
+        roomIdentifier: "focus_a",
+        gap: true,
+        verified: true,
+        deliveryRepairToken: 44,
+      });
+      await waitForDesktop(() => messageIds(harness.selectedSnapshot.value).includes("msg_2"));
+      harness.repairStreamDeliveryAvailable = true;
+      await waitForDesktop(() => harness.deliveryRepairs.length === 1);
+    });
+
+    assert.equal(harness.deliveryRepairs[0]?.repair.token, 44);
+    assert.equal(harness.getSnapshotRequests.length, 2);
+  });
+
+  it("cancels a pending delivery retry when the room stream stops", async () => {
+    const harness = createHarness({ deliveryRepairRetryMs: 20 });
+    harness.selectedSnapshot.value = focusSnapshot();
+    harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([roomMessage("msg_2", "Missed")]));
+    harness.deliveryRepairFailures = 1;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.syncSelectedRoomStream("focus_a");
+      harness.state.handleRoomStreamEvent({
+        type: "open",
+        roomIdentifier: "focus_a",
+        gap: true,
+        verified: true,
+        deliveryRepairToken: 45,
+      });
+      await waitForDesktop(() => harness.deliveryRepairs.length === 1);
+      await harness.state.syncSelectedRoomStream(null);
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    assert.equal(harness.deliveryRepairs.length, 1);
+  });
+
+  it("cancels a pending delivery retry when stream ownership moves rooms", async () => {
+    const harness = createHarness({ deliveryRepairRetryMs: 20 });
+    harness.selectedSnapshot.value = focusSnapshot();
+    harness.nextSelectedSnapshot = Promise.resolve(focusSnapshot([roomMessage("msg_2", "Missed")]));
+    harness.deliveryRepairFailures = 1;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.state.syncSelectedRoomStream("focus_a");
+      harness.state.handleRoomStreamEvent({
+        type: "open",
+        roomIdentifier: "focus_a",
+        gap: true,
+        verified: true,
+        deliveryRepairToken: 46,
+      });
+      await waitForDesktop(() => harness.deliveryRepairs.length === 1);
+      await harness.state.syncSelectedRoomStream("focus_b");
+      await new Promise((resolve) => setTimeout(resolve, 30));
+    });
+
+    assert.equal(harness.deliveryRepairs.length, 1);
   });
 
   it("replays non-message events that arrive while the verified snapshot is loading", async () => {
@@ -898,10 +1103,15 @@ describe("useDesktopAppData handleRoomStreamEvent refresh gating", () => {
   });
 });
 
-function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
+function createHarness(options: {
+  deliveryRepairRetryMs?: number;
+  snapshotTimeoutMs?: number;
+} = {}): {
   accountRooms: Ref<DesktopAccountRoomEntry[]>;
   activeEntry: Ref<SidebarEntry>;
   getSnapshotRequests: Array<string | null>;
+  deliveryRepairs: Array<{ roomIdentifier: string; repair: DesktopRoomDeliveryRepair }>;
+  deliveryRepairFailures: number;
   getArtifactsRequests: Array<string>;
   metadataRefreshCalls: Array<number | undefined>;
   nextArtifacts: DesktopRoomSharedArtifact[];
@@ -910,6 +1120,7 @@ function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
   nextAppInfo: Promise<DesktopAppInfo>;
   nextSelectedSnapshot: Promise<DesktopRoomSnapshot>;
   nextStreamReady: Promise<void>;
+  repairStreamDeliveryAvailable: boolean;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
   settingsAccountRooms: Ref<DesktopAccountRoomEntry[]>;
@@ -927,6 +1138,7 @@ function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
   const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const getSnapshotRequests: Array<string | null> = [];
+  const deliveryRepairs: Array<{ roomIdentifier: string; repair: DesktopRoomDeliveryRepair }> = [];
   const getArtifactsRequests: Array<string> = [];
   const metadataRefreshCalls: Array<number | undefined> = [];
   const listAccountRoomsCalls: Array<DesktopAccountRoomListOptions | undefined> = [];
@@ -939,6 +1151,8 @@ function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
     nextArtifacts: [] as DesktopRoomSharedArtifact[],
     nextAppInfo: Promise.resolve({} as DesktopAppInfo),
     nextStreamReady: Promise.resolve(),
+    deliveryRepairFailures: 0,
+    repairStreamDeliveryAvailable: true,
   };
 
   const state = useDesktopAppData({
@@ -963,6 +1177,7 @@ function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
     selectedRootRoomIdentifier: ref("room_parent"),
     selectedSnapshot,
     settingsAccountRooms,
+    deliveryRepairRetryMs: options.deliveryRepairRetryMs,
     snapshotTimeoutMs: options.snapshotTimeoutMs,
     syncRoomStream: async () => harness.nextStreamReady,
     workers: ref<WorkerSnapshot[]>([]),
@@ -971,6 +1186,13 @@ function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
   return {
     accountRooms,
     activeEntry,
+    deliveryRepairs,
+    get deliveryRepairFailures() {
+      return harness.deliveryRepairFailures;
+    },
+    set deliveryRepairFailures(value: number) {
+      harness.deliveryRepairFailures = value;
+    },
     getSnapshotRequests,
     getArtifactsRequests,
     metadataRefreshCalls,
@@ -1005,6 +1227,12 @@ function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
     set nextSelectedSnapshot(value: Promise<DesktopRoomSnapshot>) {
       harness.nextSelectedSnapshot = value;
     },
+    get repairStreamDeliveryAvailable() {
+      return harness.repairStreamDeliveryAvailable;
+    },
+    set repairStreamDeliveryAvailable(value: boolean) {
+      harness.repairStreamDeliveryAvailable = value;
+    },
     rootRoomSnapshot,
     selectedSnapshot,
     settingsAccountRooms,
@@ -1022,6 +1250,19 @@ function createHarness(options: { snapshotTimeoutMs?: number } = {}): {
         },
         room: {
           startStream: async () => harness.nextStreamReady,
+          get repairStreamDelivery() {
+            if (!harness.repairStreamDeliveryAvailable) return undefined;
+            return async (
+              roomIdentifier: string,
+              repair: DesktopRoomDeliveryRepair,
+            ): Promise<void> => {
+              deliveryRepairs.push({ roomIdentifier, repair });
+              if (harness.deliveryRepairFailures > 0) {
+                harness.deliveryRepairFailures -= 1;
+                throw new Error("repair handoff unavailable");
+              }
+            };
+          },
           getSnapshot: async (roomIdentifier: string | null): Promise<DesktopRoomSnapshot> => {
             getSnapshotRequests.push(roomIdentifier);
             return harness.nextSelectedSnapshot;
@@ -1390,6 +1631,14 @@ function sharedArtifact(identityKey: string): DesktopRoomSharedArtifact {
 
 async function flushAsync(): Promise<void> {
   await new Promise((resolve) => setTimeout(resolve, 0));
+}
+
+async function waitForDesktop(predicate: () => boolean): Promise<void> {
+  const deadline = Date.now() + 1_000;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("timed out waiting for desktop repair state");
+    await flushAsync();
+  }
 }
 
 function repoStatusFixture(): RepoStatus {

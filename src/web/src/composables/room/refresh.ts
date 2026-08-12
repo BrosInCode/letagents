@@ -40,6 +40,7 @@ import {
   participants,
   presence,
   reasoningSessions,
+  replaceRoomMessages,
   room,
   roomArtifacts,
   setLastActivityHistoryRequest,
@@ -49,6 +50,11 @@ import {
 } from './state'
 import { fetchTasksAndPresence } from './taskActions'
 
+const MAX_MESSAGE_REPAIR_PAGES_PER_PASS = 4
+const MAX_MESSAGE_REPAIR_MESSAGES_PER_PASS = 400
+const MAX_MESSAGE_REPAIR_BYTES_PER_PASS = 2 * 1024 * 1024
+const MAX_MESSAGE_REPAIR_WORK_MS_PER_PASS = 100
+
 interface RoomRefreshControllerDeps {
   refreshParticipants: (roomIdentifier: string) => Promise<void>
   refreshPresence: (roomIdentifier: string) => Promise<void>
@@ -57,8 +63,10 @@ interface RoomRefreshControllerDeps {
 export function createRoomRefreshController(
   deps: RoomRefreshControllerDeps,
 ) {
+  let activityRefreshGeneration = 0
   let githubEventsRefreshTimer: ReturnType<typeof setTimeout> | null = null
   let roomArtifactsRefreshTimer: ReturnType<typeof setTimeout> | null = null
+  const windowedGapMessageRepairs = new Set<string>()
 
   async function refreshTasksAndPresence(roomIdentifier: string) {
     const [next, nextArtifacts] = await Promise.all([
@@ -149,41 +157,80 @@ export function createRoomRefreshController(
 
   async function refreshRoomMessages(
     after: string | null = null,
-  ): Promise<{ success: boolean; cursor: string | null }> {
+    authoritativeGap = false,
+    isCurrent: () => boolean = () => true,
+  ): Promise<{ success: boolean; cursor: string | null; complete?: boolean }> {
     if (!room.value) return { success: false, cursor: after }
     const roomIdentifier = room.value.identifier
+    const canCommit = () => isCurrent() && room.value?.identifier === roomIdentifier
     if (!after) {
-      const page = await fetchMessages(roomIdentifier)
-      if (room.value?.identifier !== roomIdentifier) {
+      try {
+        const page = await fetchMessages(roomIdentifier)
+        if (!canCommit()) return { success: false, cursor: after }
+        replaceRoomMessages(mergeMessages(messages.value, page.messages))
+        messagesHasOlder.value = page.hasOlder || messagesHasOlder.value
+        return {
+          success: true,
+          cursor: page.messages[page.messages.length - 1]?.id ?? null,
+        }
+      } catch {
         return { success: false, cursor: after }
-      }
-      messages.value = mergeMessages(messages.value, page.messages)
-      messagesHasOlder.value = page.hasOlder || messagesHasOlder.value
-      return {
-        success: true,
-        cursor: page.messages[page.messages.length - 1]?.id ?? null,
       }
     }
 
     try {
       let cursor = after
       let hasMore = false
+      let pages = 0
+      let repairedMessages = 0
+      let repairedBytes = 0
+      const startedAt = Date.now()
+      const batch = [] as typeof messages.value
+      if (!authoritativeGap && canCommit()) windowedGapMessageRepairs.delete(roomIdentifier)
+      if (authoritativeGap && canCommit()) windowedGapMessageRepairs.add(roomIdentifier)
       do {
         const page = await fetchMessagesAfter(roomIdentifier, cursor)
-        if (room.value?.identifier !== roomIdentifier) {
+        if (!canCommit()) {
           return { success: false, cursor: after }
         }
         hasMore = page.hasMore
         if (page.messages.length === 0) {
-          return { success: !hasMore, cursor }
+          return { success: !hasMore, cursor, ...(hasMore ? { complete: false } : {}) }
         }
-        messages.value = mergeMessages(messages.value, page.messages)
+        pages += 1
+        repairedMessages += page.messages.length
+        try {
+          repairedBytes += new TextEncoder().encode(JSON.stringify(page.messages)).byteLength
+        } catch {
+          repairedBytes = MAX_MESSAGE_REPAIR_BYTES_PER_PASS + 1
+        }
+        if (!windowedGapMessageRepairs.has(roomIdentifier)) batch.push(...page.messages)
         const nextCursor = page.messages[page.messages.length - 1]?.id
         if (!nextCursor || nextCursor === cursor) {
           return { success: false, cursor: after }
         }
         cursor = nextCursor
-      } while (hasMore)
+      } while (
+        hasMore
+        && pages < MAX_MESSAGE_REPAIR_PAGES_PER_PASS
+        && repairedMessages < MAX_MESSAGE_REPAIR_MESSAGES_PER_PASS
+        && repairedBytes < MAX_MESSAGE_REPAIR_BYTES_PER_PASS
+        && Date.now() - startedAt < MAX_MESSAGE_REPAIR_WORK_MS_PER_PASS
+      )
+      if (!canCommit()) return { success: false, cursor: after }
+      if (batch.length > 0) replaceRoomMessages(mergeMessages(messages.value, batch))
+      if (hasMore) {
+        return { success: true, cursor, complete: false }
+      }
+      if (windowedGapMessageRepairs.has(roomIdentifier)) {
+        const latest = await fetchMessages(roomIdentifier)
+        if (!canCommit()) {
+          return { success: false, cursor: after }
+        }
+        replaceRoomMessages(latest.messages)
+        messagesHasOlder.value = latest.hasOlder
+        windowedGapMessageRepairs.delete(roomIdentifier)
+      }
       return { success: true, cursor }
     } catch {
       // The live stream remains connected; its next reconciliation tick will retry.
@@ -194,35 +241,43 @@ export function createRoomRefreshController(
   async function refreshGitHubEvents(
     roomIdentifier: string,
     supported = isRepoBackedRoomId(roomIdentifier),
+    isCurrent: () => boolean = () => true,
   ) {
     if (!supported) {
+      if (!isCurrent()) return false
       githubEvents.value = []
       githubEventsAvailable.value = false
       githubEventsHasMore.value = false
       githubEventsError.value = null
       githubEventsLoading.value = false
-      return
+      return true
     }
 
     githubEventsLoading.value = true
     try {
       const next = await fetchGitHubEvents(roomIdentifier)
+      if (!isCurrent()) return false
       githubEvents.value = next.events
       githubEventsAvailable.value = next.available
       githubEventsHasMore.value = next.hasMore
       githubEventsError.value = next.error
+      return true
     } finally {
-      githubEventsLoading.value = false
+      if (isCurrent()) githubEventsLoading.value = false
     }
   }
 
-  async function refreshRoomGitHubEvents(): Promise<boolean> {
+  async function refreshRoomGitHubEvents(
+    isCurrent: () => boolean = () => true,
+  ): Promise<boolean> {
     if (!room.value) return false
-    await refreshGitHubEvents(
+    const roomIdentifier = room.value.identifier
+    const repaired = await refreshGitHubEvents(
       getGitHubEventsIdentifier(room.value),
       githubEventsSupported.value,
+      () => isCurrent() && room.value?.identifier === roomIdentifier,
     )
-    return true
+    return repaired === true
   }
 
   function scheduleGitHubEventsRefresh(
@@ -310,8 +365,12 @@ export function createRoomRefreshController(
     }
   }
 
-  async function refreshRoomActivity(): Promise<boolean> {
+  async function refreshRoomActivity(
+    options: { includeMessages?: boolean } = {},
+    isCurrent: () => boolean = () => true,
+  ): Promise<boolean> {
     if (!room.value) return false
+    const requestGeneration = ++activityRefreshGeneration
     const roomIdentifier = room.value.identifier
     const previousRequest = getLastActivityHistoryRequest()
     const historyRequest = {
@@ -330,7 +389,7 @@ export function createRoomRefreshController(
         nextGithubStatus,
         nextArtifacts,
       ] = await Promise.all([
-        fetchMessages(roomIdentifier),
+        options.includeMessages === false ? Promise.resolve(null) : fetchMessages(roomIdentifier),
         fetchPresence(roomIdentifier),
         fetchParticipants(roomIdentifier),
         fetchReasoningSessions(roomIdentifier),
@@ -339,9 +398,11 @@ export function createRoomRefreshController(
         fetchTaskGithubStatus(roomIdentifier),
         fetchRoomArtifacts(roomIdentifier),
       ])
-      if (room.value?.identifier !== roomIdentifier) return false
-      messages.value = mergeMessages(messages.value, messagePage.messages)
-      messagesHasOlder.value = messagePage.hasOlder || messagesHasOlder.value
+      if (!isCurrent() || room.value?.identifier !== roomIdentifier) return false
+      if (messagePage) {
+        replaceRoomMessages(mergeMessages(messages.value, messagePage.messages))
+        messagesHasOlder.value = messagePage.hasOlder || messagesHasOlder.value
+      }
       presence.value = nextPresence
       boardHandoffPresence.value = nextPresence
       participants.value = nextParticipantsPage.participants
@@ -356,7 +417,9 @@ export function createRoomRefreshController(
       roomArtifacts.value = nextArtifacts
       return true
     } finally {
-      activityLoading.value = false
+      // Lifecycle reset clears the shared flag immediately. A retired request
+      // may relinquish its own flag, but can never clear a newer refresh.
+      if (activityRefreshGeneration === requestGeneration) activityLoading.value = false
     }
   }
 
