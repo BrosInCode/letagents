@@ -130,3 +130,11 @@ test("ready provider copy separates identity, state, and next action", () => {
   assert.match(setupStatus, /\{\{ statusDescription \}\}/);
   assert.doesNotMatch(setupStatus, /preflight\?\.detail/);
 });
+
+test("external runtime guidance always retains a recovery action", () => {
+  assert.match(actionBar, /v-if="installCommand"/);
+  assert.match(actionBar, /v-if="installUrl"/);
+  assert.match(actionBar, /v-if="!installCommand && !installUrl"/);
+  assert.match(actionBar, /Check provider setup/);
+  assert.match(modal, /@refresh="retryProviderSetup"/);
+});

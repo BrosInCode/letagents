@@ -1,6 +1,6 @@
 import { accessSync, constants as fsConstants } from "node:fs";
 import { homedir } from "node:os";
-import { delimiter, isAbsolute, join, resolve } from "node:path";
+import { delimiter, join, resolve } from "node:path";
 
 export interface CodexExecutableResolutionOptions {
   env?: NodeJS.ProcessEnv;
@@ -85,15 +85,4 @@ export function resolveCodexExecutable(
         join(homeDirectory, ".volta", "bin", "codex"),
       ];
   return commonCandidates.find(isExecutable) ?? "codex";
-}
-
-export function pinInstalledCodexExecutable(
-  options: CodexExecutableResolutionOptions = {},
-): string {
-  const executable = installedCodexExecutablePath(options);
-  if (!isAbsolute(executable) || !isExecutable(executable)) {
-    throw new Error(`Codex installer completed but ${executable} is not executable.`);
-  }
-  process.env.LETAGENTS_CODEX_BIN = executable;
-  return executable;
 }

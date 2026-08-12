@@ -78,7 +78,7 @@ function targetAriaLabel(target: DesktopMcpInstallTarget): string {
 }
 
 function targetCapabilities(target: DesktopMcpInstallTarget): string[] {
-  if (target.id === "codex") return ["Install CLI if missing", "Add MCP bridge"];
+  if (target.id === "codex") return ["Keep your Codex CLI", "Add MCP bridge"];
   return ["Add MCP bridge"];
 }
 </script>

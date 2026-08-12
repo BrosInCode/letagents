@@ -65,7 +65,6 @@ const {
   compactManagedAgentRoomArtifacts,
   managedAgentRoomArtifactsPath,
 } = await import("../main/agents/managed-agent-artifacts.js");
-const { codexInstallCommand } = await import("../main/agents/codex-install.js");
 const {
   codexSessionStatusAfterInspectFailure,
   codexSessionStatusAfterNoActiveTurnStop,
@@ -98,7 +97,7 @@ const {
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
-const { listDesktopAgentProviders } = await import("../main/agents/provider-registry.js");
+const { cursorRuntimeInstallCommand, listDesktopAgentProviders } = await import("../main/agents/provider-registry.js");
 const {
   buildCodexManagedAgentLaunchContext,
   dispatchRoomStreamEventToManagedAgents,
@@ -4920,27 +4919,16 @@ test("Codex app-server readiness wait prefers late child exit over generic timeo
   }
 });
 
-test("Codex install commands use official non-interactive installers", () => {
-  const unix = codexInstallCommand("darwin");
-  assert.equal(unix.command, "sh");
-  assert.match(unix.args.join(" "), /https:\/\/chatgpt\.com\/codex\/install\.sh/);
-  assert.match(unix.args.join(" "), /CODEX_NON_INTERACTIVE=1/);
-
-  const windows = codexInstallCommand("win32");
-  assert.equal(windows.command, "powershell.exe");
-  assert.match(windows.args.join(" "), /https:\/\/chatgpt\.com\/codex\/install\.ps1/);
-  assert.match(windows.args.join(" "), /CODEX_NON_INTERACTIVE=1/);
-});
-
 test("agent provider setup confirmation copy covers install actions", () => {
-  const codexInstall = providerSetupConfirmationResult({
-    id: "codex",
-    name: "Codex",
+  const managedRuntimeInstall = providerSetupConfirmationResult({
+    id: "open-model",
+    name: "Open Model",
   }, "install_runtime");
-  assert.equal(codexInstall.success, false);
-  assert.equal(codexInstall.action, "install_runtime");
-  assert.match(codexInstall.message, /requires confirmation/i);
-  assert.match(codexInstall.detail || "", /official Codex CLI runtime/i);
+  assert.equal(managedRuntimeInstall.success, false);
+  assert.equal(managedRuntimeInstall.action, "install_runtime");
+  assert.match(managedRuntimeInstall.message, /requires confirmation/i);
+  assert.match(managedRuntimeInstall.detail || "", /managed Open Model execution engine/i);
+  assert.match(managedRuntimeInstall.detail || "", /External provider CLIs remain user-managed/i);
 
   const bridgeInstall = providerSetupConfirmationResult({
     id: "antigravity",
@@ -4954,10 +4942,20 @@ test("agent provider setup confirmation copy covers install actions", () => {
 
 test("listDesktopAgentProviders excludes antigravity", () => {
   const providers = listDesktopAgentProviders();
+  const codex = providers.find((provider) => provider.id === "codex");
   assert.equal(
-    providers.find((provider) => provider.id === "codex")?.runtimeCommand,
+    codex?.runtimeCommand,
     "codex",
     "Codex launch sites assume the registry uses the canonical command name",
+  );
+  assert.equal(codex?.capabilities.includes("installable_runtime"), false);
+  assert.match(codex?.runtimeInstallCommand || "", /chatgpt\.com\/codex\/install/);
+  assert.equal(codex?.runtimeInstallUrl, "https://learn.chatgpt.com/docs/codex/cli");
+  assert.equal(
+    providers.find((provider) => provider.id === "open-model")
+      ?.capabilities.includes("installable_runtime"),
+    true,
+    "only the LetAgents-managed Open Model engine remains installable",
   );
   assert.ok(
     !providers.some((p) => p.id === "antigravity"),
@@ -4968,4 +4966,10 @@ test("listDesktopAgentProviders excludes antigravity", () => {
       ?.capabilities.includes("concurrent_supervised_agents"),
     "Claude owns an isolated CLI process and continuation per supervised entry",
   );
+});
+
+test("external runtime install commands stay valid for the current platform", () => {
+  assert.equal(cursorRuntimeInstallCommand("win32"), null);
+  assert.match(cursorRuntimeInstallCommand("darwin") || "", /curl .* \| bash/);
+  assert.match(cursorRuntimeInstallCommand("linux") || "", /curl .* \| bash/);
 });

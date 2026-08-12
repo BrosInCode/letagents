@@ -6,6 +6,7 @@ import {
 import { handleAttachmentProtocolRequest } from "./main/attachments.js";
 import { registerDesktopIpcHandlers } from "./main/ipc.js";
 import { configureApplicationMenu } from "./main/menu.js";
+import { startDesktopShellEnvironmentHydration } from "./main/desktop-shell-environment.js";
 import {
   initializeDesktopNotifications,
   prepareDesktopNotificationLaunch,
@@ -40,23 +41,29 @@ registerDesktopIpcHandlers();
 
 app.once("ready", async (_event, launchInfo) => {
   prepareDesktopNotificationLaunch(launchInfo);
-  await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
-    console.warn(
-      `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
-    );
-  });
-  if (process.platform === "darwin") {
-    await supervisorDaemonClient.ensureRunning().catch((error) => {
-      console.warn(`Supervisor daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);
+  const backgroundStartup = (async () => {
+    await startDesktopShellEnvironmentHydration().catch((error) => {
+      console.warn(`Desktop shell environment unavailable: ${error instanceof Error ? error.message : String(error)}`);
     });
-    // Rehydrate only desired-running daemon-inbox Codex entries. A failure is
-    // intentionally non-fatal to Electron: the paused/blocked daemon entry is
-    // truthful and recovery remains available after sign-in/host authority.
-    await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
-      console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+    await retireLegacyCodexBackedOpenModelSessions().catch((error) => {
+      console.warn(
+        `Legacy Open Model retirement failed: ${error instanceof Error ? error.message : String(error)}`,
+      );
     });
-  }
+    if (process.platform === "darwin") {
+      await supervisorDaemonClient.ensureRunning().catch((error) => {
+        console.warn(`Supervisor daemon unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      });
+      // Rehydrate only desired-running daemon-inbox Codex entries. A failure is
+      // intentionally non-fatal to Electron: the paused/blocked daemon entry is
+      // truthful and recovery remains available after sign-in/host authority.
+      await supervisorGrantCoordinator.reconcileDesiredRunning().catch((error) => {
+        console.warn(`Supervisor grant reconciliation unavailable: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }
+  })();
   if (process.env.LETAGENTS_PACKAGED_SUPERVISOR_SMOKE === "1") {
+    await backgroundStartup;
     const status = await supervisorDaemonClient.ensureRunning();
     console.log(`LETAGENTS_PACKAGED_SUPERVISOR_READY ${JSON.stringify(status)}`);
     app.exit(0);
@@ -67,6 +74,7 @@ app.once("ready", async (_event, launchInfo) => {
   app.setName("LetAgents");
   configureApplicationMenu();
   createWindow();
+  void backgroundStartup;
   initializeDesktopUpdates();
   await initializeDesktopNotifications().catch((error) => {
     console.warn(`Desktop notification setup unavailable: ${error instanceof Error ? error.message : String(error)}`);

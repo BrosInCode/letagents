@@ -218,10 +218,6 @@ const selectedMcpTargets = computed(() => {
 
 const selectedMcpTargetCount = computed(() => selectedMcpTargets.value.length);
 
-const selectedIncludesCodex = computed(() => {
-  return selectedMcpTargets.value.some((target) => target.id === "codex");
-});
-
 const selectedTargetLabel = computed(() => {
   if (selectedMcpTargetCount.value === 1) return selectedMcpTargets.value[0].name;
   if (selectedMcpTargetCount.value === props.mcpState.targets.length) return "all your apps";
@@ -230,11 +226,9 @@ const selectedTargetLabel = computed(() => {
 
 const installButtonLabel = computed(() => {
   if (props.busy) return "Installing...";
-  if (selectedIncludesCodex.value && selectedMcpTargetCount.value === 1) return "Install CLI and bridge";
-  if (selectedIncludesCodex.value) return `Install CLI and ${selectedMcpTargetCount.value} bridges`;
   return selectedMcpTargetCount.value > 1
     ? `Install in ${selectedMcpTargetCount.value} apps`
-    : "Install LetAgents";
+    : "Install LetAgents bridge";
 });
 
 const roomActionLabel = computed(() => {
@@ -264,7 +258,7 @@ const copy = computed(() => {
   if (props.mcpWizardStep === "done") {
     return `${selectedTargetLabel.value} ${selectedMcpTargetCount.value === 1 ? "has" : "have"} the LetAgents bridge. Restart or reconnect before continuing.`;
   }
-  return "Pick where your agents run. For Codex, LetAgents installs the CLI if it is missing. For every selected platform, it adds the MCP bridge for rooms.";
+  return "Pick where your agents run. Provider CLIs stay user-managed; LetAgents adds the MCP bridge for rooms to every selected app.";
 });
 
 const showFeedback = computed(() => {

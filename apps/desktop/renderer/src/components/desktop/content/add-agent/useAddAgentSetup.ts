@@ -125,13 +125,13 @@ export function useAddAgentSetup() {
       }, MODEL_PREFLIGHT_DEBOUNCE_MS);
     }
 
-    async function runPreflight(options: { refreshModels?: boolean } = {}): Promise<void> {
+    async function runPreflight(options: { refreshModels?: boolean; refreshEnvironment?: boolean } = {}): Promise<void> {
       if (!selectedProviderId.value) return;
       clearScheduledModelPreflight();
       const providerId = selectedProviderId.value;
       const version = setupVersion;
       const requestId = ++preflightRequestId;
-      loadingPreflight.value = !preflight.value;
+      loadingPreflight.value = true;
       loadError.value = null;
       setupConfirmation.value = null;
       try {
@@ -146,6 +146,7 @@ export function useAddAgentSetup() {
           modelSource: bindings.selectedModelSource.value,
           effort: bindings.selectedEffort.value || null,
           refreshModels: options.refreshModels,
+          refreshEnvironment: options.refreshEnvironment,
         });
         if (isCurrentRequest(version) && requestId === preflightRequestId && selectedProviderId.value === providerId) {
           preflight.value = result;
@@ -163,12 +164,23 @@ export function useAddAgentSetup() {
       }
     }
 
-    async function refreshSelectedProvider(options: { forceModels?: boolean } = {}): Promise<void> {
+    async function refreshSelectedProvider(options: { forceModels?: boolean; refreshEnvironment?: boolean } = {}): Promise<void> {
       if (!bindings.open() || !selectedProviderId.value) return;
       clearScheduledModelPreflight();
-      void bindings.loadOpenModelSettings();
-      void bindings.loadProviderModels({ refresh: options.forceModels });
-      await runPreflight({ refreshModels: options.forceModels });
+      const loadConfiguration = () => {
+        void bindings.loadOpenModelSettings();
+        void bindings.loadProviderModels({ refresh: options.forceModels });
+      };
+      if (options.refreshEnvironment) {
+        await runPreflight({
+          refreshModels: options.forceModels,
+          refreshEnvironment: true,
+        });
+        loadConfiguration();
+      } else {
+        loadConfiguration();
+        await runPreflight({ refreshModels: options.forceModels });
+      }
     }
 
     async function loadProviders(): Promise<void> {
@@ -217,7 +229,7 @@ export function useAddAgentSetup() {
         await loadProviders();
         return;
       }
-      await refreshSelectedProvider({ forceModels: true });
+      await refreshSelectedProvider({ forceModels: true, refreshEnvironment: true });
     }
 
     function selectProvider(providerId: DesktopAgentProviderId): void {

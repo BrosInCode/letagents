@@ -94,6 +94,12 @@ export function useAddAgentPresentation(
     )
   );
   const authCommand = computed(() => agentAuthCommand(selectedProvider.value));
+  const installCommand = computed(() =>
+    selectedProvider.value?.runtimeInstallCommand?.trim() || null
+  );
+  const installUrl = computed(() =>
+    selectedProvider.value?.runtimeInstallUrl?.trim() || null
+  );
   const authCommandForProvider = (providerId: string | null): string | null =>
     agentAuthCommand(providers.value.find((provider) => provider.id === providerId));
   const roomLabel = computed(() => props.roomDisplayName?.trim() || props.roomIdentifier);
@@ -334,6 +340,8 @@ export function useAddAgentPresentation(
     canStartManagedAgent,
     authCommand,
     authCommandForProvider,
+    installCommand,
+    installUrl,
     roomLabel,
     externalJoinPrompt,
     activeSetupConfirmation,

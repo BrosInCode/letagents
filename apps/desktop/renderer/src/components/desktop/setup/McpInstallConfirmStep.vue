@@ -57,10 +57,6 @@ const targetLabel = computed(() => {
   return "these apps";
 });
 
-const includesCodex = computed(() => {
-  return props.targets.some((target) => target.id === "codex");
-});
-
 const configPaths = computed<DesktopMcpInstallConfigPath[]>(() => {
   return props.targets.flatMap((target) =>
     target.configPaths?.length
@@ -83,17 +79,11 @@ function configPathStatusLabel(
   return "Not installed";
 }
 
-const actionCopy = computed(() => {
-  if (includesCodex.value) {
-    return `LetAgents will install Codex CLI if it is missing, then add the MCP connection to ${targetLabel.value}.`;
-  }
-  return `LetAgents will add the MCP connection to ${targetLabel.value}.`;
-});
+const actionCopy = computed(() =>
+  `LetAgents will add the MCP connection to ${targetLabel.value}. Provider CLIs stay user-managed.`,
+);
 
 const noteCopy = computed(() => {
-  if (includesCodex.value) {
-    return "LetAgents updates local CLI and MCP settings. Your code stays on this machine.";
-  }
   return "LetAgents updates the app's local MCP settings. Your code stays on this machine.";
 });
 </script>

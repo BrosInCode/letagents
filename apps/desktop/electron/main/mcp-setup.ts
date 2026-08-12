@@ -142,8 +142,7 @@ function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
     {
       id: "codex",
       name: "Codex",
-      description:
-        "We'll install Codex CLI if it is missing, then add the MCP bridge.",
+      description: "We'll add the MCP bridge for room access. Install and sign in to Codex separately.",
       configPath: join(home, ".codex", "config.toml"),
       configLocations: [
         {

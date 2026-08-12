@@ -1374,25 +1374,32 @@ test("agent setup confirmation is scoped to the selected provider and action", (
 });
 
 test("agent setup action labels and confirmation copy are provider-aware", () => {
+  const openModel = provider({
+    id: "open-model",
+    name: "Open Model",
+    capabilities: ["desktop_managed_runtime", "installable_runtime"],
+    runtimeCommand: "opencode",
+    mcpTargetId: null,
+  });
   assert.equal(
-    agentSetupActionButtonLabel("install_runtime", provider(), false, false),
-    "Install Codex",
+    agentSetupActionButtonLabel("install_runtime", openModel, false, false),
+    "Install Open Model",
   );
   assert.equal(
-    agentSetupActionButtonLabel("install_runtime", provider(), true, false),
-    "Confirm install Codex",
+    agentSetupActionButtonLabel("install_runtime", openModel, true, false),
+    "Confirm install Open Model",
   );
   assert.equal(
     agentSetupActionButtonLabel("install_mcp_bridge", provider(), true, false),
     "Confirm connection install",
   );
   assert.equal(
-    agentSetupActionButtonLabel("install_runtime", provider(), true, true),
+    agentSetupActionButtonLabel("install_runtime", openModel, true, true),
     "Installing...",
   );
   assert.equal(
-    agentSetupConfirmationMessage("install_runtime", provider()),
-    "LetAgents will install the official Codex CLI runtime on this machine after confirmation.",
+    agentSetupConfirmationMessage("install_runtime", openModel),
+    "LetAgents will install its managed Open Model execution engine on this machine after confirmation. External provider CLIs remain user-managed.",
   );
   assert.equal(
     agentSetupConfirmationMessage("install_mcp_bridge", provider({
