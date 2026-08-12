@@ -472,11 +472,11 @@ export function humanFacingSupervisorActivitySummary(
 }
 
 /**
- * Managed session lists are re-fetched on 4s polls from both the room shell
- * and the Add Agent modal. Assigning a freshly-allocated but content-equal
- * array into reactive state re-renders every dependent surface each tick,
- * which reads as constant flicker. These helpers keep the CURRENT reference
- * whenever the content did not change so idle polls trigger no reactivity.
+ * Managed session state is push-maintained and repaired by a bounded room-
+ * shell reconciliation read. Assigning a freshly allocated but content-equal
+ * array into reactive state would still re-render every dependent surface at
+ * each repair. These helpers retain the current reference when content did
+ * not change, keeping repair reads invisible to idle UI.
  */
 export function managedAgentSessionListsEqual(
   a: DesktopManagedAgentSession[],

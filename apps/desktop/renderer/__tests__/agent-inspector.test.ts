@@ -18,7 +18,9 @@ import {
   foldSupervisorActivityPush,
   mergeSupervisorEntriesPoll,
   supervisorEntriesResourceFreshness,
+  supervisorStateRepairDelayMs,
   supervisorStateSubscriptionNeedsRepair,
+  supervisorStatusTrailingRefreshGeneration,
   SUPERVISOR_ACTIVITY_CAP,
 } from "../src/domain/supervisor-entries-resource";
 import {
@@ -917,6 +919,50 @@ test("a registered state subscription still falls back to repair polling when sn
     nowMs: 100_000,
     staleAfterMs: 60_000,
   }), true);
+});
+
+test("supervisor repair scheduling follows push heartbeats without stale-spin retries", () => {
+  assert.equal(supervisorStateRepairDelayMs({
+    lastRepairAtMs: 90_000,
+    nowMs: 100_000,
+    staleAfterMs: 60_000,
+  }), 50_000);
+  assert.equal(supervisorStateRepairDelayMs({
+    lastRepairAtMs: null,
+    nowMs: 100_000,
+    staleAfterMs: 60_000,
+  }), 60_000);
+  assert.equal(supervisorStateRepairDelayMs({
+    lastRepairAtMs: 95_000,
+    nowMs: 100_000,
+    staleAfterMs: 60_000,
+  }), 55_000, "a repair attempt establishes a bounded retry deadline");
+  assert.equal(supervisorStateRepairDelayMs({
+    lastRepairAtMs: 10_000,
+    nowMs: 100_000,
+    staleAfterMs: 60_000,
+  }), 0);
+});
+
+test("an older settled daemon status queues one bounded negotiation for the required generation", () => {
+  assert.equal(supervisorStatusTrailingRefreshGeneration({
+    ownerActive: true,
+    settledGeneration: 1,
+    requiredGeneration: 2,
+    lastAttemptedGeneration: 0,
+  }), 2, "an older lower-layer single-flight result must trigger a trailing read");
+  assert.equal(supervisorStatusTrailingRefreshGeneration({
+    ownerActive: true,
+    settledGeneration: 1,
+    requiredGeneration: 2,
+    lastAttemptedGeneration: 2,
+  }), null, "one stale daemon generation cannot create an unbounded retry loop");
+  assert.equal(supervisorStatusTrailingRefreshGeneration({
+    ownerActive: true,
+    settledGeneration: 2,
+    requiredGeneration: 2,
+    lastAttemptedGeneration: 0,
+  }), null, "a converged generation needs no trailing negotiation");
 });
 
 test("switching agents hides the previous action and fences its late completion", () => {
