@@ -229,7 +229,7 @@ test("message-info invalidations never enumerate ids on the shared room stream",
     "../routes/rooms/messages/agent-receipts.ts",
     "../routes/rooms/agents/observation.ts",
     "../db/messages/create.ts",
-    "../db/auth.ts",
+    "../db/auth/room-agent-sessions.ts",
   ]) {
     const source = routeSource(relative);
     for (const call of source.match(/queueMessageInfoInvalidation\([^)]*\)/g) ?? []) {
@@ -294,7 +294,7 @@ test("only the supervised reply namespace identifies a server-side reply target"
 });
 
 test("terminal session ends are the only writer of unavailable receipts", () => {
-  const auth = routeSource("../db/auth.ts");
+  const auth = routeSource("../db/auth/room-agent-sessions.ts");
   assert.match(auth, /markUnresolvedReceiptsUnavailableTx/);
   assert.match(auth, /actor_session_id: null/);
   const receiptsRoute = routeSource("../routes/rooms/messages/agent-receipts.ts");
