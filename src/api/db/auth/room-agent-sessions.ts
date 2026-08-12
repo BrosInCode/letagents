@@ -1,5 +1,5 @@
 import crypto, { randomUUID } from "node:crypto";
-import { and, asc, desc, eq, gt, inArray, isNull, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, inArray, isNull, or, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import {
@@ -10,6 +10,7 @@ import {
   room_agent_presence,
   room_agent_session_bearers,
   room_agent_sessions,
+  supervisor_host_grants,
 } from "../schema.js";
 import { hashToken, nextPrefixedId } from "../utils.js";
 import { toRoomAgentSession } from "../mappers.js";
@@ -709,6 +710,10 @@ export async function getRoomAgentSessionBearerByToken(
       room_agent_sessions,
       eq(room_agent_session_bearers.session_id, room_agent_sessions.session_id)
     )
+    .leftJoin(
+      supervisor_host_grants,
+      eq(room_agent_session_bearers.supervisor_grant_id, supervisor_host_grants.grant_id),
+    )
     .where(and(
       eq(room_agent_session_bearers.token_hash, hashToken(token)),
       isNull(room_agent_session_bearers.revoked_at),
@@ -716,6 +721,18 @@ export async function getRoomAgentSessionBearerByToken(
       isNull(room_agent_sessions.ended_at),
       eq(room_agent_session_bearers.room_id, room_agent_sessions.room_id),
       eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
+      or(
+        and(
+          isNull(room_agent_session_bearers.supervisor_grant_id),
+          isNull(room_agent_sessions.supervisor_grant_id),
+        ),
+        and(
+          eq(room_agent_session_bearers.supervisor_grant_id, supervisor_host_grants.grant_id),
+          eq(room_agent_sessions.supervisor_grant_id, supervisor_host_grants.grant_id),
+          isNull(supervisor_host_grants.revoked_at),
+          gt(supervisor_host_grants.expires_at, now),
+        ),
+      ),
     ))
     .limit(1);
 
@@ -856,8 +873,13 @@ export async function endRoomAgentSession(input: {
       eq(room_agent_sessions.supervisor_grant_id, input.supervisor_grant_id),
       eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
     )).limit(1);
-    if (!session?.agent_instance_id) throw new SupervisorGrantFenceStaleError();
-    await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${session.owner_account_id}:${session.room_id}:${session.agent_key}:${session.agent_instance_id}`}, 0))`);
+    if (!session) throw new SupervisorGrantFenceStaleError();
+    if (!session.agent_instance_id && input.supervisor_grant_fence) {
+      throw new SupervisorGrantFenceStaleError();
+    }
+    if (session.agent_instance_id) {
+      await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`supervisor_worker:${session.owner_account_id}:${session.room_id}:${session.agent_key}:${session.agent_instance_id}`}, 0))`);
+    }
     // A lost response after the first commit must be safely replayable under
     // the same exact current grant fence and session coordinates.
     if (session.ended_at) return toRoomAgentSession(session as RoomAgentSessionRow);

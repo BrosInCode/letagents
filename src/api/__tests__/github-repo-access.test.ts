@@ -171,12 +171,13 @@ test("a fresh visibility check bypasses a cached public result", async () => {
     await getGitHubRepoVisibility(roomName, "token", { bypassCache: true }),
     "private",
   );
-  assert.equal(calls, 3, "fresh access performs anonymous discovery plus authenticated refinement");
+  assert.equal(calls, 2, "fresh access uses the owner token directly and skips the anonymous quota");
 });
 
 test("a fresh room decision bypasses both visibility and collaborator caches", async () => {
   let visibilityBypassed = false;
   let collaboratorBypassed = false;
+  let indeterminateThrows = false;
   const decision = await resolveGitHubRepoRoomAccessDecision(
     {
       roomName: "github.com/brosincode/secret-repo",
@@ -194,6 +195,7 @@ test("a fresh room decision bypasses both visibility and collaborator caches", a
       },
       isCollaborator: async (input) => {
         collaboratorBypassed = input.bypassCache === true;
+        indeterminateThrows = input.throwOnIndeterminate === true;
         return true;
       },
     },
@@ -202,6 +204,63 @@ test("a fresh room decision bypasses both visibility and collaborator caches", a
   assert.deepEqual(decision, { kind: "allow" });
   assert.equal(visibilityBypassed, true);
   assert.equal(collaboratorBypassed, true);
+  assert.equal(indeterminateThrows, false, "fresh cache bypass does not change existing caller error contracts");
+});
+
+test("authority callers explicitly opt into indeterminate provider errors", async () => {
+  let indeterminateThrows = false;
+  const decision = await resolveGitHubRepoRoomAccessDecision({
+    roomName: "github.com/brosincode/secret-repo",
+    sessionAccount: {
+      provider: "github",
+      provider_access_token: "secret-token",
+      login: "EmmyMay",
+    },
+    freshCollaboratorCheck: true,
+    throwOnIndeterminate: true,
+  }, {
+    getVisibility: async () => "private",
+    isCollaborator: async (input) => {
+      indeterminateThrows = input.throwOnIndeterminate === true;
+      return true;
+    },
+  });
+  assert.deepEqual(decision, { kind: "allow" });
+  assert.equal(indeterminateThrows, true);
+});
+
+test("fresh collaborator revalidation throws on GitHub outages instead of denying access", async () => {
+  const fetchImpl = (async () => new Response("unavailable", { status: 503 })) as typeof fetch;
+  await assert.rejects(
+    isGitHubRepoCollaborator({
+      roomName: `github.com/brosincode/indeterminate-${Date.now()}`,
+      login: "EmmyMay",
+      accessToken: "token",
+      bypassCache: true,
+      throwOnIndeterminate: true,
+      fetchImpl,
+    }),
+    /indeterminate \(503\)/,
+  );
+});
+
+test("fresh collaborator revalidation treats dead credentials and secondary throttling as indeterminate", async () => {
+  for (const response of [
+    new Response("bad credentials", { status: 401 }),
+    new Response("slow down", { status: 403, headers: { "retry-after": "60", "x-ratelimit-remaining": "4999" } }),
+  ]) {
+    await assert.rejects(
+      isGitHubRepoCollaborator({
+        roomName: `github.com/brosincode/provider-uncertain-${response.status}-${Date.now()}`,
+        login: "EmmyMay",
+        accessToken: "token",
+        bypassCache: true,
+        throwOnIndeterminate: true,
+        fetchImpl: (async () => response.clone()) as typeof fetch,
+      }),
+      new RegExp(`indeterminate \\(${response.status}\\)`),
+    );
+  }
 });
 
 test("concurrent collaborator checks are single-flighted per repository and login", async () => {
