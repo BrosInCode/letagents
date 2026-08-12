@@ -11,6 +11,8 @@ import {
   isActiveAgentInstanceConflictError,
   isActiveRoomAgentSessionStaleForRegistration,
   recordNativeHarnessActivity,
+  pauseDesktopRoomAgentDelivery,
+  isStaleDesktopRoomAgentDeliverySignalError,
   upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat,
   upsertRoomAgentPresence,
 } from "../../../db.js";
@@ -534,7 +536,11 @@ export function registerAgentSessionRoutes(
     const project = await deps.resolveRoomOrReply(roomId, res);
     if (!project) return;
     if (!(await deps.requireParticipant(req, res, project))) return;
-    const body = req.body as { agent_session_id?: string; agent_session_token?: string };
+    const body = req.body as {
+      agent_session_id?: string;
+      agent_session_token?: string;
+      delivery_signal_sequence?: unknown;
+    };
     const worker = await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id });
     if (!worker.ok) {
       res.status(worker.status).json({ error: worker.error });
@@ -544,8 +550,18 @@ export function registerAgentSessionRoutes(
       res.status(403).json({ error: "Worker sessions can only heartbeat their own delivery lease." });
       return;
     }
+    const deliverySignalSequence = body.delivery_signal_sequence === undefined
+      ? 0
+      : body.delivery_signal_sequence;
+    if (!Number.isSafeInteger(deliverySignalSequence)
+      || (deliverySignalSequence as number) < 0
+      || (deliverySignalSequence as number) > 2_147_483_647) {
+      res.status(400).json({ error: "delivery_signal_sequence must be a non-negative 32-bit integer." });
+      return;
+    }
     const identity = worker.identity;
-    const { delivery, presence } = await upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat({
+    try {
+      const { delivery, presence } = await upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat({
         room_id: project.id,
         actor_label: identity.actor_label,
         agent_key: identity.agent_key,
@@ -558,12 +574,26 @@ export function registerAgentSessionRoutes(
         ide_label: identity.ide_label,
         repo_branch: identity.repo_branch,
         credential_fence: identity.credential_fence,
+        desktop_signal_sequence: body.delivery_signal_sequence === undefined
+          ? undefined
+          : deliverySignalSequence as number,
         presence: {
           status: "idle",
           status_text: "Waiting for room messages",
         },
       });
-    res.json({ room_id: project.id, delivery_session: delivery, presence });
+      res.json({ room_id: project.id, delivery_session: delivery, presence });
+    } catch (error) {
+      if (isStaleDesktopRoomAgentDeliverySignalError(error)) {
+        res.status(409).json({
+          error: error.message,
+          code: "stale_delivery_signal",
+          current_delivery_signal_sequence: error.currentSequence,
+        });
+        return;
+      }
+      throw error;
+    }
   });
 
   app.post(/^\/rooms\/(.+)\/agent-sessions\/([^/]+)\/native-activity$/, async (req: AuthenticatedRequest, res) => {
@@ -680,6 +710,7 @@ export function registerAgentSessionRoutes(
       agent_session_token?: string;
       status_text?: string;
       availability?: "failure" | "room_closed";
+      delivery_signal_sequence?: unknown;
     };
     const worker = await requireWorkerRequestAgentIdentity({ req, body, room_id: project.id });
     if (!worker.ok) {
@@ -690,17 +721,26 @@ export function registerAgentSessionRoutes(
       res.status(403).json({ error: "Worker sessions can only pause their own delivery lease." });
       return;
     }
+    const deliverySignalSequence = body.delivery_signal_sequence === undefined
+      ? 0
+      : body.delivery_signal_sequence;
+    if (!Number.isSafeInteger(deliverySignalSequence)
+      || (deliverySignalSequence as number) < 0
+      || (deliverySignalSequence as number) > 2_147_483_647) {
+      res.status(400).json({ error: "delivery_signal_sequence must be a non-negative 32-bit integer." });
+      return;
+    }
     const identity = worker.identity;
     const pausePresence = desktopManagedPausePresence({
       availability: body.availability,
       statusText: typeof body.status_text === "string" ? body.status_text : undefined,
     });
-    const [delivery, presence] = await Promise.all([
-      disconnectRoomAgentDeliverySession({ room_id: project.id, agent_session_id: targetSessionId }),
-      upsertRoomAgentPresence({
+    try {
+      const { delivery, presence } = await pauseDesktopRoomAgentDelivery({
         room_id: project.id,
         actor_label: identity.actor_label,
         agent_key: identity.agent_key,
+        agent_instance_id: identity.agent_instance_id,
         agent_session_id: targetSessionId,
         session_kind: identity.session_kind,
         runtime: identity.runtime,
@@ -708,10 +748,34 @@ export function registerAgentSessionRoutes(
         owner_label: identity.owner_label,
         ide_label: identity.ide_label,
         repo_branch: identity.repo_branch,
-        status: pausePresence.status,
-        status_text: pausePresence.statusText,
-      }),
-    ]);
-    res.json({ room_id: project.id, delivery_session: delivery, presence });
+        credential_fence: identity.credential_fence,
+        desktop_signal_sequence: deliverySignalSequence as number,
+        presence: {
+          room_id: project.id,
+          actor_label: identity.actor_label,
+          agent_key: identity.agent_key,
+          agent_session_id: targetSessionId,
+          session_kind: identity.session_kind,
+          runtime: identity.runtime,
+          display_name: identity.display_name,
+          owner_label: identity.owner_label,
+          ide_label: identity.ide_label,
+          repo_branch: identity.repo_branch,
+          status: pausePresence.status,
+          status_text: pausePresence.statusText,
+        },
+      });
+      res.json({ room_id: project.id, delivery_session: delivery, presence });
+    } catch (error) {
+      if (isStaleDesktopRoomAgentDeliverySignalError(error)) {
+        res.status(409).json({
+          error: error.message,
+          code: "stale_delivery_signal",
+          current_delivery_signal_sequence: error.currentSequence,
+        });
+        return;
+      }
+      throw error;
+    }
   });
 }

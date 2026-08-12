@@ -543,6 +543,7 @@ export interface DesktopRoomAgentDeliveryHeartbeatInput {
   ide_label?: string | null;
   repo_branch?: string | null;
   credential_fence?: RoomAgentDeliveryCredentialFence | null;
+  desktop_signal_sequence?: number | null;
 }
 
 async function upsertDesktopRoomAgentDeliveryHeartbeatTx(
@@ -581,6 +582,7 @@ async function upsertDesktopRoomAgentDeliveryHeartbeatTx(
       transport: "desktop_events",
       credential_fingerprint: credentialFingerprint,
       credential_epoch: credentialEpoch,
+      desktop_signal_sequence: input.desktop_signal_sequence ?? 0,
       active_connection_count: 1,
       last_connected_at: now,
       last_disconnected_at: null,
@@ -604,13 +606,24 @@ async function upsertDesktopRoomAgentDeliveryHeartbeatTx(
         transport: "desktop_events",
         credential_fingerprint: credentialFingerprint,
         credential_epoch: credentialEpoch,
+        desktop_signal_sequence: input.desktop_signal_sequence ?? sql`${room_agent_delivery_sessions.desktop_signal_sequence}`,
         active_connection_count: 1,
         last_disconnected_at: null,
         reconnect_grace_expires_at: null,
         updated_at: now,
       },
+      setWhere: input.desktop_signal_sequence === undefined || input.desktop_signal_sequence === null
+        ? sql`${room_agent_delivery_sessions.desktop_signal_sequence} = 0`
+        : sql`${room_agent_delivery_sessions.desktop_signal_sequence} < ${input.desktop_signal_sequence}`,
     })
       .returning();
+    if (!connectedSession) {
+      throw await staleDesktopSignalError(tx, {
+        room_id: input.room_id,
+        delivery_key: deliveryKey,
+        agent_session_id: input.agent_session_id,
+      });
+    }
     await tx
       .update(room_agent_sessions)
       .set({ updated_at: now, last_seen_at: now })
@@ -629,6 +642,124 @@ async function upsertDesktopRoomAgentDeliveryHeartbeatTx(
     delivery: toRoomAgentDeliverySession(result.connectedSession as RoomAgentDeliverySessionRow),
     presence: result.presence,
   };
+}
+
+export class StaleDesktopRoomAgentDeliverySignalError extends Error {
+  constructor(
+    readonly agentSessionId: string,
+    readonly currentSequence: number,
+  ) {
+    super("Desktop delivery signal was superseded by a newer state transition.");
+    this.name = "StaleDesktopRoomAgentDeliverySignalError";
+  }
+}
+
+async function staleDesktopSignalError(
+  tx: any,
+  input: { room_id: string; delivery_key: string; agent_session_id: string },
+): Promise<StaleDesktopRoomAgentDeliverySignalError> {
+  const [current] = await tx.select({
+    sequence: room_agent_delivery_sessions.desktop_signal_sequence,
+  }).from(room_agent_delivery_sessions).where(and(
+    eq(room_agent_delivery_sessions.room_id, input.room_id),
+    eq(room_agent_delivery_sessions.delivery_key, input.delivery_key),
+  )).limit(1);
+  return new StaleDesktopRoomAgentDeliverySignalError(
+    input.agent_session_id,
+    current?.sequence ?? 0,
+  );
+}
+
+export function isStaleDesktopRoomAgentDeliverySignalError(
+  error: unknown,
+): error is StaleDesktopRoomAgentDeliverySignalError {
+  return error instanceof StaleDesktopRoomAgentDeliverySignalError
+    || (error instanceof Error && error.name === "StaleDesktopRoomAgentDeliverySignalError");
+}
+
+export async function pauseDesktopRoomAgentDelivery(input: DesktopRoomAgentDeliveryHeartbeatInput & {
+  desktop_signal_sequence: number;
+  presence: UpsertRoomAgentPresenceInput;
+}): Promise<{
+  delivery: RoomAgentDeliverySession | null;
+  presence: Awaited<ReturnType<typeof upsertRoomAgentPresenceTx>>;
+}> {
+  const now = new Date().toISOString();
+  const deliveryKey = buildRoomAgentDeliveryKey({
+    actor_label: input.actor_label,
+    agent_session_id: input.agent_session_id,
+  });
+  return db.transaction(async (tx) => {
+    await assertActiveDeliveryCredential(tx, {
+      room_id: input.room_id,
+      agent_session_id: input.agent_session_id,
+      credential_fence: input.credential_fence,
+    });
+    await lockRoomAgentDeliveryInstanceKeyTx(tx, input.room_id, deliveryKey);
+    const credentialFingerprint = roomAgentDeliveryCredentialFingerprint(input.credential_fence);
+    const credentialEpoch = roomAgentDeliveryCredentialEpoch(input.credential_fence);
+    const [deliveryRow] = await tx.insert(room_agent_delivery_sessions).values({
+      room_id: input.room_id,
+      delivery_key: deliveryKey,
+      actor_label: input.actor_label,
+      agent_key: input.agent_key ?? null,
+      agent_instance_id: input.agent_instance_id ?? null,
+      agent_session_id: input.agent_session_id,
+      session_kind: input.session_kind ?? "worker",
+      runtime: input.runtime ?? "unknown",
+      display_name: input.display_name,
+      owner_label: input.owner_label ?? null,
+      ide_label: input.ide_label ?? null,
+      repo_branch: input.repo_branch ?? null,
+      transport: "desktop_events",
+      credential_fingerprint: credentialFingerprint,
+      credential_epoch: credentialEpoch,
+      desktop_signal_sequence: input.desktop_signal_sequence,
+      active_connection_count: 0,
+      last_connected_at: now,
+      last_disconnected_at: now,
+      reconnect_grace_expires_at: now,
+      created_at: now,
+      updated_at: now,
+    }).onConflictDoUpdate({
+      target: [room_agent_delivery_sessions.room_id, room_agent_delivery_sessions.delivery_key],
+      set: {
+        actor_label: input.actor_label,
+        agent_key: input.agent_key ?? null,
+        agent_instance_id: input.agent_instance_id ?? null,
+        agent_session_id: input.agent_session_id,
+        session_kind: input.session_kind ?? "worker",
+        runtime: input.runtime ?? "unknown",
+        display_name: input.display_name,
+        owner_label: input.owner_label ?? null,
+        ide_label: input.ide_label ?? null,
+        repo_branch: input.repo_branch ?? null,
+        transport: "desktop_events",
+        credential_fingerprint: credentialFingerprint,
+        credential_epoch: credentialEpoch,
+        desktop_signal_sequence: input.desktop_signal_sequence,
+        active_connection_count: 0,
+        last_disconnected_at: now,
+        reconnect_grace_expires_at: now,
+        updated_at: now,
+      },
+      setWhere: input.desktop_signal_sequence === 0
+        ? sql`${room_agent_delivery_sessions.desktop_signal_sequence} = 0`
+        : sql`${room_agent_delivery_sessions.desktop_signal_sequence} < ${input.desktop_signal_sequence}`,
+    }).returning();
+    if (!deliveryRow) {
+      throw await staleDesktopSignalError(tx, {
+        room_id: input.room_id,
+        delivery_key: deliveryKey,
+        agent_session_id: input.agent_session_id,
+      });
+    }
+    const presence = await upsertRoomAgentPresenceTx(tx, input.presence, now);
+    return {
+      delivery: toRoomAgentDeliverySession(deliveryRow as RoomAgentDeliverySessionRow),
+      presence,
+    };
+  });
 }
 
 /** Idempotent lease heartbeat for a desktop host that owns room delivery. */
