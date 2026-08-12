@@ -18,6 +18,7 @@ import {
 import {
   createGlobalAgentAddressResolver,
   decideAgentMessageActivation,
+  isUntrustedExternalActivationSource,
   isTaskOwnerFollowUpMessageText,
   type ActivationIdentity,
 } from "../../../shared/activation-routing.js";
@@ -361,7 +362,9 @@ export async function addMessageWithCreateStatus(
 
     // Send-time routing snapshot: resolve active worker sessions in this room and insert queued receipts
     const routingStartedAtMs = Date.now();
-    const taskOwnerFollowUp = isTaskOwnerFollowUpMessageText(createdMessage.text);
+    const untrustedExternalEvent = isUntrustedExternalActivationSource(createdMessage.source);
+    const taskOwnerFollowUp = !untrustedExternalEvent
+      && isTaskOwnerFollowUpMessageText(createdMessage.text);
     const leases = taskOwnerFollowUp
       ? await getBoundedActiveWorkLeaseOwners(tx, roomId)
       : [];
@@ -471,7 +474,7 @@ export async function addMessageWithCreateStatus(
           candidateSessionCondition,
         )
       : candidateKeyCondition ?? candidateSessionCondition;
-    const activeSessions = needsCompletePopulation || candidateCondition
+    const activeSessions = !untrustedExternalEvent && (needsCompletePopulation || candidateCondition)
       ? await tx
           .select({
             session_id: room_agent_sessions.session_id,

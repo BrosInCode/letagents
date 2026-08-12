@@ -28,10 +28,10 @@ jobs:
           - arch: x64
             runner: macos-15-intel
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -56,6 +56,9 @@ jobs:
 
       - name: Enforce dependency cooldown
         run: npm run verify:dependency-age
+
+      - name: Test workflow supply-chain policy
+        run: npm run test:workflow-supply-chain
 
       - name: Install dependencies without lifecycle scripts
         run: |
@@ -163,7 +166,7 @@ jobs:
 
       - name: Attest installer and update provenance
         if: ${{ github.event.repository.visibility == 'public' || vars.ENABLE_DESKTOP_PROVENANCE_ATTESTATION == 'true' }}
-        uses: actions/attest@v4
+        uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4
         with:
           subject-path: |
             apps/desktop/release/artifacts/*.dmg
@@ -174,7 +177,7 @@ jobs:
         run: echo "::notice::GitHub artifact attestations are unavailable for this private repository on its current organization plan. Set ENABLE_DESKTOP_PROVENANCE_ATTESTATION=true when the plan supports private-repository attestations."
 
       - name: Upload release artifacts to this workflow
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: desktop-release-${{ matrix.arch }}
           path: apps/desktop/release/artifacts/*
@@ -196,10 +199,10 @@ jobs:
     permissions:
       contents: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: "22"
 
@@ -216,7 +219,7 @@ jobs:
           echo "DESKTOP_VERSION=${version}" >> "${GITHUB_ENV}"
 
       - name: Download both architecture artifacts
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: desktop-release-*
           path: release-artifacts
