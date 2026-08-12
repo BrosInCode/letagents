@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import type { ChildProcess } from "node:child_process";
 import { createServer } from "node:net";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import { isRentalCredentialIsolationRequested, rentalIsolatedChildEnvironment } from "./rental-child-environment.js";
 
@@ -442,9 +443,10 @@ export function launchCodexAppServer(
   codexBin: string,
   options: CodexAppServerLaunchOptions = {},
 ): CodexAppServerLaunch {
+  const runtimeEnv = desktopRuntimeEnvironment();
   const configuredEnv = options.env && Object.keys(options.env).length
-    ? { ...process.env, ...options.env }
-    : process.env;
+    ? { ...runtimeEnv, ...options.env }
+    : runtimeEnv;
   const env = isRentalCredentialIsolationRequested(configuredEnv)
     ? rentalIsolatedChildEnvironment(configuredEnv)
     : configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"

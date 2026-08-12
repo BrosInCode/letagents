@@ -282,7 +282,7 @@ test("installSelectedMcpTargets does not pass repo cwd to global MCP install", a
   assert.deepEqual(installCalls, [[["codex"]]]);
 });
 
-test("installSelectedMcpTargets installs missing Codex runtime before MCP bridge", async () => {
+test("installSelectedMcpTargets installs the bridge without managing the external Codex CLI", async () => {
   const installCalls: Array<[DesktopMcpInstallTargetId[]]> = [];
   const runtimeCalls: Array<[string, DesktopAgentProviderSetupInput]> = [];
   const installState = mcpInstallStateFixture({ completed: false });
@@ -306,8 +306,8 @@ test("installSelectedMcpTargets installs missing Codex runtime before MCP bridge
         status: "missing_runtime",
         canStart: false,
         message: "Codex is not installed.",
-        detail: "Install Codex.",
-        nextAction: "install_runtime",
+        detail: "Install Codex outside LetAgents, then check again.",
+        nextAction: "install_external_runtime",
         version: null,
         mcpStatus: "not_installed",
       }),
@@ -326,12 +326,12 @@ test("installSelectedMcpTargets installs missing Codex runtime before MCP bridge
 
   await withDesktopBridge(state.windowBridge, () => state.onboarding.installSelectedMcpTargets());
 
-  assert.deepEqual(runtimeCalls, [["codex", { action: "install_runtime", confirmed: true }]]);
+  assert.deepEqual(runtimeCalls, []);
   assert.deepEqual(installCalls, [[["codex"]]]);
-  assert.equal(state.mcpInstallFeedback.value, "Codex was installed. MCP bridge installed.");
+  assert.equal(state.mcpInstallFeedback.value, "MCP bridge installed.");
 });
 
-test("installSelectedMcpTargets skips Codex runtime install when CLI is already present", async () => {
+test("installSelectedMcpTargets remains independent when the Codex CLI is already present", async () => {
   const installCalls: Array<[DesktopMcpInstallTargetId[]]> = [];
   let runtimeSetupCount = 0;
   const installState = mcpInstallStateFixture({ completed: false });
@@ -377,7 +377,7 @@ test("installSelectedMcpTargets skips Codex runtime install when CLI is already 
 
   assert.equal(runtimeSetupCount, 0);
   assert.deepEqual(installCalls, [[["codex"]]]);
-  assert.equal(state.mcpInstallFeedback.value, "Codex CLI is already installed. MCP bridge installed.");
+  assert.equal(state.mcpInstallFeedback.value, "MCP bridge installed.");
 });
 
 test("installSelectedMcpTargets stays on install step when MCP validation still needs attention", async () => {
@@ -703,7 +703,7 @@ function mcpInstallStateFixture(
       {
         id: "codex",
         name: "Codex",
-        description: "We'll install Codex CLI if it is missing, then add the MCP bridge.",
+        description: "We'll add the MCP bridge for room access. Install and sign in to Codex separately.",
         configPath: "~/.codex/config.toml",
         configPaths: [
           {

@@ -65,6 +65,15 @@
       <code>{{ authCommand }}</code>
     </section>
 
+    <section
+      v-if="preflight?.nextAction === 'install_external_runtime' && installCommand"
+      class="desktop-add-agent-auth-command"
+      aria-label="Agent installation command"
+    >
+      <span>Install command</span>
+      <code>{{ installCommand }}</code>
+    </section>
+
     <slot />
   </section>
 </template>
@@ -91,6 +100,7 @@ defineProps<{
   worktrees: RepoWorktreeEntry[];
   worktreeDescription: string;
   authCommand: string | null;
+  installCommand: string | null;
   error: string | null;
 }>();
 const emit = defineEmits<{

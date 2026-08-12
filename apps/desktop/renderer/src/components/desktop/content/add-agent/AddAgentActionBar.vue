@@ -1,8 +1,36 @@
 <template>
   <div class="desktop-add-agent-actions">
     <div v-if="!activeSupervisedLaunch" class="desktop-add-agent-action-buttons">
+      <template v-if="preflight?.nextAction === 'install_external_runtime'">
+        <button
+          v-if="installCommand"
+          type="button"
+          class="desktop-add-agent-primary"
+          :disabled="copyingAuthCommand"
+          @click="emit('copy-install-command')"
+        >
+          {{ copyingAuthCommand ? "Copying..." : "Copy install command" }}
+        </button>
+        <button
+          v-if="installUrl"
+          type="button"
+          class="desktop-add-agent-recover"
+          @click="emit('open-install-guide')"
+        >
+          Open installation guide
+        </button>
+        <button
+          v-if="!installCommand && !installUrl"
+          type="button"
+          class="desktop-add-agent-primary"
+          :disabled="setupBusy"
+          @click="emit('refresh')"
+        >
+          Check provider setup
+        </button>
+      </template>
       <button
-        v-if="preflight?.nextAction === 'install_runtime'"
+        v-else-if="preflight?.nextAction === 'install_runtime'"
         type="button"
         class="desktop-add-agent-primary"
         :disabled="setupBusy"
@@ -141,6 +169,8 @@ const props = defineProps<{
   setupBusy: boolean;
   setupActionLabel: string;
   copyingAuthCommand: boolean;
+  installCommand?: string | null;
+  installUrl?: string | null;
   canCreateWorktree: boolean;
   matchingWorktreeCount: number;
   creatingWorktree: boolean;
@@ -157,6 +187,9 @@ const props = defineProps<{
 const emit = defineEmits<{
   "setup-action": [action: DesktopAgentProviderSetupAction];
   "copy-auth-command": [];
+  "copy-install-command": [];
+  "open-install-guide": [];
+  refresh: [];
   "choose-repo": [];
   "create-worktree": [];
   start: [];

@@ -237,31 +237,6 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     goBackMcpOnboarding();
   }
 
-  async function installCodexRuntimeIfMissing(
-    targetIds: DesktopMcpInstallTargetId[],
-  ): Promise<string | null> {
-    if (!targetIds.includes("codex")) return null;
-    const workers = desktopIpc.workers;
-    if (!workers?.runAgentProviderPreflight || !workers?.runAgentProviderSetup) return null;
-
-    const preflight = await workers.runAgentProviderPreflight("codex", {});
-    if (preflight.nextAction !== "install_runtime") {
-      if (["auth_required", "bridge_required", "repo_required", "ready"].includes(preflight.status)) {
-        return "Codex CLI is already installed.";
-      }
-      return null;
-    }
-
-    const result = await workers.runAgentProviderSetup("codex", {
-      action: "install_runtime",
-      confirmed: true,
-    });
-    if (!result.success) {
-      throw new Error(result.message || "Codex CLI install failed.");
-    }
-    return result.message || null;
-  }
-
   async function installSelectedMcpTargets(): Promise<void> {
     const targetIds = [...options.selectedMcpTargetIds.value];
     if (!targetIds.length) {
@@ -276,11 +251,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       if (!desktopIpc.setup) {
         throw new Error("Restart LetAgents Desktop so setup can install MCP automatically.");
       }
-      const runtimeMessage = await installCodexRuntimeIfMissing(targetIds);
       const result = await desktopIpc.setup.installMcpServers(targetIds);
       options.mcpInstallState.value = result.installState;
       options.selectedMcpTargetIds.value = result.targets.map((target) => target.id);
-      options.mcpInstallFeedback.value = [runtimeMessage, result.message].filter(Boolean).join(" ");
+      options.mcpInstallFeedback.value = result.message;
       if (!result.success || result.targets.some((target) => target.status !== "installed")) {
         options.mcpWizardStep.value = "install";
         return;

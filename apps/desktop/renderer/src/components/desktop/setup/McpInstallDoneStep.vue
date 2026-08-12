@@ -38,19 +38,12 @@ const title = computed(() => {
   return `${props.targets.length} agent apps are connected.`;
 });
 
-const includesCodex = computed(() => {
-  return props.targets.some((target) => target.id === "codex");
-});
-
 const restartLabel = computed(() => {
   if (props.targets.length === 1) return props.targets[0]?.name || "the app";
   return "those apps";
 });
 
 const doneCopy = computed(() => {
-  if (includesCodex.value) {
-    return `Codex CLI was checked first and installed only if missing. Restart or reconnect ${restartLabel.value} so the new LetAgents bridge is loaded.`;
-  }
   return `Restart or reconnect ${restartLabel.value} so the new LetAgents bridge is loaded.`;
 });
 </script>

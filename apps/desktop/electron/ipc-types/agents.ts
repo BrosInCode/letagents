@@ -47,6 +47,10 @@ export interface DesktopAgentProvider {
    */
   supervisedDeliveryMode?: Extract<DesktopManagedAgentDeliveryMode, "mcp_polling" | "daemon_inbox"> | null;
   runtimeCommand: string | null;
+  /** Official user-run install command for an external provider runtime. */
+  runtimeInstallCommand?: string | null;
+  /** Official provider documentation for installing an external runtime. */
+  runtimeInstallUrl?: string | null;
   /** External MCP-install target. Null when the supervised runtime injects its own bridge. */
   mcpTargetId: DesktopMcpInstallTargetId | null;
   permissionProfiles: DesktopManagedAgentPermissionProfile[];
@@ -64,6 +68,8 @@ export interface DesktopAgentProviderPreflightInput {
   modelSource?: DesktopAgentProviderModelSource | null;
   effort?: DesktopManagedAgentEffort | null;
   refreshModels?: boolean | null;
+  /** Re-import the user's terminal PATH before checking provider commands. */
+  refreshEnvironment?: boolean | null;
 }
 
 export interface DesktopAgentProviderPreflight {
@@ -72,7 +78,7 @@ export interface DesktopAgentProviderPreflight {
   canStart: boolean;
   message: string;
   detail: string | null;
-  nextAction: DesktopAgentProviderSetupAction | "authenticate" | "choose_repo" | "choose_worktree" | null;
+  nextAction: DesktopAgentProviderSetupAction | "install_external_runtime" | "authenticate" | "choose_repo" | "choose_worktree" | null;
   version: string | null;
   mcpStatus: "not_installed" | "installed" | "needs_attention" | null;
   branchMismatch?: {

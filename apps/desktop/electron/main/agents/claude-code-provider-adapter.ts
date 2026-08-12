@@ -4,6 +4,7 @@ import { mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import {
   synthesizeTerminalPayload,
@@ -297,7 +298,7 @@ class ClaudeRoomTurnObservationDetachedError extends Error {}
  * authority, so ambient owner and fixed worker credentials are also removed
  * before Claude or provider-started shell commands can inherit them.
  */
-export function claudeCliEnv(base: NodeJS.ProcessEnv = process.env, overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+export function claudeCliEnv(base: NodeJS.ProcessEnv = desktopRuntimeEnvironment(), overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
   const combined = { ...base, ...overrides };
   if (isRentalCredentialIsolationRequested(combined)) return rentalIsolatedChildEnvironment(combined);
   const {
@@ -314,7 +315,7 @@ function defaultReadVersion(claudeBin: string): Promise<string> {
     const child = execFile(
       claudeBin,
       ["--version"],
-      { timeout: VERSION_TIMEOUT_MS, env: claudeCliEnv(process.env) },
+      { timeout: VERSION_TIMEOUT_MS, env: claudeCliEnv() },
       (error, stdout, stderr) => {
         if (error) {
           reject(new Error(`Claude Code could not be checked: ${errorMessage(error)}`));
@@ -337,7 +338,7 @@ function defaultLaunchChild(input: { claudeBin: string; args: string[]; cwd: str
     detached: process.platform !== "win32",
     // The strict launch config supplies the API endpoint; these coordinates
     // make every LetAgents MCP effect borrow the exact daemon generation.
-    env: claudeCliEnv(process.env, input.env),
+    env: claudeCliEnv(desktopRuntimeEnvironment(), input.env),
   });
 
   const lineListeners = new Set<(line: string) => void>();
@@ -546,7 +547,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly exitPromises = new WeakMap<ClaudeProviderHandle, Promise<ProviderTerminalPayload>>();
 
   constructor(options: ClaudeCodeProviderAdapterOptions = {}) {
-    this.claudeBin = options.claudeBin || process.env.LETAGENTS_CLAUDE_BIN || "claude";
+    this.claudeBin = options.claudeBin || desktopRuntimeEnvironment().LETAGENTS_CLAUDE_BIN || "claude";
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;

@@ -5,6 +5,7 @@ import type {
   DesktopAgentProvider,
   DesktopAgentProviderModelsResult,
   DesktopAgentProviderPreflight,
+  DesktopAgentProviderPreflightInput,
 } from "../../electron/ipc-types";
 import { useAddAgentConfiguration } from "../src/components/desktop/content/add-agent/useAddAgentConfiguration";
 import { useAddAgentSetup } from "../src/components/desktop/content/add-agent/useAddAgentSetup";
@@ -30,6 +31,7 @@ function provider(id: "codex" | "cursor"): DesktopAgentProvider {
 test("provider switching invalidates an in-flight setup preflight", async () => {
   const oldPreflight = deferred<DesktopAgentProviderPreflight>();
   let preflightCalls = 0;
+  const preflightInputs: DesktopAgentProviderPreflightInput[] = [];
   let laterPreflight: Promise<DesktopAgentProviderPreflight> | null = null;
   Object.assign(globalThis, {
     window: {
@@ -37,8 +39,9 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
       setTimeout: () => 1,
       letagentsDesktop: {
         workers: {
-          runAgentProviderPreflight: (providerId: string) => {
+          runAgentProviderPreflight: (providerId: string, input: DesktopAgentProviderPreflightInput) => {
             preflightCalls += 1;
+            preflightInputs.push(input);
             if (preflightCalls === 1) return oldPreflight.promise;
             if (laterPreflight) return laterPreflight;
             return Promise.resolve({
@@ -117,7 +120,7 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   laterPreflight = backgroundResult.promise;
   const stableSnapshot = setup.preflight.value;
   const backgroundCheck = actions.runPreflight();
-  assert.equal(setup.loadingPreflight.value, false, "revalidation must not replace an existing snapshot with loading UI");
+  assert.equal(setup.loadingPreflight.value, true, "revalidation keeps the snapshot but disables duplicate checks");
   assert.equal(setup.preflight.value, stableSnapshot);
   backgroundResult.resolve({
     providerId: "cursor",
@@ -134,6 +137,26 @@ test("provider switching invalidates an in-flight setup preflight", async () => 
   const sameProviderSnapshot = setup.preflight.value;
   actions.selectProvider("cursor");
   assert.equal(setup.preflight.value, sameProviderSnapshot, "clicking the selected provider is a no-op");
+
+  const retryResult = deferred<DesktopAgentProviderPreflight>();
+  laterPreflight = retryResult.promise;
+  const callsBeforeRetry = preflightCalls;
+  const retry = actions.retryProviderSetup();
+  await actions.retryProviderSetup();
+  assert.equal(preflightCalls, callsBeforeRetry + 1, "duplicate Check again clicks share one in-flight preflight");
+  retryResult.resolve({
+    providerId: "cursor",
+    status: "ready",
+    canStart: true,
+    message: "Refreshed",
+    detail: null,
+    nextAction: null,
+    version: "4",
+    mcpStatus: "installed",
+  });
+  await retry;
+  assert.equal(preflightInputs.at(-1)?.refreshEnvironment, true);
+  assert.equal(preflightInputs.at(-1)?.refreshModels, true);
 });
 
 test("configuration invalidation rejects a stale model-catalog response", async () => {

@@ -20,6 +20,7 @@ import type {
   DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import { apiUrl, desktopRoot, workspaceRoot } from "./paths.js";
+import { desktopRuntimeEnvironment } from "./desktop-shell-environment.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
 
@@ -27,7 +28,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.100";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.101";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -270,7 +271,7 @@ export function supervisorDaemonSpawnEnvironment(
   env: Readonly<NodeJS.ProcessEnv> = process.env,
   sourceWorkspaceRoot = workspaceRoot,
 ): NodeJS.ProcessEnv {
-  const result: NodeJS.ProcessEnv = { ...env, ELECTRON_RUN_AS_NODE: "1" };
+  const result: NodeJS.ProcessEnv = { ...desktopRuntimeEnvironment(env), ELECTRON_RUN_AS_NODE: "1" };
   // Never trust a caller's cwd/cache-derived dev entry. The desktop's compiled
   // location is the authority for the repo build paired with this dev renderer.
   delete result.LETAGENTS_DEV_MCP_SERVER_ENTRY;
@@ -285,6 +286,7 @@ export class SupervisorDaemonClient {
   readonly daemonScriptPath: string;
   private ensureOperation: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdateHandoff: Promise<void> | null = null;
+  private environmentRefreshHandoff: Promise<DesktopSupervisorDaemonStatus> | null = null;
   private applicationUpdatePrepared = false;
   private lastReadyGeneration: number | null = null;
   private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
@@ -378,6 +380,19 @@ export class SupervisorDaemonClient {
   resumeAfterApplicationUpdateFailure(): Promise<DesktopSupervisorDaemonStatus> {
     this.applicationUpdatePrepared = false;
     return this.ensureRunning();
+  }
+
+  /** Replace the daemon so new provider work inherits the refreshed runtime PATH. */
+  restartForEnvironmentRefresh(): Promise<DesktopSupervisorDaemonStatus> {
+    if (!this.environmentRefreshHandoff) {
+      this.environmentRefreshHandoff = (async () => {
+        await this.prepareForApplicationUpdate();
+        return this.resumeAfterApplicationUpdateFailure();
+      })().finally(() => {
+        this.environmentRefreshHandoff = null;
+      });
+    }
+    return this.environmentRefreshHandoff;
   }
 
   /**
