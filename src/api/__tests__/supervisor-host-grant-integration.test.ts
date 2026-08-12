@@ -20,7 +20,7 @@ const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { resolveRequestAuth } = await import("../request/auth.js");
 const { isSupervisorGrantRouteAllowed } = await import("../request/supervisor-grant-route-registry.js");
 const { registerHttpMiddleware } = await import("../http/middleware.js");
-const { registerSupervisorHostGrantRoutes, respondToStaleSupervisorGrantFence } = await import("../routes/supervisor-host-grants.js");
+const { clearSupervisorAccessRevalidationCache, registerSupervisorHostGrantRoutes, requireSupervisorGrantRoomAccess, respondToStaleSupervisorGrantFence } = await import("../routes/supervisor-host-grants.js");
 const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
 const { requireGitRoomParticipant } = await import("../rooms/access.js");
 const { hashToken } = await import("../db/utils.js");
@@ -50,17 +50,42 @@ function recorder() {
 }
 
 async function setupLifecycle() {
+  clearSupervisorAccessRevalidationCache();
   await seedOwner("owner_route");
   const room = await authDb!.createProjectWithName("supervisor-route-room");
   const agent = await authDb!.registerAgentIdentity({ canonical_key: "owner/route-agent", name: "route-agent", display_name: "Route Agent", owner_account_id: "owner_route", owner_login: "owner", owner_label: "Owner" });
   const grantResult = await authDb!.createSupervisorHostGrant({ owner_account_id: "owner_route", host_id: "host_route", installation_id: "install_route", allowed_room_ids: [room.id], allowed_agent_keys: [agent.canonical_key], expires_at: new Date(Date.now() + 60_000).toISOString() });
   const handlers = new Map<string, any>();
+  let participantAllowed = true;
+  const accessOptions: Array<{ freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean }> = [];
   registerSupervisorHostGrantRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, delete(path: string, handler: any) { handlers.set(`DELETE ${path}`, handler); } } as never, {
-    resolveCanonicalRoomRequestId: async (id: string) => id, resolveRoomOrReply: async () => room, requireParticipant: async () => true,
+    resolveCanonicalRoomRequestId: async (id: string) => id,
+    resolveRoomOrReply: async () => room,
+    requireParticipant: async () => true,
+    getProjectById: async () => room,
+    resolveProjectRepoAccessTarget: async () => ({
+      roomName: room.id,
+      repoRoomName: "github.com/org/repo",
+    }),
+    resolveRepoRoomAccessDecision: async (input) => {
+      accessOptions.push({
+        freshCollaboratorCheck: input.freshCollaboratorCheck,
+        throwOnIndeterminate: input.throwOnIndeterminate,
+      });
+      return participantAllowed ? { kind: "allow" } : { kind: "private_repo_no_access" };
+    },
+    getGitHubAppRepositoryByRoomId: async () => undefined,
+    getSupervisorGrantOwnerAccount: async () => ({
+      account_id: "owner_route", provider_access_token: "github-token",
+      provider: "github", login: "owner_route",
+    }),
   });
   const principal = grantResult.grant;
   const reqBase = { authKind: "supervisor_grant", supervisorGrant: principal, headers: {}, body: { generation: principal.current_generation }, params: { grantId: principal.grant_id } };
-  return { room, agent, grantResult, handlers, reqBase };
+  return {
+    room, agent, grantResult, handlers, reqBase, accessOptions,
+    setParticipantAllowed(value: boolean) { participantAllowed = value; },
+  };
 }
 
 test("supervisor registry is exact default-deny", () => {
@@ -102,6 +127,181 @@ test("the exact in-transaction stale supervisor fence error maps to HTTP 409", (
   assert.equal(respondToStaleSupervisorGrantFence(recorder() as never, new Error("unrelated")), false);
 });
 
+test("grant room revalidation uses a fresh check and revokes on definitive denial", async () => {
+  clearSupervisorAccessRevalidationCache();
+  const response = recorder();
+  const options: Array<{ freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean }> = [];
+  const revoked: string[] = [];
+  const grant = {
+    grant_id: "grant_access", owner_account_id: "owner_access", host_id: "host", installation_id: "install",
+    scope_key: "owner", rental_session_id: null, token_version: 1, allowed_room_ids: ["github.com/org/repo"],
+    allowed_agent_keys: ["owner/agent"], current_generation: 1, issued_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null,
+  };
+  const allowed = await requireSupervisorGrantRoomAccess(grant as never, response as never, {
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    getProjectById: async (roomId: string) => ({ id: roomId } as never),
+    resolveProjectRepoAccessTarget: async (project: any) => ({ roomName: project.id, repoRoomName: project.id }),
+    resolveRepoRoomAccessDecision: async (input: any) => {
+      options.push(input);
+      return { kind: "private_repo_no_access" };
+    },
+    getGitHubAppRepositoryByRoomId: async () => undefined,
+    getSupervisorGrantOwnerAccount: async () => ({
+      account_id: "owner_access", provider: "github", login: "owner", provider_access_token: "token",
+    }),
+    revokeSupervisorGrantAuthority: async (input: any) => {
+      revoked.push(input.grant_id);
+      return { grant, revoked_now: true, ended_session_ids: [] } as never;
+    },
+  }, { kind: "all" });
+  assert.equal(allowed, false);
+  assert.equal(options[0]?.freshCollaboratorCheck, true);
+  assert.equal(options[0]?.throwOnIndeterminate, true);
+  assert.deepEqual(revoked, ["grant_access"]);
+  assert.equal(response.statusCode, 403);
+});
+
+test("indeterminate fresh room access errors do not revoke grant authority", async () => {
+  clearSupervisorAccessRevalidationCache();
+  let revoked = false;
+  const grant = {
+    grant_id: "grant_transient", owner_account_id: "owner_access", host_id: "host", installation_id: "install",
+    scope_key: "owner", rental_session_id: null, token_version: 1, allowed_room_ids: ["github.com/org/repo"],
+    allowed_agent_keys: ["owner/agent"], current_generation: 1, issued_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null,
+  };
+  const response = recorder();
+  const allowed = await requireSupervisorGrantRoomAccess(grant as never, response as never, {
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    getProjectById: async (roomId: string) => ({ id: roomId } as never),
+    resolveProjectRepoAccessTarget: async (project: any) => ({ roomName: project.id, repoRoomName: project.id }),
+    resolveRepoRoomAccessDecision: async () => { throw new Error("GitHub unavailable"); },
+    getGitHubAppRepositoryByRoomId: async () => undefined,
+    getSupervisorGrantOwnerAccount: async () => ({
+      account_id: "owner_access", provider: "github", login: "owner", provider_access_token: "token",
+    }),
+    revokeSupervisorGrantAuthority: async () => {
+      revoked = true;
+      return null;
+    },
+  }, { kind: "all" });
+  assert.equal(allowed, false);
+  assert.equal(response.statusCode, 503);
+  assert.equal((response.body as any).code, "SUPERVISOR_ACCESS_REVALIDATION_UNAVAILABLE");
+  assert.equal(revoked, false);
+});
+
+test("missing owner credentials and deleted rooms never trigger destructive teardown", async () => {
+  const grant = {
+    grant_id: "grant_uncertain", owner_account_id: "owner_access", host_id: "host", installation_id: "install",
+    scope_key: "owner", rental_session_id: null, token_version: 1, allowed_room_ids: ["github.com/org/repo"],
+    allowed_agent_keys: ["owner/agent"], current_generation: 1, issued_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null,
+  };
+  for (const mode of ["missing_credential", "deleted_room"] as const) {
+    clearSupervisorAccessRevalidationCache();
+    let revoked = false;
+    const response = recorder();
+    const allowed = await requireSupervisorGrantRoomAccess(grant as never, response as never, {
+      resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+      resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+      requireParticipant: async () => true,
+      getProjectById: async (roomId: string) => mode === "deleted_room" ? null : ({ id: roomId } as never),
+      resolveProjectRepoAccessTarget: async (project: any) => ({ roomName: project.id, repoRoomName: project.id }),
+      resolveRepoRoomAccessDecision: async () => ({ kind: "allow" }),
+      getGitHubAppRepositoryByRoomId: async () => undefined,
+      getSupervisorGrantOwnerAccount: async () => null,
+      revokeSupervisorGrantAuthority: async () => {
+        revoked = true;
+        return null;
+      },
+    }, { kind: "all" });
+    assert.equal(allowed, false);
+    assert.equal(response.statusCode, mode === "deleted_room" ? 409 : 503);
+    assert.equal(revoked, false);
+  }
+});
+
+test("room-scoped checks are targeted, de-duplicated, and briefly cache successful access", async () => {
+  clearSupervisorAccessRevalidationCache();
+  const grant = {
+    grant_id: "grant_targeted", owner_account_id: "owner_targeted", host_id: "host", installation_id: "install",
+    scope_key: "owner", rental_session_id: null, token_version: 1,
+    allowed_room_ids: ["github.com/org/repo-a", "github.com/org/repo-b"],
+    allowed_agent_keys: ["owner/agent"], current_generation: 1, issued_at: new Date().toISOString(),
+    expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null,
+  };
+  const resolvedRooms: string[] = [];
+  let accessChecks = 0;
+  const deps = {
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    getProjectById: async (roomId: string) => ({ id: roomId } as never),
+    resolveProjectRepoAccessTarget: async (project: any) => {
+      resolvedRooms.push(project.id);
+      return { roomName: project.id, repoRoomName: project.id };
+    },
+    resolveRepoRoomAccessDecision: async () => {
+      accessChecks += 1;
+      return { kind: "allow" as const };
+    },
+    getGitHubAppRepositoryByRoomId: async () => undefined,
+    getSupervisorGrantOwnerAccount: async () => ({
+      account_id: grant.owner_account_id, provider: "github", login: "owner", provider_access_token: "token",
+    }),
+  };
+
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    assert.equal(await requireSupervisorGrantRoomAccess(
+      grant as never,
+      recorder() as never,
+      deps,
+      { kind: "rooms", room_ids: ["github.com/org/repo-a", "github.com/org/repo-a"] },
+    ), true);
+  }
+  assert.deepEqual([...new Set(resolvedRooms)], ["github.com/org/repo-a"]);
+  assert.equal(accessChecks, 1, "the second hot-path request uses the 60-second successful-access cache");
+});
+
+test("inactive GitHub App authority revokes independently of owner OAuth availability", async () => {
+  clearSupervisorAccessRevalidationCache();
+  let revoked = false;
+  const grant = {
+    grant_id: "grant_app_inactive", owner_account_id: "owner_app", host_id: "host", installation_id: "install",
+    scope_key: "owner", rental_session_id: null, token_version: 1,
+    allowed_room_ids: ["github.com/org/repo"], allowed_agent_keys: ["owner/agent"], current_generation: 1,
+    issued_at: new Date().toISOString(), expires_at: new Date(Date.now() + 60_000).toISOString(), revoked_at: null,
+  };
+  const response = recorder();
+  const allowed = await requireSupervisorGrantRoomAccess(grant as never, response as never, {
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => ({ id: roomId }),
+    requireParticipant: async () => true,
+    getProjectById: async (roomId: string) => ({ id: roomId } as never),
+    resolveProjectRepoAccessTarget: async (project: any) => ({ roomName: project.id, repoRoomName: project.id }),
+    resolveRepoRoomAccessDecision: async () => ({ kind: "allow" }),
+    getGitHubAppRepositoryByRoomId: async () => ({ installation_id: "install", removed_at: null } as never),
+    getGitHubAppInstallationById: async () => ({
+      installation_id: "install", suspended_at: new Date().toISOString(), uninstalled_at: null,
+    } as never),
+    getSupervisorGrantOwnerAccount: async () => null,
+    revokeSupervisorGrantAuthority: async () => {
+      revoked = true;
+      return { grant, revoked_now: true, ended_session_ids: [] } as never;
+    },
+  }, { kind: "all" });
+  assert.equal(allowed, false);
+  assert.equal(response.statusCode, 409);
+  assert.equal((response.body as any).code, "SUPERVISOR_GITHUB_INSTALLATION_INACTIVE");
+  assert.equal(revoked, true);
+});
+
 test("lifecycle mint enforces room and agent allowlists through the actual route", { skip: requiresDatabase }, async () => {
   const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
   const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
@@ -120,6 +320,227 @@ test("lifecycle mint enforces room and agent allowlists through the actual route
   const agentDenied = recorder();
   await mint({ ...reqBase, body: { generation: 1, room_id: room.id, agent_key: otherAgent.canonical_key, agent_instance_id: "worker_route_1" } }, agentDenied);
   assert.equal(agentDenied.statusCode, 403);
+});
+
+test("lost Git Room access blocks renewal and tears down the grant-owned worker", { skip: requiresDatabase }, async () => {
+  const {
+    room, agent, handlers, reqBase, grantResult, accessOptions, setParticipantAllowed,
+  } = await setupLifecycle();
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const minted = recorder();
+  await mint({
+    ...reqBase,
+    body: {
+      generation: 1,
+      room_id: room.id,
+      agent_key: agent.canonical_key,
+      agent_instance_id: "worker_access_revoked",
+    },
+  }, minted);
+  assert.equal(minted.statusCode, 201);
+
+  setParticipantAllowed(false);
+  clearSupervisorAccessRevalidationCache(grantResult.grant.grant_id);
+  const renew = handlers.get("POST /supervisor-host-grants/:grantId/renew"); assert.ok(renew);
+  const denied = recorder();
+  await renew({
+    ...reqBase,
+    body: {
+      generation: 1,
+      host_id: grantResult.grant.host_id,
+      installation_id: grantResult.grant.installation_id,
+    },
+  }, denied);
+  assert.equal(denied.statusCode, 403);
+  assert.deepEqual(accessOptions.at(-1), {
+    freshCollaboratorCheck: true,
+    throwOnIndeterminate: true,
+  });
+
+  const [storedGrant] = await client!.db.select().from(schema!.supervisor_host_grants)
+    .where(eq(schema!.supervisor_host_grants.grant_id, grantResult.grant.grant_id));
+  const [storedSession] = await client!.db.select().from(schema!.room_agent_sessions)
+    .where(eq(schema!.room_agent_sessions.session_id, (minted.body as any).session_id));
+  const [storedBearer] = await client!.db.select().from(schema!.room_agent_session_bearers)
+    .where(eq(schema!.room_agent_session_bearers.bearer_id, (minted.body as any).worker_bearer_id));
+  assert.ok(storedGrant?.revoked_at);
+  assert.ok(storedSession?.ended_at);
+  assert.ok(storedBearer?.revoked_at);
+
+  const staleWorker = await resolveRequestAuth({
+    headers: { authorization: `Bearer ${(minted.body as any).worker_bearer}` },
+  } as never);
+  assert.equal(staleWorker.authKind, null);
+});
+
+test("repository access-change revocation finds repo grants and ends their workers", { skip: requiresDatabase }, async () => {
+  const { room, agent, handlers, reqBase, grantResult } = await setupLifecycle();
+  const now = new Date().toISOString();
+  await client!.db.insert(schema!.room_git_bindings).values({
+    room_id: room.id,
+    provider: "github",
+    host: "github.com",
+    repository_id: "repo_access_change",
+    repository_full_name: "BrosInCode/private-repo",
+    repository_owner: "BrosInCode",
+    repository_name: "private-repo",
+    ref_type: "default_branch",
+    ref_name: "main",
+    default_branch: "main",
+    base_ref: null,
+    head_ref: null,
+    head_repository_id: null,
+    head_repository_full_name: null,
+    head_repository_owner: null,
+    head_repository_name: null,
+    visibility: "private",
+    is_default: true,
+    source: "webhook",
+    created_at: now,
+    updated_at: now,
+  });
+
+  const mint = handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions"); assert.ok(mint);
+  const minted = recorder();
+  await mint({
+    ...reqBase,
+    body: {
+      generation: 1,
+      room_id: room.id,
+      agent_key: agent.canonical_key,
+      agent_instance_id: "worker_repo_access_change",
+    },
+  }, minted);
+  assert.equal(minted.statusCode, 201);
+
+  const revoked = await authDb!.revokeSupervisorGrantsForRepositoryAccessChange({
+    repository_full_name: "brosincode/PRIVATE-repo",
+    canonical_room_id: "github.com/brosincode/private-repo",
+    owner_login: "OWNER_ROUTE",
+  });
+  assert.deepEqual(revoked.revoked_grant_ids, [grantResult.grant.grant_id]);
+  assert.deepEqual(revoked.ended_session_ids, [(minted.body as any).session_id]);
+  assert.equal((await resolveRequestAuth({
+    headers: { authorization: `Bearer ${(minted.body as any).worker_bearer}` },
+  } as never)).authKind, null);
+});
+
+test("revocation retry finishes worker teardown after the grant was already revoked", { skip: requiresDatabase }, async () => {
+  const { room, agent, grantResult } = await setupLifecycle();
+  await authDb!.upsertGitHubRepositoryLink({
+    github_repo_id: "repo_revocation_retry",
+    room_id: room.id,
+    owner_login: "BrosInCode",
+    repo_name: "revocation-retry",
+    default_branch: "main",
+    visibility: "private",
+  });
+  const session = await authDb!.createRoomAgentSession({
+    room_id: room.id, session_kind: "worker", runtime: "test", actor_label: "Retry Worker",
+    agent_key: agent.canonical_key, agent_instance_id: "worker_revocation_retry", display_name: "Retry Worker",
+    owner_account_id: "owner_route", owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: grantResult.grant.grant_id,
+  });
+
+  await authDb!.revokeSupervisorHostGrant({
+    grant_id: grantResult.grant.grant_id,
+    owner_account_id: "owner_route",
+  });
+  assert.equal((await resolveRequestAuth({
+    headers: { authorization: `Bearer ${session.worker_bearer}` },
+  } as never)).authKind, null, "bearer auth closes as soon as the parent grant is revoked");
+
+  const retried = await authDb!.revokeSupervisorGrantsForRepositoryAccessChange({
+    repository_full_name: "brosincode/REVOCATION-retry",
+    canonical_room_id: room.id,
+  });
+  assert.deepEqual(retried.revoked_grant_ids, []);
+  assert.deepEqual(retried.ended_session_ids, [session.session_id]);
+  const ended = await authDb!.getSupervisorRoomAgentSession({
+    session_id: session.session_id,
+    supervisor_grant_id: grantResult.grant.grant_id,
+    include_ended: true,
+  });
+  assert.ok(ended?.ended_at);
+});
+
+test("repository revocation follows historical room aliases after a rename", { skip: requiresDatabase }, async () => {
+  await seedOwner("owner_alias");
+  const link = await authDb!.upsertGitHubRepositoryLink({
+    github_repo_id: "repo_alias",
+    room_id: "github.com/org/new-name",
+    owner_login: "org",
+    repo_name: "new-name",
+    default_branch: "main",
+    visibility: "private",
+  });
+  const historicalRoomId = "github.com/org/old-name";
+  await authDb!.createRoomAlias(link.room_id, historicalRoomId);
+  const created = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_alias", host_id: "host_alias", installation_id: "install_alias",
+    allowed_room_ids: [historicalRoomId], allowed_agent_keys: ["owner_alias/agent"],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+
+  const result = await authDb!.revokeSupervisorGrantsForRepositoryAccessChange({
+    repository_full_name: "ORG/NEW-NAME",
+    canonical_room_id: link.room_id,
+  });
+  assert.deepEqual(result.revoked_grant_ids, [created.grant.grant_id]);
+});
+
+test("GitHub App installation loss revokes every installed repository grant and worker", { skip: requiresDatabase }, async () => {
+  await seedOwner("owner_installation");
+  const installationId = "installation_access_loss";
+  await authDb!.upsertGitHubAppInstallation({
+    installation_id: installationId, target_type: "Organization", target_login: "org",
+    target_github_id: "github_org", repository_selection: "selected",
+  });
+  const appRepository = await authDb!.upsertGitHubAppRepository({
+    github_repo_id: "repo_installation_access_loss", installation_id: installationId,
+    owner_login: "org", repo_name: "installed-private",
+  });
+  await authDb!.upsertGitHubRepositoryLink({
+    github_repo_id: "repo_installation_access_loss", room_id: appRepository.room_id,
+    owner_login: "org", repo_name: "installed-private", default_branch: "main", visibility: "private",
+  });
+  const created = await authDb!.createSupervisorHostGrant({
+    owner_account_id: "owner_installation", host_id: "host_installation", installation_id: installationId,
+    allowed_room_ids: [appRepository.room_id], allowed_agent_keys: ["owner_installation/agent"],
+    expires_at: new Date(Date.now() + 60_000).toISOString(),
+  });
+  const session = await authDb!.createRoomAgentSession({
+    room_id: appRepository.room_id, session_kind: "worker", runtime: "test", actor_label: "Install Worker",
+    agent_key: "owner_installation/agent", display_name: "Install Worker",
+    owner_account_id: "owner_installation", owner_label: "Owner", ide_label: "Agent",
+    supervisor_grant_id: created.grant.grant_id,
+  });
+
+  const result = await authDb!.revokeSupervisorGrantsForGitHubInstallationAccessChange({
+    installation_id: installationId,
+  });
+  assert.deepEqual(result.revoked_grant_ids, [created.grant.grant_id]);
+  assert.deepEqual(result.ended_session_ids, [session.session_id]);
+  assert.equal((await resolveRequestAuth({
+    headers: { authorization: `Bearer ${session.worker_bearer}` },
+  } as never)).authKind, null);
+});
+
+test("grant revalidation falls back to a live session when the owner token is expired", { skip: requiresDatabase }, async () => {
+  await seedOwner("owner_credential_fallback");
+  await authDb!.createOwnerToken({
+    accountId: "owner_credential_fallback", githubUserId: "github_owner_credential_fallback",
+    token: "letagents-owner-token", providerAccessToken: "expired-provider-token",
+    oauthTokenExpiresAt: new Date(Date.now() - 60_000).toISOString(),
+  });
+  await authDb!.createSession(
+    "owner_credential_fallback",
+    "live-browser-session",
+    new Date(Date.now() + 60_000).toISOString(),
+    "live-provider-token",
+  );
+  const owner = await authDb!.getSupervisorGrantOwnerAccount("owner_credential_fallback");
+  assert.equal(owner?.provider_access_token, "live-provider-token");
 });
 
 test("daemon-excluded presence filters supervisor sessions before the result limit", { skip: requiresDatabase }, async () => {
@@ -740,7 +1161,7 @@ test("a valid browser cookie plus supervisor bearer fails closed", { skip: requi
   assert.equal(auth.account, null);
 });
 
-test("revoking a parent grant does not retroactively invalidate an already minted worker bearer", { skip: requiresDatabase }, async () => {
+test("revoking a parent grant immediately invalidates its worker bearer", { skip: requiresDatabase }, async () => {
   await seedOwner("owner_4");
   const created = await authDb!.createSupervisorHostGrant({
     owner_account_id: "owner_4", host_id: "host_4", installation_id: "install_4",
@@ -753,5 +1174,5 @@ test("revoking a parent grant does not retroactively invalidate an already minte
     supervisor_grant_id: created.grant.grant_id, worker_bearer_expires_at: new Date(Date.now() + 30_000).toISOString(),
   });
   await authDb!.revokeSupervisorHostGrant({ grant_id: created.grant.grant_id, owner_account_id: "owner_4" });
-  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never)).authKind, "agent_session");
+  assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never)).authKind, null);
 });

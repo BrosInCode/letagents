@@ -6,6 +6,10 @@ import {
   createSupervisorHostGrant,
   endRoomAgentSession,
   getAgentIdentityByCanonicalKey,
+  getGitHubAppInstallationById,
+  getGitHubAppRepositoryByRoomId,
+  getProjectById,
+  getSupervisorGrantOwnerAccount,
   getSupervisorHostGrantById,
   getSupervisorRoomAgentSession,
   isSupervisorGrantProvisionConflictError,
@@ -15,22 +19,230 @@ import {
   REBIND_ATTESTATION_CAUSES,
   rebindTaskLease,
   recordRebindAttestation,
-  revokeSupervisorHostGrant,
+  revokeSupervisorGrantAuthority,
   rotateRoomAgentSessionBearer,
   rotateSupervisorHostGrant,
+  type GitHubAppInstallation,
+  type GitHubAppRepository,
+  type Project,
+  type SupervisorHostGrant,
 } from "../db.js";
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
 import { buildAgentActorLabel } from "../../shared/agent-identity.js";
 import { getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import { isRentalSupervisorGrantActive } from "../rental/session-launch.js";
+import {
+  resolveProjectRepoAccessTarget,
+  resolveRepoRoomAccessDecision,
+  type RepoRoomAccessDecision,
+} from "../rooms/access.js";
+import type { SupervisorGrantOwnerAccount } from "../db/supervisor-grant-revocation.js";
 
 const MAX_GRANT_TTL_MS = 24 * 60 * 60 * 1000;
+const SUPERVISOR_ACCESS_REVALIDATION_TTL_MS = 60_000;
+const supervisorAccessRevalidationCache = new Map<string, number>();
+
+type SupervisorGrantAccessPolicy =
+  | { kind: "all" }
+  | { kind: "rooms"; room_ids: string[] }
+  | { kind: "sessions"; session_ids: string[] }
+  | { kind: "none" };
 
 type RoomResolverDeps = {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<{ id: string } | null>;
-  requireParticipant(req: AuthenticatedRequest, res: Response, project: { id: string }): Promise<boolean>;
+  requireParticipant(
+    req: AuthenticatedRequest,
+    res: Response,
+    project: { id: string },
+    options?: { freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean },
+  ): Promise<boolean>;
+  getProjectById?(roomId: string): Promise<Project | null | undefined>;
+  resolveProjectRepoAccessTarget?(project: Project): Promise<{
+    roomName: string;
+    repoRoomName: string;
+  } | null>;
+  resolveRepoRoomAccessDecision?(input: {
+    roomName: string;
+    sessionAccount: SupervisorGrantOwnerAccount;
+    freshCollaboratorCheck: true;
+    throwOnIndeterminate: true;
+  }): Promise<RepoRoomAccessDecision>;
+  getGitHubAppRepositoryByRoomId?(roomId: string): Promise<GitHubAppRepository | undefined>;
+  getGitHubAppInstallationById?(installationId: string): Promise<GitHubAppInstallation | undefined>;
+  getSupervisorGrantOwnerAccount?(accountId: string): Promise<SupervisorGrantOwnerAccount | null>;
+  revokeSupervisorGrantAuthority?(input: {
+    grant_id: string;
+    owner_account_id: string;
+  }): Promise<{ grant: SupervisorHostGrant; revoked_now: boolean; ended_session_ids: string[] } | null>;
 };
+
+function accessRevalidationCacheKey(grant: SupervisorHostGrant, repoRoomName: string): string {
+  return `${grant.grant_id}:${repoRoomName.toLowerCase()}`;
+}
+
+export function clearSupervisorAccessRevalidationCache(grantId?: string): void {
+  if (!grantId) {
+    supervisorAccessRevalidationCache.clear();
+    return;
+  }
+  for (const key of supervisorAccessRevalidationCache.keys()) {
+    if (key.startsWith(`${grantId}:`)) supervisorAccessRevalidationCache.delete(key);
+  }
+}
+
+function respondSupervisorAccessRetry(res: Response, message: string): false {
+  res.status(503).json({
+    error: message,
+    code: "SUPERVISOR_ACCESS_REVALIDATION_UNAVAILABLE",
+    retryable: true,
+  });
+  return false;
+}
+
+function respondSupervisorScopeStale(res: Response, roomId: string): false {
+  res.status(409).json({
+    error: "Supervisor grant scope references a room that no longer exists.",
+    code: "SUPERVISOR_GRANT_SCOPE_STALE",
+    room_id: roomId,
+  });
+  return false;
+}
+
+async function policyRoomIds(
+  grant: SupervisorHostGrant,
+  res: Response,
+  policy: SupervisorGrantAccessPolicy,
+): Promise<string[] | null> {
+  if (policy.kind === "none") return [];
+  if (policy.kind === "all") return grant.allowed_room_ids;
+  if (policy.kind === "rooms") {
+    const roomIds = [...new Set(policy.room_ids.map((roomId) => roomId.trim()).filter(Boolean))];
+    if (roomIds.some((roomId) => !grant.allowed_room_ids.includes(roomId))) {
+      res.status(403).json({ error: "Grant does not authorize the requested room." });
+      return null;
+    }
+    return roomIds;
+  }
+  const roomIds: string[] = [];
+  for (const sessionId of [...new Set(policy.session_ids.map((id) => id.trim()).filter(Boolean))]) {
+    const session = await getSupervisorRoomAgentSession({
+      session_id: sessionId,
+      supervisor_grant_id: grant.grant_id,
+      include_ended: true,
+    });
+    // Unknown/foreign session ids cannot authorize a mutation. Leave their
+    // established route-level 4xx contract to the locked domain operation;
+    // only resolved grant-owned sessions contribute repositories to recheck.
+    if (!session) continue;
+    if (!grant.allowed_room_ids.includes(session.room_id)) {
+      res.status(403).json({ error: "Grant does not authorize the requested worker session." });
+      return null;
+    }
+    roomIds.push(session.room_id);
+  }
+  return [...new Set(roomIds)];
+}
+
+/**
+ * Re-check every non-rental room using the grant owner's current durable
+ * GitHub credential. Definitive denial tears down both the grant and all of
+ * its worker sessions; thrown/indeterminate upstream errors leave authority
+ * unchanged so a transient GitHub outage cannot become a destructive event.
+ */
+export async function requireSupervisorGrantRoomAccess(
+  grant: SupervisorHostGrant,
+  res: Response,
+  deps: RoomResolverDeps,
+  policy: SupervisorGrantAccessPolicy,
+): Promise<boolean> {
+  if (grant.rental_session_id || policy.kind === "none") return true;
+  const loadOwner = deps.getSupervisorGrantOwnerAccount ?? getSupervisorGrantOwnerAccount;
+  const revokeAuthority = deps.revokeSupervisorGrantAuthority ?? revokeSupervisorGrantAuthority;
+  const findProject = deps.getProjectById ?? getProjectById;
+  const resolveTarget = deps.resolveProjectRepoAccessTarget ?? resolveProjectRepoAccessTarget;
+  const resolveAccess = deps.resolveRepoRoomAccessDecision ?? resolveRepoRoomAccessDecision;
+  const findAppRepository = deps.getGitHubAppRepositoryByRoomId ?? getGitHubAppRepositoryByRoomId;
+  const findAppInstallation = deps.getGitHubAppInstallationById ?? getGitHubAppInstallationById;
+  const requestedRoomIds = await policyRoomIds(grant, res, policy);
+  if (!requestedRoomIds) return false;
+
+  const accessTargets = new Map<string, { repoRoomName: string; roomName: string }>();
+  for (const allowedRoomId of requestedRoomIds) {
+    const canonicalRoomId = await deps.resolveCanonicalRoomRequestId(allowedRoomId);
+    const project = await findProject(canonicalRoomId);
+    if (!project) return respondSupervisorScopeStale(res, allowedRoomId);
+    const target = await resolveTarget(project);
+    if (!target) continue;
+    accessTargets.set(target.repoRoomName.toLowerCase(), target);
+  }
+  if (accessTargets.size === 0) return true;
+
+  const now = Date.now();
+  const pendingTargets = [...accessTargets.values()].filter((target) =>
+    (supervisorAccessRevalidationCache.get(accessRevalidationCacheKey(grant, target.repoRoomName)) ?? 0) <= now
+  );
+  if (pendingTargets.length === 0) return true;
+
+  // App removal/suspension is a definitive, independent authority loss and
+  // remains enforceable even when the owner's personal OAuth credential is down.
+  for (const target of pendingTargets) {
+    const appRepository = await findAppRepository(target.roomName);
+    if (!appRepository) continue;
+    const installation = await findAppInstallation(appRepository.installation_id);
+    if (appRepository.removed_at || !installation || installation.suspended_at || installation.uninstalled_at) {
+      await revokeAuthority({ grant_id: grant.grant_id, owner_account_id: grant.owner_account_id });
+      clearSupervisorAccessRevalidationCache(grant.grant_id);
+      res.status(409).json({
+        error: "The GitHub App installation for this supervisor grant is not active.",
+        code: "SUPERVISOR_GITHUB_INSTALLATION_INACTIVE",
+      });
+      return false;
+    }
+  }
+
+  const owner = await loadOwner(grant.owner_account_id);
+  if (!owner?.provider_access_token) {
+    return respondSupervisorAccessRetry(res, "A live GitHub owner credential is required to revalidate this supervisor grant.");
+  }
+
+  let decisions: Array<{ target: { repoRoomName: string; roomName: string }; decision: RepoRoomAccessDecision }>;
+  try {
+    decisions = await Promise.all(pendingTargets.map(async (target) => ({
+      target,
+      decision: await resolveAccess({
+        roomName: target.repoRoomName,
+        sessionAccount: owner,
+        freshCollaboratorCheck: true,
+        throwOnIndeterminate: true,
+      }),
+    })));
+  } catch {
+    return respondSupervisorAccessRetry(res, "GitHub access could not be revalidated; retry after the provider recovers.");
+  }
+
+  for (const { target, decision } of decisions) {
+    if (decision.kind === "allow") {
+      supervisorAccessRevalidationCache.set(
+        accessRevalidationCacheKey(grant, target.repoRoomName),
+        Date.now() + SUPERVISOR_ACCESS_REVALIDATION_TTL_MS,
+      );
+      continue;
+    }
+    await revokeAuthority({
+      grant_id: grant.grant_id,
+      owner_account_id: grant.owner_account_id,
+    });
+    clearSupervisorAccessRevalidationCache(grant.grant_id);
+    res.status(403).json({
+      error: "The supervisor grant owner no longer has access to an authorized Git Room.",
+      code: "SUPERVISOR_GIT_ROOM_ACCESS_REVOKED",
+      room_id: target.repoRoomName,
+    });
+    return false;
+  }
+  return true;
+}
 
 function strings(value: unknown, max = 64): string[] | null {
   if (!Array.isArray(value) || value.length === 0 || value.length > max) return null;
@@ -45,7 +257,12 @@ function requestedGeneration(req: AuthenticatedRequest): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-async function requireCurrentSupervisorGrant(req: AuthenticatedRequest, res: Response) {
+async function requireCurrentSupervisorGrant(
+  req: AuthenticatedRequest,
+  res: Response,
+  deps: RoomResolverDeps,
+  accessPolicy: SupervisorGrantAccessPolicy,
+) {
   const grant = req.authKind === "supervisor_grant" ? req.supervisorGrant : null;
   const generation = requestedGeneration(req);
   if (!grant || generation === null || generation !== grant.current_generation) {
@@ -69,6 +286,7 @@ async function requireCurrentSupervisorGrant(req: AuthenticatedRequest, res: Res
     res.status(409).json({ error: "Rental supervisor authority is no longer active." });
     return null;
   }
+  if (!(await requireSupervisorGrantRoomAccess(current, res, deps, accessPolicy))) return null;
   return current;
 }
 
@@ -97,9 +315,12 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       res.status(401).json({ error: "Supervisor grant revocation requires owner authentication." });
       return;
     }
-    const revoked = await revokeSupervisorHostGrant({ grant_id: String(req.params.grantId ?? "").trim(), owner_account_id: req.sessionAccount.account_id });
-    if (!revoked) { res.status(404).json({ error: "Active supervisor grant not found." }); return; }
-    res.json(revoked);
+    const revoked = await (deps.revokeSupervisorGrantAuthority ?? revokeSupervisorGrantAuthority)({
+      grant_id: String(req.params.grantId ?? "").trim(),
+      owner_account_id: req.sessionAccount.account_id,
+    });
+    if (!revoked?.revoked_now) { res.status(404).json({ error: "Active supervisor grant not found." }); return; }
+    res.json(revoked.grant);
   });
   if (!enabled) return;
   app.post("/supervisor-host-grants", async (req: AuthenticatedRequest, res) => {
@@ -151,10 +372,10 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/renew", async (req: AuthenticatedRequest, res) => {
-    const grant = await requireCurrentSupervisorGrant(req, res);
-    if (!grant) return;
     const grantId = String(req.params.grantId ?? "").trim();
     const body = req.body as Record<string, unknown>;
+    const grant = await requireCurrentSupervisorGrant(req, res, deps, { kind: "all" });
+    if (!grant) return;
     if (grant.grant_id !== grantId || body.host_id !== grant.host_id || body.installation_id !== grant.installation_id) {
       res.status(403).json({ error: "Grant renewal is bound to its original host and installation." });
       return;
@@ -170,7 +391,7 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/handoff", async (req: AuthenticatedRequest, res) => {
-    const grant = await requireCurrentSupervisorGrant(req, res);
+    const grant = await requireCurrentSupervisorGrant(req, res, deps, { kind: "all" });
     if (!grant) return;
     if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
       res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
@@ -185,7 +406,12 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions", async (req: AuthenticatedRequest, res) => {
-    const grant = await requireCurrentSupervisorGrant(req, res);
+    const body = req.body as Record<string, unknown>;
+    const roomId = typeof body.room_id === "string" ? body.room_id.trim() : "";
+    const grant = await requireCurrentSupervisorGrant(req, res, deps, {
+      kind: "rooms",
+      room_ids: roomId ? [roomId] : [],
+    });
     if (!grant) return;
     if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
       res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
@@ -195,8 +421,6 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
       res.status(503).json({ error: "Worker bearer mode is not enabled." });
       return;
     }
-    const body = req.body as Record<string, unknown>;
-    const roomId = typeof body.room_id === "string" ? body.room_id.trim() : "";
     const agentKey = typeof body.agent_key === "string" ? body.agent_key.trim() : "";
     const agentInstanceId = typeof body.agent_instance_id === "string" ? body.agent_instance_id.trim().slice(0, 255) : "";
     if (!agentInstanceId) {
@@ -241,13 +465,16 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions/:sessionId/rotate", async (req: AuthenticatedRequest, res) => {
-    const grant = await requireCurrentSupervisorGrant(req, res);
+    const sessionId = String(req.params.sessionId ?? "").trim();
+    const grant = await requireCurrentSupervisorGrant(req, res, deps, {
+      kind: "sessions",
+      session_ids: [sessionId],
+    });
     if (!grant) return;
     if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
       res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
       return;
     }
-    const sessionId = String(req.params.sessionId ?? "").trim();
     const session = await getSupervisorRoomAgentSession({ session_id: sessionId, supervisor_grant_id: grant.grant_id });
     if (!session || !grant.allowed_room_ids.includes(session.room_id) || !grant.allowed_agent_keys.includes(session.agent_key)) {
       res.status(403).json({ error: "Grant does not authorize that worker session." });
@@ -271,7 +498,9 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   });
 
   app.post("/supervisor-host-grants/:grantId/worker-sessions/:sessionId/end", async (req: AuthenticatedRequest, res) => {
-    const grant = await requireCurrentSupervisorGrant(req, res);
+    // Explicit teardown exemption: cleanup must remain available when GitHub
+    // is unavailable or access has changed.
+    const grant = await requireCurrentSupervisorGrant(req, res, deps, { kind: "none" });
     if (!grant) return;
     if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
       res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
@@ -308,21 +537,24 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   // The recorded supervisor_generation comes from the validated fence (never
   // the body) so a stale generation cannot be forged.
   app.post("/supervisor-host-grants/:grantId/leases/:leaseId/attestation", async (req: AuthenticatedRequest, res) => {
-    const grant = await requireCurrentSupervisorGrant(req, res);
+    const body = req.body as {
+      expected_epoch?: unknown; from_agent_session_id?: unknown;
+      work_attempt_id?: unknown; execution_generation_id?: unknown; cause?: unknown;
+    };
+    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
+    const grant = await requireCurrentSupervisorGrant(req, res, deps, {
+      kind: "sessions",
+      session_ids: fromSession ? [fromSession] : [],
+    });
     if (!grant) return;
     if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
       res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
       return;
     }
     const leaseId = String(req.params.leaseId ?? "").trim();
-    const body = req.body as {
-      expected_epoch?: unknown; from_agent_session_id?: unknown;
-      work_attempt_id?: unknown; execution_generation_id?: unknown; cause?: unknown;
-    };
     // The epoch must arrive as a JSON integer. `Number()` coercion is banned
     // here: it maps "" and whitespace strings to 0, silently attesting epoch 0.
     const expectedEpoch = body.expected_epoch;
-    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
     const workAttemptId = typeof body.work_attempt_id === "string" ? body.work_attempt_id.trim() : "";
     const executionGenerationId = typeof body.execution_generation_id === "string" ? body.execution_generation_id.trim() : "";
     const cause = typeof body.cause === "string" ? body.cause.trim() : "";
@@ -371,21 +603,24 @@ export function registerSupervisorHostGrantRoutes(app: Express, deps: RoomResolv
   // epoch/from-session CAS all gate it, and the predecessor's authority is
   // revoked in the same transaction.
   app.post("/supervisor-host-grants/:grantId/leases/:leaseId/rebind", async (req: AuthenticatedRequest, res) => {
-    const grant = await requireCurrentSupervisorGrant(req, res);
+    const body = req.body as {
+      expected_epoch?: unknown; from_agent_session_id?: unknown; to_agent_session_id?: unknown;
+      attestation_id?: unknown; work_attempt_id?: unknown; execution_generation_id?: unknown;
+    };
+    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
+    const toSession = typeof body.to_agent_session_id === "string" ? body.to_agent_session_id.trim() : "";
+    const grant = await requireCurrentSupervisorGrant(req, res, deps, {
+      kind: "sessions",
+      session_ids: [fromSession, toSession].filter(Boolean),
+    });
     if (!grant) return;
     if (grant.grant_id !== String(req.params.grantId ?? "").trim()) {
       res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
       return;
     }
     const leaseId = String(req.params.leaseId ?? "").trim();
-    const body = req.body as {
-      expected_epoch?: unknown; from_agent_session_id?: unknown; to_agent_session_id?: unknown;
-      attestation_id?: unknown; work_attempt_id?: unknown; execution_generation_id?: unknown;
-    };
     // JSON integer only — Number() coercion maps "" to 0 (see attestation route).
     const expectedEpoch = body.expected_epoch;
-    const fromSession = typeof body.from_agent_session_id === "string" ? body.from_agent_session_id.trim() : "";
-    const toSession = typeof body.to_agent_session_id === "string" ? body.to_agent_session_id.trim() : "";
     const attestationId = typeof body.attestation_id === "string" ? body.attestation_id.trim() : "";
     const workAttemptId = typeof body.work_attempt_id === "string" ? body.work_attempt_id.trim() : "";
     const executionGenerationId = typeof body.execution_generation_id === "string" ? body.execution_generation_id.trim() : "";
