@@ -2,7 +2,9 @@ import type {
   DesktopGitHubEventsPage,
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
+  DesktopRoomLiveMetadata,
   DesktopRoomMessage,
+  DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
@@ -74,8 +76,46 @@ export function appendSnapshotMessage(
   if (!snapshot) return snapshot;
   return {
     ...snapshot,
-    messages: mergeDesktopRoomMessages(snapshot.messages || [], [message]),
+    messages: appendDesktopRoomMessage(snapshot.messages || [], message),
   };
+}
+
+// Appends a single message, taking a fast path for the overwhelmingly common
+// case: a brand-new message that already belongs at the END of the current
+// (already-sorted) list. That case skips the Map rebuild + full O(n log n)
+// re-sort that `mergeDesktopRoomMessages` performs on every incoming event.
+//
+// The fast path MUST be byte-identical to the slow path for the cases it
+// handles. It relies on the invariant that `current` is already sorted by
+// `compareDesktopRoomMessages` and free of duplicate ids (guaranteed because
+// every stored message list is itself the output of a prior merge). Any case
+// the fast path can't prove safe — prompt-only filtering, a duplicate id
+// (SSE + fallback-poll can deliver the same id twice), or an out-of-order
+// arrival — falls back to the unchanged slow path.
+export function appendDesktopRoomMessage(
+  current: readonly DesktopRoomMessage[],
+  message: DesktopRoomMessage
+): DesktopRoomMessage[] {
+  if (!isPromptOnlyDesktopMessage(message) && canFastAppendDesktopRoomMessage(current, message)) {
+    return [...current, message];
+  }
+  return mergeDesktopRoomMessages(current, [message]);
+}
+
+function canFastAppendDesktopRoomMessage(
+  current: readonly DesktopRoomMessage[],
+  message: DesktopRoomMessage
+): boolean {
+  // Reject out-of-order arrivals: the message must sort at or after the last
+  // element so that appending preserves the sorted invariant.
+  const last = current[current.length - 1];
+  if (last && compareDesktopRoomMessages(message, last) < 0) return false;
+  // Reject a duplicate id so a message delivered twice routes to the slow path
+  // (which replaces in place) instead of double-appending.
+  for (const existing of current) {
+    if (existing.id === message.id) return false;
+  }
+  return true;
 }
 
 export function upsertSnapshotGitHubEvent(
@@ -98,6 +138,44 @@ export function upsertSnapshotGitHubEvent(
   };
 }
 
+export function upsertSnapshotRoomArtifact(
+  snapshot: DesktopRoomSnapshot | null,
+  artifact: DesktopRoomSharedArtifact,
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  const existingIndex = snapshot.roomArtifacts.findIndex((existing) =>
+    existing.identityKey === artifact.identityKey
+  );
+  const roomArtifacts = [...snapshot.roomArtifacts];
+  if (existingIndex >= 0) {
+    roomArtifacts.splice(existingIndex, 1, { ...roomArtifacts[existingIndex], ...artifact });
+  } else {
+    roomArtifacts.unshift(artifact);
+  }
+  roomArtifacts.sort(compareDesktopRoomArtifacts);
+  return {
+    ...snapshot,
+    roomArtifacts,
+  };
+}
+
+/**
+ * Replace the snapshot's artifacts wholesale with a freshly refetched list.
+ * Used by the artifacts-only refetch that reconciles after an `artifact_update`
+ * frame (which carries only an identity-key pointer, so it cannot be applied on
+ * its own). Keeps the same ordering as the full snapshot's artifacts.
+ */
+export function replaceSnapshotRoomArtifacts(
+  snapshot: DesktopRoomSnapshot | null,
+  artifacts: readonly DesktopRoomSharedArtifact[],
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  return {
+    ...snapshot,
+    roomArtifacts: [...artifacts].sort(compareDesktopRoomArtifacts),
+  };
+}
+
 export function mergeRoomSnapshotMessages(
   current: DesktopRoomSnapshot | null,
   incoming: DesktopRoomSnapshot
@@ -111,10 +189,84 @@ export function mergeRoomSnapshotMessages(
     };
   }
   if (!snapshotStorageNamespacesMatch(current, incoming)) return incoming;
-  return {
+  return preserveErroredSnapshotSources(current, {
     ...incoming,
     messages: mergeDesktopRoomMessages(current.messages || [], incoming.messages || []),
     githubEvents: mergeDesktopGitHubEventsPage(current.githubEvents, incoming.githubEvents),
+  });
+}
+
+/**
+ * When a refreshed snapshot reports a source as failed (`sourceStates[k].status
+ * === "error"`), keep the previously loaded data for that source instead of
+ * letting the fetch's empty fallback clobber it — so a transient outage does
+ * not blank the room. Messages and GitHub events are already unioned upstream,
+ * so they are left untouched here. A source that recovers to "ready" is
+ * replaced normally. `incoming.sourceStates` is preserved verbatim so the UI
+ * still knows which sources are currently degraded.
+ */
+export function preserveErroredSnapshotSources(
+  current: DesktopRoomSnapshot,
+  incoming: DesktopRoomSnapshot,
+): DesktopRoomSnapshot {
+  const states = incoming.sourceStates;
+  if (!states) return incoming;
+  const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  return {
+    ...incoming,
+    tasks: errored("tasks") ? current.tasks : incoming.tasks,
+    focusRooms: errored("focusRooms") ? current.focusRooms : incoming.focusRooms,
+    participants: errored("participants") ? current.participants : incoming.participants,
+    participantHiddenCount: errored("participants")
+      ? current.participantHiddenCount
+      : incoming.participantHiddenCount,
+    presence: errored("presence") ? current.presence : incoming.presence,
+    reasoningSessions: errored("reasoning") ? current.reasoningSessions : incoming.reasoningSessions,
+    recentActivity: errored("activityHistory") ? current.recentActivity : incoming.recentActivity,
+    roomArtifacts: errored("roomArtifacts") ? current.roomArtifacts : incoming.roomArtifacts,
+    boardSettings: errored("boardSettings") ? current.boardSettings : incoming.boardSettings,
+  };
+}
+
+/**
+ * Apply poll-only room metadata (focus rooms, participants, presence, recent
+ * activity, board settings) onto the current snapshot. This is what the
+ * periodic 15s tick applies: it replaces ONLY those five sections and leaves
+ * every event-fed section — messages, tasks, GitHub events, artifacts,
+ * reasoning — untouched, so live-appended data is never clobbered by a poll.
+ *
+ * A section whose fetch failed (`metadata.sourceStates[k].status === "error"`)
+ * keeps the snapshot's previously loaded data — matching
+ * `preserveErroredSnapshotSources` — so a transient outage does not blank the
+ * room; its error state is still recorded so degraded-state banners show. The
+ * sourceStates of the skipped event-fed sections are preserved verbatim.
+ */
+export function applyRoomLiveMetadata(
+  snapshot: DesktopRoomSnapshot | null,
+  metadata: DesktopRoomLiveMetadata,
+): DesktopRoomSnapshot | null {
+  if (!snapshot) return snapshot;
+  if (!snapshotMatchesRoom(snapshot, metadata.roomIdentifier)) return snapshot;
+  const states = metadata.sourceStates;
+  const errored = (key: keyof typeof states): boolean => states[key]?.status === "error";
+  return {
+    ...snapshot,
+    focusRooms: errored("focusRooms") ? snapshot.focusRooms : metadata.focusRooms,
+    participants: errored("participants") ? snapshot.participants : metadata.participants,
+    participantHiddenCount: errored("participants")
+      ? snapshot.participantHiddenCount
+      : metadata.participantHiddenCount,
+    presence: errored("presence") ? snapshot.presence : metadata.presence,
+    recentActivity: errored("activityHistory") ? snapshot.recentActivity : metadata.recentActivity,
+    boardSettings: errored("boardSettings") ? snapshot.boardSettings : metadata.boardSettings,
+    sourceStates: {
+      ...snapshot.sourceStates,
+      focusRooms: states.focusRooms,
+      participants: states.participants,
+      presence: states.presence,
+      activityHistory: states.activityHistory,
+      boardSettings: states.boardSettings,
+    },
   };
 }
 
@@ -171,10 +323,30 @@ export function mergeDesktopGitHubEvents(
   return [...byId.values()].sort(compareDesktopGitHubEvents);
 }
 
-export function shouldRefreshMetadataForMessage(message: DesktopRoomMessage): boolean {
-  const source = (message.source || "").toLowerCase();
-  const sender = (message.sender || "").toLowerCase();
-  return source === "agent" || source === "browser" || source === "github" || sender === "letagents" || sender === "github";
+/**
+ * Live SSE message frames already carry the full message payload, so an
+ * appended message renders on its own — with one exception: a message that
+ * references a thread root or reply-to that is NOT in the loaded window cannot
+ * show its ancestor context. Only that case warrants a snapshot refresh (whose
+ * thread-expansion pages backfill the missing ancestors). A message's own id
+ * counts as present because it is being appended alongside this check.
+ */
+export function messageReferencesMissingThreadContext(
+  message: DesktopRoomMessage,
+  messages: readonly DesktopRoomMessage[],
+): boolean {
+  const presentIds = new Set<string>();
+  for (const existing of messages) presentIds.add(existing.id);
+  presentIds.add(message.id);
+  const references = [
+    message.threadRootId,
+    message.threadReplyToId,
+    message.replyTo?.id,
+    message.thread?.rootMessageId,
+  ];
+  return references.some(
+    (reference) => typeof reference === "string" && reference.length > 0 && !presentIds.has(reference),
+  );
 }
 
 function compareDesktopGitHubEvents(left: DesktopGitHubRoomEvent, right: DesktopGitHubRoomEvent): number {
@@ -184,6 +356,15 @@ function compareDesktopGitHubEvents(left: DesktopGitHubRoomEvent, right: Desktop
     return rightTime - leftTime;
   }
   return right.id.localeCompare(left.id);
+}
+
+function compareDesktopRoomArtifacts(left: DesktopRoomSharedArtifact, right: DesktopRoomSharedArtifact): number {
+  const leftTime = Date.parse(left.updatedAt || left.firstSeenAt || "");
+  const rightTime = Date.parse(right.updatedAt || right.firstSeenAt || "");
+  if (Number.isFinite(leftTime) && Number.isFinite(rightTime) && leftTime !== rightTime) {
+    return rightTime - leftTime;
+  }
+  return left.identityKey.localeCompare(right.identityKey);
 }
 
 function shouldPreserveCurrentRoomSnapshot(

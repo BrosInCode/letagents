@@ -47,6 +47,12 @@
       <button type="button" @click="emit('refresh')">Retry</button>
     </div>
 
+    <div v-if="hasDegradedSources" class="desktop-inbox-error desktop-inbox-degraded" role="status">
+      <AlertTriangle :size="16" />
+      <span>{{ degradedLabel }} — showing what's available.</span>
+      <button type="button" @click="emit('refresh')">Retry</button>
+    </div>
+
     <Transition name="desktop-inbox-undo-motion">
       <div v-if="lastClearedItem" class="desktop-inbox-undo" role="status">
         <span>Dismissed "{{ lastClearedItem.title }}"</span>
@@ -65,7 +71,7 @@
       </div>
     </div>
 
-    <div v-else-if="!error && items.length === 0" class="desktop-inbox-empty">
+    <div v-else-if="!error && items.length === 0 && !hasDegradedSources" class="desktop-inbox-empty">
       <Inbox :size="22" />
       <strong>{{ filter === "actionable" ? "Nothing needs your attention" : "No inbox history yet" }}</strong>
       <span>{{ filter === "actionable" ? "Unread threads, blocked work, failed checks, and reviews will appear here." : "Threads, tasks, checks, and agent updates will appear here as they happen." }}</span>
@@ -163,7 +169,12 @@
           </div>
 
           <div class="desktop-inbox-detail-actions">
-            <button class="desktop-inbox-primary-action" type="button" @click="openItem(selectedItem)">
+            <button
+              v-if="selectedItem.kind !== 'agent_offline'"
+              class="desktop-inbox-primary-action"
+              type="button"
+              @click="openItem(selectedItem)"
+            >
               <ExternalLink :size="15" />
               <span>{{ openActionLabel(selectedItem) }}</span>
             </button>
@@ -248,6 +259,7 @@ import {
   X,
 } from "@lucide/vue";
 import { computed, ref } from "vue";
+import { formatShortDateTime } from "../../../domain/time";
 import type { DesktopInboxFilter, DesktopInboxItem } from "./room-inbox/items";
 
 interface DetailRow {
@@ -263,7 +275,18 @@ const props = defineProps<{
   error: string | null;
   hasMore: boolean;
   lastClearedItem: DesktopInboxItem | null;
+  degradedSources?: string[];
 }>();
+
+const degradedSources = computed(() => props.degradedSources ?? []);
+const hasDegradedSources = computed(() => degradedSources.value.length > 0);
+const degradedLabel = computed(() => {
+  const names = degradedSources.value;
+  if (names.length === 0) return "";
+  if (names.length === 1) return `${names[0]} couldn't be loaded`;
+  if (names.length === 2) return `${names[0]} and ${names[1]} couldn't be loaded`;
+  return `${names.slice(0, -1).join(", ")}, and ${names.at(-1)} couldn't be loaded`;
+});
 
 const emit = defineEmits<{
   "update:filter": [filter: DesktopInboxFilter];
@@ -275,6 +298,7 @@ const emit = defineEmits<{
   "open-task": [taskId: string];
   "open-github-event": [eventId: string];
   "open-reasoning": [sessionId: string];
+  "open-rental-request": [];
 }>();
 
 const selectedItemId = ref<string | null>(null);
@@ -313,7 +337,9 @@ function openItem(item: DesktopInboxItem): void {
   }
   if (item.kind === "agent_blocked") {
     emit("open-reasoning", item.session.id);
+    return;
   }
+  if (item.kind === "rental_request") emit("open-rental-request");
 }
 
 function initials(value: string): string {
@@ -327,7 +353,7 @@ function initials(value: string): string {
 function itemIcon(item: DesktopInboxItem) {
   if (item.kind === "thread") return MessageSquare;
   if (item.kind === "task_review") return CheckCircle2;
-  if (item.kind === "task_blocked" || item.kind === "github_failure") return AlertTriangle;
+  if (item.kind === "task_blocked" || item.kind === "github_failure" || item.kind === "agent_offline") return AlertTriangle;
   return Bot;
 }
 
@@ -336,6 +362,8 @@ function itemKindLabel(item: DesktopInboxItem): string {
   if (item.kind === "task_review") return "Review needed";
   if (item.kind === "task_blocked") return "Blocked task";
   if (item.kind === "github_failure") return "Failed check";
+  if (item.kind === "agent_offline") return "Agent offline";
+  if (item.kind === "rental_request") return "Rental request";
   return "Blocked agent";
 }
 
@@ -344,6 +372,7 @@ function itemSourceLabel(item: DesktopInboxItem): string {
   if (item.kind === "task_review") return "Review";
   if (item.kind === "task_blocked") return "Task";
   if (item.kind === "github_failure") return "GitHub";
+  if (item.kind === "rental_request") return "Renting";
   return "Agent";
 }
 
@@ -356,6 +385,7 @@ function openActionLabel(item: DesktopInboxItem): string {
   if (item.kind === "thread") return "Open thread";
   if (item.kind === "github_failure") return "Open check";
   if (item.kind === "agent_blocked") return "Open agent";
+  if (item.kind === "rental_request") return "Review request";
   return "Open task";
 }
 
@@ -396,6 +426,16 @@ function itemDetailRows(item: DesktopInboxItem): DetailRow[] {
       { label: "Agent", value: item.session.actorLabel || item.session.agentKey || "Unknown" },
       { label: "Task", value: item.session.taskId || "None" },
     );
+  } else if (item.kind === "agent_offline") {
+    rows.push(
+      { label: "Agent", value: item.presence.actorLabel || item.presence.agentKey || "Unknown" },
+      { label: "Last seen", value: formatTimestamp(item.presence.lastHeartbeatAt) },
+    );
+  } else if (item.kind === "rental_request") {
+    rows.push(
+      { label: "Renter", value: item.request.renterDisplayName || "Unknown" },
+      { label: "Expires", value: item.request.expiresAt ? formatTimestamp(item.request.expiresAt) : "—" },
+    );
   }
 
   return rows;
@@ -420,17 +460,14 @@ function whyText(item: DesktopInboxItem): string {
   if (item.kind === "task_blocked") {
     return "A task is blocked and needs a decision or additional information.";
   }
+  if (item.kind === "agent_offline") {
+    return "A worker agent stopped responding and its in-flight work may be stalled until it recovers or someone takes over.";
+  }
+  if (item.kind === "rental_request") return "A renter is waiting for you to choose a local runtime and approve or decline this request.";
   return "An agent session is blocked and needs human attention.";
 }
 
 function formatTimestamp(timestamp: string): string {
-  const date = new Date(timestamp);
-  if (!Number.isFinite(date.getTime())) return "";
-  return new Intl.DateTimeFormat(undefined, {
-    month: "short",
-    day: "numeric",
-    hour: "numeric",
-    minute: "2-digit",
-  }).format(date);
+  return formatShortDateTime(timestamp, { hourStyle: "numeric" }) ?? "";
 }
 </script>

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   DesktopManagedAgentRuntimeRegistry,
+  type DesktopManagedAgentDispatchContext,
   type DesktopManagedAgentRuntime,
 } from "../main/agents/managed-agent-runtime.js";
 import type {
@@ -53,6 +54,7 @@ function session(providerId = "codex"): DesktopManagedAgentSession {
 
 function stubRuntime(providerId = "codex"): DesktopManagedAgentRuntime & {
   events: DesktopRoomStreamEvent[];
+  contexts: Array<DesktopManagedAgentDispatchContext | undefined>;
   starts: DesktopManagedAgentStartInput[];
   inspections: Array<{ sessionId?: string | null; roomIdentifier?: string | null }>;
   stops: DesktopManagedAgentStopInput[];
@@ -61,6 +63,7 @@ function stubRuntime(providerId = "codex"): DesktopManagedAgentRuntime & {
   const instance = {
     providerId,
     events: [] as DesktopRoomStreamEvent[],
+    contexts: [] as Array<DesktopManagedAgentDispatchContext | undefined>,
     starts: [] as DesktopManagedAgentStartInput[],
     inspections: [] as Array<{ sessionId?: string | null; roomIdentifier?: string | null }>,
     stops: [] as DesktopManagedAgentStopInput[],
@@ -91,11 +94,17 @@ function stubRuntime(providerId = "codex"): DesktopManagedAgentRuntime & {
       }
       return session(providerId);
     },
-    dispatchRoomStreamEvent: (event: DesktopRoomStreamEvent) => {
+    retry: async (input: { sessionId: string }): Promise<DesktopManagedAgentSession | null> =>
+      input.sessionId === `session_${providerId}` ? session(providerId) : null,
+    dispatchRoomStreamEvent: (
+      event: DesktopRoomStreamEvent,
+      context?: DesktopManagedAgentDispatchContext,
+    ) => {
       if (instance.failDispatch) {
         throw new Error(`${providerId} dispatch failed`);
       }
       instance.events.push(event);
+      instance.contexts.push(context);
     },
   };
   return instance;
@@ -130,6 +139,27 @@ test("registry lists sessions from all registered runtimes", () => {
   );
 });
 
+test("registry isolates session-list failures by runtime", () => {
+  const registry = new DesktopManagedAgentRuntimeRegistry();
+  const codex = stubRuntime("codex");
+  const claude = stubRuntime("claude-code");
+  codex.listSessions = () => {
+    throw new Error("codex state unavailable");
+  };
+  registry.register(codex);
+  registry.register(claude);
+
+  assert.deepEqual(
+    registry.listSessions("room_1").map((entry) => entry.providerId),
+    ["claude-code"],
+  );
+  assert.deepEqual(registry.listSessionPopulation("room_1"), {
+    sessions: [session("claude-code")],
+    complete: false,
+    failedProviderIds: ["codex"],
+  });
+});
+
 test("registry dispatches room stream events to every registered runtime", () => {
   const registry = new DesktopManagedAgentRuntimeRegistry();
   const codex = stubRuntime("codex");
@@ -160,6 +190,50 @@ test("registry dispatches room stream events to every registered runtime", () =>
 
   assert.equal(codex.events.length, 1);
   assert.equal(claude.events.length, 1);
+  assert.deepEqual(codex.contexts[0], {
+    roomSessions: [session("codex"), session("claude-code")],
+    populationComplete: true,
+    failedProviderIds: [],
+  });
+});
+
+test("registry marks dispatch context incomplete when one provider cannot enumerate", () => {
+  const registry = new DesktopManagedAgentRuntimeRegistry();
+  const codex = stubRuntime("codex");
+  const claude = stubRuntime("claude-code");
+  codex.listSessions = () => {
+    throw new Error("codex state unavailable");
+  };
+  registry.register(codex);
+  registry.register(claude);
+
+  const event: DesktopRoomStreamEvent = {
+    type: "message",
+    roomIdentifier: "room_1",
+    message: {
+      id: "msg_2",
+      sender: "Human",
+      text: "@WarmGolden inspect",
+      attachments: [],
+      agentPromptKind: null,
+      source: "browser",
+      timestamp: "2026-06-30T00:00:00.000Z",
+      actorLabel: null,
+      agentIdentity: null,
+      threadRootId: "msg_2",
+      threadReplyToId: null,
+      thread: null,
+      replyTo: null,
+    },
+  };
+  registry.dispatchRoomStreamEvent(event);
+
+  assert.equal(claude.events.length, 1, "healthy providers still receive the frame");
+  assert.deepEqual(claude.contexts[0], {
+    roomSessions: [session("claude-code")],
+    populationComplete: false,
+    failedProviderIds: ["codex"],
+  });
 });
 
 test("registry isolates room stream dispatch failures by runtime", () => {

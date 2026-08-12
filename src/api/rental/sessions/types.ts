@@ -3,9 +3,12 @@ import type { rental_listings, rental_sessions } from "../../db/schema.js";
 export interface CreateSessionInput {
   listingId: string;
   renterAccountId: string;
-  repoOwner: string;
-  repoName: string;
-  baseBranch: string;
+  targetRoomId?: string;
+  roomHistoryAccess?: "full" | "filtered";
+  capabilityEnvelope?: Record<string, unknown> | null;
+  repoOwner?: string;
+  repoName?: string;
+  baseBranch?: string;
   taskTitle: string;
   taskPrompt: string;
   mode?: "scoped" | "trusted_open";

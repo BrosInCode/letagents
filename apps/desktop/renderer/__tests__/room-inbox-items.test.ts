@@ -2,16 +2,72 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type {
+  DesktopAgentPresence,
   DesktopGitHubRoomEvent,
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopRoomThreadInboxPage,
   DesktopTaskSummary,
 } from "../../electron/ipc-types";
+import type { DesktopSnapshotSourceStates } from "../../electron/ipc-types";
 import {
   buildDesktopInboxItems,
+  deriveInboxDegradation,
   desktopInboxItemFingerprint,
 } from "../src/components/desktop/content/room-inbox/items";
+
+describe("deriveInboxDegradation", () => {
+  const ready = () => ({ status: "ready" as const, error: null });
+  const readyStates = (): DesktopSnapshotSourceStates => ({
+    focusRooms: ready(),
+    tasks: ready(),
+    participants: ready(),
+    presence: ready(),
+    reasoning: ready(),
+    activityHistory: ready(),
+    roomArtifacts: ready(),
+    boardSettings: ready(),
+    messages: ready(),
+    githubEvents: ready(),
+  });
+
+  it("reports not degraded when everything is ready", () => {
+    assert.deepEqual(deriveInboxDegradation(readyStates()), { degraded: false, sources: [] });
+    assert.deepEqual(deriveInboxDegradation(null), { degraded: false, sources: [] });
+  });
+
+  it("flags every inbox-feeding source failure with readable labels in order", () => {
+    const states: DesktopSnapshotSourceStates = {
+      ...readyStates(),
+      tasks: { status: "error", error: "500" },
+      githubEvents: { status: "error", error: "500" },
+      reasoning: { status: "error", error: "500" },
+      presence: { status: "error", error: "500" },
+    };
+    const result = deriveInboxDegradation(states);
+    assert.equal(result.degraded, true);
+    assert.deepEqual(result.sources, ["Tasks", "GitHub checks", "Agent sessions", "Agents"]);
+  });
+
+  it("flags presence failures (offline-agent rows feed the inbox)", () => {
+    const states: DesktopSnapshotSourceStates = {
+      ...readyStates(),
+      presence: { status: "error", error: "500" },
+    };
+    assert.deepEqual(deriveInboxDegradation(states), { degraded: true, sources: ["Agents"] });
+  });
+
+  it("ignores failures in sources the inbox does not use (messages, participants, boardSettings)", () => {
+    const states: DesktopSnapshotSourceStates = {
+      ...readyStates(),
+      messages: { status: "error", error: "500" },
+      participants: { status: "error", error: "500" },
+      boardSettings: { status: "error", error: "500" },
+      focusRooms: { status: "error", error: "500" },
+    };
+    assert.deepEqual(deriveInboxDegradation(states), { degraded: false, sources: [] });
+  });
+});
 
 describe("desktop room inbox items", () => {
   it("derives actionable inbox rows from threads, tasks, GitHub failures, and blocked agents", () => {
@@ -88,7 +144,58 @@ describe("desktop room inbox items", () => {
     });
     assert.deepEqual(all.map((item) => item.id).sort(), ["thread:msg_1", "thread:msg_4"]);
   });
+
+  it("surfaces offline worker agents and ignores reachable or controller presence", () => {
+    const items = buildDesktopInboxItems({
+      filter: "actionable",
+      threadPage: null,
+      tasks: [],
+      githubEvents: [],
+      reasoningSessions: [],
+      presence: [
+        presence("FieldSignal | EmmyMay's agent | Codex", "worker", "offline"),
+        presence("RiverGrove | EmmyMay's agent | Claude Code", "worker", "active"),
+        presence("MistyMorrow | EmmyMay's agent | Agent", "controller", "offline"),
+      ],
+    });
+
+    assert.deepEqual(items.map((item) => item.kind), ["agent_offline"]);
+    const item = items[0];
+    assert.ok(item && item.kind === "agent_offline");
+    assert.equal(item.id, "agent-offline:FieldSignal | EmmyMay's agent | Codex");
+    assert.equal(item.title, "FieldSignal");
+    assert.equal(item.actionable, true);
+    assert.equal(item.context, "EmmyMay's agent");
+    assert.equal(item.activity[0]?.tone, "danger");
+  });
 });
+
+function presence(
+  actorLabel: string,
+  sessionKind: "controller" | "worker",
+  activityState: "active" | "away" | "offline",
+): DesktopAgentPresence {
+  return {
+    roomId: "room_1",
+    actorLabel,
+    agentKey: null,
+    agentInstanceId: null,
+    agentSessionId: null,
+    sessionKind,
+    runtime: "codex",
+    displayName: actorLabel.split(" | ")[0] || actorLabel,
+    ownerLabel: "EmmyMay",
+    ideLabel: "Codex",
+    repoBranch: null,
+    status: "idle",
+    statusText: null,
+    lastHeartbeatAt: "2026-06-01T08:30:00.000Z",
+    freshness: activityState === "offline" ? "stale" : "active",
+    activityState,
+    sourceFlags: ["delivery"],
+    livenessObservation: null,
+  };
+}
 
 function roomMessage(id: string, text: string, timestamp: string): DesktopRoomMessage {
   return {

@@ -15,11 +15,14 @@ import { dirname } from "node:path";
 
 import type {
   DesktopCursorMcpPolicy,
+  DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfileId,
   DesktopManagedAgentDeliveryMode,
+  DesktopManagedAgentFailure,
   DesktopManagedAgentPermissionRequest,
   DesktopManagedAgentSession,
   DesktopManagedAgentSessionStatus,
+  DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 import { getLetAgentsLocalStatePath } from "../paths.js";
 import { suggestLetAgentsCodename } from "./codenames.js";
@@ -34,118 +37,66 @@ const STATE_LOCK_SLEEP_BUFFER = new Int32Array(new SharedArrayBuffer(4));
 
 export type DesktopCodexJoinedVia = "join_code" | "join_room";
 
-export type DesktopClaudeCodeJoinedVia = "join_code" | "join_room";
-
 export type DesktopCursorJoinedVia = "join_code" | "join_room";
 
-export interface DesktopCodexLiveSessionState {
+
+export interface DesktopManagedLiveSessionBase {
   session_id: string;
   room_id: string;
   room_identifier: string;
   room_display_name?: string | null;
   display_name?: string | null;
-  /** Which desktop provider owns this Codex-engine session. Absent means "codex". */
-  provider_id?: string;
-  /** Model slug for BYOK providers that override the engine's default model. */
-  model?: string | null;
-  joined_via: DesktopCodexJoinedVia;
   cwd: string;
   repo_branch?: string | null;
+  model?: string | null;
+  effort?: DesktopManagedAgentEffort | null;
   stop_phrase: string;
   max_minutes: number;
   delivery_mode?: DesktopManagedAgentDeliveryMode;
   permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
   desktop_managed?: boolean;
+  supervisor_entry_id?: string | null;
   deadline_utc?: string | null;
   token: string;
+  agent_session_id?: string | null;
+  active_work?: {
+    kind: "message" | "task_update";
+    event_id?: string | null;
+    started_at: string;
+    summary?: string | null;
+  } | null;
+  status: DesktopManagedAgentSessionStatus;
+  last_error?: string | null;
+  failure?: DesktopManagedAgentFailure | null;
+  pending_event?: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }> | null;
+  queued_events?: Array<Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>>;
+  started_at: string;
+  updated_at: string;
+}
+
+export interface DesktopCodexLiveSessionState extends DesktopManagedLiveSessionBase {
+  /** Which desktop provider owns this Codex-engine session. Absent means "codex". */
+  provider_id?: string;
+  joined_via: DesktopCodexJoinedVia;
   thread_id: string;
   turn_id: string;
   server_url: string;
   server_pid?: number | null;
   launched_server: boolean;
   codex_bin: string;
-  agent_session_id?: string | null;
   reasoning_session_id?: string | null;
-  active_work?: {
-    kind: "message" | "task_update";
-    event_id?: string | null;
-    started_at: string;
-    summary?: string | null;
-  } | null;
-  status: DesktopManagedAgentSessionStatus;
-  last_error?: string | null;
-  started_at: string;
-  updated_at: string;
 }
 
-export interface DesktopClaudeCodeLiveSessionState {
-  session_id: string;
-  room_id: string;
-  room_identifier: string;
-  room_display_name?: string | null;
-  display_name?: string | null;
-  joined_via: DesktopClaudeCodeJoinedVia;
-  cwd: string;
-  repo_branch?: string | null;
-  stop_phrase: string;
-  max_minutes: number;
-  delivery_mode?: DesktopManagedAgentDeliveryMode;
-  permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
-  desktop_managed?: boolean;
-  deadline_utc?: string | null;
-  token: string;
-  claude_session_id?: string | null;
-  claude_bin: string;
-  agent_session_id?: string | null;
-  active_work?: {
-    kind: "message" | "task_update";
-    event_id?: string | null;
-    started_at: string;
-    summary?: string | null;
-  } | null;
-  status: DesktopManagedAgentSessionStatus;
-  last_error?: string | null;
-  recent_items?: Array<Record<string, unknown>>;
-  pending_permission_requests?: DesktopManagedAgentPermissionRequest[];
-  started_at: string;
-  updated_at: string;
-}
-
-export interface DesktopCursorLiveSessionState {
-  session_id: string;
-  room_id: string;
-  room_identifier: string;
-  room_display_name?: string | null;
-  display_name?: string | null;
+export interface DesktopCursorLiveSessionState extends DesktopManagedLiveSessionBase {
   joined_via: DesktopCursorJoinedVia;
-  cwd: string;
-  repo_branch?: string | null;
-  stop_phrase: string;
-  max_minutes: number;
-  delivery_mode?: DesktopManagedAgentDeliveryMode;
-  permission_profile_id?: DesktopManagedAgentPermissionProfileId | null;
   cursor_mcp_policy?: DesktopCursorMcpPolicy | null;
-  desktop_managed?: boolean;
-  deadline_utc?: string | null;
-  token: string;
   cursor_session_id?: string | null;
   cursor_bin: string;
-  agent_session_id?: string | null;
-  active_work?: {
-    kind: "message" | "task_update";
-    event_id?: string | null;
-    started_at: string;
-    summary?: string | null;
-  } | null;
-  status: DesktopManagedAgentSessionStatus;
-  last_error?: string | null;
   recent_items?: Array<Record<string, unknown>>;
   pending_permission_requests?: DesktopManagedAgentPermissionRequest[];
-  started_at: string;
-  updated_at: string;
 }
 
-interface SharedLetAgentsState {
+export interface SharedLetAgentsState {
   agent_identity?: StoredAgentIdentityState;
   agent_identities?: Record<string, StoredAgentIdentityState>;
   local_host_id?: string;
@@ -153,8 +104,6 @@ interface SharedLetAgentsState {
   current_agent_session_ids?: Record<string, string>;
   current_codex_live_session_ids?: Record<string, string>;
   codex_live_sessions?: Record<string, DesktopCodexLiveSessionState>;
-  current_claude_code_live_session_ids?: Record<string, string>;
-  claude_code_live_sessions?: Record<string, DesktopClaudeCodeLiveSessionState>;
   current_cursor_live_session_ids?: Record<string, string>;
   cursor_live_sessions?: Record<string, DesktopCursorLiveSessionState>;
 }
@@ -196,33 +145,56 @@ export interface StoredAgentSessionState {
   ended_at?: string | null;
 }
 
-interface BindCodexLiveSessionOptions {
-  allowStaleSingleCandidate?: boolean;
-}
-
-const CODEX_WORKER_BINDING_GRACE_MS = 2 * 60_000;
-
 function sleepSync(ms: number): void {
   if (ms > 0) {
     Atomics.wait(STATE_LOCK_SLEEP_BUFFER, 0, 0, ms);
   }
 }
 
-function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
-  if (!existsSync(statePath)) {
-    return {};
-  }
+function parseLocalState(raw: string): SharedLetAgentsState {
+  const parsed = JSON.parse(raw) as SharedLetAgentsState & {
+    current_claude_code_live_session_ids?: unknown;
+    claude_code_live_sessions?: unknown;
+  };
+  if (!parsed || typeof parsed !== "object") return {};
+  // The Electron-owned Claude runtime no longer exists. Drop its private
+  // session cache whenever local state is loaded so the next state write
+  // cannot preserve or revive that legacy execution path.
+  const {
+    current_claude_code_live_session_ids: _legacyCurrentClaudeSessionIds,
+    claude_code_live_sessions: _legacyClaudeSessions,
+    ...current
+  } = parsed;
+  return current;
+}
 
+function readLocalStateFromPath(statePath: string): SharedLetAgentsState {
+  if (!existsSync(statePath)) return {};
   try {
-    const parsed = JSON.parse(readFileSync(statePath, "utf-8")) as SharedLetAgentsState;
-    return parsed && typeof parsed === "object" ? parsed : {};
+    return parseLocalState(readFileSync(statePath, "utf-8"));
   } catch {
     return {};
   }
 }
 
+export function readAgentLocalStateSnapshot(): {
+  state: SharedLetAgentsState;
+  complete: boolean;
+} {
+  const statePath = getLetAgentsLocalStatePath();
+  if (!existsSync(statePath)) {
+    return { state: {}, complete: true };
+  }
+
+  try {
+    return { state: parseLocalState(readFileSync(statePath, "utf-8")), complete: true };
+  } catch {
+    return { state: {}, complete: false };
+  }
+}
+
 export function readAgentLocalState(): SharedLetAgentsState {
-  return readLocalStateFromPath(getLetAgentsLocalStatePath());
+  return readAgentLocalStateSnapshot().state;
 }
 
 function writeLocalStateUnlocked(statePath: string, state: SharedLetAgentsState): void {
@@ -391,63 +363,211 @@ export function markAgentSessionEnded(
   return endedSession;
 }
 
-function normalizeRoomId(value: string | null | undefined): string {
+export function normalizeRoomId(value: string | null | undefined): string {
   return String(value ?? "").trim().toLowerCase();
 }
 
-export function getCurrentCodexLiveSession(roomId?: string | null): DesktopCodexLiveSessionState | null {
-  const state = readAgentLocalState();
-  const sessionIds = state.current_codex_live_session_ids;
-  if (!sessionIds) {
-    return null;
+
+type LiveSessionMapKey = {
+  sessions: "codex_live_sessions" | "cursor_live_sessions";
+  currentIds: "current_codex_live_session_ids" | "current_cursor_live_session_ids";
+};
+
+type LiveSessionCurrentLookup = "normalize-entries" | "direct-or-raw";
+
+function createLiveSessionStore<TState extends DesktopManagedLiveSessionBase>(
+  maps: LiveSessionMapKey,
+  options: { currentLookup?: LiveSessionCurrentLookup } = {},
+) {
+  const currentLookup = options.currentLookup ?? "normalize-entries";
+
+  function sessionsOf(state: SharedLetAgentsState): Record<string, TState> {
+    return (state[maps.sessions] as Record<string, TState> | undefined) ?? {};
   }
 
-  if (roomId) {
-    const normalizedRoomId = normalizeRoomId(roomId);
-    const sessionId = Object.entries(sessionIds).find(([key]) => normalizeRoomId(key) === normalizedRoomId)?.[1];
-    if (sessionId) {
-      return state.codex_live_sessions?.[sessionId] ?? null;
+  function currentIdsOf(state: SharedLetAgentsState): Record<string, string> {
+    return (state[maps.currentIds] as Record<string, string> | undefined) ?? {};
+  }
+
+  function getCurrent(roomId?: string | null): TState | null {
+    const state = readAgentLocalState();
+
+    if (currentLookup === "direct-or-raw") {
+      const sessionIds = currentIdsOf(state);
+      const normalizedRoomId = normalizeRoomId(roomId);
+      if (normalizedRoomId) {
+        const directId = sessionIds[normalizedRoomId] ?? sessionIds[roomId ?? ""];
+        const direct = directId ? sessionsOf(state)[directId] ?? null : null;
+        if (direct) {
+          return direct;
+        }
+        return Object.values(sessionsOf(state))
+          .filter((session) =>
+            normalizeRoomId(session.room_id) === normalizedRoomId ||
+            normalizeRoomId(session.room_identifier) === normalizedRoomId
+          )
+          .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
+      }
+
+      let best: TState | null = null;
+      for (const id of Object.values(sessionIds)) {
+        const session = sessionsOf(state)[id];
+        if (session && (!best || session.updated_at > best.updated_at)) {
+          best = session;
+        }
+      }
+      return best;
     }
-    return Object.values(state.codex_live_sessions ?? {})
+
+    const sessionIds = state[maps.currentIds] as Record<string, string> | undefined;
+    if (!sessionIds) {
+      return null;
+    }
+
+    if (roomId) {
+      const normalizedRoomId = normalizeRoomId(roomId);
+      const sessionId = Object.entries(sessionIds).find(([key]) => normalizeRoomId(key) === normalizedRoomId)?.[1];
+      if (sessionId) {
+        return sessionsOf(state)[sessionId] ?? null;
+      }
+      return Object.values(sessionsOf(state))
+        .filter((session) =>
+          normalizeRoomId(session.room_id) === normalizedRoomId ||
+          normalizeRoomId(session.room_identifier) === normalizedRoomId
+        )
+        .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
+    }
+
+    let best: TState | null = null;
+    for (const id of Object.values(sessionIds)) {
+      const session = sessionsOf(state)[id];
+      if (session && (!best || session.updated_at > best.updated_at)) {
+        best = session;
+      }
+    }
+    return best;
+  }
+
+  function getStored(sessionId: string): TState | null {
+    return sessionsOf(readAgentLocalState())[sessionId] ?? null;
+  }
+
+  function listStored(roomId?: string | null): TState[] {
+    const normalizedRoom = normalizeRoomId(roomId) || null;
+    return Object.values(sessionsOf(readAgentLocalState()))
       .filter((session) =>
-        normalizeRoomId(session.room_id) === normalizedRoomId ||
-        normalizeRoomId(session.room_identifier) === normalizedRoomId
+        !normalizedRoom ||
+        normalizeRoomId(session.room_id) === normalizedRoom ||
+        normalizeRoomId(session.room_identifier) === normalizedRoom
       )
-      .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
+      .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
   }
 
-  let best: DesktopCodexLiveSessionState | null = null;
-  for (const id of Object.values(sessionIds)) {
-    const session = state.codex_live_sessions?.[id];
-    if (session && (!best || session.updated_at > best.updated_at)) {
-      best = session;
-    }
+  function isManaged(session: TState): boolean {
+    return session.desktop_managed === true || Boolean(session.delivery_mode);
   }
-  return best;
+
+  function listManaged(roomId?: string | null): TState[] {
+    return listStored(roomId).filter(isManaged);
+  }
+
+  function save(session: TState, makeCurrent = true): TState {
+    updateAgentLocalState((state) => {
+      const sessions = { ...sessionsOf(state), [session.session_id]: session };
+      (state as SharedLetAgentsState)[maps.sessions] = sessions as never;
+      if (makeCurrent) {
+        const currentIds = { ...currentIdsOf(state), [session.room_id]: session.session_id };
+        (state as SharedLetAgentsState)[maps.currentIds] = currentIds as never;
+      }
+      return state;
+    });
+    return session;
+  }
+
+  function update(
+    sessionId: string,
+    updater: (session: TState) => TState,
+  ): TState | null {
+    let updatedSession: TState | null = null;
+    updateAgentLocalState((state) => {
+      const existing = sessionsOf(state)[sessionId];
+      if (!existing) {
+        return state;
+      }
+      const updated = updater(existing);
+      const sessions = { ...sessionsOf(state), [sessionId]: updated };
+      (state as SharedLetAgentsState)[maps.sessions] = sessions as never;
+      const currentIds = { ...currentIdsOf(state) };
+      if (!currentIds[updated.room_id]) {
+        currentIds[updated.room_id] = sessionId;
+      }
+      (state as SharedLetAgentsState)[maps.currentIds] = currentIds as never;
+      updatedSession = updated;
+      return state;
+    });
+    return updatedSession;
+  }
+
+  function remove(sessionId: string): TState | null {
+    let removed: TState | null = null;
+    updateAgentLocalState((state) => {
+      const existing = sessionsOf(state)[sessionId];
+      if (!existing) return state;
+      removed = existing;
+      const sessions = { ...sessionsOf(state) };
+      delete sessions[sessionId];
+      (state as SharedLetAgentsState)[maps.sessions] = sessions as never;
+      const currentIds = { ...currentIdsOf(state) };
+      for (const [roomId, currentSessionId] of Object.entries(currentIds)) {
+        if (currentSessionId === sessionId) delete currentIds[roomId];
+      }
+      (state as SharedLetAgentsState)[maps.currentIds] = currentIds as never;
+      return state;
+    });
+    return removed;
+  }
+
+  return {
+    getCurrent,
+    getStored,
+    listStored,
+    isManaged,
+    listManaged,
+    save,
+    update,
+    remove,
+  };
+}
+
+const codexLiveSessionStore = createLiveSessionStore<DesktopCodexLiveSessionState>({
+  sessions: "codex_live_sessions",
+  currentIds: "current_codex_live_session_ids",
+});
+
+const cursorLiveSessionStore = createLiveSessionStore<DesktopCursorLiveSessionState>({
+  sessions: "cursor_live_sessions",
+  currentIds: "current_cursor_live_session_ids",
+}, { currentLookup: "direct-or-raw" });
+
+export function getCurrentCodexLiveSession(roomId?: string | null): DesktopCodexLiveSessionState | null {
+  return codexLiveSessionStore.getCurrent(roomId);
 }
 
 export function getStoredCodexLiveSession(sessionId: string): DesktopCodexLiveSessionState | null {
-  return readAgentLocalState().codex_live_sessions?.[sessionId] ?? null;
+  return codexLiveSessionStore.getStored(sessionId);
 }
 
 export function listStoredCodexLiveSessions(roomId?: string | null): DesktopCodexLiveSessionState[] {
-  const normalizedRoom = normalizeRoomId(roomId) || null;
-  return Object.values(readAgentLocalState().codex_live_sessions ?? {})
-    .filter((session) =>
-      !normalizedRoom ||
-      normalizeRoomId(session.room_id) === normalizedRoom ||
-      normalizeRoomId(session.room_identifier) === normalizedRoom
-    )
-    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  return codexLiveSessionStore.listStored(roomId);
 }
 
 export function isDesktopManagedCodexLiveSession(session: DesktopCodexLiveSessionState): boolean {
-  return session.desktop_managed === true || Boolean(session.delivery_mode);
+  return codexLiveSessionStore.isManaged(session);
 }
 
 export function listDesktopManagedCodexLiveSessions(roomId?: string | null): DesktopCodexLiveSessionState[] {
   return dedupeDesktopManagedCodexLiveSessions(
-    listStoredCodexLiveSessions(roomId).filter(isDesktopManagedCodexLiveSession),
+    codexLiveSessionStore.listManaged(roomId),
   );
 }
 
@@ -461,6 +581,12 @@ export function listDesktopManagedCodexLiveSessionsForProvider(
 ): DesktopCodexLiveSessionState[] {
   return listDesktopManagedCodexLiveSessions(roomId)
     .filter((session) => codexLiveSessionProviderId(session) === providerId);
+}
+
+export function removeStoredCodexLiveSession(
+  sessionId: string,
+): DesktopCodexLiveSessionState | null {
+  return codexLiveSessionStore.remove(sessionId);
 }
 
 export function listCodexDisplayNamesForRoom(roomId: string): string[] {
@@ -490,7 +616,13 @@ export function listCodexDisplayNamesForRoom(roomId: string): string[] {
     .filter(Boolean);
 }
 
-function isCodexAgentSession(session: StoredAgentSessionState): boolean {
+export function supervisorEntryIdForAgentSession(agentSessionId: string): string | null {
+  return listStoredCodexLiveSessions()
+    .find((session) => session.agent_session_id === agentSessionId)
+    ?.supervisor_entry_id ?? null;
+}
+
+export function isCodexAgentSession(session: StoredAgentSessionState): boolean {
   const runtime = String(session.runtime ?? "").trim().toLowerCase();
   const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
   const livenessCapability = String(session.liveness_capability ?? "").trim().toLowerCase();
@@ -516,143 +648,6 @@ function sameSessionText(left: string | null | undefined, right: string | null |
   const leftKey = normalizedSessionText(left);
   const rightKey = normalizedSessionText(right);
   return Boolean(leftKey && rightKey && leftKey === rightKey);
-}
-
-function workerHasExactLiveSessionMarker(
-  worker: StoredAgentSessionState,
-  session: DesktopCodexLiveSessionState,
-): boolean {
-  const token = String(session.token ?? "").trim();
-  if (!token) {
-    return false;
-  }
-  const runtimeMarker = `codex:${token}`;
-  const instanceMarker = `desktop-codex:${token}`;
-  return String(worker.runtime ?? "").trim() === runtimeMarker ||
-    String(worker.agent_instance_id ?? "").trim() === instanceMarker ||
-    String(worker.tool_bridge_id ?? "").includes(runtimeMarker) ||
-    String(worker.tool_bridge_id ?? "").includes(instanceMarker);
-}
-
-function workerLabelMatchesLiveSession(
-  worker: StoredAgentSessionState,
-  session: DesktopCodexLiveSessionState,
-): boolean {
-  const displayName = normalizedSessionText(session.display_name);
-  if (!displayName) {
-    return true;
-  }
-  return sameSessionText(worker.display_name, session.display_name) ||
-    sameSessionText(worker.actor_label, session.display_name);
-}
-
-function workerStartedNearLiveSession(
-  worker: StoredAgentSessionState,
-  session: DesktopCodexLiveSessionState,
-): boolean {
-  const startedAt = sessionTimestamp(session.started_at);
-  const createdAt = sessionTimestamp(worker.created_at);
-  if (!startedAt || !createdAt) {
-    return false;
-  }
-  return createdAt >= startedAt - 1_000 &&
-    createdAt <= startedAt + CODEX_WORKER_BINDING_GRACE_MS;
-}
-
-function workerCanBindToLiveSession(
-  worker: StoredAgentSessionState,
-  session: DesktopCodexLiveSessionState,
-): boolean {
-  if (workerHasExactLiveSessionMarker(worker, session)) {
-    return true;
-  }
-  return workerStartedNearLiveSession(worker, session) &&
-    workerLabelMatchesLiveSession(worker, session);
-}
-
-function codexWorkerSessionsForRoom(
-  state: SharedLetAgentsState,
-  roomId: string,
-): StoredAgentSessionState[] {
-  const normalizedRoomId = normalizeRoomId(roomId);
-  return Object.values(state.agent_sessions ?? {})
-    .filter((session) =>
-      normalizeRoomId(session.room_id) === normalizedRoomId &&
-      session.session_kind === "worker" &&
-      session.session_id &&
-      !session.ended_at &&
-      isCodexAgentSession(session)
-    )
-    .sort((left, right) =>
-      sessionTimestamp(left.created_at) - sessionTimestamp(right.created_at)
-      || left.session_id.localeCompare(right.session_id)
-    );
-}
-
-function codexWorkerSessionForLiveSession(
-  state: SharedLetAgentsState,
-  session: DesktopCodexLiveSessionState,
-  options: BindCodexLiveSessionOptions = {},
-): StoredAgentSessionState | null {
-  const candidates = codexWorkerSessionsForRoom(state, session.room_id);
-  if (!candidates.length) {
-    return null;
-  }
-
-  if (session.agent_session_id) {
-    const bound = state.agent_sessions?.[session.agent_session_id] ?? null;
-    if (
-      bound &&
-      candidates.some((candidate) => candidate.session_id === bound.session_id) &&
-      workerCanBindToLiveSession(bound, session)
-    ) {
-      return bound;
-    }
-  }
-
-  const exactRuntimeMatches = candidates.filter((candidate) =>
-    workerHasExactLiveSessionMarker(candidate, session)
-  );
-  if (exactRuntimeMatches.length === 1) {
-    return exactRuntimeMatches[0] ?? null;
-  }
-
-  const plausibleStartupMatches = candidates.filter((candidate) =>
-    workerStartedNearLiveSession(candidate, session) &&
-    workerLabelMatchesLiveSession(candidate, session)
-  );
-  if (plausibleStartupMatches.length === 1) {
-    return plausibleStartupMatches[0] ?? null;
-  }
-
-  const allowStaleSingleCandidate = options.allowStaleSingleCandidate === true;
-  const staleLabelMatches = candidates.filter((candidate) =>
-    workerLabelMatchesLiveSession(candidate, session)
-  );
-  return allowStaleSingleCandidate && plausibleStartupMatches.length === 0 && staleLabelMatches.length === 1
-    ? staleLabelMatches[0] ?? null
-    : null;
-}
-
-function persistedWorkerSessionIsInvalid(
-  state: SharedLetAgentsState,
-  session: DesktopCodexLiveSessionState,
-): boolean {
-  if (!session.agent_session_id) {
-    return false;
-  }
-  const persisted = state.agent_sessions?.[session.agent_session_id];
-  if (!persisted || persisted.ended_at) {
-    return true;
-  }
-  if (
-    persisted.session_kind !== "worker" ||
-    !isCodexAgentSession(persisted) ||
-    normalizeRoomId(persisted.room_id) !== normalizeRoomId(session.room_id)
-  ) {
-    return true;
-  }
-  return !workerCanBindToLiveSession(persisted, session);
 }
 
 function desktopManagedSessionDedupeKey(session: DesktopCodexLiveSessionState): string {
@@ -683,6 +678,7 @@ function statusSortWeight(status: DesktopManagedAgentSessionStatus): number {
       return 4;
     case "completed":
       return 3;
+    case "blocked":
     case "unknown":
       return 2;
     case "failed":
@@ -725,38 +721,17 @@ function dedupeDesktopManagedCodexLiveSessions(
     .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
 }
 
-export function bindCodexLiveSessionToWorker(
-  session: DesktopCodexLiveSessionState,
-  options: BindCodexLiveSessionOptions = {},
-): DesktopCodexLiveSessionState {
-  const state = readAgentLocalState();
-  const workerSession = codexWorkerSessionForLiveSession(state, session, options);
-  if (!workerSession) {
-    if (persistedWorkerSessionIsInvalid(state, session)) {
-      return updateCodexLiveSession(session.session_id, (current) => ({
-        ...current,
-        agent_session_id: null,
-        updated_at: new Date().toISOString(),
-      })) ?? {
-        ...session,
-        agent_session_id: null,
-      };
-    }
-    return session;
-  }
-  if (workerSession.session_id === session.agent_session_id) {
-    return session;
-  }
+export { bindCodexLiveSessionToWorker } from "./codex-live-session-binding.js";
+export {
+  codexWorkerSessionForLiveSession,
+  persistedWorkerSessionIsInvalid,
+  type BindCodexLiveSessionOptions,
+} from "./codex-live-session-lookup.js";
 
-  return updateCodexLiveSession(session.session_id, (current) => ({
-    ...current,
-    agent_session_id: workerSession.session_id,
-    updated_at: new Date().toISOString(),
-  })) ?? {
-    ...session,
-    agent_session_id: workerSession.session_id,
-  };
-}
+import {
+  codexWorkerSessionForLiveSession,
+  workerCanBindToLiveSession,
+} from "./codex-live-session-lookup.js";
 
 export function managedAgentDeliveryMode(
   session: DesktopCodexLiveSessionState,
@@ -768,172 +743,34 @@ export function saveCodexLiveSession(
   session: DesktopCodexLiveSessionState,
   makeCurrent = true,
 ): DesktopCodexLiveSessionState {
-  updateAgentLocalState((state) => {
-    state.codex_live_sessions = state.codex_live_sessions ?? {};
-    state.codex_live_sessions[session.session_id] = session;
-    if (makeCurrent) {
-      state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
-      state.current_codex_live_session_ids[session.room_id] = session.session_id;
-    }
-    return state;
-  });
-  return session;
+  return codexLiveSessionStore.save(session, makeCurrent);
 }
 
 export function updateCodexLiveSession(
   sessionId: string,
   updater: (session: DesktopCodexLiveSessionState) => DesktopCodexLiveSessionState,
 ): DesktopCodexLiveSessionState | null {
-  let updatedSession: DesktopCodexLiveSessionState | null = null;
-  updateAgentLocalState((state) => {
-    const existing = state.codex_live_sessions?.[sessionId];
-    if (!existing) {
-      return state;
-    }
-
-    const updated = updater(existing);
-    state.codex_live_sessions = state.codex_live_sessions ?? {};
-    state.codex_live_sessions[sessionId] = updated;
-    state.current_codex_live_session_ids = state.current_codex_live_session_ids ?? {};
-    if (!state.current_codex_live_session_ids[updated.room_id]) {
-      state.current_codex_live_session_ids[updated.room_id] = sessionId;
-    }
-    updatedSession = updated;
-    return state;
-  });
-  return updatedSession;
-}
-
-export function getCurrentClaudeCodeLiveSession(roomId?: string | null): DesktopClaudeCodeLiveSessionState | null {
-  const state = readAgentLocalState();
-  const sessionIds = state.current_claude_code_live_session_ids;
-  if (!sessionIds) {
-    return null;
-  }
-
-  if (roomId) {
-    const normalizedRoomId = normalizeRoomId(roomId);
-    const sessionId = Object.entries(sessionIds).find(([key]) => normalizeRoomId(key) === normalizedRoomId)?.[1];
-    if (sessionId) {
-      return state.claude_code_live_sessions?.[sessionId] ?? null;
-    }
-    return Object.values(state.claude_code_live_sessions ?? {})
-      .filter((session) =>
-        normalizeRoomId(session.room_id) === normalizedRoomId ||
-        normalizeRoomId(session.room_identifier) === normalizedRoomId
-      )
-      .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
-  }
-
-  let best: DesktopClaudeCodeLiveSessionState | null = null;
-  for (const id of Object.values(sessionIds)) {
-    const session = state.claude_code_live_sessions?.[id];
-    if (session && (!best || session.updated_at > best.updated_at)) {
-      best = session;
-    }
-  }
-  return best;
-}
-
-export function getStoredClaudeCodeLiveSession(sessionId: string): DesktopClaudeCodeLiveSessionState | null {
-  return readAgentLocalState().claude_code_live_sessions?.[sessionId] ?? null;
-}
-
-export function listStoredClaudeCodeLiveSessions(roomId?: string | null): DesktopClaudeCodeLiveSessionState[] {
-  const normalizedRoom = normalizeRoomId(roomId) || null;
-  return Object.values(readAgentLocalState().claude_code_live_sessions ?? {})
-    .filter((session) =>
-      !normalizedRoom ||
-      normalizeRoomId(session.room_id) === normalizedRoom ||
-      normalizeRoomId(session.room_identifier) === normalizedRoom
-    )
-    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
-}
-
-export function isDesktopManagedClaudeCodeLiveSession(session: DesktopClaudeCodeLiveSessionState): boolean {
-  return session.desktop_managed === true || Boolean(session.delivery_mode);
-}
-
-export function listDesktopManagedClaudeCodeLiveSessions(roomId?: string | null): DesktopClaudeCodeLiveSessionState[] {
-  return listStoredClaudeCodeLiveSessions(roomId).filter(isDesktopManagedClaudeCodeLiveSession);
-}
-
-export function listClaudeCodeDisplayNamesForRoom(roomId: string): string[] {
-  const normalizedRoom = normalizeRoomId(roomId);
-  if (!normalizedRoom) {
-    return [];
-  }
-
-  const state = readAgentLocalState();
-  const liveSessionNames = Object.values(state.claude_code_live_sessions ?? {})
-    .filter((session) =>
-      normalizeRoomId(session.room_id) === normalizedRoom ||
-      normalizeRoomId(session.room_identifier) === normalizedRoom
-    )
-    .map((session) => session.display_name);
-  const workerNames = Object.values(state.agent_sessions ?? {})
-    .filter((session) =>
-      normalizeRoomId(session.room_id) === normalizedRoom &&
-      session.session_kind === "worker" &&
-      !session.ended_at &&
-      isClaudeCodeAgentSession(session)
-    )
-    .flatMap((session) => [session.display_name, session.actor_label]);
-
-  return [...liveSessionNames, ...workerNames]
-    .map((name) => String(name ?? "").trim())
-    .filter(Boolean);
+  return codexLiveSessionStore.update(sessionId, updater);
 }
 
 export function getCurrentCursorLiveSession(roomId?: string | null): DesktopCursorLiveSessionState | null {
-  const state = readAgentLocalState();
-  const sessionIds = state.current_cursor_live_session_ids ?? {};
-  const normalizedRoomId = normalizeRoomId(roomId);
-  if (normalizedRoomId) {
-    const directId = sessionIds[normalizedRoomId] ?? sessionIds[roomId ?? ""];
-    const direct = directId ? state.cursor_live_sessions?.[directId] ?? null : null;
-    if (direct) {
-      return direct;
-    }
-    return Object.values(state.cursor_live_sessions ?? {})
-      .filter((session) =>
-        normalizeRoomId(session.room_id) === normalizedRoomId ||
-        normalizeRoomId(session.room_identifier) === normalizedRoomId
-      )
-      .sort((left, right) => right.updated_at.localeCompare(left.updated_at))[0] ?? null;
-  }
-
-  let best: DesktopCursorLiveSessionState | null = null;
-  for (const id of Object.values(sessionIds)) {
-    const session = state.cursor_live_sessions?.[id];
-    if (session && (!best || session.updated_at > best.updated_at)) {
-      best = session;
-    }
-  }
-  return best;
+  return cursorLiveSessionStore.getCurrent(roomId);
 }
 
 export function getStoredCursorLiveSession(sessionId: string): DesktopCursorLiveSessionState | null {
-  return readAgentLocalState().cursor_live_sessions?.[sessionId] ?? null;
+  return cursorLiveSessionStore.getStored(sessionId);
 }
 
 export function listStoredCursorLiveSessions(roomId?: string | null): DesktopCursorLiveSessionState[] {
-  const normalizedRoom = normalizeRoomId(roomId) || null;
-  return Object.values(readAgentLocalState().cursor_live_sessions ?? {})
-    .filter((session) =>
-      !normalizedRoom ||
-      normalizeRoomId(session.room_id) === normalizedRoom ||
-      normalizeRoomId(session.room_identifier) === normalizedRoom
-    )
-    .sort((left, right) => right.updated_at.localeCompare(left.updated_at));
+  return cursorLiveSessionStore.listStored(roomId);
 }
 
 export function isDesktopManagedCursorLiveSession(session: DesktopCursorLiveSessionState): boolean {
-  return session.desktop_managed === true || Boolean(session.delivery_mode);
+  return cursorLiveSessionStore.isManaged(session);
 }
 
 export function listDesktopManagedCursorLiveSessions(roomId?: string | null): DesktopCursorLiveSessionState[] {
-  return listStoredCursorLiveSessions(roomId).filter(isDesktopManagedCursorLiveSession);
+  return cursorLiveSessionStore.listManaged(roomId);
 }
 
 export function listCursorDisplayNamesForRoom(roomId: string): string[] {
@@ -963,19 +800,6 @@ export function listCursorDisplayNamesForRoom(roomId: string): string[] {
     .filter(Boolean);
 }
 
-function isClaudeCodeAgentSession(session: StoredAgentSessionState): boolean {
-  const runtime = String(session.runtime ?? "").trim().toLowerCase();
-  const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
-  const livenessCapability = String(session.liveness_capability ?? "").trim().toLowerCase();
-  const toolBridgeId = String(session.tool_bridge_id ?? "").trim().toLowerCase();
-
-  return runtime === "claude-code" ||
-    runtime.startsWith("claude-code:") ||
-    ideLabel === "claude code" ||
-    livenessCapability.includes("claude") ||
-    /(^|:)claude-code(:|$)/.test(toolBridgeId);
-}
-
 function isCursorAgentSession(session: StoredAgentSessionState): boolean {
   const runtime = String(session.runtime ?? "").trim().toLowerCase();
   const ideLabel = String(session.ide_label ?? "").trim().toLowerCase();
@@ -989,84 +813,18 @@ function isCursorAgentSession(session: StoredAgentSessionState): boolean {
     /(^|:)cursor(:|$)/.test(toolBridgeId);
 }
 
-export function saveClaudeCodeLiveSession(
-  session: DesktopClaudeCodeLiveSessionState,
-  makeCurrent = true,
-): DesktopClaudeCodeLiveSessionState {
-  updateAgentLocalState((state) => {
-    state.claude_code_live_sessions = state.claude_code_live_sessions ?? {};
-    state.claude_code_live_sessions[session.session_id] = session;
-    if (makeCurrent) {
-      state.current_claude_code_live_session_ids = state.current_claude_code_live_session_ids ?? {};
-      state.current_claude_code_live_session_ids[session.room_id] = session.session_id;
-    }
-    return state;
-  });
-  return session;
-}
-
-export function updateClaudeCodeLiveSession(
-  sessionId: string,
-  updater: (session: DesktopClaudeCodeLiveSessionState) => DesktopClaudeCodeLiveSessionState,
-): DesktopClaudeCodeLiveSessionState | null {
-  let updatedSession: DesktopClaudeCodeLiveSessionState | null = null;
-  updateAgentLocalState((state) => {
-    const existing = state.claude_code_live_sessions?.[sessionId];
-    if (!existing) {
-      return state;
-    }
-
-    const updated = updater(existing);
-    state.claude_code_live_sessions = state.claude_code_live_sessions ?? {};
-    state.claude_code_live_sessions[sessionId] = updated;
-    state.current_claude_code_live_session_ids = state.current_claude_code_live_session_ids ?? {};
-    if (!state.current_claude_code_live_session_ids[updated.room_id]) {
-      state.current_claude_code_live_session_ids[updated.room_id] = sessionId;
-    }
-    updatedSession = updated;
-    return state;
-  });
-  return updatedSession;
-}
-
 export function saveCursorLiveSession(
   session: DesktopCursorLiveSessionState,
   makeCurrent = true,
 ): DesktopCursorLiveSessionState {
-  updateAgentLocalState((state) => {
-    state.cursor_live_sessions = state.cursor_live_sessions ?? {};
-    state.cursor_live_sessions[session.session_id] = session;
-    if (makeCurrent) {
-      state.current_cursor_live_session_ids = state.current_cursor_live_session_ids ?? {};
-      state.current_cursor_live_session_ids[session.room_id] = session.session_id;
-    }
-    return state;
-  });
-  return session;
+  return cursorLiveSessionStore.save(session, makeCurrent);
 }
 
 export function updateCursorLiveSession(
   sessionId: string,
   updater: (session: DesktopCursorLiveSessionState) => DesktopCursorLiveSessionState,
 ): DesktopCursorLiveSessionState | null {
-  let updatedSession: DesktopCursorLiveSessionState | null = null;
-  updateAgentLocalState((state) => {
-    const existing = state.cursor_live_sessions?.[sessionId];
-    if (!existing) {
-      return state;
-    }
-
-    const updated = updater(existing);
-    state.cursor_live_sessions = state.cursor_live_sessions ?? {};
-    state.cursor_live_sessions[sessionId] = updated;
-    state.current_cursor_live_session_ids = state.current_cursor_live_session_ids ?? {};
-    if (!state.current_cursor_live_session_ids[updated.room_id]) {
-      state.current_cursor_live_session_ids[updated.room_id] = sessionId;
-    }
-    updatedSession = updated;
-    return state;
-  });
-  return updatedSession;
+  return cursorLiveSessionStore.update(sessionId, updater);
 }
 
 function nonGenericCodexName(value: string | null | undefined): string | null {
@@ -1116,10 +874,11 @@ export function toPublicManagedAgentSession(
     deliveryMode: managedAgentDeliveryMode(session),
     permissionProfileId: permissionProfile.id,
     permissionProfile,
-    canStop: Boolean(activeWorkerSessionId) &&
+    canStop: !session.supervisor_entry_id && Boolean(activeWorkerSessionId) &&
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "blocked" ||
         session.status === "unknown" ||
         (managedAgentDeliveryMode(session) === "desktop_events" && session.status === "completed")
       ),
@@ -1130,6 +889,7 @@ export function toPublicManagedAgentSession(
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? (providerId === "open-model" ? "Open Model" : "Codex"),
     model: session.model ?? null,
+    effort: session.effort ?? null,
     reasoningSessionId: session.reasoning_session_id ?? null,
     activeWork: session.active_work
       ? {
@@ -1143,115 +903,8 @@ export function toPublicManagedAgentSession(
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
-  };
-}
-
-function nonGenericClaudeCodeName(value: string | null | undefined): string | null {
-  const trimmed = String(value ?? "").trim();
-  if (!trimmed || /^claude(?:\s+code)?(?:\s+\d+)?$/i.test(trimmed)) {
-    return null;
-  }
-  return trimmed;
-}
-
-function workerHasExactClaudeCodeMarker(
-  worker: StoredAgentSessionState,
-  session: DesktopClaudeCodeLiveSessionState,
-): boolean {
-  const token = String(session.token ?? "").trim();
-  if (!token) {
-    return false;
-  }
-  const runtimeMarker = `claude-code:${token}`;
-  const instanceMarker = `desktop-claude-code:${token}`;
-  return String(worker.runtime ?? "").trim() === runtimeMarker ||
-    String(worker.agent_instance_id ?? "").trim() === instanceMarker ||
-    String(worker.tool_bridge_id ?? "").includes(runtimeMarker) ||
-    String(worker.tool_bridge_id ?? "").includes(instanceMarker);
-}
-
-function workerCanRepresentClaudeCodeSession(
-  worker: StoredAgentSessionState,
-  session: DesktopClaudeCodeLiveSessionState,
-): boolean {
-  if (
-    normalizeRoomId(worker.room_id) !== normalizeRoomId(session.room_id) ||
-    worker.session_kind !== "worker" ||
-    worker.ended_at ||
-    !isClaudeCodeAgentSession(worker)
-  ) {
-    return false;
-  }
-  return worker.session_id === session.agent_session_id ||
-    workerHasExactClaudeCodeMarker(worker, session) ||
-    sameSessionText(worker.display_name, session.display_name) ||
-    sameSessionText(worker.actor_label, session.display_name);
-}
-
-function publicDisplayNameForClaudeCodeSession(
-  session: DesktopClaudeCodeLiveSessionState,
-  workerSession: StoredAgentSessionState | null,
-): string {
-  return nonGenericClaudeCodeName(workerSession?.display_name) ||
-    nonGenericClaudeCodeName(session.display_name) ||
-    nonGenericClaudeCodeName(workerSession?.actor_label) ||
-    suggestLetAgentsCodename(listClaudeCodeDisplayNamesForRoom(session.room_id), session.token || session.session_id);
-}
-
-export function toPublicClaudeCodeManagedAgentSession(
-  session: DesktopClaudeCodeLiveSessionState,
-): DesktopManagedAgentSession {
-  const state = readAgentLocalState();
-  const persistedWorker = session.agent_session_id
-    ? state.agent_sessions?.[session.agent_session_id] ?? null
-    : null;
-  const persistedWorkerActive = Boolean(
-    persistedWorker &&
-    workerCanRepresentClaudeCodeSession(persistedWorker, session),
-  );
-  const activeWorkerSessionId = persistedWorkerActive ? session.agent_session_id ?? null : null;
-  const workerSession = persistedWorkerActive ? persistedWorker : null;
-  const displayName = publicDisplayNameForClaudeCodeSession(session, workerSession);
-  const deliveryMode = session.delivery_mode || "desktop_events";
-  const permissionProfile = managedAgentPermissionProfileForProvider("claude-code", session.permission_profile_id);
-  return {
-    id: session.session_id,
-    providerId: "claude-code",
-    runtime: "claude-code",
-    roomIdentifier: session.room_identifier || session.room_id,
-    roomDisplayName: session.room_display_name ?? null,
-    repoRootPath: session.cwd,
-    repoBranch: session.repo_branch ?? null,
-    status: session.status,
-    deliveryMode,
-    permissionProfileId: permissionProfile.id,
-    permissionProfile,
-    canStop: Boolean(activeWorkerSessionId) &&
-      (
-        session.status === "starting" ||
-        session.status === "running" ||
-        session.status === "unknown" ||
-        (deliveryMode === "desktop_events" && session.status === "completed")
-      ),
-    agentSessionId: activeWorkerSessionId,
-    actorLabel: nonGenericClaudeCodeName(workerSession?.actor_label) ?? displayName,
-    agentKey: workerSession?.agent_key ?? "claude-code",
-    displayName,
-    ownerLabel: workerSession?.owner_label ?? "Local desktop",
-    ideLabel: workerSession?.ide_label ?? "Claude Code",
-    reasoningSessionId: session.claude_session_id ?? null,
-    activeWork: session.active_work
-      ? {
-        kind: session.active_work.kind,
-        eventId: session.active_work.event_id ?? null,
-        startedAt: session.active_work.started_at,
-        summary: session.active_work.summary ?? null,
-      }
-      : null,
-    pendingPermissionRequests: session.pending_permission_requests ?? [],
-    startedAt: session.started_at,
-    updatedAt: session.updated_at,
-    lastError: session.last_error ?? null,
+    failure: session.failure ?? null,
+    supervisorEntryId: session.supervisor_entry_id ?? null,
   };
 }
 
@@ -1341,6 +994,7 @@ export function toPublicCursorManagedAgentSession(
       (
         session.status === "starting" ||
         session.status === "running" ||
+        session.status === "blocked" ||
         session.status === "unknown" ||
         (deliveryMode === "desktop_events" && session.status === "completed")
       ),
@@ -1350,6 +1004,8 @@ export function toPublicCursorManagedAgentSession(
     displayName,
     ownerLabel: workerSession?.owner_label ?? "Local desktop",
     ideLabel: workerSession?.ide_label ?? "Cursor",
+    model: session.model ?? null,
+    effort: session.effort ?? null,
     reasoningSessionId: session.cursor_session_id ?? null,
     activeWork: session.active_work
       ? {
@@ -1363,5 +1019,7 @@ export function toPublicCursorManagedAgentSession(
     startedAt: session.started_at,
     updatedAt: session.updated_at,
     lastError: session.last_error ?? null,
+    failure: session.failure ?? null,
+    supervisorEntryId: session.supervisor_entry_id ?? null,
   };
 }

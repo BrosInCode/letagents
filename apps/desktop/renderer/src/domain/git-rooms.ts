@@ -24,3 +24,29 @@ function githubRoomIdentifier(value: string): boolean {
   return /^github\.com\/[^/]+\/[^/]+$/.test(normalized) ||
     /^git-room:github\.com:[^/:\s]+\/[^/:\s]+:/.test(normalized);
 }
+
+const GIT_ROOM_REF_PATTERN =
+  /^git-room:github\.com:[^/:\s]+\/([^/:\s]+):(?:branch|ref|tag):([A-Za-z0-9_-]+)$/;
+
+/**
+ * People recognize "repo · branch", not canonical git-room identifiers with a
+ * base64url-encoded ref. Non-git-room labels pass through untouched.
+ */
+export function friendlyRoomLabel(label: string): string {
+  const match = GIT_ROOM_REF_PATTERN.exec(label.trim());
+  if (!match) return label;
+  const [, repo, encodedRef] = match;
+  const ref = decodeRoomRef(encodedRef);
+  return ref ? `${repo} · ${ref}` : repo;
+}
+
+function decodeRoomRef(encoded: string): string | null {
+  try {
+    const base64 = encoded.replace(/-/g, "+").replace(/_/g, "/");
+    const bytes = Uint8Array.from(atob(base64), (char) => char.charCodeAt(0));
+    const ref = new TextDecoder().decode(bytes);
+    return /^[\x20-\x7e]+$/.test(ref) ? ref : null;
+  } catch {
+    return null;
+  }
+}

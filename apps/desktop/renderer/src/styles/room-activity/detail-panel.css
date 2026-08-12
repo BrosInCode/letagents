@@ -4,10 +4,29 @@
   gap: 12px;
   flex: 0 0 min(400px, 34vw);
   min-width: 320px;
+  max-width: 100%;
   overflow-y: auto;
   padding: 18px;
   font-family: -apple-system, BlinkMacSystemFont, "SF Pro Text", "Inter", "Segoe UI", sans-serif;
   scrollbar-gutter: stable;
+}
+
+.desktop-activity-detail-header,
+.desktop-activity-detail-section,
+.desktop-activity-inspector-row,
+.desktop-activity-inspector-row p,
+.desktop-activity-task,
+.desktop-activity-reasoning {
+  min-width: 0;
+}
+
+.desktop-activity-detail h3,
+.desktop-activity-detail-header p,
+.desktop-activity-inspector-row p,
+.desktop-activity-task strong,
+.desktop-activity-reasoning strong,
+.desktop-activity-reasoning p {
+  overflow-wrap: anywhere;
 }
 
 .desktop-activity-detail-identity {

@@ -1,6 +1,6 @@
 {
   "name": "letagents",
-  "version": "0.12.9",
+  "version": "0.12.12",
   "description": "Let Agents Chat — MCP server for AI agent communication",
   "type": "module",
   "main": "dist/mcp/server.js",
@@ -9,24 +9,33 @@
   },
   "files": [
     "dist/mcp/**",
+    "dist/api/board-intent-payloads.js",
     "dist/shared/**",
+    "shared/**",
     "README.md"
   ],
   "scripts": {
     "clean": "rm -rf dist",
     "build": "npm run clean && tsc",
-    "build:web": "cd src/web && npm install && npx vite build",
+    "build:web": "npm --prefix src/web run build",
     "build:desktop": "npm --prefix apps/desktop run build",
     "build:all": "npm run build && npm run build:web",
     "test:mcp": "node --import tsx --test src/mcp/__tests__/*.test.ts",
+    "test:package-runtime": "node --test scripts/package-runtime.test.mjs",
+    "test:orchestrator": "node --import tsx --test src/orchestrator/__tests__/*.test.ts",
     "test:web": "node --import tsx --test src/web/tests/*.test.ts src/web/src/composables/*.test.ts",
+    "test:dependency-age": "node --test scripts/verify-dependency-age.test.mjs",
+    "test:docker-context": "node --test scripts/verify-docker-context.test.mjs",
+    "test:workflow-supply-chain": "node --test scripts/verify-workflow-supply-chain.test.mjs",
+    "test:notifications": "node --import tsx --test src/api/notifications/__tests__/*.test.ts",
+    "verify:dependency-age": "node scripts/verify-dependency-age.mjs",
     "db:generate": "drizzle-kit generate",
     "db:migrate": "tsx src/api/migrate.ts",
     "db:studio": "drizzle-kit studio",
     "prepublishOnly": "npm run build",
     "dev:api": "tsx src/api/server.ts",
     "dev:mcp": "tsx src/mcp/server.ts",
-    "dev:desktop": "npm --prefix apps/desktop run dev"
+    "dev:desktop": "node scripts/ensure-desktop-dependencies.mjs && npm --prefix apps/desktop run dev"
   },
   "keywords": [
     "mcp",
@@ -41,24 +50,28 @@
   },
   "license": "BUSL-1.1",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.12.1",
-    "drizzle-orm": "^0.45.2",
-    "express": "^5.1.0",
-    "pg": "^8.20.0",
-    "yaml": "^2.9.0"
+    "@modelcontextprotocol/sdk": "1.27.1",
+    "drizzle-orm": "0.45.2",
+    "express": "5.2.1",
+    "pg": "8.20.0",
+    "yaml": "2.9.0"
   },
   "devDependencies": {
-    "@types/express": "^5.0.2",
-    "@types/node": "^22.15.3",
-    "@types/pg": "^8.18.0",
-    "drizzle-kit": "^0.31.10",
-    "tsx": "^4.19.4",
-    "typescript": "^5.8.3",
-    "ws": "^8.20.0"
+    "@types/express": "5.0.6",
+    "@types/node": "22.19.15",
+    "@types/pg": "8.18.0",
+    "drizzle-kit": "0.31.10",
+    "tsx": "4.23.0",
+    "typescript": "5.9.3",
+    "ws": "8.21.0"
   },
   "overrides": {
+    "@hono/node-server": "2.0.10",
     "@esbuild-kit/core-utils": {
       "esbuild": "^0.25.12"
-    }
+    },
+    "fast-uri": "3.1.5",
+    "hono": "4.12.34",
+    "ip-address": "10.3.1"
   }
 }

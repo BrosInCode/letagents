@@ -23,11 +23,13 @@ import {
   roomSupportsGitHubIntegration,
 } from "../src/domain/git-rooms";
 import {
+  readEnvironmentPanelOpen,
   readGitHubEventsVisible,
   readLiquidGlassEnabled,
   readNotificationPermission,
   readNotificationsEnabled,
   readSoundEnabled,
+  rememberEnvironmentPanelOpen,
   rememberGitHubEventsVisible,
 } from "../src/components/desktop/content/room-shell/preferences";
 import {
@@ -398,6 +400,23 @@ describe("desktop room shell helpers", () => {
     assert.equal(fallback.status, "working");
   });
 
+  it("matches reasoning sessions by agent session id when labels drift", () => {
+    const target = {
+      actorLabel: null,
+      displayName: "CometLively",
+      ideLabel: "Codex",
+      sender: "CometLively",
+      agentKey: null,
+      agentSessionId: "session_local_codex",
+    };
+    const session = {
+      ...reasoningSession("reasoning_session", "Old Codex Label", "2026-05-28T02:00:00.000Z"),
+      agentSessionId: "session_local_codex",
+    };
+
+    assert.equal(latestReasoningSessionForTarget(target, [session])?.id, "reasoning_session");
+  });
+
   it("does not cross-match multiple Codex workers through generic provider keys", () => {
     const target = {
       actorLabel: "MapleRidge",
@@ -469,6 +488,9 @@ describe("desktop room shell preferences", () => {
       "letagents-desktop:notifications": "on",
       "letagents-desktop:liquid-glass": "off",
       "letagents-desktop:github-events-visible": JSON.stringify({
+        "github.com/brosincode/letagents": true,
+      }),
+      "letagents-desktop:github-events-inline-visible": JSON.stringify({
         "github.com/brosincode/letagents": false,
       }),
     }, () => {
@@ -476,14 +498,16 @@ describe("desktop room shell preferences", () => {
       assert.equal(readNotificationsEnabled(), true);
       assert.equal(readLiquidGlassEnabled(), false);
       assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
-      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/other"), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/other"), false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });
 
     withLocalStorage({}, () => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
       assert.equal(readLiquidGlassEnabled(), true);
-      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });
   });
 
@@ -492,7 +516,7 @@ describe("desktop room shell preferences", () => {
     withMutableLocalStorage(entries, () => {
       rememberGitHubEventsVisible("GitHub.com/BrosInCode/LetAgents", false);
       assert.equal(readGitHubEventsVisible("github.com/brosincode/letagents"), false);
-      assert.deepEqual(JSON.parse(entries["letagents-desktop:github-events-visible"]), {
+      assert.deepEqual(JSON.parse(entries["letagents-desktop:github-events-inline-visible"]), {
         "github.com/brosincode/letagents": false,
       });
 
@@ -501,12 +525,27 @@ describe("desktop room shell preferences", () => {
     });
   });
 
+  it("persists environment panel state per normalized room", () => {
+    const entries: Record<string, string> = {};
+    withMutableLocalStorage(entries, () => {
+      rememberEnvironmentPanelOpen("GitHub.com/BrosInCode/LetAgents", true);
+      assert.equal(readEnvironmentPanelOpen("github.com/brosincode/letagents"), true);
+      assert.deepEqual(JSON.parse(entries["letagents-desktop:environment-panel-open"]), {
+        "github.com/brosincode/letagents": true,
+      });
+
+      rememberEnvironmentPanelOpen("github.com/BrosInCode/letagents", false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
+    });
+  });
+
   it("falls back when storage or notification APIs are unavailable", () => {
     withThrowingLocalStorage(() => {
       assert.equal(readSoundEnabled(), true);
       assert.equal(readNotificationsEnabled(), false);
       assert.equal(readLiquidGlassEnabled(), true);
-      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), true);
+      assert.equal(readGitHubEventsVisible("github.com/BrosInCode/letagents"), false);
+      assert.equal(readEnvironmentPanelOpen("github.com/BrosInCode/letagents"), false);
     });
 
     withNotificationPermission("denied", () => {

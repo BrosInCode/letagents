@@ -1,5 +1,5 @@
-import { app } from "electron";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
@@ -23,6 +23,25 @@ import {
   type McpServerJsonConfig,
 } from "./mcp-config.js";
 import { apiUrl } from "./paths.js";
+
+const require = createRequire(import.meta.url);
+
+function getElectronMain(): {
+  app?: { getPath: (name: "userData") => string };
+} {
+  try {
+    const electron = require("electron") as unknown;
+    return typeof electron === "object" && electron !== null
+      ? electron as { app?: { getPath: (name: "userData") => string } }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function desktopUserDataPath(): string {
+  return getElectronMain().app?.getPath("userData") || homedir();
+}
 
 type StoredMcpInstallSetup = {
   completed: boolean;
@@ -59,7 +78,7 @@ type McpInstallTargetDefinition = Omit<
 };
 
 function getSetupStorePath(): string {
-  return join(app.getPath("userData"), "letagents-desktop-setup.json");
+  return join(desktopUserDataPath(), "letagents-desktop-setup.json");
 }
 
 function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
@@ -168,7 +187,7 @@ function stringRecord(value: unknown): Record<string, string> {
   );
 }
 
-function withRefreshedAuthEnv(
+export function withRefreshedRuntimeAndAuth(
   current: LetAgentsMcpServerConfig,
   expected: LetAgentsMcpServerConfig,
 ): LetAgentsMcpServerConfig {
@@ -187,6 +206,8 @@ function withRefreshedAuthEnv(
   const { cwd: _legacyCwd, ...server } = current;
   return {
     ...server,
+    command: expected.command || "npx",
+    args: expected.args ? [...expected.args] : undefined,
     env,
   };
 }
@@ -469,7 +490,7 @@ async function refreshLetAgentsMcpServerAuthForLocation(
       location.path,
       buildCodexTomlLetAgentsMcpConfig(
         currentConfig,
-        withRefreshedAuthEnv(currentServer, expected),
+        withRefreshedRuntimeAndAuth(currentServer, expected),
       ),
       "utf8",
     );
@@ -488,7 +509,7 @@ async function refreshLetAgentsMcpServerAuthForLocation(
     ...currentConfig,
     mcpServers: {
       ...(currentConfig.mcpServers || {}),
-      letagents: withRefreshedAuthEnv(currentServer, expected),
+      letagents: withRefreshedRuntimeAndAuth(currentServer, expected),
     },
   };
   await writeMcpJsonConfig(location.path, nextConfig);

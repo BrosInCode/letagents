@@ -3,8 +3,52 @@ import {
   getActiveTaskLocks,
   getStaleTaskPromptMutes,
   type Task,
+  type TaskLease,
 } from "../../../db.js";
 import { getTaskStalePromptState } from "../../../tasks/stale-work.js";
+
+function ageMsSince(value: string): number | null {
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? Math.max(0, Date.now() - parsed) : null;
+}
+
+export function getTaskBoardStalePromptState(input: {
+  task: Task;
+  leases: TaskLease[];
+  mute?: Parameters<typeof getTaskStalePromptState>[0]["mute"];
+}) {
+  const promptState = getTaskStalePromptState({
+    task: input.task,
+    mute: input.mute,
+  });
+  if (promptState.muted) {
+    return {
+      ...promptState,
+      is_stale: false,
+      reason: null,
+      stale_for_ms: null,
+    };
+  }
+
+  const workLease = input.leases.find((lease) => lease.task_id === input.task.id && lease.kind === "work");
+  if ((input.task.status === "accepted" || input.task.status === "merged") && workLease) {
+    return {
+      ...promptState,
+      is_stale: true,
+      reason: `${input.task.status}_with_work_lease`,
+      stale_for_ms: ageMsSince(workLease.updated_at || workLease.created_at),
+    };
+  }
+  if (["assigned", "in_progress", "blocked"].includes(input.task.status) && !workLease) {
+    return {
+      ...promptState,
+      is_stale: true,
+      reason: "missing_work_lease",
+      stale_for_ms: ageMsSince(input.task.updated_at),
+    };
+  }
+  return promptState;
+}
 
 export async function attachTaskDetails(projectId: string, task: Task) {
   const [leases, locks, stalePromptMutes] = await Promise.all([
@@ -13,13 +57,15 @@ export async function attachTaskDetails(projectId: string, task: Task) {
     getStaleTaskPromptMutes(projectId, [task.id]),
   ]);
   const stalePromptMute = stalePromptMutes[0] ?? null;
+  const taskLeases = leases.filter((lease) => lease.task_id === task.id);
   return {
     ...task,
-    stale_prompt_state: getTaskStalePromptState({
+    stale_prompt_state: getTaskBoardStalePromptState({
       task,
+      leases: taskLeases,
       mute: stalePromptMute,
     }),
-    active_leases: leases.filter((lease) => lease.task_id === task.id),
+    active_leases: taskLeases,
     active_locks: locks.filter((lock) => lock.task_id === task.id || lock.scope === "room"),
   };
 }
@@ -35,8 +81,9 @@ export async function attachTaskListDetails(projectId: string, tasks: Task[]) {
   );
   return tasks.map((task) => ({
     ...task,
-    stale_prompt_state: getTaskStalePromptState({
+    stale_prompt_state: getTaskBoardStalePromptState({
       task,
+      leases,
       mute: stalePromptMuteByTaskId.get(task.id) ?? null,
     }),
     active_leases: leases.filter((lease) => lease.task_id === task.id),

@@ -1,10 +1,17 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import type { DesktopRentalPatch } from "../../electron/ipc-types";
+import type {
+  DesktopRentalContextApproval,
+  DesktopRentalPatch,
+} from "../../electron/ipc-types";
 import {
   canApprovePatch,
   canCancelSessionStatus,
   canRequestPatchChanges,
+  contextRequestState,
+  countPendingContextRequests,
+  exposureScanState,
+  exposureTypeLabel,
   formatTime,
   humanizeToken,
   patchCheckState,
@@ -64,5 +71,46 @@ describe("rent session detail presentation helpers", () => {
     assert.equal(rentalModeLabel("scoped"), "Limited access");
     assert.equal(rentalContinuityLabel("full_transcript"), "Full room transcript");
     assert.equal(rentalContinuityLabel("smart_handoff"), "Summary only");
+  });
+
+  it("maps context request statuses to pill states", () => {
+    assert.equal(contextRequestState("pending"), "starting");
+    assert.equal(contextRequestState("approved"), "connected");
+    assert.equal(contextRequestState("denied"), "failed");
+    assert.equal(contextRequestState("expired"), "offline");
+  });
+
+  it("counts only pending context requests for the review banner", () => {
+    const base: DesktopRentalContextApproval = {
+      id: "rctxr_1",
+      sessionId: "rsess_1",
+      requestType: "read_file",
+      status: "pending",
+      path: "a.txt",
+      reason: null,
+      redactionCount: 0,
+      requestedBy: null,
+      decidedBy: null,
+      createdAt: null,
+      decidedAt: null,
+      materialized: null,
+    };
+    const requests: DesktopRentalContextApproval[] = [
+      base,
+      { ...base, id: "rctxr_2", status: "approved" },
+      { ...base, id: "rctxr_3", status: "denied" },
+      { ...base, id: "rctxr_4" },
+    ];
+    assert.equal(countPendingContextRequests(requests), 2);
+    assert.equal(countPendingContextRequests([]), 0);
+  });
+
+  it("maps exposure scan statuses and type labels", () => {
+    assert.equal(exposureScanState("passed"), "connected");
+    assert.equal(exposureScanState("redacted"), "starting");
+    assert.equal(exposureScanState("blocked"), "failed");
+    assert.equal(exposureTypeLabel("file"), "File read");
+    assert.equal(exposureTypeLabel("search_result"), "Search result");
+    assert.equal(exposureTypeLabel("command_output"), "Command output");
   });
 });

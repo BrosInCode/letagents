@@ -1,7 +1,9 @@
 import type {
+  DesktopBoardSettingsSummary,
   DesktopLocalRoomInfo,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
+  DesktopSnapshotSourceStates,
   DesktopTaskSummary,
 } from "../../../ipc-types.js";
 import type { DesktopApiError } from "../../auth.js";
@@ -30,9 +32,40 @@ const emptySnapshotCollections = {
   reasoningSessions: [],
   recentActivity: [],
   roomArtifacts: [],
+  boardSettings: defaultBoardSettings(),
   messages: [],
   githubEvents: null,
+  sourceStates: readySourceStates(),
 };
+
+function defaultBoardSettings(): DesktopBoardSettingsSummary {
+  return {
+    managerMode: "manager_optional",
+    activeManager: null,
+    pendingIntentCount: 0,
+  };
+}
+
+/**
+ * All-ready source states, used for snapshots that are not built from a live
+ * fetch (missing/error/unavailable placeholders and local rooms). Consumers
+ * treat these as "nothing failed to load".
+ */
+export function readySourceStates(): DesktopSnapshotSourceStates {
+  const ready = () => ({ status: "ready" as const, error: null });
+  return {
+    focusRooms: ready(),
+    tasks: ready(),
+    participants: ready(),
+    presence: ready(),
+    reasoning: ready(),
+    activityHistory: ready(),
+    roomArtifacts: ready(),
+    boardSettings: ready(),
+    messages: ready(),
+    githubEvents: ready(),
+  };
+}
 
 function cloudStorageState(roomIdentifier: string | null): DesktopRoomStorageState {
   return {
@@ -113,12 +146,14 @@ export function createLocalReadyRoomSnapshot(input: {
     reasoningSessions: [],
     recentActivity: [],
     roomArtifacts: [],
+    boardSettings: defaultBoardSettings(),
     messages: input.messages
       .sort((left, right) =>
         Date.parse(left.timestamp || "") - Date.parse(right.timestamp || "")
       )
       .map(mapRoomMessagePayload),
     githubEvents: null,
+    sourceStates: readySourceStates(),
   };
 }
 

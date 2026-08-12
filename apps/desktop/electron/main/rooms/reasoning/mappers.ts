@@ -8,6 +8,7 @@ export type DesktopReasoningSessionPayload = {
   room_id?: string | null;
   actor_label?: string | null;
   agent_key?: string | null;
+  agent_session_id?: string | null;
   task_id?: string | null;
   title?: string | null;
   status?: string | null;
@@ -30,6 +31,7 @@ export type DesktopReasoningUpdatePayload = {
   room_id?: string | null;
   session_id?: string | null;
   actor_label?: string | null;
+  agent_session_id?: string | null;
   status?: string | null;
   summary?: string | null;
   milestone?: string | null;
@@ -45,6 +47,7 @@ export function mapDesktopReasoningSessionPayload(
     roomId: session.room_id || null,
     actorLabel: session.actor_label || null,
     agentKey: session.agent_key || null,
+    agentSessionId: session.agent_session_id || null,
     taskId: session.task_id || null,
     title: session.title || null,
     status: session.status || null,
@@ -71,6 +74,7 @@ export function mapDesktopReasoningUpdatePayload(
     roomId: update.room_id || null,
     sessionId: update.session_id || null,
     actorLabel: update.actor_label || null,
+    agentSessionId: update.agent_session_id || null,
     status: update.status || null,
     summary: update.summary || null,
     milestone: update.milestone || null,

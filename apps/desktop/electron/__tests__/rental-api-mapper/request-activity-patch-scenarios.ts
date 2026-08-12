@@ -27,6 +27,7 @@ describe("mapApiRequest", () => {
       continuity_mode: "smart_handoff",
       lrt_limit: 50_000,
       time_limit_minutes: 60,
+      request_expires_at: "2026-05-11T09:15:00.000Z",
       created_at: "2026-05-11T09:00:00.000Z",
       updated_at: "2026-05-11T09:30:00.000Z",
     });
@@ -36,6 +37,7 @@ describe("mapApiRequest", () => {
     assert.equal(req!.status, "pending");
     assert.equal(req!.requestedLrtLimit, 50_000);
     assert.equal(req!.requestedTimeLimitMinutes, 60);
+    assert.equal(req!.expiresAt, "2026-05-11T09:15:00.000Z");
   });
 
   it("translates the 'requested' status to 'pending' for the desktop ledger", () => {

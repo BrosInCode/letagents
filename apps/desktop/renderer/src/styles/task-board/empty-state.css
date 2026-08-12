@@ -1,7 +1,59 @@
 .desktop-task-empty {
+  color: var(--text-secondary);
+}
+
+.desktop-board-empty-state {
+  align-content: center;
+  justify-items: center;
+  gap: 16px;
+  min-height: min(360px, 48vh);
+  padding: clamp(28px, 5vw, 56px);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+  text-align: center;
+}
+
+.desktop-board-empty-state[data-variant="filtered"] {
+  min-height: 260px;
+}
+
+.desktop-board-empty-copy {
   display: grid;
-  place-items: center;
-  min-height: 86px;
-  color: var(--text-tertiary);
-  font-size: 0.82rem;
+  justify-items: center;
+  gap: 6px;
+  max-width: 420px;
+}
+
+.desktop-board-empty-copy h3 {
+  margin: 0;
+  color: var(--text);
+  font-size: 1rem;
+  font-weight: 680;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+}
+
+.desktop-board-empty-copy p {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+
+.desktop-board-empty-action {
+  min-width: 132px;
+}
+
+.desktop-board-empty-state code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: var(--accent-hover);
+}
+
+@media (max-width: 560px) {
+  .desktop-board-empty-state {
+    min-height: 300px;
+    padding: 28px 22px;
+  }
 }

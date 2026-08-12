@@ -188,6 +188,7 @@ import RentSessionCreateModal from "./RentSessionCreateModal.vue";
 import RentSessionDetailModal from "./RentSessionDetailModal.vue";
 import RentProviderDashboard from "./RentProviderDashboard.vue";
 import { humanizeToken, rentalModeLabel } from "./rent-session-detail/presentation";
+import { desktopIpc } from "../../../ipc/index.js";
 
 defineProps<{
   roomIdentifier: string;
@@ -244,8 +245,8 @@ async function refresh(): Promise<void> {
   }
 }
 
-function getRentalBridge(): typeof window.letagentsDesktop.rental | undefined {
-  return window.letagentsDesktop?.rental;
+function getRentalBridge(): typeof desktopIpc.rental | undefined {
+  return desktopIpc.rental;
 }
 
 function isDisabledResult(value: unknown): boolean {

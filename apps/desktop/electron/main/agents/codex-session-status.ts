@@ -8,6 +8,7 @@ import type {
   ThreadReadTurn,
   ThreadReadTurnItem,
 } from "./codex-rpc-client.js";
+import { finalCodexAgentText, isFinalCodexAgentPhase } from "./codex-turn-result.js";
 
 export const STARTUP_POLL_INTERVAL_MS = 500;
 const DEFAULT_STARTUP_OBSERVATION_MS = 90_000;
@@ -117,12 +118,12 @@ export function finalPublicAgentMessageText(
       continue;
     }
     fallback = text;
-    if (phase === "final") {
+    if (isFinalCodexAgentPhase(phase)) {
       final = text;
     }
   }
 
-  return final ?? fallback;
+  return final ?? finalCodexAgentText(items) ?? fallback;
 }
 
 export function deriveCodexLiveSessionStatus(
@@ -164,6 +165,22 @@ export function isTerminalCodexSessionStatus(status: DesktopManagedAgentSessionS
   return status === "completed" || status === "interrupted" || status === "failed";
 }
 
+export function shouldStopCodexSessionMonitor(
+  deliveryMode: DesktopManagedAgentDeliveryMode,
+  status: DesktopManagedAgentSessionStatus,
+  serverReachable: boolean,
+): boolean {
+  if (!serverReachable) {
+    return true;
+  }
+
+  if (!isTerminalCodexSessionStatus(status)) {
+    return false;
+  }
+
+  return (deliveryMode !== "desktop_events" && deliveryMode !== "daemon_inbox") || status !== "completed";
+}
+
 export function codexSessionStatusAfterInspectFailure(
   currentStatus: DesktopManagedAgentSessionStatus,
 ): DesktopManagedAgentSessionStatus {
@@ -178,7 +195,7 @@ export function codexSessionStatusAfterTurnInterrupt(
   serverReachable: boolean,
   shutdownServer: boolean,
 ): DesktopManagedAgentSessionStatus {
-  if (deliveryMode === "desktop_events" && !shutdownServer) {
+  if ((deliveryMode === "desktop_events" || deliveryMode === "daemon_inbox") && !shutdownServer) {
     return serverReachable ? "running" : "unknown";
   }
   return "interrupted";
@@ -228,6 +245,8 @@ export function sleep(ms: number): Promise<void> {
 }
 
 export function isLikelyMaterializingError(error: unknown): boolean {
-  const message = error instanceof Error ? error.message : String(error);
-  return message.includes("not materialized yet");
+  const message = (error instanceof Error ? error.message : String(error)).toLowerCase();
+  // After system wake, app-server may answer "thread not found" briefly while
+  // its persisted thread catalog becomes readable again.
+  return message.includes("not materialized yet") || message.includes("thread not found");
 }

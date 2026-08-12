@@ -17,6 +17,7 @@ import {
   type StoredAgentIdentityState,
 } from "../../runtime.js";
 import { jsonTextResponse } from "./responses.js";
+import { workerModeDisabledToolResult } from "../../runtime/worker-bearer.js";
 
 export function registerSetAgentNameTool(server: McpServer): void {
   server.tool(
@@ -34,6 +35,8 @@ export function registerSetAgentNameTool(server: McpServer): void {
         .describe("Optional conversation ID to scope this name change. When provided, only this conversation uses the new name; other conversations keep their own identity."),
     },
     async ({ name: desiredName, conversation_id }) => {
+      const disabled = workerModeDisabledToolResult();
+      if (disabled) return jsonTextResponse(disabled);
       const trimmedName = desiredName.trim();
       if (trimmedName.length < 2 || trimmedName.length > 64) {
         return jsonTextResponse({
@@ -42,7 +45,7 @@ export function registerSetAgentNameTool(server: McpServer): void {
         });
       }
 
-      const authAvailable = Boolean(getLetagentsToken());
+      const authAvailable = Boolean(await getLetagentsToken());
       if (!authAvailable) {
         return jsonTextResponse({
           success: false,

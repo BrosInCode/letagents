@@ -115,10 +115,7 @@ if (mcpPolicy !== "normal") {
       `managed Cursor isolation turn failed: ${isolationTurn.error || isolationTurn.text || "missing result"}`,
     );
   }
-  const letAgentsToolCall = isolationTurn.rawEvents.find((event) =>
-    event.type === "tool_call" &&
-    JSON.stringify(event).toLowerCase().includes("letagents")
-  );
+  const letAgentsToolCall = isolationTurn.rawEvents.find(isLetAgentsMcpInvocation);
   if (letAgentsToolCall) {
     throw new Error("managed Cursor isolation turn emitted a LetAgents-looking tool call.");
   }
@@ -319,6 +316,22 @@ function assertMcpListLooksEmpty(result: CommandResult): void {
 
 function mentionsLetAgents(result: CommandResult): boolean {
   return `${result.stdout}\n${result.stderr}`.toLowerCase().includes("letagents");
+}
+
+function isLetAgentsMcpInvocation(event: Record<string, unknown>): boolean {
+  if (event.type !== "tool_call"
+    || !event.tool_call
+    || typeof event.tool_call !== "object"
+    || Array.isArray(event.tool_call)) {
+    return false;
+  }
+  // Cursor's built-in getMcpToolsToolCall is the supported way to prove an
+  // empty registry and legitimately contains the search term "letagents" in
+  // its arguments. Only an actual McpToolCall is an isolation failure.
+  return Object.entries(event.tool_call as Record<string, unknown>).some(([key, value]) =>
+    key.replace(/[^a-z]/gi, "").toLowerCase() === "mcptoolcall"
+      && JSON.stringify(value).toLowerCase().includes("letagents")
+  );
 }
 
 function firstNonEmptyLine(value: string): string | null {

@@ -1,0 +1,84 @@
+# Desktop release operations
+
+LetAgents desktop ships two macOS artifacts for both Apple Silicon (`arm64`) and Intel (`x64`) from signed and notarized application bundles:
+
+- `LetAgents-<version>-darwin-<arch>.dmg` is the first-install artifact. Users open it and drag LetAgents to Applications.
+- `LetAgents-<version>-darwin-<arch>.zip` is the application update payload. The updater downloads it; users should not install this file manually.
+
+Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, `latest-mac-<arch>.yml`, a ZIP blockmap, and the legacy `RELEASES-<arch>.json`. The workflow publishes the first two discovery formats to each architecture feed: `latest-mac.yml` powers the progress-aware updater, while `RELEASES.json` remains a compatibility bridge for clients released before 0.1.4. Both point to immutable, versioned files on Cloudflare R2, so stable clients never depend on GitHub's repository-wide `releases/latest` selection or private-repository authentication.
+
+## One-time Apple setup
+
+Production builds need an Apple Developer Program membership, a `Developer ID Application` certificate, and App Store Connect notarization credentials. Add these GitHub Actions secrets:
+
+| Secret | Value |
+| --- | --- |
+| `MACOS_CERTIFICATE_P12_BASE64` | Base64-encoded Developer ID Application certificate and private key exported as `.p12` |
+| `MACOS_CERTIFICATE_PASSWORD` | Password used when exporting that `.p12` |
+| `MACOS_SIGNING_IDENTITY` | Full Developer ID Application identity, including the team identifier |
+| `MACOS_PROVISIONING_PROFILE_BASE64` | Base64-encoded Developer ID provisioning profile for `chat.letagents.desktop`, including the production APNs entitlement |
+| `APPLE_API_KEY_P8_BASE64` | Base64-encoded App Store Connect API `.p8` key |
+| `APPLE_API_KEY_ID` | App Store Connect API key ID |
+| `APPLE_API_ISSUER_ID` | Issuer ID for a Team API key; leave empty only for an Individual API key |
+
+Signing credentials exist only in the release runner's temporary keychain. They are never written to a release artifact or committed to the repository.
+
+Cloudflare R2 delivery additionally uses two bucket-scoped GitHub Actions secrets and three non-secret repository variables:
+
+| Name | Kind | Value |
+| --- | --- | --- |
+| `R2_ACCESS_KEY_ID` | Secret | Access key for an R2 Account API token with Object Read & Write on only the desktop download bucket |
+| `R2_SECRET_ACCESS_KEY` | Secret | Matching S3 secret access key |
+| `R2_ACCOUNT_ID` | Variable | Cloudflare account identifier |
+| `R2_BUCKET_NAME` | Variable | R2 bucket containing desktop releases |
+| `R2_PUBLIC_BASE_URL` | Variable | Public R2 custom-domain origin, without a trailing slash |
+
+The token cannot create or delete buckets. Versioned objects are uploaded with one-year immutable caching and a SHA-256 metadata guard; an existing key with different bytes fails the release. Rolling `latest-mac.yml` and compatibility `RELEASES.json` feeds use a short, revalidating cache policy.
+
+## Cut a release
+
+1. Change `apps/desktop/package.json` to the next numeric `x.y.z` desktop version and merge that change to `staging` through a reviewed PR.
+2. From the exact reviewed commit, create and push the matching tag: `desktop-v<x.y.z>`.
+3. Watch the **Desktop release** workflow. Its arm64 and x64 jobs verify dependencies, build the exact embedded MCP and OpenCode runtimes, sign the applications, submit each app and DMG to Apple, validate the stapled tickets, and create GitHub build-provenance attestations. A final job uploads both architectures to immutable versioned R2 paths, publishes the matching GitHub Release as a backup/archive, then advances the two public R2 update feeds.
+4. Download the DMG on a clean Mac and complete the first-install smoke test before announcing the release.
+
+The workflow refuses a tag that does not exactly match the desktop package version or a runner whose CPU does not match its matrix architecture. If either architecture fails signing, notarization, verification, attestation, or artifact generation, it does not publish the release.
+
+Verify a downloaded DMG or updater ZIP against GitHub's signed provenance record with:
+
+```sh
+gh attestation verify /path/to/LetAgents-<version>-darwin-<arch>.<dmg-or-zip> --repo BrosInCode/letagents
+```
+
+## Local packaging checks
+
+Run the unsigned path to verify bundle branding, the DMG layout, the update ZIP, and release metadata without Apple credentials:
+
+```sh
+npm --prefix apps/desktop run package:mac:local
+```
+
+Unsigned output is for development only. Gatekeeper and Electron's macOS updater require the production app to be signed. Signed builds also require `MACOS_PROVISIONING_PROFILE_PATH`; the profile is embedded and the main application is signed with `electron/entitlements.mac.plist` so native push registration survives release packaging. To exercise a local Developer ID build without notarization, set the signing identity, provisioning-profile path, and `MACOS_SKIP_NOTARIZATION=1`, then run `package:mac`.
+
+For a full local release, use either a notarytool Keychain profile:
+
+```sh
+MACOS_SIGNING_IDENTITY="Developer ID Application: Example (TEAMID)" \
+MACOS_PROVISIONING_PROFILE_PATH="/path/to/LetAgents.provisionprofile" \
+MACOS_NOTARY_KEYCHAIN_PROFILE="letagents-notary" \
+npm --prefix apps/desktop run package:mac
+```
+
+or pass `MACOS_PROVISIONING_PROFILE_PATH`, `MACOS_NOTARY_API_KEY`, `MACOS_NOTARY_API_KEY_ID`, and, for Team keys, `MACOS_NOTARY_API_ISSUER`.
+
+## Updates and rollback
+
+The in-app updater consumes the signed ZIP, never the DMG. Production clients fetch `https://downloads.letagents.chat/desktop/feeds/<arch>/latest-mac.yml`: Apple Silicon uses `arm64`, while Intel uses `x64`. This rolling discovery manifest is mutable but always points to immutable, architecture-matched ZIP and blockmap files under `https://downloads.letagents.chat/desktop/v<x.y.z>/`. The versioned DMGs, ZIPs, blockmaps, checksums, and metadata are never replaced; GitHub Releases retain the same artifacts as a backup/archive and provenance-verification location. Production builds check their feed at startup and every six hours, and expose an on-demand check under **Settings → Updates** and **Help → Check for Updates**. For a staging feed, launch a packaged build with `LETAGENTS_DESKTOP_UPDATE_BASE_URL` set to an HTTPS directory containing `latest-mac.yml`; do not put that override in a stable build.
+
+The updater reports transferred bytes, total size, speed, and percent to the sidebar while work continues. It uses the previous cached ZIP and the two blockmaps to request only changed byte ranges; if that comparison or any range request fails, it safely downloads the complete ZIP instead. A fresh installation and the first update after migrating from the legacy updater should therefore be expected to download the full ZIP.
+
+The updater downloads a newer signed ZIP in the background but never restarts the app automatically. **Restart & update** first blocks agent lifecycle mutations, asks the serving supervisor daemon to drain dispatch and relinquish its owner-only socket, and verifies that exact daemon process has exited. Provider processes are not terminated. Only after that proof does the app call Electron's Squirrel.Mac installer and quit. On the next launch, the new application starts its bundled daemon and the existing startup reconciliation reconnects desired-running agents to their exact provider generations. If handoff fails, installation is cancelled, the update remains downloaded, and the current app stays open with a retryable error.
+
+Update metadata must continue to use HTTPS and immutable versioned asset URLs. Do not rely on a normal quit as the user-controlled installation path: Squirrel.Mac may stage a downloaded replacement for the next launch. If that path applies an update, the new app's normal implementation-version handshake still retires an older serving daemon before reconciliation. **Restart & update** remains the preferred path because the current app proves the handoff first and can report a retryable failure without quitting.
+
+Do not replace an existing GitHub release asset with different bytes after it has been announced. If a release is faulty, publish a higher patch version; clients and Squirrel.Mac are designed to move forward to a newer version, not silently downgrade. Stable and beta channels should use separate feed locations so pre-release metadata cannot reach stable clients.

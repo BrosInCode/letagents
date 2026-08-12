@@ -14,6 +14,7 @@
 
     <p v-if="task.description" class="desktop-task-detail-description">{{ task.description }}</p>
     <p v-else class="desktop-task-detail-muted">No task description yet.</p>
+    <p v-if="error" class="desktop-task-dialog-error" role="alert">{{ error }}</p>
 
     <section class="desktop-task-detail-grid" aria-label="Task ownership">
       <span>
@@ -115,8 +116,8 @@
       </div>
     </section>
 
-    <section v-if="taskWorkflowRefs.length || hasGitHubEventRefs" class="desktop-task-detail-section">
-      <h4>External links</h4>
+    <section v-if="taskWorkflowRefs.length || hasArtifactNavigationRefs" class="desktop-task-detail-section">
+      <h4>Workflow</h4>
       <div v-if="taskWorkflowRefs.length" class="desktop-task-detail-list">
         <a
           v-for="ref in taskWorkflowRefs"
@@ -137,6 +138,14 @@
         @click="$emit('view-events', task.id)"
       >
         View events
+      </button>
+      <button
+        v-if="hasArtifactNavigationRefs"
+        type="button"
+        class="desktop-task-detail-button desktop-task-events-link"
+        @click="$emit('view-artifacts', task.id)"
+      >
+        View artifact timeline
       </button>
     </section>
 
@@ -180,6 +189,7 @@ const props = defineProps<{
   task: DesktopTaskSummary;
   actions: TaskAction[];
   busyAction: string | null;
+  error: string | null;
   reviewAssignmentCandidates: DesktopAgentPresence[];
   selectedReviewer: string;
 }>();
@@ -189,6 +199,7 @@ const emit = defineEmits<{
   "run-action": [action: TaskAction];
   "update:selected-reviewer": [value: string];
   "view-events": [taskId: string];
+  "view-artifacts": [taskId: string];
 }>();
 
 const showAuthority = computed(() => shouldShowAuthority(props.task));
@@ -202,6 +213,9 @@ const hasGitHubEventRefs = computed(() =>
   Boolean(props.task.prUrl)
   || props.task.workflowArtifacts.some((artifact) => artifact.provider === "github")
   || taskWorkflowRefs.value.some((ref) => ref.provider === "github")
+);
+const hasArtifactNavigationRefs = computed(() =>
+  props.task.workflowArtifacts.length > 0
 );
 const reviewerSummary = computed(() => {
   const summary = reviewSummary(props.task);

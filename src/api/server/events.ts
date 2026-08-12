@@ -1,24 +1,27 @@
-import { EventEmitter } from "events";
-
 import {
   addMessageWithCreateStatus,
-  hydrateMessageReplies,
   type Message,
+  type MessageCreateTransaction,
 } from "../db.js";
-import { parseScopedId } from "../db/utils.js";
+import { createBridgedEmitter } from "./event-bridge.js";
 import type { NormalizedMessageAttachmentReference } from "../messages/attachments.js";
-import type { AgentPromptKind } from "../../shared/room-agent-prompts.js";
+import type { MessageRecipientAgentTarget } from "../db/types.js";
+import {
+  isPromptOnlyAgentMessage,
+  type AgentPromptKind,
+} from "../../shared/room-agent-prompts.js";
 
 export interface MessageCreatedEvent {
   projectId: string;
   message: Message;
+  recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
-export const messageEvents = new EventEmitter();
-export const taskEvents = new EventEmitter();
-export const githubRoomEvents = new EventEmitter();
-export const reasoningEvents = new EventEmitter();
-export const artifactEvents = new EventEmitter();
+export const messageEvents = createBridgedEmitter("messages");
+export const taskEvents = createBridgedEmitter("tasks");
+export const githubRoomEvents = createBridgedEmitter("github");
+export const reasoningEvents = createBridgedEmitter("reasoning");
+export const artifactEvents = createBridgedEmitter("artifacts");
 
 export async function emitProjectMessage(
   projectId: string,
@@ -31,42 +34,40 @@ export async function emitProjectMessage(
     thread_root_id?: string | null;
     attachments?: NormalizedMessageAttachmentReference[];
     client_message_id?: string | null;
+    publisher_agent_key?: string | null;
+    publisher_agent_session_id?: string | null;
     account_id?: string | null;
+    account_agent_routing?: boolean;
+    with_created_message_in_transaction?: (tx: MessageCreateTransaction) => Promise<void>;
   }
 ): Promise<Message> {
-  const { message, created } = await addMessageWithCreateStatus(projectId, sender, text, {
+  const {
+    message,
+    canonical_message: canonicalMessage,
+    created,
+    recipientAgentTargets,
+  } = await addMessageWithCreateStatus(projectId, sender, text, {
     source: options?.source,
     agent_prompt_kind: options?.agent_prompt_kind ?? null,
     reply_to_message_id: options?.reply_to ?? null,
     thread_root_message_id: options?.thread_root_id ?? null,
     attachments: options?.attachments,
     client_message_id: options?.client_message_id ?? null,
+    publisher_agent_key: options?.publisher_agent_key ?? null,
+    publisher_agent_session_id: options?.publisher_agent_session_id ?? null,
     account_id: options?.account_id ?? null,
+    account_agent_routing: options?.account_agent_routing,
+    with_created_message_in_transaction: options?.with_created_message_in_transaction,
   });
   if (created) {
     messageEvents.emit("message:created", {
       projectId,
-      message: await hydrateMessageForSharedEvent(projectId, message),
+      message: canonicalMessage,
+      recipientAgentTargets: isPromptOnlyAgentMessage(
+        canonicalMessage.text,
+        canonicalMessage.agent_prompt_kind,
+      ) ? recipientAgentTargets ?? [] : [],
     } satisfies MessageCreatedEvent);
   }
   return message;
-}
-
-async function hydrateMessageForSharedEvent(projectId: string, message: Message): Promise<Message> {
-  const messageNumber = parseScopedId(message.id, "msg");
-  if (!messageNumber) return message;
-  const rootNumber = parseScopedId(message.thread_root_id, "msg");
-  const [hydrated] = await hydrateMessageReplies(projectId, [{
-    room_id: projectId,
-    number: messageNumber,
-    reply_to_number: message.thread_reply_to_id ? parseScopedId(message.thread_reply_to_id, "msg") : null,
-    thread_root_number: rootNumber && rootNumber !== messageNumber ? rootNumber : null,
-    sender: message.sender,
-    text: message.text,
-    agent_prompt_kind: message.agent_prompt_kind,
-    source: message.source,
-    client_message_id: null,
-    timestamp: message.timestamp,
-  }], { accountId: null });
-  return hydrated ?? message;
 }

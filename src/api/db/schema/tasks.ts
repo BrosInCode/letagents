@@ -59,6 +59,9 @@ export const task_leases = pgTable(
       onUpdate: "cascade",
     }),
     actor_label: text("actor_label").notNull(),
+    // Monotonic rebind fence (plan §4.5). Incremented on every fenced rebind;
+    // every lease-guarded write must present the epoch it last observed.
+    epoch: integer("epoch").notNull().default(0),
     branch_ref: text("branch_ref"),
     pr_url: text("pr_url"),
     output_intent: text("output_intent"),

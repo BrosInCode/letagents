@@ -8,6 +8,105 @@ const {
   isSuppressibleDisconnectedPresence,
   registerRoomPresenceRoutes,
 } = await import("../routes/rooms/presence/index.js");
+const {
+  desktopManagedPausePresence,
+  isNumericSuffixExtension,
+  normalizeReplayedAgentDisplayName,
+  resolveReplayCanonicalBase,
+} = await import("../routes/rooms/presence/agent-session-routes.js");
+const { nativeHarnessPresenceForStatus } = await import("../db/presence/liveness.js");
+const {
+  isActiveRoomAgentSessionStaleForRegistration,
+  SAME_INSTANCE_RECLAIM_STALE_AFTER_MS,
+} = await import("../db/auth.js");
+
+test("desktop closed-room pauses stay distinct from agent failures", () => {
+  assert.deepEqual(desktopManagedPausePresence({ availability: "room_closed" }), {
+    status: "idle",
+    statusText: "Room not open on the managing desktop",
+  });
+  assert.deepEqual(desktopManagedPausePresence({ availability: "failure" }), {
+    status: "blocked",
+    statusText: "Needs attention",
+  });
+});
+
+test("native liveness presents validated idle status as listening rather than invented work", () => {
+  assert.deepEqual(nativeHarnessPresenceForStatus("idle"), {
+    status: "idle",
+    status_text: "Connected — listening",
+  });
+  assert.deepEqual(nativeHarnessPresenceForStatus("working"), {
+    status: "working",
+    status_text: "Working",
+  });
+});
+
+test("replayed collision suffixes normalize to the canonical agent display name", () => {
+  assert.equal(normalizeReplayedAgentDisplayName("SilverHarbor 2", "SilverHarbor"), "SilverHarbor");
+  assert.equal(normalizeReplayedAgentDisplayName("SilverHarbor 2 1 1 1", "SilverHarbor"), "SilverHarbor");
+  assert.equal(normalizeReplayedAgentDisplayName("SilverHarbor East", "SilverHarbor"), "SilverHarbor East");
+  assert.equal(normalizeReplayedAgentDisplayName("Agent 47", "Agent"), "Agent");
+  assert.equal(normalizeReplayedAgentDisplayName("Agent 47A", "Agent"), "Agent 47A");
+});
+
+test("isNumericSuffixExtension recognizes only base + trailing numeric groups", () => {
+  assert.equal(isNumericSuffixExtension("MistyMorrow 2 1 1 1", "MistyMorrow"), true);
+  assert.equal(isNumericSuffixExtension("MistyMorrow 1", "MistyMorrow"), true);
+  assert.equal(isNumericSuffixExtension("MistyMorrow", "MistyMorrow"), false); // no suffix
+  assert.equal(isNumericSuffixExtension("Agent 47A", "Agent"), false);         // 47A not pure-digit
+  assert.equal(isNumericSuffixExtension("MistyMorrow East", "MistyMorrow"), false);
+  assert.equal(isNumericSuffixExtension("Otter 3", "MistyMorrow"), false);     // different base
+});
+
+test("resolveReplayCanonicalBase reduces ONLY via a valid trusted base signal", () => {
+  // Trusted client base "MistyMorrow" reduces a compounded replay to it.
+  assert.equal(resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", "MistyMorrow"), "MistyMorrow");
+  assert.equal(resolveReplayCanonicalBase("MistyMorrow", "MistyMorrow"), "MistyMorrow");
+  // A deliberate numeric-ending name declared as its own base is preserved.
+  assert.equal(resolveReplayCanonicalBase("Agent 47", "Agent 47"), "Agent 47");
+  // A trusted base that does NOT match the requested label is ignored (the
+  // label is preserved, not force-reduced) — no cross-name capture.
+  assert.equal(resolveReplayCanonicalBase("Agent 47", "MistyMorrow"), "Agent 47");
+  // No signal -> fail closed, preserve verbatim (never guess from shape).
+  assert.equal(resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", null), "MistyMorrow 2 1 1 1");
+  assert.equal(resolveReplayCanonicalBase("Agent 47", ""), "Agent 47");
+});
+
+test("trusted base + normalize converges a compounded label while preserving a deliberate one", () => {
+  assert.equal(
+    normalizeReplayedAgentDisplayName("MistyMorrow 2 1 1 1", resolveReplayCanonicalBase("MistyMorrow 2 1 1 1", "MistyMorrow")),
+    "MistyMorrow",
+  );
+  // First-ever deliberate "Agent 47" (declared base "Agent 47") stays put even
+  // though the identity previously held "Agent".
+  assert.equal(
+    normalizeReplayedAgentDisplayName("Agent 47", resolveReplayCanonicalBase("Agent 47", "Agent 47")),
+    "Agent 47",
+  );
+});
+
+test("same-instance stale reclaim requires an expired heartbeat", () => {
+  const now = Date.parse("2026-07-17T19:00:00.000Z");
+  const active = {
+    last_seen_at: new Date(now - 1_000).toISOString(),
+  };
+  assert.equal(isActiveRoomAgentSessionStaleForRegistration({
+    active_session: active,
+    now_ms: now,
+  }), false, "a fresh session cannot be reclaimed without its exact credential");
+  assert.equal(isActiveRoomAgentSessionStaleForRegistration({
+    active_session: {
+      ...active,
+      last_seen_at: new Date(now - SAME_INSTANCE_RECLAIM_STALE_AFTER_MS).toISOString(),
+    },
+    now_ms: now,
+  }), true, "a stale/crashed predecessor can be reclaimed after heartbeat expiry");
+  assert.equal(isActiveRoomAgentSessionStaleForRegistration({
+    active_session: { ...active, last_seen_at: "not-a-time" },
+    now_ms: now,
+  }), false, "missing or malformed liveness proof fails closed");
+});
 
 function createDeps() {
   const unused = async () => {
@@ -21,6 +120,7 @@ function createDeps() {
     requireParticipant: unused,
     rememberAgentRoomParticipant: unused,
     maybeEmitStaleWorkPrompt: unused,
+    emitProjectMessage: unused,
   };
 }
 
@@ -44,6 +144,10 @@ test("registerRoomPresenceRoutes preserves canonical presence route order", () =
     { method: "post", path: "/^\\/rooms\\/(.+)\\/participants\\/(?:clear|archive)-disconnected$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/disconnect$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/failures$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/desktop-heartbeat$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/native-activity$/" },
+    { method: "post", path: "/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/desktop-pause$/" },
     { method: "post", path: "/^\\/rooms\\/(.+)\\/presence$/" },
   ]);
 });

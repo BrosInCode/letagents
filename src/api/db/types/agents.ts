@@ -78,6 +78,8 @@ export interface RoomAgentDeliverySession {
   last_connected_at: string;
   last_disconnected_at: string | null;
   reconnect_grace_expires_at: string | null;
+  offline_announced_at: string | null;
+  recovery_announced_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -96,7 +98,12 @@ export interface RoomAgentSession {
   agent_key: string;
   agent_instance_id: string | null;
   display_name: string;
+  /** Server-resolved base label (before any collision suffix) recorded at
+   * creation; clients echo it back as `requested_base_display_name` on
+   * re-registration so replays converge. Null on legacy rows. */
+  assigned_base_display_name?: string | null;
   owner_account_id: string;
+  supervisor_grant_id: string | null;
   owner_label: string;
   ide_label: string;
   repo_branch?: string | null;
@@ -108,6 +115,36 @@ export interface RoomAgentSession {
 
 export interface CreatedRoomAgentSession extends RoomAgentSession {
   session_token: string;
+  worker_bearer: string | null;
+}
+
+export interface RoomAgentSessionBearer {
+  bearer_id: string;
+  session_id: string;
+  room_id: string;
+  generation: number;
+  capabilities: string[];
+  issued_at: string;
+  expires_at: string;
+  revoked_at: string | null;
+  rotated_from_bearer_id: string | null;
+  supervisor_grant_id: string | null;
+}
+
+export interface SupervisorHostGrant {
+  grant_id: string;
+  owner_account_id: string;
+  host_id: string;
+  installation_id: string;
+  scope_key: string;
+  rental_session_id: string | null;
+  token_version: number;
+  allowed_room_ids: string[];
+  allowed_agent_keys: string[];
+  current_generation: number;
+  issued_at: string;
+  expires_at: string;
+  revoked_at: string | null;
 }
 
 export interface RoomParticipant {
@@ -184,10 +221,16 @@ export interface RoomAgentDeliverySessionRow {
   ide_label: string | null;
   repo_branch: string | null;
   transport: RoomAgentDeliveryTransport;
+  credential_fingerprint: string | null;
+  credential_epoch: number | null;
+  desktop_signal_sequence: number;
   active_connection_count: number;
   last_connected_at: string;
   last_disconnected_at: string | null;
   reconnect_grace_expires_at: string | null;
+  offline_announced_at: string | null;
+  recovery_announced_at: string | null;
+  next_liveness_check_at: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -207,7 +250,9 @@ export interface RoomAgentSessionRow {
   agent_key: string;
   agent_instance_id: string | null;
   display_name: string;
+  assigned_base_display_name?: string | null;
   owner_account_id: string;
+  supervisor_grant_id: string | null;
   owner_label: string;
   ide_label: string;
   repo_branch: string | null;

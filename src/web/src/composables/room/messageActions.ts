@@ -1,12 +1,14 @@
 import { prepareMessageAttachments } from './attachments'
 import { apiFetch, roomPath } from './api'
 import { fetchMessages, mergeMessages } from './data'
-import { isPromptOnlyRoomMessage } from './identity'
+import { isVisibleRoomMessage } from './identity'
 import {
+  appendRoomMessage,
   isLoadingOlderMessages,
   lastSendError,
   messages,
   messagesHasOlder,
+  replaceRoomMessages,
   room,
 } from './state'
 import type { OutgoingMessageAttachment } from './types'
@@ -49,13 +51,7 @@ export function createRoomMessageActions() {
         method: 'POST',
         body: JSON.stringify(body),
       })
-      if (
-        msg?.id &&
-        !isPromptOnlyRoomMessage(msg) &&
-        !messages.value.some((m) => m.id === msg.id)
-      ) {
-        messages.value = [...messages.value, msg]
-      }
+      if (msg?.id && isVisibleRoomMessage(msg)) appendRoomMessage(msg)
       return true
     } catch (error) {
       const message = error instanceof Error ? error.message.trim() : ''
@@ -81,7 +77,7 @@ export function createRoomMessageActions() {
     isLoadingOlderMessages.value = true
     try {
       const page = await fetchMessages(room.value.identifier, firstMessageId)
-      messages.value = mergeMessages(messages.value, page.messages)
+      replaceRoomMessages(mergeMessages(messages.value, page.messages))
       messagesHasOlder.value = page.hasOlder
       return page.messages.length > 0
     } finally {

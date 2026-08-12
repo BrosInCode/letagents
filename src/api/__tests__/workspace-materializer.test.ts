@@ -347,3 +347,88 @@ describe("WorkspaceRetention", () => {
     );
   });
 });
+
+// ---------------------------------------------------------------------------
+// Submodule neutrality
+// ---------------------------------------------------------------------------
+
+describe("WorkspaceMaterializer submodule handling", () => {
+  let submoduleCommitSha: string;
+
+  before(() => {
+    // Add a gitlink + .gitmodules pointing at a host that cannot resolve.
+    // If any materializer git command tried to fetch the submodule, the
+    // command would fail loudly and the test below would not succeed.
+    fs.writeFileSync(
+      path.join(fixtureRepoPath, ".gitmodules"),
+      [
+        '[submodule "vendor/dep"]',
+        "\tpath = vendor/dep",
+        "\turl = https://letagents-submodule-test.invalid/dep.git",
+        "",
+      ].join("\n"),
+    );
+    execSync("git add .gitmodules", { cwd: fixtureRepoPath, stdio: "pipe" });
+    execSync(
+      `git update-index --add --cacheinfo 160000,${fixtureCommitSha},vendor/dep`,
+      { cwd: fixtureRepoPath, stdio: "pipe" },
+    );
+    execSync('git commit -m "add submodule gitlink"', {
+      cwd: fixtureRepoPath,
+      stdio: "pipe",
+    });
+    submoduleCommitSha = execSync("git rev-parse HEAD", {
+      cwd: fixtureRepoPath,
+      encoding: "utf-8",
+    }).trim();
+  });
+
+  it("materializes a repo with submodules without fetching them", async () => {
+    const { db } = createMockDb();
+    const submoduleWorkspaceRoot = path.join(
+      os.tmpdir(),
+      `rental-test-submodule-ws-${Date.now()}`,
+    );
+
+    try {
+      const result = await materializeWorkspace(
+        { db, generateId: mockGenerateId },
+        {
+          sessionId: "session_submodule_1",
+          repoUrl: fixtureRepoPath,
+          baseCommitSha: submoduleCommitSha,
+          scopeGlobs: [],
+          workspaceRoot: submoduleWorkspaceRoot,
+        },
+      );
+
+      // Materialization succeeded — nothing contacted the .invalid host.
+      assert.ok(result.manifestId);
+
+      // .gitmodules is exported as an inert plain file...
+      const gitmodulesPath = path.join(result.workspacePath, ".gitmodules");
+      assert.ok(fs.existsSync(gitmodulesPath), ".gitmodules should be a plain file");
+      assert.match(
+        fs.readFileSync(gitmodulesPath, "utf-8"),
+        /letagents-submodule-test\.invalid/,
+      );
+
+      // ...and the gitlink produced no submodule content: at most an
+      // empty directory, never files, never a nested .git.
+      const gitlinkPath = path.join(result.workspacePath, "vendor", "dep");
+      if (fs.existsSync(gitlinkPath)) {
+        assert.deepStrictEqual(
+          fs.readdirSync(gitlinkPath),
+          [],
+          "gitlink must not materialize submodule content",
+        );
+      }
+      assert.ok(
+        !fs.existsSync(path.join(result.workspacePath, ".git")),
+        "workspace must not contain a .git directory",
+      );
+    } finally {
+      fs.rmSync(submoduleWorkspaceRoot, { recursive: true, force: true });
+    }
+  });
+});

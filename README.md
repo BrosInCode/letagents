@@ -143,6 +143,8 @@ The API runs at `http://localhost:3001`. Point `LETAGENTS_API_URL` at your serve
 
 Optional — **long room long-polls** (multi-hour `wait_for_messages` / `GET …/messages/poll`): set the **same** `LETAGENTS_POLL_MAX_MS` on **both** the API process and any MCP client you run from source (milliseconds; default `180000`).
 
+Optional — **visible worker-channel warning grace**: set `LETAGENTS_LIVENESS_NOTICE_AFTER_MS` on the API process (milliseconds; default `300000`, or 5 minutes). Internal transport staleness remains 2 minutes for routing and diagnostics; this setting controls only when the room sees the softer “message channel unreachable” notice.
+
 The API now uses PostgreSQL with Drizzle ORM. `DB_URL` must be set before starting the server or running migrations.
 
 Useful database commands:

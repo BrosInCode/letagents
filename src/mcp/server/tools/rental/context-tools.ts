@@ -1,6 +1,10 @@
 import { z } from "zod";
 
-import { rentalReadFile, rentalSearch } from "../../../rental-tools.js";
+import {
+  rentalReadFile,
+  rentalRequestContext,
+  rentalSearch,
+} from "../../../rental-tools.js";
 import { rentalTextResponse } from "./response.js";
 import type { RentalToolRegistrationContext } from "./types.js";
 
@@ -51,6 +55,23 @@ export function registerRentalContextTools({
           max_results,
           case_sensitive,
         })
+      )
+  );
+
+  server.tool(
+    "rental_request_context",
+    "Request renter approval to access a file outside the approved rental scope. Use this when rental_read_file returns file_not_found for a path you believe exists in the repo. Creates a pending context access request the renter can approve or deny; once approved, the file is materialized into the workspace and becomes readable via rental_read_file. Repeat calls for the same path return the existing pending request, and re-asking for an already-approved path retries delivery into the workspace (useful if the workspace was not ready at approval time).",
+    {
+      session_id: z.string().describe("Rental session id the request belongs to."),
+      path: z.string().describe("Repo-relative path you need access to."),
+      reason: z
+        .string()
+        .optional()
+        .describe("Short justification shown to the renter (max 500 chars)."),
+    },
+    async ({ session_id, path, reason }) =>
+      rentalTextResponse(
+        await rentalRequestContext(deps, { session_id, path, reason })
       )
   );
 }

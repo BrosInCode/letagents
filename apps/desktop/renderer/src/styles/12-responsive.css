@@ -33,24 +33,6 @@
     position: static;
   }
 
-  .room-activity-page {
-    overflow-y: auto;
-  }
-
-  .desktop-activity-layout {
-    flex-direction: column;
-  }
-
-  .desktop-activity-groups,
-  .desktop-activity-detail {
-    overflow: visible;
-  }
-
-  .desktop-activity-detail {
-    flex-basis: auto;
-    min-width: 0;
-  }
-
   .desktop-task-board {
     grid-auto-columns: minmax(270px, 304px);
   }
@@ -84,15 +66,29 @@
 @media (max-width: 980px) {
   .desktop-shell {
     grid-template-columns: 1fr;
+    transition: none;
   }
 
   .sidebar-resize-handle {
     display: none;
   }
 
-  .desktop-shell[data-sidebar-mode="rail"],
   .desktop-shell[data-sidebar-mode="hidden"] {
     grid-template-columns: 1fr;
+  }
+
+  .desktop-sidebar-frame,
+  .app-main {
+    grid-column: 1;
+  }
+
+  .desktop-sidebar-frame > .app-sidebar {
+    width: 100%;
+  }
+
+  .desktop-sidebar-enter-active,
+  .desktop-sidebar-leave-active {
+    transition: none;
   }
 
   .app-sidebar {
@@ -237,9 +233,15 @@
   }
 
   .room-chat-message {
-    grid-template-columns: 24px minmax(0, 1fr);
-    gap: 10px;
+    grid-template-columns: 16px minmax(0, 1fr);
+    gap: 8px;
     padding: 11px 0;
+  }
+
+  .room-message-bubble {
+    max-width: 100%;
+    padding: 10px 13px 11px;
+    border-radius: 14px 14px 14px 5px;
   }
 
   .room-message-meta-tail {
@@ -265,13 +267,26 @@
   }
 
   .desktop-board-panel {
-    padding: 12px;
+    padding: 16px 14px 18px;
   }
 
-  .desktop-board-header,
-  .desktop-board-controls {
+  .desktop-board-header {
     align-items: stretch;
     flex-direction: column;
+  }
+
+  .desktop-board-controls {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .desktop-board-header-actions {
+    align-items: stretch;
+    justify-content: flex-start;
+  }
+
+  .desktop-board-manager-pill {
+    flex: 1 1 auto;
+    max-width: none;
   }
 
   .desktop-board-search {
@@ -280,7 +295,8 @@
   }
 
   .desktop-board-filter-groups {
-    justify-content: stretch;
+    padding-left: 0;
+    border-left: 0;
   }
 
   .desktop-board-segmented {
@@ -288,16 +304,11 @@
   }
 
   .desktop-board-primary-action {
-    width: 100%;
+    width: auto;
   }
 
   .desktop-board-add-button {
-    justify-self: stretch;
-  }
-
-  .desktop-task-card-header {
-    flex-direction: column;
-    align-items: stretch;
+    flex: 0 0 auto;
   }
 
   .desktop-task-detail-grid {
@@ -318,15 +329,15 @@
     grid-auto-columns: minmax(252px, 86vw);
   }
 
-  .desktop-task-modal-backdrop {
+  .desktop-task-modal-backdrop:not(.desktop-task-inspector-backdrop) {
     padding: 16px;
   }
 
-  .desktop-task-modal {
+  .desktop-task-create-modal {
     width: calc(100vw - 32px);
     max-height: calc(100vh - 32px);
     padding: 16px;
-    border-radius: 18px;
+    border-radius: var(--radius-xl);
   }
 
   .desktop-task-create-actions {
@@ -356,6 +367,23 @@
 
   .settings-focus-list {
     padding-left: 0;
+  }
+}
+
+@media (max-width: 480px) {
+  .desktop-board-header-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    width: 100%;
+  }
+
+  .desktop-board-manager-pill {
+    width: 100%;
+    min-width: 0;
+  }
+
+  .desktop-task-board {
+    grid-auto-columns: minmax(244px, calc(100vw - 42px));
   }
 }
 

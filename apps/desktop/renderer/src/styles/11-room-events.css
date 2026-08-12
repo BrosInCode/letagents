@@ -1,4 +1,7 @@
 .desktop-events-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
   height: 100%;
   min-height: 0;
   overflow: auto;
@@ -9,8 +12,10 @@
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(220px, 360px) auto;
   gap: 10px;
+  align-content: start;
   align-items: center;
-  margin: 0 0 18px;
+  flex: 0 0 auto;
+  margin: 0;
   padding: 0 0 12px;
   border-bottom: 1px solid rgba(255, 255, 255, 0.065);
 }
@@ -165,6 +170,10 @@
   padding: 0 9px;
   border-color: rgba(255, 255, 255, 0.075);
   background: rgba(255, 255, 255, 0.035);
+}
+
+.desktop-events-branch-chip span {
+  min-width: 0;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;

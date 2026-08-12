@@ -1,9 +1,66 @@
 import type { DesktopParticipantSummary } from "../../../electron/ipc-types";
 
-const AGENT_RUNTIME_PREFIXES = ["antigravity", "claude", "codex", "orchestrator"] as const;
+const AGENT_RUNTIME_PREFIXES = [
+  "antigravity",
+  "claude",
+  "codex",
+  "open-model",
+  "opencode",
+  "orchestrator",
+] as const;
+const EVERYONE_MENTION_CANDIDATE: RoomMentionCandidate = {
+  participantKey: "room:everyone",
+  kind: "broadcast",
+  displayName: "everyone",
+  insertText: "everyone",
+  label: "Everyone",
+};
+
+export interface RoomMentionCandidate {
+  participantKey: string;
+  kind: DesktopParticipantSummary["kind"] | "broadcast";
+  displayName: string;
+  insertText: string;
+  label: string;
+}
+
+export function agentOwnerAttribution(
+  ownerLabel: string | null | undefined,
+  actorLabel?: string | null,
+): string {
+  const owner = normalizeDisplayName(ownerLabel) || ownerLabelFromActor(actorLabel);
+  if (!owner) return "Agent";
+  if (/['’]s\s+agent$/i.test(owner)) return owner;
+  return `${owner}'s agent`;
+}
+
+function ownerLabelFromActor(actorLabel: string | null | undefined): string {
+  const parts = normalizeDisplayName(actorLabel).split(" | ").map((part) => part.trim());
+  return parts.length === 3 && /agent$/i.test(parts[1] || "") ? parts[1] : "";
+}
 
 function normalizeDisplayName(value: string | null | undefined): string {
   return String(value ?? "").trim();
+}
+
+function isParserCompatibleMentionHandle(value: string): boolean {
+  return /^[A-Za-z0-9][A-Za-z0-9_.:-]*(?:\/[A-Za-z0-9][A-Za-z0-9_.-]*)*$/.test(value);
+}
+
+function agentMentionInsertText(
+  participant: DesktopParticipantSummary,
+  duplicateDisplayName: boolean,
+): string | null {
+  const displayName = normalizeDisplayName(participant.displayName);
+  // A durable key is the routing fallback, not the product label. A unique,
+  // parser-safe display name is already a server-owned activation alias and
+  // should remain what the human sees in the composer. Only ambiguity or an
+  // unsafe display name requires exposing the canonical handle.
+  if (!duplicateDisplayName && isParserCompatibleMentionHandle(displayName)) {
+    return displayName;
+  }
+  const canonical = participant.agentKey ? `agent:${participant.agentKey.trim()}` : "";
+  return canonical && isParserCompatibleMentionHandle(canonical) ? canonical : null;
 }
 
 function matchesRuntimePrefix(value: string, prefix: string): boolean {
@@ -64,6 +121,53 @@ export function sortMentionableRoomParticipants<T extends Pick<
     mentionPriority(left) - mentionPriority(right) ||
     left.displayName.localeCompare(right.displayName)
   );
+}
+
+export function roomMentionCandidates(
+  participants: readonly DesktopParticipantSummary[],
+  query: string | null | undefined,
+  limit = 6,
+): RoomMentionCandidate[] {
+  const normalizedQuery = normalizeDisplayName(query).toLowerCase();
+  const candidates: RoomMentionCandidate[] = [];
+  if ("everyone".includes(normalizedQuery)) {
+    candidates.push(EVERYONE_MENTION_CANDIDATE);
+  }
+
+  const allMentionableParticipants = sortMentionableRoomParticipants(participants
+    .filter(isMentionableRoomParticipant)
+    .filter((participant) => participant.displayName.toLowerCase() !== "everyone"));
+  const mentionableParticipants = allMentionableParticipants.filter((participant) => [
+      participant.displayName,
+      participant.ownerLabel,
+      ownerLabelFromActor(participant.actorLabel),
+    ].some((value) => normalizeDisplayName(value).toLowerCase().includes(normalizedQuery)));
+  const agentDisplayNameCounts = new Map<string, number>();
+  for (const participant of allMentionableParticipants) {
+    if (participant.kind !== "agent") continue;
+    const key = participant.displayName.toLowerCase();
+    agentDisplayNameCounts.set(key, (agentDisplayNameCounts.get(key) || 0) + 1);
+  }
+
+  candidates.push(...mentionableParticipants.flatMap((participant) => {
+    const duplicateDisplayName = participant.kind === "agent" &&
+      (agentDisplayNameCounts.get(participant.displayName.toLowerCase()) || 0) > 1;
+    const insertText = participant.kind === "agent"
+      ? agentMentionInsertText(participant, duplicateDisplayName)
+      : participant.displayName;
+    if (!insertText) return [];
+    return [{
+      participantKey: participant.participantKey,
+      kind: participant.kind,
+      displayName: participant.displayName,
+      insertText,
+      label: participant.kind === "agent"
+        ? agentOwnerAttribution(participant.ownerLabel, participant.actorLabel)
+        : "Human",
+    }];
+  }));
+
+  return candidates.slice(0, limit);
 }
 
 function mentionPriority(

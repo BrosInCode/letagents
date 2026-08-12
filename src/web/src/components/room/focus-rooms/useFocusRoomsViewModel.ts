@@ -7,8 +7,8 @@ import {
 } from '@/composables/useRoom'
 import {
   createEmptyCloseoutDetails,
+  focusStatusLabel as formatFocusStatusLabel,
   focusRoomOpenKey,
-  taskStatusLabel,
 } from './options'
 import type {
   FocusRoomsViewEmit,
@@ -102,7 +102,7 @@ export function useFocusRoomsViewModel(
     closeoutDetails.value.next_owner.trim().length > 0
   )
   const focusStatusLabel = computed(() =>
-    props.focusStatus ? taskStatusLabel(props.focusStatus) : 'active'
+    props.focusStatus ? formatFocusStatusLabel(props.focusStatus) : 'active'
   )
   const focusContextCopy = computed(() =>
     props.gitRoom

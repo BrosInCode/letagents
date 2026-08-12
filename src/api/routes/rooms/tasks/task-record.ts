@@ -1,10 +1,10 @@
 import type { Express } from "express";
 
 import {
+  BoardIntentApprovalConsumptionError,
   getActiveTaskLeases,
-  getTaskById,
-  getTaskOwnershipState,
-  updateTask,
+  LeaseFenceStaleError,
+  type BoardIntentConsumptionInput,
   type TaskStatus,
 } from "../../../db.js";
 import {
@@ -13,6 +13,7 @@ import {
 } from "../../../http/helpers.js";
 import { validateTaskWorkflowArtifactsInput } from "../../../repo-workflow.js";
 import { normalizeRoomId } from "../../../rooms/routing.js";
+import { recordBoardIntentConsumptionFailure } from "../../../tasks/board-intent-audit.js";
 import {
   buildTaskUpdatePatch,
   evaluateTaskOwnership,
@@ -38,7 +39,7 @@ export function registerTaskRecordRoutes(
 
     if (!(await deps.requireParticipant(req, res, project))) return;
 
-    const task = await getTaskById(project.id, taskId);
+    const task = await deps.getTaskById(project.id, taskId);
     if (!task) {
       res.status(404).json({ error: "Task not found" });
       return;
@@ -68,8 +69,8 @@ export function registerTaskRecordRoutes(
       return;
     }
 
-    const task = await getTaskById(project.id, taskId);
-    const taskOwnership = await getTaskOwnershipState(project.id, taskId);
+    const task = await deps.getTaskById(project.id, taskId);
+    const taskOwnership = await deps.getTaskOwnershipState(project.id, taskId);
     if (!task || !taskOwnership) {
       res.status(404).json({ error: "Task not found" });
       return;
@@ -99,6 +100,8 @@ export function registerTaskRecordRoutes(
       updates.assignee_agent_key = workerIdentity.agent_key;
     }
 
+    let auditActorKey = actorKey;
+    let boardIntentApproval: BoardIntentConsumptionInput | null = null;
     try {
       const adminOnlyStatuses = new Set<TaskStatus>(["accepted", "cancelled", "merged", "done"]);
       if (updates.status && adminOnlyStatuses.has(updates.status)) {
@@ -121,7 +124,7 @@ export function registerTaskRecordRoutes(
         return;
       }
 
-      if (isReviewChangeRequest && req.authKind !== "owner_token") {
+      if (isReviewChangeRequest && req.authKind !== "owner_token" && req.authKind !== "agent_session") {
         res.status(403).json({
           error: "Registered review worker session is required to request changes.",
           code: "coordination_review_worker_required",
@@ -139,16 +142,19 @@ export function registerTaskRecordRoutes(
         }) &&
         !reviewDecisionOnly
       ) {
-        const actorValidation = await deps.validateOwnerTokenTaskActorKey({
-          req,
-          actorKey,
-        });
-        if (actorValidation.error) {
-          res.status(409).json({ error: actorValidation.error });
-          return;
+        if (req.authKind === "owner_token") {
+          const actorValidation = await deps.validateOwnerTokenTaskActorKey({
+            req,
+            actorKey,
+          });
+          if (actorValidation.error) {
+            res.status(409).json({ error: actorValidation.error });
+            return;
+          }
+          verifiedActorKey = actorValidation.actorKey;
         }
-        verifiedActorKey = actorValidation.actorKey;
       }
+      auditActorKey = verifiedActorKey;
 
       if (!reviewDecisionOnly) {
         const ownership = evaluateTaskOwnership({
@@ -201,13 +207,25 @@ export function registerTaskRecordRoutes(
         actorKey: verifiedActorKey,
         actorInstanceId,
         actorSessionId: workerIdentity?.agent_session_id ?? null,
+        boardIntentId: deps.normalizeOptionalString(requestBody.board_intent_id),
+        boardApprovalToken: deps.normalizeOptionalString(requestBody.board_approval_token),
       });
       if (coordination.kind === "deny") {
         res.status(409).json({ error: coordination.error, code: coordination.code });
         return;
       }
+      boardIntentApproval = coordination.boardIntentApproval ?? null;
 
-      const updated = await updateTask(project.id, taskId, updates);
+      const updated = await deps.updateTask(
+        project.id,
+        taskId,
+        updates,
+        {
+          boardIntentApproval,
+          workLeaseCreation: coordination.workLeaseCreation ?? null,
+          leaseFence: coordination.leaseFence ?? null,
+        }
+      );
       if (updated && updates.status && updates.status !== task.status) {
         await deps.emitTaskLifecycleStatusMessage(project.id, updated);
       }
@@ -224,6 +242,23 @@ export function registerTaskRecordRoutes(
         res.status(404).json({ error: "Task not found" });
       }
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
+      if (error instanceof BoardIntentApprovalConsumptionError) {
+        await recordBoardIntentConsumptionFailure({
+          roomId: project.id,
+          taskId: task.id,
+          approval: boardIntentApproval,
+          error,
+          actorLabel,
+          actorKey: normalizeTaskActorKey(auditActorKey),
+          actorInstanceId,
+        });
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "PATCH /rooms/:room_id/tasks/:task_id",

@@ -19,6 +19,11 @@ export interface CoordinationLeaseLike {
   task_id: string;
   kind: TaskLeaseKind;
   status: TaskLeaseStatus;
+  // Monotonic rebind fence (plan §4.5). Present on every persisted lease
+  // (default 0). A lease-authorized write captures this and re-validates it
+  // under the shared advisory lock so a rebind that advances it invalidates a
+  // stale predecessor's in-flight write.
+  epoch: number;
   agent_key: string;
   agent_instance_id: string | null;
   agent_session_id?: string | null;

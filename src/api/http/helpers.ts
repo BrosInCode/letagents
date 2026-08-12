@@ -2,17 +2,43 @@ import type express from "express";
 import type { Response } from "express";
 
 import { getPollTimeoutCapMs } from "../../shared/poll-timeout-cap.js";
+import { RequestValidationError } from "../validation-error.js";
 import type { OwnerTokenAccount, SessionAccount } from "../db.js";
+import type { AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
+import type { SupervisorHostGrant } from "../db.js";
+
+export interface AgentSessionRequestPrincipal {
+  bearer_id: string;
+  bearer_generation: number;
+  capabilities: AgentSessionBearerCapability[];
+  room_id: string;
+  agent_session_id: string;
+  actor_label: string;
+  agent_key: string;
+  owner_account_id?: string | null;
+  agent_instance_id: string | null;
+  session_kind: "worker";
+  runtime: string;
+  display_name: string;
+  owner_label: string;
+  ide_label: string;
+  repo_branch: string | null;
+  expires_at: string;
+}
 
 export interface AuthenticatedRequest extends express.Request {
   sessionAccount?: SessionAccount | OwnerTokenAccount | null;
-  authKind?: "session" | "owner_token" | null;
+  authKind?: "session" | "owner_token" | "agent_session" | "supervisor_grant" | null;
+  agentSession?: AgentSessionRequestPrincipal | null;
+  supervisorGrant?: SupervisorHostGrant | null;
   rawBody?: Buffer;
 }
 
 export interface ResolvedRequestAuth {
   account: SessionAccount | OwnerTokenAccount | null;
-  authKind: "session" | "owner_token" | null;
+  authKind: "session" | "owner_token" | "agent_session" | "supervisor_grant" | null;
+  agentSession?: AgentSessionRequestPrincipal | null;
+  supervisorGrant?: SupervisorHostGrant | null;
 }
 
 export function parsePollTimeout(timeoutValue: string | undefined): number {
@@ -106,6 +132,9 @@ function logServerError(context: string, error: unknown): void {
 }
 
 function isSafeBadRequestError(error: unknown): error is Error {
+  if (error instanceof RequestValidationError) {
+    return true;
+  }
   return (
     error instanceof Error &&
     SAFE_BAD_REQUEST_PATTERNS.some((pattern) => pattern.test(error.message))
@@ -119,6 +148,20 @@ export function respondWithInternalError(
   message: string
 ): void {
   return respondWithError(res, 500, context, message, error);
+}
+
+export function respondWithValidationOrInternalError(
+  res: Response,
+  context: string,
+  error: unknown,
+  fallbackMessage: string
+): void {
+  if (error instanceof RequestValidationError) {
+    res.status(400).json({ error: error.message });
+    return;
+  }
+
+  respondWithInternalError(res, context, error, fallbackMessage);
 }
 
 export function respondWithBadRequest(

@@ -1,8 +1,11 @@
 import type {
+  DesktopRentalContextApproval,
+  DesktopRentalExposure,
   DesktopRentalPatch,
   DesktopRentalPatchGateStatus,
   DesktopRentalSessionStatus,
 } from "../../../../../../electron/ipc-types";
+import { formatFullTimestamp } from "../../../../domain/time";
 
 type PillState = "active" | "connected" | "failed" | "offline" | "starting";
 
@@ -50,9 +53,7 @@ export function patchCheckState(status: DesktopRentalPatch["checkResults"][numbe
 }
 
 export function formatTime(value: string | null | undefined): string {
-  if (!value) return "—";
-  const date = new Date(value);
-  return Number.isNaN(date.getTime()) ? value : date.toLocaleString();
+  return formatFullTimestamp(value);
 }
 
 export function humanizeToken(value: string): string {
@@ -69,6 +70,52 @@ export function rentalModeLabel(mode: string): string {
 
 export function rentalContinuityLabel(mode: string): string {
   return mode === "full_transcript" ? "Full room transcript" : "Summary only";
+}
+
+export function contextRequestState(
+  status: DesktopRentalContextApproval["status"],
+): PillState {
+  if (status === "approved") return "connected";
+  if (status === "pending") return "starting";
+  if (status === "denied") return "failed";
+  return "offline";
+}
+
+export function isPendingContextRequest(
+  request: DesktopRentalContextApproval,
+): boolean {
+  return request.status === "pending";
+}
+
+export function countPendingContextRequests(
+  requests: DesktopRentalContextApproval[],
+): number {
+  return requests.filter(isPendingContextRequest).length;
+}
+
+export function exposureScanState(
+  status: DesktopRentalExposure["secretScanStatus"],
+): PillState {
+  if (status === "passed") return "connected";
+  if (status === "redacted") return "starting";
+  return "failed";
+}
+
+export function exposureTypeLabel(
+  type: DesktopRentalExposure["exposureType"],
+): string {
+  switch (type) {
+    case "file":
+      return "File read";
+    case "search_result":
+      return "Search result";
+    case "directory_listing":
+      return "Directory listing";
+    case "command_output":
+      return "Command output";
+    default:
+      return humanizeToken(type);
+  }
 }
 
 export function canApprovePatch(patch: DesktopRentalPatch): boolean {

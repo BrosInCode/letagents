@@ -1,13 +1,24 @@
+import type { DesktopGitRoomInfo } from "../../../../electron/ipc-types";
+
 export type RoomEntry = {
   id: string;
   type: "room";
-  kind: "parent" | "focus";
+  kind: "parent" | "focus" | "branch";
   roomIdentifier: string | null;
   title: string;
   meta: string;
   sectionLabel: string;
   headline: string;
   description: string;
+  gitRoom?: DesktopGitRoomInfo | null;
+  focusKey?: string | null;
+  focusStatus?: "active" | "concluded" | null;
+  sourceTaskId?: string | null;
+  parentRoomIdentifier?: string | null;
+  pinTargetRoomIdentifier?: string | null;
+  pinnedAccountRoomIdentifiers?: string[];
+  suggestedAction?: string | null;
+  currentWorkspace?: boolean;
   latestMessageId: string | null;
   latestMessageAt: string | null;
   hasUnread: boolean;
@@ -29,13 +40,23 @@ export type SystemEntry = {
   sectionLabel: string;
 };
 
-export type SidebarEntry = RoomEntry | SystemEntry;
+export type MarketplaceEntry = {
+  id: "marketplace:rent";
+  type: "marketplace";
+  title: "Rent";
+  description: string;
+  sectionLabel: "LetAgents";
+};
+
+export type SidebarEntry = RoomEntry | SystemEntry | MarketplaceEntry;
 
 export type ProjectGroup = {
   id: string;
   roomName: string;
   parent: RoomEntry;
+  branchRooms: RoomEntry[];
   focusRooms: RoomEntry[];
+  childRoomOrder?: string[];
 };
 
-export type SidebarMode = "expanded" | "rail" | "hidden";
+export type SidebarMode = "expanded" | "hidden";

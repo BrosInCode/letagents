@@ -41,7 +41,7 @@ export async function resolveOwnerTokenWorkerWriteIdentity(input: {
   room_id: string;
   body: Record<string, unknown>;
 }): Promise<OwnerTokenWorkerWriteIdentity> {
-  if (input.req.authKind !== "owner_token") {
+  if (input.req.authKind !== "owner_token" && input.req.authKind !== "agent_session") {
     return { kind: "not_owner_token" };
   }
   if (isDesktopHumanWrite(input.req, input.body)) {

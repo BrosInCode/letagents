@@ -40,6 +40,12 @@ import type {
   RunWorkspaceCommandInput,
   RunWorkspaceCommandResult,
 } from "../../../rental/command-broker.js";
+import type {
+  ContextRequestRecord,
+  ContextRequestType,
+  DecideContextRequestResult,
+} from "../../../rental/context-requests.js";
+import type { ExposureRecord } from "../../../rental/exposure-ledger.js";
 
 export interface RentalInternalRouteDeps {
   ingestUsage: (
@@ -95,6 +101,7 @@ export interface RentalInternalRouteDeps {
     sessionId: string,
     update: {
       status: "completed" | "cancelled";
+      expectedStatus: typeof rental_sessions.$inferSelect["status"];
       endedAt: Date;
     },
   ) => Promise<typeof rental_sessions.$inferSelect | null>;
@@ -102,6 +109,8 @@ export interface RentalInternalRouteDeps {
   releaseSessionLease?: (
     input: ReleaseLeaseInput,
   ) => Promise<ReleaseSessionLeaseResult>;
+  /** Stop the supervised worker and revoke its rental-scoped authority. */
+  revokeSessionLaunchAuthority?: (sessionId: string) => Promise<void>;
   readContextFile: (
     sessionId: string,
     input: Omit<ContextReadFileInput, "sessionId">,
@@ -122,4 +131,23 @@ export interface RentalInternalRouteDeps {
     sessionId: string,
     input: Omit<RunWorkspaceCommandInput, "sessionId">,
   ) => Promise<RunWorkspaceCommandResult>;
+  createContextRequest: (
+    sessionId: string,
+    input: {
+      path: string;
+      reason?: string;
+      requestType?: ContextRequestType;
+      requestedBy?: string;
+    },
+  ) => Promise<ContextRequestRecord>;
+  listContextRequests: (sessionId: string) => Promise<ContextRequestRecord[]>;
+  decideContextRequest: (
+    sessionId: string,
+    input: {
+      requestId: string;
+      decision: "approved" | "denied";
+      decidedBy: string;
+    },
+  ) => Promise<DecideContextRequestResult>;
+  listSessionExposures: (sessionId: string) => Promise<ExposureRecord[]>;
 }

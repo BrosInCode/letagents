@@ -4,10 +4,21 @@ import test from "node:test";
 import {
   MAX_MESSAGE_ATTACHMENTS,
   MAX_MESSAGE_ATTACHMENT_BYTES,
+  canStageMessageAttachment,
   formatAttachmentContentDisposition,
   normalizeAttachmentUploadRequest,
   normalizeMessageAttachmentReferences,
 } from "../messages/attachments.js";
+
+test("attachment staging requires an authenticated human or scoped worker", () => {
+  assert.equal(canStageMessageAttachment({ authKind: null, sessionAccount: null }), false);
+  assert.equal(canStageMessageAttachment({
+    authKind: "session",
+    sessionAccount: { account_id: "acct_1" } as never,
+  }), true);
+  assert.equal(canStageMessageAttachment({ authKind: "agent_session", sessionAccount: null }), true);
+  assert.equal(canStageMessageAttachment({ authKind: "supervisor_grant", sessionAccount: null }), false);
+});
 
 test("normalizeAttachmentUploadRequest accepts frontend metadata aliases", () => {
   const attachment = normalizeAttachmentUploadRequest({

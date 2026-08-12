@@ -86,6 +86,11 @@
         class="message-textarea"
         placeholder="Write a message…"
         v-model="text"
+        role="combobox"
+        aria-autocomplete="list"
+        :aria-expanded="mentionMenuOpen"
+        aria-controls="composer-mention-listbox"
+        :aria-activedescendant="mentionMenuOpen ? `composer-mention-option-${filteredMentionCandidates[mentionActiveIndex]?.key}` : undefined"
         @input="syncMentionContext"
         @click="syncMentionContext"
         @select="syncMentionContext"
@@ -336,9 +341,13 @@ function handleKeyDown(e: KeyboardEvent) {
       moveMentionSelection(-1)
       return
     }
-    if ((e.key === 'Enter' || e.key === 'Tab') && filteredMentionCandidates.value.length > 0) {
+    if (e.key === 'Enter' && filteredMentionCandidates.value.length > 0) {
       e.preventDefault()
       selectMention(filteredMentionCandidates.value[mentionActiveIndex.value])
+      return
+    }
+    if (e.key === 'Tab') {
+      resetMentionContext()
       return
     }
     if (e.key === 'Escape') {

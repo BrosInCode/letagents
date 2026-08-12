@@ -1,4 +1,5 @@
 import type { DesktopRoomMessage } from "../../../ipc-types.js";
+import { parseAccountAgentRoutingEnvelope } from "../../../../../../shared/message-contracts.mjs";
 import {
   mapRoomMessageAttachmentPayload,
   type RoomMessageAttachmentPayload,
@@ -10,10 +11,16 @@ export type RoomMessageReplyPayload = {
   text: string;
   source?: string | null;
   timestamp: string;
+  agent_identity?: {
+    actor_label?: string | null;
+    agent_key?: string | null;
+    agent_session_id?: string | null;
+  } | null;
 };
 
 export type RoomMessagePayload = {
   id: string;
+  client_message_id?: string | null;
   sender: string;
   text: string;
   attachments?: RoomMessageAttachmentPayload[] | null;
@@ -34,6 +41,15 @@ export type RoomMessagePayload = {
     agent_key?: string | null;
     agent_session_id?: string | null;
   } | null;
+  account_agent_routing?: {
+    version?: number;
+    authority?: string;
+    recipient_agent_keys?: unknown;
+    recipient_agent_sessions?: unknown;
+    control_authorized?: unknown;
+  } | null;
+  /** Local persistence provenance; never supplied by the cloud API. */
+  local_control_authorized?: boolean;
 };
 
 export type RoomMessageThreadSummaryPayload = {
@@ -48,14 +64,18 @@ export type RoomMessageThreadSummaryPayload = {
     message_count?: number | null;
     latest_message_id?: string | null;
   }> | null;
+  participant_count?: number | null;
+  participants_truncated?: boolean | null;
   last_read_message_id?: string | null;
 };
 
 export function mapRoomMessagePayload(
   message: RoomMessagePayload,
 ): DesktopRoomMessage {
+  const accountAgentRouting = mapAccountAgentRouting(message.account_agent_routing);
   return {
     id: message.id,
+    clientMessageId: message.client_message_id?.trim() || null,
     sender: message.sender,
     text: message.text,
     attachments: (message.attachments || []).map(
@@ -79,9 +99,37 @@ export function mapRoomMessagePayload(
           text: message.reply_to.text,
           source: message.reply_to.source || null,
           timestamp: message.reply_to.timestamp,
+          agentIdentity: mapRoomMessageAgentIdentity(message.reply_to.agent_identity || null),
         }
       : null,
+    ...(accountAgentRouting === undefined ? {} : { accountAgentRouting }),
+    ...(typeof message.local_control_authorized === "boolean"
+      ? { localControlAuthorized: message.local_control_authorized }
+      : {}),
   };
+}
+
+/**
+ * Map a cloud response that opted into the Desktop routing contract. A
+ * missing envelope means the response came from an old/partial API path; it
+ * must never widen into mutable local alias routing.
+ */
+export function mapCloudRoomMessagePayload(
+  message: RoomMessagePayload,
+): DesktopRoomMessage {
+  const mapped = mapRoomMessagePayload(message);
+  return mapped.accountAgentRouting
+    ? mapped
+    : {
+        ...mapped,
+        accountAgentRouting: { version: 1, authority: "invalid" },
+      };
+}
+
+function mapAccountAgentRouting(
+  routing: RoomMessagePayload["account_agent_routing"],
+): DesktopRoomMessage["accountAgentRouting"] | undefined {
+  return parseAccountAgentRoutingEnvelope(routing);
 }
 
 export function mapRoomMessageThreadSummary(
@@ -94,6 +142,15 @@ export function mapRoomMessageThreadSummary(
   thread?: RoomMessageThreadSummaryPayload | null,
 ): DesktopRoomMessage["thread"] {
   if (!thread) return null;
+  const participants = (thread.participants || [])
+    .map((participant) => ({
+      sender: participant.sender || "",
+      source: participant.source || null,
+      messageCount: Number(participant.message_count || 0),
+      latestMessageId: participant.latest_message_id || "",
+    }))
+    .filter((participant) => participant.sender && participant.latestMessageId);
+  const participantCount = Math.max(participants.length, Number(thread.participant_count || 0));
   const unreadCount = Number(thread.unread_count || 0);
   const latestReply = thread.latest_reply
     ? {
@@ -110,14 +167,10 @@ export function mapRoomMessageThreadSummary(
     unreadCount,
     hasUnread: Boolean(thread.has_unread) || unreadCount > 0,
     latestReply,
-    participants: (thread.participants || [])
-      .map((participant) => ({
-        sender: participant.sender || "",
-        source: participant.source || null,
-        messageCount: Number(participant.message_count || 0),
-        latestMessageId: participant.latest_message_id || "",
-      }))
-      .filter((participant) => participant.sender && participant.latestMessageId),
+    participants,
+    participantCount,
+    participantsTruncated: Boolean(thread.participants_truncated)
+      || participants.length < participantCount,
     lastReadMessageId: thread.last_read_message_id || null,
   };
 }

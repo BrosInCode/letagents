@@ -24,6 +24,7 @@ import {
   toPublicStoredRoomSession,
 } from "../../runtime.js";
 import { jsonTextResponse } from "./responses.js";
+import { getWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
 
 type ApiHealthFetch = (
   url: string,
@@ -96,6 +97,23 @@ export function registerGetOnboardingStatusTool(server: McpServer): void {
         .describe("Working directory to inspect for repo context. Defaults to the current process directory."),
     },
     async ({ cwd }) => {
+      const workerRuntime = getWorkerBearerRuntime();
+      if (workerRuntime.mode === "invalid") {
+        return jsonTextResponse({ success: false, error: "worker_bearer_configuration_invalid", message: workerRuntime.error });
+      }
+      if (workerRuntime.mode === "worker" || workerRuntime.mode === "supervised") {
+        return jsonTextResponse({
+          api_url: API_URL,
+          worker_bearer_mode: workerRuntime.mode === "worker",
+          supervised_bounded_mode: workerRuntime.mode === "supervised",
+          authenticated: true,
+          auth_source: workerRuntime.mode === "worker" ? "worker_bearer" : "daemon_supervised",
+          account: null,
+          pending_device_auth: null,
+          next_step: "join_room",
+          note: "Owner-auth onboarding and saved-auth state are disabled in worker credential mode.",
+        });
+      }
       const workingDir = cwd || process.cwd();
       const repoRoot = resolveGitRoot(workingDir);
       const configRoom = getRoomFromConfig(workingDir);

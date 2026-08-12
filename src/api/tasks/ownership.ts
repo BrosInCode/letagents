@@ -1,7 +1,7 @@
 import type { TaskStatus } from "../db.js";
 import type { TaskWorkflowArtifact } from "../repo-workflow.js";
 
-type RequestAuthKind = "session" | "owner_token" | null | undefined;
+type RequestAuthKind = "session" | "owner_token" | "agent_session" | "supervisor_grant" | null | undefined;
 
 const AGENT_OWNED_TASK_STATUSES = new Set<TaskStatus>([
   "assigned",
@@ -110,7 +110,7 @@ export function requiresTaskOwnershipGuard(input: {
   requestedAssigneeAgentKey?: string | null;
 }): boolean {
   const { authKind, requestedStatus, requestedAssignee, requestedAssigneeAgentKey } = input;
-  if (authKind !== "owner_token") {
+  if (authKind !== "owner_token" && authKind !== "agent_session") {
     return false;
   }
 

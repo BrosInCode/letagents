@@ -1,0 +1,316 @@
+.supervised-launch-progress {
+  grid-column: 1;
+  grid-row: 1 / span 3;
+  display: grid;
+  gap: 16px;
+  min-width: 0;
+}
+
+.supervised-launch-progress-header {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.supervised-launch-progress-provider {
+  color: var(--launch-accent, var(--text-tertiary));
+  font-size: 0.67rem;
+  font-weight: 850;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.supervised-launch-progress-header strong {
+  max-width: 42ch;
+  color: var(--text);
+  font-size: 1rem;
+  line-height: 1.3;
+}
+
+.supervised-launch-progress-header small {
+  color: var(--text-secondary);
+  font-size: 0.78rem;
+}
+
+.supervised-launch-phases {
+  display: grid;
+  gap: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.supervised-launch-phase {
+  position: relative;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 10px;
+  min-height: 34px;
+  font-size: 0.78rem;
+  color: var(--text-tertiary);
+}
+
+.supervised-launch-phase:not(:last-child)::after {
+  content: "";
+  position: absolute;
+  top: 23px;
+  bottom: -11px;
+  left: 9px;
+  width: 1px;
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.supervised-launch-phase[data-state="done"]:not(:last-child)::after {
+  background: color-mix(in srgb, var(--launch-accent, #6ee7a0) 38%, transparent);
+}
+
+.supervised-launch-phase[data-state="done"] { color: var(--text-secondary); }
+
+.supervised-launch-phase[data-state="active"] { color: var(--text); }
+
+.supervised-launch-phase[data-state="failed"] { color: #fca5a5; }
+
+.supervised-launch-phase-marker {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  border-radius: 999px;
+  background: #181a20;
+}
+
+.supervised-launch-phase[data-state="done"] .supervised-launch-phase-marker { color: var(--launch-accent, #4ade80); }
+
+.supervised-launch-phase[data-state="failed"] .supervised-launch-phase-marker { color: #f87171; }
+
+.supervised-launch-phase-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.supervised-launch-phase-spinner {
+  width: 13px;
+  height: 13px;
+  border-radius: 999px;
+  border: 1.6px solid rgba(255, 255, 255, 0.2);
+  border-top-color: var(--launch-accent, currentColor);
+  animation: supervised-launch-spin 0.7s linear infinite;
+}
+
+@keyframes supervised-launch-spin {
+  to { transform: rotate(360deg); }
+}
+
+.supervised-launch-phase-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.supervised-launch-phase-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supervised-launch-phase-detail {
+  color: var(--text-tertiary);
+  font-size: 0.72rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.supervised-launch-phase-status {
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+  align-self: start;
+}
+
+.supervised-launch-progress-hint {
+  margin: 0;
+  padding-top: 12px;
+  border-top: 1px solid rgba(255, 255, 255, 0.07);
+  color: var(--text-secondary);
+  font-size: 0.76rem;
+}
+
+.supervised-launch-progress-failure {
+  display: grid;
+  grid-template-columns: 34px minmax(0, 1fr);
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid color-mix(in srgb, var(--launch-accent, #f4bd62) 22%, transparent);
+  border-radius: 13px;
+  background: color-mix(in srgb, var(--launch-accent, #f4bd62) 6%, transparent);
+  color: var(--text);
+  font-size: 0.76rem;
+}
+
+.supervised-launch-failure-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 34px;
+  height: 34px;
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--launch-accent, #f4bd62) 13%, transparent);
+  color: var(--launch-accent, #f4bd62);
+}
+
+.supervised-launch-failure-copy {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+}
+
+.supervised-launch-failure-copy p,
+.supervised-launch-failure-details p {
+  margin: 0;
+}
+
+.supervised-launch-failure-copy p {
+  color: var(--text);
+  font-weight: 690;
+  line-height: 1.45;
+}
+
+.supervised-launch-failure-copy small {
+  color: var(--text-secondary);
+  font-size: 0.74rem;
+  line-height: 1.45;
+}
+
+.supervised-launch-failure-actions {
+  grid-column: 2;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 2px;
+}
+
+.supervised-launch-recovery {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-width: 82px;
+  min-height: 32px;
+  padding: 0 12px;
+  font-size: 0.74rem;
+  font-weight: 780;
+  color: #17130b;
+  background: var(--launch-accent, #f4bd62);
+  border: 1px solid transparent;
+  border-radius: 8px;
+  cursor: pointer;
+}
+
+.supervised-launch-dismiss {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.045);
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 0.74rem;
+  font-weight: 750;
+}
+
+.supervised-launch-recovery:disabled,
+.supervised-launch-dismiss:disabled {
+  cursor: wait;
+  opacity: 0.66;
+}
+
+.supervised-launch-recovery:focus-visible {
+  outline: 2px solid var(--launch-accent, #c7ceff);
+  outline-offset: 2px;
+}
+
+.supervised-launch-dismiss:focus-visible,
+.supervised-launch-failure-details summary:focus-visible {
+  outline: 2px solid var(--launch-accent, #c7ceff);
+  outline-offset: 2px;
+}
+
+.supervised-launch-button-spinner {
+  width: 12px;
+  height: 12px;
+  border: 1.5px solid rgba(23, 19, 11, 0.28);
+  border-top-color: currentColor;
+  border-radius: 999px;
+  animation: supervised-launch-spin 0.7s linear infinite;
+}
+
+.supervised-launch-failure-details {
+  grid-column: 2;
+  color: var(--text-tertiary);
+  font-size: 0.7rem;
+}
+
+.supervised-launch-failure-details summary {
+  width: max-content;
+  cursor: pointer;
+  color: var(--text-secondary);
+}
+
+.supervised-launch-failure-details p {
+  max-width: 68ch;
+  padding-top: 6px;
+  line-height: 1.45;
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .supervised-launch-recovery:hover {
+    filter: brightness(1.06);
+  }
+
+  .supervised-launch-dismiss:hover:not(:disabled) {
+    border-color: rgba(255, 255, 255, 0.2);
+    color: var(--text);
+  }
+}
+
+@media (max-width: 680px) {
+  .supervised-launch-phase {
+    grid-template-columns: 20px minmax(0, 1fr);
+    align-items: start;
+    padding-block: 5px;
+  }
+
+  .supervised-launch-phase-status {
+    grid-column: 2;
+    margin-top: -2px;
+  }
+
+  .supervised-launch-phase[data-state="active"] .supervised-launch-phase-label,
+  .supervised-launch-phase[data-state="active"] .supervised-launch-phase-detail,
+  .supervised-launch-phase[data-state="failed"] .supervised-launch-phase-label,
+  .supervised-launch-phase[data-state="failed"] .supervised-launch-phase-detail {
+    overflow: visible;
+    text-overflow: clip;
+    white-space: normal;
+  }
+
+  .supervised-launch-progress-failure {
+    grid-template-columns: 30px minmax(0, 1fr);
+    padding: 12px;
+  }
+
+  .supervised-launch-failure-icon {
+    width: 30px;
+    height: 30px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .supervised-launch-phase-spinner,
+  .supervised-launch-button-spinner { animation: none; }
+}

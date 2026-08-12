@@ -18,6 +18,16 @@ export type LetAgentsMcpServerConfig = NonNullable<
   McpServerJsonConfig["mcpServers"]
 >[string];
 
+// npm exec otherwise treats a managed checkout whose package name is itself
+// `letagents` as the requested local package and then fails when that pristine
+// checkout has no built bin. An npm alias gives the official registry runtime
+// a distinct package identity while keeping the public `letagents` bin.
+export const LETAGENTS_NPX_ARGS = [
+  "-y",
+  "--package=letagents-runtime@npm:letagents",
+  "letagents",
+] as const;
+
 type McpInstallStatus = DesktopMcpInstallTarget["status"];
 
 export function createLetAgentsMcpServerConfig(input: {
@@ -34,7 +44,7 @@ export function createLetAgentsMcpServerConfig(input: {
 
   return {
     command: "npx",
-    args: ["-y", "letagents"],
+    args: [...LETAGENTS_NPX_ARGS],
     env,
   };
 }

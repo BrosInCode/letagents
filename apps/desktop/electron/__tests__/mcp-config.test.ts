@@ -9,7 +9,9 @@ import {
   getJsonLetAgentsMcpInstallStatusFromRaw,
   getLetAgentsMcpServerIssue,
   isLocalDevLetAgentsApiUrl,
+  LETAGENTS_NPX_ARGS,
 } from "../main/mcp-config.js";
+import { withRefreshedRuntimeAndAuth } from "../main/mcp-setup.js";
 
 const baseExpected = createLetAgentsMcpServerConfig({
   apiUrl: "https://letagents.chat",
@@ -21,6 +23,8 @@ const expectedWithToken = createLetAgentsMcpServerConfig({
 });
 
 test("createLetAgentsMcpServerConfig includes auth token only when present and omits cwd", () => {
+  assert.equal(baseExpected.command, "npx");
+  assert.deepEqual(baseExpected.args, [...LETAGENTS_NPX_ARGS]);
   assert.deepEqual(baseExpected.env, {
     LETAGENTS_API_URL: "https://letagents.chat",
   });
@@ -30,6 +34,27 @@ test("createLetAgentsMcpServerConfig includes auth token only when present and o
     LETAGENTS_TOKEN: "letagents-token",
   });
   assert.equal(expectedWithToken.cwd, undefined);
+});
+
+test("runtime refresh repairs a repo-shadowable npm command without copying a legacy cwd", () => {
+  const repaired = withRefreshedRuntimeAndAuth({
+    command: "npx",
+    args: ["-y", "letagents"],
+    cwd: "/managed/worktrees/letagents",
+    env: {
+      LETAGENTS_API_URL: "https://old.example.invalid",
+      LETAGENTS_TOKEN: "old-token",
+      CUSTOM_ENV: "preserved",
+    },
+  }, expectedWithToken);
+  assert.equal(repaired.command, "npx");
+  assert.deepEqual(repaired.args, [...LETAGENTS_NPX_ARGS]);
+  assert.equal(repaired.cwd, undefined);
+  assert.deepEqual(repaired.env, {
+    LETAGENTS_API_URL: "https://letagents.chat",
+    LETAGENTS_TOKEN: "letagents-token",
+    CUSTOM_ENV: "preserved",
+  });
 });
 
 test("json install status requires token state and rejects legacy cwd", () => {
@@ -109,7 +134,7 @@ test("json install status rejects missing API URL because runtime would fall bac
     mcpServers: {
       letagents: {
         command: "npx",
-        args: ["-y", "letagents"],
+        args: baseExpected.args,
         env: {},
       },
     },
@@ -125,7 +150,7 @@ test("json install status rejects missing API URL because runtime would fall bac
   const issue = getLetAgentsMcpServerIssue(
     {
       command: "npx",
-      args: ["-y", "letagents"],
+      args: baseExpected.args,
       env: {},
     },
     baseExpected,

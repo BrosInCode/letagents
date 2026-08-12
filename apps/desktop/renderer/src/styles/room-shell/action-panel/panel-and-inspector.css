@@ -1,4 +1,5 @@
 .desktop-room-action-panel {
+  color-scheme: dark;
   display: grid;
   gap: 10px;
   background: rgba(9, 9, 9, 0.98);

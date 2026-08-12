@@ -1,14 +1,18 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import type { Response } from "express";
+
 import {
   clearSessionCookie,
   parseCookies,
   parseLimit,
   parsePollTimeout,
+  respondWithValidationOrInternalError,
   sanitizeRedirectPath,
   setSessionCookie,
 } from "../http/helpers.js";
+import { RequestValidationError } from "../validation-error.js";
 
 test("parseLimit accepts positive integers only", () => {
   assert.equal(parseLimit(undefined), undefined);
@@ -74,4 +78,43 @@ test("session cookie helpers write the expected Set-Cookie header", () => {
     headers.get("Set-Cookie"),
     "letagents_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0"
   );
+});
+
+function responseRecorder() {
+  return {
+    statusCode: 200,
+    body: undefined as unknown,
+    status(code: number) {
+      this.statusCode = code;
+      return this;
+    },
+    json(body: unknown) {
+      this.body = body;
+      return this;
+    },
+  };
+}
+
+test("respondWithValidationOrInternalError maps validation errors to 400 with the message", () => {
+  const res = responseRecorder();
+  respondWithValidationOrInternalError(
+    res as unknown as Response,
+    "test",
+    new RequestValidationError("reply_to must be a valid message id"),
+    "Message could not be created.",
+  );
+  assert.equal(res.statusCode, 400);
+  assert.deepEqual(res.body, { error: "reply_to must be a valid message id" });
+});
+
+test("respondWithValidationOrInternalError maps unexpected errors to 500 with the fallback", () => {
+  const res = responseRecorder();
+  respondWithValidationOrInternalError(
+    res as unknown as Response,
+    "test",
+    new Error("connection refused"),
+    "Message could not be created.",
+  );
+  assert.equal(res.statusCode, 500);
+  assert.deepEqual(res.body, { error: "Message could not be created." });
 });

@@ -1,7 +1,5 @@
-import {
-  buildRoomAgentPrompt,
-  normalizeAgentPromptKind,
-} from "../../../shared/room-agent-prompts.js";
+import { normalizeAgentPromptKind } from "../../../shared/room-agent-prompts.js";
+import { dispenseRoomAgentPrompt } from "../../agent-prompt-delivery.js";
 
 export function getLastMessageId(payload: unknown): string | undefined {
   if (!payload || typeof payload !== "object") {
@@ -17,7 +15,7 @@ export function withJoinRoomAgentPrompt(payload: Record<string, unknown>): Recor
   return {
     ...payload,
     agent_prompt_kind: "join",
-    agent_prompt: buildRoomAgentPrompt("join"),
+    agent_prompt: dispenseRoomAgentPrompt("join"),
   };
 }
 
@@ -186,7 +184,7 @@ function toAgentReadableMessage(
   return {
     ...record,
     visible_text: text,
-    agent_prompt: buildRoomAgentPrompt(kind),
+    agent_prompt: dispenseRoomAgentPrompt(kind),
     prompt_injected: kind === "inline",
   };
 }
@@ -201,6 +199,78 @@ export function toAgentReadableMessages(messages: unknown[] | undefined, context
   }
   const summaries = buildThreadSummaries(records, recordsById);
   return (messages ?? []).map((message) => toAgentReadableMessage(message, recordsById, summaries));
+}
+
+export const AGENT_MESSAGE_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
+export const AGENT_MESSAGE_BODY_MAX_BYTES = AGENT_MESSAGE_OUTPUT_MAX_BYTES / 2;
+
+function jsonUtf8Bytes(value: unknown): number {
+  const serialized = JSON.stringify(value);
+  return Buffer.byteLength(serialized === undefined ? "null" : serialized, "utf8");
+}
+
+function compactOversizedAgentMessage(message: unknown): unknown {
+  if (!isRecord(message)) {
+    return { content_truncated: true, value_type: typeof message };
+  }
+  const text = typeof message.text === "string" ? message.text : "";
+  return {
+    ...(typeof message.id === "string" ? { id: message.id } : {}),
+    ...(typeof message.sender === "string" ? { sender: message.sender } : {}),
+    ...(typeof message.source === "string" ? { source: message.source } : {}),
+    ...(typeof message.timestamp === "string" ? { timestamp: message.timestamp } : {}),
+    ...(typeof message.thread_root_id === "string"
+      ? { thread_root_id: message.thread_root_id }
+      : {}),
+    ...(typeof message.thread_reply_to_id === "string"
+      ? { thread_reply_to_id: message.thread_reply_to_id }
+      : {}),
+    text: text.slice(0, 16 * 1024),
+    content_truncated: true,
+    original_utf8_bytes: jsonUtf8Bytes(message),
+  };
+}
+
+export function boundAgentMessageOutput(
+  messages: readonly unknown[],
+  options: {
+    direction?: "prefix" | "suffix";
+    maxBytes?: number;
+  } = {},
+): {
+  messages: unknown[];
+  truncated: boolean;
+  omittedMessageCount: number;
+  outputBytes: number;
+} {
+  const direction = options.direction ?? "prefix";
+  const maxBytes = Math.max(1024, Math.floor(
+    options.maxBytes ?? AGENT_MESSAGE_OUTPUT_MAX_BYTES,
+  ));
+  const ordered = direction === "suffix" ? [...messages].reverse() : [...messages];
+  const selected: unknown[] = [];
+  let outputBytes = 2; // JSON array brackets.
+
+  for (const message of ordered) {
+    let candidate = message;
+    let candidateBytes = jsonUtf8Bytes(candidate);
+    if (candidateBytes + 2 > maxBytes) {
+      candidate = compactOversizedAgentMessage(candidate);
+      candidateBytes = jsonUtf8Bytes(candidate);
+    }
+    const separatorBytes = selected.length > 0 ? 1 : 0;
+    if (outputBytes + separatorBytes + candidateBytes > maxBytes) break;
+    selected.push(candidate);
+    outputBytes += separatorBytes + candidateBytes;
+  }
+
+  if (direction === "suffix") selected.reverse();
+  return {
+    messages: selected,
+    truncated: selected.length < messages.length,
+    omittedMessageCount: messages.length - selected.length,
+    outputBytes,
+  };
 }
 
 export function appendIncludePromptOnly(path: string): string {

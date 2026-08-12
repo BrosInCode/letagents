@@ -14,6 +14,11 @@ process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
 import { isValidTransition } from "../rental/session-state-machine.js";
 
+// Imported dynamically — these modules pull in the db client, which requires
+// DB_URL at import time; static imports would hoist above the stub assignment.
+const loadCreate = () => import("../rental/sessions/create.js");
+const loadQueries = () => import("../rental/sessions/queries.js");
+
 // ===== State Machine Tests =====
 
 describe("isValidTransition (§18.2 state machine)", () => {
@@ -48,6 +53,9 @@ describe("isValidTransition (§18.2 state machine)", () => {
   it("active → expired is valid", () => {
     assert.ok(isValidTransition("active", "expired"));
   });
+  it("active → completed is valid (rental_complete without a patch cycle)", () => {
+    assert.ok(isValidTransition("active", "completed"));
+  });
   it("budget_exhausted → active is valid (extend budget)", () => {
     assert.ok(isValidTransition("budget_exhausted", "active"));
   });
@@ -76,6 +84,51 @@ describe("isValidTransition (§18.2 state machine)", () => {
   });
   it("requested → completed is invalid (skip states)", () => {
     assert.ok(!isValidTransition("requested", "completed"));
+  });
+});
+
+// ===== Session Creation Guards =====
+
+describe("resolveSessionLrtLimit", () => {
+  it("prefers the renter-supplied limit over the listing default", async () => {
+    const { resolveSessionLrtLimit } = await loadCreate();
+    assert.strictEqual(resolveSessionLrtLimit(500, 1000), 500);
+  });
+  it("falls back to the listing default", async () => {
+    const { resolveSessionLrtLimit } = await loadCreate();
+    assert.strictEqual(resolveSessionLrtLimit(undefined, 1000), 1000);
+  });
+  it("throws lrt_limit_required when neither is set", async () => {
+    const { resolveSessionLrtLimit } = await loadCreate();
+    assert.throws(
+      () => resolveSessionLrtLimit(undefined, null),
+      /lrt_limit_required/,
+    );
+  });
+  it("throws lrt_limit_invalid for zero, negative, and non-integer limits", async () => {
+    const { resolveSessionLrtLimit } = await loadCreate();
+    assert.throws(() => resolveSessionLrtLimit(0, null), /lrt_limit_invalid/);
+    assert.throws(() => resolveSessionLrtLimit(-5, 1000), /lrt_limit_invalid/);
+    assert.throws(() => resolveSessionLrtLimit(1.5, null), /lrt_limit_invalid/);
+  });
+});
+
+describe("CAPACITY_CONSUMING_STATUSES", () => {
+  it("excludes requested and terminal states", async () => {
+    const { CAPACITY_CONSUMING_STATUSES } = await loadQueries();
+    for (const status of ["requested", "completed", "cancelled", "expired", "failed"]) {
+      assert.ok(
+        !(CAPACITY_CONSUMING_STATUSES as readonly string[]).includes(status),
+        `${status} should not consume listing capacity`,
+      );
+    }
+  });
+  it("includes every in-flight state", async () => {
+    const { CAPACITY_CONSUMING_STATUSES } = await loadQueries();
+    assert.deepStrictEqual([...CAPACITY_CONSUMING_STATUSES], [
+      "accepted", "provisioning", "active", "blocked",
+      "patch_review", "pr_opened", "budget_exhausted", "stale",
+    ]);
   });
 });
 
@@ -294,6 +347,41 @@ describe("renter session route handlers", () => {
     assert.strictEqual(res.status, 400);
     const json = (await res.json()) as { error: string };
     assert.strictEqual(json.error, "mode_not_supported");
+  });
+
+  it("returns 400 when no LRT limit is resolvable", async () => {
+    deps.createSession = async () => {
+      throw new Error("lrt_limit_required");
+    };
+    const res = await req("POST", "/api/rental/sessions", {
+      listingId: "l1",
+      repoOwner: "o",
+      repoName: "r",
+      baseBranch: "main",
+      taskTitle: "t",
+      taskPrompt: "p",
+    });
+    assert.strictEqual(res.status, 400);
+    const json = (await res.json()) as { error: string };
+    assert.strictEqual(json.error, "lrt_limit_required");
+  });
+
+  it("returns 400 when the LRT limit is invalid", async () => {
+    deps.createSession = async () => {
+      throw new Error("lrt_limit_invalid");
+    };
+    const res = await req("POST", "/api/rental/sessions", {
+      listingId: "l1",
+      repoOwner: "o",
+      repoName: "r",
+      baseBranch: "main",
+      taskTitle: "t",
+      taskPrompt: "p",
+      lrtLimit: -5,
+    });
+    assert.strictEqual(res.status, 400);
+    const json = (await res.json()) as { error: string };
+    assert.strictEqual(json.error, "lrt_limit_invalid");
   });
 
   it("passes D3 trigger fields to service", async () => {
@@ -641,6 +729,35 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(json.status, "accepted");
   });
 
+  it("POST accept binds the launch to the exact desktop installation", async () => {
+    let acceptedLaunch: unknown;
+    deps.acceptSession = async (_sessionId, _accountId, launch) => {
+      acceptedLaunch = launch;
+      return { id: "rsess_1", status: "accepted" };
+    };
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/accept",
+      {
+        hostId: "desktop-host-1",
+        installationId: "desktop-installation-1",
+        runtime: {
+          kind: "cursor",
+          permissionProfileId: "sandboxed_write",
+        },
+      },
+    );
+    assert.strictEqual(res.status, 200);
+    assert.deepEqual(acceptedLaunch, {
+      hostId: "desktop-host-1",
+      installationId: "desktop-installation-1",
+      runtime: {
+        kind: "cursor",
+        permissionProfileId: "sandboxed_write",
+      },
+    });
+  });
+
   it("POST accept returns 404 for non-owned session", async () => {
     deps.acceptSession = async () => null;
     const res = await req(
@@ -676,6 +793,19 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(json.error, "quota_lease_lane_locked held_by=rsess_other");
   });
 
+  it("POST accept returns 409 when the listing is at capacity", async () => {
+    deps.acceptSession = async () => {
+      throw new Error("listing_at_capacity");
+    };
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/accept"
+    );
+    assert.strictEqual(res.status, 409);
+    const json = (await res.json()) as { error: string };
+    assert.strictEqual(json.error, "listing_at_capacity");
+  });
+
   it("POST provision returns a rental room and provisioning session", async () => {
     const res = await req(
       "POST",
@@ -691,6 +821,30 @@ describe("provider session route handlers (p1.3 additions)", () => {
     assert.strictEqual(json.roomId, "rroom_1");
     assert.strictEqual(json.participantId, "rpart_1");
     assert.strictEqual(json.session.status, "provisioning");
+  });
+
+  it("POST provision derives the participant identity from the provider account", async () => {
+    let provisionInput: Record<string, unknown> | undefined;
+    deps.provisionSession = async (input: Record<string, unknown>) => {
+      provisionInput = input;
+      return {
+        roomId: "rroom_1",
+        participantId: "rpart_1",
+        session: { id: input.sessionId, room_id: "rroom_1", status: "provisioning" },
+      };
+    };
+    const res = await req(
+      "POST",
+      "/api/rental/provider/sessions/rsess_1/provision",
+      {
+        parentRoomId: "github.com/BrosInCode/letagents",
+        providerDisplayName: "Forged Stranger",
+      },
+    );
+    assert.strictEqual(res.status, 201);
+    assert.equal(provisionInput?.providerDisplayName, "Provider Login");
+    assert.equal(provisionInput?.providerGithubLogin, "provider-login");
+    assert.equal(provisionInput?.providerGithubId, "12345");
   });
 
   it("POST provision returns an existing rental room on idempotent retry", async () => {

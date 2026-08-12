@@ -1,5 +1,7 @@
 import type {
   DesktopLocalChatSyncResult,
+  DesktopMessageInfo,
+  DesktopRoomMessage,
   DesktopTaskSummary,
   DesktopRoomLatestMessage,
   DesktopRoomMessagesPage,
@@ -9,6 +11,7 @@ import type {
   DesktopRoomThreadReadResult,
   DesktopSendRoomMessageResult,
 } from "../../ipc-types.js";
+import { parsePositivePgIntegerScopedId } from "../../../../../shared/message-contracts.mjs";
 import { apiFetch, DesktopApiError, readStoredAuth } from "../auth.js";
 import {
   consumeLocalStagedAttachments,
@@ -19,6 +22,7 @@ import {
   claimUnsyncedLocalChatMessages,
   getLatestLocalChatMessages,
   getLocalChatMessagesBefore,
+  getLocalChatMessagesAround,
   getLocalMessageThread,
   getLocalMessageThreads,
   getSyncedCloudMessageId,
@@ -47,13 +51,29 @@ import {
 import { roomMessageHistoryPageSize } from "../paths.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import {
+  mapCloudRoomMessagePayload,
   mapRoomMessagePayload,
   mapRoomMessageThreadSummary,
   type RoomMessagePayload,
 } from "./messages/mappers.js";
 import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
+import {
+  getStoredAgentSession,
+  type StoredAgentSessionState,
+} from "../agents/state.js";
 
-export { mapRoomMessagePayload, type RoomMessagePayload };
+export { mapCloudRoomMessagePayload, mapRoomMessagePayload, type RoomMessagePayload };
+
+export function desktopMessageAccountRoutingRequest(
+  headers: Record<string, string> = {},
+): { headers: Record<string, string> } {
+  return {
+    headers: {
+      ...headers,
+      "X-LetAgents-Desktop-Client": "1",
+    },
+  };
+}
 
 type RoomThreadInboxPayload = {
   threads: Array<{
@@ -115,10 +135,9 @@ export async function sendDesktopRoomMessage(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages`,
     {
       method: "POST",
-      headers: {
+      ...desktopMessageAccountRoutingRequest({
         "Content-Type": "application/json",
-        "X-LetAgents-Desktop-Client": "1",
-      },
+      }),
       body: JSON.stringify({
         sender,
         text: trimmedText,
@@ -130,7 +149,7 @@ export async function sendDesktopRoomMessage(
   );
 
   return {
-    message: mapRoomMessagePayload(message),
+    message: mapCloudRoomMessagePayload(message),
   };
 }
 
@@ -182,6 +201,7 @@ export async function getDesktopRoomThread(
     has_older?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedThreadRootId)}/thread?${params.toString()}`,
+    desktopMessageAccountRoutingRequest(),
   );
   const summary = mapRoomMessageThreadSummary(
     page.summary ?? page.root.thread ?? null,
@@ -212,7 +232,7 @@ export async function getDesktopRoomThreads(
   if (beforeMessageId !== undefined && beforeMessageId !== null && typeof beforeMessageId !== "string") {
     throw new Error("Thread inbox cursor must be a message id.");
   }
-  if (trimmedBeforeMessageId && !/^msg_\d+$/.test(trimmedBeforeMessageId)) {
+  if (trimmedBeforeMessageId && !parsePositivePgIntegerScopedId(trimmedBeforeMessageId, "msg")) {
     throw new Error("Thread inbox cursor must be a message id.");
   }
   if (filter !== "all" && filter !== "unread") {
@@ -254,14 +274,30 @@ export async function getDesktopRoomThreads(
   try {
     const page = await apiFetch<RoomThreadInboxPayload>(
       `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/threads?${params.toString()}`,
+      desktopMessageAccountRoutingRequest(),
     );
     return mapThreadInboxPayload(page);
   } catch (error) {
-    if (error instanceof DesktopApiError && error.status === 404) {
+    if (isMissingThreadRouteError(error)) {
       return emptyThreadInboxPage();
     }
     throw error;
   }
+}
+
+/**
+ * A bare 404 (no machine-readable `code`) means an older server that does not
+ * expose the thread-inbox route yet — treat that as "no thread inbox" and
+ * render an empty inbox. A 404 that carries a code (e.g. ROOM_NOT_FOUND) is a
+ * real error about a specific room and must surface rather than be masked as an
+ * empty inbox, along with every non-404 error (auth, 5xx, malformed).
+ */
+export function isMissingThreadRouteError(error: unknown): boolean {
+  return (
+    error instanceof DesktopApiError &&
+    error.status === 404 &&
+    !error.payload?.code
+  );
 }
 
 function emptyThreadInboxPage(): DesktopRoomThreadInboxPage {
@@ -396,6 +432,7 @@ export async function getDesktopRoomMessagesBefore(
     has_more?: boolean;
   }>(
     `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages?limit=${encodeURIComponent(String(limit))}&before=${encodeURIComponent(trimmedBeforeMessageId)}`,
+    desktopMessageAccountRoutingRequest(),
   );
 
   return {
@@ -407,6 +444,41 @@ export async function getDesktopRoomMessagesBefore(
       .map(mapRoomMessagePayload),
     hasOlder: Boolean(page.has_older ?? page.has_more),
   };
+}
+
+export async function getDesktopRoomMessage(
+  roomIdentifier: string,
+  messageId: string,
+): Promise<DesktopRoomMessage | null> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedMessageId = messageId.trim();
+  if (!trimmedRoomIdentifier || !parsePositivePgIntegerScopedId(trimmedMessageId, "msg")) return null;
+  if (isDesktopSmokeCheck()) return null;
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") {
+    const localRoomIdentifier = localRoomIdentifierForStorage(
+      storage,
+      trimmedRoomIdentifier,
+    );
+    const page = await getLocalChatMessagesAround(
+      localRoomIdentifier,
+      trimmedMessageId,
+      { before: 0, after: 0 },
+    );
+    const message = page.messages.find((candidate) => candidate.id === trimmedMessageId);
+    return message ? mapRoomMessagePayload(message) : null;
+  }
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(
+    storage,
+    trimmedRoomIdentifier,
+  );
+  const response = await apiFetch<{ message?: RoomMessagePayload | null }>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}`,
+    desktopMessageAccountRoutingRequest(),
+  );
+  return response.message ? mapRoomMessagePayload(response.message) : null;
 }
 
 export async function getDesktopRoomLatestMessages(
@@ -470,6 +542,111 @@ export async function getDesktopRoomLatestMessages(
 
 export { readChatStorageSettings, setChatStorageMode, setRoomStorageMode };
 
+export function resolveLocalCloudPublishAuthority(input: {
+  source: string | null | undefined;
+  publisherAgentKey: string | null;
+  publisherSessionId: string | null;
+  localControlAuthorized: boolean | null | undefined;
+  cloudRoomIdentifier: string;
+  publisherSession: {
+    session_id: string;
+    session_token?: string;
+    agent_key?: string | null;
+    room_id: string;
+  } | null;
+}): "worker" | "human" | null {
+  if (
+    input.source === "agent"
+    && input.publisherSessionId
+    && input.publisherAgentKey
+    && input.publisherSession?.session_id === input.publisherSessionId
+    && Boolean(input.publisherSession.session_token)
+    && input.publisherSession.agent_key === input.publisherAgentKey
+    && input.publisherSession.room_id === input.cloudRoomIdentifier
+  ) {
+    return "worker";
+  }
+  if (
+    input.source === "browser"
+    && input.localControlAuthorized === true
+    && !input.publisherAgentKey
+    && !input.publisherSessionId
+  ) {
+    return "human";
+  }
+  return null;
+}
+
+type CloudSyncWorkerSession = Pick<
+  StoredAgentSessionState,
+  "session_id" | "session_token" | "agent_key" | "room_id"
+>;
+
+async function registerLocalPublisherForCloudSync(
+  cloudRoomIdentifier: string,
+  localSession: StoredAgentSessionState,
+  publisherAgentKey: string,
+): Promise<CloudSyncWorkerSession> {
+  if (
+    localSession.session_kind !== "worker"
+    || localSession.ended_at
+    || localSession.agent_key !== publisherAgentKey
+  ) {
+    throw new Error("Local publisher session is no longer authoritative.");
+  }
+  const created = await apiFetch<{
+    session_id?: string;
+    session_token?: string;
+    agent_key?: string | null;
+    room_id?: string;
+  }>(`/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      actor_key: publisherAgentKey,
+      actor_label: localSession.actor_label || publisherAgentKey,
+      display_name: localSession.display_name || localSession.actor_label || publisherAgentKey,
+      ide_label: localSession.ide_label || "Agent",
+      session_kind: "worker",
+      runtime: localSession.runtime || "local-sync",
+      repo_branch: localSession.repo_branch || null,
+    }),
+  });
+  const sessionId = created.session_id?.trim() || "";
+  const sessionToken = created.session_token?.trim() || "";
+  if (
+    !sessionId
+    || !sessionToken
+    || created.agent_key !== publisherAgentKey
+    || created.room_id !== cloudRoomIdentifier
+  ) {
+    throw new Error("Cloud publisher registration returned mismatched authority.");
+  }
+  return {
+    session_id: sessionId,
+    session_token: sessionToken,
+    agent_key: publisherAgentKey,
+    room_id: cloudRoomIdentifier,
+  };
+}
+
+async function disconnectCloudSyncWorkerSession(
+  cloudRoomIdentifier: string,
+  session: CloudSyncWorkerSession,
+): Promise<void> {
+  await apiFetch(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
+    {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        agent_session_id: session.session_id,
+        agent_session_token: session.session_token,
+      }),
+    },
+  );
+}
+
 export async function syncDesktopLocalChatRoom(
   roomIdentifier: string,
 ): Promise<DesktopLocalChatSyncResult> {
@@ -489,10 +666,63 @@ export async function syncDesktopLocalChatRoom(
 
   const localMessages = await claimUnsyncedLocalChatMessages(localRoomIdentifier);
   const cloudIdsByLocalId = new Map<string, string>();
+  const cloudPublisherByLocalSessionId = new Map<string, CloudSyncWorkerSession>();
   let syncedCount = 0;
   let skippedCount = 0;
 
+  try {
   for (const localMessage of localMessages) {
+    const publisherSessionId = localMessage.agent_identity?.agent_session_id?.trim() || null;
+    const publisherAgentKey = localMessage.agent_identity?.agent_key?.trim() || null;
+    const publisherSession = publisherSessionId
+      ? getStoredAgentSession(publisherSessionId)
+      : null;
+    let effectivePublisherSessionId = publisherSessionId;
+    let effectivePublisherSession: CloudSyncWorkerSession | StoredAgentSessionState | null =
+      publisherSession;
+    if (
+      localMessage.source === "agent"
+      && publisherSessionId
+      && publisherAgentKey
+      && publisherSession?.room_id === localRoomIdentifier
+      && publisherSession.agent_key === publisherAgentKey
+      && publisherSession.session_kind === "worker"
+      && !publisherSession.ended_at
+    ) {
+      let cloudPublisher = cloudPublisherByLocalSessionId.get(publisherSessionId);
+      if (!cloudPublisher) {
+        try {
+          cloudPublisher = await registerLocalPublisherForCloudSync(
+            cloudRoomIdentifier,
+            publisherSession,
+            publisherAgentKey,
+          );
+          cloudPublisherByLocalSessionId.set(publisherSessionId, cloudPublisher);
+        } catch {
+          skippedCount += 1;
+          continue;
+        }
+      }
+      effectivePublisherSession = cloudPublisher;
+      effectivePublisherSessionId = cloudPublisher.session_id;
+    }
+    const publishAuthority = resolveLocalCloudPublishAuthority({
+      source: localMessage.source,
+      publisherAgentKey,
+      publisherSessionId: effectivePublisherSessionId,
+      localControlAuthorized: localMessage.local_control_authorized,
+      cloudRoomIdentifier,
+      publisherSession: effectivePublisherSession,
+    });
+    const publishAsWorker = publishAuthority === "worker";
+    const publishAsHuman = publishAuthority === "human";
+    if (!publishAsWorker && !publishAsHuman) {
+      // Never promote agent/imported/ambiguous provenance into an owner-human
+      // cloud write. The durable claim expires and can be retried if the exact
+      // worker session becomes available again.
+      skippedCount += 1;
+      continue;
+    }
     const replyToCloudId = localMessage.reply_to?.id
       ? cloudIdsByLocalId.get(localMessage.reply_to.id) ||
         await getSyncedCloudMessageId({
@@ -535,7 +765,7 @@ export async function syncDesktopLocalChatRoom(
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "X-LetAgents-Desktop-Client": "1",
+          ...(publishAsHuman ? { "X-LetAgents-Desktop-Client": "1" } : {}),
         },
         body: JSON.stringify({
           sender: localMessage.sender,
@@ -544,6 +774,10 @@ export async function syncDesktopLocalChatRoom(
           thread_root_id: threadRootCloudId,
           attachments,
           client_message_id: localMessage.sync_key,
+          ...(publishAsWorker && effectivePublisherSession ? {
+            agent_session_id: effectivePublisherSession.session_id,
+            agent_session_token: effectivePublisherSession.session_token,
+          } : {}),
         }),
       },
     );
@@ -559,6 +793,10 @@ export async function syncDesktopLocalChatRoom(
     } else {
       skippedCount += 1;
     }
+  }
+  } finally {
+    await Promise.allSettled([...cloudPublisherByLocalSessionId.values()].map((session) =>
+      disconnectCloudSyncWorkerSession(cloudRoomIdentifier, session)));
   }
 
   const taskResult = await syncLocalRoomTasks({
@@ -803,4 +1041,83 @@ async function syncLocalRoomTasks(input: {
   }
 
   return { syncedTaskCount, skippedTaskCount };
+}
+
+type MessageInfoPayload = {
+  message?: {
+    id?: string; sender?: string; text_preview?: string; timestamp?: string;
+    thread_root_id?: string; reply_to_id?: string | null;
+  };
+  seen_by_people?: Array<{ name?: string; avatar_url?: string | null; seen_at?: string }>;
+  agents_asked?: Array<{
+    receipt_id?: string; agent_key?: string; actor_label?: string;
+    activation_reason_label?: string; receipt_state?: string; observed?: boolean;
+    reply_message_id?: string | null;
+  }>;
+  also_observed?: Array<{ agent_key?: string; display_name?: string }>;
+  summary_counts?: { seen_count?: number; asked_count?: number; reply_count?: number; observed_count?: number };
+};
+
+export function mapDesktopMessageInfoPayload(payload: MessageInfoPayload): DesktopMessageInfo | null {
+  const message = payload.message;
+  if (!message?.id || !message.sender || !message.timestamp) return null;
+  return {
+    message: {
+      id: message.id,
+      sender: message.sender,
+      textPreview: message.text_preview ?? "",
+      timestamp: message.timestamp,
+      threadRootId: message.thread_root_id ?? message.id,
+      replyToId: message.reply_to_id ?? null,
+    },
+    seenByPeople: (payload.seen_by_people ?? []).flatMap((person) =>
+      person.name && person.seen_at
+        ? [{ name: person.name, avatarUrl: person.avatar_url ?? null, seenAt: person.seen_at }]
+        : []),
+    agentsAsked: (payload.agents_asked ?? []).flatMap((agent) =>
+      agent.receipt_id && agent.agent_key && agent.receipt_state
+        ? [{
+          receiptId: agent.receipt_id,
+          agentKey: agent.agent_key,
+          actorLabel: agent.actor_label || agent.agent_key,
+          activationReasonLabel: agent.activation_reason_label || "",
+          receiptState: agent.receipt_state,
+          observed: agent.observed === true,
+          replyMessageId: agent.reply_message_id ?? null,
+        }]
+        : []),
+    alsoObserved: (payload.also_observed ?? []).flatMap((agent) =>
+      agent.agent_key
+        ? [{ agentKey: agent.agent_key, displayName: agent.display_name || agent.agent_key }]
+        : []),
+    summaryCounts: {
+      seenCount: payload.summary_counts?.seen_count ?? 0,
+      askedCount: payload.summary_counts?.asked_count ?? 0,
+      replyCount: payload.summary_counts?.reply_count ?? 0,
+      observedCount: payload.summary_counts?.observed_count ?? 0,
+    },
+  };
+}
+
+/**
+ * Message info is cloud truth. Local-only rooms return null and the surface
+ * shows its local-room copy instead of fabricating receipts.
+ */
+export async function getDesktopRoomMessageInfo(
+  roomIdentifier: string,
+  messageId: string,
+): Promise<DesktopMessageInfo | null> {
+  const trimmedRoomIdentifier = roomIdentifier.trim();
+  const trimmedMessageId = messageId.trim();
+  if (!trimmedRoomIdentifier || !parsePositivePgIntegerScopedId(trimmedMessageId, "msg")) return null;
+  if (isDesktopSmokeCheck()) return null;
+
+  const storage = await resolveLocalAwareRoomStorageMode(trimmedRoomIdentifier);
+  if (storage.effectiveMode === "local") return null;
+
+  const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, trimmedRoomIdentifier);
+  const payload = await apiFetch<MessageInfoPayload>(
+    `/rooms/${encodeURIComponent(cloudRoomIdentifier)}/messages/${encodeURIComponent(trimmedMessageId)}/info`,
+  );
+  return mapDesktopMessageInfoPayload(payload);
 }

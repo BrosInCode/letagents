@@ -61,16 +61,15 @@ test("create-session forwards a mapped body and maps the response back", async (
   assert.equal(out.id, "rsess_42");
 });
 
-test("create-session falls back to a stub when API call fails", async () => {
+test("create-session surfaces API failure", async () => {
   const { client } = makeFakeClient({
     createSession: { ok: false, status: 400, error: "listing_not_found", body: null },
   });
   const handlers = captureHandlersWithClient(client);
-  const out = (await invoke(handlers, "desktop:rental:create-session", {
+  await assert.rejects(() => invoke(handlers, "desktop:rental:create-session", {
     listingId: "listing_1",
     taskTitle: "x",
-  })) as { id: string };
-  assert.equal(out.id, "session_stub");
+  }), { code: "request_failed" });
 });
 
 test("get-session maps the live response", async () => {
@@ -97,7 +96,7 @@ test("get-session maps the live response", async () => {
   assert.equal(out.status, "active");
 });
 
-test("cancel-session falls back to a cancelled stub when the API rejects", async () => {
+test("cancel-session surfaces API rejection", async () => {
   const { client } = makeFakeClient({
     cancelSession: {
       ok: false,
@@ -107,34 +106,29 @@ test("cancel-session falls back to a cancelled stub when the API rejects", async
     },
   });
   const handlers = captureHandlersWithClient(client);
-  const out = (await invoke(handlers, "desktop:rental:cancel-session", "rsess_8")) as {
-    id: string;
-    status: string;
-  };
-  assert.equal(out.id, "rsess_8");
-  assert.equal(out.status, "cancelled");
+  await assert.rejects(() => invoke(handlers, "desktop:rental:cancel-session", "rsess_8"), { code: "request_failed" });
 });
 
-test("accept-request forwards to acceptRequest and maps to a session", async () => {
-  const { client, calls } = makeFakeClient({
-    acceptRequest: {
-      ok: true,
-      status: 200,
-      body: sessionRow({
-        id: "rsess_9",
-        status: "accepted",
-        task_title: "T",
-        task_prompt: "P",
-      }),
-    },
+test("accept-request delegates to the main-process launch coordinator", async () => {
+  let accepted: unknown[] = [];
+  const handlers = captureHandlersWithClient(null, {
+    launchCoordinator: {
+      async acceptAndLaunch(...args: unknown[]) {
+        accepted = args;
+        return sessionRow({ id: "rsess_9", status: "active" }) as never;
+      },
+    } as never,
   });
-  const handlers = captureHandlersWithClient(client);
-  const out = (await invoke(handlers, "desktop:rental:accept-request", "rsess_9")) as {
+  const out = (await invoke(handlers, "desktop:rental:accept-request", "rsess_9", {
+    providerId: "codex",
+    permissionProfileId: "full_access",
+  })) as {
     id: string;
     status: string;
   };
-  assert.equal(calls[0]?.method, "acceptRequest");
-  assert.equal(out.status, "accepted");
+  assert.equal(out.status, "active");
+  assert.equal(accepted[0], "rsess_9");
+  assert.deepEqual(accepted[1], { providerId: "codex", permissionProfileId: "full_access" });
 });
 
 test("decline-request forwards to declineRequest and maps to a request payload", async () => {
@@ -156,34 +150,15 @@ test("decline-request forwards to declineRequest and maps to a request payload",
   assert.equal(out.status, "cancelled");
 });
 
-test("without apiClient live-client session channels still return stubs", async () => {
+test("without apiClient live-client session channels fail visibly", async () => {
   const handlers = captureHandlersWithClient(null);
-  const create = (await invoke(
+  await assert.rejects(() => invoke(
     handlers,
     "desktop:rental:create-session",
     { listingId: "listing_1" },
-  )) as { id: string };
-  assert.equal(create.id, "session_stub");
-  const get = (await invoke(handlers, "desktop:rental:get-session", "rsess_z")) as {
-    id: string;
-  };
-  assert.equal(get.id, "rsess_z");
-  const cancel = (await invoke(
-    handlers,
-    "desktop:rental:cancel-session",
-    "rsess_z",
-  )) as { status: string };
-  assert.equal(cancel.status, "cancelled");
-  const accept = (await invoke(
-    handlers,
-    "desktop:rental:accept-request",
-    "rsess_z",
-  )) as { status: string };
-  assert.equal(accept.status, "accepted");
-  const decline = (await invoke(
-    handlers,
-    "desktop:rental:decline-request",
-    "rsess_z",
-  )) as { status: string };
-  assert.equal(decline.status, "declined");
+  ), { code: "unavailable" });
+  await assert.rejects(() => invoke(handlers, "desktop:rental:get-session", "rsess_z"), { code: "unavailable" });
+  await assert.rejects(() => invoke(handlers, "desktop:rental:cancel-session", "rsess_z"), { code: "unavailable" });
+  await assert.rejects(() => invoke(handlers, "desktop:rental:accept-request", "rsess_z"), { code: "unavailable" });
+  await assert.rejects(() => invoke(handlers, "desktop:rental:decline-request", "rsess_z"), { code: "unavailable" });
 });

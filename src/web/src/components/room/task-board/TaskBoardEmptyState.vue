@@ -11,26 +11,34 @@
 .board-empty {
   display: grid;
   place-items: center;
+  min-height: 220px;
   padding: 40px 20px;
-  color: var(--muted, #71717a);
+  border: 1px dashed var(--border-strong);
+  border-radius: var(--radius-lg);
+  background: var(--bg-subtle);
+  color: var(--text-secondary);
   text-align: center;
 }
 
 .board-empty h3 {
   margin-bottom: 4px;
-  color: var(--text, #fafafa);
-  font-size: 0.88rem;
+  color: var(--text);
+  font-size: 0.9rem;
+  font-weight: 650;
 }
 
 .board-empty p {
+  margin: 0;
   font-size: 0.82rem;
   line-height: 1.5;
 }
 
 .board-empty code {
   padding: 1px 5px;
-  border-radius: 4px;
-  background: var(--surface, #18181b);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xs);
+  background: var(--bg-elevated);
+  color: var(--text);
   font-size: 0.78rem;
 }
 </style>

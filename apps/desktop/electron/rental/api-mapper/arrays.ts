@@ -1,15 +1,20 @@
 import type {
   DesktopRentalActivityEvent,
+  DesktopRentalContextApproval,
+  DesktopRentalExposure,
   DesktopRentalListing,
   DesktopRentalPatch,
   DesktopRentalRequest,
+  DesktopRentalSession,
 } from "../../ipc-types.js";
 
 import { mapApiActivityEvent } from "./activity.js";
+import { mapApiContextApproval, mapApiExposure } from "./context.js";
 import { mapApiListing } from "./listing.js";
 import { mapApiPatch } from "./patch.js";
 import { isObject } from "./primitives.js";
 import { mapApiRequest } from "./request.js";
+import { mapApiSession } from "./session.js";
 
 // ---------------------------------------------------------------------------
 // Array helpers
@@ -35,6 +40,13 @@ export function mapApiRequestArray(raw: unknown): DesktopRentalRequest[] {
     .filter((x): x is DesktopRentalRequest => x !== null);
 }
 
+export function mapApiSessionArray(raw: unknown): DesktopRentalSession[] {
+  const rows = unwrapArray(raw, "sessions");
+  return rows
+    .map((row) => mapApiSession(row))
+    .filter((x): x is DesktopRentalSession => x !== null);
+}
+
 export function mapApiActivityEventArray(
   raw: unknown,
 ): DesktopRentalActivityEvent[] {
@@ -49,6 +61,22 @@ export function mapApiPatchArray(raw: unknown): DesktopRentalPatch[] {
   return rows
     .map((row) => mapApiPatch(row))
     .filter((x): x is DesktopRentalPatch => x !== null);
+}
+
+export function mapApiExposureArray(raw: unknown): DesktopRentalExposure[] {
+  const rows = unwrapArray(raw, "exposures");
+  return rows
+    .map((row) => mapApiExposure(row))
+    .filter((x): x is DesktopRentalExposure => x !== null);
+}
+
+export function mapApiContextApprovalArray(
+  raw: unknown,
+): DesktopRentalContextApproval[] {
+  const rows = unwrapArray(raw, "requests", "context_requests");
+  return rows
+    .map((row) => mapApiContextApproval(row))
+    .filter((x): x is DesktopRentalContextApproval => x !== null);
 }
 
 function unwrapArray(raw: unknown, ...keys: string[]): unknown[] {

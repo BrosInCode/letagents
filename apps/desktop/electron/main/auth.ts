@@ -1,7 +1,10 @@
-import { app, safeStorage } from "electron";
 import { Buffer } from "node:buffer";
 import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
+import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+
+import { Agent } from "undici";
 
 import type {
   DesktopAuthAccount,
@@ -13,6 +16,91 @@ import type {
 import { apiUrl } from "./paths.js";
 import { desktopSmokeAuthStatus, isDesktopSmokeCheck } from "./smoke.js";
 
+const require = createRequire(import.meta.url);
+let warnedAboutUserDataFallback = false;
+
+/**
+ * Shared keep-alive dispatcher for all {@link apiFetch} traffic.
+ *
+ * The electron main process makes ~10+ HTTPS requests/second to the LetAgents
+ * API at peak. With the default undici dispatcher (keepAliveTimeout ~4s, no
+ * per-origin connection cap) bursts open ~10 sockets that idle-reap into
+ * TIME_WAIT (measured: 54 ESTABLISHED + 246 TIME_WAIT). A longer keep-alive
+ * window plus a per-origin connection cap lets the burst reuse a bounded pool
+ * of warm sockets instead of churning fresh connections.
+ *
+ * This is passed per-request via `RequestInit.dispatcher` rather than through
+ * `setGlobalDispatcher` on purpose: room-stream.ts drives its own long-lived
+ * SSE/long-poll fetches on the default global dispatcher, and we must not
+ * retune those from under it.
+ *
+ * Compatibility note: passing an external undici `Agent` into Electron's
+ * internal-undici global `fetch` was runtime-verified on Electron 42.4.0
+ * (Node 22.20); re-verify socket reuse when upgrading Electron.
+ */
+const API_KEEP_ALIVE_DISPATCHER = new Agent({
+  keepAliveTimeout: 45_000,
+  keepAliveMaxTimeout: 60_000,
+  connections: 16,
+});
+
+/** Default per-request timeout for {@link apiFetch} when the caller passes no signal. */
+const DEFAULT_API_TIMEOUT_MS = 30_000;
+
+interface DesktopSecretStorage {
+  isEncryptionAvailable: () => boolean;
+  encryptString: (value: string) => Buffer;
+  decryptString: (value: Buffer) => string;
+}
+
+function getElectronMain(): {
+  app?: { getPath: (name: "userData") => string };
+  safeStorage?: DesktopSecretStorage;
+} {
+  try {
+    const electron = require("electron") as unknown;
+    return typeof electron === "object" && electron !== null
+      ? electron as {
+          app?: { getPath: (name: "userData") => string };
+          safeStorage?: DesktopSecretStorage;
+        }
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+function desktopUserDataPath(): string {
+  // Test/CI override so suites can point the auth store at a temp dir instead
+  // of the real per-user location (mirrors LETAGENTS_STATE_PATH in paths.ts).
+  const overridePath = process.env.LETAGENTS_DESKTOP_USER_DATA_DIR?.trim();
+  if (overridePath) {
+    return overridePath;
+  }
+
+  const userDataPath = getElectronMain().app?.getPath("userData");
+  if (userDataPath) {
+    return userDataPath;
+  }
+
+  const fallbackPath = join(homedir(), ".letagents", "desktop");
+  if (!warnedAboutUserDataFallback) {
+    console.warn(
+      "[desktop-auth] Electron userData path unavailable; storing auth state in ~/.letagents/desktop."
+    );
+    warnedAboutUserDataFallback = true;
+  }
+  return fallbackPath;
+}
+
+function desktopSecretStorage(): DesktopSecretStorage {
+  return getElectronMain().safeStorage || {
+    isEncryptionAvailable: () => false,
+    encryptString: (value) => Buffer.from(value, "utf8"),
+    decryptString: (value) => value.toString("utf8"),
+  };
+}
+
 type ApiErrorPayload = {
   error?: string;
   code?: string;
@@ -22,6 +110,7 @@ type ApiErrorPayload = {
   interval?: number;
   expires_in?: number;
   status?: string;
+  current_delivery_signal_sequence?: number;
 };
 
 type StoredDesktopAuth = {
@@ -89,7 +178,7 @@ export class DesktopApiError extends Error {
 }
 
 function getAuthStorePath(): string {
-  return join(app.getPath("userData"), "letagents-desktop-auth.json");
+  return join(desktopUserDataPath(), "letagents-desktop-auth.json");
 }
 
 function normalizeAuthAccount(
@@ -109,6 +198,7 @@ function normalizeAuthAccount(
 
 function encryptTokenForStorage(token: string | null): string | null {
   if (!token) return null;
+  const safeStorage = desktopSecretStorage();
   if (!safeStorage.isEncryptionAvailable()) {
     return `plain:${token}`;
   }
@@ -127,13 +217,13 @@ function decryptTokenFromStorage(
 
   if (
     !encryptedToken.startsWith("safe:") ||
-    !safeStorage.isEncryptionAvailable()
+    !desktopSecretStorage().isEncryptionAvailable()
   ) {
     return null;
   }
 
   try {
-    return safeStorage.decryptString(
+    return desktopSecretStorage().decryptString(
       Buffer.from(encryptedToken.slice("safe:".length), "base64"),
     );
   } catch {
@@ -141,11 +231,45 @@ function decryptTokenFromStorage(
   }
 }
 
+function emptyStoredAuth(): StoredDesktopAuth {
+  return {
+    token: null,
+    ownerTokenId: null,
+    oauthTokenExpiresAt: null,
+    account: null,
+    pendingDeviceAuth: null,
+    savedAt: new Date(0).toISOString(),
+  };
+}
+
+/**
+ * In-memory cache of the parsed auth store.
+ *
+ * `apiFetch` calls `readStoredAuth` on EVERY request; at the measured request
+ * rate (~10/s) an uncached read is ~10 disk reads + OS-keychain decrypts per
+ * second for a token that changes ~never, which pinned the main process near
+ * 90% CPU. This module is the ONLY writer of the auth store file (see
+ * `writeStoredAuth` / `clearStoredAuth`), so no external process can mutate it
+ * behind our back — the cache can therefore be treated as authoritative and is
+ * only ever invalidated from our own mutation paths. Every mutation
+ * (`writeStoredAuth`, `updateStoredAuth`, device-auth completion, the
+ * auth-status token refresh, sign-out via `clearStoredAuth`) funnels through
+ * those two functions, so refreshing the cache there keeps it correct.
+ *
+ * Security note: the cache holds exactly what each request already held
+ * transiently (a decrypted bearer token in main-process memory); it does not
+ * widen exposure or persist the token anywhere new.
+ */
+let cachedAuth: StoredDesktopAuth | null = null;
+
 export async function readStoredAuth(): Promise<StoredDesktopAuth> {
+  if (cachedAuth) {
+    return cachedAuth;
+  }
   try {
     const raw = await readFile(getAuthStorePath(), "utf8");
     const parsed = JSON.parse(raw) as Partial<PersistedDesktopAuth>;
-    return {
+    cachedAuth = {
       token: decryptTokenFromStorage(parsed),
       ownerTokenId: parsed.ownerTokenId || null,
       oauthTokenExpiresAt: parsed.oauthTokenExpiresAt || null,
@@ -153,15 +277,17 @@ export async function readStoredAuth(): Promise<StoredDesktopAuth> {
       pendingDeviceAuth: parsed.pendingDeviceAuth || null,
       savedAt: parsed.savedAt || new Date(0).toISOString(),
     };
-  } catch {
-    return {
-      token: null,
-      ownerTokenId: null,
-      oauthTokenExpiresAt: null,
-      account: null,
-      pendingDeviceAuth: null,
-      savedAt: new Date(0).toISOString(),
-    };
+    return cachedAuth;
+  } catch (error) {
+    // Only a missing file (= signed out) is a cacheable outcome. A transient
+    // read failure (EPERM/EIO disk hiccup at startup, etc.) must NOT latch the
+    // app signed-out until restart — leave the cache cold so the next call
+    // retries the disk read and self-heals, like the old uncached code did.
+    if ((error as NodeJS.ErrnoException)?.code === "ENOENT") {
+      cachedAuth = emptyStoredAuth();
+      return cachedAuth;
+    }
+    return emptyStoredAuth();
   }
 }
 
@@ -180,6 +306,10 @@ async function writeStoredAuth(nextAuth: StoredDesktopAuth): Promise<void> {
     `${JSON.stringify(persistedAuth, null, 2)}\n`,
     "utf8",
   );
+  // Refresh the cache from the value we just persisted so the next
+  // readStoredAuth (e.g. the Authorization header on the next apiFetch) reflects
+  // this mutation without another disk read + keychain decrypt.
+  cachedAuth = { ...nextAuth };
 }
 
 async function updateStoredAuth(
@@ -197,6 +327,9 @@ async function updateStoredAuth(
 
 export async function clearStoredAuth(): Promise<void> {
   await rm(getAuthStorePath(), { force: true });
+  // Sign-out path: drop the token from the cache too, otherwise the next
+  // apiFetch would keep sending the just-cleared bearer token.
+  cachedAuth = emptyStoredAuth();
 }
 
 function buildAuthStatus(input: {
@@ -276,21 +409,74 @@ async function parseApiErrorPayload(
   }
 }
 
+/**
+ * Options controlling {@link apiFetch}'s default per-request timeout.
+ *
+ * `apiFetch` attaches `AbortSignal.timeout(DEFAULT_API_TIMEOUT_MS)` when the
+ * caller passes no `signal`, so a stuck request can't hang the main process
+ * forever. Callers with a legitimately-slow operation (or that manage their own
+ * cancellation) opt out or extend:
+ *   - passing an explicit `init.signal` disables the default timeout entirely
+ *     (the caller owns cancellation);
+ *   - `{ timeoutMs: N }` overrides the default with N ms;
+ *   - `{ timeoutMs: null }` disables the default timeout with no replacement.
+ */
+export type ApiFetchOptions = {
+  timeoutMs?: number | null;
+};
+
 export async function apiFetch<T>(
   path: string,
   init?: RequestInit,
+  options?: ApiFetchOptions,
 ): Promise<T> {
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers(init?.headers);
   requestHeaders.set("Accept", "application/json");
+  if (
+    typeof init?.body === "string"
+    && init.body.length > 0
+    && !requestHeaders.has("Content-Type")
+  ) {
+    requestHeaders.set("Content-Type", "application/json");
+  }
   if (storedAuth.token && !requestHeaders.has("Authorization")) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
   }
 
-  const response = await fetch(`${apiUrl}${path}`, {
+  // A caller-provided signal always wins: we never override it with a default
+  // timeout, since the caller owns that request's cancellation policy.
+  const callerSignal = init?.signal ?? null;
+  const timeoutMs =
+    options?.timeoutMs === null
+      ? null
+      : options?.timeoutMs ?? DEFAULT_API_TIMEOUT_MS;
+  const timeoutSignal =
+    callerSignal || timeoutMs === null ? null : AbortSignal.timeout(timeoutMs);
+
+  // `dispatcher` is an undici extension to RequestInit that Node/Electron's
+  // global fetch honors at runtime; it is absent from the DOM RequestInit type,
+  // hence the cast.
+  const fetchInit = {
     ...init,
     headers: requestHeaders,
-  });
+    signal: callerSignal ?? timeoutSignal ?? undefined,
+    dispatcher: API_KEEP_ALIVE_DISPATCHER,
+  } as RequestInit;
+
+  let response: Response;
+  try {
+    response = await fetch(`${apiUrl}${path}`, fetchInit);
+  } catch (error) {
+    // Surface our own timeout as a clear Error (not an opaque AbortError) so
+    // callers like snapshot loadSource degrade gracefully on `error.message`.
+    if (timeoutSignal?.aborted && !callerSignal) {
+      throw new Error(
+        `LetAgents API request to ${path} timed out after ${timeoutMs} ms.`,
+      );
+    }
+    throw error;
+  }
 
   if (!response.ok) {
     throw new DesktopApiError(

@@ -1,6 +1,6 @@
 import type { Response } from "express";
 
-import type { Project } from "../../../db.js";
+import type { Message, Project } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 
 export interface RoomPresenceRouteDeps {
@@ -27,4 +27,10 @@ export interface RoomPresenceRouteDeps {
     preserveLastSeenAtOnConflict?: boolean;
   }): Promise<void>;
   maybeEmitStaleWorkPrompt(projectId: string): Promise<unknown>;
+  emitProjectMessage(
+    projectId: string,
+    sender: string,
+    text: string,
+    options?: { source?: string; client_message_id?: string | null },
+  ): Promise<Message>;
 }

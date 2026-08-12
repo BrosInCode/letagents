@@ -1,4 +1,5 @@
 import { databaseSkipReason, dbApi } from "./database.js";
+import { hashToken } from "../../db/utils.js";
 
 export type CoordinationTestActor = {
   actor_label: string;
@@ -55,6 +56,10 @@ export async function createWorkerSessionCredentials(input: {
     display_name: session.display_name,
     owner_label: session.owner_label,
     ide_label: session.ide_label,
+    credential_fence: {
+      kind: "session_token",
+      token_hash: hashToken(session.session_token),
+    },
     transport: "long_poll",
   });
 

@@ -8,12 +8,13 @@ import type {
   RepoStatus,
 } from "../../../electron/ipc-types";
 import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode } from "../components/desktop/types";
-import { systemEntries } from "../domain/desktop-navigation";
+import { rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
 import {
   buildSidebarProjectGroups,
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
+  resolveAccountRoomAliasIdentifier,
   rootPathLabel,
   rootRoomEntryId,
   type RecentRootRoom,
@@ -54,9 +55,26 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     ) || null;
   });
 
+  const currentRootRoomIdentifier = computed(() => {
+    const identifier = options.rootRoomSnapshot.value?.roomIdentifier
+      || options.selectedRootRoomIdentifier.value
+      || null;
+    return resolveAccountRoomAliasIdentifier(identifier, options.accountRooms.value)
+      || identifier;
+  });
+
+  const currentAccountRoom = computed(() => {
+    const identifier = normalizeRoomIdentifier(currentRootRoomIdentifier.value);
+    if (!identifier) return null;
+    return options.accountRooms.value.find(
+      (room) => normalizeRoomIdentifier(room.roomIdentifier) === identifier,
+    ) || null;
+  });
+
   const repoName = computed(() => {
     return currentRecentRootRoom.value?.displayName
       || options.rootRoomSnapshot.value?.room?.displayName
+      || currentAccountRoom.value?.displayName
       || options.rootRoomSnapshot.value?.roomIdentifier
       || options.repoStatus.value?.rootPath?.split("/").filter(Boolean).pop()
       || options.appInfo.value?.workspaceRoot?.split("/").filter(Boolean).pop()
@@ -131,8 +149,17 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
       (entry) => aliases.has(normalizeRoomIdentifier(entry.identifier) || "")
     ) || null;
     const hasRootPathOverride = Object.prototype.hasOwnProperty.call(rememberOptions, "rootPath");
-    const rootPath = hasRootPathOverride
-      ? rememberOptions.rootPath || null
+    const overrideRootPath = hasRootPathOverride ? rememberOptions.rootPath || null : undefined;
+    // A truthy override wins. An explicit null/empty override normally clears the
+    // root (e.g. canonicalizing a stale invite-room alias). But for a repo-backed
+    // room — one whose snapshot carries a gitRoom — a null override must NOT erase
+    // a previously-recorded durable project root: the account/app-agent reopen
+    // path sends { rootPath: null } to mean "open as a room", not "forget which
+    // project this repo room belongs to". Preserving it keeps the repo-backed
+    // focus room attached to its project instead of falling back to HOME later.
+    const snapshotIsRepoBacked = Boolean(snapshot.room?.gitRoom);
+    const rootPath = overrideRootPath !== undefined
+      ? overrideRootPath ?? (snapshotIsRepoBacked ? existingRoom?.rootPath ?? null : null)
       : existingRoom
         ? existingRoom.rootPath
         : options.repoStatus.value?.rootPath ?? options.appInfo.value?.workspaceRoot ?? null;
@@ -191,16 +218,18 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   });
 
   const currentParentRoom = computed<RoomEntry>(() => ({
-    id: rootRoomEntryId(options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value || repoName.value),
+    id: rootRoomEntryId(currentRootRoomIdentifier.value || repoName.value),
     type: "room",
     kind: "parent",
-    roomIdentifier: options.rootRoomSnapshot.value?.roomIdentifier || options.selectedRootRoomIdentifier.value || null,
+    roomIdentifier: currentRootRoomIdentifier.value,
     title: repoName.value,
     meta: currentParentRoomMeta.value,
     sectionLabel: "Parent room",
     headline: "Start here, then branch work into focused rooms when it needs space.",
     description:
       "The main room should feel like home base: familiar, recent, and connected to the focused work happening around it.",
+    gitRoom: options.rootRoomSnapshot.value?.room?.gitRoom ?? currentAccountRoom.value?.gitRoom ?? null,
+    currentWorkspace: true,
     latestMessageId: options.rootRoomSnapshot.value?.messages.at(-1)?.id || null,
     latestMessageAt: options.rootRoomSnapshot.value?.messages.at(-1)?.timestamp || null,
     hasUnread: false,
@@ -224,6 +253,9 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     sectionLabel: currentParentRoom.value.sectionLabel,
     headline: currentParentRoom.value.headline,
     description: currentParentRoom.value.description,
+    gitRoom: currentParentRoom.value.gitRoom ?? null,
+    suggestedAction: currentParentRoom.value.suggestedAction ?? null,
+    currentWorkspace: currentParentRoom.value.currentWorkspace ?? false,
     latestMessageId: currentParentRoom.value.latestMessageId,
     latestMessageAt: currentParentRoom.value.latestMessageAt,
     hasUnread: false,
@@ -233,6 +265,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
   const activeEntry = ref<SidebarEntry>(pinnedRoom.value);
   const sidebarMode = ref<SidebarMode>("expanded");
+  const pinnedCollapsed = ref(false);
   const roomsCollapsed = ref(false);
   const collapsedProjects = ref<Record<string, boolean>>({});
 
@@ -242,10 +275,11 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
     for (const group of projectEntries.value) {
       if (group.parent.id === entryId) return group.parent;
-      const focusRoom = group.focusRooms.find((room) => room.id === entryId);
-      if (focusRoom) return focusRoom;
+      const childRoom = projectChildRooms(group).find((room) => room.id === entryId);
+      if (childRoom) return childRoom;
     }
 
+    if (entryId === rentMarketplaceEntry.id) return rentMarketplaceEntry;
     return systemEntries.find((entry) => entry.id === entryId) || null;
   }
 
@@ -263,12 +297,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
   }
 
   function cycleSidebar() {
-    sidebarMode.value =
-      sidebarMode.value === "expanded"
-        ? "rail"
-        : sidebarMode.value === "rail"
-          ? "hidden"
-          : "expanded";
+    sidebarMode.value = sidebarMode.value === "expanded" ? "hidden" : "expanded";
   }
 
   function toggleProject(projectId: string) {
@@ -280,6 +309,10 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
   function toggleRoomsCollapsed(): void {
     roomsCollapsed.value = !roomsCollapsed.value;
+  }
+
+  function togglePinnedCollapsed(): void {
+    pinnedCollapsed.value = !pinnedCollapsed.value;
   }
 
   function openRoomSnapshot(
@@ -309,11 +342,11 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
 
     if (activeEntry.value.type !== "room") return;
 
-    if (activeEntry.value.kind === "focus") {
-      const nextFocus = projectEntries.value
-        .flatMap((project) => project.focusRooms)
+    if (activeEntry.value.kind !== "parent") {
+      const nextChild = projectEntries.value
+        .flatMap(projectChildRooms)
         .find((room) => room.id === activeEntry.value.id);
-      activeEntry.value = nextFocus || currentParentRoom.value;
+      activeEntry.value = nextChild || currentParentRoom.value;
       return;
     }
 
@@ -336,6 +369,7 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     focusRooms,
     getAuthRoomIdentifier,
     openRoomSnapshot,
+    pinnedCollapsed,
     pinnedRoom,
     projectEntries,
     reconcileActiveEntry,
@@ -351,8 +385,13 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     selectedRoomInfo,
     sidebarMode,
     toggleProject,
+    togglePinnedCollapsed,
     toggleRoomsCollapsed,
   };
+}
+
+function projectChildRooms(project: ProjectGroup): RoomEntry[] {
+  return [...project.branchRooms, ...project.focusRooms];
 }
 
 function roomSnapshotAliases(snapshot: DesktopRoomSnapshot): Set<string> {

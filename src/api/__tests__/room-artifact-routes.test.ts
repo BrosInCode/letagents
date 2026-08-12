@@ -101,6 +101,9 @@ function routeDeps(
     getRoomSharedArtifactByIdentityKey: async () => {
       throw new Error("unexpected hydration");
     },
+    requireWorkerRequestAgentIdentity: async () => {
+      throw new Error("unexpected worker identity check");
+    },
     ...overrides,
   };
 }
@@ -270,4 +273,389 @@ test("room artifact route publishes a manual artifact and links tasks", async ()
     room_id: ROOM_ID,
     artifact: hydratedArtifact,
   });
+});
+
+test("room artifact route stores agent-session publishes as workflow artifacts", async () => {
+  const calls: unknown[] = [];
+  const hydratedArtifact = artifactRow({
+    source: "task_workflow_artifact",
+    linked_task_ids: ["task_4"],
+  });
+
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async (input) => {
+      calls.push({
+        workerIdentity: {
+          room_id: input.room_id,
+          agent_session_id: input.body.agent_session_id,
+        },
+      });
+      return {
+        ok: true,
+        identity: {
+          actor_label: "CedarVista | Emmy's agent | Claude Code",
+          agent_key: "emmy/cedarvista",
+          agent_instance_id: null,
+          agent_session_id: "agent_session_1",
+          session_kind: "worker",
+          runtime: "claude-code:token",
+          display_name: "CedarVista",
+          owner_label: "Emmy",
+          ide_label: "Claude Code",
+          repo_branch: "feature/x",
+        },
+      };
+    },
+    upsertRoomSharedArtifact: async (input) => {
+      calls.push({ upsert: { source: input.source } });
+      return artifactRow({ room_id: input.room_id, source: "task_workflow_artifact" });
+    },
+    linkRoomSharedArtifactToTask: async (input) => {
+      calls.push({ link: { task_id: input.task_id, source: input.source } });
+    },
+    getRoomSharedArtifactByIdentityKey: async () => hydratedArtifact,
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:key:emmy/cedarvista:branch:feature/x",
+          title: "CedarVista changes on feature/x (2 files)",
+          ref: "feature/x",
+          state: "updated",
+        },
+        task_id: "task_4",
+        agent_session_id: "agent_session_1",
+        agent_session_token: "token_1",
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(calls, [
+    { resolve: "github.com/brosincode/letagents" },
+    { participant: "github.com/brosincode/letagents" },
+    {
+      workerIdentity: {
+        room_id: "github.com/brosincode/letagents",
+        agent_session_id: "agent_session_1",
+      },
+    },
+    { upsert: { source: "task_workflow_artifact" } },
+    { link: { task_id: "task_4", source: "task_workflow_artifact" } },
+  ]);
+  assert.deepEqual(res.body, {
+    room_id: ROOM_ID,
+    artifact: hydratedArtifact,
+  });
+});
+
+test("room artifact route rejects a change_summary id that does not match the authenticated worker", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => ({
+      ok: true,
+      identity: {
+        actor_label: "CedarVista | Emmy's agent | Claude Code",
+        agent_key: "emmy/cedarvista",
+        agent_instance_id: null,
+        agent_session_id: "agent_session_1",
+        session_kind: "worker",
+        runtime: "claude-code:token",
+        display_name: "CedarVista",
+        owner_label: "Emmy",
+        ide_label: "Claude Code",
+        repo_branch: "feature/x",
+      },
+    }),
+    // upsert is left as the default throwing stub — it must NOT be reached.
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:key:someone/else:branch:feature/x",
+          ref: "feature/x",
+          state: "updated",
+        },
+        agent_session_id: "agent_session_1",
+        agent_session_token: "token_1",
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+});
+
+test("room artifact route accepts a session-based change_summary id matching the worker session", async () => {
+  const calls: unknown[] = [];
+  const hydratedArtifact = artifactRow({ kind: "change_summary" });
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => ({
+      ok: true,
+      identity: {
+        actor_label: "Generic | Emmy's agent | Codex",
+        agent_key: "codex",
+        agent_instance_id: null,
+        agent_session_id: "agent_session_9",
+        session_kind: "worker",
+        runtime: "codex",
+        display_name: "Generic",
+        owner_label: "Emmy",
+        ide_label: "Codex",
+        repo_branch: "feature/x",
+      },
+    }),
+    upsertRoomSharedArtifact: async (input) =>
+      artifactRow({ room_id: input.room_id, kind: "change_summary" }),
+    getRoomSharedArtifactByIdentityKey: async () => hydratedArtifact,
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        agent_session_id: "agent_session_9",
+        agent_session_token: "token_9",
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:session:agent_session_9:branch:feature/x",
+          ref: "feature/x",
+          state: "updated",
+        },
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+});
+
+test("room artifact route rejects a malformed managed-agent change_summary identity form", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => ({
+      ok: true,
+      identity: {
+        actor_label: "X | Emmy's agent | Codex",
+        agent_key: "emmy/x",
+        agent_instance_id: null,
+        agent_session_id: "agent_session_9",
+        session_kind: "worker",
+        runtime: "codex",
+        display_name: "X",
+        owner_label: "Emmy",
+        ide_label: "Codex",
+        repo_branch: "feature/x",
+      },
+    }),
+    // upsert left as the throwing stub — must not be reached.
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        agent_session_id: "agent_session_9",
+        agent_session_token: "token_9",
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:weird:branch:feature/x",
+          ref: "feature/x",
+          state: "updated",
+        },
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+});
+
+test("room artifact route rejects a managed-agent change_summary id missing a branch segment", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => ({
+      ok: true,
+      identity: {
+        actor_label: "X | Emmy's agent | Codex",
+        agent_key: "emmy/x",
+        agent_instance_id: null,
+        agent_session_id: "agent_session_9",
+        session_kind: "worker",
+        runtime: "codex",
+        display_name: "X",
+        owner_label: "Emmy",
+        ide_label: "Codex",
+        repo_branch: "feature/x",
+      },
+    }),
+    // upsert left as the throwing stub — must not be reached.
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        agent_session_id: "agent_session_9",
+        agent_session_token: "token_9",
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:key:emmy/x",
+          ref: "feature/x",
+          state: "updated",
+        },
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 403);
+});
+
+test("room artifact route rejects invalid agent session credentials instead of downgrading to manual", async () => {
+  const calls: unknown[] = [];
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => ({
+      ok: false,
+      status: 401,
+      error: "Invalid agent session credentials.",
+    }),
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:key:emmy/cedarvista:branch:feature/x",
+        },
+        agent_session_id: "agent_session_1",
+        agent_session_token: "wrong",
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(res.body, { error: "Invalid agent session credentials." });
+  assert.deepEqual(calls, [
+    { resolve: "github.com/brosincode/letagents" },
+    { participant: "github.com/brosincode/letagents" },
+  ]);
+});
+
+test("room artifact route passes change_summary detail through to the upsert", async () => {
+  // Regression guard: normalizePublishedArtifact rebuilds the artifact field by
+  // field, so a new field is silently dropped unless it is threaded through.
+  const calls: unknown[] = [];
+  let capturedUpsert: { artifact?: { detail?: unknown } } | null = null;
+  const handler = registeredHandler("post", routeDeps(calls, {
+    requireWorkerRequestAgentIdentity: async () => ({
+      ok: true,
+      identity: {
+        actor_label: "X | Emmy's agent | Claude Code",
+        agent_key: "emmy/x",
+        agent_instance_id: null,
+        agent_session_id: "agent_session_1",
+        session_kind: "worker",
+        runtime: "claude-code:token",
+        display_name: "X",
+        owner_label: "Emmy",
+        ide_label: "Claude Code",
+        repo_branch: "feature/y",
+      },
+    }),
+    upsertRoomSharedArtifact: async (input) => {
+      capturedUpsert = input as { artifact?: { detail?: unknown } };
+      return artifactRow({ room_id: input.room_id, kind: "change_summary" });
+    },
+    getRoomSharedArtifactByIdentityKey: async () => artifactRow({ kind: "change_summary" }),
+  }));
+
+  const res = responseStub();
+  await handler(
+    {
+      params: { 0: "github.com/BrosInCode/letagents" },
+      authKind: "owner_token",
+      body: {
+        agent_session_id: "agent_session_1",
+        agent_session_token: "token_1",
+        artifact: {
+          provider: "git",
+          kind: "change_summary",
+          id: "managed-agent:key:emmy/x:branch:feature/y",
+          ref: "feature/y",
+          state: "updated",
+          detail: {
+            type: "change_summary",
+            version: 1,
+            changedFileCount: 1,
+            additions: 4,
+            deletions: 1,
+            stagedFileCount: 1,
+            unstagedFileCount: 0,
+            untrackedFileCount: 0,
+            hiddenFileCount: 0,
+            files: [
+              {
+                path: "src/a.ts",
+                previousPath: null,
+                status: "modified",
+                additions: 4,
+                deletions: 1,
+                binary: false,
+                staged: true,
+                unstaged: false,
+                untracked: false,
+              },
+            ],
+          },
+        },
+      },
+      sessionAccount: null,
+    },
+    res
+  );
+
+  assert.equal(res.statusCode, 200);
+  const detail = capturedUpsert?.artifact?.detail as
+    | { type: string; files: unknown[] }
+    | undefined;
+  assert.ok(detail, "detail must survive validation + normalization into the upsert");
+  assert.equal(detail?.type, "change_summary");
+  assert.equal(detail?.files.length, 1);
 });

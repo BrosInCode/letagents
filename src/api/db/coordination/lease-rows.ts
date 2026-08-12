@@ -30,6 +30,7 @@ export function createTaskLeaseRow(
     agent_instance_id: input.agent_instance_id ?? null,
     agent_session_id: input.agent_session_id ?? null,
     actor_label: input.actor_label,
+    epoch: 0,
     branch_ref: input.branch_ref ?? null,
     pr_url: input.pr_url ?? null,
     output_intent: input.output_intent ?? null,

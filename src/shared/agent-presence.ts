@@ -22,6 +22,7 @@ export const ROOM_AGENT_RECONNECT_GRACE_MS = 10_000;
 export const ROOM_AGENT_DELIVERY_TRANSPORTS = [
   "long_poll",
   "sse",
+  "desktop_events",
 ] as const;
 
 export type RoomAgentDeliveryTransport = (typeof ROOM_AGENT_DELIVERY_TRANSPORTS)[number];
@@ -32,6 +33,20 @@ export const ROOM_AGENT_SESSION_KINDS = [
 ] as const;
 
 export type RoomAgentSessionKind = (typeof ROOM_AGENT_SESSION_KINDS)[number];
+
+/** Durable proof that must still be current when a delivery lease is written. */
+export type RoomAgentDeliveryCredentialFence =
+  | { kind: "session_token"; token_hash: string }
+  | { kind: "bearer"; bearer_id: string; generation: number; expires_at?: string | null };
+
+export function isRoomAgentDeliveryCredentialExpired(
+  fence: RoomAgentDeliveryCredentialFence | null | undefined,
+  now = Date.now(),
+): boolean {
+  if (fence?.kind !== "bearer" || !fence.expires_at) return false;
+  const expiresAt = Date.parse(fence.expires_at);
+  return Number.isFinite(expiresAt) && expiresAt <= now;
+}
 
 export function normalizeRoomAgentSessionKind(value: unknown): RoomAgentSessionKind {
   return String(value || "").trim().toLowerCase() === "worker" ? "worker" : "controller";

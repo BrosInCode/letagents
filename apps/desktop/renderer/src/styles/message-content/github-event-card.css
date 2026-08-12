@@ -76,13 +76,24 @@
 .desktop-github-chip.is-status {
   border-color: color-mix(in srgb, var(--event-accent) 24%, rgba(255, 255, 255, 0.08));
   background: color-mix(in srgb, var(--event-accent) 13%, rgba(255, 255, 255, 0.04));
-  color: var(--text-secondary);
 }
 
 .desktop-github-chip.is-task {
   border-color: rgba(245, 158, 11, 0.1);
   background: rgba(245, 158, 11, 0.08);
   color: #f59e0b;
+}
+
+.desktop-github-chip.is-task.is-interactive {
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.desktop-github-chip.is-task.is-interactive:hover,
+.desktop-github-chip.is-task.is-interactive:focus-visible {
+  border-color: color-mix(in srgb, #f59e0b 54%, transparent);
+  background: color-mix(in srgb, #f59e0b 15%, transparent);
+  outline: none;
 }
 
 .desktop-github-event strong {

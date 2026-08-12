@@ -37,6 +37,7 @@ interface SetupStateInput {
   selectedMcpTargetIds?: DesktopMcpInstallTargetId[];
   firstRunStage?: FirstRunWizardStage;
   mcpWizardStep?: DesktopMcpWizardStep;
+  initialBootstrapTimeoutMs?: number;
   roomBridge?: {
     getSnapshot?: (roomIdentifier: string | null) => Promise<DesktopRoomSnapshot>;
   };
@@ -138,12 +139,12 @@ test("first-run setup shows splash while unresolved and gates incomplete MCP", (
   state.setupLoadError.value = null;
   state.mcpInstallState.value = mcpInstallStateFixture({ completed: false });
 
-  assert.equal(state.onboarding.showFirstRunSplash.value, false);
+  assert.equal(state.onboarding.showFirstRunSplash.value, true);
   assert.equal(state.onboarding.showFirstRunGate.value, true);
 
   state.mcpInstallState.value = mcpInstallStateFixture({ completed: true });
 
-  assert.equal(state.onboarding.showFirstRunSplash.value, false);
+  assert.equal(state.onboarding.showFirstRunSplash.value, true);
   assert.equal(state.onboarding.showFirstRunGate.value, false);
 });
 
@@ -188,6 +189,53 @@ test("loadFirstRunSetup refreshes completed setup even when GitHub is skipped", 
   assert.equal(state.firstRunStage.value, "github");
   assert.equal(state.onboarding.showFirstRunGate.value, false);
   assert.equal(refreshCount, 1);
+});
+
+test("initial splash remains visible until the first room refresh completes", async () => {
+  let finishRefresh: (() => void) | null = null;
+  const refreshPending = new Promise<void>((resolve) => {
+    finishRefresh = resolve;
+  });
+  const state = makeSetupState({
+    refresh: () => refreshPending,
+    setupBridge: {
+      getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }),
+    },
+    authBridge: {
+      getStatus: async () => authStatusFixture({ authenticated: false }),
+    },
+  });
+
+  const loadPromise = withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup());
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(state.mcpInstallState.value?.completed, true);
+  assert.equal(state.onboarding.showFirstRunSplash.value, true);
+
+  finishRefresh?.();
+  await loadPromise;
+
+  assert.equal(state.onboarding.showFirstRunSplash.value, false);
+});
+
+test("initial splash yields when the first room refresh stalls", async () => {
+  const state = makeSetupState({
+    initialBootstrapTimeoutMs: 5,
+    refresh: () => new Promise<void>(() => undefined),
+    setupBridge: {
+      getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }),
+    },
+    authBridge: {
+      getStatus: async () => authStatusFixture({ authenticated: false }),
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.loadFirstRunSetup());
+
+  assert.equal(state.onboarding.showFirstRunSplash.value, false);
+  assert.equal(state.loading.value, false);
+  assert.equal(state.setupLoadError.value, null);
 });
 
 test("startFirstRunSetup advances welcome to MCP choose step", () => {
@@ -572,6 +620,7 @@ function makeSetupState(input: SetupStateInput = {}) {
     repoStatus,
     selectedMcpTargetIds: ref(input.selectedMcpTargetIds ?? []),
     setupLoadError,
+    initialBootstrapTimeoutMs: input.initialBootstrapTimeoutMs,
   });
 
   return {
@@ -740,6 +789,11 @@ function snapshotFixture(
     reasoningSessions: [],
     recentActivity: [],
     roomArtifacts: [],
+    boardSettings: {
+      managerMode: "manager_optional",
+      activeManager: null,
+      pendingIntentCount: 0,
+    },
     messages: [],
     githubEvents: null,
   };

@@ -78,7 +78,9 @@ export function mapApiRequest(raw: unknown): DesktopRentalRequest | null {
       "timeLimitMinutes",
     ),
     createdAt: isoOrNull(raw.created_at ?? raw.createdAt),
-    expiresAt: isoOrNull(raw.expires_at ?? raw.expiresAt),
+    expiresAt: isoOrNull(
+      raw.request_expires_at ?? raw.requestExpiresAt ?? raw.expires_at ?? raw.expiresAt,
+    ),
     updatedAt: nonNullIso(raw.updated_at ?? raw.updatedAt, new Date().toISOString()),
   };
 }

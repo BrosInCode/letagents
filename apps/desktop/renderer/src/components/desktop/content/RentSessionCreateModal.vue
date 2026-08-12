@@ -127,6 +127,7 @@ import {
   trapFocusInDialog,
 } from "./modal-focus";
 import { rentalContinuityLabel, rentalModeLabel } from "./rent-session-detail/presentation";
+import { desktopIpc } from "../../../ipc/index.js";
 
 const props = defineProps<{
   open: boolean;
@@ -184,7 +185,7 @@ function cancel(): void {
 async function submit(): Promise<void> {
   if (!canSubmit.value || !props.listing) return;
 
-  const bridge = window.letagentsDesktop?.rental;
+  const bridge = desktopIpc.rental;
   if (!bridge?.createSession) {
     errorMessage.value = "Rent an Agent is turned off in this desktop app.";
     return;

@@ -9,8 +9,10 @@
     @drop.prevent="handleAttachmentDrop"
   >
     <div
+      ref="threadLayoutElement"
       class="room-chat-layout"
       :data-thread-open="Boolean(activeThreadParent)"
+      :data-thread-overlay="threadPaneOverlay"
       :data-thread-resizing="isResizingThreadPane"
       :style="threadLayoutStyle"
     >
@@ -30,19 +32,36 @@
           :thread-messages="threadMessagesWithThreadOverrides"
           :message-namespace="messageNamespace"
           :local-agent-work="localAgentWork"
+          :delivery-receipts-by-message="deliveryReceiptsByMessage"
+          :delivery-recovery-available="deliveryRecoveryAvailable"
+          :continuation-repair-available="continuationRepairAvailable"
+          :room-delivery-skip-available="roomDeliverySkipAvailable"
+          :delivery-retry-keys="deliveryRetryKeys"
+          :continuation-repair-keys="continuationRepairKeys"
+          :room-delivery-skip-keys="roomDeliverySkipKeys"
+          :participants="participants"
+          :presence="presence"
+          :supervisor-entries="roomSupervisorEntries"
+          @reveal-message="requestMessageReveal"
           :has-filtered-room-activity="hasFilteredRoomActivity"
           :room-identifier="roomIdentifier"
           :github-activity-available="githubEventsAvailable"
           :room-loading="roomLoading"
           :search-query="searchQuery"
+          :task-reference-ids="taskReferenceIds"
           :initial-scroll-top="initialScrollTop"
           @load-older="emit('load-older')"
           @open-agent="openAgentModal"
           @open-image="openImageViewer"
           @open-thread="openThread"
           @quote-reply="quoteReply"
+          @message-info="openMessageInfo"
           @quote-selection="quoteSelectedText"
           @open-github-event="emit('open-github-event', $event)"
+          @open-task="emit('open-task', $event)"
+          @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
+          @restore-conversation="(agentId, sourceMessageId) => emit('restore-conversation', agentId, sourceMessageId)"
+          @skip-delivery="(agentId, sourceMessageId) => emit('skip-delivery', agentId, sourceMessageId)"
           @scroll-position="emit('scroll-position', $event)"
         />
 
@@ -65,9 +84,11 @@
 
         <RoomComposer
           v-else
+          ref="roomComposer"
           :attaching="attaching"
           :attachment-drafts="attachmentDrafts"
           :attachment-error="attachmentError"
+          :event-previews="composerEventPreviews"
           :initial-draft="initialDraft"
           :participants="participants"
           :permission-approvals="permissionApprovals"
@@ -85,6 +106,8 @@
           @open-permission-detail="emit('open-permission-detail', $event)"
           @pick-attachments="pickAttachments"
           @remove-attachment="removeAttachment"
+          @open-event-preview="openEventPreview"
+          @dismiss-event-preview="emit('dismiss-event-preview', $event)"
           @resolve-permission="(approval, behavior) => emit('resolve-permission', approval, behavior)"
           @send-message="handleComposerSend"
         />
@@ -129,6 +152,7 @@
 
       <RoomThreadPanel
         v-if="activeThreadPanelParent"
+        @message-info="openMessageInfo"
         :parent="activeThreadPanelParent"
         :initial-thread-summary="activeThreadInitialSummary"
         :replies="activeThreadReplies"
@@ -142,12 +166,27 @@
         :pending-attachment-drafts="threadPendingAttachmentDrafts"
         :has-older-replies="activeThreadHasOlder"
         :loading-older-replies="loadingOlderThreadReplies"
+        :reveal-message-id="threadRevealTargetId"
         :search-query="searchQuery"
         :active-search-message-id="activeSearchMessageId"
+        :task-reference-ids="taskReferenceIds"
+        :delivery-receipts-by-message="deliveryReceiptsByMessage"
+        :delivery-recovery-available="deliveryRecoveryAvailable"
+        :continuation-repair-available="continuationRepairAvailable"
+        :room-delivery-skip-available="roomDeliverySkipAvailable"
+        :delivery-retry-keys="deliveryRetryKeys"
+        :continuation-repair-keys="continuationRepairKeys"
+        :room-delivery-skip-keys="roomDeliverySkipKeys"
+        :presence="presence"
+        :supervisor-entries="roomSupervisorEntries"
+        @retry-delivery="(agentId, sourceMessageId) => emit('retry-delivery', agentId, sourceMessageId)"
+        @restore-conversation="(agentId, sourceMessageId) => emit('restore-conversation', agentId, sourceMessageId)"
+        @skip-delivery="(agentId, sourceMessageId) => emit('skip-delivery', agentId, sourceMessageId)"
         @close="closeThread"
         @open-image="openImageViewer"
         @open-agent="openAgentModal"
         @open-github-event="emit('open-github-event', $event)"
+        @open-task="emit('open-task', $event)"
         @jump-message="jumpToMessage"
         @load-older-replies="loadOlderThreadReplies"
         @pick-attachments="pickThreadAttachments"
@@ -156,6 +195,15 @@
         @send-thread-message="sendThreadMessage"
       />
     </div>
+
+    <RoomMessageInfoSurface
+      :open="messageInfoTargetId !== null"
+      :room-identifier="roomIdentifier ?? ''"
+      :message-id="messageInfoTargetId ?? ''"
+      :invoker-context="messageInfoInvokerContext"
+      @close="messageInfoTargetId = null"
+      @scroll-to-message="revealMessageFromInfo"
+    />
   </section>
 </template>
 
@@ -169,12 +217,14 @@ import type {
   DesktopReasoningSession,
   DesktopRoomMessage,
   DesktopRoomMessageThreadSummary,
+  DesktopSupervisorManifestEntry,
   DesktopTaskSummary,
 } from "../../../../../electron/ipc-types";
 import DesktopImageViewerModal from "./DesktopImageViewerModal.vue";
-import type {
-  ManagedAgentPermissionApproval,
-  ManagedAgentWorkIndicator,
+import {
+  normalizeManagedAgentRoomIdentifier,
+  type ManagedAgentPermissionApproval,
+  type ManagedAgentWorkIndicator,
 } from "../../../domain/managed-agents";
 import type { AgentModalTarget } from "./desktop-chat-message/types";
 import {
@@ -182,8 +232,17 @@ import {
   isLowSignalGitHubCheckMessage,
 } from "./desktop-chat-message/github-event";
 import RoomComposer from "./room-chat/RoomComposer.vue";
+import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
+import RoomMessageInfoSurface from "./room-chat/RoomMessageInfoSurface.vue";
 import RoomMessageViewport from "./room-chat/RoomMessageViewport.vue";
 import RoomThreadPanel from "./room-chat/RoomThreadPanel.vue";
+import {
+  maxThreadPaneWidthForContainer,
+  shouldOverlayThreadPane,
+  threadPaneDefaultWidth,
+  threadPaneHardMaxWidth,
+  threadPaneMinWidth,
+} from "./room-chat/thread-layout";
 import {
   resolveThreadParent,
   threadParentId,
@@ -192,6 +251,8 @@ import {
 import { useAgentReasoningLauncher } from "./room-chat/useAgentReasoningLauncher";
 import { useRoomAttachments } from "./room-chat/useRoomAttachments";
 import { useRoomImages } from "./room-chat/useRoomImages";
+import { desktopIpc } from "../../../ipc/index.js";
+import { roomMessageRevealDestination } from "../../../domain/room-message-reveal";
 
 const props = defineProps<{
   active: boolean;
@@ -199,8 +260,17 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
+  deliveryRecoveryAvailable?: boolean;
+  continuationRepairAvailable?: boolean;
+  roomDeliverySkipAvailable?: boolean;
+  deliveryRetryKeys?: ReadonlySet<string>;
+  continuationRepairKeys?: ReadonlySet<string>;
+  roomDeliverySkipKeys?: ReadonlySet<string>;
+  revealedMessageId?: string | null;
   permissionApprovals: ManagedAgentPermissionApproval[];
   permissionError: string | null;
+  composerEventPreviews: ComposerEventPreview[];
   hasFilteredRoomActivity: boolean;
   roomIdentifier: string | null;
   githubEventsVisible: boolean;
@@ -212,6 +282,7 @@ const props = defineProps<{
   loadingOlderMessages: boolean;
   participants: DesktopParticipantSummary[];
   presence: DesktopAgentPresence[];
+  supervisorEntries?: DesktopSupervisorManifestEntry[];
   resolvingPermissionIds: Record<string, DesktopManagedAgentPermissionDecisionBehavior>;
   reasoningSessions: DesktopReasoningSession[];
   tasks: DesktopTaskSummary[];
@@ -220,6 +291,18 @@ const props = defineProps<{
   initialDraft?: string;
   initialScrollTop?: number | null;
 }>();
+
+/*
+ * Keep provider resolution anchored to the room currently being rendered.
+ * The manifest is the authoritative local record even when older message and
+ * participant snapshots contain only the generic "Supervisor worker" label.
+ */
+const roomSupervisorEntries = computed(() => {
+  const roomIdentifier = normalizeManagedAgentRoomIdentifier(props.roomIdentifier);
+  return (props.supervisorEntries ?? []).filter((entry) =>
+    normalizeManagedAgentRoomIdentifier(entry.roomId) === roomIdentifier
+  );
+});
 
 const emit = defineEmits<{
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>, threadRootId?: string | null];
@@ -233,6 +316,14 @@ const emit = defineEmits<{
   "draft-change": [text: string];
   "scroll-position": [scrollTop: number];
   "open-github-event": [url: string];
+  "open-events": [];
+  "open-task": [taskId: string];
+  "retry-delivery": [agentId: string, sourceMessageId: string];
+  "restore-conversation": [agentId: string, sourceMessageId: string];
+  "skip-delivery": [agentId: string, sourceMessageId: string];
+  "reveal-message": [messageId: string];
+  "message-reveal-unavailable": [messageId: string];
+  "dismiss-event-preview": [messageId: string];
   "resolve-permission": [
     approval: ManagedAgentPermissionApproval,
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
@@ -246,14 +337,17 @@ interface RoomReplyTarget extends DesktopRoomMessage {
 }
 
 const threadLayoutAnimationMs = 250;
-const threadPaneMinWidth = 320;
-const threadPaneDefaultWidth = 380;
-const threadPaneHardMaxWidth = 560;
-const threadPaneMinRoomWidth = 560;
+const taskReferenceIds = computed<ReadonlySet<string>>(() =>
+  new Set(props.tasks.map((task) => task.id))
+);
 const threadResizeStep = 24;
 const activeThreadParentId = ref<string | null>(null);
+const threadRevealTargetId = ref<string | null>(null);
 const replyTarget = ref<RoomReplyTarget | null>(null);
 const messageViewport = ref<InstanceType<typeof RoomMessageViewport> | null>(null);
+const roomComposer = ref<InstanceType<typeof RoomComposer> | null>(null);
+const threadLayoutElement = ref<HTMLElement | null>(null);
+const threadLayoutWidth = ref(0);
 const threadReturnFocusElement = ref<HTMLElement | null>(null);
 const transientHighlightMessageId = ref<string | null>(null);
 const threadPaneWidth = ref(threadPaneDefaultWidth);
@@ -268,11 +362,13 @@ const openedThreadSummaries = ref(new Map<string, DesktopRoomMessageThreadSummar
 const lastMarkedThreadReadKey = ref<string | null>(null);
 let transientHighlightTimeout: number | null = null;
 let threadPaneResizeState: { startX: number; startWidth: number; cursor: string; userSelect: string } | null = null;
+let threadLayoutResizeObserver: ResizeObserver | null = null;
 const messagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.messages));
 const threadMessagesWithThreadOverrides = computed(() => applyThreadSummaryOverrides(props.threadMessages));
 const threadLayoutStyle = computed<CSSProperties>(() => ({
   "--room-thread-pane-width": `${threadPaneWidth.value}px`,
 }));
+const threadPaneOverlay = computed(() => shouldOverlayThreadPane(threadLayoutWidth.value));
 const activeThreadParent = computed(() =>
   fetchedThreadRootId.value === activeThreadParentId.value && fetchedThreadRoot.value
     ? applyThreadSummaryOverride(fetchedThreadRoot.value)
@@ -350,7 +446,7 @@ const { openAgentModal } = useAgentReasoningLauncher({
   openAgentDetail: (target) => emit("open-agent-detail", target),
 });
 
-function openThread(messageId: string): void {
+function openThread(messageId: string, refresh = true): void {
   if (document.activeElement instanceof HTMLElement) {
     threadReturnFocusElement.value = document.activeElement;
   }
@@ -360,7 +456,7 @@ function openThread(messageId: string): void {
   }
   forgetOpenedThreadSummary(messageId);
   activeThreadParentId.value = messageId;
-  void loadThread(messageId);
+  if (refresh) void loadThread(messageId);
 }
 
 function quoteReply(messageId: string): void {
@@ -386,6 +482,14 @@ function quoteSelectedText(messageId: string, selectedText: string): void {
     : null;
 }
 
+function openEventPreview(event: ComposerEventPreview): void {
+  if (event.url) {
+    emit("open-github-event", event.url);
+    return;
+  }
+  emit("open-events");
+}
+
 function clearReplyTarget(): void {
   replyTarget.value = null;
 }
@@ -393,6 +497,7 @@ function clearReplyTarget(): void {
 function closeThread(): void {
   messageViewport.value?.preserveScrollAnchorOnNextLayout(threadLayoutAnimationMs);
   activeThreadParentId.value = null;
+  threadRevealTargetId.value = null;
   clearThreadAttachmentDrafts();
   void nextTick(() => {
     threadReturnFocusElement.value?.focus({ preventScroll: true });
@@ -461,13 +566,21 @@ function clampThreadPaneWidth(width: number): number {
 }
 
 function maxThreadPaneWidth(): number {
-  if (typeof window === "undefined") return threadPaneHardMaxWidth;
-  const viewportLimitedMax = window.innerWidth - threadPaneMinRoomWidth;
-  return Math.max(threadPaneMinWidth, Math.min(threadPaneHardMaxWidth, viewportLimitedMax));
+  const containerWidth = threadLayoutWidth.value || threadLayoutElement.value?.clientWidth || 0;
+  return containerWidth
+    ? maxThreadPaneWidthForContainer(containerWidth)
+    : threadPaneHardMaxWidth;
 }
 
 function clampThreadPaneToViewport(): void {
+  if (threadPaneOverlay.value) return;
   threadPaneWidth.value = clampThreadPaneWidth(threadPaneWidth.value);
+}
+
+function syncThreadLayoutWidth(): void {
+  const width = threadLayoutElement.value?.clientWidth || 0;
+  threadLayoutWidth.value = width;
+  if (!shouldOverlayThreadPane(width)) clampThreadPaneToViewport();
 }
 
 function sendThreadMessage(
@@ -484,7 +597,7 @@ async function loadThread(threadRootId: string): Promise<void> {
   const roomIdentifier = props.roomIdentifier;
   const messageNamespace = props.messageNamespace;
   if (!roomIdentifier) return;
-  const roomApi = window.letagentsDesktop?.room;
+  const roomApi = desktopIpc.room;
   if (!roomApi?.getThread) return;
   try {
     const page = await roomApi.getThread(roomIdentifier, threadRootId);
@@ -507,7 +620,7 @@ async function loadOlderThreadReplies(): Promise<void> {
   const roomIdentifier = props.roomIdentifier;
   const messageNamespace = props.messageNamespace;
   if (!threadRootId || !roomIdentifier || loadingOlderThreadReplies.value || !activeThreadHasOlder.value) return;
-  const roomApi = window.letagentsDesktop?.room;
+  const roomApi = desktopIpc.room;
   if (!roomApi?.getThread) return;
   const beforeMessageId = fetchedThreadReplies.value[0]?.id || null;
   if (!beforeMessageId) return;
@@ -537,7 +650,7 @@ async function markThreadRead(
   messageNamespace = props.messageNamespace,
 ): Promise<void> {
   if (!roomIdentifier || !props.active) return;
-  const roomApi = window.letagentsDesktop?.room;
+  const roomApi = desktopIpc.room;
   if (!roomApi?.markThreadRead) return;
   const readKey = `${threadRootId}:${messageId}`;
   if (lastMarkedThreadReadKey.value === readKey) return;
@@ -615,8 +728,27 @@ function mergeThreadMessages(
 }
 
 function jumpToMessage(messageId: string): void {
+  const destination = roomMessageRevealDestination(
+    messageId,
+    messagesWithThreadOverrides.value,
+    threadMessagesWithThreadOverrides.value,
+  );
+  if (destination.kind === "thread") {
+    // The source graph already contains this exact reply. Render it directly;
+    // a refresh RPC must not be allowed to turn a known link into a no-op.
+    threadRevealTargetId.value = messageId;
+    openThread(destination.threadRootId, false);
+    return;
+  }
+  if (destination.kind === "history") {
+    emit("reveal-message", messageId);
+    return;
+  }
   transientHighlightMessageId.value = messageId;
-  messageViewport.value?.scrollToMessage(messageId);
+  if (!messageViewport.value?.scrollToMessage(messageId)) {
+    emit("reveal-message", messageId);
+    return;
+  }
   if (transientHighlightTimeout !== null) {
     window.clearTimeout(transientHighlightTimeout);
   }
@@ -625,6 +757,38 @@ function jumpToMessage(messageId: string): void {
     transientHighlightTimeout = null;
   }, 1800);
 }
+
+function requestMessageReveal(messageId: string): void {
+  emit("reveal-message", messageId);
+}
+
+const messageInfoTargetId = ref<string | null>(null);
+const messageInfoInvokerContext = ref<"timeline" | "thread-root" | "thread-reply" | null>(null);
+
+// Message info is scoped to the full message-identity namespace, not just
+// the room id: a namespace change re-keys message ids even within one room,
+// so the open card (or an in-flight fetch target) must never outlive either.
+watch(() => [props.roomIdentifier, props.messageNamespace] as const, () => {
+  messageInfoTargetId.value = null;
+});
+
+function openMessageInfo(messageId: string, context: "timeline" | "thread-root" | "thread-reply"): void {
+  messageInfoTargetId.value = messageId;
+  messageInfoInvokerContext.value = context;
+}
+
+function revealMessageFromInfo(messageId: string): void {
+  messageInfoTargetId.value = null;
+  jumpToMessage(messageId);
+  emit("reveal-message", messageId);
+}
+
+watch(
+  () => props.revealedMessageId,
+  (messageId) => {
+    if (messageId) void nextTick(() => jumpToMessage(messageId));
+  },
+);
 
 function handleComposerSend(
   text: string,
@@ -687,14 +851,24 @@ watch(
 );
 
 onMounted(() => {
-  clampThreadPaneToViewport();
-  window.addEventListener("resize", clampThreadPaneToViewport);
+  syncThreadLayoutWidth();
+  if (typeof ResizeObserver !== "undefined" && threadLayoutElement.value) {
+    threadLayoutResizeObserver = new ResizeObserver(syncThreadLayoutWidth);
+    threadLayoutResizeObserver.observe(threadLayoutElement.value);
+  }
+  window.addEventListener("resize", syncThreadLayoutWidth);
 });
 
-defineExpose({ openThread });
+function focusComposerWithMention(mentionText: string): void {
+  roomComposer.value?.focusWithMention(mentionText);
+}
+
+defineExpose({ openThread, focusComposerWithMention });
 
 onBeforeUnmount(() => {
-  window.removeEventListener("resize", clampThreadPaneToViewport);
+  window.removeEventListener("resize", syncThreadLayoutWidth);
+  threadLayoutResizeObserver?.disconnect();
+  threadLayoutResizeObserver = null;
   stopThreadPaneResize();
   if (transientHighlightTimeout !== null) {
     window.clearTimeout(transientHighlightTimeout);

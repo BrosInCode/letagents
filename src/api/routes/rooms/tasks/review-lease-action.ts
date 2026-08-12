@@ -130,7 +130,23 @@ export function registerTaskReviewLeaseActionRoute(
         return;
       }
 
-      const releasedLease = await releaseTaskLease(project.id, reviewLease.id);
+      // Fence the release on the review lease identity the actor-match above
+      // observed: if it moved or is no longer active (concurrent release), the
+      // CAS matches 0 rows and we conflict instead of recording a phantom
+      // release. Review leases are non-rebindable, so epoch is the static 0
+      // consistency guard.
+      const releasedLease = await releaseTaskLease(project.id, reviewLease.id, {
+        kind: "review",
+        expected_epoch: reviewLease.epoch,
+        expected_agent_session_id: reviewLease.agent_session_id ?? null,
+      });
+      if (!releasedLease) {
+        res.status(409).json({
+          error: "Review lease changed before it could be released; re-read and retry.",
+          code: "coordination_review_lease_stale",
+        });
+        return;
+      }
       await createCoordinationEvent({
         room_id: project.id,
         task_id: task.id,

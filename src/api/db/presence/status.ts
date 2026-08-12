@@ -4,7 +4,7 @@ import { toRoomAgentPresence } from "../mappers.js";
 import { room_agent_presence } from "../schema.js";
 import type { RoomAgentPresence, RoomAgentPresenceRow } from "../types.js";
 
-export async function upsertRoomAgentPresence(input: {
+export interface UpsertRoomAgentPresenceInput {
   room_id: string;
   actor_label: string;
   agent_key?: string | null;
@@ -17,10 +17,14 @@ export async function upsertRoomAgentPresence(input: {
   repo_branch?: string | null;
   status: AgentPresenceStatus;
   status_text?: string | null;
-}): Promise<RoomAgentPresence> {
-  const now = new Date().toISOString();
+}
 
-  const [presence] = await db
+export async function upsertRoomAgentPresenceTx(
+  tx: any,
+  input: UpsertRoomAgentPresenceInput,
+  now = new Date().toISOString(),
+): Promise<RoomAgentPresence> {
+  const [presence] = await tx
     .insert(room_agent_presence)
     .values({
       room_id: input.room_id,
@@ -59,4 +63,10 @@ export async function upsertRoomAgentPresence(input: {
     .returning();
 
   return toRoomAgentPresence(presence as RoomAgentPresenceRow);
+}
+
+export async function upsertRoomAgentPresence(
+  input: UpsertRoomAgentPresenceInput,
+): Promise<RoomAgentPresence> {
+  return upsertRoomAgentPresenceTx(db, input);
 }

@@ -204,9 +204,19 @@ test("agent session helpers maintain current sessions per room and skip ended se
     assert.equal(resolveWaitAgentSession("room_1", null), null);
     assert.equal(resolveWaitAgentSession("room_1", undefined), null);
     assert.deepEqual(resolveWaitAgentSession("room_1", oldSession.session_id), oldSession);
+    assert.throws(
+      () => resolveWaitAgentSession("room_1", "agent_session_missing"),
+      /Unknown agent_session_id/,
+      "resume cannot silently register a replacement when exact local credentials are missing",
+    );
 
     const ended = endStoredAgentSession("agent_session_new", "2026-05-28T00:06:00.000Z");
     assert.equal(ended?.ended_at, "2026-05-28T00:06:00.000Z");
+    assert.throws(
+      () => resolveWaitAgentSession("room_2", newSession.session_id),
+      /ended at/,
+      "resume fails closed for an ended exact worker session",
+    );
     assert.equal(getCurrentAgentSession("room_2"), null);
     assert.deepEqual(getCurrentAgentSession(), oldSession);
   });

@@ -1,7 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { createRequire } from "node:module";
 import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
 
 import type {
   DesktopAccountRoomEntry,
@@ -12,23 +10,22 @@ import type {
   DesktopTaskSummary,
 } from "../../ipc-types.js";
 import {
-  localChatDatabasePath,
   localFilesPath,
   resolveRoomStorageMode,
   setRoomStorageMode,
 } from "../chat-storage/settings.js";
+import {
+  syncLocalRoomArtifactsForTask,
+  validateLocalRoomArtifactInputs,
+} from "./artifacts/local-store.js";
 import { mapDesktopGitRoomPayload } from "./git-room.js";
-
-type SqliteStatement = {
-  all: (...params: unknown[]) => Record<string, unknown>[];
-  get: (...params: unknown[]) => Record<string, unknown> | undefined;
-  run: (...params: unknown[]) => unknown;
-};
-
-type SqliteDatabase = {
-  exec: (sql: string) => void;
-  prepare: (sql: string) => SqliteStatement;
-};
+import {
+  addColumnIfMissing,
+  beginImmediate,
+  getLocalChatDatabase,
+  rollback,
+  type SqliteDatabase,
+} from "./local-db.js";
 
 type LocalRoomRow = {
   room_id: string;
@@ -90,10 +87,6 @@ export type LocalReviewLeaseInput = {
   leaseId?: string | null;
 };
 
-const require = createRequire(import.meta.url);
-let db: SqliteDatabase | null = null;
-let initialized = false;
-
 const validLocalTaskTransitions: Record<string, string[]> = {
   proposed: ["accepted", "cancelled"],
   accepted: ["assigned", "cancelled"],
@@ -105,20 +98,14 @@ const validLocalTaskTransitions: Record<string, string[]> = {
   done: ["accepted"],
   cancelled: ["accepted"],
 };
+const localReviewLeaseActiveStatuses = new Set(["in_review", "blocked"]);
+let schemaInitialized = false;
 
 async function getDb(): Promise<SqliteDatabase> {
-  if (db) return db;
-  await mkdir(dirname(localChatDatabasePath), { recursive: true });
   await mkdir(localFilesPath, { recursive: true });
-  const { DatabaseSync } = require("node:sqlite") as {
-    DatabaseSync: new (path: string) => SqliteDatabase;
-  };
-  db = new DatabaseSync(localChatDatabasePath);
-  db.exec("PRAGMA journal_mode = WAL");
-  db.exec("PRAGMA foreign_keys = ON");
-  db.exec("PRAGMA busy_timeout = 5000");
-  if (!initialized) {
-    db.exec(`
+  const database = await getLocalChatDatabase();
+  if (!schemaInitialized) {
+    database.exec(`
       CREATE TABLE IF NOT EXISTS local_rooms (
         room_id TEXT PRIMARY KEY,
         display_name TEXT NOT NULL,
@@ -170,52 +157,25 @@ async function getDb(): Promise<SqliteDatabase> {
         ON local_tasks (room_id, sync_key)
         WHERE sync_key IS NOT NULL;
     `);
-    addColumnIfMissing(db, "local_rooms", "published_at", "TEXT");
-    addColumnIfMissing(db, "local_rooms", "archived_at", "TEXT");
-    addColumnIfMissing(db, "local_rooms", "pinned_at", "TEXT");
-    addColumnIfMissing(db, "local_rooms", "git_room_json", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "assignee_agent_key", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "assignee_agent_instance_id", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "assignee_agent_session_id", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "workflow_artifacts_json", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "workflow_refs_json", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "sync_started_at", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "sync_dirty", "INTEGER NOT NULL DEFAULT 0");
-    addColumnIfMissing(db, "local_tasks", "review_lease_id", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "review_holder_label", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "review_agent_key", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "review_agent_session_id", "TEXT");
-    addColumnIfMissing(db, "local_tasks", "review_updated_at", "TEXT");
-    initialized = true;
+    addColumnIfMissing(database, "local_rooms", "published_at", "TEXT");
+    addColumnIfMissing(database, "local_rooms", "archived_at", "TEXT");
+    addColumnIfMissing(database, "local_rooms", "pinned_at", "TEXT");
+    addColumnIfMissing(database, "local_rooms", "git_room_json", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "assignee_agent_key", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "assignee_agent_instance_id", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "assignee_agent_session_id", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "workflow_artifacts_json", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "workflow_refs_json", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "sync_started_at", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "sync_dirty", "INTEGER NOT NULL DEFAULT 0");
+    addColumnIfMissing(database, "local_tasks", "review_lease_id", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "review_holder_label", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "review_agent_key", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "review_agent_session_id", "TEXT");
+    addColumnIfMissing(database, "local_tasks", "review_updated_at", "TEXT");
+    schemaInitialized = true;
   }
-  return db;
-}
-
-function addColumnIfMissing(
-  database: SqliteDatabase,
-  tableName: string,
-  columnName: string,
-  definition: string,
-): void {
-  try {
-    database.exec(`ALTER TABLE ${tableName} ADD COLUMN ${columnName} ${definition}`);
-  } catch (error) {
-    if (!String(error).toLowerCase().includes("duplicate column")) {
-      throw error;
-    }
-  }
-}
-
-function beginImmediate(database: SqliteDatabase): void {
-  database.exec("BEGIN IMMEDIATE");
-}
-
-function rollback(database: SqliteDatabase): void {
-  try {
-    database.exec("ROLLBACK");
-  } catch {
-    // SQLite may already have closed the transaction after an error.
-  }
+  return database;
 }
 
 function mapRoomRow(row: Record<string, unknown>): LocalRoomRow {
@@ -792,6 +752,14 @@ export async function updateLocalTask(
     patch.workflowArtifacts === undefined
       ? current.workflow_artifacts_json
       : JSON.stringify(patch.workflowArtifacts || []);
+  const nextWorkflowArtifactInputs = patch.workflowArtifacts === undefined
+    ? null
+    : (patch.workflowArtifacts || []) as Record<string, unknown>[];
+  if (nextWorkflowArtifactInputs) {
+    validateLocalRoomArtifactInputs(nextWorkflowArtifactInputs, {
+      requireStableIdentity: false,
+    });
+  }
   const nextAssigneeAgentKey =
     patch.assigneeAgentKey === undefined
       ? current.assignee_agent_key
@@ -831,6 +799,13 @@ export async function updateLocalTask(
       taskId,
     );
   touchLocalRoom(database, roomId, now);
+  if (patch.workflowArtifacts !== undefined) {
+    await syncLocalRoomArtifactsForTask({
+      roomId,
+      taskId,
+      artifacts: nextWorkflowArtifactInputs || [],
+    });
+  }
   const updated = await getLocalTask(roomId, taskId);
   if (!updated) throw new Error("Task not found.");
   return updated;
@@ -850,6 +825,11 @@ export async function claimLocalTaskReviewLease(
   const actorKey = input.agentKey?.trim() || null;
   const actorSessionId = input.agentSessionId?.trim() || null;
   const holderLabel = input.holderLabel?.trim() || actorKey || "Local reviewer";
+  if (!localReviewLeaseActiveStatuses.has(current.status)) {
+    throw new Error(
+      `Cannot assign review authority while task is ${current.status}. Move the task to in_review first.`,
+    );
+  }
   if (
     actorKey &&
     current.assignee_agent_key &&
@@ -951,6 +931,15 @@ export async function importLocalTasks(
   tasks: DesktopTaskSummary[],
 ): Promise<void> {
   if (!tasks.length) return;
+  const taskArtifactInputs = tasks.map((task) => ({
+    taskId: task.id,
+    artifacts: (task.workflowArtifacts || []) as Record<string, unknown>[],
+  }));
+  for (const task of taskArtifactInputs) {
+    validateLocalRoomArtifactInputs(task.artifacts, {
+      requireStableIdentity: false,
+    });
+  }
   const database = await getDb();
   const now = new Date().toISOString();
   beginImmediate(database);
@@ -964,7 +953,7 @@ export async function importLocalTasks(
             created_by, pr_url, workflow_artifacts_json, workflow_refs_json,
             synced_cloud_id, sync_key, sync_started_at, sync_dirty, created_at, updated_at
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?, ?, NULL, 0, ?, ?)
           ON CONFLICT(room_id, task_id) DO UPDATE SET
             title = excluded.title,
             description = excluded.description,
@@ -1002,6 +991,13 @@ export async function importLocalTasks(
   } catch (error) {
     rollback(database);
     throw error;
+  }
+  for (const task of taskArtifactInputs) {
+    await syncLocalRoomArtifactsForTask({
+      roomId,
+      taskId: task.taskId,
+      artifacts: task.artifacts,
+    });
   }
 }
 

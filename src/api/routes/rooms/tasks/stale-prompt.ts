@@ -4,6 +4,7 @@ import {
   clearStaleTaskPromptMute,
   getTaskById,
   getTaskOwnershipState,
+  LeaseFenceStaleError,
   upsertStaleTaskPromptMute,
 } from "../../../db.js";
 import {
@@ -102,12 +103,16 @@ export function registerTaskStalePromptRoutes(
         task_id: task.id,
         task_updated_at: task.updated_at,
         muted_by: mutedBy,
-      });
+      }, coordination.leaseFence ?? null);
 
       const taskWithDetails = await attachTaskDetails(project.id, task);
       deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
       res.status(200).json({ ...taskWithDetails, room_id: project.id });
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "POST /rooms/:room_id/tasks/:task_id/stale-prompt-mute",
@@ -182,12 +187,16 @@ export function registerTaskStalePromptRoutes(
         return;
       }
 
-      await clearStaleTaskPromptMute(project.id, task.id);
+      await clearStaleTaskPromptMute(project.id, task.id, coordination.leaseFence ?? null);
 
       const taskWithDetails = await attachTaskDetails(project.id, task);
       deps.taskEvents.emit("task:updated", { projectId: project.id, task: taskWithDetails });
       res.status(200).json({ ...taskWithDetails, room_id: project.id });
     } catch (error) {
+      if (error instanceof LeaseFenceStaleError) {
+        res.status(409).json({ error: error.message, code: error.code });
+        return;
+      }
       respondWithBadRequest(
         res,
         "DELETE /rooms/:room_id/tasks/:task_id/stale-prompt-mute",

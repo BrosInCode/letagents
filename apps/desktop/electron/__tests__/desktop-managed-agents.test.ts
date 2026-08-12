@@ -1,13 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { Buffer } from "node:buffer";
+import { execFileSync } from "node:child_process";
+import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import test from "node:test";
 
-const tempDir = mkdtempSync(join(tmpdir(), "letagents-desktop-managed-agents-"));
-process.env.LETAGENTS_STATE_PATH = join(tempDir, "mcp-state.json");
-process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH = join(tempDir, "chat-storage.json");
-process.env.LETAGENTS_LOCAL_CHAT_DB = join(tempDir, "local-chat.sqlite");
+import { createElectronTestEnv } from "./harness.js";
+
+const { tempDir, statePath, resetState } = createElectronTestEnv({
+  prefix: "letagents-desktop-managed-agents-",
+  paths: ["state", "chatStorage", "localChatDb"],
+});
 
 const {
   bindCodexLiveSessionToWorker,
@@ -20,15 +23,24 @@ const {
   listCodexDisplayNamesForRoom,
   listStoredCodexLiveSessions,
   managedAgentDeliveryMode,
+  readAgentLocalState,
   saveAgentSession,
   saveCodexLiveSession,
   saveStoredAgentIdentity,
+  toPublicCursorManagedAgentSession,
   toPublicManagedAgentSession,
 } = await import("../main/agents/state.js");
 const {
   canDeliverDesktopEventToSession,
+  buildLocalLegacyAccountAgentRouting,
+  codexManagedAgentMessageActivationDecision,
+  desktopManagedAgentMessageActivationDecision,
   isOwnRoomStreamEvent,
   isStopPhraseRoomStreamEvent,
+  resolveCodexRoomStreamEventRecipients,
+  resolveDesktopRoomStreamEventRecipients,
+  shouldDeliverCodexRoomStreamEventToManagedAgent,
+  shouldDeliverRoomStreamEventToManagedAgent,
   shouldDeliverRoomStreamEventToSession,
 } = await import("../main/agents/codex-event-routing.js");
 const { buildCodexStartPrompt } = await import("../main/agents/codex-start-prompt.js");
@@ -42,6 +54,14 @@ const {
   parseManagedAgentContextRequest,
 } = await import("../main/agents/managed-agent-context-protocol.js");
 const {
+  executeManagedAgentContextRequest,
+} = await import("../main/agents/managed-agent-context.js");
+const {
+  buildManagedAgentRoomToolResultPrompt,
+  MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
+  parseManagedAgentRoomToolRequest,
+} = await import("../main/agents/managed-agent-room-tools-protocol.js");
+const {
   compactManagedAgentRoomArtifacts,
   managedAgentRoomArtifactsPath,
 } = await import("../main/agents/managed-agent-artifacts.js");
@@ -54,7 +74,9 @@ const {
   deriveCodexLiveSessionStatus,
   finalPublicAgentMessageText,
   isActiveCodexTurnStatus,
+  isLikelyMaterializingError,
   parseStartupObservationMs,
+  shouldStopCodexSessionMonitor,
   shouldShutdownManagedAgentOnStop,
   summarizeItems,
 } = await import("../main/agents/codex-session-status.js");
@@ -69,16 +91,32 @@ const {
   firstRedactedCodexAppServerOutputLine,
   launchCodexAppServer,
   redactCodexAppServerOutput,
+  resolveCodexAppServerUrl,
   sensitiveCodexAppServerConfigValues,
   sensitiveCodexAppServerEnvValues,
   waitForLaunchedCodexAppServer,
 } = await import("../main/agents/codex-app-server.js");
 const { DEFAULT_CODEX_DELIVERY_MODE } = await import("../main/agents/defaults.js");
 const { providerSetupConfirmationResult } = await import("../main/agents/provider-setup-confirmation.js");
+const { listDesktopAgentProviders } = await import("../main/agents/provider-registry.js");
+const {
+  buildCodexManagedAgentLaunchContext,
+  dispatchRoomStreamEventToManagedAgents,
+} = await import("../main/agents/codex-supervisor.js");
 const {
   desktopManagedAgentReplyTargetForMessage,
   persistDesktopManagedAgentLocalReply,
 } = await import("../main/agents/managed-agent-local-replies.js");
+const {
+  buildManagedAgentChangeSummaryWorkflowArtifact,
+  publishManagedAgentLocalChangeSummaryArtifact,
+} = await import("../main/agents/managed-agent-change-summary-artifacts.js");
+const {
+  resolveDesktopManagedAgentWorkerRegistration,
+} = await import("../main/agents/managed-agent-local-worker-session.js");
+const {
+  MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+} = await import("../ipc-types.js");
 const {
   assertManagedAgentPermissionProfileAvailable,
   listManagedAgentPermissionProfiles,
@@ -94,15 +132,21 @@ const {
   getLocalChatMessages,
 } = await import("../main/rooms/messages/local-store.js");
 const {
+  getLocalRoomArtifacts,
+} = await import("../main/rooms/artifacts/local-store.js");
+const {
   isManagedRoomStreamEvent,
   listDeliverableCodexSessionsForRoomStreamEvent,
 } = await import("../main/agents/codex-managed-agent-dispatch.js");
-const { buildClaudeCodeDesktopEventPrompt } = await import("../main/agents/claude-code-event-prompt.js");
 const { buildCursorDesktopEventPrompt } = await import("../main/agents/cursor-event-prompt.js");
 
-import type { DesktopRoomStreamEvent, DesktopTaskSummary } from "../ipc-types.js";
 import type {
-  DesktopClaudeCodeLiveSessionState,
+  DesktopManagedAgentSession,
+  DesktopRoomMessage,
+  DesktopRoomStreamEvent,
+  DesktopTaskSummary,
+} from "../ipc-types.js";
+import type {
   DesktopCodexLiveSessionState,
   DesktopCursorLiveSessionState,
   StoredAgentSessionState,
@@ -122,15 +166,8 @@ async function waitForCodexLaunchExitForTest(
   }
 }
 
-test.after(() => {
-  delete process.env.LETAGENTS_STATE_PATH;
-  delete process.env.LETAGENTS_CHAT_STORAGE_SETTINGS_PATH;
-  delete process.env.LETAGENTS_LOCAL_CHAT_DB;
-  rmSync(tempDir, { recursive: true, force: true });
-});
-
-function resetState(state: Record<string, unknown> = {}): void {
-  writeFileSync(process.env.LETAGENTS_STATE_PATH ?? "", `${JSON.stringify(state, null, 2)}\n`, "utf-8");
+function git(cwd: string, args: string[]): void {
+  execFileSync("git", args, { cwd, stdio: "pipe" });
 }
 
 function liveSession(
@@ -213,6 +250,21 @@ function messageEvent(
   };
 }
 
+function publicManagedAgentSession(
+  overrides: Partial<DesktopManagedAgentSession> = {},
+): DesktopManagedAgentSession {
+  return {
+    ...toPublicManagedAgentSession(liveSession()),
+    agentSessionId: "agent_session_1",
+    actorLabel: "RiverField",
+    agentKey: "EmmyMay/riverfield",
+    displayName: "RiverField",
+    status: "running",
+    deliveryMode: "desktop_events",
+    ...overrides,
+  };
+}
+
 function managedWorkerSession(
   overrides: Partial<StoredAgentSessionState> = {},
 ): StoredAgentSessionState {
@@ -233,6 +285,221 @@ function managedWorkerSession(
     ended_at: null,
     ...overrides,
   };
+}
+
+type ScriptedCodexWebSocket = {
+  prompts: string[];
+  sentMessages: Array<Record<string, unknown>>;
+  unexpectedCalls: string[];
+  restore: () => void;
+};
+
+type StrictFetchMock = {
+  unexpectedCalls: string[];
+  restore: () => void;
+};
+
+function installScriptedCodexWebSocketForTest(turnReplies: string[]): ScriptedCodexWebSocket {
+  const originalWebSocket = globalThis.WebSocket;
+  const replies = [...turnReplies];
+  const completedTurns = new Map<string, string>();
+  const prompts: string[] = [];
+  const sentMessages: Array<Record<string, unknown>> = [];
+  const unexpectedCalls: string[] = [];
+  let turnStartCount = 0;
+
+  class FakeWebSocket {
+    static readonly OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+
+    constructor(readonly url: string) {
+      queueMicrotask(() => this.onopen?.());
+    }
+
+    send(raw: string): void {
+      const message = JSON.parse(raw) as {
+        id?: number;
+        method?: string;
+        params?: { threadId?: string; input?: Array<{ text?: string }> };
+      };
+      sentMessages.push(message as Record<string, unknown>);
+      if (!message.id) {
+        if (message.method !== "initialized") {
+          unexpectedCalls.push(`notification:${message.method ?? "(missing method)"}`);
+        }
+        return;
+      }
+
+      let result: Record<string, unknown>;
+      let completedTurnId: string | null = null;
+      if (message.method === "initialize") {
+        result = {};
+      } else if (message.method === "turn/start") {
+        const turnId = `turn_event_${++turnStartCount}`;
+        completedTurnId = turnId;
+        prompts.push(String(message.params?.input?.[0]?.text ?? ""));
+        completedTurns.set(turnId, replies.shift() ?? "NO_ROOM_REPLY");
+        result = { turn: { id: turnId } };
+      } else if (message.method === "thread/read") {
+        result = {
+          thread: {
+            status: { type: "idle" },
+            turns: [
+              { id: "turn_boot", status: "completed", items: [] },
+              ...[...completedTurns.entries()].map(([id, text]) => ({
+                id,
+                status: "completed",
+                items: [{ type: "agentMessage", phase: "final", text }],
+              })),
+            ],
+          },
+        };
+      } else {
+        unexpectedCalls.push(`rpc:${message.method ?? "(missing method)"}`);
+        result = {
+          error: `Unexpected Codex app-server RPC in test: ${message.method ?? "(missing method)"}`,
+        };
+      }
+
+      queueMicrotask(() => {
+        this.onmessage?.({ data: JSON.stringify({ id: message.id, result }) });
+        if (completedTurnId) {
+          this.onmessage?.({
+            data: JSON.stringify({
+              method: "turn/completed",
+              params: { threadId: message.params?.threadId, turnId: completedTurnId },
+            }),
+          });
+        }
+      });
+    }
+
+    close(): void {
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+    FakeWebSocket as unknown as typeof WebSocket;
+
+  return {
+    prompts,
+    sentMessages,
+    unexpectedCalls,
+    restore: () => {
+      globalThis.WebSocket = originalWebSocket;
+    },
+  };
+}
+
+function installReadyAndReasoningFetchForTest(): StrictFetchMock {
+  const originalFetch = globalThis.fetch;
+  const unexpectedCalls: string[] = [];
+  (globalThis as unknown as { fetch: typeof fetch }).fetch = (async (input: RequestInfo | URL, _init?: RequestInit) => {
+    const url = input instanceof Request ? input.url : String(input);
+    if (url.endsWith("/readyz")) {
+      return new Response("ok", { status: 200 });
+    }
+    if (url.includes("/reasoning-sessions")) {
+      return new Response(JSON.stringify({ session: { id: "reasoning_1" } }), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      });
+    }
+    unexpectedCalls.push(`fetch:${url}`);
+    return new Response(JSON.stringify({
+      error: `Unexpected fetch in desktop event room tool test: ${url}`,
+    }), {
+      status: 599,
+      headers: { "Content-Type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  return {
+    unexpectedCalls,
+    restore: () => {
+      globalThis.fetch = originalFetch;
+    },
+  };
+}
+
+function failOnUnexpectedDesktopEventTestCalls(
+  websocket: ScriptedCodexWebSocket,
+  fetchMock: StrictFetchMock,
+): void {
+  const unexpectedCalls = [
+    ...websocket.unexpectedCalls,
+    ...fetchMock.unexpectedCalls,
+  ];
+  if (unexpectedCalls.length) {
+    assert.fail(`Unexpected desktop event test calls: ${unexpectedCalls.join(", ")}`);
+  }
+}
+
+async function waitForCondition<T>(
+  read: () => T | Promise<T>,
+  description: string,
+  timeoutMs = 7_000,
+): Promise<NonNullable<T>> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = await read();
+    if (value) {
+      return value as NonNullable<T>;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.fail(`Timed out waiting for ${description}`);
+}
+
+async function setupDesktopEventRoomToolSession(input: {
+  roomIdentifier: string;
+  sessionId: string;
+  workerSessionId: string;
+  displayName: string;
+  cwd?: string;
+  repoBranch?: string | null;
+  ideLabel?: string;
+}): Promise<void> {
+  const token = `LOCAL_CODEX_ROOM_${input.sessionId}`;
+  await createLocalRoom({
+    roomIdentifier: input.roomIdentifier,
+    displayName: "Desktop Event Room",
+  });
+  await setLocalAwareRoomStorageMode(input.roomIdentifier, "local");
+  saveAgentSession(managedWorkerSession({
+    session_id: input.workerSessionId,
+    session_token: `${input.workerSessionId}_token`,
+    room_id: input.roomIdentifier,
+    runtime: `codex:${token}`,
+    actor_label: `${input.displayName} | EmmyMay's agent | ${input.ideLabel ?? "Codex"}`,
+    agent_key: `EmmyMay/${input.displayName.toLowerCase()}`,
+    agent_instance_id: `desktop-codex:${token}`,
+    display_name: input.displayName,
+    owner_label: "EmmyMay's agent",
+    ide_label: input.ideLabel ?? "Codex",
+  }));
+  saveCodexLiveSession(liveSession({
+    session_id: input.sessionId,
+    room_id: input.roomIdentifier,
+    room_identifier: input.roomIdentifier,
+    room_display_name: "Desktop Event Room",
+    display_name: input.displayName,
+    cwd: input.cwd ?? "/tmp/repo",
+    repo_branch: input.repoBranch ?? "codex/git-rooms",
+    token,
+    agent_session_id: input.workerSessionId,
+    thread_id: `thread_${input.sessionId}`,
+    turn_id: "turn_boot",
+    server_url: "ws://127.0.0.1:4500",
+    status: "completed",
+    reasoning_session_id: "reasoning_1",
+  }));
 }
 
 test("desktop Codex runtime reasoning summaries accumulate readable app-server deltas", () => {
@@ -261,7 +528,8 @@ test("desktop Codex runtime reasoning summaries accumulate readable app-server d
 
 test("managed agent permission profiles map provider-specific available and gated modes", () => {
   const claudeProfiles = listManagedAgentPermissionProfiles("claude-code");
-  assert.equal(claudeProfiles.find((profile) => profile.id === "ask_before_write")?.status, "available");
+  assert.equal(claudeProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.equal(claudeProfiles.find((profile) => profile.id === "read_only")?.status, "available");
   assert.equal(claudeProfiles.find((profile) => profile.id === "full_access")?.status, "available");
 
   const cursorProfiles = listManagedAgentPermissionProfiles("cursor");
@@ -269,12 +537,14 @@ test("managed agent permission profiles map provider-specific available and gate
   assert.equal(cursorProfiles.find((profile) => profile.id === "sandboxed_write")?.status, "available");
   assert.equal(cursorProfiles.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(cursorProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.equal(cursorProfiles.find((profile) => profile.id === "read_only")?.isDefault, true);
 
   const codexProfiles = listManagedAgentPermissionProfiles("codex");
   assert.equal(codexProfiles.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(codexProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
 
-  assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "ask_before_write");
+  assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "read_only");
+  assert.equal(managedAgentPermissionProfileForProvider("cursor", null).id, "read_only");
   assert.equal(assertManagedAgentPermissionProfileAvailable("cursor", "full_access").id, "full_access");
   assert.throws(
     () => assertManagedAgentPermissionProfileAvailable("cursor", "unknown_profile"),
@@ -290,6 +560,63 @@ test("public Codex managed session projects the selected permission profile", ()
   assert.equal(publicSession.permissionProfileId, "full_access");
   assert.equal(publicSession.permissionProfile.label, "Full access");
   assert.equal(publicSession.permissionProfile.status, "available");
+  assert.equal(publicSession.model, null);
+  assert.equal(publicSession.effort, null);
+  assert.equal(toPublicManagedAgentSession(liveSession({
+    model: "gpt-5.2-codex-high",
+    effort: "high",
+  })).model, "gpt-5.2-codex-high");
+  assert.equal(toPublicManagedAgentSession(liveSession({
+    model: "gpt-5.2-codex-high",
+    effort: "high",
+  })).effort, "high");
+});
+
+test("loading local state drops the removed in-app Claude session cache permanently", () => {
+  resetState({
+    local_host_id: "host_keep",
+    current_claude_code_live_session_ids: { room_1: "legacy_claude" },
+    claude_code_live_sessions: {
+      legacy_claude: {
+        session_id: "legacy_claude",
+        room_id: "room_1",
+        delivery_mode: "desktop_events",
+      },
+    },
+  });
+
+  assert.deepEqual(readAgentLocalState(), { local_host_id: "host_keep" });
+  saveStoredAgentIdentity({
+    name: "state-cleanup",
+    display_name: "State cleanup",
+    owner_label: "Local desktop",
+    actor_label: "State cleanup",
+    resolved_at: "2026-07-29T00:00:00.000Z",
+  });
+  const persisted = JSON.parse(readFileSync(statePath!, "utf8")) as Record<string, unknown>;
+  assert.equal("current_claude_code_live_session_ids" in persisted, false);
+  assert.equal("claude_code_live_sessions" in persisted, false);
+  assert.equal(persisted.local_host_id, "host_keep");
+});
+
+test("public Cursor managed session preserves its durable supervisor entry id", () => {
+  const publicSession = toPublicCursorManagedAgentSession({
+    session_id: "managed_cursor",
+    room_id: "room_1",
+    room_identifier: "room_1",
+    cwd: "/tmp/repo",
+    stop_phrase: "/stop",
+    max_minutes: 0,
+    token: "token",
+    status: "running",
+    started_at: "2026-06-14T12:00:00.000Z",
+    updated_at: "2026-06-14T12:00:00.000Z",
+    joined_via: "join_room",
+    cursor_bin: "cursor-agent",
+    supervisor_entry_id: "supervised_cursor",
+  });
+
+  assert.equal(publicSession.supervisorEntryId, "supervised_cursor");
 });
 
 test("desktop Codex runtime reasoning hides raw app-server reasoning text", () => {
@@ -360,7 +687,9 @@ test("desktop Codex dispatch selects only deliverable sessions for room events",
     status: "running",
   }));
 
-  const event = messageEvent();
+  const event = messageEvent({
+    message: { ...messageEvent().message, text: "@StoneForge please check this" },
+  });
 
   assert.equal(isManagedRoomStreamEvent(event), true);
   assert.deepEqual(
@@ -1050,6 +1379,7 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.match(pollingPrompt, /readable progress for the desktop UI/);
   assert.match(pollingPrompt, /Suggested codename: MapleRidge/);
   assert.match(pollingPrompt, /runtime="codex:LOCAL_CODEX_ROOM_test"/);
+  assert.match(pollingPrompt, /cwd="\/tmp\/repo"/, "fresh supervised registration carries the exact worktree into the MCP bind path");
   assert.match(pollingPrompt, /MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor/);
   assert.match(pollingPrompt, /Treat this as your room identity/);
   assert.match(pollingPrompt, /Call set_agent_name with that chosen codename before posting status or registering/);
@@ -1058,6 +1388,11 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.match(pollingPrompt, /Call read_messages once, then call get_board once/);
   assert.match(pollingPrompt, /claim it with claim_task using the registered agent_session_id before entering the wait loop/);
   assert.match(pollingPrompt, /get_onboarding_status/);
+  assert.match(pollingPrompt, /advance the cursor for every observed message/);
+  assert.match(pollingPrompt, /direct @mention of your exact ID\/name/);
+  assert.match(pollingPrompt, /literal @everyone broadcast/);
+  assert.match(pollingPrompt, /unassigned task updates/);
+  assert.match(pollingPrompt, /Never react to your own output/);
   assert.match(eventPrompt, /Do not call wait_for_messages/);
   assert.match(eventPrompt, /already registered this room worker as CedarVista/);
   assert.match(eventPrompt, /Do not call LetAgents MCP room tools during bootstrap/);
@@ -1066,6 +1401,7 @@ test("Codex start prompts distinguish MCP polling from desktop-delivered events"
   assert.doesNotMatch(eventPrompt, /register_agent_session/);
   assert.doesNotMatch(eventPrompt, /get_onboarding_status/);
   assert.match(eventPrompt, /desktop app will send room events/);
+  assert.match(eventPrompt, /room transcript is shared context/);
 });
 
 test("Codex start prompts JSON-escape unusual room names", () => {
@@ -1085,6 +1421,29 @@ test("Codex start prompts JSON-escape unusual room names", () => {
     prompt,
     /join_room with \{"name":"github\.com\/example\/repo \\"staging\\"","session_mode":"current"\}/,
   );
+});
+
+test("supervised resume prompt reuses the exact worker and cursor without replaying registration", () => {
+  const prompt = buildCodexStartPrompt({
+    roomIdentifier: "focus_37",
+    joinedVia: "join_room",
+    cwd: "/tmp/repo",
+    deliveryMode: "mcp_polling",
+    stopPhrase: "/stop-codex-room",
+    token: "LOCAL_CODEX_ROOM_test",
+    suggestedDisplayName: "MapleRidge",
+    deadlineUtc: null,
+    maxMinutes: 0,
+    resumeWorker: { agentSessionId: "agent_session_exact", roomCursor: "msg_2819" },
+  });
+
+  assert.match(prompt, /agent_session_exact/);
+  assert.match(prompt, /msg_2819/);
+  assert.match(prompt, /exact supervised room is "focus_37"/);
+  assert.match(prompt, /Do not call resume_room_session/);
+  assert.match(prompt, /Do not call register_agent_session/);
+  assert.doesNotMatch(prompt, /Suggested codename|Call set_agent_name|Call read_messages once/);
+  assert.doesNotMatch(prompt, /join_room with|join_code with/);
 });
 
 test("desktop-delivered event prompts include stop handling without resuming MCP polling", () => {
@@ -1114,7 +1473,8 @@ test("desktop-delivered event prompts include stop handling without resuming MCP
   assert.match(prompt, /exactly equals "\/stop-codex-room"/);
   assert.match(prompt, /LOCAL_CODEX_ROOM_test_DONE/);
   assert.match(prompt, /do not call wait_for_messages/);
-  assert.match(prompt, /Do not call LetAgents MCP room tools/);
+  assert.match(prompt, /Do not call raw LetAgents MCP room tools/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /desktop should publish as you/);
   assert.match(prompt, /Do not include hidden chain-of-thought/);
 });
@@ -1150,7 +1510,11 @@ test("desktop-delivered event prompts advertise brokered context tools", () => {
     },
   });
 
-  assert.match(prompt, /do not assume earlier thread history is already in this prompt/);
+  assert.match(prompt, /Do not assume earlier thread history is already in this prompt/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
+  assert.match(prompt, /get_board/);
+  assert.match(prompt, /send_thread_message/);
+  assert.match(prompt, /Desktop room tools run under your stored worker identity/);
   assert.match(prompt, new RegExp(MANAGED_AGENT_CONTEXT_REQUEST_PREFIX));
   assert.match(prompt, /read_recent_room_messages/);
   assert.match(prompt, /search_room_messages/);
@@ -1198,14 +1562,203 @@ test("desktop context requests parse and stay out of public replies", () => {
   assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", MANAGED_AGENT_CONTEXT_REQUEST_PREFIX), null);
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_CONTEXT_REQUEST inline."),
-    "This mentions LETAGENTS_CONTEXT_REQUEST inline.",
+    null,
   );
   assert.equal(
     desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "LETAGENTS_CONTEXT_REQUEST. This is plain prose."),
-    "LETAGENTS_CONTEXT_REQUEST. This is plain prose.",
+    null,
   );
   assert.equal(parseManagedAgentContextRequest("LETAGENTS_CONTEXT_REQUEST not-json"), null);
   assert.equal(parseManagedAgentContextRequest("hello"), null);
+});
+
+test("desktop room tool requests parse and stay out of public replies", () => {
+  const requestLine =
+    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"claim_task","arguments":{"task_id":"task_1"},"idempotency_key":"event_1:claim_task"}`;
+  const expectedRequest = {
+    tool: "claim_task",
+    arguments: { task_id: "task_1" },
+    idempotency_key: "event_1:claim_task",
+  };
+
+  assert.deepEqual(parseManagedAgentRoomToolRequest(requestLine), expectedRequest);
+  assert.equal(parseManagedAgentRoomToolRequest(`- ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`> ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`1. ${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`Claiming now:\n${requestLine}`), null);
+  assert.equal(parseManagedAgentRoomToolRequest(`${requestLine} thanks`), null);
+  assert.equal(
+    parseManagedAgentRoomToolRequest(`${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} {"tool":"wait_for_messages","arguments":{}}`),
+    null,
+  );
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", requestLine), null);
+  assert.equal(desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `Claiming now:\n${requestLine}`), null);
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} not-json`),
+    null,
+  );
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "This mentions LETAGENTS_ROOM_TOOL_REQUEST inline."),
+    null,
+  );
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "I will finish with NO_ROOM_REPLY."),
+    "I will finish with NO_ROOM_REPLY.",
+  );
+  assert.equal(
+    desktopEventPublicReplyText("LOCAL_CODEX_ROOM_test", "Stopping with LOCAL_CODEX_ROOM_test_DONE."),
+    "Stopping with LOCAL_CODEX_ROOM_test_DONE.",
+  );
+});
+
+test("desktop room tool result prompts return structured brokered results", () => {
+  const prompt = buildManagedAgentRoomToolResultPrompt({
+    ok: true,
+    tool: "get_board",
+    roomIdentifier: "room_1",
+    storage: "cloud",
+    data: { tasks: [{ id: "task_1", title: "Bridge room tools" }] },
+  });
+
+  assert.match(prompt, /Desktop room tool result/);
+  assert.match(prompt, /worker session token was not exposed/);
+  assert.match(prompt, /untrusted room\/task\/artifact content/);
+  assert.match(prompt, /LETAGENTS_ROOM_TOOL_REQUEST/);
+});
+
+test("Codex desktop events report malformed brokered room tool requests", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_malformed_tool";
+  await setupDesktopEventRoomToolSession({
+    roomIdentifier,
+    sessionId: "codex_malformed_room_tool",
+    workerSessionId: "agent_session_codex_malformed_tool",
+    displayName: "CedarVista",
+  });
+
+  const websocket = installScriptedCodexWebSocketForTest([
+    `${MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX} not-json`,
+  ]);
+  const fetchMock = installReadyAndReasoningFetchForTest();
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent({
+      roomIdentifier,
+      message: {
+        ...messageEvent().message,
+        id: "msg_codex_malformed_tool",
+        text: "@CedarVista please check the board",
+        threadRootId: "msg_codex_malformed_tool",
+      },
+    }));
+
+    const failedSession = await waitForCondition(
+      () => {
+        failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
+        const current = getCurrentCodexLiveSession(roomIdentifier);
+        return current?.last_error ? current : null;
+      },
+      "Codex malformed room tool request error",
+    );
+    const page = await getLocalChatMessages(roomIdentifier);
+
+    assert.equal(websocket.sentMessages.filter((message) => message.method === "turn/start").length, 1);
+    assert.match(websocket.prompts[0] ?? "", /please check the board/);
+    assert.equal(failedSession.status, "unknown");
+    assert.equal(failedSession.active_work, null);
+    assert.equal(failedSession.last_error, "Codex emitted a malformed desktop room tool request.");
+    assert.equal(page.messages.some((message) => message.text.includes("malformed")), false);
+  } finally {
+    fetchMock.restore();
+    websocket.restore();
+  }
+});
+
+test("Codex desktop events publish local change summary artifacts", async () => {
+  resetState();
+  const roomIdentifier = "local_room_codex_change_summary_artifact";
+  const repo = mkdtempSync(join(tempDir, "codex-change-summary-repo-"));
+  git(repo, ["init", "-q"]);
+  git(repo, ["config", "user.email", "agent@example.com"]);
+  git(repo, ["config", "user.name", "Agent"]);
+  writeFileSync(join(repo, "tracked.txt"), "one\n");
+  git(repo, ["add", "tracked.txt"]);
+  git(repo, ["commit", "-qm", "init"]);
+  writeFileSync(join(repo, "tracked.txt"), "one\ntwo\n");
+  await setupDesktopEventRoomToolSession({
+    roomIdentifier,
+    sessionId: "codex_change_summary_artifact",
+    workerSessionId: "agent_session_codex_change_summary_artifact",
+    displayName: "CedarVista",
+    cwd: repo,
+    repoBranch: "feature/artifact-producer",
+  });
+
+  const websocket = installScriptedCodexWebSocketForTest([
+    "Implemented the artifact producer.",
+    "Linked the first task.",
+    "Linked the second task.",
+  ]);
+  const fetchMock = installReadyAndReasoningFetchForTest();
+  try {
+    dispatchRoomStreamEventToManagedAgents(messageEvent({
+      roomIdentifier,
+      message: {
+        ...messageEvent().message,
+        id: "msg_codex_change_summary_artifact",
+        text: "@CedarVista please implement the artifact producer",
+        threadRootId: "msg_codex_change_summary_artifact",
+      },
+    }));
+
+    const artifact = await waitForCondition(async () => {
+      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
+      const artifacts = await getLocalRoomArtifacts(roomIdentifier);
+      return artifacts.artifacts?.find((entry) => entry.kind === "change_summary") ?? null;
+    }, "Codex desktop event local change summary artifact");
+
+    assert.equal(artifact.provider, "git");
+    assert.equal(artifact.source, "task_workflow_artifact");
+    assert.equal(artifact.ref, "feature/artifact-producer");
+    assert.equal(artifact.state, "updated");
+    assert.equal(artifact.linked_task_ids?.length, 0);
+    assert.match(artifact.identity_key ?? "", /git:change_summary:id:managed-agent:key:EmmyMay\/cedarvista:branch:feature\/artifact-producer/);
+    dispatchRoomStreamEventToManagedAgents({
+      type: "task_update",
+      roomIdentifier,
+      task: taskSummary({
+        id: "task_artifact_1",
+        assignee: "CedarVista",
+      }),
+    });
+    const taskOneArtifact = await waitForCondition(async () => {
+      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
+      const artifacts = await getLocalRoomArtifacts(roomIdentifier);
+      const current = artifacts.artifacts?.find((entry) => entry.kind === "change_summary") ?? null;
+      return current?.linked_task_ids?.[0] === "task_artifact_1" ? current : null;
+    }, "Codex desktop event task one artifact link");
+    assert.deepEqual(taskOneArtifact.linked_task_ids, ["task_artifact_1"]);
+
+    dispatchRoomStreamEventToManagedAgents({
+      type: "task_update",
+      roomIdentifier,
+      task: taskSummary({
+        id: "task_artifact_2",
+        assignee: "CedarVista",
+      }),
+    });
+    const taskTwoArtifact = await waitForCondition(async () => {
+      failOnUnexpectedDesktopEventTestCalls(websocket, fetchMock);
+      const artifacts = await getLocalRoomArtifacts(roomIdentifier);
+      const current = artifacts.artifacts?.find((entry) => entry.kind === "change_summary") ?? null;
+      return current?.linked_task_ids?.[0] === "task_artifact_2" ? current : null;
+    }, "Codex desktop event task two artifact link");
+    assert.deepEqual(taskTwoArtifact.linked_task_ids, ["task_artifact_2"]);
+    assert.deepEqual((await getLocalRoomArtifacts(roomIdentifier, { taskId: "task_artifact_1" })).artifacts, []);
+    assert.equal(websocket.sentMessages.filter((message) => message.method === "turn/start").length, 3);
+  } finally {
+    fetchMock.restore();
+    websocket.restore();
+  }
 });
 
 test("desktop context result prompts return compact brokered context", () => {
@@ -1314,6 +1867,285 @@ test("desktop managed agent replies are persisted into local room chat", async (
   assert.equal(reply?.source, "agent");
   assert.equal(reply?.sender, "StoneForge | EmmyMay's agent | Codex");
   assert.equal(reply?.reply_to, null);
+});
+
+test("desktop managed local replies are recognized as the worker's own messages", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_own_reply_room",
+    displayName: "Own Reply Room",
+  });
+  await setLocalAwareRoomStorageMode("local_own_reply_room", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("local_own_reply_room");
+  const workerSession = managedWorkerSession({
+    session_id: "worker_local_own",
+    session_token: "worker_local_token",
+    room_id: "local_own_reply_room",
+    actor_label: "StoneForge | EmmyMay's agent | Codex",
+    agent_key: "local/emmymay/codex/stone-forge",
+    display_name: "StoneForge",
+    owner_label: "EmmyMay",
+    ide_label: "Codex",
+  });
+
+  const result = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "local_own_reply_room",
+    storage,
+    workerSession,
+    replyTo: null,
+    text: "Local reply from myself.",
+  });
+
+  assert.equal(result?.sender, workerSession.actor_label);
+  assert.equal(result?.agentIdentity?.agentKey, workerSession.agent_key);
+  assert.equal(result?.agentIdentity?.agentSessionId, workerSession.session_id);
+  assert.equal(
+    shouldDeliverRoomStreamEventToManagedAgent({
+      id: "session_public",
+      providerId: "codex",
+      runtime: "codex",
+      roomIdentifier: "local_own_reply_room",
+      roomDisplayName: "Own Reply Room",
+      repoRootPath: tempDir,
+      repoBranch: null,
+      status: "completed",
+      deliveryMode: "desktop_events",
+      permissionProfileId: "read_only",
+      permissionProfile: managedAgentPermissionProfileForProvider("codex", "read_only"),
+      canStop: true,
+      agentSessionId: workerSession.session_id,
+      actorLabel: workerSession.actor_label ?? null,
+      agentKey: workerSession.agent_key ?? null,
+      displayName: workerSession.display_name ?? null,
+      ownerLabel: workerSession.owner_label ?? null,
+      ideLabel: workerSession.ide_label ?? null,
+      reasoningSessionId: null,
+      activeWork: null,
+      pendingPermissionRequests: [],
+      startedAt: "2026-06-14T12:00:00.000Z",
+      updatedAt: "2026-06-14T12:00:00.000Z",
+      lastError: null,
+    }, {
+      type: "message",
+      roomIdentifier: "local_own_reply_room",
+      message: result!,
+    }),
+    false,
+  );
+});
+
+test("desktop managed worker registration maps linked local rooms to cloud id in cloud mode", async () => {
+  await createLocalRoom({
+    roomIdentifier: "linked_cloud_registration_room",
+    cloudRoomIdentifier: "github.com/BrosInCode/letagents",
+    displayName: "Linked Cloud Room",
+  });
+  await setLocalAwareRoomStorageMode("linked_cloud_registration_room", "cloud");
+
+  const registration = await resolveDesktopManagedAgentWorkerRegistration({
+    roomIdentifier: "linked_cloud_registration_room",
+  });
+
+  assert.equal(registration.storage.effectiveMode, "cloud");
+  assert.equal(registration.cloudRoomIdentifier, "github.com/BrosInCode/letagents");
+});
+
+test("desktop managed agent local replies preserve change summary attachments", async () => {
+  await createLocalRoom({
+    roomIdentifier: "local_changes_room",
+    cloudRoomIdentifier: "room_changes",
+    displayName: "Changes Room",
+  });
+  await setLocalAwareRoomStorageMode("room_changes", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("room_changes");
+  const payloadJson = JSON.stringify({
+    kind: "managed_agent_change_summary",
+    version: 1,
+    summary: {
+      providerId: "codex",
+      repoBranch: "main",
+      changeScope: "working_tree",
+      changedFileCount: 1,
+      stagedFileCount: 0,
+      unstagedFileCount: 1,
+      untrackedFileCount: 0,
+      additions: 3,
+      deletions: 1,
+      files: [{
+        path: "apps/desktop/App.vue",
+        previousPath: null,
+        status: "modified",
+        additions: 3,
+        deletions: 1,
+        binary: false,
+        staged: false,
+        unstaged: true,
+        untracked: false,
+      }],
+      hiddenFileCount: 0,
+      isGitRepo: true,
+      updatedAt: "2026-07-02T00:00:00.000Z",
+      error: null,
+    },
+  });
+  const payload = Buffer.from(payloadJson, "utf8").toString("base64");
+
+  const result = await persistDesktopManagedAgentLocalReply({
+    roomIdentifier: "room_changes",
+    storage,
+    workerSession: managedWorkerSession({ room_id: "room_changes" }),
+    replyTo: null,
+    text: "Implemented the change.",
+    attachments: [{
+      id: "managed-agent-change-summary",
+      file_name: "agent-changes.json",
+      mime_type: MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+      size_bytes: Buffer.byteLength(payloadJson, "utf8"),
+      content_base64: payload,
+    }],
+  });
+
+  assert.equal(result?.attachments.length, 1);
+  assert.equal(result?.attachments[0]?.mimeType, MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME);
+  assert.equal(result?.attachments[0]?.contentBase64, payload);
+  const savedPayload = JSON.parse(Buffer.from(result?.attachments[0]?.contentBase64 ?? "", "base64").toString("utf8"));
+  assert.equal("sessionId" in savedPayload.summary, false);
+  assert.equal("repoRootPath" in savedPayload.summary, false);
+});
+
+test("desktop managed agent change summaries publish stable local workflow artifacts", async () => {
+  const room = await createLocalRoom({
+    roomIdentifier: "local_change_summary_artifacts",
+    cloudRoomIdentifier: "room_change_summary_artifacts",
+    displayName: "Change Summary Artifacts",
+  });
+  await setLocalAwareRoomStorageMode("room_change_summary_artifacts", "local");
+  const storage = await resolveLocalAwareRoomStorageMode("room_change_summary_artifacts");
+  const workerSession = managedWorkerSession({
+    session_id: "agent_session_summary",
+    room_id: "room_change_summary_artifacts",
+    display_name: "StoneForge",
+  });
+  const summary = {
+    providerId: "codex" as const,
+    repoBranch: "feature/artifacts",
+    changeScope: "working_tree" as const,
+    changedFileCount: 2,
+    stagedFileCount: 0,
+    unstagedFileCount: 2,
+    untrackedFileCount: 0,
+    additions: 8,
+    deletions: 3,
+    files: [
+      {
+        path: "src/a.ts",
+        previousPath: null,
+        status: "modified" as const,
+        additions: 5,
+        deletions: 2,
+        binary: false,
+        staged: false,
+        unstaged: true,
+        untracked: false,
+      },
+      {
+        path: "src/b.ts",
+        previousPath: null,
+        status: "modified" as const,
+        additions: 3,
+        deletions: 1,
+        binary: false,
+        staged: false,
+        unstaged: true,
+        untracked: false,
+      },
+    ],
+    hiddenFileCount: 0,
+    isGitRepo: true,
+    updatedAt: "2026-07-02T00:00:00.000Z",
+    error: null,
+  };
+
+  const artifactInput = buildManagedAgentChangeSummaryWorkflowArtifact({
+    summary,
+    workerSession,
+  });
+  assert.equal(
+    artifactInput?.id,
+    "managed-agent:key:codex/stone-forge:branch:feature/artifacts",
+  );
+
+  const first = await publishManagedAgentLocalChangeSummaryArtifact({
+    roomIdentifier: "room_change_summary_artifacts",
+    storage,
+    workerSession,
+    summary,
+    taskId: "task_7",
+  });
+  assert.equal(
+    first?.artifactIdentityKey,
+    "git:change_summary:id:managed-agent:key:codex/stone-forge:branch:feature/artifacts",
+  );
+
+  await publishManagedAgentLocalChangeSummaryArtifact({
+    roomIdentifier: "room_change_summary_artifacts",
+    storage,
+    workerSession,
+    summary: {
+      ...summary,
+      changedFileCount: 3,
+      hiddenFileCount: 1,
+      updatedAt: "2026-07-02T00:05:00.000Z",
+    },
+    taskId: "task_8",
+  });
+
+  const artifacts = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(artifacts.artifacts?.length, 1);
+  assert.equal(artifacts.artifacts?.[0]?.kind, "change_summary");
+  assert.equal(artifacts.artifacts?.[0]?.source, "task_workflow_artifact");
+  assert.equal(artifacts.artifacts?.[0]?.title, "StoneForge worktree on feature/artifacts (3 files changed)");
+  assert.equal(artifacts.artifacts?.[0]?.ref, "feature/artifacts");
+  assert.equal(artifacts.artifacts?.[0]?.state, "updated");
+  assert.deepEqual(artifacts.artifacts?.[0]?.linked_task_ids, ["task_8"]);
+  assert.deepEqual((await getLocalRoomArtifacts(room.roomIdentifier, { taskId: "task_7" })).artifacts, []);
+
+  await publishManagedAgentLocalChangeSummaryArtifact({
+    roomIdentifier: "room_change_summary_artifacts",
+    storage,
+    workerSession,
+    summary: {
+      ...summary,
+      changedFileCount: 0,
+      stagedFileCount: 0,
+      unstagedFileCount: 0,
+      untrackedFileCount: 0,
+      additions: 0,
+      deletions: 0,
+      updatedAt: "2026-07-02T00:10:00.000Z",
+    },
+  });
+  const cleanArtifacts = await getLocalRoomArtifacts(room.roomIdentifier);
+  assert.equal(cleanArtifacts.artifacts?.length, 1);
+  assert.equal(cleanArtifacts.artifacts?.[0]?.title, "StoneForge worktree clean on feature/artifacts");
+  assert.equal(cleanArtifacts.artifacts?.[0]?.state, "clean");
+  assert.deepEqual(cleanArtifacts.artifacts?.[0]?.linked_task_ids, []);
+
+  assert.equal(
+    await publishManagedAgentLocalChangeSummaryArtifact({
+      roomIdentifier: "room_change_summary_artifacts",
+      storage: { ...storage, effectiveMode: "cloud", isLocalRoom: false },
+      workerSession,
+      summary,
+    }),
+    null,
+  );
+  assert.equal(
+    buildManagedAgentChangeSummaryWorkflowArtifact({
+      summary: { ...summary, isGitRepo: false, error: "Not a Git repository." },
+      workerSession,
+    }),
+    null,
+  );
 });
 
 test("desktop managed agent reply targets distinguish quote replies from thread replies", () => {
@@ -1441,6 +2273,13 @@ test("desktop event routing treats only the exact room stop phrase as a worker s
       threadReplyToId: null,
       thread: null,
       replyTo: null,
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: true,
+      },
     },
   };
 
@@ -1451,6 +2290,26 @@ test("desktop event routing treats only the exact room stop phrase as a worker s
       message: { ...event.message, text: " /stop-codex-room " },
     }),
     false,
+  );
+  assert.equal(
+    isStopPhraseRoomStreamEvent(session, {
+      ...event,
+      message: {
+        ...event.message,
+        accountAgentRouting: {
+          version: 1,
+          authority: "receipts",
+          recipientAgentKeys: ["EmmyMay/cometlively"],
+          recipientSessions: [{
+            agentKey: "EmmyMay/cometlively",
+            agentSessionId: session.agent_session_id!,
+          }],
+          controlAuthorized: false,
+        },
+      },
+    }),
+    false,
+    "another account cannot turn addressed chat text into lifecycle control",
   );
   assert.equal(
     isStopPhraseRoomStreamEvent(session, {
@@ -1576,6 +2435,8 @@ test("desktop-delivered event prompts mark human thread replies to human-authore
             latestMessageId: "msg_agent_answer",
           },
         ],
+        participantCount: 2,
+        participantsTruncated: false,
         lastReadMessageId: null,
       },
       replyTo: {
@@ -1604,32 +2465,6 @@ test("desktop-delivered event prompts keep top-level messages free of thread con
   assert.doesNotMatch(prompt, /Thread context:/);
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
-
-function claudeCodeLiveSession(
-  overrides: Partial<DesktopClaudeCodeLiveSessionState> = {},
-): DesktopClaudeCodeLiveSessionState {
-  return {
-    session_id: "claude_session_1",
-    room_id: "room_1",
-    room_identifier: "room_1",
-    room_display_name: "Room One",
-    joined_via: "join_room",
-    cwd: "/tmp/repo",
-    stop_phrase: "/stop-claude-room",
-    max_minutes: 0,
-    delivery_mode: "desktop_events",
-    deadline_utc: null,
-    token: "LOCAL_CLAUDE_ROOM_test",
-    claude_session_id: null,
-    claude_bin: "claude",
-    agent_session_id: null,
-    status: "running",
-    last_error: null,
-    started_at: "2026-06-14T12:00:00.000Z",
-    updated_at: "2026-06-14T12:00:00.000Z",
-    ...overrides,
-  };
-}
 
 function cursorLiveSession(
   overrides: Partial<DesktopCursorLiveSessionState> = {},
@@ -1693,6 +2528,8 @@ function humanThreadReplyEvent(): Extract<DesktopRoomStreamEvent, { type: "messa
             latestMessageId: "msg_agent_answer",
           },
         ],
+        participantCount: 2,
+        participantsTruncated: false,
         lastReadMessageId: null,
       },
       replyTo: {
@@ -1706,31 +2543,6 @@ function humanThreadReplyEvent(): Extract<DesktopRoomStreamEvent, { type: "messa
   };
 }
 
-test("Claude Code desktop event prompts include thread metadata for human thread replies", () => {
-  const prompt = buildClaudeCodeDesktopEventPrompt(
-    claudeCodeLiveSession({ display_name: "CedarVista" }),
-    humanThreadReplyEvent(),
-  );
-
-  assert.match(prompt, /Reply to: msg_root from EmmyMay/);
-  assert.match(prompt, /Thread root: msg_root from EmmyMay/);
-  assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
-  assert.match(prompt, /human reply inside a thread you are participating in/);
-  assert.match(prompt, /desktop will keep it in the same thread/);
-  assert.match(prompt, /NO_ROOM_REPLY/);
-});
-
-test("Claude Code desktop event prompts keep top-level messages free of thread context", () => {
-  const prompt = buildClaudeCodeDesktopEventPrompt(
-    claudeCodeLiveSession({ display_name: "CedarVista" }),
-    messageEvent(),
-  );
-
-  assert.doesNotMatch(prompt, /Thread root:/);
-  assert.doesNotMatch(prompt, /Thread context:/);
-  assert.match(prompt, /NO_ROOM_REPLY/);
-});
-
 test("Cursor desktop event prompts include thread metadata for human thread replies", () => {
   const prompt = buildCursorDesktopEventPrompt(
     cursorLiveSession({ display_name: "CedarVista" }),
@@ -1742,6 +2554,7 @@ test("Cursor desktop event prompts include thread metadata for human thread repl
   assert.match(prompt, /Thread reply to: msg_root from EmmyMay/);
   assert.match(prompt, /human reply inside a thread you are participating in/);
   assert.match(prompt, /desktop will keep it in the same thread/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
@@ -1753,6 +2566,7 @@ test("Cursor desktop event prompts keep top-level messages free of thread contex
 
   assert.doesNotMatch(prompt, /Thread root:/);
   assert.doesNotMatch(prompt, /Thread context:/);
+  assert.match(prompt, new RegExp(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX));
   assert.match(prompt, /NO_ROOM_REPLY/);
 });
 
@@ -1954,6 +2768,1296 @@ test("desktop event routing suppresses a renamed worker's own messages by stable
   assert.equal(isOwnRoomStreamEvent(session, genericOtherEvent), false);
 });
 
+test("desktop message routing treats top-level quote replies as direct replies", () => {
+  const directReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_reply",
+      text: "yes I want to, is there another way?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "You can promote me through the room controls.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_reply",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+  const targetWorkers = [
+    publicManagedAgentSession({ providerId: "codex", runtime: "codex" }),
+    publicManagedAgentSession({ providerId: "claude-code", runtime: "claude-code" }),
+    publicManagedAgentSession({ providerId: "cursor", runtime: "cursor" }),
+  ];
+  const otherWorker = publicManagedAgentSession({
+    id: "local_dawn",
+    providerId: "cursor",
+    runtime: "cursor",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+
+  for (const worker of targetWorkers) {
+    assert.equal(shouldDeliverRoomStreamEventToManagedAgent(worker, directReply), true);
+  }
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(otherWorker, directReply), false);
+});
+
+test("desktop message routing keeps broadcasts and unaddressed room messages deliverable", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const broadcastReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_broadcast_reply",
+      text: "@everyone what do you think?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "This is my read.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_broadcast_reply",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+  const unaddressed = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_unaddressed",
+      text: "can someone check this?",
+      replyTo: null,
+      threadRootId: "msg_unaddressed",
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, broadcastReply), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, broadcastReply), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, unaddressed), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, unaddressed), true);
+});
+
+test("Codex room activation routes only explicit addresses while retaining a shared transcript", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const oak = publicManagedAgentSession({
+    id: "local_oak",
+    agentSessionId: "agent_session_oak",
+    actorLabel: "OakSolar",
+    agentKey: "EmmyMay/oaksolar",
+    displayName: "OakSolar",
+  });
+  const workers = [river, dawn, oak];
+  const dispatchedNames = (event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>) =>
+    resolveCodexRoomStreamEventRecipients(workers, event)
+      .map((worker) => worker.displayName);
+
+  const untaggedHuman = messageEvent({
+    message: { ...messageEvent().message, id: "msg_untagged", text: "Can someone investigate this?" },
+  });
+  const directToDawn = messageEvent({
+    message: { ...messageEvent().message, id: "msg_direct_dawn", text: "@DawnRidge investigate this." },
+  });
+  const directToDawnById = messageEvent({
+    message: { ...messageEvent().message, id: "msg_direct_dawn_id", text: "@agent_session_dawn investigate this." },
+  });
+  const broadcast = messageEvent({
+    message: { ...messageEvent().message, id: "msg_everyone", text: "@everyone please review the plan." },
+  });
+  const peerUntargeted = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_peer_untagged",
+      sender: "RiverField",
+      source: "agent",
+      text: "I found another detail.",
+    },
+  });
+  const threadForDawn = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_thread_dawn",
+      text: "Here is the follow-up.",
+      threadRootId: "msg_thread_root",
+      threadReplyToId: "msg_someone_else",
+      replyTo: {
+        id: "msg_someone_else",
+        sender: "EmmyMay",
+        text: "Initial question",
+        source: "browser",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      thread: {
+        rootMessageId: "msg_thread_root",
+        replyCount: 2,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [{
+          sender: "DawnRidge",
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "msg_dawn_prior",
+        }],
+        participantCount: 1,
+        participantsTruncated: false,
+        lastReadMessageId: null,
+      },
+    },
+  });
+
+  assert.deepEqual(dispatchedNames(untaggedHuman), [], "an untagged top-level message is transcript context, not a fan-out event");
+  assert.deepEqual(dispatchedNames(directToDawn), ["DawnRidge"]);
+  assert.deepEqual(dispatchedNames(directToDawnById), ["DawnRidge"]);
+  assert.deepEqual(dispatchedNames(broadcast), ["RiverField", "DawnRidge", "OakSolar"], "each worker receives one broadcast turn");
+  assert.deepEqual(dispatchedNames(messageEvent({
+    message: { ...messageEvent().message, id: "msg_punctuated_name", text: "@DawnRidge. Please investigate." },
+  })), ["DawnRidge"], "sentence punctuation is not part of a display-name mention");
+  assert.deepEqual(dispatchedNames(messageEvent({
+    message: { ...messageEvent().message, id: "msg_punctuated_session", text: "@agent_session_dawn: please investigate." },
+  })), ["DawnRidge"], "terminal punctuation is not part of a stable session mention");
+  assert.deepEqual(dispatchedNames(messageEvent({
+    message: { ...messageEvent().message, id: "msg_punctuated_everyone", text: "@everyone. Please review." },
+  })), ["RiverField", "DawnRidge", "OakSolar"], "a punctuated broadcast still reaches the room");
+  assert.deepEqual(dispatchedNames(peerUntargeted), [], "peer chatter cannot create agent-to-agent ping-pong");
+  assert.deepEqual(dispatchedNames(threadForDawn), ["DawnRidge"], "only existing thread participants receive continuations");
+
+  const assignedToDawn: Extract<DesktopRoomStreamEvent, { type: "task_update" }> = {
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assigneeAgentKey: "EmmyMay/dawnridge" }),
+  };
+  const unassigned: Extract<DesktopRoomStreamEvent, { type: "task_update" }> = {
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary(),
+  };
+  assert.deepEqual(dispatchedNames(assignedToDawn), ["DawnRidge"]);
+  assert.deepEqual(dispatchedNames(unassigned), []);
+
+  const ownBroadcast = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_self",
+      sender: "DawnRidge",
+      source: "agent",
+      text: "@everyone I completed my check.",
+    },
+  });
+  assert.equal(shouldDeliverCodexRoomStreamEventToManagedAgent(dawn, ownBroadcast), false, "a worker never reactivates itself");
+  assert.equal(codexManagedAgentMessageActivationDecision(dawn, directToDawn.message), "activate");
+});
+
+test("desktop account routing is exact beyond display caps and authoritative for snapshots", () => {
+  const workers = Array.from({ length: 60 }, (_, index) => publicManagedAgentSession({
+    id: `local_${index}`,
+    agentSessionId: `agent_session_${index}`,
+    actorLabel: `Agent ${index}`,
+    agentKey: `owner/agent-${index}`,
+    displayName: `Agent ${index}`,
+  }));
+  const target = workers[0]!;
+  const cappedParticipants = workers.slice(10).map((worker, index) => ({
+    sender: worker.actorLabel || worker.displayName || worker.agentKey || "Agent",
+    source: "agent",
+    messageCount: 1,
+    latestMessageId: `msg_${index + 10}`,
+  }));
+  const legacy = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_legacy_overlay",
+      text: "continuing",
+      threadRootId: "msg_root",
+      threadReplyToId: "msg_previous",
+      thread: {
+        rootMessageId: "msg_root",
+        replyCount: 70,
+        unreadCount: 1,
+        hasUnread: true,
+        latestReply: null,
+        participants: cappedParticipants,
+        participantCount: 70,
+        participantsTruncated: true,
+        lastReadMessageId: null,
+      },
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+          activationReason: "thread_participant",
+        }],
+      },
+    },
+  });
+  const codexLegacyKeys = resolveCodexRoomStreamEventRecipients(workers, legacy)
+    .map((worker) => worker.agentKey);
+  const providerLegacyKeys = resolveDesktopRoomStreamEventRecipients(workers, legacy)
+    .map((worker) => worker.agentKey);
+  assert.equal(codexLegacyKeys.includes(target.agentKey), true, "the old member beyond the display cap is retained");
+  assert.equal(codexLegacyKeys.includes(workers[1]!.agentKey), false, "membership does not widen to absent workers");
+  assert.equal(providerLegacyKeys.includes(target.agentKey), true, "provider-neutral routing consumes the same exact overlay");
+
+  const authoritativeEmpty = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_snapshot_empty",
+      text: "@everyone",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+      },
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients(workers, authoritativeEmpty), []);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients(workers, authoritativeEmpty), []);
+
+  const malformed = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_malformed_overlay",
+      accountAgentRouting: { version: 1, authority: "invalid" },
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients(workers, malformed), []);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients(workers, malformed), []);
+
+  const duplicate = {
+    ...workers[1]!,
+    providerId: "cursor" as const,
+    agentKey: target.agentKey,
+  };
+  const receipt = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_duplicate_durable_key",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], receipt),
+    [target],
+    "an exact receipt session remains authoritative during durable-key overlap",
+  );
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target, duplicate], receipt), [target]);
+
+  const exactLegacyNegative = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_exact_legacy_negative",
+      thread: {
+        ...legacy.message.thread!,
+        latestReply: {
+          id: "msg_prior",
+          sender: target.actorLabel!,
+          text: "prior",
+          source: "agent",
+          timestamp: "2026-01-01T00:00:00.000Z",
+        },
+        participants: [{
+          sender: target.actorLabel!,
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "msg_prior",
+        }],
+      },
+      replyTo: {
+        id: "msg_prior",
+        sender: target.actorLabel!,
+        text: "prior",
+        source: "agent",
+        timestamp: "2026-01-01T00:00:00.000Z",
+      },
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target], exactLegacyNegative),
+    [],
+    "display participants cannot override an authoritative negative membership",
+  );
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target], exactLegacyNegative), []);
+
+  const exactLegacyTarget = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_exact_legacy_session",
+      text: "@everyone continue",
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+          activationReason: "broadcast",
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], exactLegacyTarget),
+    [target],
+    "server-selected legacy authority disambiguates a same-key overlap",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], exactLegacyTarget),
+    [target],
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([duplicate], exactLegacyTarget),
+    [],
+    "a remote exact legacy representative cannot be replaced by a local same-key worker",
+  );
+  const unwrappedLegacy = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_unwrapped_incomplete_population",
+      accountAgentRouting: undefined,
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target], unwrappedLegacy, false),
+    [],
+    "an incomplete provider population cannot manufacture unique legacy authority",
+  );
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target], unwrappedLegacy, false), []);
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target], exactLegacyTarget, false),
+    [target],
+    "exact server-selected sessions remain safe when another provider cannot enumerate",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target], exactLegacyTarget, false),
+    [target],
+  );
+  const exactLegacyEmpty = messageEvent({
+    message: {
+      ...exactLegacyTarget.message,
+      id: "msg_exact_legacy_empty",
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+      },
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients([target], exactLegacyEmpty), []);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target], exactLegacyEmpty), []);
+
+  const localRotationRouting = buildLocalLegacyAccountAgentRouting(
+    [target, duplicate],
+    {
+      ...legacy.message,
+      id: "msg_local_rotation_broadcast",
+      text: "@everyone continue",
+      accountAgentRouting: undefined,
+    },
+  );
+  assert.deepEqual(localRotationRouting, {
+    version: 1,
+    authority: "legacy",
+    recipientAgentKeys: [target.agentKey!],
+    recipientSessions: [{
+      agentKey: target.agentKey!,
+      agentSessionId: target.agentSessionId!,
+      activationReason: "local_legacy",
+    }],
+    controlAuthorized: true,
+  }, "local broadcast authority collapses a cross-provider rotation to one exact session");
+  const localRotationEvent = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_local_rotation_broadcast",
+      text: "@everyone continue",
+      accountAgentRouting: localRotationRouting,
+    },
+  });
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients([target, duplicate], localRotationEvent), [target]);
+  assert.deepEqual(resolveDesktopRoomStreamEventRecipients([target, duplicate], localRotationEvent), [target]);
+
+  const exactLocalReplyRouting = buildLocalLegacyAccountAgentRouting(
+    [target, duplicate],
+    {
+      ...legacy.message,
+      id: "msg_local_exact_reply",
+      threadRootId: "msg_local_exact_reply",
+      threadReplyToId: null,
+      text: "following up",
+      replyTo: {
+        id: "msg_local_publisher",
+        sender: duplicate.actorLabel!,
+        text: "prior agent message",
+        source: "agent",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        agentIdentity: {
+          name: null,
+          displayName: duplicate.displayName,
+          ownerLabel: null,
+          ownerAttribution: null,
+          ideLabel: null,
+          actorLabel: duplicate.actorLabel,
+          agentKey: duplicate.agentKey,
+          agentSessionId: duplicate.agentSessionId,
+        },
+      },
+    },
+  );
+  assert.deepEqual(exactLocalReplyRouting.recipientSessions, [{
+    agentKey: target.agentKey!,
+    agentSessionId: duplicate.agentSessionId!,
+    activationReason: "local_legacy",
+  }], "a quoted local agent message preserves its exact overlapping session");
+  const humanAliasReplyRouting = buildLocalLegacyAccountAgentRouting(
+    [target],
+    {
+      ...legacy.message,
+      id: "msg_local_human_reply",
+      threadRootId: "msg_local_human_reply",
+      threadReplyToId: null,
+      text: "following up",
+      replyTo: {
+        id: "msg_local_human",
+        sender: target.actorLabel!,
+        text: "human with the same label",
+        source: "browser",
+        timestamp: "2026-01-01T00:00:00.000Z",
+        agentIdentity: null,
+      },
+    },
+  );
+  assert.deepEqual(
+    humanAliasReplyRouting.recipientSessions,
+    [],
+    "a quoted browser message never becomes an agent target through its mutable sender label",
+  );
+
+  const externalMcpSession = {
+    id: "persisted:external_mcp",
+    agentSessionId: "external_mcp",
+    agentKey: "other/oak",
+    actorLabel: target.actorLabel,
+    displayName: target.displayName,
+    startedAt: "1969-12-31T23:59:59.000Z",
+  };
+  const crossProcessAmbiguousRouting = buildLocalLegacyAccountAgentRouting(
+    [target],
+    { ...legacy.message, id: "msg_external_mcp_alias", text: "@agent0 continue" },
+    [],
+    [target, externalMcpSession],
+  );
+  assert.deepEqual(
+    crossProcessAmbiguousRouting.recipientSessions,
+    [],
+    "an external MCP worker remains in desktop's room-global alias ambiguity set",
+  );
+  const crossProcessSameKeyRouting = buildLocalLegacyAccountAgentRouting(
+    [target],
+    { ...legacy.message, id: "msg_external_mcp_same_key", text: "@everyone continue" },
+    [],
+    [target, { ...externalMcpSession, agentKey: target.agentKey }],
+  );
+  assert.deepEqual(
+    crossProcessSameKeyRouting.recipientSessions,
+    [{
+      agentKey: target.agentKey!,
+      agentSessionId: "external_mcp",
+      activationReason: "local_legacy",
+    }],
+    "desktop cannot replace the globally selected external representative with a local generation",
+  );
+
+  const localRotationCases: Array<[string, DesktopRoomMessage, readonly string[]]> = [
+    ["thread participant", {
+      ...legacy.message,
+      id: "msg_local_rotation_thread",
+      threadRootId: "msg_local_rotation_root",
+      thread: {
+        ...legacy.message.thread!,
+        rootMessageId: "msg_local_rotation_root",
+        participants: [],
+      },
+      text: "continue",
+    }, [target.agentKey!]],
+    ["display alias mention", {
+      ...legacy.message,
+      id: "msg_local_rotation_mention",
+      text: "@agent0 continue",
+    }, []],
+    ["durable mention", {
+      ...legacy.message,
+      id: "msg_local_rotation_durable_mention",
+      text: `@agent:${target.agentKey} continue`,
+    }, []],
+    ["quoted reply", {
+      ...legacy.message,
+      id: "msg_local_rotation_reply",
+      text: "continue",
+      threadRootId: "",
+      threadReplyToId: "",
+      thread: null,
+      replyTo: {
+        id: "msg_local_rotation_quoted",
+        sender: target.actorLabel!,
+        text: "previous",
+        source: "agent",
+        timestamp: new Date(0).toISOString(),
+      },
+    }, []],
+  ];
+  for (const [label, message, participantKeys] of localRotationCases) {
+    const routing = buildLocalLegacyAccountAgentRouting(
+      [target, duplicate],
+      message,
+      participantKeys,
+    );
+    assert.deepEqual(
+      routing.recipientSessions,
+      [{
+        agentKey: target.agentKey!,
+        agentSessionId: target.agentSessionId!,
+        activationReason: "local_legacy",
+      }],
+      `local ${label} authority resolves the durable key before choosing one session`,
+    );
+  }
+  for (const text of ["@everyone done", `@agent:${target.agentKey} done`]) {
+    const ownRouting = buildLocalLegacyAccountAgentRouting(
+      [target, duplicate],
+      {
+        ...legacy.message,
+        id: `msg_local_rotation_self_${text.includes("everyone") ? "broadcast" : "mention"}`,
+        source: "agent",
+        sender: target.actorLabel!,
+        text,
+        agentIdentity: {
+          name: null,
+          displayName: target.displayName,
+          ownerLabel: null,
+          ownerAttribution: null,
+          ideLabel: null,
+          actorLabel: target.actorLabel!,
+          agentKey: target.agentKey!,
+          agentSessionId: null,
+        },
+      },
+    );
+    assert.deepEqual(
+      ownRouting.recipientSessions,
+      [],
+      "durable publisher authority suppresses every live generation of the same key",
+    );
+  }
+  const identitylessLocalAgentRouting = buildLocalLegacyAccountAgentRouting(
+    [target, duplicate],
+    {
+      ...legacy.message,
+      id: "msg_local_legacy_identityless_agent",
+      source: "agent",
+      sender: target.actorLabel!,
+      text: "@everyone continue",
+      agentIdentity: null,
+    },
+  );
+  assert.deepEqual(
+    identitylessLocalAgentRouting.recipientSessions,
+    [],
+    "identityless legacy agent rows fail closed instead of replaying into current workers",
+  );
+
+  const exactRotationReceipt = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_exact_rotation_receipt",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], exactRotationReceipt),
+    [target],
+    "an exact captured receipt session disambiguates a supported rotation overlap",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], exactRotationReceipt),
+    [target],
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([duplicate], exactRotationReceipt),
+    [],
+    "an absent captured session remains authoritative while it may be active on another desktop",
+  );
+  assert.equal(desktopManagedAgentMessageActivationDecision(target, exactRotationReceipt.message), "activate");
+  assert.equal(desktopManagedAgentMessageActivationDecision(duplicate, exactRotationReceipt.message), "silent");
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(target, exactRotationReceipt), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(duplicate, exactRotationReceipt), false);
+  const endedRotationReceipt = messageEvent({
+    message: {
+      ...exactRotationReceipt.message,
+      id: "msg_ended_rotation_receipt",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [target.agentKey!],
+        recipientSessions: [{
+          agentKey: target.agentKey!,
+          agentSessionId: target.agentSessionId!,
+          successorAgentSessionId: duplicate.agentSessionId!,
+        }],
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([duplicate], endedRotationReceipt),
+    [duplicate],
+    "only the server-authorized exact successor inherits an ended receipt",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], endedRotationReceipt),
+    [duplicate],
+    "the successor decision overrides stale local visibility of the ended capture",
+  );
+
+  const duplicateLegacy = messageEvent({
+    message: {
+      ...legacy.message,
+      id: "msg_duplicate_legacy_key",
+      thread: {
+        ...legacy.message.thread!,
+        participants: [{
+          sender: target.agentKey!,
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "msg_1",
+        }],
+      },
+      accountAgentRouting: undefined,
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients([target, duplicate], duplicateLegacy),
+    [],
+    "a display participant cannot bypass an ambiguous durable membership key",
+  );
+  assert.deepEqual(
+    resolveDesktopRoomStreamEventRecipients([target, duplicate], duplicateLegacy),
+    [],
+  );
+});
+
+test("Codex room activation fails closed for duplicate names and accepts a canonical target", () => {
+  const aliceOak = publicManagedAgentSession({
+    id: "local_alice_oak",
+    agentSessionId: "agent_session_alice_oak",
+    actorLabel: "Oak | Alice's agent | Codex",
+    agentKey: "local/alice/codex/oak",
+    displayName: "Oak",
+  });
+  const bobOak = publicManagedAgentSession({
+    id: "local_bob_oak",
+    agentSessionId: "agent_session_bob_oak",
+    actorLabel: "Oak | Bob's agent | Codex",
+    agentKey: "local/bob/codex/oak",
+    displayName: "Oak",
+  });
+  const workers = [aliceOak, bobOak];
+  const targets = (text: string) => resolveCodexRoomStreamEventRecipients(workers, messageEvent({
+    message: { ...messageEvent().message, id: `msg_${text}`, text },
+  })).map((worker) => worker.agentSessionId);
+
+  assert.deepEqual(targets("@Oak please review"), [], "a duplicate display alias cannot fan out");
+  assert.deepEqual(
+    targets("@agent:local/alice/codex/oak please review"),
+    ["agent_session_alice_oak"],
+    "the canonical key resolves exactly one duplicate-name worker",
+  );
+  const aliceBroadcast = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_alice_broadcast",
+      sender: "Oak",
+      actorLabel: "Oak | Alice's agent | Codex",
+      source: "agent",
+      text: "@everyone I finished my pass",
+      agentIdentity: {
+        name: "Oak",
+        displayName: "Oak",
+        ownerLabel: "Alice",
+        ownerAttribution: "Alice's agent",
+        ideLabel: "Codex",
+        actorLabel: "Oak | Alice's agent | Codex",
+        agentKey: "local/alice/codex/oak",
+        agentSessionId: "agent_session_alice_oak",
+      },
+    },
+  });
+  assert.deepEqual(
+    resolveCodexRoomStreamEventRecipients(workers, aliceBroadcast).map((worker) => worker.agentSessionId),
+    ["agent_session_bob_oak"],
+    "a stable author identity excludes only self even when display names collide",
+  );
+});
+
+test("Codex task, reply, and identityless author routing resolve aliases across the room", () => {
+  const aliceOak = publicManagedAgentSession({
+    id: "local_alice_oak",
+    agentSessionId: "agent_session_alice_oak",
+    actorLabel: "Oak | Alice's agent | Codex",
+    agentKey: "local/alice/codex/oak",
+    displayName: "Oak",
+  });
+  const bobOak = publicManagedAgentSession({
+    id: "local_bob_oak",
+    agentSessionId: "agent_session_bob_oak",
+    actorLabel: "Oak | Bob's agent | Codex",
+    agentKey: "local/bob/codex/oak",
+    displayName: "Oak",
+  });
+  const cedar = publicManagedAgentSession({
+    id: "local_cedar",
+    agentSessionId: "agent_session_cedar",
+    actorLabel: "CedarVista",
+    agentKey: "local/cedar",
+    displayName: "CedarVista",
+  });
+  const codexNamed = publicManagedAgentSession({
+    id: "local_codex_named",
+    agentSessionId: "agent_session_codex_named",
+    actorLabel: "Codex",
+    agentKey: "local/codex-named",
+    displayName: "Codex",
+  });
+  const workers = [aliceOak, bobOak, cedar, codexNamed];
+  const recipients = (event: Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>) =>
+    resolveCodexRoomStreamEventRecipients(workers, event).map((worker) => worker.agentSessionId);
+
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assigneeAgentKey: "local/alice/codex/oak", assignee: "Oak" }),
+  }), ["agent_session_alice_oak"], "stable task identity wins over a duplicate display label");
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assignee: "Oak" }),
+  }), [], "an alias-only task assignment must be unique");
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assignee: "CedarVista" }),
+  }), ["agent_session_cedar"], "a unique alias-only task assignment still works");
+  assert.deepEqual(resolveCodexRoomStreamEventRecipients([
+    aliceOak,
+    { ...bobOak, agentKey: aliceOak.agentKey },
+  ], {
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({ assigneeAgentKey: "local/alice/codex/oak" }),
+  }), [], "a duplicated canonical task key fails closed instead of activating both owners");
+  assert.deepEqual(recipients({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary({
+      activeLeases: [{
+        id: "conflicting_lease",
+        kind: "work",
+        holderLabel: "Oak",
+        agentKey: "local/bob/codex/oak",
+        agentSessionId: "agent_session_alice_oak",
+        status: "active",
+        updatedAt: "2026-06-14T12:10:00.000Z",
+      }],
+    }),
+  }), [], "conflicting stable lease fields cannot fan out to two workers");
+
+  const reply = (sender: string) => recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: `reply_${sender}`,
+      text: "follow-up",
+      replyTo: { id: "prior", sender, text: "prior", source: "agent", timestamp: "2026-06-14T12:00:00.000Z" },
+    },
+  }));
+  assert.deepEqual(reply("Oak"), [], "a duplicate reply alias cannot wake both workers");
+  assert.deepEqual(reply("Oak | Alice's agent | Codex"), ["agent_session_alice_oak"], "a full actor label wins over a colliding label segment");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "composite_thread_participant",
+      text: "continuing the thread",
+      threadRootId: "thread_root",
+      threadReplyToId: "prior_reply",
+      thread: {
+        rootMessageId: "thread_root",
+        replyCount: 1,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [{
+          sender: "Oak | Alice's agent | Codex",
+          source: "agent",
+          messageCount: 1,
+          latestMessageId: "prior_reply",
+        }],
+        participantCount: 1,
+        participantsTruncated: false,
+        lastReadMessageId: null,
+      },
+    },
+  })), ["agent_session_alice_oak"], "a composite thread participant cannot activate a worker named after one label segment");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "identityless_duplicate_author_broadcast",
+      sender: "Oak",
+      source: "agent",
+      text: "@everyone please verify this.",
+    },
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar", "agent_session_codex_named"],
+  "an ambiguous identityless author is not treated as self for every duplicate worker");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "browser_sender_agent_name_collision",
+      sender: "CedarVista",
+      source: "browser",
+      text: "@everyone please verify this.",
+    },
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar", "agent_session_codex_named"],
+  "a human sender sharing an agent name does not suppress that agent from a broadcast");
+
+  assert.deepEqual(recipients(messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "conflicting_structured_author_broadcast",
+      sender: "Oak",
+      source: "agent",
+      text: "@everyone please verify this.",
+      agentIdentity: {
+        name: "Oak",
+        displayName: "Oak",
+        ownerLabel: "Alice",
+        ownerAttribution: "Alice's agent",
+        ideLabel: "Codex",
+        actorLabel: "Oak",
+        agentKey: "local/alice/codex/oak",
+        agentSessionId: "agent_session_bob_oak",
+      },
+    },
+  })), ["agent_session_alice_oak", "agent_session_bob_oak", "agent_session_cedar", "agent_session_codex_named"],
+  "conflicting stable author fields fail closed instead of suppressing two workers");
+});
+
+test("task routing gives an exact active lease global authority across provider rotations", () => {
+  const oldCodex = publicManagedAgentSession({
+    id: "local_old_codex",
+    providerId: "codex",
+    agentSessionId: "agent_session_old",
+    actorLabel: "Oak | Emmy's agent | Codex",
+    agentKey: "EmmyMay/oak",
+    displayName: "Oak",
+  });
+  const currentCursor = publicManagedAgentSession({
+    id: "local_current_cursor",
+    providerId: "cursor",
+    agentSessionId: "agent_session_current",
+    actorLabel: "Oak | Emmy's agent | Cursor",
+    agentKey: "EmmyMay/oak",
+    displayName: "Oak",
+  });
+  const cedar = publicManagedAgentSession({
+    id: "local_cedar_cursor",
+    providerId: "cursor",
+    agentSessionId: "agent_session_cedar",
+    actorLabel: "Cedar | Emmy's agent | Cursor",
+    agentKey: "EmmyMay/cedar",
+    displayName: "Cedar",
+  });
+  const workers = [oldCodex, currentCursor, cedar];
+  const resolvers = [
+    resolveCodexRoomStreamEventRecipients,
+    resolveDesktopRoomStreamEventRecipients,
+  ];
+  const taskEvent = (
+    overrides: Partial<DesktopTaskSummary>,
+  ): Extract<DesktopRoomStreamEvent, { type: "task_update" }> => ({
+    type: "task_update",
+    roomIdentifier: "room_1",
+    task: taskSummary(overrides),
+  });
+  const activeWorkLease = (
+    overrides: Partial<DesktopTaskSummary["activeLeases"][number]> = {},
+  ): DesktopTaskSummary["activeLeases"][number] => ({
+    id: "lease_work",
+    kind: "work",
+    holderLabel: "Oak",
+    agentKey: "EmmyMay/oak",
+    agentSessionId: "agent_session_current",
+    status: "active",
+    updatedAt: "2026-06-14T12:10:00.000Z",
+    ...overrides,
+  });
+
+  for (const resolve of resolvers) {
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assignee: "Oak",
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease()],
+      })),
+      [currentCursor],
+      "the exact lease selects only the current session without requiring its shared key to be unique",
+    );
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease({ agentKey: "EmmyMay/cedar" })],
+      })),
+      [],
+      "an exact lease whose supplied durable key mismatches the worker fails closed",
+    );
+    assert.deepEqual(
+      resolve([
+        currentCursor,
+        { ...cedar, agentSessionId: currentCursor.agentSessionId, agentKey: currentCursor.agentKey },
+      ], taskEvent({
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease()],
+      })),
+      [],
+      "a duplicate exact session identity fails closed",
+    );
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assigneeAgentKey: "EmmyMay/oak",
+        activeLeases: [activeWorkLease({ agentSessionId: null })],
+      })),
+      [],
+      "a key-only rotation remains ambiguous across providers",
+    );
+    assert.deepEqual(
+      resolve(workers, taskEvent({
+        assignee: "Cedar",
+        assigneeAgentKey: "EmmyMay/cedar",
+        activeLeases: [activeWorkLease({
+          holderLabel: "Cedar",
+          agentKey: "EmmyMay/cedar",
+          agentSessionId: null,
+        })],
+      })),
+      [cedar],
+      "a key-only legacy lease still resolves when exactly one global worker owns the key",
+    );
+  }
+});
+
+test("Codex stop control reaches a blocked bound worker but excludes unsafe recipients", () => {
+  resetState({
+    agent_sessions: {
+      worker_blocked_stop: managedWorkerSession({
+        session_id: "worker_blocked_stop",
+        room_id: "room_stop_control",
+        runtime: "codex:LOCAL_CODEX_ROOM_blocked_stop",
+        actor_label: "BlockedCedar",
+        agent_key: "local/blocked/cedar",
+        display_name: "BlockedCedar",
+      }),
+      worker_interrupted_stop: managedWorkerSession({
+        session_id: "worker_interrupted_stop",
+        room_id: "room_stop_control",
+        runtime: "codex:LOCAL_CODEX_ROOM_interrupted_stop",
+      }),
+      worker_failed_stop: managedWorkerSession({
+        session_id: "worker_failed_stop",
+        room_id: "room_stop_control",
+        runtime: "codex:LOCAL_CODEX_ROOM_failed_stop",
+      }),
+    },
+  });
+  for (const [sessionId, token, status, agentSessionId] of [
+    ["blocked_stop", "LOCAL_CODEX_ROOM_blocked_stop", "blocked", "worker_blocked_stop"],
+    ["interrupted_stop", "LOCAL_CODEX_ROOM_interrupted_stop", "interrupted", "worker_interrupted_stop"],
+    ["failed_stop", "LOCAL_CODEX_ROOM_failed_stop", "failed", "worker_failed_stop"],
+    ["unbound_stop", "LOCAL_CODEX_ROOM_unbound_stop", "blocked", null],
+  ] as const) {
+    saveCodexLiveSession(liveSession({
+      session_id: sessionId,
+      room_id: "room_stop_control",
+      room_identifier: "room_stop_control",
+      token,
+      agent_session_id: agentSessionId,
+      stop_phrase: "/stop-codex-room",
+      status,
+    }));
+  }
+  const stopEvent = messageEvent({
+    roomIdentifier: "room_stop_control",
+    message: {
+      ...messageEvent().message,
+      id: "msg_stop_blocked",
+      text: "/stop-codex-room",
+      accountAgentRouting: {
+        version: 1,
+        authority: "receipts",
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: true,
+      },
+    },
+  });
+
+  assert.deepEqual(
+    listDeliverableCodexSessionsForRoomStreamEvent(stopEvent).map((session) => session.session_id),
+    ["blocked_stop"],
+  );
+  assert.deepEqual(
+    listDeliverableCodexSessionsForRoomStreamEvent({
+      ...stopEvent,
+      message: {
+        ...stopEvent.message,
+        id: "msg_stop_self",
+        sender: "BlockedCedar",
+        source: "agent",
+      },
+    }),
+    [],
+    "self-authored stop text is not reflected back into the same worker",
+  );
+});
+
+test("Codex activation does not filter earlier untagged room context", async () => {
+  const roomIdentifier = "codex_activation_shared_context";
+  const room = await createLocalRoom({ roomIdentifier, displayName: "Codex activation context" });
+  await setLocalAwareRoomStorageMode(roomIdentifier, "local");
+  await addLocalChatMessage(room.roomIdentifier, {
+    sender: "EmmyMay",
+    text: "Earlier untagged observation that matters.",
+    source: "browser",
+  });
+  await addLocalChatMessage(room.roomIdentifier, {
+    sender: "EmmyMay",
+    text: "@RiverField please investigate using the earlier observation.",
+    source: "browser",
+  });
+
+  const result = await executeManagedAgentContextRequest(liveSession({
+    room_id: roomIdentifier,
+    room_identifier: roomIdentifier,
+  }), {
+    tool: "read_recent_room_messages",
+    arguments: { limit: 20 },
+  });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.storage, "local");
+  assert.deepEqual(
+    (result.messages as Array<{ text: string }>).map((message) => message.text),
+    ["Earlier untagged observation that matters.", "@RiverField please investigate using the earlier observation."],
+  );
+});
+
+test("desktop message routing keeps human quote replies deliverable", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const humanQuoteReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_human_quote",
+      text: "can someone check this?",
+      replyTo: {
+        id: "msg_human",
+        sender: "EmmyMay",
+        text: "Earlier context",
+        source: "browser",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_human_quote",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, humanQuoteReply), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, humanQuoteReply), true);
+});
+
+test("desktop message routing keeps real thread replies participant-aware", () => {
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const threadReply = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_thread_reply",
+      text: "what about this?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "This is my read.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_thread_root",
+      threadReplyToId: "msg_river",
+      thread: {
+        rootMessageId: "msg_thread_root",
+        replyCount: 3,
+        unreadCount: 0,
+        hasUnread: false,
+        latestReply: null,
+        participants: [
+          {
+            sender: "RiverField",
+            source: "agent",
+            messageCount: 1,
+            latestMessageId: "msg_river",
+          },
+          {
+            sender: "DawnRidge",
+            source: "agent",
+            messageCount: 1,
+            latestMessageId: "msg_dawn",
+          },
+        ],
+        participantCount: 2,
+        participantsTruncated: false,
+        lastReadMessageId: null,
+      },
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, threadReply), true);
+});
+
+test("desktop message routing lets explicit mentions override quote targets", () => {
+  const river = publicManagedAgentSession();
+  const dawn = publicManagedAgentSession({
+    id: "local_dawn",
+    agentSessionId: "agent_session_dawn",
+    actorLabel: "DawnRidge",
+    agentKey: "EmmyMay/dawnridge",
+    displayName: "DawnRidge",
+  });
+  const mentionedOtherAgent = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_mention_quote",
+      text: "@DawnRidge can you check this?",
+      replyTo: {
+        id: "msg_river",
+        sender: "RiverField",
+        text: "This is my read.",
+        source: "agent",
+        timestamp: "2026-06-14T12:00:00.000Z",
+      },
+      threadRootId: "msg_mention_quote",
+      threadReplyToId: null,
+      thread: null,
+    },
+  });
+
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(dawn, mentionedOtherAgent), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(river, mentionedOtherAgent), false);
+});
+
+test("desktop message routing delivers multi-segment canonical mentions only to their target", () => {
+  const target = publicManagedAgentSession({
+    actorLabel: "Oak | Alice's agent | Codex",
+    agentKey: "local/alice/codex/oak",
+    displayName: "Oak",
+  });
+  const other = publicManagedAgentSession({
+    id: "local_bob_oak",
+    agentSessionId: "agent_session_bob_oak",
+    actorLabel: "Oak | Bob's agent | Codex",
+    agentKey: "local/bob/codex/oak",
+    displayName: "Oak",
+  });
+  const event = messageEvent({
+    message: {
+      ...messageEvent().message,
+      id: "msg_canonical_mention",
+      text: "@agent:local/alice/codex/oak please review",
+    },
+  });
+
+  assert.equal(desktopManagedAgentMessageActivationDecision(target, event.message), "activate");
+  assert.equal(desktopManagedAgentMessageActivationDecision(other, event.message), "silent");
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(target, event), true);
+  assert.equal(shouldDeliverRoomStreamEventToManagedAgent(other, event), false);
+});
+
+test("desktop message routing leaves arbitrary scoped packages unaddressed", () => {
+  const worker = publicManagedAgentSession();
+  for (const packageName of ["@types/node", "@vue/runtime-core", "@babel/core", "@agent/core"]) {
+    const event = messageEvent({
+      message: {
+        ...messageEvent().message,
+        id: `msg_package_${packageName}`,
+        text: `npm install ${packageName}`,
+      },
+    });
+    assert.equal(desktopManagedAgentMessageActivationDecision(worker, event.message), "unclear");
+  }
+});
+
 test("desktop event routing does not deliver queued events after a worker is stopped", () => {
   resetState({
     agent_sessions: {
@@ -2089,6 +4193,7 @@ test("turn interrupts keep desktop-event workers reusable unless shutdown is req
   assert.equal(codexSessionStatusAfterTurnInterrupt("desktop_events", true, false), "running");
   assert.equal(codexSessionStatusAfterTurnInterrupt("desktop_events", false, false), "unknown");
   assert.equal(codexSessionStatusAfterTurnInterrupt("desktop_events", true, true), "interrupted");
+  assert.equal(codexSessionStatusAfterTurnInterrupt("daemon_inbox", true, false), "running");
   assert.equal(codexSessionStatusAfterTurnInterrupt("mcp_polling", true, false), "interrupted");
 });
 
@@ -2116,6 +4221,22 @@ test("startup inspection failures keep Codex bootstrap in the starting state", (
       process.env.LETAGENTS_CODEX_STARTUP_OBSERVATION_MS = previous;
     }
   }
+});
+
+test("Codex thread reads treat wake-up materialization errors as retryable", () => {
+  assert.equal(isLikelyMaterializingError(new Error("thread not materialized yet")), true);
+  assert.equal(isLikelyMaterializingError(new Error("thread not found: thread_123")), true);
+  assert.equal(isLikelyMaterializingError(new Error("THREAD NOT FOUND: thread_123")), true);
+  assert.equal(isLikelyMaterializingError(new Error("permission denied")), false);
+});
+
+test("desktop-event session monitors stay active while agents wait for events", () => {
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "completed", true), false);
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "running", true), false);
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "failed", true), true);
+  assert.equal(shouldStopCodexSessionMonitor("desktop_events", "completed", false), true);
+  assert.equal(shouldStopCodexSessionMonitor("daemon_inbox", "completed", true), false);
+  assert.equal(shouldStopCodexSessionMonitor("mcp_polling", "completed", true), true);
 });
 
 test("managed Codex stop modes distinguish stopping a turn from shutting down the worker", () => {
@@ -2238,6 +4359,54 @@ test("CodexRpcClient initializes app-server using the documented wire shape", as
   assert.equal(sentMessages[1]?.jsonrpc, undefined);
   assert.equal(sentMessages[2]?.method, "thread/start");
   assert.equal(sentMessages[2]?.jsonrpc, undefined);
+});
+
+test("CodexRpcClient request timeout does not report a live socket as disconnected", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  let disconnected = 0;
+  let socketClosed = false;
+
+  class FakeWebSocket {
+    static readonly OPEN = 1;
+    readyState = FakeWebSocket.OPEN;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+
+    constructor(readonly url: string) {
+      queueMicrotask(() => this.onopen?.());
+    }
+
+    send(raw: string): void {
+      const message = JSON.parse(raw) as { id?: number; method?: string };
+      if (!message.id || message.method !== "initialize") return;
+      queueMicrotask(() => {
+        this.onmessage?.({ data: JSON.stringify({ id: message.id, result: {} }) });
+      });
+    }
+
+    close(): void {
+      socketClosed = true;
+      this.readyState = 3;
+      this.onclose?.();
+    }
+  }
+
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket =
+    FakeWebSocket as unknown as typeof WebSocket;
+  try {
+    const client = new CodexRpcClient("ws://127.0.0.1:4500", undefined, 5);
+    client.onDisconnect(() => { disconnected += 1; });
+    await client.connect();
+
+    await assert.rejects(client.request("thread/read", {}), /request timed out: thread\/read/);
+    assert.equal(disconnected, 0);
+    assert.equal(socketClosed, false);
+    client.close();
+  } finally {
+    globalThis.WebSocket = originalWebSocket;
+  }
 });
 
 test("CodexRpcClient rejects requests when the app-server socket is not open", async () => {
@@ -2363,14 +4532,31 @@ test("Codex app-server launcher captures spawn errors for the supervisor", async
   assert.match(exit.error.message, /letagents-codex-missing-bin-for-test|ENOENT|spawn/i);
 });
 
+test("Codex app-server launcher uses the trusted worktree as its process cwd", async () => {
+  const bin = join(tempDir, "codex-reporting-app-server-cwd");
+  writeFileSync(
+    bin,
+    "#!/usr/bin/env node\nprocess.stdout.write(process.cwd());\n",
+    { mode: 0o755 },
+  );
+
+  const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+    trustedProjectPath: tempDir,
+  });
+  const exit = await waitForCodexLaunchExitForTest(launch);
+
+  assert.equal(exit.type, "exit");
+  assert.equal(exit.output?.stdout, realpathSync(tempDir));
+});
+
 test("Codex app-server launcher captures early process output without leaking env secrets", async () => {
   const bin = join(tempDir, "codex-failing-app-server");
-  const secret = "open-model-secret-for-test";
+  const secret = "provider-secret-for-test";
   writeFileSync(
     bin,
     [
       "#!/usr/bin/env node",
-      "const secret = process.env.LETAGENTS_OPEN_MODEL_API_KEY || '';",
+      "const secret = process.env.OPENAI_API_KEY || '';",
       "process.stderr.write('fatal app-server key ');",
       "process.stderr.write(secret.slice(0, 7));",
       "setTimeout(() => {",
@@ -2383,7 +4569,7 @@ test("Codex app-server launcher captures early process output without leaking en
   );
 
   const launch = launchCodexAppServer("ws://127.0.0.1:1", bin, {
-    env: { LETAGENTS_OPEN_MODEL_API_KEY: secret },
+    env: { OPENAI_API_KEY: secret },
   });
   const exit = await waitForCodexLaunchExitForTest(launch);
 
@@ -2416,6 +4602,65 @@ test("Codex app-server launcher redacts inherited environment secrets", async ()
     } else {
       process.env.LETAGENTS_TOKEN = previousToken;
     }
+  }
+});
+
+test("Codex app-server launcher strips ambient LetAgents credentials only for supervised bounded turns", async () => {
+  const bin = join(tempDir, "codex-reporting-supervised-environment");
+  const boundedReport = join(tempDir, "codex-supervised-environment.json");
+  const ordinaryReport = join(tempDir, "codex-ordinary-environment.json");
+  const ownerToken = "inherited-owner-token-for-bounded-launch";
+  const workerBearer = "inherited-worker-bearer-for-bounded-launch";
+  const previousOwner = process.env.LETAGENTS_TOKEN;
+  const previousBearer = process.env.LETAGENTS_AGENT_SESSION_BEARER;
+  process.env.LETAGENTS_TOKEN = ownerToken;
+  process.env.LETAGENTS_AGENT_SESSION_BEARER = workerBearer;
+  writeFileSync(bin, [
+    "#!/usr/bin/env node",
+    "const { writeFileSync } = require('node:fs');",
+    "writeFileSync(process.env.LAUNCH_ENV_REPORT, JSON.stringify({",
+    "  owner: process.env.LETAGENTS_TOKEN ?? null,",
+    "  bearer: process.env.LETAGENTS_AGENT_SESSION_BEARER ?? null,",
+    "  bounded: process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS ?? null,",
+    "  retained: process.env.LETAGENTS_ENV_CANARY ?? null,",
+    "}));",
+    "",
+  ].join("\n"), { mode: 0o755 });
+
+  try {
+    const bounded = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+      env: {
+        LAUNCH_ENV_REPORT: boundedReport,
+        LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+        LETAGENTS_ENV_CANARY: "retained-in-bounded-mode",
+      },
+    });
+    assert.equal((await waitForCodexLaunchExitForTest(bounded)).type, "exit");
+    assert.deepEqual(JSON.parse(readFileSync(boundedReport, "utf8")), {
+      owner: null,
+      bearer: null,
+      bounded: "1",
+      retained: "retained-in-bounded-mode",
+    });
+
+    const ordinary = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+      env: {
+        LAUNCH_ENV_REPORT: ordinaryReport,
+        LETAGENTS_ENV_CANARY: "retained-in-ordinary-mode",
+      },
+    });
+    assert.equal((await waitForCodexLaunchExitForTest(ordinary)).type, "exit");
+    assert.deepEqual(JSON.parse(readFileSync(ordinaryReport, "utf8")), {
+      owner: ownerToken,
+      bearer: workerBearer,
+      bounded: null,
+      retained: "retained-in-ordinary-mode",
+    });
+  } finally {
+    if (previousOwner === undefined) delete process.env.LETAGENTS_TOKEN;
+    else process.env.LETAGENTS_TOKEN = previousOwner;
+    if (previousBearer === undefined) delete process.env.LETAGENTS_AGENT_SESSION_BEARER;
+    else process.env.LETAGENTS_AGENT_SESSION_BEARER = previousBearer;
   }
 });
 
@@ -2540,6 +4785,54 @@ test("Codex app-server launcher trusts the selected managed worktree", () => {
     "--listen",
     "ws://127.0.0.1:4500",
   ]);
+  assert.deepEqual(codexAppServerLaunchArgs("ws://127.0.0.1:4500", {
+    trustedProjectPath: "/tmp/room-worktree",
+    configOverrides: ['model="gpt-5.2-codex-high"', 'model_reasoning_effort="xhigh"'],
+  }), [
+    "app-server",
+    "-c",
+    'projects."/tmp/room-worktree".trust_level="trusted"',
+    "-c",
+    'model="gpt-5.2-codex-high"',
+    "-c",
+    'model_reasoning_effort="xhigh"',
+    "--listen",
+    "ws://127.0.0.1:4500",
+  ]);
+});
+
+test("managed Codex effort-only starts use a dedicated app-server config override", () => {
+  const effortOnly = buildCodexManagedAgentLaunchContext({
+    effort: "xhigh",
+  });
+
+  assert.equal(effortOnly.model, null);
+  assert.equal(effortOnly.effort, "xhigh");
+  assert.deepEqual(effortOnly.launch.configOverrides, [
+    'model_reasoning_effort="xhigh"',
+  ]);
+  assert.equal(effortOnly.dedicatedServer, true);
+
+  const providerDefault = buildCodexManagedAgentLaunchContext({});
+  assert.deepEqual(providerDefault.launch, {});
+  assert.equal(providerDefault.dedicatedServer, false);
+});
+
+test("dedicated Codex app-server URLs do not reuse the shared configured server", async () => {
+  const previous = process.env.LETAGENTS_CODEX_SERVER_URL;
+  process.env.LETAGENTS_CODEX_SERVER_URL = "ws://127.0.0.1:4500";
+  try {
+    assert.equal(await resolveCodexAppServerUrl(null, { dedicated: false }), "ws://127.0.0.1:4500");
+    const dedicatedUrl = await resolveCodexAppServerUrl(null, { dedicated: true });
+    assert.match(dedicatedUrl, /^ws:\/\/127\.0\.0\.1:\d+$/);
+    assert.notEqual(dedicatedUrl, "ws://127.0.0.1:4500");
+  } finally {
+    if (previous === undefined) {
+      delete process.env.LETAGENTS_CODEX_SERVER_URL;
+    } else {
+      process.env.LETAGENTS_CODEX_SERVER_URL = previous;
+    }
+  }
 });
 
 test("Codex app-server readiness wait fails on early launched-process errors", async () => {
@@ -2657,4 +4950,22 @@ test("agent provider setup confirmation copy covers install actions", () => {
   assert.equal(bridgeInstall.action, "install_mcp_bridge");
   assert.match(bridgeInstall.message, /requires confirmation/i);
   assert.match(bridgeInstall.detail || "", /agent app configuration/i);
+});
+
+test("listDesktopAgentProviders excludes antigravity", () => {
+  const providers = listDesktopAgentProviders();
+  assert.equal(
+    providers.find((provider) => provider.id === "codex")?.runtimeCommand,
+    "codex",
+    "Codex launch sites assume the registry uses the canonical command name",
+  );
+  assert.ok(
+    !providers.some((p) => p.id === "antigravity"),
+    "antigravity should not appear in the Add Agent UI provider list",
+  );
+  assert.ok(
+    providers.find((provider) => provider.id === "claude-code")
+      ?.capabilities.includes("concurrent_supervised_agents"),
+    "Claude owns an isolated CLI process and continuation per supervised entry",
+  );
 });

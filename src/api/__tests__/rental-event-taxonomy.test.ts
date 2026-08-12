@@ -31,11 +31,14 @@ import {
 } from "../rental/activity-event-types.js";
 
 describe("§9.4 event taxonomy completeness", () => {
-  it("has exactly 50 event types (43 from spec §9.4 + 2 D4 lane events + 3 budget extension events + 2 patch review events)", () => {
+  it("has exactly 53 event types (43 from spec §9.4 + 2 D4 lane events + 3 budget extension events + 2 patch review events + 3 context access events)", () => {
     // D4 amendment (renter quota lane lifecycle) added:
     //   lane.exhausted  — detected when the renter's IDE quota dies
     //   lane.recovered  — detected when the renter's lane refreshes
-    assert.strictEqual(ALL_ACTIVITY_EVENT_TYPES.length, 50);
+    // Context access requests added:
+    //   context.access_requested / approved / denied — renter-gated
+    //   out-of-scope context asks
+    assert.strictEqual(ALL_ACTIVITY_EVENT_TYPES.length, 53);
   });
 
   it("all event types are unique", () => {
@@ -71,6 +74,9 @@ describe("§9.4 event taxonomy completeness", () => {
       "patch_gate.apply_failed",
       // D4 amendment — renter quota lane lifecycle
       "lane.exhausted", "lane.recovered",
+      // Context access requests — renter-gated out-of-scope asks
+      "context.access_requested", "context.access_approved",
+      "context.access_denied",
     ];
     const typeSet = new Set<string>(ALL_ACTIVITY_EVENT_TYPES);
     for (const event of specEvents) {
@@ -84,7 +90,7 @@ describe("§9.4 event taxonomy completeness", () => {
     // ensures each element is a valid union member.
     // At runtime, we verify the count matches.
     const _typeCheck: readonly RentalActivityEventType[] = ALL_ACTIVITY_EVENT_TYPES;
-    assert.ok(_typeCheck.length === 50);
+    assert.ok(_typeCheck.length === 53);
   });
 });
 

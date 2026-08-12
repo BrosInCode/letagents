@@ -28,6 +28,7 @@ function makeLane(overrides: Partial<QuotaLane> = {}): QuotaLane {
     provider: "codex",
     model: "gpt-5",
     quotaLaneId: "lane-primary",
+    providerAccountId: "acct_provider",
     ...overrides,
   };
 }
@@ -55,6 +56,7 @@ function makeSession(overrides: Record<string, unknown> = {}) {
 
 function makeListing(overrides: Record<string, unknown> = {}) {
   return {
+    provider_account_id: "acct_provider",
     ide_kind: "codex",
     model_label: "gpt-5",
     quota_lane_id: "lane-primary",
@@ -208,5 +210,37 @@ describe("quota lease lifecycle helpers", () => {
     assert.equal(deps.persisted.length, 1);
     assert.equal(deps.persisted[0]!.lease.releaseReason, "completed");
     assert.equal(deps.emitted[0]?.eventType, SESSION_TEARDOWN_COMPLETED);
+  });
+
+  it("makes a provider lane reusable after a post-accept decline", async () => {
+    const acceptedLease = createLease({
+      sessionId: "rsess_declined",
+      lane: makeLane(),
+      snapshot: makeSnapshot(),
+      nowIso: "2026-05-11T11:00:00.000Z",
+    });
+    const releaseDeps = makeDeps({
+      sessionLease: acceptedLease,
+      nowIso: "2026-05-11T12:05:00.000Z",
+    });
+
+    await releaseQuotaLeaseForSession(
+      makeSession({ id: "rsess_declined" }) as never,
+      "declined",
+      releaseDeps,
+    );
+
+    const releasedLease = releaseDeps.persisted[0]!.lease;
+    assert.equal(releasedLease.releaseReason, "declined");
+    assert.equal(releasedLease.releasedAt, "2026-05-11T12:05:00.000Z");
+
+    const acquireDeps = makeDeps({ activeLeases: [] });
+    const nextLease = await acquireQuotaLeaseForSession(
+      makeSession({ id: "rsess_next" }) as never,
+      makeListing() as never,
+      acquireDeps,
+    );
+
+    assert.equal(nextLease.sessionId, "rsess_next");
   });
 });

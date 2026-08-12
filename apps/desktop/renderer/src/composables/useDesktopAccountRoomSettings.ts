@@ -1,7 +1,10 @@
 import { ref, type Ref } from "vue";
-import type { DesktopAccountRoomEntry, DesktopRoomSnapshot } from "../../../electron/ipc-types";
+import type { DesktopAccountRoomEntry, DesktopRoomInfo, DesktopRoomSnapshot } from "../../../electron/ipc-types";
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
+import { desktopIpc } from "../ipc/index.js";
+import type { FocusRoomConclusionInput } from "../domain/focus-room-conclusion";
 import {
+  buildRoomPinMutation,
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
   type RecentRootRoom,
@@ -29,11 +32,32 @@ interface DesktopAccountRoomSettingsOptions {
   refresh: () => Promise<void>;
   refreshAccountRooms: () => Promise<void>;
   onRoomArchived?: (roomIdentifier: string, displayName?: string | null) => Promise<void>;
+  onRoomRenamed?: (room: DesktopRoomInfo) => void;
+  notify?: (message: string, state: "error" | "info" | "success") => void;
 }
+
+export type SidebarRoomBatchMutationFailure = {
+  entryId: string;
+  message: string;
+};
+
+export type SidebarRoomBatchMutationResult = {
+  succeededEntryIds: string[];
+  partiallySucceededEntryIds: string[];
+  failures: SidebarRoomBatchMutationFailure[];
+  refreshError: string | null;
+};
 
 export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSettingsOptions) {
   const settingsFeedback = ref<{ message: string; state: "error" | "info" | "success" } | null>(null);
   const settingsRoomActionBusyKey = ref<string | null>(null);
+
+  // Sidebar-triggered actions report here: the Settings pane may not be
+  // visible, so the outcome also goes to the app-level notifier.
+  function reportSidebarRoomAction(message: string, state: "error" | "info" | "success"): void {
+    settingsFeedback.value = { message, state };
+    options.notify?.(message, state);
+  }
 
   async function refreshSettings(): Promise<void> {
     settingsFeedback.value = { message: "Refreshing account rooms...", state: "info" };
@@ -52,7 +76,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsFeedback.value = { message: `Opening ${room.displayName}...`, state: "info" };
     options.loading.value = true;
     try {
-      const snapshot = await window.letagentsDesktop.room.getSnapshot(room.roomIdentifier);
+      const snapshot = await desktopIpc.room.getSnapshot(room.roomIdentifier);
       options.openRoomSnapshot(snapshot, {
         kind: "room",
         rootPath: null,
@@ -77,7 +101,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsRoomActionBusyKey.value = settingsRoomActionKey("leave", room);
     settingsFeedback.value = { message: `Leaving ${room.displayName}...`, state: "info" };
     try {
-      await window.letagentsDesktop.room.leaveAccountRoom(room.roomIdentifier);
+      await desktopIpc.room.leaveAccountRoom(room.roomIdentifier);
       forgetRecentRootRoom(room.roomIdentifier);
       await options.refreshAccountRooms();
       settingsFeedback.value = { message: `Left ${room.displayName}.`, state: "success" };
@@ -99,7 +123,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
       state: "info",
     };
     try {
-      await window.letagentsDesktop.room.updateAccountRoom(room.roomIdentifier, { pinned: nextPinned });
+      await desktopIpc.room.updateAccountRoom(room.roomIdentifier, { pinned: nextPinned });
       await options.refreshAccountRooms();
       settingsFeedback.value = {
         message: nextPinned ? `${room.displayName} pinned.` : `${room.displayName} unpinned.`,
@@ -119,7 +143,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsRoomActionBusyKey.value = settingsRoomActionKey("restore", room);
     settingsFeedback.value = { message: `Restoring ${room.displayName}...`, state: "info" };
     try {
-      await window.letagentsDesktop.room.updateAccountRoom(room.roomIdentifier, { archived: false });
+      await desktopIpc.room.updateAccountRoom(room.roomIdentifier, { archived: false });
       await options.refreshAccountRooms();
       settingsFeedback.value = { message: `${room.displayName} restored to your sidebar.`, state: "success" };
     } catch (error) {
@@ -127,6 +151,131 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         message: error instanceof Error ? error.message : `Could not restore ${room.displayName}.`,
         state: "error",
       };
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
+  async function renameSidebarRoom(entry: RoomEntry): Promise<void> {
+    if (!entry.roomIdentifier) return;
+    const displayName = window.prompt(`Rename ${entry.title}:`, entry.title)?.trim();
+    if (!displayName || displayName === entry.title.trim()) return;
+    settingsRoomActionBusyKey.value = `rename:${entry.roomIdentifier}`;
+    try {
+      const room = await desktopIpc.room.rename(entry.roomIdentifier, displayName);
+      options.onRoomRenamed?.(room);
+      await options.refreshAccountRooms();
+      reportSidebarRoomAction(`Renamed to ${room.displayName || displayName}.`, "success");
+    } catch (error) {
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not rename ${entry.title}.`,
+        "error",
+      );
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
+  async function archiveSidebarFocusRoom(entry: RoomEntry): Promise<void> {
+    if (!entry.focusKey || !entry.parentRoomIdentifier) return;
+    const displayName = entry.title || entry.roomIdentifier || "this focus room";
+    const confirmed = window.confirm(
+      `Hide ${displayName}? It will be removed from the focus room manager, but the room history is preserved.`,
+    );
+    if (!confirmed) return;
+    settingsRoomActionBusyKey.value = `archive-focus:${entry.roomIdentifier || entry.focusKey}`;
+    try {
+      await desktopIpc.room.archiveFocusRoom(entry.parentRoomIdentifier, entry.focusKey);
+      await options.refresh();
+      reportSidebarRoomAction(`${displayName} hidden.`, "success");
+    } catch (error) {
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not hide ${displayName}.`,
+        "error",
+      );
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
+  async function concludeSidebarFocusRoom(
+    entry: RoomEntry,
+    input: FocusRoomConclusionInput,
+  ): Promise<
+    | { ok: true; refreshError: string | null }
+    | { ok: false; error: string }
+  > {
+    if (!entry.focusKey || !entry.parentRoomIdentifier || entry.focusStatus === "concluded") {
+      const error = "This focus room is no longer available to conclude.";
+      return { ok: false, error };
+    }
+
+    const displayName = entry.title || entry.roomIdentifier || "Focus room";
+    settingsRoomActionBusyKey.value = `conclude-focus:${entry.roomIdentifier || entry.focusKey}`;
+    try {
+      await desktopIpc.room.concludeFocusRoom(
+        entry.parentRoomIdentifier,
+        entry.focusKey,
+        input.summary,
+        input.details,
+        input.quickClose,
+      );
+    } catch (caught) {
+      const error = caught instanceof Error ? caught.message : `Could not conclude ${displayName}.`;
+      settingsRoomActionBusyKey.value = null;
+      return { ok: false, error };
+    }
+
+    try {
+      await options.refresh();
+      return { ok: true, refreshError: null };
+    } catch (caught) {
+      const refreshError = caught instanceof Error
+        ? caught.message
+        : "The room list could not be refreshed.";
+      return { ok: true, refreshError };
+    } finally {
+      settingsRoomActionBusyKey.value = null;
+    }
+  }
+
+  async function togglePinSidebarRoom(entry: RoomEntry): Promise<void> {
+    const mutation = buildRoomPinMutation(entry);
+    if (!mutation) return;
+    const displayName = entry.title || entry.roomIdentifier || "Room";
+    settingsRoomActionBusyKey.value = `pin:${entry.roomIdentifier || mutation.roomIdentifiers[0]}`;
+    try {
+      // Unpinning clears every pinned account room in the group, not just the
+      // projected parent, so the aggregated pin state cannot stick. Wait for
+      // every request even when one fails: some may still have succeeded, and
+      // the sidebar must be refreshed to whatever state the server now holds.
+      const results = await Promise.allSettled(mutation.roomIdentifiers.map((roomIdentifier) =>
+        desktopIpc.room.updateAccountRoom(roomIdentifier, { pinned: mutation.pinned })
+      ));
+      await options.refreshAccountRooms();
+      const failures = results.filter(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (!failures.length) {
+        reportSidebarRoomAction(
+          mutation.pinned ? `${displayName} pinned.` : `${displayName} unpinned.`,
+          "success",
+        );
+        return;
+      }
+      const reason = failures[0].reason;
+      const detail = reason instanceof Error ? reason.message : `Could not update ${displayName}.`;
+      reportSidebarRoomAction(
+        failures.length === results.length
+          ? detail
+          : `Only ${results.length - failures.length} of ${results.length} rooms in ${displayName} were updated: ${detail}`,
+        "error",
+      );
+    } catch (error) {
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not update ${displayName}.`,
+        "error",
+      );
     } finally {
       settingsRoomActionBusyKey.value = null;
     }
@@ -145,23 +294,156 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsFeedback.value = { message: `Hiding ${displayName}...`, state: "info" };
     try {
       if (isAccountRoom) {
-        await window.letagentsDesktop.room.updateAccountRoom(roomIdentifier, { archived: true });
+        await desktopIpc.room.updateAccountRoom(roomIdentifier, { archived: true });
       }
       forgetRecentRootRoom(roomIdentifier, displayName);
       await options.refreshAccountRooms();
       await options.onRoomArchived?.(roomIdentifier, displayName);
-      settingsFeedback.value = {
-        message: isAccountRoom ? `${displayName} hidden from your rooms.` : `${displayName} hidden from recent rooms.`,
-        state: "success",
-      };
+      reportSidebarRoomAction(
+        isAccountRoom ? `${displayName} hidden from your rooms.` : `${displayName} hidden from recent rooms.`,
+        "success",
+      );
     } catch (error) {
-      settingsFeedback.value = {
-        message: error instanceof Error ? error.message : `Could not hide ${displayName}.`,
-        state: "error",
-      };
+      reportSidebarRoomAction(
+        error instanceof Error ? error.message : `Could not hide ${displayName}.`,
+        "error",
+      );
     } finally {
       settingsRoomActionBusyKey.value = null;
     }
+  }
+
+  async function batchSetSidebarRoomsPinned(
+    entries: readonly RoomEntry[],
+    pinned: boolean,
+  ): Promise<SidebarRoomBatchMutationResult> {
+    settingsRoomActionBusyKey.value = "batch:pin";
+    const partiallySucceededEntryIds: string[] = [];
+    let anyMutationSucceeded = false;
+    const results = await Promise.allSettled(entries.map(async (entry) => {
+      const mutation = buildRoomPinMutation(entry);
+      if (!mutation) throw new Error(`${entry.title} cannot be pinned.`);
+      const identifiers = pinned
+        ? mutation.roomIdentifiers.slice(0, 1)
+        : mutation.roomIdentifiers;
+      const mutations = await Promise.allSettled(identifiers.map((roomIdentifier) =>
+        desktopIpc.room.updateAccountRoom(roomIdentifier, { pinned })
+      ));
+      const fulfilledCount = mutations.filter((result) => result.status === "fulfilled").length;
+      anyMutationSucceeded = anyMutationSucceeded || fulfilledCount > 0;
+      const rejected = mutations.find(
+        (result): result is PromiseRejectedResult => result.status === "rejected",
+      );
+      if (rejected) {
+        if (fulfilledCount > 0) partiallySucceededEntryIds.push(entry.id);
+        throw rejected.reason;
+      }
+      return entry.id;
+    }));
+    const result = await finishSidebarRoomBatch(
+      entries,
+      results,
+      options.refreshAccountRooms,
+      { forceRefresh: anyMutationSucceeded, partiallySucceededEntryIds },
+    );
+    settingsRoomActionBusyKey.value = null;
+    return result;
+  }
+
+  async function batchConcludeSidebarFocusRooms(
+    entries: readonly RoomEntry[],
+  ): Promise<SidebarRoomBatchMutationResult> {
+    settingsRoomActionBusyKey.value = "batch:conclude";
+    const results = await Promise.allSettled(entries.map(async (entry) => {
+      if (!entry.focusKey || !entry.parentRoomIdentifier || entry.focusStatus === "concluded") {
+        throw new Error(`${entry.title} is no longer available to conclude.`);
+      }
+      await desktopIpc.room.concludeFocusRoom(
+        entry.parentRoomIdentifier,
+        entry.focusKey,
+        "",
+        null,
+        true,
+      );
+      return entry.id;
+    }));
+    const result = await finishSidebarRoomBatch(entries, results, options.refresh);
+    settingsRoomActionBusyKey.value = null;
+    return result;
+  }
+
+  async function batchHideSidebarRooms(
+    entries: readonly RoomEntry[],
+  ): Promise<SidebarRoomBatchMutationResult> {
+    settingsRoomActionBusyKey.value = "batch:hide";
+    const results = await Promise.allSettled(entries.map(async (entry) => {
+      if (entry.kind === "focus") {
+        if (!entry.focusKey || !entry.parentRoomIdentifier) {
+          throw new Error(`${entry.title} is no longer available to hide.`);
+        }
+        await desktopIpc.room.archiveFocusRoom(entry.parentRoomIdentifier, entry.focusKey);
+        return entry.id;
+      }
+      if (entry.kind !== "parent" || !entry.roomIdentifier) {
+        throw new Error(`${entry.title} cannot be hidden.`);
+      }
+      const normalizedRoomIdentifier = normalizeRoomIdentifier(entry.roomIdentifier);
+      const isAccountRoom = [...options.accountRooms.value, ...options.settingsAccountRooms.value].some(
+        (room) => normalizeRoomIdentifier(room.roomIdentifier) === normalizedRoomIdentifier,
+      );
+      if (isAccountRoom) {
+        await desktopIpc.room.updateAccountRoom(entry.roomIdentifier, { archived: true });
+      }
+      forgetRecentRootRoom(entry.roomIdentifier, entry.title);
+      return entry.id;
+    }));
+    const result = await finishSidebarRoomBatch(entries, results, options.refresh);
+    settingsRoomActionBusyKey.value = null;
+    return result;
+  }
+
+  async function finishSidebarRoomBatch(
+    entries: readonly RoomEntry[],
+    results: readonly PromiseSettledResult<string>[],
+    refreshRooms: () => Promise<void>,
+    batchOptions: {
+      forceRefresh?: boolean;
+      partiallySucceededEntryIds?: string[];
+    } = {},
+  ): Promise<SidebarRoomBatchMutationResult> {
+    const succeededEntryIds: string[] = [];
+    const failures: SidebarRoomBatchMutationFailure[] = [];
+    results.forEach((result, index) => {
+      const entry = entries[index];
+      if (!entry) return;
+      if (result.status === "fulfilled") {
+        succeededEntryIds.push(entry.id);
+        return;
+      }
+      failures.push({
+        entryId: entry.id,
+        message: result.reason instanceof Error
+          ? result.reason.message
+          : `Could not update ${entry.title}.`,
+      });
+    });
+
+    let refreshError: string | null = null;
+    if (succeededEntryIds.length || batchOptions.forceRefresh) {
+      try {
+        await refreshRooms();
+      } catch (caught) {
+        refreshError = caught instanceof Error
+          ? caught.message
+          : "The room list could not be refreshed.";
+      }
+    }
+    return {
+      succeededEntryIds,
+      partiallySucceededEntryIds: batchOptions.partiallySucceededEntryIds || [],
+      failures,
+      refreshError,
+    };
   }
 
   async function deleteAccountRoom(room: DesktopAccountRoomEntry): Promise<void> {
@@ -176,7 +458,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
     settingsRoomActionBusyKey.value = settingsRoomActionKey("delete", room);
     settingsFeedback.value = { message: `Deleting ${room.displayName}...`, state: "info" };
     try {
-      await window.letagentsDesktop.room.deleteAccountRoom(room.roomIdentifier);
+      await desktopIpc.room.deleteAccountRoom(room.roomIdentifier);
       forgetRecentRootRoom(room.roomIdentifier);
       options.accountRooms.value = options.accountRooms.value.filter(
         (entry) => normalizeRoomIdentifier(entry.roomIdentifier) !== normalizeRoomIdentifier(room.roomIdentifier)
@@ -228,14 +510,21 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
   }
 
   return {
+    batchConcludeSidebarFocusRooms,
+    batchHideSidebarRooms,
+    batchSetSidebarRoomsPinned,
+    archiveSidebarFocusRoom,
     archiveSidebarRoom,
+    concludeSidebarFocusRoom,
     deleteAccountRoom,
     leaveAccountRoom,
+    renameSidebarRoom,
     openAccountRoomFromSettings,
     refreshSettings,
     restoreAccountRoom,
     settingsFeedback,
     settingsRoomActionBusyKey,
     toggleAccountRoomPin,
+    togglePinSidebarRoom,
   };
 }

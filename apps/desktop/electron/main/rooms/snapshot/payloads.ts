@@ -1,4 +1,8 @@
-import type { DesktopReasoningSession } from "../../../ipc-types.js";
+import type {
+  DesktopReasoningSession,
+  DesktopRoomSharedArtifactDetail,
+  DesktopSnapshotSourceStates,
+} from "../../../ipc-types.js";
 import type { GitHubEventsResponse } from "../events.js";
 import type { RoomMessagePayload } from "../messages/mappers.js";
 import type { DesktopTaskSummaryPayload } from "../tasks/mappers.js";
@@ -117,6 +121,7 @@ export interface ReasoningSessionPayload {
   room_id?: string | null;
   actor_label?: string | null;
   agent_key?: string | null;
+  agent_session_id?: string | null;
   task_id?: string | null;
   title?: string | null;
   status?: string | null;
@@ -195,11 +200,25 @@ export interface RoomArtifactsResponse {
     url?: string | null;
     ref?: string | null;
     state?: string | null;
+    detail?: DesktopRoomSharedArtifactDetail | null;
     source?: string | null;
     first_seen_at?: string | null;
     updated_at?: string | null;
     linked_task_ids?: string[];
   }>;
+}
+
+export interface BoardSettingsResponse {
+  settings?: {
+    manager_mode?: "off" | "manager_optional" | "intent_required" | string;
+  } | null;
+  active_manager?: {
+    agent_session_id?: string | null;
+    agent_key?: string | null;
+    actor_label?: string | null;
+    runtime_source?: "desktop_managed" | "open_model" | "external" | "unknown" | string | null;
+  } | null;
+  pending_intent_count?: number | null;
 }
 
 export interface RoomSnapshotData {
@@ -210,6 +229,8 @@ export interface RoomSnapshotData {
   reasoningData: ReasoningResponse;
   activityHistoryData: ActivityHistoryResponse;
   roomArtifactsData: RoomArtifactsResponse;
+  boardSettingsData: BoardSettingsResponse;
   messagesData: MessagesResponse;
   githubEventsData: GitHubEventsResponse | null;
+  sourceStates: DesktopSnapshotSourceStates;
 }

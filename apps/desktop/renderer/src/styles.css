@@ -1,6 +1,8 @@
 @import "./styles/01-base.css";
 @import "./styles/app-shell/layout.css";
 @import "./styles/app-shell/shared-primitives.css";
+@import "./styles/app-shell/context-menu.css";
+@import "./styles/app-shell/action-toasts.css";
 @import "./styles/app-shell/sidebar.css";
 @import "./styles/app-shell/sidebar-rooms.css";
 @import "./styles/app-shell/main-content.css";
@@ -18,6 +20,7 @@
 @import "./styles/11-room-events.css";
 @import "./styles/12-room-inbox.css";
 @import "./styles/surfaces/shared-surfaces.css";
+@import "./styles/surfaces/focus-room.css";
 @import "./styles/surfaces/settings.css";
 @import "./styles/surfaces/auth-onboarding.css";
 @import "./styles/surfaces/mcp-onboarding.css";

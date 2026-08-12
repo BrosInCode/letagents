@@ -6,13 +6,14 @@ import { registerTaskLeaseActionRoute } from "./lease-action.js";
 import { registerTaskListAndCreateRoutes } from "./list-and-create.js";
 import { registerTaskRecordRoutes } from "./task-record.js";
 import { registerTaskReviewLeaseActionRoute } from "./review-lease-action.js";
+import { registerTaskReviewVerdictRoute } from "./review-verdict.js";
 import { isDesktopHumanTaskWriteForTest } from "./request-identity.js";
 import { registerTaskStalePromptRoutes } from "./stale-prompt.js";
-import { isCurrentStalePromptAction } from "./task-details.js";
+import { getTaskBoardStalePromptState, isCurrentStalePromptAction } from "./task-details.js";
 import type { RoomTaskRouteDeps } from "./types.js";
 
 export type { RoomTaskRouteDeps } from "./types.js";
-export { isCurrentStalePromptAction, isDesktopHumanTaskWriteForTest };
+export { getTaskBoardStalePromptState, isCurrentStalePromptAction, isDesktopHumanTaskWriteForTest };
 
 export function registerRoomTaskRoutes(
   app: Express,
@@ -23,6 +24,7 @@ export function registerRoomTaskRoutes(
   registerTaskStalePromptRoutes(app, deps);
   registerTaskLeaseActionRoute(app, deps);
   registerTaskReviewLeaseActionRoute(app, deps);
+  registerTaskReviewVerdictRoute(app, deps);
   registerTaskGitHubStatusRoute(app, deps);
   registerTaskRecordRoutes(app, deps);
 }

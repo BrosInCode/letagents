@@ -1,3 +1,5 @@
+import { wordInitials } from "../../../../domain/initials";
+
 export function livenessCapabilityLabel(value: string | null | undefined): string {
   const normalized = String(value || "").trim().toLowerCase();
   if (normalized === "codex_app_server_runtime_stream") return "Codex app-server stream";
@@ -12,5 +14,5 @@ export function taskStatusLabel(status: string): string {
 }
 
 export function initials(value: string): string {
-  return value.split(/\s+/).filter(Boolean).slice(0, 2).map((part) => part[0]?.toUpperCase()).join("") || "A";
+  return wordInitials(value, "A");
 }

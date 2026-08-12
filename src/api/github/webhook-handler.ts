@@ -24,6 +24,7 @@ import {
   createGitHubAppSync,
   toGitHubWebhookId,
 } from "./app-sync.js";
+import { clearGitHubInstallationTokenCache } from "./app-client.js";
 import { getExistingGitHubEventRefRoom } from "./git-room-routing.js";
 import { materializeGitHubWebhookEvent } from "./room-events.js";
 import {
@@ -179,6 +180,13 @@ export async function handleGitHubWebhookEvent(
   const roomId = payload.repository?.full_name
     ? buildGitHubRepoRoomId(payload.repository.full_name)
     : null;
+
+  if (
+    installationId
+    && (eventName === "installation" || eventName === "installation_repositories")
+  ) {
+    clearGitHubInstallationTokenCache(installationId);
+  }
 
   if (
     eventName === "member"

@@ -417,3 +417,125 @@ describe("releaseSessionLease — active lease", () => {
     assert.equal(deps.emitted.length, 0);
   });
 });
+
+// ---------------------------------------------------------------------------
+// acquireLease — lane capacity above 1
+// ---------------------------------------------------------------------------
+
+describe("acquireLease — laneCapacity above 1", () => {
+  const lane = () => makeLane({ provider: "claude_code", model: "sonnet-5", quotaLaneId: null });
+
+  function heldLease(sessionId: string): QuotaLease {
+    return createLease({
+      sessionId,
+      lane: lane(),
+      snapshot: makeSnapshot(),
+      nowIso: NOW,
+    });
+  }
+
+  it("admits a second session when capacity allows it", async () => {
+    const deps = makeDeps({ activeLeases: [heldLease("rsess_a")] });
+    const result = await acquireLease(
+      {
+        sessionId: "rsess_b",
+        roomId: "room_1",
+        lane: lane(),
+        snapshot: makeSnapshot(),
+        laneCapacity: 2,
+      },
+      deps,
+    );
+    assert.equal(result.ok, true);
+    assert.equal(result.reason, QUOTA_LEASE_REASONS.AVAILABLE);
+    assert.equal(deps.persisted.length, 1);
+    assert.equal(deps.emitted.length, 1);
+  });
+
+  it("locks the lane once capacity is reached", async () => {
+    const deps = makeDeps({
+      activeLeases: [heldLease("rsess_a"), heldLease("rsess_b")],
+    });
+    const result = await acquireLease(
+      {
+        sessionId: "rsess_c",
+        roomId: "room_1",
+        lane: lane(),
+        snapshot: makeSnapshot(),
+        laneCapacity: 2,
+      },
+      deps,
+    );
+    assert.equal(result.ok, false);
+    assert.equal(result.reason, QUOTA_LEASE_REASONS.LANE_LOCKED);
+    assert.equal(result.conflictingSessionId, "rsess_a");
+    assert.equal(deps.persisted.length, 0);
+    assert.equal(deps.emitted.length, 0);
+  });
+
+  it("serializes racing acquires through withLaneLock so capacity holds", async () => {
+    // Two sessions genuinely race for the last capacity slot: both
+    // acquireLease calls are launched unawaited, and a queuing fake
+    // lock (the pg advisory lock stand-in) admits one body at a time.
+    // Under the lock the loser observes the winner's persisted lease
+    // and gets lane_locked; without serialization both would read one
+    // active lease and both would be admitted.
+    const store: QuotaLease[] = [heldLease("rsess_a")];
+    let queue: Promise<unknown> = Promise.resolve();
+    let bodiesInFlight = 0;
+    let maxBodiesInFlight = 0;
+
+    const deps: QuotaLeaseOrchestratorDeps = {
+      async loadActiveLeasesForLane() {
+        // Yield so an unserialized implementation would interleave here.
+        await new Promise((resolve) => setImmediate(resolve));
+        return [...store];
+      },
+      async loadSessionLease() {
+        return null;
+      },
+      async persistSessionLease(_sessionId, lease) {
+        await new Promise((resolve) => setImmediate(resolve));
+        store.push(lease);
+      },
+      async emitLeaseEvent() {},
+      now: () => NOW,
+      async withLaneLock(_lane, body) {
+        const run = queue.then(async () => {
+          bodiesInFlight += 1;
+          maxBodiesInFlight = Math.max(maxBodiesInFlight, bodiesInFlight);
+          try {
+            return await body(this as QuotaLeaseOrchestratorDeps);
+          } finally {
+            bodiesInFlight -= 1;
+          }
+        });
+        queue = run.catch(() => undefined);
+        return run as Promise<never>;
+      },
+    };
+
+    const input = (sessionId: string) => ({
+      sessionId,
+      roomId: null,
+      lane: lane(),
+      snapshot: makeSnapshot(),
+      laneCapacity: 2,
+    });
+
+    // Launch both BEFORE awaiting either — a genuine race for one slot.
+    const firstPromise = acquireLease(input("rsess_b"), deps);
+    const secondPromise = acquireLease(input("rsess_c"), deps);
+    const [first, second] = await Promise.all([firstPromise, secondPromise]);
+
+    assert.deepEqual(
+      [first.ok, second.ok].sort(),
+      [false, true],
+      "exactly one racer wins the last slot",
+    );
+    const loser = first.ok ? second : first;
+    assert.equal(loser.reason, QUOTA_LEASE_REASONS.LANE_LOCKED);
+    assert.equal(store.filter((l) => !l.releasedAt).length, 2);
+    assert.equal(maxBodiesInFlight, 1, "lock bodies must not overlap");
+  });
+});

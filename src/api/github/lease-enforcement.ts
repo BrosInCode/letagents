@@ -1,8 +1,10 @@
-import crypto from "crypto";
-
 import type { CoordinationDecisionResult, CoordinationLeaseLike } from "../coordination-policy.js";
 import type { GitHubAppConfig } from "./config.js";
+import { githubRequestJson, mintInstallationToken } from "./app-client.js";
 import type { RepoPullRequestRef } from "../repo-workflow.js";
+
+// Re-exported for existing importers; the implementation now lives in app-client.
+export { createGitHubAppJwt } from "./app-client.js";
 
 export const LETAGENTS_LEASE_CHECK_NAME = "letagents-lease";
 
@@ -41,14 +43,6 @@ const CLOSEABLE_PULL_REQUEST_ACTIONS = new Set([
   "ready_for_review",
   "synchronize",
 ]);
-
-function base64UrlJson(value: unknown): string {
-  return Buffer.from(JSON.stringify(value)).toString("base64url");
-}
-
-function base64UrlSignature(value: Buffer): string {
-  return value.toString("base64url");
-}
 
 function normalizeBranchRef(value: string | null | undefined): string | null {
   const trimmed = value?.trim();
@@ -198,86 +192,6 @@ export function buildGitHubLeaseEnforcementPlan(input: {
   };
 }
 
-export function createGitHubAppJwt(input: {
-  appId: string;
-  privateKey: string;
-  now?: Date;
-}): string {
-  const nowSeconds = Math.floor((input.now?.getTime() ?? Date.now()) / 1000);
-  const header = base64UrlJson({ alg: "RS256", typ: "JWT" });
-  const payload = base64UrlJson({
-    iat: nowSeconds - 60,
-    exp: nowSeconds + 9 * 60,
-    iss: input.appId,
-  });
-  const signingInput = `${header}.${payload}`;
-  const signature = crypto.sign(
-    "RSA-SHA256",
-    Buffer.from(signingInput),
-    input.privateKey
-  );
-  return `${signingInput}.${base64UrlSignature(signature)}`;
-}
-
-async function githubApiRequest(input: {
-  fetchImpl: typeof fetch;
-  url: string;
-  method: string;
-  token: string;
-  body?: unknown;
-}): Promise<unknown> {
-  const response = await input.fetchImpl(input.url, {
-    method: input.method,
-    headers: {
-      Accept: "application/vnd.github+json",
-      Authorization: `Bearer ${input.token}`,
-      "Content-Type": "application/json",
-      "User-Agent": "letagents",
-      "X-GitHub-Api-Version": "2022-11-28",
-    },
-    body: input.body === undefined ? undefined : JSON.stringify(input.body),
-  });
-
-  if (!response.ok) {
-    const body = await response.text();
-    throw new Error(`GitHub API ${input.method} ${input.url} failed: ${response.status} ${body}`);
-  }
-
-  if (response.status === 204) {
-    return null;
-  }
-
-  return response.json();
-}
-
-async function createInstallationAccessToken(input: {
-  config: GitHubAppConfig;
-  installationId: string;
-  fetchImpl: typeof fetch;
-}): Promise<string> {
-  if (!input.config.appId || !input.config.privateKey) {
-    throw new Error("GitHub App appId and privateKey are required");
-  }
-
-  const jwt = createGitHubAppJwt({
-    appId: input.config.appId,
-    privateKey: input.config.privateKey,
-  });
-  const result = await githubApiRequest({
-    fetchImpl: input.fetchImpl,
-    url: `https://api.github.com/app/installations/${input.installationId}/access_tokens`,
-    method: "POST",
-    token: jwt,
-  });
-  const token = typeof result === "object" && result && "token" in result
-    ? String((result as { token: unknown }).token)
-    : "";
-  if (!token) {
-    throw new Error("GitHub installation token response did not include a token");
-  }
-  return token;
-}
-
 export async function publishGitHubLeaseEnforcement(input: {
   config: GitHubAppConfig;
   installationId: string | null;
@@ -298,7 +212,7 @@ export async function publishGitHubLeaseEnforcement(input: {
   }
 
   const fetchImpl = input.fetchImpl ?? fetch;
-  const token = await createInstallationAccessToken({
+  const token = await mintInstallationToken({
     config: input.config,
     installationId: input.installationId,
     fetchImpl,
@@ -306,7 +220,7 @@ export async function publishGitHubLeaseEnforcement(input: {
   const repoPath = encodeURI(input.repositoryFullName);
 
   if (input.plan.checkRun) {
-    await githubApiRequest({
+    await githubRequestJson({
       fetchImpl,
       url: `https://api.github.com/repos/${repoPath}/check-runs`,
       method: "POST",
@@ -327,7 +241,7 @@ export async function publishGitHubLeaseEnforcement(input: {
   }
 
   if (input.plan.commentBody) {
-    await githubApiRequest({
+    await githubRequestJson({
       fetchImpl,
       url: `https://api.github.com/repos/${repoPath}/issues/${input.pullRequestNumber}/comments`,
       method: "POST",
@@ -337,7 +251,7 @@ export async function publishGitHubLeaseEnforcement(input: {
   }
 
   if (input.plan.closePullRequest) {
-    await githubApiRequest({
+    await githubRequestJson({
       fetchImpl,
       url: `https://api.github.com/repos/${repoPath}/pulls/${input.pullRequestNumber}`,
       method: "PATCH",

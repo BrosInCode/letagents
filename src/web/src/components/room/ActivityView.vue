@@ -24,6 +24,11 @@
     <ActivityArtifactsPanel
       :artifacts="props.roomArtifacts"
       :tasks="props.tasks"
+      :pr-repo="props.currentRoom?.gitRoom ? {
+        host: props.currentRoom.gitRoom.host,
+        owner: props.currentRoom.gitRoom.repository.owner,
+        name: props.currentRoom.gitRoom.repository.name,
+      } : null"
     />
 
     <p v-if="activeView === 'live'" class="activity-desktop-note">

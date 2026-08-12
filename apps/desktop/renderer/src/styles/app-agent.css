@@ -15,6 +15,12 @@
   --app-agent-orb-smoke: rgba(124, 141, 169, 0.2);
 }
 
+/* The App Agent is still a dark-only surface. Keep it internally coherent while
+ * the Board opts into the scoped light theme. */
+.desktop-shell:has(.desktop-board-panel) .app-agent {
+  color-scheme: dark;
+}
+
 .desktop-shell:has(.desktop-room-control-rail) .app-agent[data-open="false"][data-state="idle"] {
   pointer-events: none;
   opacity: 0;
@@ -69,6 +75,11 @@
 .app-agent-orb:disabled {
   cursor: not-allowed;
   opacity: 0.5;
+}
+
+.app-agent-orb:focus-visible {
+  outline: 3px solid var(--blue);
+  outline-offset: 4px;
 }
 
 .app-agent-orb-atmosphere,
@@ -266,6 +277,23 @@
   will-change: backdrop-filter, transform;
 }
 
+.desktop-shell:has(.desktop-board-panel) .app-agent-orb--launcher .app-agent-orb-lens {
+  border-color: color-mix(in srgb, var(--text) 62%, transparent);
+  background-color: var(--bg-elevated);
+  box-shadow:
+    inset 0 0 0 1px color-mix(in srgb, var(--text) 24%, transparent),
+    var(--shadow-lg);
+}
+
+@media (max-width: 640px) {
+  .desktop-shell:has(.desktop-board-panel) .app-agent-orb--launcher {
+    --app-agent-orb-size: 44px;
+    --app-agent-orb-lens-size: 42px;
+    width: 44px;
+    height: 44px;
+  }
+}
+
 .app-agent-liquid-orb .app-agent-orb-atmosphere,
 .app-agent-liquid-orb .app-agent-orb-halo,
 .app-agent-liquid-orb .app-agent-orb-dust {
@@ -367,6 +395,21 @@
   filter: blur(2px);
   opacity: 0.78;
   animation: app-agent-orb-ink-spark 3.8s ease-in-out infinite;
+}
+
+/*
+ * Battery: the launcher orb's three decorative ink animations run `infinite`
+ * through the feGaussianBlur + feDisplacementMap glass filter, so every frame
+ * forces a full GPU filter re-evaluation even while the app sits idle. Pause
+ * them whenever the window is hidden or blurred (App.vue toggles
+ * `data-app-idle` on the document root). Scoped to the launcher ink animations
+ * only — the state-gated running/success animations and the reduced-motion
+ * block below are untouched.
+ */
+:root[data-app-idle] .app-agent-orb--launcher .app-agent-orb-lens::before,
+:root[data-app-idle] .app-agent-orb--launcher .app-agent-orb-lens::after,
+:root[data-app-idle] .app-agent-orb--launcher .app-agent-orb-sheen::after {
+  animation-play-state: paused;
 }
 
 .app-agent-orb--launcher:hover {
@@ -1298,7 +1341,7 @@
 @media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
   .app-agent-launcher,
   .app-agent-panel {
-    background: rgba(18, 18, 21, 0.98);
+    background: var(--bg-elevated);
     backdrop-filter: none;
   }
 }

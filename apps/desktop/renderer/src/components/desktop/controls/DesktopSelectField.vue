@@ -7,6 +7,8 @@
         :value="modelValue"
         :disabled="disabled"
         :aria-label="label || undefined"
+        :aria-describedby="describedBy || undefined"
+        :data-testid="testId || undefined"
         @change="handleChange"
       >
         <option v-if="placeholder" value="" :disabled="placeholderDisabled">
@@ -42,6 +44,8 @@ withDefaults(
     label?: string;
     disabled?: boolean;
     id?: string;
+    describedBy?: string;
+    testId?: string;
     placeholder?: string;
     placeholderDisabled?: boolean;
   }>(),
@@ -49,6 +53,8 @@ withDefaults(
     label: "",
     disabled: false,
     id: undefined,
+    describedBy: "",
+    testId: "",
     placeholder: "",
     placeholderDisabled: true,
   }

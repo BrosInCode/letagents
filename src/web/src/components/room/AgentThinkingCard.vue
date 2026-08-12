@@ -163,20 +163,64 @@ const visibleDetails = computed(() => props.card.details.slice(0, props.compact 
 }
 
 .thinking-card[data-compact='true'] {
-  gap: 8px;
-  padding: 11px 12px;
+  gap: 6px;
+  padding: 2px 0 2px 12px;
+  border: none;
+  border-left: 1px solid color-mix(in srgb, currentColor 34%, transparent);
+  border-radius: 0;
+  background: transparent;
+}
+
+.thinking-card[data-compact='true'] .thinking-card-kicker {
+  display: none;
+}
+
+.thinking-card[data-compact='true'] .thinking-card-header {
+  gap: 6px;
+}
+
+.thinking-card[data-compact='true'] .thinking-card-phase {
+  padding: 0;
+  border: none;
+  background: transparent;
+  font-size: 0.66rem;
+  font-weight: 650;
+  opacity: 0.76;
 }
 
 .thinking-card[data-compact='true'] .thinking-card-summary {
-  font-size: 0.86rem;
+  font-size: 0.82rem;
+  line-height: 1.5;
+  color: var(--text-secondary, #a1a1aa);
+}
+
+.thinking-card[data-compact='true'] .thinking-card-fields {
+  gap: 5px;
 }
 
 .thinking-card[data-compact='true'] .thinking-card-field {
-  padding: 8px 10px;
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 7px;
+  padding: 0;
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+.thinking-card[data-compact='true'] .thinking-card-field span {
+  font-size: 0.62rem;
+}
+
+.thinking-card[data-compact='true'] .thinking-card-field strong {
+  font-size: 0.76rem;
+  font-weight: 500;
+  color: var(--text-secondary, #a1a1aa);
 }
 
 .thinking-card[data-compact='true'] .thinking-card-details {
-  font-size: 0.74rem;
+  gap: 3px;
+  font-size: 0.72rem;
 }
 
 @media (max-width: 768px) {
@@ -187,6 +231,11 @@ const visibleDetails = computed(() => props.card.details.slice(0, props.compact 
 
   .thinking-card-summary {
     font-size: 0.88rem;
+  }
+
+  .thinking-card[data-compact='true'] {
+    padding: 2px 0 2px 10px;
+    border-radius: 0;
   }
 }
 </style>

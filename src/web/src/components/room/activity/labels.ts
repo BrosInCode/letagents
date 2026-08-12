@@ -1,4 +1,5 @@
 import type { ParticipantActivityState } from './types'
+import { TASK_STATUS_LABELS } from '../../../domain/taskStatus'
 
 export const STATUS_ORDER = ['working', 'reviewing', 'blocked', 'idle'] as const
 
@@ -8,17 +9,7 @@ export const ACTIVITY_STATE_LABELS: Record<ParticipantActivityState, string> = {
   offline: 'Recently disconnected',
 }
 
-export const TASK_STATUS_LABELS: Record<string, string> = {
-  proposed: 'Proposed',
-  accepted: 'Accepted',
-  assigned: 'Assigned',
-  in_progress: 'In progress',
-  blocked: 'Blocked',
-  in_review: 'In review',
-  merged: 'Merged',
-  done: 'Done',
-  cancelled: 'Cancelled',
-}
+export { TASK_STATUS_LABELS }
 
 export const COMPLETED_TASK_STATUSES = new Set(['merged', 'done'])
 export const OPEN_TASK_STATUSES = new Set([

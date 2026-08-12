@@ -59,6 +59,11 @@
       </div>
       <button type="button" @click="$emit('clear-reply')">Cancel</button>
     </div>
+    <RoomComposerEventChips
+      :event-previews="eventPreviews"
+      @open-event-preview="openEventPreview"
+      @dismiss-event-preview="emit('dismiss-event-preview', $event)"
+    />
     <div class="desktop-composer-input-row">
       <button
         class="desktop-composer-add-agent"
@@ -77,11 +82,17 @@
         class="desktop-composer-input"
         rows="1"
         :aria-label="composerInputLabel"
+        role="combobox"
+        aria-autocomplete="list"
+        :aria-expanded="mentionOpen"
+        aria-controls="desktop-mention-listbox"
+        :aria-activedescendant="mentionOpen ? `desktop-mention-option-${mentionCandidates[activeMentionIndex]?.participantKey}` : undefined"
         :disabled="roomLoading || !roomIdentifier"
         data-testid="desktop-composer-input"
         @input="handleDraftInput"
-        @keydown.down.prevent="moveMentionSelection(1)"
-        @keydown.up.prevent="moveMentionSelection(-1)"
+        @keydown.down="moveMentionSelection($event, 1)"
+        @keydown.up="moveMentionSelection($event, -1)"
+        @keydown.tab="closeMentionForTab"
         @keydown.enter="handleEnterKey"
         @keydown.escape="mentionOpen = false"
       />
@@ -102,10 +113,13 @@
       <button
         class="desktop-composer-send"
         type="submit"
+        :aria-label="sending ? 'Sending message' : 'Send message'"
+        :title="sending ? 'Sending message' : 'Send message'"
         :disabled="roomLoading || sending || !canSend"
         data-testid="desktop-composer-send"
       >
-        {{ sending ? "Sending..." : "Send" }}
+        <LoaderCircle v-if="sending" :size="16" aria-hidden="true" />
+        <ArrowUp v-else :size="17" aria-hidden="true" />
       </button>
     </div>
     <DesktopAttachmentDrafts
@@ -113,18 +127,28 @@
       :pending-attachments="pendingAttachmentDrafts"
       @remove="$emit('remove-attachment', $event)"
     />
-    <div v-if="mentionOpen" class="desktop-mention-panel" data-testid="desktop-mention-panel">
+    <div
+      v-if="mentionOpen"
+      id="desktop-mention-listbox"
+      class="desktop-mention-panel"
+      role="listbox"
+      data-testid="desktop-mention-panel"
+    >
       <button
         v-for="(candidate, index) in mentionCandidates"
         :key="candidate.participantKey"
         class="desktop-mention-option"
+        :id="`desktop-mention-option-${candidate.participantKey}`"
+        role="option"
+        tabindex="-1"
+        :aria-selected="index === activeMentionIndex"
         :data-active="index === activeMentionIndex"
         :data-testid="`desktop-mention-option-${candidate.participantKey}`"
         type="button"
-        @click="insertMention(candidate.displayName)"
+        @click="insertMention(candidate.insertText)"
       >
         <span>{{ candidate.displayName }}</span>
-        <small>{{ candidate.kind === 'agent' ? 'Agent' : 'Human' }}</small>
+        <small>{{ candidate.label }}</small>
       </button>
     </div>
     <div v-if="sendError || attachmentError" class="desktop-composer-footer">
@@ -137,18 +161,16 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { Plus } from "@lucide/vue";
+import { ArrowUp, LoaderCircle, Plus } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
   DesktopStagedAttachment,
 } from "../../../../../../electron/ipc-types";
 import type { ManagedAgentPermissionApproval } from "../../../../domain/managed-agents";
-import {
-  isMentionableRoomParticipant,
-  sortMentionableRoomParticipants,
-} from "../../../../domain/participants";
+import { roomMentionCandidates } from "../../../../domain/participants";
 import DesktopAttachmentDrafts, { type PendingAttachmentDraft } from "../DesktopAttachmentDrafts.vue";
+import RoomComposerEventChips, { type ComposerEventPreview } from "./RoomComposerEventChips.vue";
 import { applySelectedTextQuoteToDraft, displaySender, replyPreview } from "./message-format";
 
 export interface RoomComposerReplyTarget {
@@ -163,6 +185,7 @@ const props = defineProps<{
   attaching: boolean;
   attachmentDrafts: DesktopStagedAttachment[];
   attachmentError: string | null;
+  eventPreviews: ComposerEventPreview[];
   initialDraft?: string;
   participants: DesktopParticipantSummary[];
   pendingAttachmentDrafts: PendingAttachmentDraft[];
@@ -188,6 +211,8 @@ const emit = defineEmits<{
     behavior: DesktopManagedAgentPermissionDecisionBehavior,
   ];
   "send-message": [text: string, replyTo: string | null, attachments: Array<{ upload_id: string }>];
+  "open-event-preview": [event: ComposerEventPreview];
+  "dismiss-event-preview": [messageId: string];
 }>();
 
 const maxComposerInputHeight = 156;
@@ -218,11 +243,7 @@ const mentionOpen = computed({
   },
 });
 const mentionCandidates = computed(() => {
-  const query = (mentionQuery.value || "").toLowerCase();
-  return sortMentionableRoomParticipants(props.participants
-    .filter(isMentionableRoomParticipant)
-    .filter((participant) => participant.displayName.toLowerCase().includes(query)))
-    .slice(0, 6);
+  return roomMentionCandidates(props.participants, mentionQuery.value);
 });
 
 watch(
@@ -298,7 +319,7 @@ function handleEnterKey(event: KeyboardEvent): void {
   event.preventDefault();
   if (mentionOpen.value) {
     const candidate = mentionCandidates.value[activeMentionIndex.value];
-    if (candidate) insertMention(candidate.displayName);
+    if (candidate) insertMention(candidate.insertText);
     return;
   }
   if (event.metaKey || event.ctrlKey || event.shiftKey) {
@@ -309,7 +330,7 @@ function handleEnterKey(event: KeyboardEvent): void {
 }
 
 function syncMentionQuery(): void {
-  const match = /(^|\s)@([A-Za-z0-9._-]*)$/.exec(draft.value);
+  const match = /(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/.exec(draft.value);
   mentionQuery.value = match ? match[2] : null;
   activeMentionIndex.value = 0;
 }
@@ -319,18 +340,37 @@ function handleDraftInput(): void {
   syncMentionQuery();
 }
 
-function moveMentionSelection(delta: number): void {
+function moveMentionSelection(event: KeyboardEvent, delta: number): void {
   if (!mentionOpen.value) return;
+  event.preventDefault();
   const count = mentionCandidates.value.length;
   if (!count) return;
   activeMentionIndex.value = (activeMentionIndex.value + delta + count) % count;
 }
 
-function insertMention(displayName: string): void {
-  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._-]*)$/, `$1@${displayName} `);
+function closeMentionForTab(): void {
+  if (mentionOpen.value) mentionQuery.value = null;
+}
+
+function insertMention(mentionText: string): void {
+  draft.value = draft.value.replace(/(^|\s)@([A-Za-z0-9._:-]*(?:\/[A-Za-z0-9._-]*)*)$/, `$1@${mentionText} `);
   mentionQuery.value = null;
   syncDraftToShell();
   void nextTick(() => textareaElement.value?.focus());
+}
+
+/** Canonical entry point for non-composer surfaces such as the Agent Inspector. */
+function focusWithMention(mentionText: string): void {
+  const separator = draft.value && !/\s$/.test(draft.value) ? " " : "";
+  draft.value = `${draft.value}${separator}@${mentionText} `;
+  mentionQuery.value = null;
+  syncDraftToShell();
+  void nextTick(() => {
+    syncTextareaHeight();
+    const input = textareaElement.value;
+    input?.focus();
+    input?.setSelectionRange(draft.value.length, draft.value.length);
+  });
 }
 
 function syncDraftToShell(): void {
@@ -345,4 +385,10 @@ function syncTextareaHeight(): void {
   input.style.height = `${Math.max(nextHeight, 34)}px`;
   input.style.overflowY = input.scrollHeight > maxComposerInputHeight ? "auto" : "hidden";
 }
+
+function openEventPreview(event: ComposerEventPreview): void {
+  emit("open-event-preview", event);
+}
+
+defineExpose({ focusWithMention });
 </script>

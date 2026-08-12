@@ -4,9 +4,10 @@ import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { registerMessageTools, registerStatusTools } from "../server/tools/messages.js";
 import { buildSendMessageRequestBody } from "../server/tools/messages/send-tool.js";
 import {
-  buildWaitForMessagesHistoryPageRequest,
+  DEFAULT_WAIT_CATCHUP_LIMIT,
   buildWaitForMessagesRequestOptions,
   filterSilentActivationMessages,
+  planWaitForMessagesFetch,
   resolveEffectiveAfterMessageId,
 } from "../server/tools/messages/wait-tool.js";
 import {
@@ -139,26 +140,6 @@ test("wait_for_messages remote requests preserve worker delivery headers", () =>
   );
 });
 
-test("wait_for_messages paginated history requests preserve worker delivery headers", () => {
-  const deliveryHeaders = {
-    [LETAGENTS_AGENT_SESSION_ID_HEADER]: "agent_session_1",
-    [LETAGENTS_AGENT_SESSION_TOKEN_HEADER]: "token_1",
-  };
-
-  const request = buildWaitForMessagesHistoryPageRequest({
-    targetRoomId: "room_1",
-    targetProjectId: "project_1",
-    queryString: "after=msg_1",
-    deliveryHeaders,
-  });
-
-  assert.equal(request.room_id, "room_1");
-  assert.equal(request.project_id, "project_1");
-  assert.deepEqual(request.options, { headers: deliveryHeaders });
-  assert.equal(request.room_path("room_1"), "/rooms/room_1/messages?after=msg_1&include_prompt_only=1");
-  assert.equal(request.project_path("project_1"), "/projects/project_1/messages?after=msg_1&include_prompt_only=1");
-});
-
 test("wait_for_messages filters silent activation messages without losing cursor progress", () => {
   const result = filterSilentActivationMessages([
     {
@@ -199,6 +180,40 @@ test("wait_for_messages filters silent activation messages without losing cursor
   assert.deepEqual(result.messages.map((message) => message.id), ["msg_2"]);
   assert.deepEqual(result.skipped_message_ids, ["msg_1", "msg_3"]);
   assert.equal(result.last_observed_message_id, "msg_3");
+});
+
+test("wait_for_messages catches up on a bounded recent tail when no cursor is given", () => {
+  const plan = planWaitForMessagesFetch({ effectiveAfterMessageId: undefined });
+
+  assert.deepEqual(plan, { mode: "catch_up_tail", limit: DEFAULT_WAIT_CATCHUP_LIMIT });
+  // The bound must be finite and small so a no-cursor call never replays the
+  // entire room history (the multi-MB busy-room bug this fix addresses).
+  assert.ok(plan.mode === "catch_up_tail" && plan.limit > 0 && plan.limit <= 500);
+});
+
+test("wait_for_messages respects an explicit catch-up limit override", () => {
+  const plan = planWaitForMessagesFetch({ effectiveAfterMessageId: undefined, catchupLimit: 25 });
+
+  assert.deepEqual(plan, { mode: "catch_up_tail", limit: 25 });
+});
+
+test("wait_for_messages keeps cursor semantics while response paging stays bounded", () => {
+  const plan = planWaitForMessagesFetch({ effectiveAfterMessageId: "msg_42" });
+
+  // The cursor is preserved; the runtime returns one bounded page and exposes
+  // last_observed_message_id/truncated so the next call resumes safely.
+  assert.deepEqual(plan, { mode: "after_cursor", after: "msg_42" });
+});
+
+test("wait_for_messages description no longer promises the full history on a no-cursor call", () => {
+  const registrations = collectMessageToolRegistrations();
+  const wait = registrations.find((registration) => registration.name === "wait_for_messages");
+
+  assert.ok(wait, "wait_for_messages should be registered");
+  const afterField = (wait.schema as { after_message_id?: { description?: string } }).after_message_id;
+  const description = afterField?.description ?? "";
+  assert.doesNotMatch(description, /all existing messages/i);
+  assert.match(description, /most recent/i);
 });
 
 test("wait_for_messages honors explicit cursors instead of forcing stored progress", () => {

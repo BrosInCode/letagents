@@ -67,6 +67,7 @@ export interface DesktopReasoningSession {
   roomId: string | null;
   actorLabel: string | null;
   agentKey: string | null;
+  agentSessionId?: string | null;
   taskId: string | null;
   title: string | null;
   status: string | null;
@@ -89,6 +90,7 @@ export interface DesktopReasoningUpdate {
   roomId: string | null;
   sessionId: string | null;
   actorLabel: string | null;
+  agentSessionId?: string | null;
   status: string | null;
   summary: string | null;
   milestone: string | null;

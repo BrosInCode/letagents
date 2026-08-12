@@ -24,12 +24,18 @@ export function participantMatchesHuman(
 }
 
 export function isHumanMessage(message: DesktopRoomMessage): boolean {
+  if (message.source === "managed_agent_failure") return false;
   return message.source === "browser" || !message.agentIdentity;
 }
 
 export function latestStatusMessage(messages: DesktopRoomMessage[]): string | null {
-  const message = [...messages].reverse().find((entry) => /^\[status\]\s*/i.test(entry.text || ""));
-  return message ? message.text.replace(/^\[status\]\s*/i, "").trim() : null;
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const text = messages[index]?.text || "";
+    if (/^\[status\]\s*/i.test(text)) {
+      return text.replace(/^\[status\]\s*/i, "").trim();
+    }
+  }
+  return null;
 }
 
 export function sessionMatchesAgent(

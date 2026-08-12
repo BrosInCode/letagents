@@ -163,7 +163,11 @@ describe("mapApiSession", () => {
       task_prompt: "Refresh fails on stale token",
       mode: "scoped",
       continuity_mode: "smart_handoff",
+      room_history_access: "full",
       status: "accepted",
+      launch_state: "launch_failed",
+      launch_error_code: "provider_unavailable",
+      launch_error_message: "Cursor signed out.",
       approved_scope: { include_paths: ["src/auth/**"], protected_paths: [".env"] },
       policy: { max_lrt: 50_000, require_patch_gate: true },
       quota_lease: {
@@ -194,7 +198,11 @@ describe("mapApiSession", () => {
     assert.equal(session!.listingId, "listing_1");
     assert.equal(session!.roomIdentifier, "room_1");
     assert.equal(session!.status, "accepted");
+    assert.equal(session!.launchState, "launch_failed");
+    assert.equal(session!.launchErrorCode, "provider_unavailable");
+    assert.equal(session!.launchErrorMessage, "Cursor signed out.");
     assert.equal(session!.mode, "scoped");
+    assert.equal(session!.roomHistoryAccess, "full");
     assert.deepEqual(session!.approvedScope.includePaths, ["src/auth/**"]);
     assert.deepEqual(session!.approvedScope.protectedPaths, [".env"]);
     assert.equal(session!.policy.maxLrt, 50_000);

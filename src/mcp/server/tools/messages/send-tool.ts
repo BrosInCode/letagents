@@ -18,6 +18,7 @@ import {
   toPublicAgentIdentity,
   touchCurrentRoom,
 } from "../../runtime.js";
+import { findLocalMessageById, findRemoteMessageById } from "./message-lookup.js";
 import { jsonToolResponse } from "./response.js";
 
 type MessageRecord = Record<string, unknown>;
@@ -30,10 +31,7 @@ type SendMessageInput = {
   agent_session_id?: string;
 };
 
-type AgentSessionCredentialPayload = {
-  agent_session_id: string;
-  agent_session_token: string;
-};
+type AgentSessionCredentialPayload = Record<string, string>;
 
 export function buildSendMessageRequestBody(input: {
   sender: string;
@@ -62,54 +60,6 @@ function explicitThreadRootId(message: MessageRecord | null): string | null {
     return root;
   }
   return null;
-}
-
-async function findLocalMessageById(roomId: string, messageId: string): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const result = await getLocalChatMessages(roomId, {
-      after: afterCursor,
-      include_prompt_only: true,
-    });
-    const messages = (result.messages ?? []) as MessageRecord[];
-    const match = messages.find((message) => message.id === messageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = typeof lastMessage?.id === "string" ? lastMessage.id : undefined;
-    if (!afterCursor) return null;
-  }
-}
-
-async function findRemoteMessageById(input: {
-  roomId: string | null;
-  projectId: string | null;
-  messageId: string;
-}): Promise<MessageRecord | null> {
-  let afterCursor: string | undefined;
-  for (;;) {
-    const query = new URLSearchParams();
-    if (afterCursor) query.set("after", afterCursor);
-    const qs = query.toString();
-    const result = await roomScopedApiCall<{
-      messages?: MessageRecord[];
-      has_more?: boolean;
-    }>({
-      room_id: input.roomId,
-      project_id: input.projectId,
-      room_path: (roomId) =>
-        appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(roomId)}/messages${qs ? `?${qs}` : ""}`),
-      project_path: (projectId) =>
-        appendIncludePromptOnly(`/projects/${encodeURIComponent(projectId)}/messages${qs ? `?${qs}` : ""}`),
-    });
-    const messages = result.messages ?? [];
-    const match = messages.find((message) => message.id === input.messageId);
-    if (match) return match;
-    if (!result.has_more || messages.length === 0) return null;
-    const lastMessage = messages[messages.length - 1];
-    afterCursor = typeof lastMessage?.id === "string" ? lastMessage.id : undefined;
-    if (!afterCursor) return null;
-  }
 }
 
 async function findMessageById(input: {
@@ -194,6 +144,8 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
       reply_to: replyTarget,
       ...(resolvedThreadRoot ? { thread_root_id: resolvedThreadRoot } : {}),
       source: "agent",
+      publisher_agent_key: agentSession?.agent_key ?? null,
+      publisher_agent_session_id: agentSession?.session_id ?? null,
     });
     touchCurrentRoom(message.id);
     return jsonToolResponse({
@@ -225,6 +177,10 @@ async function sendMessageFromTool(input: SendMessageInput): Promise<ReturnType<
     getRememberedRoomPresence(targetRoomId ?? currentRoom?.room_id ?? null, identity),
     agentSession
   );
+
+  // The `replied` receipt transition is server-owned: message creation marks
+  // the publisher's receipt on the reply target atomically with the reply
+  // itself, for MCP workers and supervised daemon publications alike.
 
   return jsonToolResponse({
     ...message,

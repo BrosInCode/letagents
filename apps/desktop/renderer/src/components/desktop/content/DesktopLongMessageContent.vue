@@ -6,7 +6,7 @@
       :class="{ collapsed: isLong && !expanded }"
       :data-testid="`desktop-long-message-content-${safeMessageId}`"
     >
-      <div class="desktop-long-message-html" v-html="html" />
+      <div class="desktop-long-message-html" v-html="html" @click="handleInlineReferenceClick" />
       <span v-if="isLong && !expanded" class="desktop-long-message-fade" aria-hidden="true" />
     </div>
 
@@ -51,7 +51,11 @@
             <button type="button" @click="closeReader">Close</button>
           </header>
 
-          <div class="desktop-reader-content desktop-long-message-html" v-html="html" />
+          <div
+            class="desktop-reader-content desktop-long-message-html"
+            v-html="html"
+            @click="handleInlineReferenceClick"
+          />
 
           <footer class="desktop-reader-footer">
             <button type="button" @click="copyText">{{ copyLabel }}</button>
@@ -66,6 +70,8 @@
 <script setup lang="ts">
 import { computed, nextTick, ref } from "vue";
 
+import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+
 const props = withDefaults(defineProps<{
   text: string;
   html: string;
@@ -77,9 +83,14 @@ const props = withDefaults(defineProps<{
   collapseAfterLines: 18,
 });
 
+const emit = defineEmits<{
+  "message-reference-click": [messageId: string];
+  "task-reference-click": [taskId: string];
+}>();
+
 const expanded = ref(false);
 const readerOpen = ref(false);
-const copied = ref(false);
+const { copied, copy: copyToClipboard } = useCopyIndicator(1600);
 const readerDialog = ref<HTMLElement | null>(null);
 
 const lineCount = computed(() => props.text ? props.text.split(/\r\n|\r|\n/).length : 0);
@@ -107,15 +118,27 @@ function closeReader(): void {
   readerOpen.value = false;
 }
 
-async function copyText(): Promise<void> {
-  try {
-    await navigator.clipboard.writeText(props.text);
-    copied.value = true;
-    window.setTimeout(() => {
-      copied.value = false;
-    }, 1600);
-  } catch {
-    copied.value = false;
+function handleInlineReferenceClick(event: MouseEvent): void {
+  const messageTarget = event.target instanceof Element
+    ? event.target.closest<HTMLElement>("[data-message-reference-id]")
+    : null;
+  const taskTarget = event.target instanceof Element
+    ? event.target.closest<HTMLElement>("[data-task-reference-id]")
+    : null;
+  const messageId = messageTarget?.dataset.messageReferenceId || "";
+  const taskId = taskTarget?.dataset.taskReferenceId || "";
+  if (!messageId && !taskId) return;
+  event.preventDefault();
+  event.stopPropagation();
+  readerOpen.value = false;
+  if (messageId) {
+    emit("message-reference-click", messageId);
+    return;
   }
+  emit("task-reference-click", taskId);
+}
+
+async function copyText(): Promise<void> {
+  await copyToClipboard(props.text);
 }
 </script>

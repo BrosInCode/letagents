@@ -99,6 +99,8 @@ export function registerPostReasoningTool(server: McpServer): void {
             sender: identity.actor_label,
             text: normalizedMilestone,
             source: "agent",
+            publisher_agent_key: agentSession?.agent_key ?? null,
+            publisher_agent_session_id: agentSession?.session_id ?? null,
           });
           milestoneMessageId = milestoneMessage.id;
           touchCurrentRoom(milestoneMessageId);

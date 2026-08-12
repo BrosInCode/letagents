@@ -31,8 +31,9 @@ export function captureHandlers(
 
 export function captureHandlersWithClient(
   client: RentalApiClient | null,
+  options: DesktopRentalHandlerOptions = {},
 ): Map<string, CapturedHandler> {
-  return captureHandlers(true, { apiClient: client });
+  return captureHandlers(true, { apiClient: client, ...options });
 }
 
 export function makeFakeClient(

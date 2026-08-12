@@ -5,6 +5,9 @@ import type {
   ResolvedRequestAuth,
 } from "./helpers.js";
 import { LETAGENTS_ORIGIN_ROOM_ID_HEADER } from "../../shared/request-headers.js";
+import { requiredAgentSessionRouteCapability } from "../request/agent-session-route-capabilities.js";
+import { isSupervisorGrantRouteAllowed } from "../request/supervisor-grant-route-registry.js";
+import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 
 export interface HttpMiddlewareDeps {
   resolveRequestAuth(req: AuthenticatedRequest): Promise<ResolvedRequestAuth>;
@@ -47,6 +50,21 @@ export function registerHttpMiddleware(
       const auth = await deps.resolveRequestAuth(req);
       req.sessionAccount = auth.account;
       req.authKind = auth.authKind;
+      req.agentSession = auth.agentSession ?? null;
+      req.supervisorGrant = auth.supervisorGrant ?? null;
+      if (req.authKind === "supervisor_grant") {
+        if (!isSupervisorHostGrantFeatureEnabled() || !isSupervisorGrantRouteAllowed(req.method, req.path)) {
+          _res.status(403).json({ error: "This supervisor grant is not authorized for the requested route." });
+          return;
+        }
+      }
+      if (req.authKind === "agent_session" && req.agentSession) {
+        const capability = requiredAgentSessionRouteCapability(req.method, req.path);
+        if (!capability || !req.agentSession.capabilities.includes(capability)) {
+          _res.status(403).json({ error: "This worker bearer is not authorized for the requested route." });
+          return;
+        }
+      }
       next();
     } catch (error) {
       next(error);

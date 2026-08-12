@@ -1,4 +1,6 @@
 import type {
+  RoomSharedArtifactChangedFile,
+  RoomSharedArtifactDetail,
   TaskWorkflowArtifact,
   TaskWorkflowArtifactKind,
   TaskWorkflowArtifactMatch,
@@ -7,6 +9,7 @@ import type {
 } from "./types.js";
 
 const TASK_WORKFLOW_ARTIFACT_PROVIDERS = new Set<TaskWorkflowRefProvider>([
+  "git",
   "github",
   "gitlab",
   "bitbucket",
@@ -16,6 +19,9 @@ const TASK_WORKFLOW_ARTIFACT_PROVIDERS = new Set<TaskWorkflowRefProvider>([
 const TASK_WORKFLOW_ARTIFACT_KINDS = new Set<TaskWorkflowArtifactKind>([
   "issue",
   "branch",
+  "commit",
+  "diff",
+  "change_summary",
   "pull_request",
   "merge_request",
   "review",
@@ -32,9 +38,24 @@ const TASK_WORKFLOW_ARTIFACT_KEYS = new Set([
   "url",
   "ref",
   "state",
+  "detail",
 ]);
 
 const MAX_TASK_WORKFLOW_ARTIFACTS = 32;
+// Safety ceiling on the persisted file list. The UI collapses/expands within this
+// set; anything beyond is folded into hiddenFileCount rather than stored.
+const MAX_CHANGE_SUMMARY_FILES = 200;
+const MAX_ARTIFACT_PATH_LENGTH = 1024;
+const CHANGE_SUMMARY_FILE_STATUSES = new Set([
+  "added",
+  "modified",
+  "deleted",
+  "renamed",
+  "copied",
+  "typechange",
+  "untracked",
+  "unknown",
+]);
 
 function areSameTaskWorkflowArtifact(
   left: TaskWorkflowArtifact,
@@ -106,6 +127,12 @@ function buildTaskWorkflowRefLabel(artifact: TaskWorkflowArtifact): string {
       return artifact.number ? `Issue #${artifact.number}` : "Issue";
     case "branch":
       return artifact.ref ? `Branch ${artifact.ref}` : "Branch";
+    case "commit":
+      return artifact.id ? `Commit ${artifact.id.slice(0, 12)}` : "Commit";
+    case "diff":
+      return artifact.title ? `Diff ${artifact.title}` : "Diff";
+    case "change_summary":
+      return artifact.title ? `Change summary ${artifact.title}` : "Change summary";
     case "pull_request":
       return artifact.number ? `PR #${artifact.number}` : "PR";
     case "merge_request":
@@ -250,6 +277,88 @@ function asOptionalInteger(
   return value;
 }
 
+function asChangeSummaryCount(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? Math.floor(value) : 0;
+}
+
+function sanitizeChangeSummaryFile(
+  value: unknown,
+  index: number,
+  fileIndex: number
+): RoomSharedArtifactChangedFile {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`workflow_artifacts[${index}].detail.files[${fileIndex}] must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  const path = record.path;
+  if (typeof path !== "string" || !path.trim() || path.length > MAX_ARTIFACT_PATH_LENGTH) {
+    throw new Error(`workflow_artifacts[${index}].detail.files[${fileIndex}].path is invalid`);
+  }
+  const previousPath =
+    typeof record.previousPath === "string" && record.previousPath.length <= MAX_ARTIFACT_PATH_LENGTH
+      ? record.previousPath
+      : null;
+  const status =
+    typeof record.status === "string" && CHANGE_SUMMARY_FILE_STATUSES.has(record.status)
+      ? record.status
+      : "unknown";
+  return {
+    path,
+    previousPath,
+    status,
+    additions: asChangeSummaryCount(record.additions),
+    deletions: asChangeSummaryCount(record.deletions),
+    binary: record.binary === true,
+    staged: record.staged === true,
+    unstaged: record.unstaged === true,
+    untracked: record.untracked === true,
+  };
+}
+
+// Validate + clamp the structured detail. Discriminated on `type`; only
+// change_summary is supported today (others reject). Never contains code.
+function sanitizeArtifactDetail(
+  value: unknown,
+  index: number
+): RoomSharedArtifactDetail | null | undefined {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (typeof value !== "object" || Array.isArray(value)) {
+    throw new Error(`workflow_artifacts[${index}].detail must be an object`);
+  }
+  const record = value as Record<string, unknown>;
+  if (record.type !== "change_summary") {
+    throw new Error(`workflow_artifacts[${index}].detail.type is unsupported`);
+  }
+  if (record.version !== 1) {
+    throw new Error(`workflow_artifacts[${index}].detail.version is unsupported`);
+  }
+  const filesInput = Array.isArray(record.files) ? record.files : [];
+  const files = filesInput
+    .slice(0, MAX_CHANGE_SUMMARY_FILES)
+    .map((file, fileIndex) => sanitizeChangeSummaryFile(file, index, fileIndex));
+  const droppedByCap = Math.max(0, filesInput.length - files.length);
+  const changedFileCount = asChangeSummaryCount(record.changedFileCount);
+  const hiddenFileCount = asChangeSummaryCount(record.hiddenFileCount) + droppedByCap;
+  if (changedFileCount !== files.length + hiddenFileCount) {
+    throw new Error(
+      `workflow_artifacts[${index}].detail is inconsistent: changedFileCount must equal files.length + hiddenFileCount`,
+    );
+  }
+  return {
+    type: "change_summary",
+    version: 1,
+    changedFileCount,
+    additions: asChangeSummaryCount(record.additions),
+    deletions: asChangeSummaryCount(record.deletions),
+    stagedFileCount: asChangeSummaryCount(record.stagedFileCount),
+    unstagedFileCount: asChangeSummaryCount(record.unstagedFileCount),
+    untrackedFileCount: asChangeSummaryCount(record.untrackedFileCount),
+    hiddenFileCount,
+    files,
+  };
+}
+
 export function validateTaskWorkflowArtifactsInput(input: unknown): TaskWorkflowArtifact[] | undefined {
   if (input === undefined) {
     return undefined;
@@ -293,6 +402,19 @@ export function validateTaskWorkflowArtifactsInput(input: unknown): TaskWorkflow
       throw new Error(`workflow_artifacts[${index}].kind is invalid`);
     }
 
+    const detail =
+      record.detail !== undefined ? sanitizeArtifactDetail(record.detail, index) : undefined;
+    if (detail?.type === "change_summary" && kind !== "change_summary") {
+      throw new Error(
+        `workflow_artifacts[${index}].detail of type "change_summary" requires kind "change_summary"`,
+      );
+    }
+    if (detail && typeof record.state === "string" && record.state.trim() === "clean") {
+      throw new Error(
+        `workflow_artifacts[${index}] cannot carry change_summary detail while state is "clean"`,
+      );
+    }
+
     return {
       provider: provider as TaskWorkflowRefProvider,
       kind: kind as TaskWorkflowArtifactKind,
@@ -308,6 +430,7 @@ export function validateTaskWorkflowArtifactsInput(input: unknown): TaskWorkflow
       ...(record.state !== undefined
         ? { state: asOptionalString(record.state, "state", index) }
         : {}),
+      ...(detail !== undefined ? { detail } : {}),
     };
   });
 }

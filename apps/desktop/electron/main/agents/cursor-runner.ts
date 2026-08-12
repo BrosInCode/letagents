@@ -10,6 +10,7 @@ export interface CursorTurnInput {
   cursorSessionId?: string | null;
   cursorBin?: string | null;
   env?: Record<string, string | undefined>;
+  model?: string | null;
   mode?: CursorReadOnlyMode | null;
   force?: boolean;
   sandbox?: CursorSandboxMode | null;
@@ -68,6 +69,10 @@ export function buildCursorAgentArgs(input: CursorTurnInput): string[] {
   }
   if (input.sandbox) {
     args.push("--sandbox", input.sandbox);
+  }
+  const model = input.model?.trim();
+  if (model) {
+    args.push("--model", model);
   }
   const resume = input.cursorSessionId?.trim();
   if (resume) {

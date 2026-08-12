@@ -92,6 +92,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import type { RoomTask } from '@/composables/useRoom'
+import { taskStatusLabel } from '@/domain/taskStatus'
 
 const props = defineProps<{
   open: boolean
@@ -164,7 +165,7 @@ const authorityRows = computed(() =>
         id: task.id,
         shortId: formatTaskShortId(task.id),
         title: task.title,
-        status: statusLabel(task.status),
+        status: taskStatusLabel(task.status),
         lease: lease ? `${lease.kind} lease` : 'No active lease',
         branch: lease?.branch_ref || 'No branch',
         pr,
@@ -176,10 +177,6 @@ function formatTaskShortId(taskId: string): string {
   const match = /^task_(\d+)$/i.exec(taskId.trim())
   if (match) return `T${match[1]}`
   return taskId.replace(/^task_/i, 'T')
-}
-
-function statusLabel(status: string): string {
-  return status.replace(/_/g, ' ')
 }
 
 </script>

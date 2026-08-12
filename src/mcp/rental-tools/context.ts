@@ -76,6 +76,57 @@ export async function rentalReadFile(
   }
 }
 
+export interface RentalRequestContextInput {
+  session_id: string;
+  path: string;
+  reason?: string;
+}
+
+export interface RentalRequestContextResult {
+  success?: boolean;
+  id?: string;
+  status?: string;
+  path?: string;
+  error?: string;
+}
+
+/**
+ * File a context access request for a path outside the approved scope.
+ * The renter reviews it; once approved the file becomes readable via
+ * rental_read_file.
+ */
+export async function rentalRequestContext(
+  deps: RentalToolDeps,
+  input: RentalRequestContextInput,
+): Promise<RentalRequestContextResult> {
+  const sessionIdError = validateSessionId(input);
+  if (sessionIdError) return { success: false, error: sessionIdError };
+  if (typeof input.path !== "string" || !input.path.trim()) {
+    return { success: false, error: "path is required" };
+  }
+
+  const body: Record<string, unknown> = { path: input.path.trim() };
+  if (typeof input.reason === "string" && input.reason.trim()) {
+    body.reason = input.reason.trim();
+  }
+
+  try {
+    return await deps.apiCall<RentalRequestContextResult>(
+      `/api/rental/sessions/${encodeSessionId(input.session_id)}/context-requests`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(body),
+      },
+    );
+  } catch (err) {
+    return {
+      success: false,
+      error: errorMessage(err),
+    };
+  }
+}
+
 export async function rentalSearch(
   deps: RentalToolDeps,
   input: RentalSearchInput,

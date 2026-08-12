@@ -17,17 +17,18 @@ export function restoreFocus(element: HTMLElement | null): void {
   }
 }
 
+export function focusFirstElementInDialog(dialog: HTMLElement | null): void {
+  if (!dialog) return;
+  const firstElement = focusableElementsInDialog(dialog)[0];
+  (firstElement || dialog).focus({ preventScroll: true });
+}
+
 export function trapFocusInDialog(event: KeyboardEvent, dialog: HTMLElement | null): void {
   if (!dialog) {
     return;
   }
 
-  const focusableElements = Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-    .filter((element) =>
-      !element.hasAttribute("disabled") &&
-      element.getAttribute("aria-hidden") !== "true" &&
-      element.getClientRects().length > 0
-    );
+  const focusableElements = focusableElementsInDialog(dialog);
   if (!focusableElements.length) {
     event.preventDefault();
     dialog.focus({ preventScroll: true });
@@ -37,7 +38,12 @@ export function trapFocusInDialog(event: KeyboardEvent, dialog: HTMLElement | nu
   const firstElement = focusableElements[0];
   const lastElement = focusableElements[focusableElements.length - 1];
   const activeElement = currentFocusableElement();
-  if (event.shiftKey && (!activeElement || !dialog.contains(activeElement) || activeElement === firstElement)) {
+  if (event.shiftKey && (
+    !activeElement
+    || !dialog.contains(activeElement)
+    || activeElement === dialog
+    || activeElement === firstElement
+  )) {
     event.preventDefault();
     lastElement.focus({ preventScroll: true });
     return;
@@ -47,4 +53,13 @@ export function trapFocusInDialog(event: KeyboardEvent, dialog: HTMLElement | nu
     event.preventDefault();
     firstElement.focus({ preventScroll: true });
   }
+}
+
+function focusableElementsInDialog(dialog: HTMLElement): HTMLElement[] {
+  return Array.from(dialog.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((element) =>
+      !element.hasAttribute("disabled")
+      && element.getAttribute("aria-hidden") !== "true"
+      && element.getClientRects().length > 0
+    );
 }

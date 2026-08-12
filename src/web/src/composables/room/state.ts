@@ -37,6 +37,34 @@ export type ActivityHistoryRequest = {
 }
 
 export const messages = ref<RoomMessage[]>([])
+let indexedMessages = messages.value
+const messageIds = new Set<string>()
+
+function ensureMessageIndex() {
+  // Tests and legacy call sites may replace the exported ref directly. Rebuild
+  // only on that snapshot boundary; steady-state live appends stay O(1).
+  if (indexedMessages === messages.value) return
+  indexedMessages = messages.value
+  messageIds.clear()
+  for (const message of indexedMessages) messageIds.add(message.id)
+}
+
+export function replaceRoomMessages(next: RoomMessage[]) {
+  messages.value = next
+  indexedMessages = next
+  messageIds.clear()
+  for (const message of next) messageIds.add(message.id)
+}
+
+export function appendRoomMessage(message: RoomMessage): boolean {
+  ensureMessageIndex()
+  if (messageIds.has(message.id)) return false
+  // Vue tracks mutations on the reactive array. Avoid copying and rescanning
+  // the complete transcript for every live event.
+  messages.value.push(message)
+  messageIds.add(message.id)
+  return true
+}
 export const messagesHasOlder = ref(false)
 export const isLoadingOlderMessages = ref(false)
 export const presence = ref<RoomAgentPresence[]>([])
@@ -105,7 +133,7 @@ export function resetRoomState(options: {
 }) {
   nextActivityHistoryRequestSequence()
   room.value = null
-  messages.value = []
+  replaceRoomMessages([])
   messagesHasOlder.value = false
   isLoadingOlderMessages.value = false
   tasks.value = []
@@ -116,6 +144,7 @@ export function resetRoomState(options: {
   participants.value = []
   participantHiddenCount.value = 0
   activityHistory.value = null
+  activityLoading.value = false
   activityHistoryLoading.value = options.activityHistoryLoading
   activityHistoryError.value = ''
   setLastActivityHistoryRequest(options.activityHistoryRequest || {})

@@ -1,9 +1,11 @@
 import assert from "node:assert/strict";
+import { Buffer } from "node:buffer";
 import { describe, it } from "node:test";
 import { ref } from "vue";
 
 import type {
   DesktopAgentPresence,
+  DesktopManagedAgentChangeSummary,
   DesktopParticipantSummary,
   DesktopReasoningSession,
   DesktopRoomMessage,
@@ -11,9 +13,19 @@ import type {
 } from "../../electron/ipc-types";
 import {
   isMentionableRoomParticipant,
+  roomMentionCandidates,
   sortMentionableRoomParticipants,
 } from "../src/domain/participants";
 import { isIdleReasoningSession } from "../src/domain/reasoning";
+import {
+  decodeManagedAgentChangeSummaryAttachment,
+  isManagedAgentChangeSummaryAttachment,
+  MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+  managedAgentChangedFileStateLabel,
+  managedAgentChangeSummarySubtitle,
+  managedAgentChangeSummaryTitle,
+  visibleManagedAgentChangedFiles,
+} from "../src/domain/managed-agent-changes";
 import { formatBytes } from "../src/components/desktop/content/attachments/formatting";
 import {
   attachmentHref,
@@ -23,13 +35,16 @@ import {
   isImageAttachment,
 } from "../src/components/desktop/content/desktop-chat-message/attachments";
 import {
+  agentTargetWithPresenceSession,
   hasReasoningStreamSurface,
   latestReasoningForAgent,
+  useAgentReasoningLauncher,
 } from "../src/components/desktop/content/room-chat/useAgentReasoningLauncher";
 import {
   applyThreadQuoteToDraft,
   buildThreadIndicatorSummary,
   buildThreadSummaries,
+  scrollThreadMessageIntoView,
   resolveThreadParent,
   roomTimelineMessages,
   threadQuotePreview,
@@ -37,6 +52,7 @@ import {
   threadReplies,
 } from "../src/components/desktop/content/room-chat/thread-utils";
 import { buildMessageTimelineEntries } from "../src/components/desktop/content/room-chat/timeline";
+import { getAppendedMessageIds } from "../src/components/desktop/content/room-chat/message-arrival";
 import {
   applySelectedTextQuoteToDraft,
   selectedTextQuoteBlock,
@@ -45,12 +61,34 @@ import {
   isLowSignalGitHubCheckMessage,
   parseGitHubEvent,
 } from "../src/components/desktop/content/desktop-chat-message/github-event";
-import { parseSenderIdentity } from "../src/components/desktop/content/desktop-chat-message/identity";
-import { renderMessageText } from "../src/components/desktop/content/desktop-chat-message/message-rendering";
+import {
+  parseSenderIdentity,
+  resolveOwnerAttribution,
+} from "../src/components/desktop/content/desktop-chat-message/identity";
+import {
+  isAmbientSystemMessage,
+  renderMessageText,
+  stripStatusPrefix,
+} from "../src/components/desktop/content/desktop-chat-message/message-rendering";
 import { renderDesktopMarkdown } from "../src/components/desktop/content/formatting/markdown";
 import { useDesktopRoomSearch } from "../src/components/desktop/content/room-shell/useDesktopRoomSearch";
 
 describe("room chat helpers", () => {
+  it("only animates genuinely appended messages", () => {
+    assert.deepEqual(getAppendedMessageIds([], ["msg_1"]), []);
+    assert.deepEqual(getAppendedMessageIds(["msg_2"], ["msg_1", "msg_2"]), []);
+    assert.deepEqual(getAppendedMessageIds(["msg_1"], ["msg_1", "msg_2", "msg_3"]), ["msg_2", "msg_3"]);
+    assert.deepEqual(getAppendedMessageIds(["msg_1"], ["msg_9", "msg_10"]), []);
+  });
+
+  it("keeps routine status annotations quiet without muting failures", () => {
+    assert.equal(isAmbientSystemMessage("LetAgents", "[status] task_1 is in review"), true);
+    assert.equal(isAmbientSystemMessage("system", "[STATUS] worker connected"), true);
+    assert.equal(isAmbientSystemMessage("LetAgents", "[status] task_1 is blocked"), false);
+    assert.equal(isAmbientSystemMessage("agent", "[status] reviewing PR"), false);
+    assert.equal(stripStatusPrefix("[status] task_1 is done"), "task_1 is done");
+  });
+
   it("builds image attachment ids and data URLs consistently", () => {
     const attachment: DesktopRoomMessageAttachment = {
       id: null,
@@ -70,6 +108,49 @@ describe("room chat helpers", () => {
     assert.equal(attachmentMeta(attachment), "image/png · 1.5 KB");
     assert.equal(imageAttachmentId("msg_1", attachment), "msg_1:screen.png-1536-image/png");
     assert.equal(isImageAttachment(attachment), true);
+  });
+
+  it("decodes managed agent change summary attachments", () => {
+    const { sessionId: _sessionId, repoRootPath: _repoRootPath, ...summary } = managedAgentChangeSummary();
+    const attachment: DesktopRoomMessageAttachment = {
+      id: "managed-agent-change-summary",
+      name: "Agent changes",
+      fileName: "agent-changes.json",
+      mimeType: MANAGED_AGENT_CHANGE_SUMMARY_ATTACHMENT_MIME,
+      sizeBytes: 120,
+      url: null,
+      downloadUrl: null,
+      dataUrl: null,
+      contentBase64: Buffer.from(JSON.stringify({
+        kind: "managed_agent_change_summary",
+        version: 1,
+        summary: {
+          ...summary,
+          changeScope: "working_tree",
+        },
+      }), "utf8").toString("base64"),
+    };
+
+    const decoded = decodeManagedAgentChangeSummaryAttachment(attachment);
+
+    assert.equal(isManagedAgentChangeSummaryAttachment(attachment), true);
+    assert.equal("repoRootPath" in (decoded ?? {}), false);
+    assert.equal(decoded?.changedFileCount, 2);
+    assert.equal(managedAgentChangeSummaryTitle(decoded), "Working tree changes: 2 files");
+    assert.equal(managedAgentChangeSummarySubtitle(decoded), "tracked +8  tracked -1  1 untracked");
+    assert.equal(
+      managedAgentChangeSummaryTitle(null, false, { unavailable: true }),
+      "Change summary unavailable",
+    );
+    assert.equal(
+      managedAgentChangeSummarySubtitle(null, false, { unavailable: true }),
+      "Attachment could not be loaded.",
+    );
+    assert.deepEqual(visibleManagedAgentChangedFiles(decoded, false).map((file) => file.path), [
+      "apps/desktop/App.vue",
+      "notes.md",
+    ]);
+    assert.equal(managedAgentChangedFileStateLabel(decoded!.files[1]!), "untracked");
   });
 
   it("summarizes reply threads by parent message", () => {
@@ -331,6 +412,23 @@ describe("room chat helpers", () => {
     assert.equal(search.activeSearchMessageId.value, "msg_2");
   });
 
+  it("finds and scrolls the requested thread message through its shared DOM contract", () => {
+    const calls: ScrollIntoViewOptions[] = [];
+    const elements = ["msg_root", "msg_reply"].map((messageId) => ({
+      dataset: { threadMessageId: messageId },
+      scrollIntoView: (options: ScrollIntoViewOptions) => calls.push(options),
+    })) as unknown as HTMLElement[];
+    const root = {
+      querySelectorAll: () => elements,
+    } as unknown as Pick<ParentNode, "querySelectorAll">;
+
+    const target = scrollThreadMessageIntoView(root, "msg_reply", "smooth");
+
+    assert.equal(target, elements[1]);
+    assert.deepEqual(calls, [{ behavior: "smooth", block: "center" }]);
+    assert.equal(scrollThreadMessageIntoView(root, "msg_missing"), null);
+  });
+
   it("matches agents to their newest reasoning session and stream fallback", () => {
     const target = {
       actorLabel: "Agent Smith | Codex",
@@ -344,6 +442,65 @@ describe("room chat helpers", () => {
     assert.equal(latestReasoningForAgent(target, [oldSession, newSession])?.id, "reasoning_new");
     assert.equal(hasReasoningStreamSurface(target, []), true);
     assert.equal(hasReasoningStreamSurface({ ...target, ideLabel: null }, [presenceEntry()]), true);
+  });
+
+  it("keeps Inspector identity raw while retaining presence enrichment for legacy reasoning", () => {
+    const target = {
+      actorLabel: "DawnHarbor | EmmyMay's agent | Codex",
+      displayName: "DawnHarbor",
+      ownerAttribution: "EmmyMay's agent",
+      ideLabel: "Codex",
+      sender: "DawnHarbor | EmmyMay's agent | Codex",
+      agentKey: null,
+      agentSessionId: null,
+    };
+    const dawn = presenceEntry({
+      actorLabel: target.actorLabel,
+      displayName: "DawnHarbor",
+      agentSessionId: "agent_session_403",
+    });
+    const sameProviderPeer = presenceEntry({
+      actorLabel: "SilverCove | EmmyMay's agent | Codex",
+      displayName: "DawnHarbor",
+      agentSessionId: "agent_session_402",
+    });
+    let openedTarget = null as typeof target | null;
+    const launcher = useAgentReasoningLauncher({
+      presence: () => [sameProviderPeer, dawn],
+      reasoningSessions: () => [],
+      openReasoning: () => assert.fail("detail route should not open reasoning"),
+      openFallback: () => assert.fail("detail route should not open fallback"),
+      openAgentDetail: (resolved) => { openedTarget = resolved; },
+    });
+
+    launcher.openAgentModal(target);
+
+    assert.equal(openedTarget?.agentSessionId, null, "Inspector resolution must bypass actor-label presence inference");
+    assert.equal(agentTargetWithPresenceSession(target, [sameProviderPeer, dawn]).agentSessionId, "agent_session_403");
+  });
+
+  it("fails closed when a clicked message identity maps to multiple room sessions", () => {
+    const target = {
+      actorLabel: "SharedActor | EmmyMay's agent | Codex",
+      displayName: "SharedActor",
+      ownerAttribution: "EmmyMay's agent",
+      ideLabel: "Codex",
+      sender: "SharedActor | EmmyMay's agent | Codex",
+      agentKey: "EmmyMay/sharedactor",
+      agentSessionId: null,
+    };
+    const first = presenceEntry({
+      actorLabel: target.actorLabel,
+      agentKey: target.agentKey,
+      agentSessionId: "agent_session_first",
+    });
+    const second = presenceEntry({
+      actorLabel: target.actorLabel,
+      agentKey: target.agentKey,
+      agentSessionId: "agent_session_second",
+    });
+
+    assert.equal(agentTargetWithPresenceSession(target, [first, second]).agentSessionId, null);
   });
 
   it("detects idle reasoning sessions before offering turn stops", () => {
@@ -372,6 +529,14 @@ describe("room chat helpers", () => {
       ownerAttribution: null,
       ideLabel: "Codex",
     });
+  });
+
+  it("recovers desktop message ownership from partial structured identity", () => {
+    assert.equal(resolveOwnerAttribution({ ownerLabel: "EmmyMay" }), "EmmyMay's agent");
+    assert.equal(
+      resolveOwnerAttribution({ actorLabel: "Oak | EmmyMay's agent | Codex" }),
+      "EmmyMay's agent",
+    );
   });
 
   it("keeps anonymous and misclassified runtime names out of mention candidates", () => {
@@ -438,6 +603,176 @@ describe("room chat helpers", () => {
     assert.equal(cappedCandidates.some((candidate) => candidate.displayName === "Human6"), false);
   });
 
+  it("adds @everyone as the first room mention candidate", () => {
+    const candidates = roomMentionCandidates([
+      participant({
+        participantKey: "human:emmy",
+        displayName: "EmmyMay",
+        githubLogin: "emmymay",
+      }),
+      participant({
+        participantKey: "agent-presence:lumenvale",
+        kind: "agent",
+        displayName: "LumenVale",
+        actorLabel: "LumenVale",
+        agentKey: "cursor/lumenvale",
+        githubLogin: null,
+        ownerLabel: "EmmyMay",
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+    ], "");
+
+    assert.equal(candidates[0]?.participantKey, "room:everyone");
+    assert.equal(candidates[0]?.displayName, "everyone");
+    assert.equal(candidates[0]?.insertText, "everyone");
+    assert.equal(candidates[0]?.label, "Everyone");
+    assert.equal(candidates[1]?.displayName, "LumenVale");
+    assert.equal(candidates[1]?.label, "EmmyMay's agent");
+    assert.equal(roomMentionCandidates([participant({
+      participantKey: "agent-presence:lumenvale",
+      kind: "agent",
+      displayName: "LumenVale",
+      githubLogin: null,
+      ownerLabel: "EmmyMay",
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    })], "emmy")[0]?.displayName, "LumenVale");
+  });
+
+  it("filters the @everyone mention candidate by query", () => {
+    assert.equal(roomMentionCandidates([], "eve")[0]?.insertText, "everyone");
+    assert.equal(roomMentionCandidates([], "lumen").length, 0);
+  });
+
+  it("recovers mention ownership from actor labels and disambiguates duplicate agent names", () => {
+    const candidates = roomMentionCandidates([
+      participant({
+        participantKey: "agent:alice/oak",
+        kind: "agent",
+        displayName: "Oak",
+        actorLabel: "Oak | Alice's agent | Codex",
+        agentKey: "local/Alice/codex/oak",
+        githubLogin: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+      participant({
+        participantKey: "agent:bob/oak",
+        kind: "agent",
+        displayName: "Oak",
+        actorLabel: "Oak | Bob's agent | Codex",
+        agentKey: "local/Bob/codex/oak",
+        githubLogin: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+    ], "bob");
+
+    assert.equal(candidates[0]?.label, "Bob's agent");
+    assert.equal(candidates[0]?.insertText, "agent:local/Bob/codex/oak");
+  });
+
+  it("excludes duplicate agent names when no stable agent key can disambiguate them", () => {
+    const candidates = roomMentionCandidates([
+      participant({
+        participantKey: "agent:alice/oak",
+        kind: "agent",
+        displayName: "Oak",
+        actorLabel: "Oak | Alice's agent | Codex",
+        agentKey: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+      participant({
+        participantKey: "agent:bob/oak",
+        kind: "agent",
+        displayName: "Oak",
+        actorLabel: "Oak | Bob's agent | Codex",
+        agentKey: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+    ], "oak");
+
+    assert.deepEqual(candidates, []);
+  });
+
+  it("uses canonical handles for supervised names the desktop parser cannot address", () => {
+    const stable = roomMentionCandidates([participant({
+      participantKey: "agent:local/alice/codex/agent-smith",
+      kind: "agent",
+      displayName: "Agent Smith",
+      actorLabel: "Agent Smith | Alice's agent | Codex",
+      agentKey: "local/Alice/codex/agent-smith",
+      githubLogin: null,
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    })], "smith");
+    const unaddressable = roomMentionCandidates([participant({
+      participantKey: "agent:legacy-agent-smith",
+      kind: "agent",
+      displayName: "Agent Smith",
+      actorLabel: "Agent Smith | Alice's agent | Codex",
+      agentKey: null,
+      githubLogin: null,
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    })], "smith");
+
+    assert.equal(stable[0]?.insertText, "agent:local/Alice/codex/agent-smith");
+    assert.deepEqual(unaddressable, [], "the UI never inserts a label the activation parser would truncate");
+  });
+
+  it("shows and inserts a unique friendly Open Model codename", () => {
+    const candidates = roomMentionCandidates([participant({
+      participantKey: "desktop-supervisor-agent:supervised_1",
+      kind: "agent",
+      displayName: "GardenWinter",
+      actorLabel: "GardenWinter | EmmyMay's agent | Open Model",
+      agentKey: "EmmyMay/desktop-open-model-4d8fe3",
+      githubLogin: null,
+      activityState: "active",
+      sourceFlags: ["delivery", "presence"],
+    })], "garden");
+
+    assert.equal(candidates[0]?.displayName, "GardenWinter");
+    assert.equal(candidates[0]?.insertText, "GardenWinter");
+  });
+
+  it("falls back to exact durable handles when friendly supervised names collide", () => {
+    const candidates = roomMentionCandidates([
+      participant({
+        participantKey: "desktop-supervisor-agent:supervised_1",
+        kind: "agent",
+        displayName: "GardenWinter",
+        actorLabel: "GardenWinter | EmmyMay's agent | Open Model",
+        agentKey: "EmmyMay/desktop-open-model-first",
+        githubLogin: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+      participant({
+        participantKey: "desktop-supervisor-agent:supervised_2",
+        kind: "agent",
+        displayName: "GardenWinter",
+        actorLabel: "GardenWinter | EmmyMay's agent | Open Model",
+        agentKey: "EmmyMay/desktop-open-model-second",
+        githubLogin: null,
+        activityState: "active",
+        sourceFlags: ["delivery", "presence"],
+      }),
+    ], "garden");
+
+    assert.deepEqual(
+      candidates.map((candidate) => candidate.insertText),
+      [
+        "agent:EmmyMay/desktop-open-model-first",
+        "agent:EmmyMay/desktop-open-model-second",
+      ],
+    );
+  });
+
   it("maps GitHub room messages to desktop event cards", () => {
     const event = parseGitHubEvent({
       ...roomMessage("github_1", null),
@@ -478,7 +813,72 @@ describe("room chat helpers", () => {
   it("renders desktop message text with escaped markup and search highlights", () => {
     assert.equal(
       renderMessageText("Hello <script> @Noether **ship** https://example.com", "ship"),
-      'Hello &lt;script&gt; <span class="mention-token">@Noether</span> <strong><mark class="message-search-hit">ship</mark></strong> <a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a>',
+      '<p>Hello &lt;script&gt; <span class="mention-token">@Noether</span> <strong><mark class="message-search-hit">ship</mark></strong> <a href="https://example.com" target="_blank" rel="noopener noreferrer">https://example.com</a></p>',
+    );
+  });
+
+  it("links loaded message id references in desktop message text", () => {
+    assert.equal(
+      renderMessageText("See msg_6's note, not msg_99.", "", new Set(["msg_6"])),
+      '<p>See <button class="message-reference-link" type="button" data-message-reference-id="msg_6" title="Jump to msg_6">msg_6</button>\'s note, not msg_99.</p>',
+    );
+  });
+
+  it("does not link message id references inside code or URLs", () => {
+    assert.equal(
+      renderMessageText("Use `msg_6` or https://example.com/msg_6 before msg_7", "", new Set(["msg_6", "msg_7"])),
+      '<p>Use <code>msg_6</code> or <a href="https://example.com/msg_6" target="_blank" rel="noopener noreferrer">https://example.com/msg_6</a> before <button class="message-reference-link" type="button" data-message-reference-id="msg_7" title="Jump to msg_7">msg_7</button></p>',
+    );
+  });
+
+  it("links loaded task references to the Board", () => {
+    assert.equal(
+      renderMessageText(
+        "Continue task_42, then task_99.",
+        "",
+        undefined,
+        new Set(["task_42"]),
+      ),
+      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Open task_42 on the Board">task_42</button>, then task_99.</p>',
+    );
+  });
+
+  it("keeps task references linked when search highlights only part of the id", () => {
+    assert.equal(
+      renderMessageText(
+        "Continue task_42.",
+        "42",
+        undefined,
+        new Set(["task_42"]),
+      ),
+      '<p>Continue <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_42" title="Open task_42 on the Board">task_<mark class="message-search-hit">42</mark></button>.</p>',
+    );
+  });
+
+  it("highlights escaped HTML characters without breaking encoded message text", () => {
+    assert.equal(
+      renderMessageText('Say "quote" & <tag>.', '"quote"'),
+      '<p>Say <mark class="message-search-hit">&quot;quote&quot;</mark> &amp; &lt;tag&gt;.</p>',
+    );
+    assert.equal(
+      renderMessageText('Say "quote" & <tag>.', "&"),
+      '<p>Say &quot;quote&quot; <mark class="message-search-hit">&amp;</mark> &lt;tag&gt;.</p>',
+    );
+    assert.equal(
+      renderMessageText('Say "quote" & <tag>.', "<tag>"),
+      '<p>Say &quot;quote&quot; &amp; <mark class="message-search-hit">&lt;tag&gt;</mark>.</p>',
+    );
+  });
+
+  it("does not link task references inside code or existing links", () => {
+    assert.equal(
+      renderMessageText(
+        "Use `task_42` or https://example.com/task_42 before task_7",
+        "",
+        undefined,
+        new Set(["task_42", "task_7"]),
+      ),
+      '<p>Use <code>task_42</code> or <a href="https://example.com/task_42" target="_blank" rel="noopener noreferrer">https://example.com/task_42</a> before <button class="message-reference-link task-reference-link" type="button" data-task-reference-id="task_7" title="Open task_7 on the Board">task_7</button></p>',
     );
   });
 
@@ -501,6 +901,33 @@ describe("room chat helpers", () => {
       }),
       '<h2>Summary</h2><ul><li><strong>Ship</strong> <code>events</code></li><li>See <a href="https://example.com/?q=a&amp;b=c" target="_blank" rel="noopener noreferrer">https://example.com/?q=a&amp;b=c</a></li></ul><p>&lt;script&gt;</p>',
     );
+  });
+
+  it("renders safe block markdown in desktop message bubbles", () => {
+    assert.equal(
+      renderMessageText([
+        "## Review",
+        "",
+        "- **Approved**",
+        "- [x] Tests pass",
+        "",
+        "> Use `npm test`",
+        "",
+        "1. Ship",
+        "2. Monitor",
+        "",
+        "```ts",
+        'const safe = "<ok>"',
+        "```",
+      ].join("\n"), ""),
+      '<h2>Review</h2><ul><li><strong>Approved</strong></li><li><input class="markdown-task-checkbox" type="checkbox" disabled checked>Tests pass</li></ul><blockquote><p>Use <code>npm test</code></p></blockquote><ol><li>Ship</li><li>Monitor</li></ol><pre><code class="language-ts">const safe = &quot;&lt;ok&gt;&quot;</code></pre>',
+    );
+  });
+
+  it("bounds adversarial blockquote nesting in desktop messages", () => {
+    const html = renderMessageText(`${">".repeat(5_000)} safe`, "");
+    assert.match(html, /safe/);
+    assert.ok((html.match(/<blockquote>/g) || []).length <= 9);
   });
 });
 
@@ -532,6 +959,49 @@ function roomMessage(
           timestamp: "2026-05-28T00:00:00.000Z",
         }
       : null,
+  };
+}
+
+function managedAgentChangeSummary(): DesktopManagedAgentChangeSummary {
+  return {
+    sessionId: "local_session_1",
+    providerId: "codex",
+    repoRootPath: "/tmp/repo",
+    repoBranch: "main",
+    changedFileCount: 2,
+    stagedFileCount: 0,
+    unstagedFileCount: 1,
+    untrackedFileCount: 1,
+    additions: 8,
+    deletions: 1,
+    files: [
+      {
+        path: "apps/desktop/App.vue",
+        previousPath: null,
+        status: "modified",
+        additions: 8,
+        deletions: 1,
+        binary: false,
+        staged: false,
+        unstaged: true,
+        untracked: false,
+      },
+      {
+        path: "notes.md",
+        previousPath: null,
+        status: "untracked",
+        additions: 0,
+        deletions: 0,
+        binary: false,
+        staged: false,
+        unstaged: false,
+        untracked: true,
+      },
+    ],
+    hiddenFileCount: 0,
+    isGitRepo: true,
+    updatedAt: "2026-07-02T00:00:00.000Z",
+    error: null,
   };
 }
 
@@ -579,8 +1049,9 @@ function reasoningSession(id: string, updatedAt: string): DesktopReasoningSessio
   };
 }
 
-function presenceEntry(): DesktopAgentPresence {
+function presenceEntry(overrides: Partial<DesktopAgentPresence> = {}): DesktopAgentPresence {
   return {
+    agentKey: null,
     agentSessionId: "session_1",
     agentInstanceId: null,
     actorLabel: "Agent Smith | Codex",
@@ -598,5 +1069,6 @@ function presenceEntry(): DesktopAgentPresence {
     lastHeartbeatAt: "2026-05-28T02:00:00.000Z",
     roomId: "room_1",
     livenessObservation: null,
+    ...overrides,
   };
 }

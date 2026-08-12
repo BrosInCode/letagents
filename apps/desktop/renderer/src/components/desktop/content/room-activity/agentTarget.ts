@@ -6,6 +6,9 @@ export function activityParticipantToAgentTarget(
 ): AgentModalTarget {
   const displayName = participant.label || participant.actorLabel || "Agent";
   return {
+    messageId: null,
+    clientMessageId: null,
+    messageSource: null,
     actorLabel: participant.actorLabel,
     displayName,
     ownerAttribution: ownerAttribution(participant.ownerLabel),
