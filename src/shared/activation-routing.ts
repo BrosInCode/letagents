@@ -21,6 +21,15 @@ export type AgentMessageActivationReason =
   | "system_event"
   | "unaddressed";
 
+/**
+ * Repository events can contain text written by any external contributor.
+ * They remain visible room activity, but their text is never an instruction
+ * channel for a managed local worker.
+ */
+export function isUntrustedExternalActivationSource(source: unknown): boolean {
+  return normalizeSender(source) === "github";
+}
+
 export interface AgentMessageActivation {
   for_current_agent: {
     decision: AgentMessageActivationDecision;
@@ -198,7 +207,10 @@ export function decideAgentMessageActivation(
   identity: ActivationIdentity,
   context: AgentMessageActivationContext = {},
 ): AgentMessageActivation["for_current_agent"] {
-  if (normalizeSender(message.source) === "managed_agent_failure") {
+  if (
+    normalizeSender(message.source) === "managed_agent_failure"
+    || isUntrustedExternalActivationSource(message.source)
+  ) {
     return decision("silent", "system_event");
   }
 

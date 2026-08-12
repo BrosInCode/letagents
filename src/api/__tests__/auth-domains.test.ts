@@ -167,3 +167,25 @@ test("the facade preserves direct runtime export identities", async () => {
     }
   }
 });
+
+test("device authorization starts are bounded per caller and globally before GitHub requests", async () => {
+  const {
+    checkDeviceAuthStartRateLimit,
+    resetDeviceAuthStartRateLimitForTests,
+  } = await import("../routes/auth/index.js");
+  resetDeviceAuthStartRateLimitForTests();
+
+  for (let index = 0; index < 5; index += 1) {
+    assert.equal(checkDeviceAuthStartRateLimit("client-a", 1_000), true);
+  }
+  assert.equal(checkDeviceAuthStartRateLimit("client-a", 1_000), false);
+  assert.equal(checkDeviceAuthStartRateLimit("client-b", 1_000), true);
+
+  resetDeviceAuthStartRateLimitForTests();
+  for (let index = 0; index < 20; index += 1) {
+    assert.equal(checkDeviceAuthStartRateLimit(`client-${index}`, 1_000), true);
+  }
+  assert.equal(checkDeviceAuthStartRateLimit("client-over-global-limit", 1_000), false);
+  assert.equal(checkDeviceAuthStartRateLimit("client-over-global-limit", 61_001), true);
+  resetDeviceAuthStartRateLimitForTests();
+});

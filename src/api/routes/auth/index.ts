@@ -44,6 +44,65 @@ interface PendingDeviceAuth {
 
 const pendingDeviceAuths = new Map<string, PendingDeviceAuth>();
 const MAX_PENDING_DEVICE_AUTHS = 500;
+const DEVICE_AUTH_START_WINDOW_MS = 60_000;
+const DEVICE_AUTH_START_GLOBAL_MAX = 20;
+const DEVICE_AUTH_START_CLIENT_MAX = 5;
+const DEVICE_AUTH_START_CLIENT_CACHE_MAX = 10_000;
+
+type DeviceAuthStartWindow = { count: number; resetAt: number };
+let deviceAuthGlobalStartWindow: DeviceAuthStartWindow | null = null;
+const deviceAuthClientStartWindows = new Map<string, DeviceAuthStartWindow>();
+
+function consumeWindow(
+  current: DeviceAuthStartWindow | null,
+  limit: number,
+  now: number,
+): { allowed: boolean; window: DeviceAuthStartWindow } {
+  if (!current || current.resetAt <= now) {
+    return { allowed: true, window: { count: 1, resetAt: now + DEVICE_AUTH_START_WINDOW_MS } };
+  }
+  const next = { ...current, count: current.count + 1 };
+  return { allowed: next.count <= limit, window: next };
+}
+
+export function checkDeviceAuthStartRateLimit(clientKey: string, now = Date.now()): boolean {
+  for (const [key, window] of deviceAuthClientStartWindows) {
+    if (window.resetAt <= now) deviceAuthClientStartWindows.delete(key);
+  }
+  while (deviceAuthClientStartWindows.size >= DEVICE_AUTH_START_CLIENT_CACHE_MAX) {
+    const oldestKey = deviceAuthClientStartWindows.keys().next().value as string | undefined;
+    if (!oldestKey) break;
+    deviceAuthClientStartWindows.delete(oldestKey);
+  }
+
+  const normalizedClientKey = clientKey.trim().slice(0, 200) || "unknown";
+  const client = consumeWindow(
+    deviceAuthClientStartWindows.get(normalizedClientKey) ?? null,
+    DEVICE_AUTH_START_CLIENT_MAX,
+    now,
+  );
+  deviceAuthClientStartWindows.set(normalizedClientKey, client.window);
+  if (!client.allowed) return false;
+
+  const global = consumeWindow(
+    deviceAuthGlobalStartWindow,
+    DEVICE_AUTH_START_GLOBAL_MAX,
+    now,
+  );
+  deviceAuthGlobalStartWindow = global.window;
+  return global.allowed;
+}
+
+export function resetDeviceAuthStartRateLimitForTests(): void {
+  deviceAuthGlobalStartWindow = null;
+  deviceAuthClientStartWindows.clear();
+}
+
+function deviceAuthClientKey(req: AuthenticatedRequest): string {
+  const forwarded = req.headers["cf-connecting-ip"]
+    ?? req.headers["x-forwarded-for"]?.toString().split(",")[0];
+  return String(forwarded ?? req.socket.remoteAddress ?? "unknown").trim().slice(0, 200);
+}
 
 function cleanupExpiredDeviceAuths(): void {
   const now = Date.now();
@@ -148,7 +207,11 @@ export function registerAuthRoutes(app: Express): void {
     }
   });
 
-  app.post("/auth/device/start", async (_req, res) => {
+  app.post("/auth/device/start", async (req: AuthenticatedRequest, res) => {
+    if (!checkDeviceAuthStartRateLimit(deviceAuthClientKey(req))) {
+      res.status(429).json({ error: "Too many device authorization requests. Please slow down." });
+      return;
+    }
     cleanupExpiredDeviceAuths();
     if (pendingDeviceAuths.size >= MAX_PENDING_DEVICE_AUTHS) {
       res.status(429).json({ error: "Too many pending device authorization requests" });

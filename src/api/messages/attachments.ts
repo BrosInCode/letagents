@@ -15,6 +15,13 @@ export interface NormalizedMessageAttachmentReference {
   upload_id: string;
 }
 
+export function canStageMessageAttachment(input: {
+  authKind?: string | null;
+  sessionAccount?: unknown;
+}): boolean {
+  return Boolean(input.sessionAccount) || input.authKind === "agent_session";
+}
+
 function sanitizeFilename(value: string): string {
   const trimmed = value.trim().replace(/\\/g, "/").split("/").pop()?.trim() ?? "";
   const safe = trimmed
