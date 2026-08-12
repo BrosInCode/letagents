@@ -37,6 +37,9 @@ jobs:
       - name: Test workflow supply-chain policy
         run: npm run test:workflow-supply-chain
 
+      - name: Test production Docker context
+        run: npm run test:docker-context
+
       - name: Enforce dependency cooldown
         run: npm run verify:dependency-age
 
