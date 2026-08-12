@@ -207,9 +207,9 @@
         @refresh="refreshGitHubEvents"
         @load-older="loadOlderGitHubEvents"
         @install-github="installGitHubIntegration"
-        @clear-task-filter="eventsTaskFilterId = null"
+        @clear-task-filter="clearEventsTaskFilter"
         @open-task="openBoardTask"
-        @close-selected-event="eventsSelectedEventId = null"
+        @close-selected-event="closeSelectedGitHubEvent"
       />
 
       <RoomActivityTabView
@@ -340,9 +340,7 @@ import type {
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
   DesktopRoomMessage,
-  DesktopRoomThreadInboxPage,
   DesktopReasoningSession,
-  DesktopRentalRequest,
   DesktopSnapshotSourceStates,
   DesktopSupervisorManifestEntry,
   DesktopAgentStreamEvent,
@@ -355,13 +353,8 @@ import type {
 } from "../../../../../electron/ipc-types";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
 import { useDesktopActionToasts } from "../../../composables/useDesktopActionToasts";
-import { loadRentalProviderDashboard, useRentalProviderEvents } from "../../../composables/useRentalProviderEvents";
-import { mergeDesktopGitHubEventsPage } from "../../../domain/desktop-room-snapshots";
 import type { FocusRoomConcludedEvent } from "../../../domain/focus-room-conclusion";
-import {
-  isLocalGitRoom,
-  roomSupportsGitHubIntegration,
-} from "../../../domain/git-rooms";
+import { isLocalGitRoom } from "../../../domain/git-rooms";
 import {
   activeManagedAgentWorkIndicators,
   managedAgentSessionDisplayName,
@@ -462,26 +455,14 @@ import {
 import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
-import type { ComposerEventPreview } from "./room-chat/RoomComposerEventChips.vue";
-import { buildComposerEventPreview } from "./room-chat/composer-event-preview";
 import type {
   AgentInspectorSelection,
   AgentInspectorRequest,
   AgentModalTarget,
-  GitHubEventPresentation,
 } from "./desktop-chat-message/types";
-import {
-  isLowSignalGitHubCheckMessage,
-  parseGitHubEvent,
-} from "./desktop-chat-message/github-event";
-import {
-  buildDesktopInboxItems,
-  deriveInboxDegradation,
-  desktopInboxItemFingerprint,
-  type DesktopInboxFilter,
-  type DesktopInboxItem,
-} from "./room-inbox/items";
 import { useDesktopRoomGitHub } from "./room-shell/useDesktopRoomGitHub";
+import { useDesktopRoomGitHubEvents } from "./room-shell/useDesktopRoomGitHubEvents";
+import { useDesktopRoomInbox } from "./room-shell/useDesktopRoomInbox";
 import { useDesktopRoomMessages } from "./room-shell/useDesktopRoomMessages";
 import {
   useDesktopRoomPreferences,
@@ -490,8 +471,6 @@ import {
 import { useDesktopRoomSearch } from "./room-shell/useDesktopRoomSearch";
 import { isThreadReplyMessage } from "./room-shell/threading";
 import { desktopIpc } from "../../../ipc/index.js";
-
-type RoomTabIndicatorTone = NonNullable<NonNullable<RoomTab["indicator"]>["tone"]>;
 
 const props = defineProps<{
   sidebarMode: SidebarMode;
@@ -577,7 +556,6 @@ let agentInspectorRoomMoveRecoveryTimer: number | null = null;
 let agentInspectorWorkRequestToken = 0;
 const rulesOpen = ref(false);
 const { copied: roomLinkCopied, copy: copyRoomLinkToClipboard } = useCopyIndicator(1400);
-const inboxFilter = ref<DesktopInboxFilter>("actionable");
 const deliveryRetryCoordinator = createRoomDeliveryRetryCoordinator();
 const deliveryRetryingKeys = deliveryRetryCoordinator.retryingKeys;
 const continuationRepairCoordinator = createRoomDeliveryRetryCoordinator();
@@ -586,25 +564,6 @@ const roomDeliverySkipCoordinator = createRoomDeliveryRetryCoordinator();
 const roomDeliverySkippingKeys = roomDeliverySkipCoordinator.retryingKeys;
 const deliveryRetryNegotiated = ref(false);
 const deliveryRetryAvailable = computed(() => deliveryRetryNegotiated.value && typeof desktopIpc.supervisor?.retryRoomDelivery === "function");
-const threadInboxPage = ref<DesktopRoomThreadInboxPage | null>(null);
-const inboxLoading = ref(false);
-const inboxLoadingOlder = ref(false);
-const inboxError = ref<string | null>(null);
-const inboxLoadedKey = ref<string | null>(null);
-const inboxDismissals = ref<Record<string, string>>({});
-const lastClearedInboxItem = ref<DesktopInboxItem | null>(null);
-const inboxSeenFingerprints = ref<string[]>([]);
-const inboxUnseenCount = ref(0);
-const inboxSeenInitialized = ref(false);
-const rentalRequests = ref<DesktopRentalRequest[]>([]);
-const rentalRequestsUnavailable = ref(false);
-const eventsPage = ref<DesktopGitHubEventsPage | null>(props.githubEvents);
-const eventsLoading = ref(false);
-const eventsLoadingOlder = ref(false);
-const eventsError = ref<string | null>(null);
-const eventsTaskFilterId = ref<string | null>(null);
-const eventsSelectedEventId = ref<string | null>(null);
-const eventsLoadedOlderWithoutMatches = ref(false);
 const boardSelectedTaskId = ref<string | null>(null);
 const activityHistoryRequest = ref(0);
 const artifactTimelineTaskFilterId = ref<string | null>(null);
@@ -612,9 +571,6 @@ const storageBusy = ref(false);
 const githubEventsVisible = ref(readGitHubEventsVisible(props.room.identifier));
 const environmentPanelOpen = ref(readEnvironmentPanelOpen(props.room.identifier));
 const refreshedEnvironmentRepoStatus = ref<RepoStatus | null>(null);
-const composerGitHubEventPreviews = ref<ComposerEventPreview[]>([]);
-const eventsUnseenCount = ref(0);
-const eventsUnseenTone = ref<RoomTabIndicatorTone>("info");
 const managedAgentSessions = ref<DesktopManagedAgentSession[]>([]);
 const supervisorEntries = ref<DesktopSupervisorManifestEntry[]>([]);
 const supervisorEntriesState = ref<SupervisorEntriesResource["state"]>("loading");
@@ -721,10 +677,6 @@ provide(managedAgentSessionsKey, {
 });
 const composerPermissionError = ref<string | null>(null);
 const resolvingComposerPermissionIds = ref<Record<string, DesktopManagedAgentPermissionDecisionBehavior>>({});
-let githubEventsRefreshTimer: number | null = null;
-const composerGitHubEventTimers = new Map<string, number>();
-let inboxRefreshTimer: number | null = null;
-let inboxUndoTimer: number | null = null;
 let managedAgentSessionsRefreshTimer: number | null = null;
 let managedAgentSessionsRefreshRequestId = 0;
 let managedAgentSessionsMutationVersion = 0;
@@ -744,14 +696,11 @@ let supervisorStateSequence = 0;
 let pendingSupervisorStateSnapshot: DesktopSupervisorStateSnapshot | null = null;
 let supervisorStateFrame: number | null = null;
 let environmentRepoStatusRefreshRequestId = 0;
-let inboxReloadAfterCurrentLoad = false;
-let inboxThreadBaselinePending = false;
 const roomUrl = computed(() =>
   buildLetAgentsRoomCopyValue(props.room.identifier, {
     localOnly: props.storage.localRoom?.publishStatus === "local_only",
   })
 );
-const isGitHubIntegrationRoom = computed(() => roomSupportsGitHubIntegration(props.room));
 const localGitRoom = computed(() => isLocalGitRoom(props.room));
 const isLocalRoom = computed(() => props.storage.effectiveMode === "local");
 const messageNamespace = computed(() =>
@@ -761,8 +710,6 @@ const messageNamespace = computed(() =>
     props.storage.localRoom?.roomIdentifier || "cloud",
   ].join(":")
 );
-inboxDismissals.value = readInboxDismissals(messageNamespace.value);
-
 const {
   soundEnabled,
   notificationsEnabled,
@@ -837,23 +784,39 @@ const {
   refreshRoom: () => emit("refresh-room"),
 });
 
-const githubRepository = computed(() =>
-  githubStatus.value?.repository?.fullName
-  || repoRepositoryFromRoomIdentifier(props.room.identifier)
-  || eventsPage.value?.githubRoomIdentifier
-  || null
-);
-
-const githubEventsAvailable = computed(() =>
-  !localGitRoom.value && (
-    isGitHubIntegrationRoom.value
-    || Boolean(githubStatus.value?.connected)
-    || Boolean(eventsPage.value?.events.length)
-    || props.messages.some(shouldRefreshEventsForMessage)
-  )
-);
-
-const showEventsTab = computed(() => githubEventsAvailable.value);
+const {
+  eventsPage,
+  eventsLoading,
+  eventsLoadingOlder,
+  eventsError,
+  eventsTaskFilterId,
+  eventsSelectedEventId,
+  eventsLoadedOlderWithoutMatches,
+  composerGitHubEventPreviews,
+  eventsUnseenCount,
+  eventsUnseenTone,
+  githubRepository,
+  showEventsTab,
+  openEventsTab,
+  refreshGitHubEvents,
+  loadOlderGitHubEvents,
+  openEventsForTask,
+  openEventById,
+  clearTaskFilter: clearEventsTaskFilter,
+  closeSelectedEvent: closeSelectedGitHubEvent,
+  openGitHubEventFromChat,
+  openGitHubUrlExternally,
+  dismissComposerGitHubEventPreview,
+} = useDesktopRoomGitHubEvents({
+  room: roomRef,
+  messages: messagesRef,
+  initialPage: toRef(props, "githubEvents"),
+  activeTab,
+  localGitRoom,
+  githubConnected: computed(() => Boolean(githubStatus.value?.connected)),
+  connectedRepository: computed(() => githubStatus.value?.repository?.fullName || null),
+});
+const githubEventsAvailable = showEventsTab;
 const showEnvironmentPanelWidget = computed(() =>
   activeTab.value === "chat" && Boolean(props.room.gitRoom) && !actionPanelOpen.value && !searchOpen.value
 );
@@ -927,46 +890,50 @@ const localAgentWork = computed(() =>
 const pendingPermissionApprovals = computed(() =>
   pendingManagedAgentPermissionApprovals(roomManagedAgentSessions.value, props.room.identifier)
 );
-const rawInboxItems = computed(() =>
-  buildDesktopInboxItems({
-    filter: inboxFilter.value,
-    threadPage: threadInboxPage.value,
-    tasks: props.tasks,
-    githubEvents: eventsPage.value?.events || [],
-    reasoningSessions: props.reasoningSessions,
-    presence: roomPresence.value,
-    rentalRequests: rentalRequests.value,
-    fallbackRepository: githubRepository.value,
-  })
-);
-const inboxItems = computed(() =>
-  rawInboxItems.value.filter((item) => !isInboxItemDismissed(item))
-);
-const inboxActionableCount = computed(() =>
-  inboxItems.value.filter((item) => item.actionable).length
-);
-const inboxActionableFingerprints = computed(() =>
-  inboxItems.value
-    .filter((item) => item.actionable)
-    .map(desktopInboxItemFingerprint)
-);
-const inboxHasMore = computed(() => Boolean(threadInboxPage.value?.hasMore));
-const inboxDegradation = computed(() => {
-  const snapshotDegradation = deriveInboxDegradation(props.sourceStates ?? null);
-  return rentalRequestsUnavailable.value
-    ? { ...snapshotDegradation, sources: [...snapshotDegradation.sources, "Rental requests"] }
-    : snapshotDegradation;
+const {
+  inboxFilter,
+  inboxLoading,
+  inboxLoadingOlder,
+  inboxError,
+  lastClearedInboxItem,
+  inboxUnseenCount,
+  inboxItems,
+  inboxActionableCount,
+  inboxHasMore,
+  inboxDegradation,
+  loadOlderInboxThreads,
+  handleInboxRefresh,
+  openInboxThread,
+  clearInboxItem,
+  restoreInboxItem,
+  handleThreadRead,
+  openBoardTask,
+  openInboxGitHubEvent,
+  scheduleInboxRefresh,
+} = useDesktopRoomInbox({
+  room: roomRef,
+  namespace: messageNamespace,
+  activeTab,
+  tasks: toRef(props, "tasks"),
+  githubEvents: eventsPage,
+  reasoningSessions: reasoningSessionsRef,
+  presence: roomPresence,
+  sourceStates: computed(() => props.sourceStates ?? null),
+  fallbackRepository: githubRepository,
+  openThread: async (rootMessageId) => {
+    activeTab.value = "chat";
+    await nextTick();
+    roomChatView.value?.openThread(rootMessageId);
+  },
+  openBoardTask: (taskId) => {
+    boardSelectedTaskId.value = taskId;
+    activeTab.value = "board";
+  },
+  openGitHubEvent: (eventId) => {
+    openEventById(eventId);
+  },
+  refreshRoom: () => emit("refresh-room"),
 });
-
-watch(() => props.githubEvents, (nextPage) => {
-  if (!nextPage) {
-    if (!eventsPage.value || eventsPage.value.roomIdentifier !== props.room.identifier) {
-      eventsPage.value = null;
-    }
-    return;
-  }
-  eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
-}, { immediate: true });
 
 watch(() => props.room.identifier, () => {
   selectedAgentDetailRequestVersion.value += 1;
@@ -976,7 +943,6 @@ watch(() => props.room.identifier, () => {
   agentInspectorWorkResource.value = emptyAgentInspectorWorkResource();
   agentInspectorWorkSourceMessageId.value = null;
   activeTab.value = readRoomActiveTab(props.room.identifier);
-  eventsPage.value = props.githubEvents;
   refreshedEnvironmentRepoStatus.value = null;
   managedAgentSessions.value = [];
   supervisorEntries.value = [];
@@ -986,15 +952,9 @@ watch(() => props.room.identifier, () => {
   supervisorEntriesUpdatedAt.value = null;
   composerPermissionError.value = null;
   resolvingComposerPermissionIds.value = {};
-  eventsTaskFilterId.value = null;
-  eventsSelectedEventId.value = null;
   boardSelectedTaskId.value = null;
-  eventsError.value = null;
-  eventsLoadedOlderWithoutMatches.value = false;
   githubEventsVisible.value = readGitHubEventsVisible(props.room.identifier);
   environmentPanelOpen.value = readEnvironmentPanelOpen(props.room.identifier);
-  clearComposerGitHubEventPreviews();
-  resetEventsIndicator();
   supervisorStateLastRepairAtMs = null;
   void refreshManagedAgentSessions();
   scheduleManagedAgentSessionsRepair();
@@ -1003,18 +963,6 @@ watch(() => props.room.identifier, () => {
 watch(() => props.repoStatus, () => {
   refreshedEnvironmentRepoStatus.value = null;
 });
-
-watch(messageNamespace, () => {
-  inboxDismissals.value = readInboxDismissals(messageNamespace.value);
-  clearInboxUndoState();
-  const hasSeenState = hydrateInboxIndicatorState(messageNamespace.value);
-  resetInboxState();
-  inboxThreadBaselinePending = !hasSeenState;
-  if (inboxThreadBaselinePending) {
-    acknowledgeInboxItems();
-  }
-  void loadInboxThreads({ baselineIndicator: inboxThreadBaselinePending }).catch(() => undefined);
-}, { immediate: true });
 
 watch(addAgentModalOpen, (open) => {
   if (open) {
@@ -1058,39 +1006,7 @@ watch(isLocalRoom, (local) => {
 
 watch(activeTab, (tab) => {
   rememberRoomActiveTab(props.room.identifier, tab);
-  if (tab === "events" && showEventsTab.value && !eventsPage.value && !eventsLoading.value) {
-    void refreshGitHubEvents().catch(() => undefined);
-  }
-  if (tab === "events") {
-    resetEventsIndicator();
-  }
-  if (tab === "inbox" && inboxLoadedKey.value !== currentInboxLoadKey() && !inboxLoading.value) {
-    void loadInboxThreads().catch(() => undefined);
-  }
-  if (tab === "inbox") {
-    void loadRentalRequests();
-    acknowledgeInboxItems();
-  }
 }, { flush: "sync" });
-
-watch(inboxFilter, () => {
-  resetInboxState();
-  void loadInboxThreads({ baselineIndicator: !inboxSeenInitialized.value }).catch(() => undefined);
-});
-
-watch(inboxActionableFingerprints, (fingerprints) => {
-  if (activeTab.value === "inbox") {
-    acknowledgeInboxItems(fingerprints);
-    return;
-  }
-  if (!inboxSeenInitialized.value) {
-    inboxUnseenCount.value = 0;
-    return;
-  }
-
-  const seen = new Set(inboxSeenFingerprints.value);
-  inboxUnseenCount.value = fingerprints.filter((fingerprint) => !seen.has(fingerprint)).length;
-}, { immediate: true });
 
 watch(() => props.messages.at(-1)?.id || null, () => {
   const latestMessage = props.messages.at(-1);
@@ -1098,13 +1014,6 @@ watch(() => props.messages.at(-1)?.id || null, () => {
   if (isThreadReplyMessage(latestMessage)) {
     scheduleInboxRefresh(activeTab.value === "inbox" ? 200 : 700);
   }
-  if (!showEventsTab.value || !shouldRefreshEventsForMessage(latestMessage)) return;
-  if (!shouldPreviewComposerEvent(latestMessage)) {
-    scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
-    return;
-  }
-  ingestComposerGitHubEvent(latestMessage);
-  scheduleGitHubEventsRefresh(activeTab.value === "events" ? 250 : 900);
 });
 
 watch(
@@ -1121,19 +1030,6 @@ onBeforeUnmount(() => {
   managedAgentSessionsRefreshOwnerActive = false;
   managedAgentSessionsRefreshQueued = false;
   managedAgentSessionsRefreshRequestId += 1;
-  if (githubEventsRefreshTimer !== null) {
-    window.clearTimeout(githubEventsRefreshTimer);
-    githubEventsRefreshTimer = null;
-  }
-  clearComposerGitHubEventPreviews();
-  if (inboxRefreshTimer !== null) {
-    window.clearTimeout(inboxRefreshTimer);
-    inboxRefreshTimer = null;
-  }
-  if (inboxUndoTimer !== null) {
-    window.clearTimeout(inboxUndoTimer);
-    inboxUndoTimer = null;
-  }
   stopManagedAgentSessionsRefreshTimer();
   supervisorStatusRequestToken += 1;
   agentInspectorSettingsRequestToken += 1;
@@ -1162,7 +1058,6 @@ onBeforeUnmount(() => {
 });
 
 onMounted(() => {
-  void loadRentalRequests();
   document.addEventListener("visibilitychange", handleManagedAgentSessionsVisibilityChange);
   unsubscribeManagedAgentSessionUpdate = desktopIpc.workers?.onManagedAgentSessionUpdate?.((session) => {
     if (!managedAgentSessionMatchesRoom(session, props.room.identifier)) {
@@ -1359,347 +1254,6 @@ function rememberRoomActiveTab(roomIdentifier: string, tab: RoomTabId): void {
   }
 }
 
-function currentInboxLoadKey(): string {
-  return `${messageNamespace.value}:${inboxFilter.value}`;
-}
-
-function resetInboxIndicatorState(): void {
-  inboxSeenFingerprints.value = [];
-  inboxUnseenCount.value = 0;
-  inboxSeenInitialized.value = false;
-}
-
-function acknowledgeInboxItems(fingerprints = inboxActionableFingerprints.value): void {
-  inboxSeenFingerprints.value = [...new Set(fingerprints)];
-  inboxUnseenCount.value = 0;
-  inboxSeenInitialized.value = true;
-  writeInboxSeenFingerprints(messageNamespace.value, inboxSeenFingerprints.value);
-}
-
-function inboxSeenStorageKey(namespace: string): string {
-  return `letagents-desktop:room-inbox-seen:${namespace}`;
-}
-
-function hydrateInboxIndicatorState(namespace: string): boolean {
-  const fingerprints = readInboxSeenFingerprints(namespace);
-  if (fingerprints === null) {
-    resetInboxIndicatorState();
-    return false;
-  }
-  inboxSeenFingerprints.value = fingerprints;
-  inboxUnseenCount.value = 0;
-  inboxSeenInitialized.value = true;
-  return true;
-}
-
-function readInboxSeenFingerprints(namespace: string): string[] | null {
-  try {
-    const raw = window.localStorage.getItem(inboxSeenStorageKey(namespace));
-    if (raw === null) return null;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return null;
-    if (!parsed.every((item) => typeof item === "string")) return null;
-    return [...new Set(parsed)];
-  } catch {
-    return null;
-  }
-}
-
-function writeInboxSeenFingerprints(namespace: string, fingerprints: string[]): void {
-  try {
-    window.localStorage.setItem(inboxSeenStorageKey(namespace), JSON.stringify(fingerprints));
-  } catch {
-    // The indicator can fall back to the in-memory baseline when storage is unavailable.
-  }
-}
-
-function inboxDismissalsStorageKey(namespace: string): string {
-  return `letagents-desktop:room-inbox-dismissals:${namespace}`;
-}
-
-function readInboxDismissals(namespace: string): Record<string, string> {
-  try {
-    const parsed = JSON.parse(window.localStorage.getItem(inboxDismissalsStorageKey(namespace)) || "{}");
-    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return {};
-    return Object.fromEntries(
-      Object.entries(parsed).filter((entry): entry is [string, string] => typeof entry[1] === "string"),
-    );
-  } catch {
-    return {};
-  }
-}
-
-function writeInboxDismissals(namespace: string, dismissals: Record<string, string>): void {
-  try {
-    window.localStorage.setItem(inboxDismissalsStorageKey(namespace), JSON.stringify(dismissals));
-  } catch {
-    // Clearing the current view should still work even when storage is unavailable.
-  }
-}
-
-function resetInboxState(): void {
-  threadInboxPage.value = null;
-  inboxLoading.value = false;
-  inboxLoadingOlder.value = false;
-  inboxError.value = null;
-  inboxLoadedKey.value = null;
-  inboxReloadAfterCurrentLoad = false;
-  if (inboxRefreshTimer !== null) {
-    window.clearTimeout(inboxRefreshTimer);
-    inboxRefreshTimer = null;
-  }
-}
-
-async function loadInboxThreads(options: { append?: boolean; baselineIndicator?: boolean } = {}): Promise<void> {
-  const roomApi = desktopIpc.room;
-  const requestKey = currentInboxLoadKey();
-  const append = Boolean(options.append);
-  const shouldBaselineIndicator = !append && (options.baselineIndicator || inboxThreadBaselinePending);
-  if (!roomApi?.getThreads) {
-    threadInboxPage.value = { threads: [], hasMore: false, unreadThreadCount: 0 };
-    inboxLoadedKey.value = requestKey;
-    if (shouldBaselineIndicator) {
-      acknowledgeInboxItems();
-      inboxThreadBaselinePending = false;
-    }
-    return;
-  }
-  if (append) {
-    if (inboxLoadingOlder.value || !threadInboxPage.value?.hasMore) return;
-  } else if (inboxLoading.value) {
-    inboxReloadAfterCurrentLoad = true;
-    return;
-  }
-
-  const before = append
-    ? threadInboxPage.value?.threads.at(-1)?.summary.latestReply?.id || null
-    : null;
-  if (append && !before) return;
-  if (append) {
-    inboxLoadingOlder.value = true;
-  } else {
-    inboxLoading.value = true;
-  }
-  inboxError.value = null;
-
-  try {
-    const page = await roomApi.getThreads(
-      props.room.identifier,
-      inboxFilter.value === "actionable" ? "unread" : "all",
-      before,
-      75,
-    );
-    if (currentInboxLoadKey() !== requestKey) return;
-    threadInboxPage.value = append && threadInboxPage.value
-      ? mergeThreadInboxPages(threadInboxPage.value, page)
-      : page;
-    inboxLoadedKey.value = requestKey;
-    if (shouldBaselineIndicator) {
-      acknowledgeInboxItems();
-      inboxThreadBaselinePending = false;
-    }
-  } catch (error) {
-    if (currentInboxLoadKey() === requestKey) {
-      inboxError.value = error instanceof Error ? error.message : "Inbox could not be loaded.";
-    }
-  } finally {
-    const shouldReload = !append && inboxReloadAfterCurrentLoad && currentInboxLoadKey() === requestKey;
-    if (currentInboxLoadKey() === requestKey) {
-      inboxLoading.value = false;
-      inboxLoadingOlder.value = false;
-    }
-    if (shouldReload) {
-      inboxReloadAfterCurrentLoad = false;
-      void loadInboxThreads().catch(() => undefined);
-    }
-  }
-}
-
-function loadOlderInboxThreads(): void {
-  void loadInboxThreads({ append: true });
-}
-
-function handleInboxRefresh(): void {
-  // Always reload the thread inbox. If snapshot-backed inbox sources (tasks,
-  // GitHub events, agent sessions, presence) are degraded, also ask the app to
-  // re-fetch the room snapshot so a retry can recover them, not just the threads.
-  void loadInboxThreads().catch(() => undefined);
-  void loadRentalRequests();
-  if (inboxDegradation.value.degraded) {
-    emit("refresh-room");
-  }
-}
-
-async function loadRentalRequests(): Promise<void> {
-  if (!desktopIpc.rental?.getProviderDashboard) return;
-  try {
-    const dashboard = await loadRentalProviderDashboard();
-    rentalRequests.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests : [];
-    rentalRequestsUnavailable.value = false;
-  } catch {
-    rentalRequests.value = [];
-    rentalRequestsUnavailable.value = true;
-  }
-}
-
-useRentalProviderEvents(() => {
-  void loadRentalRequests();
-});
-
-function mergeThreadInboxPages(
-  current: DesktopRoomThreadInboxPage,
-  next: DesktopRoomThreadInboxPage,
-): DesktopRoomThreadInboxPage {
-  const threadsByRoot = new Map(current.threads.map((item) => [item.root.id, item]));
-  for (const item of next.threads) {
-    threadsByRoot.set(item.root.id, item);
-  }
-  return {
-    threads: [...threadsByRoot.values()],
-    hasMore: next.hasMore,
-    unreadThreadCount: next.unreadThreadCount,
-  };
-}
-
-async function openInboxThread(item: Extract<DesktopInboxItem, { kind: "thread" }>): Promise<void> {
-  activeTab.value = "chat";
-  await nextTick();
-  roomChatView.value?.openThread(item.root.id);
-}
-
-function clearInboxItem(item: DesktopInboxItem): void {
-  dismissInboxItem(item);
-  showInboxUndo(item);
-}
-
-function dismissInboxItem(item: DesktopInboxItem): void {
-  const nextDismissals = {
-    ...inboxDismissals.value,
-    [item.id]: desktopInboxItemFingerprint(item),
-  };
-  inboxDismissals.value = nextDismissals;
-  writeInboxDismissals(messageNamespace.value, nextDismissals);
-}
-
-function restoreInboxItem(item: DesktopInboxItem): void {
-  const nextDismissals = { ...inboxDismissals.value };
-  delete nextDismissals[item.id];
-  inboxDismissals.value = nextDismissals;
-  writeInboxDismissals(messageNamespace.value, nextDismissals);
-  clearInboxUndoState();
-}
-
-function showInboxUndo(item: DesktopInboxItem): void {
-  lastClearedInboxItem.value = item;
-  if (inboxUndoTimer !== null) {
-    window.clearTimeout(inboxUndoTimer);
-  }
-  inboxUndoTimer = window.setTimeout(() => {
-    clearInboxUndoState();
-  }, 8_000);
-}
-
-function clearInboxUndoState(): void {
-  lastClearedInboxItem.value = null;
-  if (inboxUndoTimer !== null) {
-    window.clearTimeout(inboxUndoTimer);
-    inboxUndoTimer = null;
-  }
-}
-
-function isInboxItemDismissed(item: DesktopInboxItem): boolean {
-  return inboxDismissals.value[item.id] === desktopInboxItemFingerprint(item);
-}
-
-function handleThreadRead(threadRootId: string, summary: DesktopRoomThreadInboxPage["threads"][number]["summary"]): void {
-  const page = threadInboxPage.value;
-  if (!page) return;
-  const previous = page.threads.find((item) => item.root.id === threadRootId);
-  if (!previous) return;
-  const previousUnread = previous.summary.unreadCount > 0 ? 1 : 0;
-  const nextUnread = summary.unreadCount > 0 ? 1 : 0;
-  threadInboxPage.value = {
-    ...page,
-    unreadThreadCount: Math.max(0, page.unreadThreadCount - previousUnread + nextUnread),
-    threads: page.threads.map((item) =>
-      item.root.id === threadRootId
-        ? { ...item, root: { ...item.root, thread: summary }, summary }
-        : item
-    ),
-  };
-}
-
-function openBoardTask(taskId: string): void {
-  boardSelectedTaskId.value = taskId;
-  activeTab.value = "board";
-}
-
-function openInboxGitHubEvent(eventId: string): void {
-  eventsTaskFilterId.value = null;
-  eventsSelectedEventId.value = eventId;
-  activeTab.value = "events";
-}
-
-function openEventsTab(): void {
-  if (!showEventsTab.value) return;
-  eventsTaskFilterId.value = null;
-  eventsSelectedEventId.value = null;
-  activeTab.value = "events";
-}
-
-function scheduleInboxRefresh(delayMs: number): void {
-  if (inboxRefreshTimer !== null) {
-    window.clearTimeout(inboxRefreshTimer);
-  }
-  inboxRefreshTimer = window.setTimeout(() => {
-    inboxRefreshTimer = null;
-    void loadInboxThreads().catch(() => undefined);
-  }, delayMs);
-}
-
-async function refreshGitHubEvents(): Promise<void> {
-  if (!showEventsTab.value || !desktopIpc.room?.getGitHubEvents) return;
-  eventsLoading.value = true;
-  eventsError.value = null;
-  try {
-    const nextPage = await desktopIpc.room.getGitHubEvents(props.room.identifier, { limit: 100 });
-    eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
-  } catch (error) {
-    eventsError.value = error instanceof Error ? error.message : "GitHub events could not be loaded.";
-  } finally {
-    eventsLoading.value = false;
-  }
-}
-
-async function loadOlderGitHubEvents(): Promise<void> {
-  if (!showEventsTab.value || !desktopIpc.room?.getGitHubEvents || eventsLoadingOlder.value) return;
-  const after = eventsPage.value?.events.at(-1)?.id || null;
-  if (!after) return;
-  eventsLoadingOlder.value = true;
-  eventsError.value = null;
-  eventsLoadedOlderWithoutMatches.value = false;
-  const beforeCount = eventsPage.value?.events.length || 0;
-  try {
-    const nextPage = await desktopIpc.room.getGitHubEvents(props.room.identifier, {
-      limit: 100,
-      after,
-    });
-    eventsPage.value = mergeDesktopGitHubEventsPage(eventsPage.value, nextPage);
-    eventsLoadedOlderWithoutMatches.value = Boolean(nextPage.events.length && (eventsPage.value?.events.length || 0) === beforeCount);
-  } catch (error) {
-    eventsError.value = error instanceof Error ? error.message : "Older GitHub events could not be loaded.";
-  } finally {
-    eventsLoadingOlder.value = false;
-  }
-}
-
-function openEventsForTask(taskId: string): void {
-  if (!showEventsTab.value) return;
-  eventsTaskFilterId.value = taskId;
-  eventsSelectedEventId.value = null;
-  activeTab.value = "events";
-}
-
 function openArtifactsForTask(taskId: string): void {
   boardSelectedTaskId.value = taskId;
   artifactTimelineTaskFilterId.value = taskId;
@@ -1707,93 +1261,6 @@ function openArtifactsForTask(taskId: string): void {
   activeTab.value = "activity";
 }
 
-async function openGitHubEventFromChat(url: string): Promise<void> {
-  if (!showEventsTab.value) return;
-  eventsTaskFilterId.value = null;
-  activeTab.value = "events";
-  const firstMatch = findEventByUrl(url);
-  if (firstMatch) {
-    eventsSelectedEventId.value = firstMatch.id;
-    return;
-  }
-  await refreshGitHubEvents();
-  eventsSelectedEventId.value = findEventByUrl(url)?.id || null;
-}
-
-async function openGitHubUrlExternally(url: string): Promise<void> {
-  if (desktopIpc.app?.openGitHubUrl) {
-    await desktopIpc.app.openGitHubUrl(url);
-    return;
-  }
-  await desktopIpc.auth?.openVerification?.(url);
-}
-
-function scheduleGitHubEventsRefresh(delayMs: number): void {
-  if (!showEventsTab.value) return;
-  if (githubEventsRefreshTimer !== null) {
-    window.clearTimeout(githubEventsRefreshTimer);
-  }
-  githubEventsRefreshTimer = window.setTimeout(() => {
-    githubEventsRefreshTimer = null;
-    void refreshGitHubEvents().catch(() => undefined);
-  }, delayMs);
-}
-
-function ingestComposerGitHubEvent(message: DesktopRoomMessage): void {
-  if (activeTab.value === "events" || isLowSignalGitHubCheckMessage(message)) return;
-  const event = parseGitHubEvent(message);
-  if (!event) return;
-  eventsUnseenCount.value = Math.min(99, eventsUnseenCount.value + 1);
-  eventsUnseenTone.value = eventTabIndicatorTone(event.tone);
-  addComposerGitHubEventPreview(message.id, event);
-}
-
-function addComposerGitHubEventPreview(messageId: string, event: GitHubEventPresentation): void {
-  const preview = buildComposerEventPreview(messageId, event, props.room, eventsPage.value?.events || []);
-  const existingTimer = composerGitHubEventTimers.get(messageId);
-  if (existingTimer !== undefined) window.clearTimeout(existingTimer);
-  composerGitHubEventPreviews.value = [
-    ...composerGitHubEventPreviews.value.filter((item) => item.id !== messageId),
-    preview,
-  ].slice(-1);
-  for (const staleId of [...composerGitHubEventTimers.keys()]) {
-    if (composerGitHubEventPreviews.value.some((item) => item.id === staleId)) continue;
-    const timer = composerGitHubEventTimers.get(staleId);
-    if (timer !== undefined) window.clearTimeout(timer);
-    composerGitHubEventTimers.delete(staleId);
-  }
-  composerGitHubEventTimers.set(messageId, window.setTimeout(() => {
-    composerGitHubEventTimers.delete(messageId);
-    composerGitHubEventPreviews.value = composerGitHubEventPreviews.value.filter((item) => item.id !== messageId);
-  }, 8000));
-}
-
-function clearComposerGitHubEventPreviews(): void {
-  for (const timer of composerGitHubEventTimers.values()) {
-    window.clearTimeout(timer);
-  }
-  composerGitHubEventTimers.clear();
-  composerGitHubEventPreviews.value = [];
-}
-
-function dismissComposerGitHubEventPreview(messageId: string): void {
-  const timer = composerGitHubEventTimers.get(messageId);
-  if (timer !== undefined) window.clearTimeout(timer);
-  composerGitHubEventTimers.delete(messageId);
-  composerGitHubEventPreviews.value = composerGitHubEventPreviews.value.filter((item) => item.id !== messageId);
-}
-
-function resetEventsIndicator(): void {
-  eventsUnseenCount.value = 0;
-  eventsUnseenTone.value = "info";
-}
-
-function eventTabIndicatorTone(tone: GitHubEventPresentation["tone"]): RoomTabIndicatorTone {
-  if (tone === "emerald") return "success";
-  if (tone === "rose") return "danger";
-  if (tone === "amber") return "warning";
-  return "info";
-}
 
 function toggleGitHubEventsVisible(): void {
   githubEventsVisible.value = !githubEventsVisible.value;
@@ -1862,51 +1329,6 @@ async function publishLocalRoom(): Promise<void> {
   } finally {
     storageBusy.value = false;
   }
-}
-
-function shouldRefreshEventsForMessage(message: DesktopRoomMessage): boolean {
-  const source = (message.source || "").toLowerCase();
-  const sender = (message.sender || "").toLowerCase();
-  return source === "github" || sender === "github";
-}
-
-function shouldPreviewComposerEvent(message: DesktopRoomMessage): boolean {
-  const timestamp = Date.parse(message.timestamp);
-  if (!Number.isFinite(timestamp)) return false;
-  return Date.now() - timestamp < 30_000;
-}
-
-function repoRepositoryFromRoomIdentifier(identifier: string): string | null {
-  const match = /^github\.com\/([^/]+\/[^/]+)$/i.exec(identifier.trim());
-  return match ? match[1] : null;
-}
-
-function findEventByUrl(url: string): NonNullable<DesktopGitHubEventsPage["events"][number]> | null {
-  const exactUrl = normalizeExactGitHubUrl(url);
-  if (!exactUrl) return null;
-  const events = eventsPage.value?.events || [];
-  const exactMatch = events.find((event) =>
-    normalizeExactGitHubUrl(event.githubObjectUrl) === exactUrl
-  );
-  if (exactMatch) return exactMatch;
-
-  const normalizedUrl = normalizeGitHubObjectUrl(url);
-  if (!normalizedUrl) return null;
-  return events.find((event) =>
-    normalizeGitHubObjectUrl(event.githubObjectUrl) === normalizedUrl
-  ) || null;
-}
-
-function normalizeExactGitHubUrl(url: string | null | undefined): string | null {
-  const trimmed = url?.trim();
-  if (!trimmed) return null;
-  return trimmed.replace(/\/$/, "").toLowerCase();
-}
-
-function normalizeGitHubObjectUrl(url: string | null | undefined): string | null {
-  const trimmed = normalizeExactGitHubUrl(url);
-  if (!trimmed) return null;
-  return trimmed.replace(/[#?].*$/, "");
 }
 
 function toggleSearchTool(): void {
