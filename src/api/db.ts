@@ -42,6 +42,14 @@ export {
   assignProjectAdminIfRoomHasNoAdmins,
   isProjectAdmin,
 } from "./db/auth.js";
+export {
+  getSupervisorGrantOwnerAccount,
+  listSupervisorGrantAuthoritiesForRepository,
+  revokeSupervisorGrantAuthority,
+  revokeSupervisorGrantsForGitHubInstallationAccessChange,
+  revokeSupervisorGrantsForRepositoryAccessChange,
+} from "./db/supervisor-grant-revocation.js";
+export type { SupervisorGrantOwnerAccount } from "./db/supervisor-grant-revocation.js";
 export { isValidTransition, getTasksForRooms, createTask, approveTaskCreateBoardIntent, acceptProposedTaskTx, normalizeTaskCreateBoardIntentPayload, getTasks, getOpenTasks, getTaskById, getTaskOwnershipState, findTaskByPrUrl, findTaskBySourceMessageId } from "./db/tasks.js";
 export { findTaskByWorkflowArtifactMatches, updateTask, setTaskAssignmentStateForLeaseAction } from "./db/tasks.js";
 export { expireStaleTaskLeases, createTaskLease, getActiveTaskLeases, upsertStaleTaskPromptMute, getStaleTaskPromptMutes, clearStaleTaskPromptMute, revokeTaskLease, releaseTaskLease } from "./db/coordination.js";
