@@ -780,7 +780,13 @@ export async function createFencedRoomAgentSession(
         eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
         isNull(room_agent_sessions.ended_at),
       ))
-      .orderBy(desc(room_agent_sessions.last_seen_at))
+      // Board Manager failover share-locks both manager session rows before
+      // entering the delivery-key lock domain. Every multi-session auth
+      // mutation must acquire those rows in the same deterministic order or
+      // replacement and failover can each hold one row while waiting on the
+      // other. Product-level predecessor ranking happens after the locks are
+      // held; lock order must not encode selection policy.
+      .orderBy(asc(room_agent_sessions.session_id))
       .limit(MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION + 1)
       .for("update");
 
@@ -802,7 +808,15 @@ export async function createFencedRoomAgentSession(
 
     const replacementTarget = predecessors.find((row: RoomAgentSessionRow) =>
       replacementProofMatches(row, replacementProof)
-    ) ?? predecessors[0] ?? null;
+    ) ?? predecessors.reduce<RoomAgentSessionRow | null>((latest, row) => {
+      if (!latest) return row as RoomAgentSessionRow;
+      const rowLastSeen = Date.parse(row.last_seen_at);
+      const latestLastSeen = Date.parse(latest.last_seen_at);
+      if (rowLastSeen !== latestLastSeen) {
+        return rowLastSeen > latestLastSeen ? row as RoomAgentSessionRow : latest;
+      }
+      return row.session_id > latest.session_id ? row as RoomAgentSessionRow : latest;
+    }, null);
     const replacedSessionIds = predecessors.map((row: RoomAgentSessionRow) => row.session_id);
     const retiredCredentials = await collectSessionCredentialFingerprintsTx(
       tx,
@@ -894,14 +908,27 @@ export async function createOrRotateSupervisorWorkerSession(
         eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
         isNull(room_agent_sessions.ended_at),
       ))
-      .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id))
+      // Match the global session-row lock order used by failover and general
+      // replacement. Retention policy is evaluated below after all rows are
+      // locked, independently from concurrency control.
+      .orderBy(asc(room_agent_sessions.session_id))
       .limit(MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION + 1)
       .for("update");
     if (existing.length > MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION) {
       throw new Error("Too many active supervisor sessions to rotate atomically.");
     }
-    const retained = existing[0] ?? null;
-    const duplicateSessionIds = existing.slice(1).map((row: RoomAgentSessionRow) => row.session_id);
+    const retained = existing.reduce<RoomAgentSessionRow | null>((oldest, row) => {
+      if (!oldest) return row as RoomAgentSessionRow;
+      const rowCreatedAt = Date.parse(row.created_at);
+      const oldestCreatedAt = Date.parse(oldest.created_at);
+      if (rowCreatedAt !== oldestCreatedAt) {
+        return rowCreatedAt < oldestCreatedAt ? row as RoomAgentSessionRow : oldest;
+      }
+      return row.session_id < oldest.session_id ? row as RoomAgentSessionRow : oldest;
+    }, null);
+    const duplicateSessionIds = existing
+      .filter((row: RoomAgentSessionRow) => row.session_id !== retained?.session_id)
+      .map((row: RoomAgentSessionRow) => row.session_id);
     const retiredCredentials = await collectSessionCredentialFingerprintsTx(
       tx,
       existing as RoomAgentSessionRow[],

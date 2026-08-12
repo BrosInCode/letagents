@@ -208,10 +208,10 @@ async function countRoomAgentDeliveryInstancesTx(
   return countRow?.count ?? 0;
 }
 
-async function lockRoomAgentDeliveryInstanceKeyTx(
+/** Enter the shared delivery mutation lock domain in database text order. */
+export async function lockRoomAgentDeliveryKeysTx(
   tx: any,
-  roomId: string,
-  deliveryKey: string,
+  keys: Array<{ room_id: string; delivery_key: string }>,
 ): Promise<void> {
   // Every instance mutation and its aggregate projection must share one MVCC
   // serialization point. Row locks alone are insufficient because two hosts
@@ -219,11 +219,24 @@ async function lockRoomAgentDeliveryInstanceKeyTx(
   // then both preserve a false-live aggregate. The transaction-scoped lock is
   // released automatically on commit/rollback and hash collisions only reduce
   // concurrency; they cannot weaken correctness.
+  if (keys.length === 0) return;
+  const keysJson = JSON.stringify(keys);
   await tx.execute(sql`
     SELECT pg_advisory_xact_lock(
-      hashtextextended(concat(${roomId}::text, chr(31), ${deliveryKey}::text), 0)
+      hashtextextended(concat(candidate.room_id, chr(31), candidate.delivery_key), 0)
     )
+      FROM jsonb_to_recordset(${keysJson}::jsonb)
+        AS candidate(room_id text, delivery_key text)
+     ORDER BY candidate.room_id, candidate.delivery_key
   `);
+}
+
+async function lockRoomAgentDeliveryInstanceKeyTx(
+  tx: any,
+  roomId: string,
+  deliveryKey: string,
+): Promise<void> {
+  await lockRoomAgentDeliveryKeysTx(tx, [{ room_id: roomId, delivery_key: deliveryKey }]);
 }
 
 async function assertActiveDeliveryCredential(

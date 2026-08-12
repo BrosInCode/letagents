@@ -249,6 +249,7 @@ export const room_agent_delivery_sessions = pgTable(
     }),
     offline_announced_at: timestamp("offline_announced_at", { mode: "string", withTimezone: true }),
     recovery_announced_at: timestamp("recovery_announced_at", { mode: "string", withTimezone: true }),
+    next_liveness_check_at: timestamp("next_liveness_check_at", { mode: "string", withTimezone: true }),
     created_at: timestamp("created_at", { mode: "string", withTimezone: true }).notNull(),
     updated_at: timestamp("updated_at", { mode: "string", withTimezone: true }).notNull(),
   },
@@ -278,6 +279,9 @@ export const room_agent_delivery_sessions = pgTable(
     room_branch_idx: index("room_agent_delivery_sessions_room_branch_idx")
       .on(table.room_id, table.repo_branch)
       .where(sql`${table.repo_branch} IS NOT NULL`),
+    liveness_due_idx: index("room_agent_delivery_sessions_liveness_due_idx")
+      .on(table.next_liveness_check_at, table.room_id, table.delivery_key)
+      .where(sql`${table.session_kind} = 'worker' AND ${table.next_liveness_check_at} IS NOT NULL`),
     active_count_check: check(
       "room_agent_delivery_sessions_active_connection_count_check",
       sql`${table.active_connection_count} >= 0`
