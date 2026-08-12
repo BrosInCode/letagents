@@ -27,6 +27,7 @@ const getRoomAgentPresence = dbModule?.getRoomAgentPresence;
 const getRoomAgentPresenceSnapshot = dbModule?.getRoomAgentPresenceSnapshot;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const markRoomAgentDeliveryDisconnected = dbModule?.markRoomAgentDeliveryDisconnected;
+const pruneStaleRoomAgentDeliveryInstances = dbModule?.pruneStaleRoomAgentDeliveryInstances;
 const upsertDesktopRoomAgentDeliveryHeartbeat = dbModule?.upsertDesktopRoomAgentDeliveryHeartbeat;
 const setRoomLiveAgentSuppressed = dbModule?.setRoomLiveAgentSuppressed;
 const upsertAccount = dbModule?.upsertAccount;
@@ -331,6 +332,226 @@ test(
     assert.equal(stalePresence[0]?.activity_state, "offline");
     assert.equal(stalePresence[0]?.status_text, "reviewing task_159 backend lane");
   }
+);
+
+test(
+  "process delivery instances make repeated disconnects idempotent across hosts",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName
+      || !db
+      || !markRoomAgentDeliveryConnected
+      || !markRoomAgentDeliveryDisconnected
+      || !room_agent_delivery_sessions
+    ) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const room = await createProjectWithName("github.com/brosincode/delivery-instance-idempotency");
+    const actorLabel = "Shared Poller | Owner | MCP";
+    const base = {
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "owner/shared-poller",
+      session_kind: "controller" as const,
+      runtime: "mcp",
+      display_name: "Shared Poller",
+      owner_label: "Owner",
+      ide_label: "MCP",
+      transport: "long_poll" as const,
+    };
+    await markRoomAgentDeliveryConnected({ ...base, delivery_instance_id: "host-a" });
+    await markRoomAgentDeliveryConnected({ ...base, delivery_instance_id: "host-b" });
+
+    const readCount = async () => {
+      const [row] = await db.select({ count: room_agent_delivery_sessions.active_connection_count })
+        .from(room_agent_delivery_sessions)
+        .where(sql`${room_agent_delivery_sessions.room_id} = ${room.id}`);
+      return row?.count;
+    };
+    assert.equal(await readCount(), 2);
+
+    await markRoomAgentDeliveryDisconnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      delivery_instance_id: "host-a",
+    });
+    assert.equal(await readCount(), 1);
+    await markRoomAgentDeliveryDisconnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      delivery_instance_id: "host-a",
+    });
+    assert.equal(await readCount(), 1, "a retried release cannot consume host B's count");
+
+    await markRoomAgentDeliveryDisconnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      delivery_instance_id: "host-b",
+    });
+    assert.equal(await readCount(), 0);
+  },
+);
+
+test(
+  "the bounded liveness sweep prunes abandoned delivery instances and their aggregate count",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (
+      !createProjectWithName
+      || !db
+      || !markRoomAgentDeliveryConnected
+      || !pruneStaleRoomAgentDeliveryInstances
+      || !room_agent_delivery_sessions
+    ) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const room = await createProjectWithName("github.com/brosincode/delivery-instance-prune");
+    const actorLabel = "Abandoned Poller | Owner | MCP";
+    await markRoomAgentDeliveryConnected({
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "owner/abandoned-poller",
+      session_kind: "controller",
+      runtime: "mcp",
+      display_name: "Abandoned Poller",
+      owner_label: "Owner",
+      ide_label: "MCP",
+      delivery_instance_id: "crashed-host",
+      transport: "long_poll",
+    });
+    const staleAt = new Date(Date.now() - ACTIVE_AGENT_DELIVERY_WINDOW_MS - 1_000).toISOString();
+    await pool!.query(
+      "UPDATE room_agent_delivery_instances SET updated_at = $1 WHERE room_id = $2",
+      [staleAt, room.id],
+    );
+    assert.equal(await pruneStaleRoomAgentDeliveryInstances({ limit: 1 }), 1);
+    const [row] = await db.select({ count: room_agent_delivery_sessions.active_connection_count })
+      .from(room_agent_delivery_sessions)
+      .where(sql`${room_agent_delivery_sessions.room_id} = ${room.id}`);
+    assert.equal(row?.count, 0);
+  },
+);
+
+test(
+  "stale delivery prune discovers only a bounded updated-at index window before deduplicating keys",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!createProjectWithName || !pool) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const room = await createProjectWithName("github.com/brosincode/delivery-instance-prune-plan");
+    await pool.query(`
+      INSERT INTO room_agent_delivery_instances (
+        room_id, delivery_key, instance_id, credential_fingerprint,
+        transport, created_at, updated_at
+      )
+      SELECT $1,
+             'controller:plan-' || series,
+             'instance-' || series,
+             NULL,
+             'long_poll',
+             NOW() - INTERVAL '2 minutes',
+             NOW() - INTERVAL '2 minutes'
+      FROM generate_series(1, 10000) AS series
+    `, [room.id]);
+    await pool.query("ANALYZE room_agent_delivery_instances");
+    const explained = await pool.query<{ "QUERY PLAN": string }>(`
+      EXPLAIN (ANALYZE, BUFFERS, FORMAT TEXT)
+      SELECT DISTINCT candidate.room_id, candidate.delivery_key
+      FROM (
+        SELECT room_id, delivery_key
+        FROM room_agent_delivery_instances
+        WHERE updated_at < NOW() - INTERVAL '1 minute'
+        ORDER BY updated_at
+        LIMIT 1000
+      ) AS candidate
+      ORDER BY candidate.room_id, candidate.delivery_key
+    `);
+    const plan = explained.rows.map((row) => row["QUERY PLAN"]).join("\n");
+    assert.match(plan, /Limit/);
+    assert.match(plan, /room_agent_delivery_instances_stale_idx/);
+    assert.doesNotMatch(plan, /Seq Scan on room_agent_delivery_instances/);
+  },
+);
+
+test(
+  "concurrent final-host releases serialize before instance mutation and converge the aggregate to zero",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed room agent presence tests" : false,
+  },
+  async () => {
+    if (!createProjectWithName || !markRoomAgentDeliveryConnected || !markRoomAgentDeliveryDisconnected || !pool) {
+      throw new Error("DB-backed room agent presence tests require TEST_DB_URL");
+    }
+    const room = await createProjectWithName("github.com/brosincode/delivery-instance-concurrent-release");
+    const actorLabel = "Concurrent Poller | Owner | MCP";
+    const deliveryKey = `controller:${actorLabel}`;
+    const base = {
+      room_id: room.id,
+      actor_label: actorLabel,
+      agent_key: "owner/concurrent-poller",
+      session_kind: "controller" as const,
+      runtime: "mcp",
+      display_name: "Concurrent Poller",
+      owner_label: "Owner",
+      ide_label: "MCP",
+      transport: "long_poll" as const,
+    };
+    await markRoomAgentDeliveryConnected({ ...base, delivery_instance_id: "host-a" });
+    await markRoomAgentDeliveryConnected({ ...base, delivery_instance_id: "host-b" });
+
+    const gate = await pool.connect();
+    try {
+      await gate.query("BEGIN");
+      await gate.query(
+        "SELECT pg_advisory_xact_lock(hashtextextended(concat($1::text, chr(31), $2::text), 0))",
+        [room.id, deliveryKey],
+      );
+      let releaseASettled = false;
+      let releaseBSettled = false;
+      const releaseA = markRoomAgentDeliveryDisconnected({
+        room_id: room.id,
+        actor_label: actorLabel,
+        delivery_instance_id: "host-a",
+      }).finally(() => { releaseASettled = true; });
+      const releaseB = markRoomAgentDeliveryDisconnected({
+        room_id: room.id,
+        actor_label: actorLabel,
+        delivery_instance_id: "host-b",
+      }).finally(() => { releaseBSettled = true; });
+      await sleep(50);
+      assert.equal(releaseASettled, false, "host A waits before deleting its instance");
+      assert.equal(releaseBSettled, false, "host B waits before deleting its instance");
+      await gate.query("COMMIT");
+      await Promise.all([releaseA, releaseB]);
+    } finally {
+      await gate.query("ROLLBACK").catch(() => undefined);
+      gate.release();
+    }
+
+    const final = await pool.query<{ count: number; instances: number }>(`
+      SELECT delivery.active_connection_count::int AS count,
+             count(instance.instance_id)::int AS instances
+      FROM room_agent_delivery_sessions AS delivery
+      LEFT JOIN room_agent_delivery_instances AS instance
+        ON instance.room_id = delivery.room_id
+       AND instance.delivery_key = delivery.delivery_key
+      WHERE delivery.room_id = $1 AND delivery.delivery_key = $2
+      GROUP BY delivery.active_connection_count
+    `, [room.id, deliveryKey]);
+    assert.deepEqual(final.rows[0], { count: 0, instances: 0 });
+  },
 );
 
 test(

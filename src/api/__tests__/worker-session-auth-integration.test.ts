@@ -450,7 +450,7 @@ test(
   },
   async () => {
     const { room, worker } = await seedHarness();
-    if (!createFencedRoomAgentSession || !markRoomAgentDeliveryConnected || !getRoomAgentDeliverySessions) {
+    if (!createFencedRoomAgentSession || !markRoomAgentDeliveryConnected || !markRoomAgentDeliveryHeartbeat || !getRoomAgentDeliverySessions) {
       throw new Error("DB-backed worker session tests require TEST_DB_URL");
     }
     const deliveryInput = {
@@ -468,6 +468,7 @@ test(
     };
     await markRoomAgentDeliveryConnected({
       ...deliveryInput,
+      delivery_instance_id: "predecessor-instance",
       credential_fence: { kind: "session_token", token_hash: hashToken(worker.session_token) },
     });
     const [rotation, staleReopen] = await Promise.allSettled([
@@ -505,6 +506,12 @@ test(
       0,
       "rotation retires a stale connection even when its reconnect raced on another DB connection",
     );
+    const retiredInstances = await pool!.query<{ count: number }>(`
+      SELECT count(*)::int AS count
+      FROM room_agent_delivery_instances
+      WHERE room_id = $1 AND delivery_key = $2
+    `, [room.id, `agent_session:${worker.session_id}`]);
+    assert.equal(retiredInstances.rows[0]?.count, 0, "rotation retires predecessor instance tokens atomically");
 
     await assert.rejects(markRoomAgentDeliveryConnected({
       ...deliveryInput,
@@ -512,11 +519,27 @@ test(
     }), { name: "InactiveRoomAgentDeliverySessionError" });
     await markRoomAgentDeliveryConnected({
       ...deliveryInput,
+      delivery_instance_id: "successor-instance",
       credential_fence: {
         kind: "session_token",
         token_hash: hashToken(rotated.session.session_token),
       },
     });
+    assert.equal(await markRoomAgentDeliveryHeartbeat({
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_session_id: worker.session_id,
+      delivery_instance_id: "successor-instance",
+      credential_fence: {
+        kind: "session_token",
+        token_hash: hashToken(rotated.session.session_token),
+      },
+    }), true);
+    const successorDelivery = await getRoomAgentDeliverySessions(room.id);
+    assert.equal(
+      successorDelivery.find((delivery) => delivery.agent_session_id === worker.session_id)?.active_connection_count,
+      1,
+    );
   },
 );
 
@@ -569,6 +592,75 @@ test(
       WHERE room_id = $1 AND agent_session_id = $2
     `, [room.id, worker.session_id]);
     assert.equal(projection.rows[0]?.active_connection_count, 0);
+  },
+);
+
+test(
+  "new instance accounting survives a summary-only retirement from an older API binary",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room, worker } = await seedHarness();
+    if (!markRoomAgentDeliveryConnected || !markRoomAgentDeliveryHeartbeat || !getRoomAgentDeliverySessions || !pool) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const deliveryInput = {
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_key: worker.agent_key,
+      agent_instance_id: worker.agent_instance_id,
+      agent_session_id: worker.session_id,
+      session_kind: "worker" as const,
+      runtime: worker.runtime,
+      display_name: worker.display_name,
+      owner_label: worker.owner_label,
+      ide_label: worker.ide_label,
+      transport: "sse" as const,
+      credential_fence: { kind: "session_token" as const, token_hash: hashToken(worker.session_token) },
+    };
+    await markRoomAgentDeliveryConnected({
+      ...deliveryInput,
+      delivery_instance_id: "mixed-version-predecessor",
+    });
+
+    // This is the exact pre-0080 retirement shape: the old binary resets the
+    // aggregate projection but cannot know about the new instance table.
+    await pool.query(`
+      UPDATE room_agent_delivery_sessions
+      SET active_connection_count = 0,
+          last_disconnected_at = NOW(),
+          reconnect_grace_expires_at = NOW(),
+          updated_at = NOW()
+      WHERE room_id = $1 AND delivery_key = $2
+    `, [room.id, `agent_session:${worker.session_id}`]);
+
+    await markRoomAgentDeliveryConnected({
+      ...deliveryInput,
+      delivery_instance_id: "mixed-version-successor",
+    });
+    await pool.query(`
+      UPDATE room_agent_delivery_instances
+      SET updated_at = NOW() - INTERVAL '2 minutes'
+      WHERE room_id = $1
+        AND delivery_key = $2
+        AND instance_id = 'mixed-version-predecessor'
+    `, [room.id, `agent_session:${worker.session_id}`]);
+
+    assert.equal(await markRoomAgentDeliveryHeartbeat({
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_session_id: worker.session_id,
+      delivery_instance_id: "mixed-version-successor",
+      credential_fence: deliveryInput.credential_fence,
+    }), true);
+    const deliveries = await getRoomAgentDeliverySessions(room.id);
+    assert.equal(
+      deliveries.find((delivery) => delivery.agent_session_id === worker.session_id)?.active_connection_count,
+      1,
+      "removing the unknown predecessor cannot subtract the live successor below its instance floor",
+    );
   },
 );
 
