@@ -30,6 +30,17 @@ import {
   type Task,
 } from "../db.js";
 import {
+  getDueRoomOperationalContext,
+  getLivenessRoomContexts,
+} from "../db/coordination/due-room-context.js";
+import {
+  lockBoardManagerFailoverDeliveryKeysTx,
+  rescheduleActiveBoardManagerAssignment,
+} from "../db/coordination/board-manager-failover.js";
+import { rescheduleEscalationCandidateBoardIntent } from "../db/coordination/board-intents.js";
+import { rescheduleStalledRoomCandidate } from "../db/coordination/room-stall.js";
+import { rescheduleLivenessAnnouncementCandidate } from "../db/presence/offline-announcements.js";
+import {
   createBoardManagerFailoverSweeper,
   type BoardManagerFailoverResult,
 } from "../rooms/board-manager-failover-sweep.js";
@@ -89,9 +100,11 @@ async function announceRecovery(input: LivenessAnnouncementInput): Promise<void>
 const livenessSweeper = createLivenessSweeper({
   listCandidates: (options) => listLivenessAnnouncementCandidates(options),
   getCandidate: getLivenessAnnouncementCandidate,
+  rescheduleCandidate: rescheduleLivenessAnnouncementCandidate,
   getSuppressedActorLabels: getRoomLiveAgentSuppressionActorLabels,
   getActiveBoardManagerSessionId: async (roomId) =>
     (await getActiveBoardManager(roomId))?.agent_session_id ?? null,
+  getRoomContexts: getLivenessRoomContexts,
   announceOffline,
   announceRecovery,
   offlineAnnounceAfterMs: resolveOfflineAnnounceAfterMs(
@@ -117,8 +130,11 @@ async function announceFailover(input: {
   text: string;
   client_message_id: string;
   dead_assignment_id: string;
+  dead_assignment_agent_session_id: string;
+  dead_assignment_claimed_check_at: string | null;
   successor_agent_session_id: string;
 }): Promise<BoardManagerFailoverResult | null> {
+  if (!input.dead_assignment_claimed_check_at) return null;
   let released: BoardManagerAssignment | null = null;
   let promoted: BoardManagerAssignment | null = null;
   try {
@@ -127,10 +143,17 @@ async function announceFailover(input: {
       agent_prompt_kind: "auto",
       client_message_id: input.client_message_id,
       with_created_message_in_transaction: async (tx) => {
+        await lockBoardManagerFailoverDeliveryKeysTx(tx, {
+          room_id: input.room_id,
+          dead_agent_session_id: input.dead_assignment_agent_session_id,
+          successor_agent_session_id: input.successor_agent_session_id,
+        });
         released = await releaseBoardManagerAssignmentTx(tx, {
           assignment_id: input.dead_assignment_id,
           released_by: FAILOVER_ACTOR,
           reason: "Board Manager went offline; automatic failover.",
+          claimed_check_at: input.dead_assignment_claimed_check_at,
+          require_unreachable_delivery: true,
         });
         if (!released) {
           throw new BoardManagerFailoverLostRace();
@@ -139,6 +162,7 @@ async function announceFailover(input: {
           room_id: input.room_id,
           agent_session_id: input.successor_agent_session_id,
           assigned_by: FAILOVER_ACTOR,
+          require_reachable_delivery: true,
         });
         if (!promoted) {
           throw new BoardManagerFailoverLostRace();
@@ -167,6 +191,7 @@ async function announceFailover(input: {
 
 const boardManagerFailoverSweeper = createBoardManagerFailoverSweeper({
   listActiveManagerAssignments: listActiveBoardManagerAssignments,
+  rescheduleAssignment: rescheduleActiveBoardManagerAssignment,
   getManagerFailoverMode: async (roomId) => (await getRoomBoardSettings(roomId)).manager_failover,
   getDeliveryCandidate: getLivenessAnnouncementCandidate,
   listManagerCandidates: listActiveBoardManagerCandidates,
@@ -239,7 +264,10 @@ async function hasReachableManager(roomId: string): Promise<boolean> {
 
 const intentEscalationSweeper = createIntentEscalationSweeper({
   listCandidates: (options) => listEscalationCandidateBoardIntents(options),
+  rescheduleCandidate: rescheduleEscalationCandidateBoardIntent,
   hasReachableManager,
+  getReachableManagerRoomIds: async (roomIds) =>
+    (await getDueRoomOperationalContext(roomIds)).reachable_manager_room_ids,
   countRecentAutoApprovals: countRecentAutoApprovedIntents,
   autoApproveIntent: async (input) => {
     let approvedTask: Task | null = null;
@@ -358,7 +386,9 @@ class RoomStallNudgeLostRace extends Error {
 
 const roomStallSweeper = createRoomStallSweeper({
   listStalledRooms: (options) => listStalledRoomCandidates(options),
+  rescheduleRoom: rescheduleStalledRoomCandidate,
   hasReachableManager,
+  getRoomContexts: getDueRoomOperationalContext,
   listLiveWorkerLabels: async (roomId) => {
     const presence = await getRoomAgentPresence(roomId, {
       limit: 20,

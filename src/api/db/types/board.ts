@@ -93,6 +93,9 @@ export interface RoomBoardSettingsRow {
   manager_mode: BoardManagerMode;
   manager_failover: string;
   stall_nudged_at: string | null;
+  open_task_count: number;
+  last_task_closed_at: string | null;
+  stall_check_at: string | null;
   updated_by: string | null;
   created_at: string;
   updated_at: string;
@@ -108,6 +111,7 @@ export interface BoardManagerAssignmentRow {
   assigned_by: string;
   status: BoardManagerAssignmentStatus;
   last_heartbeat_at: string | null;
+  stall_check_at: string | null;
   released_by: string | null;
   release_reason: string | null;
   released_at: string | null;
@@ -133,6 +137,7 @@ export interface BoardIntentRow {
   decided_at: string | null;
   expires_at: string | null;
   escalated_at: string | null;
+  escalation_check_at: string | null;
   auto_approved: boolean;
   created_at: string;
   updated_at: string;

@@ -230,6 +230,7 @@ export interface RoomAgentDeliverySessionRow {
   reconnect_grace_expires_at: string | null;
   offline_announced_at: string | null;
   recovery_announced_at: string | null;
+  next_liveness_check_at: string | null;
   created_at: string;
   updated_at: string;
 }

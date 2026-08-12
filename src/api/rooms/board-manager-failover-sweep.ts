@@ -114,7 +114,8 @@ export interface BoardManagerFailoverResult {
 }
 
 export interface BoardManagerFailoverSweeperDeps {
-  listActiveManagerAssignments(): Promise<ActiveBoardManagerAssignmentCandidate[]>;
+  listActiveManagerAssignments(input?: { now?: number; limit?: number }): Promise<ActiveBoardManagerAssignmentCandidate[]>;
+  rescheduleAssignment?(input: { assignment_id: string; claimed_check_at: string; next_check_at: string | null }): Promise<void>;
   getManagerFailoverMode(roomId: string): Promise<BoardManagerFailoverMode>;
   getDeliveryCandidate(input: {
     room_id: string;
@@ -149,6 +150,8 @@ export interface BoardManagerFailoverSweeperDeps {
     text: string;
     client_message_id: string;
     dead_assignment_id: string;
+    dead_assignment_agent_session_id: string;
+    dead_assignment_claimed_check_at: string | null;
     successor_agent_session_id: string;
   }): Promise<BoardManagerFailoverResult | null>;
   countPendingIntents(roomId: string): Promise<number>;
@@ -184,12 +187,22 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
 
   async function pickSuccessor(
     roomId: string,
-    assignment: BoardManagerAssignment
+    assignment: BoardManagerAssignment,
+    prefetched?: ActiveBoardManagerAssignmentCandidate["successor_candidates"],
   ): Promise<BoardManagerCandidate | null> {
     // Prefer candidates with a live connection; fall back to grace-window
     // ones only when nobody is solidly online, so a worker that dropped
     // seconds ago does not outrank a stably connected peer and cause an
     // immediate second failover.
+    if (prefetched) {
+      return prefetched.find((entry) =>
+        entry.candidate.agent_session_id !== assignment.agent_session_id
+        && entry.connection_state === "live")?.candidate
+        ?? prefetched.find((entry) =>
+          entry.candidate.agent_session_id !== assignment.agent_session_id
+          && entry.connection_state === "grace")?.candidate
+        ?? null;
+    }
     const candidates = await deps.listManagerCandidates(roomId, assignment);
     let graceFallback: BoardManagerCandidate | null = null;
     for (const candidate of candidates) {
@@ -242,15 +255,22 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
     const assignment = entry.assignment;
     const roomId = assignment.room_id;
 
-    const mode = await deps.getManagerFailoverMode(roomId);
+    const mode = entry.manager_failover ?? await deps.getManagerFailoverMode(roomId);
     if (mode === "off") {
+      if (entry.claimed_check_at) await deps.rescheduleAssignment?.({
+        assignment_id: assignment.id,
+        claimed_check_at: entry.claimed_check_at,
+        next_check_at: null,
+      });
       return;
     }
 
-    const delivery = await deps.getDeliveryCandidate({
-      room_id: roomId,
-      delivery_key: `agent_session:${assignment.agent_session_id}`,
-    });
+    const delivery = entry.delivery_candidate !== undefined
+      ? entry.delivery_candidate
+      : await deps.getDeliveryCandidate({
+          room_id: roomId,
+          delivery_key: `agent_session:${assignment.agent_session_id}`,
+        });
     const verdict = evaluateBoardManagerDeath({
       assignment_created_at: assignment.created_at,
       agent_session_ended_at: entry.agent_session_ended_at,
@@ -258,15 +278,28 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
       now,
     });
     if (!verdict.dead) {
+      if (entry.claimed_check_at) {
+        const lastSeenAt = Date.parse(delivery?.session.updated_at ?? assignment.created_at);
+        await deps.rescheduleAssignment?.({
+          assignment_id: assignment.id,
+          claimed_check_at: entry.claimed_check_at,
+          next_check_at: new Date(Math.max(now + 60_000, lastSeenAt + MANAGER_FAILOVER_AFTER_MS)).toISOString(),
+        });
+      }
       return;
     }
 
-    const successor = await pickSuccessor(roomId, assignment);
+    const successor = await pickSuccessor(roomId, assignment, entry.successor_candidates);
 
     if (mode === "announce" || !successor) {
       // Auto mode with nobody reachable degrades to announcing, so the room
       // still hears about the vacancy instead of silently waiting.
       await announceOfflineOnly(roomId, assignment, verdict.epoch, successor, now, summary);
+      if (entry.claimed_check_at) await deps.rescheduleAssignment?.({
+        assignment_id: assignment.id,
+        claimed_check_at: entry.claimed_check_at,
+        next_check_at: new Date(now + MANAGER_OFFLINE_REATTEMPT_COOLDOWN_MS).toISOString(),
+      });
       return;
     }
 
@@ -275,6 +308,8 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
       text: buildManagerFailoverAnnouncementText({ assignment, successor }),
       client_message_id: `board_manager_failover:${assignment.id}`,
       dead_assignment_id: assignment.id,
+      dead_assignment_agent_session_id: assignment.agent_session_id,
+      dead_assignment_claimed_check_at: entry.claimed_check_at ?? null,
       successor_agent_session_id: successor.agent_session_id,
     });
     if (!result) {
@@ -305,7 +340,7 @@ export function createBoardManagerFailoverSweeper(deps: BoardManagerFailoverSwee
       rooms_with_errors: 0,
     };
 
-    const assignments = await deps.listActiveManagerAssignments();
+    const assignments = await deps.listActiveManagerAssignments({ now, limit: 100 });
     for (const entry of assignments) {
       try {
         await sweepAssignment(entry, now, summary);

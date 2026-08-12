@@ -47,6 +47,13 @@ async function seedRoomWithClosedTask(name: string, closedMinutesAgo: number) {
     "UPDATE tasks SET status = 'done', updated_at = $3 WHERE room_id = $1 AND number = $2",
     [project.id, Number(task.id.replace("task_", "")), new Date(Date.now() - closedMinutesAgo * 60_000)]
   );
+  await pool!.query(
+    `UPDATE room_board_settings
+        SET last_task_closed_at = $2,
+            stall_check_at = $2::timestamptz + interval '30 minutes'
+      WHERE room_id = $1`,
+    [project.id, new Date(Date.now() - closedMinutesAgo * 60_000)],
+  );
   return project.id;
 }
 
@@ -62,7 +69,7 @@ test(
     const emptyRoom = await createProjectWithName!("stall-never-worked-room");
     const freshRoom = await seedRoomWithClosedTask("stall-fresh-room", 5);
 
-    const candidates = await listStalledRoomCandidates!({ stalledForMs: 30 * 60_000 });
+    const candidates = await listStalledRoomCandidates!({});
     const roomIds = candidates.map((entry) => entry.room_id);
     assert.ok(roomIds.includes(drainedRoom), "a 45-minute-drained board is a candidate");
     assert.ok(!roomIds.includes(activeRoom.id), "open tasks exclude the room");
@@ -83,7 +90,7 @@ test(
     const { addMessageWithCreateStatus, getRoomBoardSettings, listStalledRoomCandidates, markRoomStallNudgedTx } =
       dbModule!;
     const roomId = await seedRoomWithClosedTask("stall-nudge-room", 45);
-    const [candidate] = (await listStalledRoomCandidates!({ stalledForMs: 30 * 60_000 })).filter(
+    const [candidate] = (await listStalledRoomCandidates!({})).filter(
       (entry) => entry.room_id === roomId
     );
     assert.ok(candidate);
@@ -115,7 +122,7 @@ test(
 
     // A fenced drain drops out of the candidate list entirely.
     assert.equal(
-      (await listStalledRoomCandidates!({ stalledForMs: 30 * 60_000 })).some(
+      (await listStalledRoomCandidates!({})).some(
         (entry) => entry.room_id === roomId
       ),
       false,
@@ -124,6 +131,12 @@ test(
 
     // A NEWER drain epoch re-arms the fence.
     const newerEpoch = new Date(Date.parse(epoch) + 60 * 60_000).toISOString();
+    await pool!.query(
+      `UPDATE room_board_settings
+          SET last_task_closed_at = $2, stall_check_at = $2::timestamptz + interval '30 minutes'
+        WHERE room_id = $1`,
+      [roomId, newerEpoch]
+    );
     assert.equal(
       await markRoomStallNudgedTx!(db!, { room_id: roomId, epoch: newerEpoch }),
       true

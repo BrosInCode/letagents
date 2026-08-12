@@ -52,7 +52,7 @@ async function seedStuckTaskCreateIntent(minutesOld = 15) {
     proposer_actor_key: "EmmyMay/river-grove",
   });
   await pool!.query(
-    "UPDATE board_intents SET created_at = $3 WHERE room_id = $1 AND id = $2",
+    "UPDATE board_intents SET created_at = $3, escalation_check_at = $3::timestamptz + interval '10 minutes' WHERE room_id = $1 AND id = $2",
     [project.id, intent.id, new Date(Date.now() - minutesOld * 60_000)]
   );
   return { roomId: project.id, intentId: intent.id };
@@ -76,7 +76,7 @@ test(
     } = dbModule!;
     const { roomId, intentId } = await seedStuckTaskCreateIntent();
 
-    const listed = (await listEscalationCandidateBoardIntents!({ olderThanMs: 10 * 60_000 })).find(
+    const listed = (await listEscalationCandidateBoardIntents!({})).find(
       (entry) => entry.intent.id === intentId
     );
     assert.ok(listed, "a 15-minute-old pending intent must be an escalation candidate");
@@ -140,7 +140,7 @@ test(
       false
     );
     assert.equal(
-      (await listEscalationCandidateBoardIntents!({ olderThanMs: 10 * 60_000 })).some(
+      (await listEscalationCandidateBoardIntents!({})).some(
         (entry) => entry.intent.id === intentId
       ),
       false
@@ -222,11 +222,11 @@ test(
       proposer_actor_key: "EmmyMay/river-grove",
     });
     await pool!.query(
-      "UPDATE board_intents SET created_at = $3, expires_at = $4 WHERE room_id = $1 AND id = $2",
+      "UPDATE board_intents SET created_at = $3, escalation_check_at = $3::timestamptz + interval '10 minutes', expires_at = $4 WHERE room_id = $1 AND id = $2",
       [roomId, expired.id, new Date(Date.now() - 30 * 60_000), new Date(Date.now() - 60_000)]
     );
 
-    const candidates = await listEscalationCandidateBoardIntents!({ olderThanMs: 10 * 60_000 });
+    const candidates = await listEscalationCandidateBoardIntents!({});
     const ids = candidates.map((entry) => entry.intent.id);
     assert.ok(ids.includes(oldPendingId));
     assert.ok(!ids.includes(young.id), "young intents wait out the threshold");
@@ -362,7 +362,7 @@ test(
       proposer_actor_key: "EmmyMay/river-grove",
     });
     await pool!.query(
-      "UPDATE board_intents SET created_at = $3 WHERE room_id = $1 AND id = $2",
+      "UPDATE board_intents SET created_at = $3, escalation_check_at = $3::timestamptz + interval '10 minutes' WHERE room_id = $1 AND id = $2",
       [roomId, second.id, new Date(Date.now() - 15 * 60_000)]
     );
 

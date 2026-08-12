@@ -2,6 +2,7 @@ import { and, eq, sql } from "drizzle-orm";
 import { db } from "../client.js";
 import { toRoomAgentLivenessObservation, toRoomAgentPresence } from "../mappers.js";
 import {
+  room_agent_delivery_sessions,
   room_agent_liveness_observations,
   room_agent_presence,
   room_agent_sessions,
@@ -11,6 +12,21 @@ import type { RoomAgentLivenessObservation, RoomAgentLivenessObservationRow, Roo
 import type { AgentPresenceStatus } from "../../../shared/agent-presence.js";
 
 class StaleNativePresenceOwnerError extends Error {}
+
+type LivenessDeliveryScheduler = Pick<typeof db, "update">;
+
+async function scheduleNativeHarnessDeliveryCheck(
+  executor: LivenessDeliveryScheduler,
+  input: { room_id: string; agent_session_id: string; observed_at: string },
+): Promise<void> {
+  await executor.update(room_agent_delivery_sessions)
+    .set({ next_liveness_check_at: new Date(Date.parse(input.observed_at) + 5 * 60_000).toISOString() })
+    .where(and(
+      eq(room_agent_delivery_sessions.room_id, input.room_id),
+      eq(room_agent_delivery_sessions.agent_session_id, input.agent_session_id),
+      eq(room_agent_delivery_sessions.session_kind, "worker"),
+    ));
+}
 
 /**
  * Rendered presence outlives a worker session so room history does not blink
@@ -128,14 +144,27 @@ export async function upsertRoomAgentLivenessObservation(input: {
       setWhere: sql`${room_agent_liveness_observations.last_observed_at} < ${lastObservedAt}::timestamptz`,
     })
     .returning();
-  if (observation) return toRoomAgentLivenessObservation(observation as RoomAgentLivenessObservationRow);
-  const [current] = await db.select().from(room_agent_liveness_observations).where(and(
-    eq(room_agent_liveness_observations.room_id, input.room_id),
-    eq(room_agent_liveness_observations.agent_session_id, input.agent_session_id),
-    eq(room_agent_liveness_observations.source, source),
-  )).limit(1);
-  if (!current) throw new Error("Liveness observation disappeared during an ordered upsert.");
-  return toRoomAgentLivenessObservation(current as RoomAgentLivenessObservationRow);
+  let resolved = observation;
+  if (!resolved) {
+    const [current] = await db.select().from(room_agent_liveness_observations).where(and(
+      eq(room_agent_liveness_observations.room_id, input.room_id),
+      eq(room_agent_liveness_observations.agent_session_id, input.agent_session_id),
+      eq(room_agent_liveness_observations.source, source),
+    )).limit(1);
+    if (!current) throw new Error("Liveness observation disappeared during an ordered upsert.");
+    resolved = current;
+  }
+  if (source === "native_harness" && observation) {
+    // Native work can remain active while room delivery is quiet. Push the
+    // same due record so the indexed sweep wakes only when both axes may be
+    // stale, instead of rechecking it every minute while work continues.
+    await scheduleNativeHarnessDeliveryCheck(db, {
+      room_id: input.room_id,
+      agent_session_id: input.agent_session_id,
+      observed_at: now,
+    });
+  }
+  return toRoomAgentLivenessObservation(resolved as RoomAgentLivenessObservationRow);
 }
 
 /**
@@ -296,6 +325,12 @@ export async function recordNativeHarnessActivity(input: {
       setWhere: nativePresenceOwnerFence(input),
     }).returning();
     if (!presenceRow) throw new StaleNativePresenceOwnerError("A newer worker session owns this actor's rendered presence.");
+
+    await scheduleNativeHarnessDeliveryCheck(tx, {
+      room_id: input.room_id,
+      agent_session_id: input.agent_session_id,
+      observed_at: serverNow,
+    });
 
     const held = await tx.select({ id: task_leases.id, epoch: task_leases.epoch }).from(task_leases).where(and(
       eq(task_leases.room_id, input.room_id),
