@@ -232,14 +232,24 @@ export interface LivenessAnnouncementInput {
 }
 
 export interface LivenessSweeperDeps {
-  listCandidates(options: { withinMs: number }): Promise<LivenessAnnouncementCandidate[]>;
+  listCandidates(options: { now?: number; limit?: number }): Promise<LivenessAnnouncementCandidate[]>;
   /** Fresh single-row re-read; transitions are revalidated on it just before emitting. */
   getCandidate(input: {
     room_id: string;
     delivery_key: string;
   }): Promise<LivenessAnnouncementCandidate | null>;
+  rescheduleCandidate?(input: {
+    room_id: string;
+    delivery_key: string;
+    claimed_check_at: string;
+    next_check_at: string | null;
+  }): Promise<void>;
   getSuppressedActorLabels(roomId: string): Promise<ReadonlySet<string>>;
   getActiveBoardManagerSessionId(roomId: string): Promise<string | null>;
+  getRoomContexts?(roomIds: readonly string[]): Promise<ReadonlyMap<string, {
+    suppressed_actor_labels: ReadonlySet<string>;
+    active_manager_session_id: string | null;
+  }>>;
   /**
    * Post the announcement AND persist its marker atomically (one DB
    * transaction), deduped on client_message_id. Implementations must
@@ -337,20 +347,63 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
     roomId: string,
     candidates: readonly LivenessAnnouncementCandidate[],
     now: number,
-    summary: LivenessSweepSummary
+    summary: LivenessSweepSummary,
+    prefetchedContext?: {
+      suppressed_actor_labels: ReadonlySet<string>;
+      active_manager_session_id: string | null;
+    },
   ): Promise<void> {
-    const suppressedActors = await deps.getSuppressedActorLabels(roomId);
+    const suppressedActors = prefetchedContext?.suppressed_actor_labels
+      ?? await deps.getSuppressedActorLabels(roomId);
     const transitions = selectLivenessTransitions({
       candidates,
       suppressedActors,
       now,
       offlineAnnounceAfterMs,
     });
+    const transitionedKeys = new Set(transitions.map((transition) => transition.session.delivery_key));
+    if (deps.rescheduleCandidate) {
+      for (const candidate of candidates) {
+        if (transitionedKeys.has(candidate.session.delivery_key)) continue;
+        const session = candidate.session;
+        let nextCheckAt: string | null = null;
+        const actorLabel = normalizeRoomActorLabel(session.actor_label);
+        const suppressed = Boolean(actorLabel && suppressedActors.has(actorLabel));
+        if (!candidate.agent_session_ended_at && !candidate.supervisor_managed && !suppressed) {
+          const lastSeenAt = parseTime(getRoomAgentDeliverySessionLastSeenAt(session));
+          const outageAt = getOutageEpochAt(session);
+          const announcedAt = parseTime(session.offline_announced_at);
+          if (isRoomAgentDeliverySessionReachable(session, now)) {
+            nextCheckAt = new Date(now + offlineAnnounceAfterMs).toISOString();
+          } else if (lastSeenAt !== null && now - lastSeenAt < offlineAnnounceAfterMs) {
+            nextCheckAt = new Date(lastSeenAt + offlineAnnounceAfterMs).toISOString();
+          } else {
+            const runtimeLastActiveAt = parseTime(
+              candidate.native_last_active_at ?? candidate.runtime_last_active_at,
+            );
+            if (runtimeLastActiveAt !== null && now - runtimeLastActiveAt < offlineAnnounceAfterMs) {
+              nextCheckAt = new Date(runtimeLastActiveAt + offlineAnnounceAfterMs).toISOString();
+            } else if (!(announcedAt !== null && outageAt !== null && announcedAt >= outageAt)) {
+              nextCheckAt = new Date(now + 60_000).toISOString();
+            }
+          }
+        }
+        if (!candidate.claimed_check_at) continue;
+        await deps.rescheduleCandidate({
+          room_id: roomId,
+          delivery_key: session.delivery_key,
+          claimed_check_at: candidate.claimed_check_at,
+          next_check_at: nextCheckAt,
+        });
+      }
+    }
     if (transitions.length === 0) {
       return;
     }
 
-    const managerSessionId = await deps.getActiveBoardManagerSessionId(roomId);
+    const managerSessionId = prefetchedContext
+      ? prefetchedContext.active_manager_session_id
+      : await deps.getActiveBoardManagerSessionId(roomId);
     for (const transition of transitions) {
       try {
         await processTransition(roomId, transition, suppressedActors, managerSessionId, now, summary);
@@ -370,7 +423,10 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
       rooms_with_errors: 0,
     };
 
-    const candidates = await deps.listCandidates({ withinMs: OFFLINE_ANNOUNCE_MAX_AGE_MS });
+    const candidates = await deps.listCandidates({
+      now,
+      limit: 250,
+    });
     const candidatesByRoom = new Map<string, LivenessAnnouncementCandidate[]>();
     for (const candidate of candidates) {
       const roomId = candidate.session.room_id;
@@ -382,9 +438,12 @@ export function createLivenessSweeper(deps: LivenessSweeperDeps) {
       }
     }
 
+    const contexts = deps.getRoomContexts
+      ? await deps.getRoomContexts([...candidatesByRoom.keys()])
+      : null;
     for (const [roomId, roomCandidates] of candidatesByRoom) {
       try {
-        await sweepRoom(roomId, roomCandidates, now, summary);
+        await sweepRoom(roomId, roomCandidates, now, summary, contexts?.get(roomId));
       } catch (error) {
         summary.rooms_with_errors += 1;
         deps.onError?.(roomId, error);

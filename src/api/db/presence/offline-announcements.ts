@@ -1,4 +1,4 @@
-import { and, eq, gte, sql } from "drizzle-orm";
+import { and, eq, sql } from "drizzle-orm";
 
 import { db } from "../client.js";
 import { toRoomAgentDeliverySession } from "../mappers.js";
@@ -7,6 +7,8 @@ import type { RoomAgentDeliverySession, RoomAgentDeliverySessionRow } from "../t
 
 export interface LivenessAnnouncementCandidate {
   session: RoomAgentDeliverySession;
+  /** Exact retry timestamp installed by the SKIP LOCKED claim. */
+  claimed_check_at?: string | null;
   /** Set when the linked worker session was ended deliberately (clean exit). */
   agent_session_ended_at: string | null;
   /**
@@ -58,37 +60,80 @@ function toCandidate(row: {
 }
 
 /**
- * Worker delivery sessions that may need an offline or recovery announcement.
- * The only cut here is recency: any worker row touched (connected,
- * heartbeated, or disconnected) within `withinMs` is a candidate, so
- * long-dead rows never re-enter the announcement pipeline. All transition
- * logic — reachability, announcement epochs, recovery matching — lives in the
- * liveness sweeper, deliberately NOT in this query: filtering on announcement
- * markers here has already hidden a real case once (a dead-socket death after
- * a recovery, where last_disconnected_at is NULL).
+ * Atomically claim a bounded page of due worker delivery sessions. The due
+ * index replaces the former scan of every row touched in the last hour;
+ * transition semantics remain in the sweeper and a claim is retryable after
+ * one minute if its worker crashes before evaluation completes.
  */
 export async function listLivenessAnnouncementCandidates(options?: {
-  withinMs?: number;
   now?: number;
+  limit?: number;
 }): Promise<LivenessAnnouncementCandidate[]> {
   const now = options?.now ?? Date.now();
-  const cutoff = new Date(now - (options?.withinMs ?? 60 * 60 * 1000)).toISOString();
-
+  const limit = Math.min(Math.max(options?.limit ?? 250, 1), 1_000);
+  const retryAt = new Date(now + 60_000).toISOString();
+  const dueRows = await db.execute<{
+    room_id: string;
+    delivery_key: string;
+    claimed_check_at: string | null;
+    eligible: boolean;
+  }>(sql`
+    WITH due AS (
+      SELECT ${room_agent_delivery_sessions.room_id}, ${room_agent_delivery_sessions.delivery_key},
+             ${room_agent_delivery_sessions.updated_at} >= ${new Date(now - 60 * 60_000).toISOString()}::timestamptz AS eligible
+        FROM ${room_agent_delivery_sessions}
+       WHERE ${room_agent_delivery_sessions.session_kind} = 'worker'
+         AND ${room_agent_delivery_sessions.next_liveness_check_at} <= ${new Date(now).toISOString()}::timestamptz
+       ORDER BY ${room_agent_delivery_sessions.next_liveness_check_at},
+                ${room_agent_delivery_sessions.room_id}, ${room_agent_delivery_sessions.delivery_key}
+       LIMIT ${limit}
+       FOR UPDATE SKIP LOCKED
+    )
+    UPDATE ${room_agent_delivery_sessions} AS delivery
+       SET next_liveness_check_at = CASE WHEN due.eligible
+         THEN ${retryAt}::timestamptz ELSE NULL END
+      FROM due
+     WHERE delivery.room_id = due.room_id
+       AND delivery.delivery_key = due.delivery_key
+    RETURNING delivery.room_id, delivery.delivery_key,
+              delivery.next_liveness_check_at AS claimed_check_at,
+              due.eligible
+  `);
+  const eligibleRows = dueRows.rows.filter((row) => row.eligible && row.claimed_check_at !== null);
+  if (eligibleRows.length === 0) return [];
   const rows = await db
     .select(candidateSelection)
     .from(room_agent_delivery_sessions)
-    .leftJoin(
-      room_agent_sessions,
-      eq(room_agent_sessions.session_id, room_agent_delivery_sessions.agent_session_id)
-    )
-    .where(
-      and(
-        eq(room_agent_delivery_sessions.session_kind, "worker"),
-        gte(room_agent_delivery_sessions.updated_at, cutoff)
-      )
-    );
+    .leftJoin(room_agent_sessions, eq(room_agent_sessions.session_id, room_agent_delivery_sessions.agent_session_id))
+    .where(sql`(${room_agent_delivery_sessions.room_id}, ${room_agent_delivery_sessions.delivery_key}) IN (
+      SELECT value->>0, value->>1
+        FROM jsonb_array_elements(${JSON.stringify(eligibleRows.map((row) => [row.room_id, row.delivery_key]))}::jsonb)
+    )`);
 
-  return rows.map(toCandidate);
+  const claimByKey = new Map(eligibleRows.map((row) => [
+    `${row.room_id}\u001f${row.delivery_key}`,
+    row.claimed_check_at,
+  ]));
+  return rows.map((row) => ({
+    ...toCandidate(row),
+    claimed_check_at: claimByKey.get(`${row.session.room_id}\u001f${row.session.delivery_key}`) ?? null,
+  }));
+}
+
+/** Persist the next semantic check after a claimed candidate produced no transition. */
+export async function rescheduleLivenessAnnouncementCandidate(input: {
+  room_id: string;
+  delivery_key: string;
+  claimed_check_at: string;
+  next_check_at: string | null;
+}): Promise<void> {
+  await db.update(room_agent_delivery_sessions)
+    .set({ next_liveness_check_at: input.next_check_at })
+    .where(and(
+      eq(room_agent_delivery_sessions.room_id, input.room_id),
+      eq(room_agent_delivery_sessions.delivery_key, input.delivery_key),
+      eq(room_agent_delivery_sessions.next_liveness_check_at, input.claimed_check_at),
+    ));
 }
 
 /** Fresh single-row re-read used to revalidate a transition just before emitting. */

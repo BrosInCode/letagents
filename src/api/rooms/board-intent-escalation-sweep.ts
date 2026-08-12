@@ -75,9 +75,11 @@ export function buildHumanEscalationText(input: {
 }
 
 export interface IntentEscalationSweeperDeps {
-  listCandidates(input: { olderThanMs: number }): Promise<EscalationCandidateBoardIntent[]>;
+  listCandidates(input: { now?: number; limit?: number }): Promise<EscalationCandidateBoardIntent[]>;
+  rescheduleCandidate?(input: { intent_id: string; claimed_check_at: string; next_check_at: string | null }): Promise<void>;
   /** True when the room has an active Board Manager whose session is currently reachable. */
   hasReachableManager(roomId: string): Promise<boolean>;
+  getReachableManagerRoomIds?(roomIds: readonly string[]): Promise<ReadonlySet<string>>;
   countRecentAutoApprovals(input: {
     room_id: string;
     proposer_actor_key: string;
@@ -130,6 +132,11 @@ export function createIntentEscalationSweeper(deps: IntentEscalationSweeperDeps)
     }
     if (managerReachable) {
       // A live manager owns the decision; escalation is only for vacancies.
+      if (entry.claimed_check_at) await deps.rescheduleCandidate?.({
+        intent_id: intent.id,
+        claimed_check_at: entry.claimed_check_at,
+        next_check_at: new Date(now + INTENT_ESCALATION_AFTER_MS).toISOString(),
+      });
       return;
     }
 
@@ -192,8 +199,18 @@ export function createIntentEscalationSweeper(deps: IntentEscalationSweeperDeps)
       rooms_with_errors: 0,
     };
 
-    const candidates = await deps.listCandidates({ olderThanMs: INTENT_ESCALATION_AFTER_MS });
+    const candidates = await deps.listCandidates({
+      now,
+      limit: 100,
+    });
+    const candidateRoomIds = [...new Set(candidates.map((entry) => entry.intent.room_id))];
+    const reachableManagerRooms = deps.getReachableManagerRoomIds
+      ? await deps.getReachableManagerRoomIds(candidateRoomIds)
+      : null;
     const managerReachableByRoom = new Map<string, boolean>();
+    if (reachableManagerRooms) {
+      for (const roomId of candidateRoomIds) managerReachableByRoom.set(roomId, reachableManagerRooms.has(roomId));
+    }
     const roomsWithErrors = new Set<string>();
     for (const entry of candidates) {
       try {

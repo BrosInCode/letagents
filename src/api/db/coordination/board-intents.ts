@@ -211,7 +211,12 @@ export async function getActiveBoardManager(
 }
 
 export function inferBoardManagerRuntimeSource(
-  session: RoomAgentSessionRow
+  session: {
+    runtime: string;
+    ide_label: string | null;
+    liveness_capability: string | null;
+    tool_bridge_id: string | null;
+  }
 ): BoardManagerRuntimeSource {
   const signal = [
     session.runtime,
@@ -379,6 +384,7 @@ export async function createBoardIntent(input: {
     decided_at: null,
     expires_at: input.expires_at ?? defaultPendingIntentExpiresAt(nowDate),
     escalated_at: null,
+    escalation_check_at: new Date(nowDate.getTime() + 10 * 60_000).toISOString(),
     auto_approved: false,
     created_at: now,
     updated_at: now,
@@ -733,6 +739,7 @@ export async function shouldRequireBoardIntent(input: {
 export interface EscalationCandidateBoardIntent {
   intent: BoardIntent;
   manager_mode: BoardManagerMode;
+  claimed_check_at?: string | null;
 }
 
 /**
@@ -741,13 +748,48 @@ export interface EscalationCandidateBoardIntent {
  * intents past their pending TTL never escalate.
  */
 export async function listEscalationCandidateBoardIntents(input: {
-  olderThanMs: number;
   now?: number;
+  limit?: number;
 }): Promise<EscalationCandidateBoardIntent[]> {
   const now = input.now ?? Date.now();
-  await expireBoardIntents({ now: new Date(now) });
-
-  const cutoff = new Date(now - input.olderThanMs).toISOString();
+  const limit = Math.min(Math.max(input.limit ?? 100, 1), 500);
+  await db.execute(sql`
+    WITH due_expiry AS (
+      SELECT ${board_intents.id}
+        FROM ${board_intents}
+       WHERE ${board_intents.status} IN ('pending', 'approved')
+         AND ${board_intents.expires_at} IS NOT NULL
+         AND ${board_intents.expires_at} <= ${new Date(now).toISOString()}::timestamptz
+       ORDER BY ${board_intents.expires_at}, ${board_intents.id}
+       LIMIT ${limit}
+       FOR UPDATE SKIP LOCKED
+    )
+    UPDATE ${board_intents} AS intent
+       SET status = 'expired', updated_at = ${new Date(now).toISOString()}::timestamptz
+      FROM due_expiry
+     WHERE intent.id = due_expiry.id
+  `);
+  const retryAt = new Date(now + 60_000).toISOString();
+  const claimed = await db.execute<{ id: string; claimed_check_at: string }>(sql`
+    WITH due AS (
+      SELECT ${board_intents.id}
+        FROM ${board_intents}
+       WHERE ${board_intents.status} = 'pending'
+         AND ${board_intents.escalated_at} IS NULL
+         AND (${board_intents.expires_at} IS NULL
+           OR ${board_intents.expires_at} > ${new Date(now).toISOString()}::timestamptz)
+         AND ${board_intents.escalation_check_at} <= ${new Date(now).toISOString()}::timestamptz
+       ORDER BY ${board_intents.escalation_check_at}, ${board_intents.id}
+       LIMIT ${limit}
+       FOR UPDATE SKIP LOCKED
+    )
+    UPDATE ${board_intents} AS intent
+       SET escalation_check_at = ${retryAt}::timestamptz
+      FROM due
+     WHERE intent.id = due.id
+    RETURNING intent.id, intent.escalation_check_at AS claimed_check_at
+  `);
+  if (claimed.rows.length === 0) return [];
   const rows = await db
     .select({ intent: board_intents, manager_mode: room_board_settings.manager_mode })
     .from(board_intents)
@@ -755,16 +797,33 @@ export async function listEscalationCandidateBoardIntents(input: {
     .where(
       and(
         eq(board_intents.status, "pending"),
-        sql`${board_intents.escalated_at} IS NULL`,
-        sql`${board_intents.created_at} <= ${cutoff}::timestamptz`
+        sql`${board_intents.id} IN (
+          SELECT jsonb_array_elements_text(${JSON.stringify(claimed.rows.map((row) => row.id))}::jsonb)
+        )`
       )
     )
     .orderBy(asc(board_intents.created_at));
 
+  const claimById = new Map(claimed.rows.map((row) => [row.id, row.claimed_check_at]));
   return rows.map((row) => ({
     intent: toBoardIntent(row.intent as BoardIntentRow),
     manager_mode: normalizeBoardManagerMode(row.manager_mode),
+    claimed_check_at: claimById.get(row.intent.id) ?? null,
   }));
+}
+
+export async function rescheduleEscalationCandidateBoardIntent(input: {
+  intent_id: string;
+  claimed_check_at: string;
+  next_check_at: string | null;
+}): Promise<void> {
+  await db.update(board_intents)
+    .set({ escalation_check_at: input.next_check_at })
+    .where(and(
+      eq(board_intents.id, input.intent_id),
+      eq(board_intents.status, "pending"),
+      eq(board_intents.escalation_check_at, input.claimed_check_at),
+    ));
 }
 
 /**

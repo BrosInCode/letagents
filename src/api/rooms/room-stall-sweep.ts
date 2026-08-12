@@ -98,11 +98,16 @@ export function buildRoomStallNudgeText(input: {
 }
 
 export interface RoomStallSweeperDeps {
-  listStalledRooms(input: { stalledForMs: number }): Promise<StalledRoomCandidate[]>;
+  listStalledRooms(input: { now?: number; limit?: number }): Promise<StalledRoomCandidate[]>;
+  rescheduleRoom?(input: { room_id: string; claimed_check_at: string; next_check_at: string | null }): Promise<void>;
   /** True when the room has an active Board Manager whose session is currently reachable. */
   hasReachableManager(roomId: string): Promise<boolean>;
   /** Actor labels of currently reachable worker agents in the room. */
   listLiveWorkerLabels(roomId: string): Promise<string[]>;
+  getRoomContexts?(roomIds: readonly string[]): Promise<{
+    reachable_manager_room_ids: ReadonlySet<string>;
+    live_worker_labels_by_room: ReadonlyMap<string, readonly string[]>;
+  }>;
   /** Post the nudge AND the stall fence in one transaction, deduped on client_message_id. */
   announceStall(input: {
     room_id: string;
@@ -123,7 +128,8 @@ export function createRoomStallSweeper(deps: RoomStallSweeperDeps) {
   async function sweepRoom(
     candidate: StalledRoomCandidate,
     now: number,
-    summary: RoomStallSweepSummary
+    summary: RoomStallSweepSummary,
+    prefetched?: { managerReachable: boolean; liveWorkerLabels: readonly string[] },
   ): Promise<void> {
     const roomId = candidate.room_id;
 
@@ -136,15 +142,30 @@ export function createRoomStallSweeper(deps: RoomStallSweeperDeps) {
       now,
     });
     if (!precheck.stalled || !precheck.epoch) {
+      if (candidate.claimed_check_at) await deps.rescheduleRoom?.({
+        room_id: roomId,
+        claimed_check_at: candidate.claimed_check_at,
+        next_check_at: null,
+      });
       return;
     }
 
-    const managerReachable = await deps.hasReachableManager(roomId);
+    const managerReachable = prefetched?.managerReachable
+      ?? await deps.hasReachableManager(roomId);
     if (managerReachable) {
+      if (candidate.claimed_check_at) await deps.rescheduleRoom?.({
+        room_id: roomId,
+        claimed_check_at: candidate.claimed_check_at,
+        // Delivery heartbeats push the same deadline. If they stop, this
+        // bounded repair fires after the 90-second reachability window.
+        next_check_at: new Date(now + 90_000).toISOString(),
+      });
       return;
     }
 
-    const liveWorkers = await deps.listLiveWorkerLabels(roomId);
+    const liveWorkers = prefetched?.liveWorkerLabels
+      ? [...prefetched.liveWorkerLabels]
+      : await deps.listLiveWorkerLabels(roomId);
     const verdict = evaluateRoomStall({
       candidate,
       manager_reachable: managerReachable,
@@ -152,6 +173,11 @@ export function createRoomStallSweeper(deps: RoomStallSweeperDeps) {
       now,
     });
     if (!verdict.stalled || !verdict.epoch) {
+      if (candidate.claimed_check_at) await deps.rescheduleRoom?.({
+        room_id: roomId,
+        claimed_check_at: candidate.claimed_check_at,
+        next_check_at: liveWorkers.length === 0 ? null : candidate.claimed_check_at,
+      });
       return;
     }
 
@@ -174,10 +200,19 @@ export function createRoomStallSweeper(deps: RoomStallSweeperDeps) {
     const now = deps.now?.() ?? Date.now();
     const summary: RoomStallSweepSummary = { nudged: 0, rooms_with_errors: 0 };
 
-    const candidates = await deps.listStalledRooms({ stalledForMs: ROOM_STALL_AFTER_MS });
+    const candidates = await deps.listStalledRooms({
+      now,
+      limit: 100,
+    });
+    const contexts = deps.getRoomContexts
+      ? await deps.getRoomContexts(candidates.map((candidate) => candidate.room_id))
+      : null;
     for (const candidate of candidates) {
       try {
-        await sweepRoom(candidate, now, summary);
+        await sweepRoom(candidate, now, summary, contexts ? {
+          managerReachable: contexts.reachable_manager_room_ids.has(candidate.room_id),
+          liveWorkerLabels: contexts.live_worker_labels_by_room.get(candidate.room_id) ?? [],
+        } : undefined);
       } catch (error) {
         summary.rooms_with_errors += 1;
         deps.onError?.(candidate.room_id, error);
