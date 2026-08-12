@@ -20,6 +20,7 @@ import {
   listLivenessAnnouncementCandidates,
   markAgentOfflineAnnounced,
   markAgentRecoveryAnnounced,
+  pruneStaleRoomAgentDeliveryInstances,
   markBoardIntentAutoApprovedTx,
   promoteBoardManagerTx,
   recordBoardManagerAssignedEvent,
@@ -410,6 +411,11 @@ export function startLivenessSweep(): void {
       return;
     }
     const run = (async () => {
+      try {
+      await pruneStaleRoomAgentDeliveryInstances();
+      } catch (error) {
+      console.error("Delivery instance cleanup failed:", error);
+      }
       try {
       await livenessSweeper.sweepOnce();
       } catch (error) {

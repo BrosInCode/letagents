@@ -3,7 +3,7 @@ import { and, asc, desc, eq, gt, inArray, isNull, lte, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import { randomUUID } from "node:crypto";
-import { accounts, agents, auth_sessions, auth_states, message_agent_receipt_events, message_agent_receipts, owner_tokens, project_admins, room_agent_delivery_sessions, room_agent_presence, room_agent_session_bearers, room_agent_sessions, supervisor_host_grants } from "./schema.js";
+import { accounts, agents, auth_sessions, auth_states, message_agent_receipt_events, message_agent_receipts, owner_tokens, project_admins, room_agent_delivery_instances, room_agent_delivery_sessions, room_agent_presence, room_agent_session_bearers, room_agent_sessions, supervisor_host_grants } from "./schema.js";
 import { AUTH_STATE_TTL_MS, hashToken, nextPrefixedId } from "./utils.js";
 import { toRoomAgentSession } from "./mappers.js";
 import type { Account, AgentIdentity, AuthState, CreatedRoomAgentSession, OwnerToken, OwnerTokenAccount, RoomAgentRegistrationLiveness, RoomAgentSession, RoomAgentSessionBearer, RoomAgentSessionRow, Session, SessionAccount, SupervisorHostGrant } from "./types.js";
@@ -66,6 +66,26 @@ async function retireRoomAgentDeliveryTx(
   now: string,
 ): Promise<void> {
   if (sessionIds.length === 0) return;
+  const deliveryKeys = sessionIds.map((sessionId) => `agent_session:${sessionId}`).sort();
+  const lockKeysJson = JSON.stringify(deliveryKeys);
+  await tx.execute(sql`
+    SELECT pg_advisory_xact_lock(
+      hashtextextended(concat(delivery.room_id, chr(31), delivery.delivery_key), 0)
+    )
+    FROM room_agent_delivery_sessions AS delivery
+    INNER JOIN jsonb_array_elements_text(${lockKeysJson}::jsonb) AS key(value)
+      ON key.value = delivery.delivery_key
+    ORDER BY delivery.room_id, delivery.delivery_key
+  `);
+  // Instance rows are the idempotency authority for aggregate decrements.
+  // Delete them in the same credential-retirement transaction as the summary
+  // reset; otherwise a successor can later subtract a retired predecessor a
+  // second time when the predecessor crosses the stale-heartbeat cutoff.
+  await tx.delete(room_agent_delivery_instances)
+    .where(inArray(
+      room_agent_delivery_instances.delivery_key,
+      deliveryKeys,
+    ));
   await tx.update(room_agent_delivery_sessions)
     .set({
       active_connection_count: 0,
