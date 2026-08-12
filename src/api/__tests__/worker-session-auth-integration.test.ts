@@ -42,6 +42,7 @@ const endRoomAgentSession = dbModule?.endRoomAgentSession;
 const getRoomAgentDeliverySessions = dbModule?.getRoomAgentDeliverySessions;
 const markRoomAgentDeliveryConnected = dbModule?.markRoomAgentDeliveryConnected;
 const markRoomAgentDeliveryHeartbeat = dbModule?.markRoomAgentDeliveryHeartbeat;
+const pauseDesktopRoomAgentDelivery = dbModule?.pauseDesktopRoomAgentDelivery;
 const upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat = dbModule?.upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat;
 const updateTask = dbModule?.updateTask;
 
@@ -735,6 +736,86 @@ test(
     assert.deepEqual(projections.rows[0], {
       active_connection_count: 0,
       presence_count: 0,
+    });
+  },
+);
+
+test(
+  "desktop delivery signal sequence rejects a pause that commits after a newer resume",
+  {
+    concurrency: false,
+    skip: requiresDatabase ? "set TEST_DB_URL to run DB-backed worker session auth tests" : false,
+  },
+  async () => {
+    const { room, worker } = await seedHarness();
+    if (!pauseDesktopRoomAgentDelivery || !upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat || !pool) {
+      throw new Error("DB-backed worker session tests require TEST_DB_URL");
+    }
+    const credentialFence = {
+      kind: "session_token" as const,
+      token_hash: hashToken(worker.session_token),
+    };
+    const delivery = {
+      room_id: room.id,
+      actor_label: worker.actor_label,
+      agent_key: worker.agent_key,
+      agent_instance_id: worker.agent_instance_id,
+      agent_session_id: worker.session_id,
+      session_kind: "worker" as const,
+      runtime: worker.runtime,
+      display_name: worker.display_name,
+      owner_label: worker.owner_label,
+      ide_label: worker.ide_label,
+      credential_fence: credentialFence,
+    };
+    await pauseDesktopRoomAgentDelivery({
+      ...delivery,
+      desktop_signal_sequence: 1,
+      presence: {
+        ...delivery,
+        status: "idle",
+        status_text: "room closed",
+      },
+    });
+    await upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat({
+      ...delivery,
+      desktop_signal_sequence: 2,
+      presence: {
+        status: "idle",
+        status_text: "resumed",
+      },
+    });
+    await assert.rejects(
+      pauseDesktopRoomAgentDelivery({
+        ...delivery,
+        desktop_signal_sequence: 1,
+        presence: {
+          ...delivery,
+          status: "idle",
+          status_text: "late stale pause",
+        },
+      }),
+      (error: unknown) => (
+        error instanceof Error
+        && error.name === "StaleDesktopRoomAgentDeliverySignalError"
+        && (error as Error & { currentSequence?: number }).currentSequence === 2
+      ),
+    );
+    const current = await pool.query<{
+      active_connection_count: number;
+      desktop_signal_sequence: number;
+      status_text: string | null;
+    }>(`
+      SELECT d.active_connection_count, d.desktop_signal_sequence, p.status_text
+      FROM room_agent_delivery_sessions d
+      LEFT JOIN room_agent_presence p
+        ON p.room_id = d.room_id AND p.agent_session_id = d.agent_session_id
+      WHERE d.room_id = $1 AND d.agent_session_id = $2
+    `, [room.id, worker.session_id]);
+    assert.deepEqual(current.rows[0], {
+      active_connection_count: 1,
+      desktop_signal_sequence: 2,
+      status_text: "resumed",
     });
   },
 );

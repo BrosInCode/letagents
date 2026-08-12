@@ -89,6 +89,7 @@ async function retireRoomAgentDeliveryTx(
   await tx.update(room_agent_delivery_sessions)
     .set({
       active_connection_count: 0,
+      desktop_signal_sequence: 0,
       last_disconnected_at: now,
       reconnect_grace_expires_at: now,
       updated_at: now,

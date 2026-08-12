@@ -110,6 +110,7 @@ type ApiErrorPayload = {
   interval?: number;
   expires_in?: number;
   status?: string;
+  current_delivery_signal_sequence?: number;
 };
 
 type StoredDesktopAuth = {
