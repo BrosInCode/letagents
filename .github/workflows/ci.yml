@@ -24,15 +24,18 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       - name: Test dependency cooldown policy
         run: npm run test:dependency-age
+
+      - name: Test workflow supply-chain policy
+        run: npm run test:workflow-supply-chain
 
       - name: Enforce dependency cooldown
         run: npm run verify:dependency-age
@@ -140,10 +143,10 @@ jobs:
       TEST_DB_URL: postgres://test:test@localhost:5432/letagents_test
       GITHUB_WEBHOOK_SECRET: test-webhook-secret
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
@@ -329,16 +332,16 @@ jobs:
       contents: read
       id-token: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: '22'
 
       # Trusted Publishing needs npm >= 11.5; node 22 bundles npm 10.
       - name: Update npm for Trusted Publishing support
-        run: npm install -g npm@latest
+        run: npm install -g npm@11.6.2
 
       - name: Check whether this version is already published
         id: version
@@ -390,14 +393,14 @@ jobs:
     outputs:
       image_tag: ${{ steps.vars.outputs.sha_tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - name: Set image tag
         id: vars
         run: echo "sha_tag=sha-${GITHUB_SHA::12}" >> "$GITHUB_OUTPUT"
 
       - name: Log in to GHCR
-        uses: docker/login-action@v3
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -405,7 +408,7 @@ jobs:
 
       # Build and push the production app image
       - name: Build and push app image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           target: ""
@@ -416,7 +419,7 @@ jobs:
 
       # Build and push the migration image (includes drizzle-kit)
       - name: Build and push migrate image
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
         with:
           context: .
           target: migrator
@@ -436,7 +439,7 @@ jobs:
       GH_DEPLOY_TOKEN: ${{ github.token }}
     steps:
       - name: Deploy to production
-        uses: appleboy/ssh-action@v1
+        uses: appleboy/ssh-action@0ff4204d59e8e51228ff73bce53f80d53301dee2 # v1
         with:
           host: ${{ secrets.DEPLOY_HOST }}
           username: ${{ secrets.DEPLOY_USER }}

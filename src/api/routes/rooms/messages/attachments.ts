@@ -17,7 +17,10 @@ import {
   createPresignedAttachmentUpload,
   isAttachmentStorageConfigured,
 } from "../../../messages/attachment-storage.js";
-import { normalizeAttachmentUploadRequest } from "../../../messages/attachments.js";
+import {
+  canStageMessageAttachment,
+  normalizeAttachmentUploadRequest,
+} from "../../../messages/attachments.js";
 import {
   resolveParticipantRoom,
   routeParam,
@@ -51,6 +54,14 @@ export function registerMessageAttachmentRoutes(
   app.post(/^\/rooms\/(.+)\/attachments\/uploads$/, async (req: AuthenticatedRequest, res) => {
     const project = await resolveParticipantRoom(req, res, deps);
     if (!project) return;
+
+    if (!canStageMessageAttachment(req)) {
+      res.status(401).json({
+        error: "Authentication is required to upload attachments.",
+        code: "NOT_AUTHENTICATED",
+      });
+      return;
+    }
 
     if (!isAttachmentStorageConfigured()) {
       res.status(503).json({ error: "Attachment object storage is not configured" });

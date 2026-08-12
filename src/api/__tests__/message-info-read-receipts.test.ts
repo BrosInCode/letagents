@@ -135,6 +135,22 @@ test("snapshot system failures retain the canonical silent system-event reason",
   });
 });
 
+test("send-time routing never creates managed-agent recipients for GitHub event text", () => {
+  const create = routeSource("../db/messages/create.ts");
+  assert.match(
+    create,
+    /const untrustedExternalEvent = isUntrustedExternalActivationSource\(createdMessage\.source\)/,
+  );
+  assert.match(
+    create,
+    /const activeSessions = !untrustedExternalEvent && \(needsCompletePopulation \|\| candidateCondition\)/,
+  );
+  assert.match(
+    create,
+    /const taskOwnerFollowUp = !untrustedExternalEvent\s+&& isTaskOwnerFollowUpMessageText/,
+  );
+});
+
 test("malformed scoped ids cannot borrow another message's receipt", () => {
   for (const id of ["msg_5junk", "msg_05", "msg_0", "msg_2147483648", "msg_9007199254740992"]) {
     const [attached] = attachAgentMessageActivationsFromReceipts(
