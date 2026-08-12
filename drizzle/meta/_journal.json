@@ -568,6 +568,13 @@
       "when": 1786665600000,
       "tag": "0080_room_agent_delivery_instances",
       "breakpoints": true
+    },
+    {
+      "idx": 81,
+      "version": "7",
+      "when": 1786752000000,
+      "tag": "0081_desktop_delivery_signal_sequence",
+      "breakpoints": true
     }
   ]
 }

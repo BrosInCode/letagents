@@ -5,7 +5,12 @@ import type {
   DesktopRoomStreamEvent,
 } from "../../ipc-types.js";
 import { desktopEventPublicReplyText } from "./codex-event-prompt.js";
-import { createDesktopDeliverySignalGuard } from "./managed-agent-delivery-signal.js";
+import {
+  createDesktopDeliverySignalGuard,
+  createDesktopDeliverySignalLane,
+  type DesktopDeliverySignalGeneration,
+  type DesktopDeliverySignalLane,
+} from "./managed-agent-delivery-signal.js";
 import {
   desktopManagedAgentReplyTargetForMessage,
   persistDesktopManagedAgentLocalReply,
@@ -40,17 +45,110 @@ import {
 type ManagedRoomEvent = Extract<DesktopRoomStreamEvent, { type: "message" | "task_update" }>;
 const DESKTOP_DELIVERY_HEARTBEAT_MS = 30_000;
 const desktopDeliveryHeartbeatTimers = new Map<string, NodeJS.Timeout>();
+interface DesktopDeliverySignalRuntime {
+  lane: DesktopDeliverySignalLane;
+  epoch: number;
+  desiredState: string | null;
+  generation: DesktopDeliverySignalGeneration;
+  nextServerSequence: number;
+}
+const desktopDeliverySignalRuntimes = new Map<string, DesktopDeliverySignalRuntime>();
 // Stops a worker whose delivery lease the server no longer recognises from
 // storming desktop-heartbeat/desktop-pause: 404/410 is terminal, everything
 // else backs off (the PR #715 pause-spam caveat).
 const desktopDeliverySignalGuard = createDesktopDeliverySignalGuard();
+
+function desktopDeliverySignalRuntime(sessionId: string): DesktopDeliverySignalRuntime {
+  let runtime = desktopDeliverySignalRuntimes.get(sessionId);
+  if (!runtime) {
+    const lane = createDesktopDeliverySignalLane();
+    runtime = {
+      lane,
+      epoch: 0,
+      desiredState: null,
+      generation: lane.advance(),
+      nextServerSequence: 0,
+    };
+    desktopDeliverySignalRuntimes.set(sessionId, runtime);
+  }
+  return runtime;
+}
+
+function selectDesktopDeliverySignalState(
+  sessionId: string,
+  desiredState: string,
+): DesktopDeliverySignalRuntime {
+  const runtime = desktopDeliverySignalRuntime(sessionId);
+  if (runtime.desiredState !== desiredState) {
+    runtime.epoch += 1;
+    runtime.desiredState = desiredState;
+    runtime.generation = runtime.lane.advance();
+  }
+  return runtime;
+}
+
+function restartDesktopDeliverySignalState(sessionId: string): void {
+  const runtime = desktopDeliverySignalRuntime(sessionId);
+  runtime.epoch += 1;
+  runtime.desiredState = null;
+  runtime.generation = runtime.lane.advance();
+}
+
+function nextDesktopDeliverySignalSequence(runtime: DesktopDeliverySignalRuntime): number {
+  runtime.nextServerSequence += 1;
+  return runtime.nextServerSequence;
+}
+
+function reconcileDesktopDeliverySignalSequence(
+  runtime: DesktopDeliverySignalRuntime,
+  error: unknown,
+): boolean {
+  const candidate = error && typeof error === "object"
+    ? error as {
+        status?: unknown;
+        payload?: { code?: unknown; current_delivery_signal_sequence?: unknown } | null;
+      }
+    : null;
+  if (candidate?.status !== 409 || candidate.payload?.code !== "stale_delivery_signal") return false;
+  const current = candidate.payload.current_delivery_signal_sequence;
+  if (typeof current === "number" && Number.isSafeInteger(current) && current >= 0) {
+    runtime.nextServerSequence = Math.max(runtime.nextServerSequence, current);
+  }
+  return true;
+}
+
+function retireDesktopDeliverySignalRuntime(
+  sessionId: string,
+  runtime: DesktopDeliverySignalRuntime,
+): void {
+  if (desktopDeliverySignalRuntimes.get(sessionId) === runtime) {
+    desktopDeliverySignalRuntimes.delete(sessionId);
+  }
+}
+
+function retireDesktopDeliverySignalRuntimeAfterDrain(
+  sessionId: string,
+  runtime: DesktopDeliverySignalRuntime,
+): void {
+  const generation = runtime.generation;
+  void runtime.lane.run(generation, `retire:${runtime.epoch}`, async () => undefined)
+    .finally(() => {
+      if (
+        runtime.lane.isCurrent(generation)
+        && !desktopDeliveryHeartbeatTimers.has(sessionId)
+      ) retireDesktopDeliverySignalRuntime(sessionId, runtime);
+    });
+}
 
 // Terminal teardown for a delivery signal: stop the heartbeat and end the
 // session locally, but keep the guard's terminal flag so any repeated
 // in-flight pause calls short-circuit instead of re-POSTing.
 function tearDownDesktopDeliverySignal(sessionId: string): void {
   stopDesktopManagedWorkerDeliveryHeartbeat(sessionId);
+  const runtime = desktopDeliverySignalRuntime(sessionId);
+  restartDesktopDeliverySignalState(sessionId);
   markAgentSessionEnded(sessionId);
+  retireDesktopDeliverySignalRuntimeAfterDrain(sessionId, runtime);
 }
 
 // The shared worker plumbing deliberately lazy-imports auth.js,
@@ -330,73 +428,106 @@ export function stopDesktopManagedWorkerDeliveryHeartbeat(sessionId: string): vo
 export function endDesktopManagedWorkerSession(sessionId: string | null | undefined): void {
   if (!sessionId) return;
   stopDesktopManagedWorkerDeliveryHeartbeat(sessionId);
+  const runtime = desktopDeliverySignalRuntime(sessionId);
+  restartDesktopDeliverySignalState(sessionId);
   desktopDeliverySignalGuard.forget(sessionId);
   markAgentSessionEnded(sessionId);
+  retireDesktopDeliverySignalRuntimeAfterDrain(sessionId, runtime);
 }
 
 async function postDesktopManagedWorkerDeliveryHeartbeat(
   session: StoredAgentSessionState,
   streamRoomIdentifier: string,
 ): Promise<void> {
+  const runtimeAtInvocation = desktopDeliverySignalRuntime(session.session_id);
+  const invocationEpoch = runtimeAtInvocation.epoch;
+  const invocationIsCurrent = (): boolean => (
+    desktopDeliverySignalRuntimes.get(session.session_id) === runtimeAtInvocation
+    && runtimeAtInvocation.epoch === invocationEpoch
+  );
   if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) return;
+  if (!invocationIsCurrent()) return;
 
-  const decision = desktopDeliverySignalGuard.beforeSend(session.session_id);
-  if (decision.action === "skip") {
-    // A session the server has forgotten stays forgotten: tear it down instead
-    // of letting the 30s timer keep firing dead signals.
-    if (decision.reason === "terminal") tearDownDesktopDeliverySignal(session.session_id);
-    return;
-  }
-
-  const { apiFetch, DesktopApiError } = await import("../auth.js");
   const { getActiveRoomIdentifier } = await import("../room-stream.js");
+  if (!invocationIsCurrent()) return;
   const roomClosed = getActiveRoomIdentifier()?.trim() !== streamRoomIdentifier.trim();
-  const path = roomClosed
-    ? `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-pause`
-    : `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-heartbeat`;
-  const body = roomClosed
-    ? {
-        agent_session_id: session.session_id,
-        agent_session_token: session.session_token,
-        status_text: "Room is not open on the managing desktop",
-        availability: "room_closed",
+  const desiredState = roomClosed ? "room_closed" : "active";
+  const runtime = selectDesktopDeliverySignalState(session.session_id, desiredState);
+  await runtime.lane.run(runtime.generation, desiredState, async (isCurrent) => {
+    const decision = roomClosed
+      ? desktopDeliverySignalGuard.beforeStateChange(session.session_id, "room_closed")
+      : desktopDeliverySignalGuard.beforeSend(session.session_id);
+    if (decision.action === "skip") {
+      // A session the server has forgotten stays forgotten: tear it down instead
+      // of letting the 30s timer keep firing dead signals.
+      if (decision.reason === "terminal" && isCurrent()) tearDownDesktopDeliverySignal(session.session_id);
+      return;
+    }
+
+    const { apiFetch, DesktopApiError } = await import("../auth.js");
+    if (!isCurrent()) return;
+    const deliverySignalSequence = nextDesktopDeliverySignalSequence(runtime);
+    const path = roomClosed
+      ? `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-pause`
+      : `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-heartbeat`;
+    const body = roomClosed
+      ? {
+          agent_session_id: session.session_id,
+          agent_session_token: session.session_token,
+          status_text: "Room is not open on the managing desktop",
+          availability: "room_closed",
+          delivery_signal_sequence: deliverySignalSequence,
+        }
+      : {
+          agent_session_id: session.session_id,
+          agent_session_token: session.session_token,
+          delivery_signal_sequence: deliverySignalSequence,
+        };
+    try {
+      await apiFetch<Record<string, unknown>>(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+        body: JSON.stringify(body),
+      });
+      if (!isCurrent()) return;
+      if (roomClosed) desktopDeliverySignalGuard.recordSuccess(session.session_id, "room_closed");
+      else desktopDeliverySignalGuard.recordSuccess(session.session_id);
+      const supervisorEntryId = supervisorEntryIdForAgentSession(session.session_id);
+      if (supervisorEntryId) {
+        const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
+        await supervisorDaemonClient.updateWorkplaceLiveness(
+          supervisorEntryId,
+          "reachable",
+          roomClosed ? "Room channel reachable; delivery intentionally paused while the room is closed." : "Room heartbeat accepted.",
+        ).catch(() => undefined);
       }
-    : {
-        agent_session_id: session.session_id,
-        agent_session_token: session.session_token,
-      };
-  try {
-    await apiFetch<Record<string, unknown>>(path, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
-      body: JSON.stringify(body),
-    });
-    desktopDeliverySignalGuard.recordSuccess(session.session_id);
-    const supervisorEntryId = supervisorEntryIdForAgentSession(session.session_id);
-    if (supervisorEntryId) {
-      const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
-      await supervisorDaemonClient.updateWorkplaceLiveness(
-        supervisorEntryId,
-        "reachable",
-        roomClosed ? "Room channel reachable; delivery intentionally paused while the room is closed." : "Room heartbeat accepted.",
-      ).catch(() => undefined);
+    } catch (error) {
+      if (!isCurrent()) return;
+      const status = error instanceof DesktopApiError ? error.status : null;
+      if (reconcileDesktopDeliverySignalSequence(runtime, error)) {
+        if (isCurrent()) {
+          setImmediate(() => {
+            void postDesktopManagedWorkerDeliveryHeartbeat(session, streamRoomIdentifier)
+              .catch(() => undefined);
+          });
+        }
+        return;
+      }
+      const terminal = desktopDeliverySignalGuard.recordFailure(session.session_id, status).terminal;
+      const supervisorEntryId = supervisorEntryIdForAgentSession(session.session_id);
+      if (supervisorEntryId) {
+        const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
+        await supervisorDaemonClient.updateWorkplaceLiveness(
+          supervisorEntryId,
+          terminal ? "stale" : "unknown",
+          terminal ? "Room session is no longer accepted; native execution is evaluated independently." : "Room heartbeat failed; reachability is unknown.",
+        ).catch(() => undefined);
+      }
+      if (terminal && isCurrent()) {
+        tearDownDesktopDeliverySignal(session.session_id);
+      }
     }
-  } catch (error) {
-    const status = error instanceof DesktopApiError ? error.status : null;
-    const terminal = desktopDeliverySignalGuard.recordFailure(session.session_id, status).terminal;
-    const supervisorEntryId = supervisorEntryIdForAgentSession(session.session_id);
-    if (supervisorEntryId) {
-      const { supervisorDaemonClient } = await import("../supervisor-daemon.js");
-      await supervisorDaemonClient.updateWorkplaceLiveness(
-        supervisorEntryId,
-        terminal ? "stale" : "unknown",
-        terminal ? "Room session is no longer accepted; native execution is evaluated independently." : "Room heartbeat failed; reachability is unknown.",
-      ).catch(() => undefined);
-    }
-    if (terminal) {
-      tearDownDesktopDeliverySignal(session.session_id);
-    }
-  }
+  });
 }
 
 export function startDesktopManagedWorkerDeliveryHeartbeat(
@@ -406,6 +537,7 @@ export function startDesktopManagedWorkerDeliveryHeartbeat(
   stopDesktopManagedWorkerDeliveryHeartbeat(session.session_id);
   // A genuine (re)start / resume earns a clean slate so a session that recovered
   // can signal again even after an earlier terminal stop.
+  restartDesktopDeliverySignalState(session.session_id);
   desktopDeliverySignalGuard.reset(session.session_id);
   void postDesktopManagedWorkerDeliveryHeartbeat(session, streamRoomIdentifier).catch(() => undefined);
   const timer = setInterval(() => {
@@ -420,38 +552,54 @@ export async function pauseDesktopManagedWorkerDelivery(
   statusText: string,
 ): Promise<void> {
   stopDesktopManagedWorkerDeliveryHeartbeat(session.session_id);
+  const desiredState = `failure:${statusText}`;
+  const runtime = selectDesktopDeliverySignalState(session.session_id, desiredState);
   if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) return;
-
-  // onSessionUnavailable fires this per failed turn, so without the guard a run
-  // of failures (or a server that 404s the endpoint) becomes a pause storm.
-  const decision = desktopDeliverySignalGuard.beforeSend(session.session_id);
-  if (decision.action === "skip") {
-    if (decision.reason === "terminal") markAgentSessionEnded(session.session_id);
-    return;
-  }
-
-  const { apiFetch, DesktopApiError } = await import("../auth.js");
-  try {
-    await apiFetch<Record<string, unknown>>(
-      `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-pause`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
-        body: JSON.stringify({
-          agent_session_id: session.session_id,
-          agent_session_token: session.session_token,
-          status_text: statusText,
-          availability: "failure",
-        }),
-      },
-    );
-    desktopDeliverySignalGuard.recordSuccess(session.session_id);
-  } catch (error) {
-    const status = error instanceof DesktopApiError ? error.status : null;
-    if (desktopDeliverySignalGuard.recordFailure(session.session_id, status).terminal) {
-      markAgentSessionEnded(session.session_id);
+  if (!runtime.lane.isCurrent(runtime.generation)) return;
+  await runtime.lane.run(runtime.generation, desiredState, async (isCurrent) => {
+    // onSessionUnavailable fires this per failed turn, so without the guard a run
+    // of failures (or a server that 404s the endpoint) becomes a pause storm.
+    const decision = desktopDeliverySignalGuard.beforeSend(session.session_id);
+    if (decision.action === "skip") {
+      if (decision.reason === "terminal" && isCurrent()) markAgentSessionEnded(session.session_id);
+      return;
     }
-  }
+
+    const { apiFetch, DesktopApiError } = await import("../auth.js");
+    if (!isCurrent()) return;
+    const deliverySignalSequence = nextDesktopDeliverySignalSequence(runtime);
+    try {
+      await apiFetch<Record<string, unknown>>(
+        `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/desktop-pause`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "X-LetAgents-Desktop-Client": "1" },
+          body: JSON.stringify({
+            agent_session_id: session.session_id,
+            agent_session_token: session.session_token,
+            status_text: statusText,
+            availability: "failure",
+            delivery_signal_sequence: deliverySignalSequence,
+          }),
+        },
+      );
+      if (isCurrent()) desktopDeliverySignalGuard.recordSuccess(session.session_id);
+    } catch (error) {
+      if (!isCurrent()) return;
+      const status = error instanceof DesktopApiError ? error.status : null;
+      if (reconcileDesktopDeliverySignalSequence(runtime, error)) {
+        if (isCurrent()) {
+          setImmediate(() => {
+            void pauseDesktopManagedWorkerDelivery(session, statusText).catch(() => undefined);
+          });
+        }
+        return;
+      }
+      if (desktopDeliverySignalGuard.recordFailure(session.session_id, status).terminal && isCurrent()) {
+        markAgentSessionEnded(session.session_id);
+      }
+    }
+  });
 }
 
 export async function disconnectDesktopManagedWorker(
@@ -461,31 +609,37 @@ export async function disconnectDesktopManagedWorker(
     return;
   }
   stopDesktopManagedWorkerDeliveryHeartbeat(session.session_id);
+  const runtime = selectDesktopDeliverySignalState(session.session_id, "disconnect");
   desktopDeliverySignalGuard.forget(session.session_id);
 
-  if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) {
-    markAgentSessionEnded(session.session_id);
-    return;
-  }
+  await runtime.lane.run(runtime.generation, "disconnect", async (isCurrent) => {
+    if (!(await shouldUseCloudDesktopManagedAgentWorkerSession(session))) {
+      if (isCurrent()) markAgentSessionEnded(session.session_id);
+      return;
+    }
+    if (!isCurrent()) return;
 
-  try {
-    const { apiFetch } = await import("../auth.js");
-    await apiFetch<Record<string, unknown>>(
-      `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          agent_session_id: session.session_id,
-          agent_session_token: session.session_token,
-        }),
-      },
-    );
-  } catch {
-    // Local cleanup still matters; the next room snapshot will reconcile any server-side state.
-  } finally {
-    markAgentSessionEnded(session.session_id);
-  }
+    try {
+      const { apiFetch } = await import("../auth.js");
+      if (!isCurrent()) return;
+      await apiFetch<Record<string, unknown>>(
+        `/rooms/${encodeURIComponent(session.room_id)}/agent-sessions/${encodeURIComponent(session.session_id)}/disconnect`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            agent_session_id: session.session_id,
+            agent_session_token: session.session_token,
+          }),
+        },
+      );
+    } catch {
+      // Local cleanup still matters; the next room snapshot will reconcile any server-side state.
+    } finally {
+      if (isCurrent()) markAgentSessionEnded(session.session_id);
+      retireDesktopDeliverySignalRuntimeAfterDrain(session.session_id, runtime);
+    }
+  });
 }
 
 export function managedAgentWorkerReplyTargetForEvent(event: ManagedRoomEvent): DesktopManagedAgentReplyTarget {

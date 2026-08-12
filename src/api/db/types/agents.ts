@@ -223,6 +223,7 @@ export interface RoomAgentDeliverySessionRow {
   transport: RoomAgentDeliveryTransport;
   credential_fingerprint: string | null;
   credential_epoch: number | null;
+  desktop_signal_sequence: number;
   active_connection_count: number;
   last_connected_at: string;
   last_disconnected_at: string | null;
