@@ -1,6 +1,10 @@
 import { buildAgentRoomParticipantKey } from "../../shared/room-participant.js";
+import { randomUUID } from "node:crypto";
 import type { RoomAgentDeliveryTransport } from "../../shared/agent-presence.js";
-import { ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS } from "../../shared/agent-presence.js";
+import {
+  ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS,
+  ROOM_AGENT_RECONNECT_GRACE_MS,
+} from "../../shared/agent-presence.js";
 import { isRoomAgentDeliveryCredentialExpired } from "../../shared/agent-presence.js";
 import {
   forceDisconnectRoomAgentDeliverySession,
@@ -23,10 +27,13 @@ import {
 
 interface SharedDeliveryLease {
   identity: ResolvedRequestAgentIdentity;
+  deliveryInstanceId: string;
   refs: number;
   heartbeat: ReturnType<typeof setInterval>;
   expiryTimer: ReturnType<typeof setTimeout> | null;
+  idleTimer: ReturnType<typeof setTimeout> | null;
   disconnectHandlers: Set<() => void>;
+  disconnectDurably: () => Promise<void>;
 }
 
 interface SharedDeliveryFence {
@@ -43,6 +50,225 @@ interface SharedDeliveryFence {
 const sharedDeliveryLeases = new Map<string, SharedDeliveryLease>();
 const sharedDeliveryLeaseCreations = new Map<string, Promise<SharedDeliveryLease>>();
 const sharedDeliveryFences = new Map<string, SharedDeliveryFence>();
+
+interface PendingDeliveryRelease {
+  key: string;
+  leaseKey: string;
+  release: () => Promise<void>;
+  attempt: number;
+  dueAt: number;
+}
+
+const MAX_CONCURRENT_DELIVERY_RELEASES = 8;
+// Sixteen retained instances cover repeated poll churn without letting one
+// credential own an unbounded outage queue. Older exact instance tokens are
+// safe to evict:
+// the bounded database sweep retires them once their heartbeat window closes.
+const MAX_PENDING_DELIVERY_RELEASES_PER_LEASE = 16;
+const MAX_PENDING_DELIVERY_RELEASES = 4_096;
+const pendingDeliveryReleases = new Map<string, PendingDeliveryRelease>();
+const pendingDeliveryReleaseGroups = new Map<string, Set<string>>();
+const deliveryReleaseQueue: PendingDeliveryRelease[] = [];
+const deliveryReleaseQueueIndexes = new Map<string, number>();
+const activeDeliveryReleases = new Set<Promise<void>>();
+let deliveryReleaseTimer: ReturnType<typeof setTimeout> | null = null;
+let deliveryReleaseTimerDueAt: number | null = null;
+let drainingDeliveryReleases = false;
+
+function deliveryReleaseRetryDelay(attempt: number): number {
+  const exponential = Math.min(30_000, 500 * (2 ** Math.min(attempt - 1, 6)));
+  return Math.round(exponential * (0.75 + Math.random() * 0.5));
+}
+
+function swapDeliveryReleaseQueue(left: number, right: number): void {
+  [deliveryReleaseQueue[left], deliveryReleaseQueue[right]] = [
+    deliveryReleaseQueue[right]!,
+    deliveryReleaseQueue[left]!,
+  ];
+  deliveryReleaseQueueIndexes.set(deliveryReleaseQueue[left]!.key, left);
+  deliveryReleaseQueueIndexes.set(deliveryReleaseQueue[right]!.key, right);
+}
+
+function pushDeliveryReleaseQueue(entry: PendingDeliveryRelease): void {
+  deliveryReleaseQueue.push(entry);
+  let index = deliveryReleaseQueue.length - 1;
+  deliveryReleaseQueueIndexes.set(entry.key, index);
+  while (index > 0) {
+    const parent = Math.floor((index - 1) / 2);
+    if (deliveryReleaseQueue[parent]!.dueAt <= deliveryReleaseQueue[index]!.dueAt) break;
+    swapDeliveryReleaseQueue(parent, index);
+    index = parent;
+  }
+}
+
+function removeDeliveryReleaseQueueAt(index: number): PendingDeliveryRelease | null {
+  const removed = deliveryReleaseQueue[index] ?? null;
+  if (!removed) return null;
+  const last = deliveryReleaseQueue.pop();
+  deliveryReleaseQueueIndexes.delete(removed.key);
+  if (index < deliveryReleaseQueue.length && last) {
+    deliveryReleaseQueue[index] = last;
+    deliveryReleaseQueueIndexes.set(last.key, index);
+    const parent = Math.floor((index - 1) / 2);
+    if (index > 0 && deliveryReleaseQueue[index]!.dueAt < deliveryReleaseQueue[parent]!.dueAt) {
+      while (index > 0) {
+        const nextParent = Math.floor((index - 1) / 2);
+        if (deliveryReleaseQueue[nextParent]!.dueAt <= deliveryReleaseQueue[index]!.dueAt) break;
+        swapDeliveryReleaseQueue(nextParent, index);
+        index = nextParent;
+      }
+      return removed;
+    }
+    while (true) {
+      const left = index * 2 + 1;
+      const right = left + 1;
+      let smallest = index;
+      if (left < deliveryReleaseQueue.length
+        && deliveryReleaseQueue[left]!.dueAt < deliveryReleaseQueue[smallest]!.dueAt) smallest = left;
+      if (right < deliveryReleaseQueue.length
+        && deliveryReleaseQueue[right]!.dueAt < deliveryReleaseQueue[smallest]!.dueAt) smallest = right;
+      if (smallest === index) break;
+      swapDeliveryReleaseQueue(index, smallest);
+      index = smallest;
+    }
+  }
+  return removed;
+}
+
+function peekDeliveryReleaseQueue(): PendingDeliveryRelease | null {
+  return deliveryReleaseQueue[0] ?? null;
+}
+
+function removePendingDeliveryRelease(key: string): PendingDeliveryRelease | null {
+  const entry = pendingDeliveryReleases.get(key) ?? null;
+  if (!entry) return null;
+  pendingDeliveryReleases.delete(key);
+  const queueIndex = deliveryReleaseQueueIndexes.get(key);
+  if (queueIndex !== undefined) removeDeliveryReleaseQueueAt(queueIndex);
+  const group = pendingDeliveryReleaseGroups.get(entry.leaseKey);
+  group?.delete(key);
+  if (group?.size === 0) pendingDeliveryReleaseGroups.delete(entry.leaseKey);
+  return entry;
+}
+
+function retainPendingDeliveryRelease(entry: PendingDeliveryRelease): void {
+  const existing = pendingDeliveryReleases.get(entry.key);
+  if (existing) removePendingDeliveryRelease(existing.key);
+
+  let group = pendingDeliveryReleaseGroups.get(entry.leaseKey);
+  if (!group) {
+    group = new Set();
+    pendingDeliveryReleaseGroups.set(entry.leaseKey, group);
+  }
+  while (group.size >= MAX_PENDING_DELIVERY_RELEASES_PER_LEASE) {
+    const oldest = group.values().next().value as string | undefined;
+    if (!oldest) break;
+    removePendingDeliveryRelease(oldest);
+  }
+  while (pendingDeliveryReleases.size >= MAX_PENDING_DELIVERY_RELEASES) {
+    const oldest = pendingDeliveryReleases.keys().next().value as string | undefined;
+    if (!oldest) break;
+    removePendingDeliveryRelease(oldest);
+  }
+  group = pendingDeliveryReleaseGroups.get(entry.leaseKey) ?? new Set<string>();
+  if (!pendingDeliveryReleaseGroups.has(entry.leaseKey)) {
+    pendingDeliveryReleaseGroups.set(entry.leaseKey, group);
+  }
+  pendingDeliveryReleases.set(entry.key, entry);
+  group.add(entry.key);
+  pushDeliveryReleaseQueue(entry);
+}
+
+function armDeliveryReleaseScheduler(): void {
+  if (
+    drainingDeliveryReleases
+    || pendingDeliveryReleases.size === 0
+    || activeDeliveryReleases.size >= MAX_CONCURRENT_DELIVERY_RELEASES
+  ) return;
+  const next = peekDeliveryReleaseQueue();
+  if (!next) return;
+  if (deliveryReleaseTimer && deliveryReleaseTimerDueAt !== null) {
+    if (deliveryReleaseTimerDueAt <= next.dueAt) return;
+    clearTimeout(deliveryReleaseTimer);
+  }
+  deliveryReleaseTimerDueAt = next.dueAt;
+  deliveryReleaseTimer = setTimeout(() => {
+    deliveryReleaseTimer = null;
+    deliveryReleaseTimerDueAt = null;
+    pumpDeliveryReleaseScheduler();
+  }, Math.max(0, next.dueAt - Date.now()));
+  deliveryReleaseTimer.unref?.();
+}
+
+function pumpDeliveryReleaseScheduler(): void {
+  if (drainingDeliveryReleases) return;
+  const now = Date.now();
+  while (activeDeliveryReleases.size < MAX_CONCURRENT_DELIVERY_RELEASES) {
+    const next = peekDeliveryReleaseQueue();
+    if (!next || next.dueAt > now) break;
+    const entry = removePendingDeliveryRelease(next.key);
+    if (!entry) continue;
+    let work!: Promise<void>;
+    work = entry.release().catch((error: unknown) => {
+      console.error("[room agent delivery] durable release retry failed", error);
+      if (drainingDeliveryReleases) throw error;
+      retainPendingDeliveryRelease({
+        ...entry,
+        attempt: entry.attempt + 1,
+        dueAt: Date.now() + deliveryReleaseRetryDelay(entry.attempt + 1),
+      });
+    }).finally(() => {
+      activeDeliveryReleases.delete(work);
+      pumpDeliveryReleaseScheduler();
+      armDeliveryReleaseScheduler();
+    });
+    activeDeliveryReleases.add(work);
+  }
+  armDeliveryReleaseScheduler();
+}
+
+function scheduleDeliveryReleaseRetry(input: {
+  leaseKey: string;
+  deliveryInstanceId: string;
+  release: () => Promise<void>;
+}): void {
+  const key = pendingDeliveryReleaseKey(input.leaseKey, input.deliveryInstanceId);
+  if (!pendingDeliveryReleases.has(key)) {
+    retainPendingDeliveryRelease({
+      key,
+      leaseKey: input.leaseKey,
+      release: input.release,
+      attempt: 1,
+      dueAt: Date.now() + deliveryReleaseRetryDelay(1),
+    });
+  }
+  armDeliveryReleaseScheduler();
+}
+
+function pendingDeliveryReleaseKey(leaseKey: string, deliveryInstanceId: string): string {
+  return `${leaseKey}\n${deliveryInstanceId}`;
+}
+
+async function drainPendingDeliveryReleases(): Promise<PromiseSettledResult<void>[]> {
+  drainingDeliveryReleases = true;
+  if (deliveryReleaseTimer) clearTimeout(deliveryReleaseTimer);
+  deliveryReleaseTimer = null;
+  deliveryReleaseTimerDueAt = null;
+  const activeResults = await Promise.allSettled([...activeDeliveryReleases]);
+  const entries = [...pendingDeliveryReleases.values()];
+  pendingDeliveryReleases.clear();
+  pendingDeliveryReleaseGroups.clear();
+  deliveryReleaseQueue.length = 0;
+  deliveryReleaseQueueIndexes.clear();
+  const results: PromiseSettledResult<void>[] = [];
+  for (let index = 0; index < entries.length; index += MAX_CONCURRENT_DELIVERY_RELEASES) {
+    results.push(...await Promise.allSettled(
+      entries.slice(index, index + MAX_CONCURRENT_DELIVERY_RELEASES).map((entry) => entry.release()),
+    ));
+  }
+  drainingDeliveryReleases = false;
+  return [...activeResults, ...results];
+}
 
 function sharedDeliveryCreationKey(leaseKey: string, credentialFingerprint: string | null): string {
   return `${leaseKey}\n${credentialFingerprint ?? "unfenced"}`;
@@ -61,6 +287,8 @@ function retireSharedDeliveryLease(
   if (sharedDeliveryLeases.get(leaseKey) === lease) sharedDeliveryLeases.delete(leaseKey);
   clearInterval(lease.heartbeat);
   if (lease.expiryTimer) clearTimeout(lease.expiryTimer);
+  if (lease.idleTimer) clearTimeout(lease.idleTimer);
+  lease.idleTimer = null;
   for (const handler of lease.disconnectHandlers) {
     try {
       handler();
@@ -125,6 +353,8 @@ export interface RoomAgentDeliveryDeps {
   markRoomAgentDeliveryHeartbeat: typeof markRoomAgentDeliveryHeartbeat;
   upsertRoomParticipant: typeof upsertRoomParticipant;
   heartbeatIntervalMs: number;
+  /** Keep a zero-reference poll lease alive for the immediate successor poll. */
+  idleLeaseMs?: number;
 }
 
 const defaultRoomAgentDeliveryDeps: RoomAgentDeliveryDeps = {
@@ -135,6 +365,7 @@ const defaultRoomAgentDeliveryDeps: RoomAgentDeliveryDeps = {
   markRoomAgentDeliveryHeartbeat,
   upsertRoomParticipant,
   heartbeatIntervalMs: ROOM_AGENT_DELIVERY_HEARTBEAT_INTERVAL_MS,
+  idleLeaseMs: ROOM_AGENT_RECONNECT_GRACE_MS,
 };
 
 export class InvalidRoomAgentDeliverySessionError extends Error {
@@ -149,6 +380,100 @@ export interface RoomAgentDeliverySession {
   /** Revalidate the exact delivery credential against durable state. */
   checkCredential: () => Promise<boolean>;
   end: () => Promise<void>;
+}
+
+async function disconnectSharedDeliveryLease(
+  leaseKey: string,
+  lease: SharedDeliveryLease,
+  fence: SharedDeliveryFence,
+): Promise<void> {
+  if (lease.refs > 0) return;
+  if (sharedDeliveryLeases.get(leaseKey) !== lease) return;
+  if (lease.idleTimer) clearTimeout(lease.idleTimer);
+  lease.idleTimer = null;
+
+  const previousDisconnect = fence.disconnecting;
+  const disconnecting = (async () => {
+    await previousDisconnect?.catch(() => undefined);
+    await lease.disconnectDurably();
+  })();
+  fence.disconnecting = disconnecting;
+  try {
+    await disconnecting;
+    if (lease.refs === 0 && sharedDeliveryLeases.get(leaseKey) === lease) {
+      retireSharedDeliveryLease(leaseKey, lease, "idle delivery expiry");
+    }
+  } catch (error) {
+    // A single process-wide scheduler retries the idempotent instance release
+    // with bounded concurrency and jittered backoff. Retiring the live lease
+    // here prevents one timer and one heartbeat per failed session.
+    if (lease.refs === 0 && sharedDeliveryLeases.get(leaseKey) === lease) {
+      retireSharedDeliveryLease(leaseKey, lease, "idle delivery release failed");
+      scheduleDeliveryReleaseRetry({
+        leaseKey,
+        deliveryInstanceId: lease.deliveryInstanceId,
+        release: lease.disconnectDurably,
+      });
+    }
+    throw error;
+  } finally {
+    if (fence.disconnecting === disconnecting) fence.disconnecting = null;
+    cleanupSharedDeliveryFence(leaseKey, fence);
+  }
+}
+
+/**
+ * Flush process-local delivery leases before the database pool closes. Normal
+ * zero-reference leases intentionally outlive one long-poll response, so SSE
+ * cleanup alone is not a complete shutdown drain.
+ */
+export async function drainRoomAgentDeliveryLeases(): Promise<void> {
+  // Let a setup already past identity resolution either publish its lease or
+  // compensate before the shutdown snapshot. New HTTP intake is closed first.
+  await Promise.allSettled([...sharedDeliveryLeaseCreations.values()]);
+  const leases = [...sharedDeliveryLeases.entries()];
+  const disconnectResults = await Promise.allSettled(leases.map(async ([leaseKey, lease]) => {
+    const fence = getSharedDeliveryFence(leaseKey);
+    const previousDisconnect = fence.disconnecting;
+    if (previousDisconnect) {
+      try {
+        await previousDisconnect;
+      } catch (error) {
+        // disconnectSharedDeliveryLease schedules the exact idempotent retry
+        // before rejecting. Let the scheduler's shutdown result supersede that
+        // first error; an unrelated/forced disconnect remains fatal.
+        if (!pendingDeliveryReleases.has(
+          pendingDeliveryReleaseKey(leaseKey, lease.deliveryInstanceId),
+        )) throw error;
+      }
+      return;
+    }
+    retireSharedDeliveryLease(leaseKey, lease, "server shutdown");
+    const disconnecting = (async () => {
+      await lease.disconnectDurably();
+    })();
+    fence.disconnecting = disconnecting;
+    try {
+      await disconnecting;
+    } finally {
+      if (fence.disconnecting === disconnecting) fence.disconnecting = null;
+      cleanupSharedDeliveryFence(leaseKey, fence);
+    }
+  }));
+  // An idle timer may already have removed its lease and entered the durable
+  // disconnect before shutdown took the snapshot above. Drain that fence too.
+  const fenceResults = await Promise.allSettled(
+    [...sharedDeliveryFences.values()]
+      .map((fence) => fence.disconnecting)
+      .filter((pending): pending is Promise<unknown> => Boolean(pending)),
+  );
+  const pendingReleaseResults = await drainPendingDeliveryReleases();
+  const failures = [...disconnectResults, ...fenceResults, ...pendingReleaseResults]
+    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+    .map((result) => result.reason);
+  if (failures.length > 0) {
+    throw new AggregateError(failures, "Failed to drain room agent delivery leases.");
+  }
 }
 
 function getOptionalQueryString(value: unknown): string | null {
@@ -235,15 +560,7 @@ export async function disconnectRoomAgentDeliverySession(input: {
     const deliverySession = await deps.forceDisconnectRoomAgentDeliverySession(input);
     const lease = sharedDeliveryLeases.get(leaseKey);
     if (lease) {
-      sharedDeliveryLeases.delete(leaseKey);
-      clearInterval(lease.heartbeat);
-    }
-    for (const handler of lease?.disconnectHandlers ?? []) {
-      try {
-        handler();
-      } catch (error) {
-        console.error("[room agent delivery] disconnect handler failed", error);
-      }
+      retireSharedDeliveryLease(leaseKey, lease, "forced disconnect");
     }
     return deliverySession;
   })();
@@ -310,6 +627,16 @@ export async function beginRoomAgentDelivery(input: {
     } else if (resolvedLeaseKey !== leaseKey) {
       throw new InvalidRoomAgentDeliverySessionError();
     }
+    // Idle expiry owns the same durable disconnect fence as explicit teardown.
+    // A request that started just before the timer fired must not reconnect
+    // until that disconnect commits, or the late decrement could clobber the
+    // newly connected lease.
+    await fence.disconnecting?.catch(() => undefined);
+    const preexistingLease = sharedDeliveryLeases.get(leaseKey);
+    if (preexistingLease?.idleTimer) {
+      clearTimeout(preexistingLease.idleTimer);
+      preexistingLease.idleTimer = null;
+    }
     setupCredentialFingerprint = roomAgentDeliveryCredentialFingerprint(identity.credential_fence);
     if (setupCredentialFingerprint) {
       fence.activeCredentialFingerprints.set(
@@ -353,6 +680,10 @@ export async function beginRoomAgentDelivery(input: {
     if (sharedDeliveryLeases.get(leaseKey) !== lease) {
       throw new InvalidRoomAgentDeliverySessionError("Agent delivery session was disconnected during setup.");
     }
+    if (lease.idleTimer) {
+      clearTimeout(lease.idleTimer);
+      lease.idleTimer = null;
+    }
     lease.refs += 1;
     if (input.onSessionDisconnected) {
       lease.disconnectHandlers.add(input.onSessionDisconnected);
@@ -370,6 +701,7 @@ export async function beginRoomAgentDelivery(input: {
           actor_label: identity.actor_label,
           agent_session_id: identity.agent_session_id,
           credential_fence: identity.credential_fence,
+          delivery_instance_id: lease.deliveryInstanceId,
         });
         if (active !== false) return true;
         if (sharedDeliveryLeases.get(activeLeaseKey) === lease) {
@@ -389,16 +721,21 @@ export async function beginRoomAgentDelivery(input: {
         }
         lease.refs = Math.max(0, lease.refs - 1);
         if (lease.refs > 0 || sharedDeliveryLeases.get(activeLeaseKey) !== lease) return;
-        sharedDeliveryLeases.delete(activeLeaseKey);
-        clearInterval(lease.heartbeat);
-        if (lease.expiryTimer) clearTimeout(lease.expiryTimer);
-        await deps.markRoomAgentDeliveryDisconnected({
-          room_id: input.roomId,
-          actor_label: identity.actor_label,
-          agent_session_id: identity.agent_session_id,
-          credential_fence: identity.credential_fence,
-        });
-        cleanupSharedDeliveryFence(activeLeaseKey, activeFence);
+        const idleLeaseMs = input.transport === "long_poll"
+          ? Math.max(0, deps.idleLeaseMs ?? 0)
+          : 0;
+        if (idleLeaseMs === 0) {
+          await disconnectSharedDeliveryLease(activeLeaseKey, lease, activeFence);
+          return;
+        }
+        if (lease.idleTimer) clearTimeout(lease.idleTimer);
+        lease.idleTimer = setTimeout(() => {
+          lease.idleTimer = null;
+          void disconnectSharedDeliveryLease(activeLeaseKey, lease, activeFence).catch((error: unknown) => {
+            console.error(`[room agent delivery] failed to expire idle delivery for ${input.roomId}`, error);
+          });
+        }, idleLeaseMs);
+        lease.idleTimer.unref?.();
       },
     };
   } finally {
@@ -431,6 +768,7 @@ async function createSharedDeliveryLease(
 ): Promise<SharedDeliveryLease> {
   let connected = false;
   const credentialFingerprint = roomAgentDeliveryCredentialFingerprint(identity.credential_fence);
+  const deliveryInstanceId = randomUUID();
   try {
     assertDeliverySetupCurrent(fence, setupGeneration, credentialFingerprint);
     await deps.markRoomAgentDeliveryConnected({
@@ -446,6 +784,7 @@ async function createSharedDeliveryLease(
       ide_label: identity.ide_label,
       repo_branch: identity.repo_branch,
       credential_fence: identity.credential_fence,
+      delivery_instance_id: deliveryInstanceId,
       transport: input.transport,
     });
     connected = true;
@@ -480,6 +819,7 @@ async function createSharedDeliveryLease(
         actor_label: identity.actor_label,
         agent_session_id: identity.agent_session_id,
         credential_fence: identity.credential_fence,
+        delivery_instance_id: lease.deliveryInstanceId,
       }).then((active) => {
         if (active !== false || sharedDeliveryLeases.get(leaseKey) !== lease) return;
         retireSharedDeliveryLease(leaseKey, lease, "inactive credential");
@@ -493,10 +833,21 @@ async function createSharedDeliveryLease(
     heartbeat.unref?.();
     lease = {
       identity,
+      deliveryInstanceId,
       refs: 0,
       heartbeat,
       expiryTimer: null,
+      idleTimer: null,
       disconnectHandlers: new Set(),
+      disconnectDurably: async () => {
+        await deps.markRoomAgentDeliveryDisconnected({
+          room_id: input.roomId,
+          actor_label: identity.actor_label,
+          agent_session_id: identity.agent_session_id,
+          credential_fence: identity.credential_fence,
+          delivery_instance_id: deliveryInstanceId,
+        });
+      },
     };
     if (identity.credential_fence?.kind === "bearer" && identity.credential_fence.expires_at) {
       const delay = Math.max(0, Date.parse(identity.credential_fence.expires_at) - Date.now());
@@ -507,6 +858,7 @@ async function createSharedDeliveryLease(
             actor_label: identity.actor_label,
             agent_session_id: identity.agent_session_id,
             credential_fence: identity.credential_fence,
+            delivery_instance_id: deliveryInstanceId,
           }).catch((error: unknown) => {
             console.error(`[room agent delivery] failed to retire expired delivery for ${input.roomId}`, error);
           }).finally(() => {
@@ -524,13 +876,26 @@ async function createSharedDeliveryLease(
     sharedDeliveryLeases.set(leaseKey, lease);
     return lease;
   } catch (error) {
-    if (connected) {
-      await deps.markRoomAgentDeliveryDisconnected({
-        room_id: input.roomId,
-        actor_label: identity.actor_label,
-        agent_session_id: identity.agent_session_id,
-        credential_fence: identity.credential_fence,
-      }).catch(() => undefined);
+    // The database call can fail after commit. The exact instance token makes
+    // compensation safe whether the connect committed, rolled back, or is
+    // retried after a transport-level ambiguous result.
+    if (connected || deliveryInstanceId) {
+      const release = async () => {
+        await deps.markRoomAgentDeliveryDisconnected({
+          room_id: input.roomId,
+          actor_label: identity.actor_label,
+          agent_session_id: identity.agent_session_id,
+          credential_fence: identity.credential_fence,
+          delivery_instance_id: deliveryInstanceId,
+        });
+      };
+      await release().catch(() => {
+        scheduleDeliveryReleaseRetry({
+          leaseKey,
+          deliveryInstanceId,
+          release,
+        });
+      });
     }
     if (error instanceof InactiveRoomAgentDeliverySessionError) {
       throw new InvalidRoomAgentDeliverySessionError("Agent delivery session is no longer active.");

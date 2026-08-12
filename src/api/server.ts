@@ -6,6 +6,7 @@ import { assertMessageThreadProjectionReady } from "./db/messages/projection-rea
 import { closeApiRouteEventBroker } from "./server/routes.js";
 import { pool } from "./db/client.js";
 import { waitForSseCleanupDrain } from "./http/sse.js";
+import { drainRoomAgentDeliveryLeases } from "./rooms/agent-delivery.js";
 import {
   closeHttpServerIntake,
   createGracefulShutdownController,
@@ -47,7 +48,10 @@ const shutdown = createGracefulShutdownController({
   },
   stopBridge: stopRoomEventBridge,
   closeBroker: closeApiRouteEventBroker,
-  drainConnections: waitForSseCleanupDrain,
+  drainConnections: async () => {
+    await waitForSseCleanupDrain();
+    await drainRoomAgentDeliveryLeases();
+  },
   closeDatabase: () => pool.end(),
   forceClose: () => server.closeAllConnections?.(),
   exit: (code) => process.exit(code),
