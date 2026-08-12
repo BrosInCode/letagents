@@ -36,6 +36,7 @@ test("desktop updater exposes a truthful unsupported state without touching the 
     availableVersion: null,
     releaseName: null,
     releaseNotes: null,
+    downloadProgress: null,
     lastCheckedAt: null,
     error: null,
     unsupportedReason: "Production builds only.",
@@ -49,16 +50,23 @@ test("desktop updater exposes a truthful unsupported state without touching the 
 test("desktop updater tracks background download and release metadata", async () => {
   const { updater, events, statuses } = controller();
   await updater.check();
-  updater.markAvailable();
+  updater.markAvailable({ version: "0.2.0", total: 1000 });
+  updater.markDownloadProgress({ percent: 42.5, transferred: 425, total: 1000, bytesPerSecond: 125 });
   updater.markDownloaded({ releaseName: "LetAgents 0.2.0", releaseNotes: "Safer updates" });
   assert.deepEqual(events, ["check"]);
-  assert.deepEqual(statuses, ["checking", "downloading", "ready"]);
+  assert.deepEqual(statuses, ["checking", "downloading", "downloading", "ready"]);
   assert.deepEqual(updater.getStatus(), {
     phase: "ready",
     currentVersion: "0.1.0",
     availableVersion: "0.2.0",
     releaseName: "LetAgents 0.2.0",
     releaseNotes: "Safer updates",
+    downloadProgress: {
+      percent: 100,
+      transferred: 1000,
+      total: 1000,
+      bytesPerSecond: 125,
+    },
     lastCheckedAt: "2026-08-10T12:00:00.000Z",
     error: null,
     unsupportedReason: null,
@@ -105,6 +113,37 @@ test("Squirrel launch failure restarts supervision after a completed handoff", a
   assert.deepEqual(events, ["handoff", "install", "recover"]);
   assert.equal(status.phase, "ready");
   assert.match(status.error || "", /could not relaunch/);
+});
+
+test("asynchronous native staging failure restores supervision once and keeps the update retryable", async () => {
+  let releaseRecovery!: () => void;
+  const recoveryGate = new Promise<void>((resolve) => { releaseRecovery = resolve; });
+  const { updater, events } = controller({
+    recoverAfterInstallFailure: async () => {
+      events.push("recover");
+      await recoveryGate;
+    },
+  });
+  updater.markDownloaded({ releaseName: "LetAgents 0.2.0" });
+  const installing = await updater.install();
+  assert.equal(installing.phase, "installing");
+
+  const firstFailure = updater.fail(new Error("native staging failed"));
+  const duplicateFailure = updater.fail(new Error("duplicate native error"));
+  assert.deepEqual(events, ["handoff", "install", "recover"]);
+  releaseRecovery();
+
+  const [firstStatus, duplicateStatus] = await Promise.all([firstFailure, duplicateFailure]);
+  assert.equal(firstStatus.phase, "ready");
+  assert.equal(duplicateStatus.phase, "ready");
+  assert.equal(firstStatus.canInstall, true);
+  assert.match(firstStatus.error || "", /native staging failed/);
+  assert.deepEqual(events, ["handoff", "install", "recover"]);
+
+  const lateDuplicate = await updater.fail(new Error("late duplicate native error"));
+  assert.equal(lateDuplicate.phase, "ready");
+  assert.match(lateDuplicate.error || "", /native staging failed/);
+  assert.deepEqual(events, ["handoff", "install", "recover"]);
 });
 
 test("release version parsing accepts stable and prerelease names", () => {

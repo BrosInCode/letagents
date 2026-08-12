@@ -602,18 +602,35 @@
     <div v-else class="sidebar-footer">
       <button
         class="sidebar-row sidebar-settings-row"
-        :data-active="activeEntry.id === settingsEntry.id || activeEntry.type === 'system'"
-        :aria-current="activeEntry.id === settingsEntry.id || activeEntry.type === 'system' ? 'page' : undefined"
+        :class="{ 'sidebar-update-row': updatePresentation.active }"
+        :data-active="!updatePresentation.active && (activeEntry.id === settingsEntry.id || activeEntry.type === 'system')"
+        :data-update-state="updatePresentation.state"
+        :aria-current="!updatePresentation.active && (activeEntry.id === settingsEntry.id || activeEntry.type === 'system') ? 'page' : undefined"
         type="button"
         data-testid="sidebar-settings"
-        @click="$emit('select-entry', settingsEntry)"
+        @click="handleSettingsRowClick"
       >
         <span class="system-icon" aria-hidden="true">
-          <Settings />
+          <Download v-if="updatePresentation.state === 'downloading'" />
+          <CircleCheck v-else-if="updatePresentation.state === 'ready'" />
+          <RefreshCw v-else-if="updatePresentation.state === 'installing'" />
+          <TriangleAlert v-else-if="updatePresentation.state === 'error'" />
+          <Settings v-else />
         </span>
         <span class="system-copy">
-          <span>Settings</span>
-          <small>Account, storage, setup</small>
+          <span>{{ updatePresentation.title }}</span>
+          <small>{{ updatePresentation.detail }}</small>
+        </span>
+        <span
+          v-if="updatePresentation.state === 'downloading'"
+          class="sidebar-update-progress"
+          role="progressbar"
+          :aria-label="updatePresentation.title"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="updatePresentation.percent ?? undefined"
+        >
+          <span :style="{ width: `${updatePresentation.percent ?? 14}%` }"></span>
         </span>
       </button>
     </div>
@@ -643,8 +660,10 @@ import {
   Archive,
   Check,
   CheckCircle2,
+  CircleCheck,
   ChevronRight,
   Copy,
+  Download,
   ExternalLink,
   GitBranch,
   Handshake,
@@ -655,12 +674,15 @@ import {
   Pin,
   PinOff,
   Plus,
+  RefreshCw,
   Search,
   Settings,
+  TriangleAlert,
   X,
 } from "@lucide/vue";
 import { computed, nextTick, ref, watch, type Component } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
+import { desktopUpdateSidebarPresentation } from "../../../domain/desktop-update-status";
 import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import {
   SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT,
@@ -690,6 +712,7 @@ import {
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
+import type { DesktopUpdateStatus } from "../../../../../electron/ipc-types";
 
 const props = defineProps<{
   activeEntry: SidebarEntry;
@@ -703,12 +726,14 @@ const props = defineProps<{
   selectedEntryIds: string[];
   batchActionBusy: SidebarRoomBatchActionId | null;
   rentalRequestCount?: number;
+  updateStatus: DesktopUpdateStatus | null;
 }>();
 
 const emit = defineEmits<{
   "cycle-sidebar": [];
   "new-room": [];
   "open-rent": [];
+  "open-updates": [];
   "archive-room": [entry: RoomEntry];
   "archive-focus-room": [entry: RoomEntry];
   "conclude-focus-room": [entry: RoomEntry];
@@ -757,6 +782,15 @@ const dragState = ref<SidebarDragState | null>(null);
 const dropTarget = ref<SidebarDropTarget | null>(null);
 const reorderAnnouncement = ref("");
 const suppressedActivationEntryId = ref<string | null>(null);
+const updatePresentation = computed(() => desktopUpdateSidebarPresentation(props.updateStatus));
+
+function handleSettingsRowClick(): void {
+  if (updatePresentation.value.active) {
+    emit("open-updates");
+    return;
+  }
+  emit("select-entry", props.settingsEntry);
+}
 
 const roomReorderEnabled = computed(() => isSidebarRoomReorderEnabled(
   props.selectionActive,

@@ -730,12 +730,76 @@
 }
 
 .sidebar-settings-row {
+  position: relative;
+  overflow: hidden;
   min-height: 48px;
   margin-top: 6px;
   padding: 5px 8px;
   border-color: transparent;
   border-radius: 10px;
   background: transparent;
+}
+
+.sidebar-update-row {
+  padding-bottom: 8px;
+  background: color-mix(in srgb, var(--sidebar-selection) 8%, transparent);
+}
+
+.sidebar-update-row .system-copy small {
+  font-variant-numeric: tabular-nums;
+}
+
+.sidebar-update-row[data-update-state="downloading"] .system-icon {
+  background: var(--blue-dim);
+  color: var(--blue);
+}
+
+.sidebar-update-row[data-update-state="ready"] .system-icon {
+  background: var(--green-dim);
+  color: var(--green);
+}
+
+.sidebar-update-row[data-update-state="error"] .system-icon {
+  background: var(--red-dim);
+  color: var(--red);
+}
+
+.sidebar-update-row[data-update-state="installing"] .system-icon svg {
+  animation: sidebar-update-spin 1.15s linear infinite;
+}
+
+.sidebar-update-progress {
+  position: absolute;
+  right: 8px;
+  bottom: 3px;
+  left: 8px;
+  height: 2px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--blue) 16%, transparent);
+}
+
+.sidebar-update-progress > span {
+  display: block;
+  height: 100%;
+  min-width: 8px;
+  border-radius: inherit;
+  background: var(--blue);
+  transition: width 240ms var(--ease-out);
+}
+
+@keyframes sidebar-update-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-update-row[data-update-state="installing"] .system-icon svg {
+    animation: none;
+  }
+
+  .sidebar-update-progress > span {
+    transition: none;
+  }
 }
 
 .pinned-room[data-active="true"],

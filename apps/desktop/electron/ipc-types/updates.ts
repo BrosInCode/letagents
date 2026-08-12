@@ -8,12 +8,20 @@ export type DesktopUpdatePhase =
   | "installing"
   | "error";
 
+export interface DesktopUpdateProgress {
+  percent: number;
+  transferred: number;
+  total: number;
+  bytesPerSecond: number;
+}
+
 export interface DesktopUpdateStatus {
   phase: DesktopUpdatePhase;
   currentVersion: string;
   availableVersion: string | null;
   releaseName: string | null;
   releaseNotes: string | null;
+  downloadProgress: DesktopUpdateProgress | null;
   lastCheckedAt: string | null;
   error: string | null;
   unsupportedReason: string | null;

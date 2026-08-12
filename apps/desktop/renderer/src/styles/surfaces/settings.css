@@ -535,6 +535,30 @@ img.settings-profile-avatar {
   margin: 0;
 }
 
+.settings-update-progress {
+  width: min(100%, 520px);
+  height: 5px;
+  margin-top: 5px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--blue) 14%, transparent);
+}
+
+.settings-update-progress > span {
+  display: block;
+  height: 100%;
+  min-width: 12px;
+  border-radius: inherit;
+  background: var(--blue);
+  transition: width 240ms var(--ease-out);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .settings-update-progress > span {
+    transition: none;
+  }
+}
+
 .settings-update-copy p {
   color: var(--text-tertiary);
   font-size: 0.72rem;

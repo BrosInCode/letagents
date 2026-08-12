@@ -3,9 +3,6 @@
     <article
       class="settings-update-card"
       :data-tone="presentation.tone"
-      role="status"
-      aria-live="polite"
-      aria-atomic="true"
     >
       <div class="settings-update-icon" aria-hidden="true">
         <Download v-if="updateStatus?.phase === 'downloading'" />
@@ -16,8 +13,19 @@
       </div>
       <div class="settings-update-copy">
         <p>Desktop updates</p>
-        <h2>{{ presentation.title }}</h2>
+        <h2 role="status" aria-live="polite" aria-atomic="true">{{ presentation.title }}</h2>
         <span>{{ presentation.detail }}</span>
+        <div
+          v-if="updateStatus?.phase === 'downloading'"
+          class="settings-update-progress"
+          role="progressbar"
+          aria-label="Update download progress"
+          aria-valuemin="0"
+          aria-valuemax="100"
+          :aria-valuenow="updateStatus.downloadProgress?.percent"
+        >
+          <span :style="{ width: `${updateStatus.downloadProgress?.percent ?? 14}%` }"></span>
+        </div>
       </div>
       <div class="settings-update-actions">
         <button

@@ -296,7 +296,9 @@ jobs:
             case "${artifact_name}" in
               *.dmg) content_type="application/x-apple-diskimage" ;;
               *.zip) content_type="application/zip" ;;
+              *.blockmap) content_type="application/octet-stream" ;;
               *.json) content_type="application/json" ;;
+              *.yml) content_type="application/yaml" ;;
               *.sha256) content_type="text/plain" ;;
               *) content_type="application/octet-stream" ;;
             esac
@@ -357,28 +359,33 @@ jobs:
         run: |
           set -euo pipefail
           for arch in arm64 x64; do
-            source_manifest="release-artifacts/RELEASES-${arch}.json"
-            if [[ ! -s "${source_manifest}" ]]; then
-              echo "Missing update manifest ${source_manifest}." >&2
-              exit 1
-            fi
-            feed_key="desktop/feeds/${arch}/RELEASES.json"
-            manifest_sha256=$(sha256sum "${source_manifest}" | awk '{print $1}')
-            aws s3 cp "${source_manifest}" "s3://${R2_BUCKET_NAME}/${feed_key}" \
-              --endpoint-url "${R2_ENDPOINT_URL}" \
-              --cache-control "public,max-age=60,must-revalidate" \
-              --content-type "application/json" \
-              --metadata "sha256=${manifest_sha256}" \
-              --no-progress
-            remote_sha256=$(aws s3api head-object \
-              --endpoint-url "${R2_ENDPOINT_URL}" \
-              --bucket "${R2_BUCKET_NAME}" \
-              --key "${feed_key}" \
-              --query 'Metadata.sha256' \
-              --output text)
-            if [[ "${remote_sha256}" != "${manifest_sha256}" ]]; then
-              echo "R2 update feed verification failed for ${arch}." >&2
-              exit 1
-            fi
-            echo "Published ${R2_PUBLIC_BASE_URL}/${feed_key}."
+            for feed_spec in \
+              "RELEASES-${arch}.json|RELEASES.json|application/json" \
+              "latest-mac-${arch}.yml|latest-mac.yml|application/yaml"; do
+              IFS='|' read -r source_name public_name content_type <<<"${feed_spec}"
+              source_manifest="release-artifacts/${source_name}"
+              if [[ ! -s "${source_manifest}" ]]; then
+                echo "Missing update manifest ${source_manifest}." >&2
+                exit 1
+              fi
+              feed_key="desktop/feeds/${arch}/${public_name}"
+              manifest_sha256=$(sha256sum "${source_manifest}" | awk '{print $1}')
+              aws s3 cp "${source_manifest}" "s3://${R2_BUCKET_NAME}/${feed_key}" \
+                --endpoint-url "${R2_ENDPOINT_URL}" \
+                --cache-control "public,max-age=60,must-revalidate" \
+                --content-type "${content_type}" \
+                --metadata "sha256=${manifest_sha256}" \
+                --no-progress
+              remote_sha256=$(aws s3api head-object \
+                --endpoint-url "${R2_ENDPOINT_URL}" \
+                --bucket "${R2_BUCKET_NAME}" \
+                --key "${feed_key}" \
+                --query 'Metadata.sha256' \
+                --output text)
+              if [[ "${remote_sha256}" != "${manifest_sha256}" ]]; then
+                echo "R2 update feed verification failed for ${arch}/${public_name}." >&2
+                exit 1
+              fi
+              echo "Published ${R2_PUBLIC_BASE_URL}/${feed_key}."
+            done
           done

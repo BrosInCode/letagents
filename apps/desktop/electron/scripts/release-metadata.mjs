@@ -44,6 +44,42 @@ export function desktopMetadataNames({ arch }) {
   return {
     releaseManifest: `desktop-release-${arch}.json`,
     squirrelManifest: `RELEASES-${arch}.json`,
+    updaterManifest: `latest-mac-${arch}.yml`,
+  };
+}
+
+export function createElectronUpdaterMacManifest({
+  version,
+  arch,
+  baseUrl,
+  publishedAt,
+  notes = "",
+  zipArtifact,
+}) {
+  const assets = desktopAssetNames({ version, arch });
+  const normalizedBaseUrl = normalizeReleaseBaseUrl(baseUrl);
+  const publicationDate = new Date(publishedAt);
+  if (Number.isNaN(publicationDate.valueOf())) {
+    throw new Error(`Desktop release metadata requires a valid publication date; received '${publishedAt ?? ""}'.`);
+  }
+  if (
+    zipArtifact?.name !== assets.zip
+    || !Number.isSafeInteger(zipArtifact?.bytes)
+    || zipArtifact.bytes <= 0
+    || typeof zipArtifact?.sha512 !== "string"
+    || !/^[A-Za-z0-9+/]+={0,2}$/.test(zipArtifact.sha512)
+  ) {
+    throw new Error("electron-updater metadata requires the architecture ZIP size and base64 SHA-512 digest.");
+  }
+  const url = new URL(assets.zip, normalizedBaseUrl).toString();
+  return {
+    version,
+    files: [{ url, sha512: zipArtifact.sha512, size: zipArtifact.bytes }],
+    path: url,
+    sha512: zipArtifact.sha512,
+    releaseName: `LetAgents ${version}`,
+    releaseNotes: String(notes),
+    releaseDate: publicationDate.toISOString(),
   };
 }
 
@@ -98,12 +134,13 @@ export function createDesktopReleaseManifest({
     publishedAt: publicationDate.toISOString(),
     signed: Boolean(signed),
     notarized: Boolean(notarized),
-    artifacts: artifacts.map(({ name, bytes, sha256, kind }) => ({
+    artifacts: artifacts.map(({ name, bytes, sha256, sha512, kind }) => ({
       kind,
       name,
       url: new URL(name, normalizedBaseUrl).toString(),
       bytes,
       sha256,
+      ...(sha512 ? { sha512 } : {}),
     })),
   };
 }

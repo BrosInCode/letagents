@@ -3,9 +3,9 @@
 LetAgents desktop ships two macOS artifacts for both Apple Silicon (`arm64`) and Intel (`x64`) from signed and notarized application bundles:
 
 - `LetAgents-<version>-darwin-<arch>.dmg` is the first-install artifact. Users open it and drag LetAgents to Applications.
-- `LetAgents-<version>-darwin-<arch>.zip` is the Squirrel.Mac update payload. The application updater downloads it; users should not install this file manually.
+- `LetAgents-<version>-darwin-<arch>.zip` is the application update payload. The updater downloads it; users should not install this file manually.
 
-Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, and `RELEASES-<arch>.json`. The latter uses Electron's static Squirrel.Mac format and points to the immutable, versioned ZIP URL on Cloudflare R2. The workflow copies each architecture manifest to a dedicated public R2 feed as `RELEASES.json`; stable clients never depend on GitHub's repository-wide `releases/latest` selection or private-repository authentication.
+Each versioned release also includes SHA-256 checksum files, `desktop-release-<arch>.json`, `latest-mac-<arch>.yml`, a ZIP blockmap, and the legacy `RELEASES-<arch>.json`. The workflow publishes the first two discovery formats to each architecture feed: `latest-mac.yml` powers the progress-aware updater, while `RELEASES.json` remains a compatibility bridge for clients released before 0.1.4. Both point to immutable, versioned files on Cloudflare R2, so stable clients never depend on GitHub's repository-wide `releases/latest` selection or private-repository authentication.
 
 ## One-time Apple setup
 
@@ -33,7 +33,7 @@ Cloudflare R2 delivery additionally uses two bucket-scoped GitHub Actions secret
 | `R2_BUCKET_NAME` | Variable | R2 bucket containing desktop releases |
 | `R2_PUBLIC_BASE_URL` | Variable | Public R2 custom-domain origin, without a trailing slash |
 
-The token cannot create or delete buckets. Versioned objects are uploaded with one-year immutable caching and a SHA-256 metadata guard; an existing key with different bytes fails the release. Rolling `RELEASES.json` feeds use a short, revalidating cache policy.
+The token cannot create or delete buckets. Versioned objects are uploaded with one-year immutable caching and a SHA-256 metadata guard; an existing key with different bytes fails the release. Rolling `latest-mac.yml` and compatibility `RELEASES.json` feeds use a short, revalidating cache policy.
 
 ## Cut a release
 
@@ -73,9 +73,11 @@ or pass `MACOS_PROVISIONING_PROFILE_PATH`, `MACOS_NOTARY_API_KEY`, `MACOS_NOTARY
 
 ## Updates and rollback
 
-The in-app updater consumes the signed ZIP, never the DMG. Production clients fetch `https://downloads.letagents.chat/desktop/feeds/<arch>/RELEASES.json`: Apple Silicon uses `arm64`, while Intel uses `x64`. These rolling discovery manifests are the only mutable release objects and always point to immutable, architecture-matched ZIP URLs under `https://downloads.letagents.chat/desktop/v<x.y.z>/`. The versioned DMGs, ZIPs, checksums, and metadata are never replaced; GitHub Releases retain the same artifacts as a backup/archive and provenance-verification location. Production builds check their feed at startup and every six hours, and expose an on-demand check under **Settings → Updates** and **Help → Check for Updates**. For a staging feed, launch a packaged build with `LETAGENTS_DESKTOP_UPDATE_BASE_URL` set to an HTTPS directory containing `RELEASES.json`; do not put that override in a stable build.
+The in-app updater consumes the signed ZIP, never the DMG. Production clients fetch `https://downloads.letagents.chat/desktop/feeds/<arch>/latest-mac.yml`: Apple Silicon uses `arm64`, while Intel uses `x64`. This rolling discovery manifest is mutable but always points to immutable, architecture-matched ZIP and blockmap files under `https://downloads.letagents.chat/desktop/v<x.y.z>/`. The versioned DMGs, ZIPs, blockmaps, checksums, and metadata are never replaced; GitHub Releases retain the same artifacts as a backup/archive and provenance-verification location. Production builds check their feed at startup and every six hours, and expose an on-demand check under **Settings → Updates** and **Help → Check for Updates**. For a staging feed, launch a packaged build with `LETAGENTS_DESKTOP_UPDATE_BASE_URL` set to an HTTPS directory containing `latest-mac.yml`; do not put that override in a stable build.
 
-Squirrel downloads a newer signed ZIP in the background but never restarts the app automatically. **Restart & update** first blocks agent lifecycle mutations, asks the serving supervisor daemon to drain dispatch and relinquish its owner-only socket, and verifies that exact daemon process has exited. Provider processes are not terminated. Only after that proof does the app call Electron's installer and quit. On the next launch, the new application starts its bundled daemon and the existing startup reconciliation reconnects desired-running agents to their exact provider generations. If handoff fails, installation is cancelled, the update remains downloaded, and the current app stays open with a retryable error.
+The updater reports transferred bytes, total size, speed, and percent to the sidebar while work continues. It uses the previous cached ZIP and the two blockmaps to request only changed byte ranges; if that comparison or any range request fails, it safely downloads the complete ZIP instead. A fresh installation and the first update after migrating from the legacy updater should therefore be expected to download the full ZIP.
+
+The updater downloads a newer signed ZIP in the background but never restarts the app automatically. **Restart & update** first blocks agent lifecycle mutations, asks the serving supervisor daemon to drain dispatch and relinquish its owner-only socket, and verifies that exact daemon process has exited. Provider processes are not terminated. Only after that proof does the app call Electron's Squirrel.Mac installer and quit. On the next launch, the new application starts its bundled daemon and the existing startup reconciliation reconnects desired-running agents to their exact provider generations. If handoff fails, installation is cancelled, the update remains downloaded, and the current app stays open with a retryable error.
 
 Update metadata must continue to use HTTPS and immutable versioned asset URLs. Do not rely on a normal quit as the user-controlled installation path: Squirrel.Mac may stage a downloaded replacement for the next launch. If that path applies an update, the new app's normal implementation-version handshake still retires an older serving daemon before reconciliation. **Restart & update** remains the preferred path because the current app proves the handoff first and can report a retryable failure without quitting.
 
