@@ -1,4 +1,4 @@
-import type { DesktopUpdateStatus } from "../ipc-types.js";
+import type { DesktopUpdateProgress, DesktopUpdateStatus } from "../ipc-types.js";
 
 const supportedDesktopUpdateArchitectures = new Set(["arm64", "x64"]);
 
@@ -24,6 +24,28 @@ export interface DesktopDownloadedUpdate {
   releaseNotes?: string | null;
 }
 
+export interface DesktopAvailableUpdate extends DesktopDownloadedUpdate {
+  version?: string | null;
+  total?: number | null;
+}
+
+function normalizeProgress(progress: DesktopUpdateProgress): DesktopUpdateProgress {
+  const total = Number.isFinite(progress.total) && progress.total > 0 ? Math.floor(progress.total) : 0;
+  const transferred = Number.isFinite(progress.transferred) && progress.transferred > 0
+    ? Math.min(Math.floor(progress.transferred), total || Number.MAX_SAFE_INTEGER)
+    : 0;
+  const derivedPercent = total > 0 ? (transferred / total) * 100 : 0;
+  const percent = Number.isFinite(progress.percent) ? progress.percent : derivedPercent;
+  return {
+    percent: Math.max(0, Math.min(100, percent)),
+    transferred,
+    total,
+    bytesPerSecond: Number.isFinite(progress.bytesPerSecond) && progress.bytesPerSecond > 0
+      ? Math.floor(progress.bytesPerSecond)
+      : 0,
+  };
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error || "Unknown update error");
 }
@@ -37,6 +59,7 @@ export class DesktopUpdaterController {
   private status: DesktopUpdateStatus;
   private readonly options: DesktopUpdaterControllerOptions;
   private installOperation: Promise<DesktopUpdateStatus> | null = null;
+  private installRecoveryOperation: Promise<DesktopUpdateStatus> | null = null;
 
   constructor(options: DesktopUpdaterControllerOptions) {
     this.options = options;
@@ -46,6 +69,7 @@ export class DesktopUpdaterController {
       availableVersion: null,
       releaseName: null,
       releaseNotes: null,
+      downloadProgress: null,
       lastCheckedAt: null,
       error: null,
       unsupportedReason: options.supported
@@ -57,7 +81,10 @@ export class DesktopUpdaterController {
   }
 
   getStatus(): DesktopUpdateStatus {
-    return { ...this.status };
+    return {
+      ...this.status,
+      downloadProgress: this.status.downloadProgress ? { ...this.status.downloadProgress } : null,
+    };
   }
 
   isInstalling(): boolean {
@@ -68,11 +95,11 @@ export class DesktopUpdaterController {
     if (!this.options.supported || ["installing", "downloading", "ready"].includes(this.status.phase)) {
       return this.getStatus();
     }
-    this.update({ phase: "checking", error: null });
+    this.update({ phase: "checking", error: null, downloadProgress: null });
     try {
       await this.options.checkForUpdates();
     } catch (error) {
-      this.fail(error);
+      await this.fail(error);
     }
     return this.getStatus();
   }
@@ -91,9 +118,30 @@ export class DesktopUpdaterController {
     this.update({ phase: "checking", error: null });
   }
 
-  markAvailable(): void {
+  markAvailable(update: DesktopAvailableUpdate = {}): void {
     if (!this.options.supported || this.status.phase === "installing") return;
-    this.update({ phase: "downloading", error: null });
+    const version = update.version?.trim() || null;
+    const releaseName = update.releaseName?.trim() || (version ? `LetAgents ${version}` : null);
+    const total = Number.isFinite(update.total) && Number(update.total) > 0 ? Math.floor(Number(update.total)) : 0;
+    this.update({
+      phase: "downloading",
+      availableVersion: version || versionFromReleaseName(releaseName),
+      releaseName,
+      releaseNotes: update.releaseNotes?.trim() || null,
+      downloadProgress: total > 0
+        ? { percent: 0, transferred: 0, total, bytesPerSecond: 0 }
+        : null,
+      error: null,
+    });
+  }
+
+  markDownloadProgress(progress: DesktopUpdateProgress): void {
+    if (!this.options.supported || this.status.phase === "installing") return;
+    this.update({
+      phase: "downloading",
+      downloadProgress: normalizeProgress(progress),
+      error: null,
+    });
   }
 
   markUpToDate(): void {
@@ -103,6 +151,7 @@ export class DesktopUpdaterController {
       availableVersion: null,
       releaseName: null,
       releaseNotes: null,
+      downloadProgress: null,
       lastCheckedAt: this.options.now?.().toISOString() || new Date().toISOString(),
       error: null,
     });
@@ -110,24 +159,41 @@ export class DesktopUpdaterController {
 
   markDownloaded(update: DesktopDownloadedUpdate): void {
     if (!this.options.supported || this.status.phase === "installing") return;
-    const releaseName = update.releaseName?.trim() || null;
+    const releaseName = update.releaseName?.trim() || this.status.releaseName;
+    const downloadProgress = this.status.downloadProgress?.total
+      ? {
+          ...this.status.downloadProgress,
+          percent: 100,
+          transferred: this.status.downloadProgress.total,
+        }
+      : this.status.downloadProgress;
     this.update({
       phase: "ready",
-      availableVersion: versionFromReleaseName(releaseName),
+      availableVersion: versionFromReleaseName(releaseName) || this.status.availableVersion,
       releaseName,
-      releaseNotes: update.releaseNotes?.trim() || null,
+      releaseNotes: update.releaseNotes?.trim() || this.status.releaseNotes,
+      downloadProgress,
       lastCheckedAt: this.options.now?.().toISOString() || new Date().toISOString(),
       error: null,
     });
   }
 
-  fail(error: unknown): void {
-    if (!this.options.supported || this.status.phase === "installing") return;
+  fail(error: unknown): Promise<DesktopUpdateStatus> {
+    if (!this.options.supported) return Promise.resolve(this.getStatus());
+    if (this.status.phase === "installing") return this.recoverFromInstallFailure(error);
+    if (this.status.phase === "ready") {
+      this.update({
+        error: this.status.error || errorMessage(error),
+        lastCheckedAt: this.options.now?.().toISOString() || new Date().toISOString(),
+      });
+      return Promise.resolve(this.getStatus());
+    }
     this.update({
       phase: "error",
       error: errorMessage(error),
       lastCheckedAt: this.options.now?.().toISOString() || new Date().toISOString(),
     });
+    return Promise.resolve(this.getStatus());
   }
 
   private async installOnce(): Promise<DesktopUpdateStatus> {
@@ -138,16 +204,32 @@ export class DesktopUpdaterController {
       handoffCompleted = true;
       this.options.quitAndInstall();
     } catch (error) {
-      let detail = errorMessage(error);
-      if (handoffCompleted && this.options.recoverAfterInstallFailure) {
-        try {
-          await this.options.recoverAfterInstallFailure();
-        } catch (recoveryError) {
-          detail = `${detail} Supervisor recovery also failed: ${errorMessage(recoveryError)}`;
-        }
+      if (handoffCompleted) {
+        return this.recoverFromInstallFailure(error);
       }
-      this.update({ phase: "ready", error: detail });
+      this.update({ phase: "ready", error: errorMessage(error) });
     }
+    return this.getStatus();
+  }
+
+  private recoverFromInstallFailure(error: unknown): Promise<DesktopUpdateStatus> {
+    if (this.installRecoveryOperation) return this.installRecoveryOperation;
+    this.installRecoveryOperation = this.recoverFromInstallFailureOnce(error).finally(() => {
+      this.installRecoveryOperation = null;
+    });
+    return this.installRecoveryOperation;
+  }
+
+  private async recoverFromInstallFailureOnce(error: unknown): Promise<DesktopUpdateStatus> {
+    let detail = errorMessage(error);
+    if (this.options.recoverAfterInstallFailure) {
+      try {
+        await this.options.recoverAfterInstallFailure();
+      } catch (recoveryError) {
+        detail = `${detail} Supervisor recovery also failed: ${errorMessage(recoveryError)}`;
+      }
+    }
+    this.update({ phase: "ready", error: detail });
     return this.getStatus();
   }
 

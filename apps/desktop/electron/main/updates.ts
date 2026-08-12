@@ -1,5 +1,5 @@
 import electron from "electron";
-import { UpdateSourceType, updateElectronApp } from "update-electron-app";
+import electronUpdaterModule, { type ProgressInfo, type UpdateInfo } from "electron-updater";
 
 import type { DesktopUpdateStatus } from "../ipc-types.js";
 import { DesktopUpdaterController, desktopUpdateFeedBaseUrl } from "./desktop-updater.js";
@@ -8,17 +8,20 @@ import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
 import { emitToMainWindow, focusMainWindow } from "./window.js";
 
 const electronRuntime = electron as Partial<typeof import("electron")>;
-const { app, autoUpdater, Notification } = electronRuntime;
-const updateInterval = "6 hours";
+const { app, Notification } = electronRuntime;
+const updateIntervalMs = 6 * 60 * 60 * 1000;
 
 let initialized = false;
-let stopScheduledUpdates: (() => void) | null = null;
+let scheduledUpdateCheck: NodeJS.Timeout | null = null;
 let notifiedReleaseName: string | null = null;
+
+function desktopAutoUpdater() {
+  return electronUpdaterModule.autoUpdater;
+}
 
 function updatesSupported(): boolean {
   return process.platform === "darwin"
     && app?.isPackaged === true
-    && Boolean(autoUpdater)
     && Boolean(desktopUpdateFeedBaseUrl(process.arch));
 }
 
@@ -48,72 +51,110 @@ function publishStatus(status: DesktopUpdateStatus): void {
   notification.show();
 }
 
+function updateBaseUrl(): string {
+  const configuredBaseUrl = process.env.LETAGENTS_DESKTOP_UPDATE_BASE_URL?.trim();
+  const baseUrl = configuredBaseUrl || desktopUpdateFeedBaseUrl(process.arch);
+  if (!baseUrl) throw new Error(`No desktop update feed is configured for the ${process.arch} architecture.`);
+  let parsed: URL;
+  try {
+    parsed = new URL(baseUrl);
+  } catch {
+    throw new Error("The desktop update feed must be an absolute HTTPS URL.");
+  }
+  if (parsed.protocol !== "https:") throw new Error("The desktop update feed must use HTTPS.");
+  if (!parsed.pathname.endsWith("/")) parsed.pathname += "/";
+  return parsed.toString();
+}
+
+function releaseNotes(info: UpdateInfo): string | null {
+  if (typeof info.releaseNotes === "string") return info.releaseNotes.trim() || null;
+  if (Array.isArray(info.releaseNotes)) {
+    const notes = info.releaseNotes.map((entry) => entry.note?.trim()).filter(Boolean);
+    return notes.length > 0 ? notes.join("\n\n") : null;
+  }
+  return null;
+}
+
+function updateSize(info: UpdateInfo): number | null {
+  const zip = info.files.find((file) => file.url.endsWith(".zip")) || info.files[0];
+  return Number.isFinite(zip?.size) && Number(zip.size) > 0 ? Number(zip.size) : null;
+}
+
 export const desktopUpdater = new DesktopUpdaterController({
   currentVersion: app?.getVersion?.() || process.env.npm_package_version || "0.0.0",
   supported: updatesSupported(),
   unsupportedReason: unsupportedReason(),
-  checkForUpdates: () => {
-    if (!autoUpdater) throw new Error("Electron autoUpdater is unavailable.");
-    return autoUpdater.checkForUpdates();
-  },
+  checkForUpdates: () => desktopAutoUpdater().checkForUpdates(),
   prepareForInstall: () => supervisorDaemonClient.prepareForApplicationUpdate(),
   recoverAfterInstallFailure: async () => {
     await supervisorDaemonClient.resumeAfterApplicationUpdateFailure();
     await supervisorGrantCoordinator.reconcileDesiredRunning();
   },
-  quitAndInstall: () => {
-    if (!autoUpdater) throw new Error("Electron autoUpdater is unavailable.");
-    autoUpdater.quitAndInstall();
-  },
+  quitAndInstall: () => desktopAutoUpdater().quitAndInstall(false, true),
   publish: publishStatus,
 });
-
-function updateBaseUrl(): string {
-  const configuredBaseUrl = process.env.LETAGENTS_DESKTOP_UPDATE_BASE_URL?.trim();
-  const baseUrl = configuredBaseUrl || desktopUpdateFeedBaseUrl(process.arch);
-  if (!baseUrl) throw new Error(`No desktop update feed is configured for the ${process.arch} architecture.`);
-  return baseUrl.replace(/\/+$/, "");
-}
 
 export function initializeDesktopUpdates(): void {
   if (initialized) return;
   initialized = true;
   if (!updatesSupported()) return;
-  if (!autoUpdater) return;
 
-  autoUpdater.on("checking-for-update", () => desktopUpdater.markChecking());
-  autoUpdater.on("update-available", () => desktopUpdater.markAvailable());
-  autoUpdater.on("update-not-available", () => desktopUpdater.markUpToDate());
-  autoUpdater.on("error", (error) => desktopUpdater.fail(error));
-  autoUpdater.on(
-    "update-downloaded",
-    (_event, releaseNotes, releaseName) => desktopUpdater.markDownloaded({ releaseName, releaseNotes }),
-  );
+  const electronUpdater = desktopAutoUpdater();
+  electronUpdater.autoDownload = true;
+  electronUpdater.autoInstallOnAppQuit = false;
+  electronUpdater.autoRunAppAfterInstall = true;
+  electronUpdater.allowDowngrade = false;
+  electronUpdater.allowPrerelease = false;
+  electronUpdater.logger = {
+    debug: (...values: unknown[]) => console.debug("[desktop-updater]", ...values),
+    info: (...values: unknown[]) => console.info("[desktop-updater]", ...values),
+    warn: (...values: unknown[]) => console.warn("[desktop-updater]", ...values),
+    error: (...values: unknown[]) => console.error("[desktop-updater]", ...values),
+  };
 
   try {
-    const scheduled = updateElectronApp({
-      updateSource: {
-        type: UpdateSourceType.StaticStorage,
-        baseUrl: updateBaseUrl(),
-      },
-      updateInterval,
-      notifyUser: false,
-      logger: {
-        log: (...values: unknown[]) => console.log("[desktop-updater]", ...values),
-        info: (...values: unknown[]) => console.info("[desktop-updater]", ...values),
-        warn: (...values: unknown[]) => console.warn("[desktop-updater]", ...values),
-        error: (...values: unknown[]) => console.error("[desktop-updater]", ...values),
-      },
-    });
-    stopScheduledUpdates = scheduled.stopUpdates;
+    electronUpdater.setFeedURL({ provider: "generic", url: updateBaseUrl() });
   } catch (error) {
-    desktopUpdater.fail(error);
+    void desktopUpdater.fail(error);
+    return;
   }
+
+  electronUpdater.on("checking-for-update", () => desktopUpdater.markChecking());
+  electronUpdater.on("update-available", (info) => desktopUpdater.markAvailable({
+    version: info.version,
+    releaseName: info.releaseName || `LetAgents ${info.version}`,
+    releaseNotes: releaseNotes(info),
+    total: updateSize(info),
+  }));
+  electronUpdater.on("download-progress", (progress: ProgressInfo) => {
+    desktopUpdater.markDownloadProgress({
+      percent: progress.percent,
+      transferred: progress.transferred,
+      total: progress.total,
+      bytesPerSecond: progress.bytesPerSecond,
+    });
+  });
+  electronUpdater.on("update-not-available", () => desktopUpdater.markUpToDate());
+  electronUpdater.on("error", (error) => {
+    // MacUpdater performs native Squirrel staging after quitAndInstall returns.
+    // A late error must restore daemon supervision after the completed handoff.
+    void desktopUpdater.fail(error);
+  });
+  electronUpdater.on("update-downloaded", (info) => desktopUpdater.markDownloaded({
+    releaseName: info.releaseName || `LetAgents ${info.version}`,
+    releaseNotes: releaseNotes(info),
+  }));
+
+  void desktopUpdater.check();
+  scheduledUpdateCheck = setInterval(() => {
+    void desktopUpdater.check();
+  }, updateIntervalMs);
+  scheduledUpdateCheck.unref();
 }
 
 export function stopDesktopUpdates(): void {
-  stopScheduledUpdates?.();
-  stopScheduledUpdates = null;
+  if (scheduledUpdateCheck) clearInterval(scheduledUpdateCheck);
+  scheduledUpdateCheck = null;
 }
 
 export function assertDesktopUpdateMutationAllowed(): void {
