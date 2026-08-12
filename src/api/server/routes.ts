@@ -33,6 +33,7 @@ import {
   requireGitRoomParticipant as requireParticipant,
   resolveGitHubRoomEntryDecision,
   resolveGitRoomProjectRole as resolveProjectRole,
+  resolveRequestProjectRepoAccessRoomName,
   resolveProjectRepoRoomAccessDecision,
   resolveProjectRoomEntryDecision,
   resolveRepoRoomAccessDecision,
@@ -160,6 +161,7 @@ import {
 } from "../rental/sessions.js";
 import { provisionRentalRoomForProvider } from "../rental/room-projection.js";
 import { publicRentalProviders } from "../rental/provider-hosts.js";
+import { rentalActivityEvents } from "../rental/activity-emitter.js";
 import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
@@ -170,6 +172,16 @@ import {
   taskEvents,
   emitProjectMessage,
 } from "./events.js";
+import {
+  roomEventBridgeLossEvents,
+  setRoomEventBridgeInterestPredicate,
+} from "./event-bridge.js";
+import { messageInfoEvents } from "./message-info-events.js";
+import { createRoomEventBroker, type RoomEventBroker } from "./room-event-broker.js";
+import {
+  createRoomMessageOverlayBatcher,
+  type RoomMessageOverlayBatcher,
+} from "./room-message-overlays.js";
 import {
   emitTaskLifecycleStatusMessage,
   enforceFocusParentBoardWriteIsolation,
@@ -184,7 +196,36 @@ import {
   validateOwnerTokenTaskActorKey,
 } from "./room-services.js";
 
+let sharedRoomEventBroker: RoomEventBroker | null = null;
+let sharedRoomMessageOverlayBatcher: RoomMessageOverlayBatcher | null = null;
+
+function getRoomEventBroker(): RoomEventBroker {
+  sharedRoomEventBroker ??= createRoomEventBroker({
+    messageEvents,
+    taskEvents,
+    githubRoomEvents,
+    reasoningEvents,
+    artifactEvents,
+    rentalActivityEvents,
+    messageInfoEvents,
+    bridgeLossEvents: roomEventBridgeLossEvents,
+  });
+  setRoomEventBridgeInterestPredicate((roomId) => sharedRoomEventBroker?.hasInterest(roomId) ?? false);
+  return sharedRoomEventBroker;
+}
+
+export function closeApiRouteEventBroker(): void {
+  sharedRoomEventBroker?.close();
+  sharedRoomEventBroker = null;
+  sharedRoomMessageOverlayBatcher?.close();
+  sharedRoomMessageOverlayBatcher = null;
+  setRoomEventBridgeInterestPredicate(null);
+}
+
 export function registerApiRoutes(app: Express): void {
+  const roomEventBroker = getRoomEventBroker();
+  sharedRoomMessageOverlayBatcher ??= createRoomMessageOverlayBatcher();
+  const roomMessageOverlayBatcher = sharedRoomMessageOverlayBatcher;
   const roomEntryRouteDeps = {
     getProjectById,
     getGitRoomBindingForRoom,
@@ -223,7 +264,9 @@ export function registerApiRoutes(app: Express): void {
   } satisfies LegacyProjectRouteDeps;
 
   const legacyProjectMessageRouteDeps = {
-    messageEvents,
+    roomEventBroker,
+    roomMessageOverlayBatcher,
+    resolveRequestProjectRepoAccessRoomName,
     resolveCanonicalRoomRequestId,
     requireParticipant,
     parseOptionalAgentPromptKind,
@@ -254,11 +297,9 @@ export function registerApiRoutes(app: Express): void {
   } satisfies LegacyProjectTaskRouteDeps;
 
   const roomMessageRouteDeps = {
-    artifactEvents,
-    githubRoomEvents,
-    messageEvents,
-    taskEvents,
-    reasoningEvents,
+    roomEventBroker,
+    roomMessageOverlayBatcher,
+    resolveRequestProjectRepoAccessRoomName,
     resolveCanonicalRoomRequestId,
     resolveRoomOrReply,
     requireParticipant,

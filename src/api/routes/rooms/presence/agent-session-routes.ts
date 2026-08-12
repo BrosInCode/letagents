@@ -3,7 +3,6 @@ import type { Express } from "express";
 import {
   createFencedRoomAgentSession,
   endRoomAgentSession,
-  forceDisconnectRoomAgentDeliverySession,
   getActiveRoomAgentSessionsForWorkerIdentity,
   getAgentIdentityByCanonicalKey,
   getLastEndedWorkerSessionDisplayName,
@@ -12,7 +11,7 @@ import {
   isActiveAgentInstanceConflictError,
   isActiveRoomAgentSessionStaleForRegistration,
   recordNativeHarnessActivity,
-  upsertDesktopRoomAgentDeliveryHeartbeat,
+  upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat,
   upsertRoomAgentPresence,
 } from "../../../db.js";
 import {
@@ -546,8 +545,7 @@ export function registerAgentSessionRoutes(
       return;
     }
     const identity = worker.identity;
-    const [delivery, presence] = await Promise.all([
-      upsertDesktopRoomAgentDeliveryHeartbeat({
+    const { delivery, presence } = await upsertDesktopRoomAgentDeliveryAndPresenceHeartbeat({
         room_id: project.id,
         actor_label: identity.actor_label,
         agent_key: identity.agent_key,
@@ -559,22 +557,12 @@ export function registerAgentSessionRoutes(
         owner_label: identity.owner_label,
         ide_label: identity.ide_label,
         repo_branch: identity.repo_branch,
-      }),
-      upsertRoomAgentPresence({
-        room_id: project.id,
-        actor_label: identity.actor_label,
-        agent_key: identity.agent_key,
-        agent_session_id: targetSessionId,
-        session_kind: identity.session_kind,
-        runtime: identity.runtime,
-        display_name: identity.display_name,
-        owner_label: identity.owner_label,
-        ide_label: identity.ide_label,
-        repo_branch: identity.repo_branch,
-        status: "idle",
-        status_text: "Waiting for room messages",
-      }),
-    ]);
+        credential_fence: identity.credential_fence,
+        presence: {
+          status: "idle",
+          status_text: "Waiting for room messages",
+        },
+      });
     res.json({ room_id: project.id, delivery_session: delivery, presence });
   });
 
@@ -708,7 +696,7 @@ export function registerAgentSessionRoutes(
       statusText: typeof body.status_text === "string" ? body.status_text : undefined,
     });
     const [delivery, presence] = await Promise.all([
-      forceDisconnectRoomAgentDeliverySession({ room_id: project.id, agent_session_id: targetSessionId }),
+      disconnectRoomAgentDeliverySession({ room_id: project.id, agent_session_id: targetSessionId }),
       upsertRoomAgentPresence({
         room_id: project.id,
         actor_label: identity.actor_label,

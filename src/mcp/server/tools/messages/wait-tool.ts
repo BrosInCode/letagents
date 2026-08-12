@@ -704,6 +704,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const allMessages: unknown[] = [];
       let roomIdFromResponse: string | undefined;
       let catchUpTruncated = false;
+      let apiObservedCursor: string | null = null;
 
       // Long-poll the server (blocks up to serverTimeout for new messages),
       // optionally seeded with a cursor. Shared by the cursor path and by the
@@ -720,6 +721,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         const firstResult = await roomScopedApiCall<{
           messages?: Array<{ id?: string }>;
           has_more?: boolean;
+          last_observed_message_id?: string | null;
           room_id?: string;
           project_id?: string;
         }>({
@@ -738,6 +740,9 @@ export function registerWaitForMessagesTool(server: McpServer): void {
         allMessages.push(...(firstResult.messages ?? []));
         roomIdFromResponse = roomIdFromResponse || firstResult.room_id || firstResult.project_id;
         catchUpTruncated = Boolean(firstResult.has_more);
+        apiObservedCursor = typeof firstResult.last_observed_message_id === "string"
+          ? firstResult.last_observed_message_id
+          : null;
       };
 
       if (fetchPlan.mode === "catch_up_tail") {
@@ -788,9 +793,12 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       if (bounded.omittedMessageCount > 0) {
         output.omitted_message_count = bounded.omittedMessageCount;
       }
+      if (apiObservedCursor) output.last_observed_message_id = apiObservedCursor;
 
       if (targetRoomId) {
-        const observedCursor = routing.last_observed_message_id ?? getLastMessageId(output);
+        const observedCursor = apiObservedCursor
+          ?? routing.last_observed_message_id
+          ?? getLastMessageId(output);
         touchRoomSession(targetRoomId, observedCursor);
 
         if (allMessages.length > 0 && agentSession) {

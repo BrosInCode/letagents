@@ -574,13 +574,14 @@ test("ordinary worker bearer mode retains wait_for_messages when bounded deliver
       requests.push(requestUrl);
       if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
       if (requestUrl.includes("/messages/poll")) {
-        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+        return new Response(JSON.stringify({ messages: [], last_observed_message_id: "msg_2" }), { status: 200 });
       }
       return new Response(JSON.stringify({ messages: [] }), { status: 200 });
     };
     const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
     const result = await wait({ room_id: "room_ordinary", after_message_id: "msg_1", timeout: 1 });
     assert.match(result.content[0]!.text, /messages/);
+    assert.equal(JSON.parse(result.content[0]!.text).last_observed_message_id, "msg_2");
     assert.ok(requests.some((url) => url.includes("/rooms/room_ordinary/messages/poll")));
   });
   globalThis.fetch = originalFetch;

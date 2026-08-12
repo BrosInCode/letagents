@@ -12,9 +12,11 @@ if (testDatabaseUrl) {
 
 const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
+const dbUtilsModule = testDatabaseUrl ? await import("../db/utils.js") : null;
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
+const hashToken = dbUtilsModule?.hashToken;
 
 async function resetDatabase(): Promise<void> {
   if (!db || !pool) {
@@ -268,12 +270,17 @@ test(
       owner_label: "EmmyMay",
       ide_label: "Codex",
     });
+    if (!hashToken) throw new Error("DB-backed escalation tests require TEST_DB_URL");
     await markRoomAgentDeliveryConnected!({
       room_id: roomId,
       actor_label: "CedarFern | EmmyMay's agent | Codex",
       agent_session_id: manager.session_id,
       session_kind: "worker",
       display_name: "CedarFern",
+      credential_fence: {
+        kind: "session_token",
+        token_hash: hashToken(manager.session_token),
+      },
       transport: "long_poll",
     });
     await assignBoardManager!({

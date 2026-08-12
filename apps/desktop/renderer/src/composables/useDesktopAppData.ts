@@ -18,6 +18,7 @@ import type {
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import {
   appendSnapshotMessage,
+  mergeDesktopRoomMessages,
   mergeRoomSnapshotMessages,
   messageReferencesMissingThreadContext,
   removeSnapshotReasoningSession,
@@ -69,6 +70,9 @@ interface DesktopAppDataOptions {
   selectedRootRoomIdentifier: Ref<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
   settingsAccountRooms: Ref<DesktopAccountRoomEntry[]>;
+  deliveryRepairRetryMs?: number;
+  streamBufferMaxBytes?: number;
+  streamBufferMaxEvents?: number;
   snapshotTimeoutMs?: number;
   syncRoomStream: (roomIdentifier: string | null, afterMessageId?: string | null) => Promise<void>;
   workers: Ref<WorkerSnapshot[]>;
@@ -76,6 +80,33 @@ interface DesktopAppDataOptions {
 
 const selectedSnapshotCacheLimit = 8;
 const defaultRoomSnapshotTimeoutMs = 15_000;
+const defaultDeliveryRepairRetryMs = 500;
+const maxDeliveryRepairRetryMs = 5_000;
+const defaultStreamBufferMaxEvents = 256;
+const defaultStreamBufferMaxBytes = 1024 * 1024;
+
+interface PendingDeliveryRepairState {
+  token: number;
+  baseline: DesktopRoomSnapshot | null;
+  retryDelayMs: number;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+}
+
+export function buildRoomStreamDeliveryRepair(
+  previous: DesktopRoomSnapshot,
+  repaired: DesktopRoomSnapshot,
+): { messages: DesktopRoomMessage[]; tasks: DesktopTaskSummary[] } {
+  const previousMessageIds = new Set(previous.messages.map((message) => message.id));
+  const previousTaskVersions = new Map(
+    previous.tasks.map((task) => [task.id, task.updatedAt]),
+  );
+  return {
+    messages: repaired.messages.filter((message) => !previousMessageIds.has(message.id)),
+    tasks: repaired.tasks.filter(
+      (task) => previousTaskVersions.get(task.id) !== task.updatedAt,
+    ),
+  };
+}
 
 export function useDesktopAppData(options: DesktopAppDataOptions) {
   let selectedSnapshotRequestId = 0;
@@ -88,8 +119,133 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   let activeStreamRoom: string | null = null;
   let activeStreamToken = 0;
   let bufferedStreamEvents: DesktopRoomStreamEvent[] = [];
+  let bufferedStreamEventBytes = 0;
+  let streamBufferOverflow = false;
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
+  const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
+
+  function resetBufferedStreamEvents(): void {
+    bufferedStreamEvents = [];
+    bufferedStreamEventBytes = 0;
+    streamBufferOverflow = false;
+  }
+
+  function serializedStreamEventBytes(event: DesktopRoomStreamEvent): number {
+    try {
+      return new TextEncoder().encode(JSON.stringify(event)).byteLength;
+    } catch {
+      return (options.streamBufferMaxBytes ?? defaultStreamBufferMaxBytes) + 1;
+    }
+  }
+
+  function bufferStreamEvent(event: DesktopRoomStreamEvent): void {
+    if (streamBufferOverflow) return;
+    const bytes = serializedStreamEventBytes(event);
+    if (
+      bufferedStreamEvents.length >= (options.streamBufferMaxEvents ?? defaultStreamBufferMaxEvents)
+      || bufferedStreamEventBytes + bytes > (options.streamBufferMaxBytes ?? defaultStreamBufferMaxBytes)
+    ) {
+      bufferedStreamEvents = [];
+      bufferedStreamEventBytes = 0;
+      streamBufferOverflow = true;
+      return;
+    }
+    bufferedStreamEvents.push(event);
+    bufferedStreamEventBytes += bytes;
+  }
+
+  function clearPendingDeliveryRepair(roomKey: string): void {
+    const pending = pendingDeliveryRepairs.get(roomKey);
+    if (pending?.retryTimer) clearTimeout(pending.retryTimer);
+    pendingDeliveryRepairs.delete(roomKey);
+  }
+
+  function clearPendingDeliveryRepairs(): void {
+    for (const roomKey of pendingDeliveryRepairs.keys()) clearPendingDeliveryRepair(roomKey);
+  }
+
+  function setPendingDeliveryRepair(roomIdentifier: string, token: number): void {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    if (!roomKey) return;
+    const existing = pendingDeliveryRepairs.get(roomKey);
+    if (existing?.token === token) return;
+    clearPendingDeliveryRepair(roomKey);
+    pendingDeliveryRepairs.set(roomKey, {
+      token,
+      baseline: snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)
+        ? options.selectedSnapshot.value
+        : null,
+      retryDelayMs: options.deliveryRepairRetryMs ?? defaultDeliveryRepairRetryMs,
+      retryTimer: null,
+    });
+  }
+
+  function schedulePendingDeliveryRepair(roomIdentifier: string, token: number): void {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    const pending = roomKey ? pendingDeliveryRepairs.get(roomKey) : null;
+    if (
+      !roomKey
+      || !pending
+      || pending.token !== token
+      || pending.retryTimer
+      || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
+    ) return;
+    const delayMs = pending.retryDelayMs;
+    pending.retryTimer = setTimeout(() => {
+      pending.retryTimer = null;
+      if (
+        pendingDeliveryRepairs.get(roomKey) === pending
+        && normalizeRoomIdentifier(activeStreamRoom) === roomKey
+      ) scheduleRoomStreamReconciliation(roomIdentifier);
+    }, delayMs);
+    pending.retryDelayMs = Math.min(delayMs * 2, maxDeliveryRepairRetryMs);
+  }
+
+  async function repairManagedAgentDeliveryFromSnapshot(
+    roomIdentifier: string,
+    previousSnapshot: DesktopRoomSnapshot | null,
+    repairedSnapshot: DesktopRoomSnapshot,
+    token: number | null,
+  ): Promise<boolean> {
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    const pending = roomKey ? pendingDeliveryRepairs.get(roomKey) : null;
+    if (
+      !roomKey
+      || token === null
+      || !pending
+      || pending.token !== token
+    ) return true;
+    const baseline = pending.baseline
+      || (snapshotMatchesRoom(previousSnapshot, roomIdentifier) ? previousSnapshot : null);
+    if (baseline && !pending.baseline) pending.baseline = baseline;
+    const deliverySourcesReady = repairedSnapshot.access.status === "ready" && (!repairedSnapshot.sourceStates
+      || (
+        repairedSnapshot.sourceStates.messages?.status === "ready"
+        && repairedSnapshot.sourceStates.tasks?.status === "ready"
+      ));
+    if (!deliverySourcesReady || !desktopIpc.room.repairStreamDelivery) {
+      schedulePendingDeliveryRepair(roomIdentifier, token);
+      return false;
+    }
+    try {
+      await desktopIpc.room.repairStreamDelivery(roomIdentifier, {
+        token,
+        ...(baseline
+          ? buildRoomStreamDeliveryRepair(baseline, repairedSnapshot)
+          : { messages: repairedSnapshot.messages, tasks: repairedSnapshot.tasks }),
+      });
+      if (pendingDeliveryRepairs.get(roomKey) === pending) {
+        clearPendingDeliveryRepair(roomKey);
+      }
+      return true;
+    } catch {
+      // Keep the broker cursor uncommitted and retry this same repair token.
+      // The main-process delivery tracker makes repeated handoffs idempotent.
+      schedulePendingDeliveryRepair(roomIdentifier, token);
+      return false;
+    }
+  }
 
   watch(options.selectedSnapshot, (snapshot) => {
     if (skipNextSelectedSnapshotCache) {
@@ -146,6 +302,13 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         requestedRootRoomIdentifier,
         loadedRootRoomContext.snapshot,
         nextAccountRooms || nextSettingsAccountRooms || [],
+      );
+      const nextRootRoomKey = normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier);
+      await repairManagedAgentDeliveryFromSnapshot(
+        nextRootRoomSnapshot.roomIdentifier || "",
+        options.selectedSnapshot.value,
+        nextRootRoomSnapshot,
+        nextRootRoomKey ? pendingDeliveryRepairs.get(nextRootRoomKey)?.token ?? null : null,
       );
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
@@ -337,6 +500,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       barrierToken = await beginRoomSnapshotBarrier(roomIdentifier);
       const nextSnapshot = await getRoomSnapshot(roomIdentifier);
       if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
+      const roomKey = normalizeRoomIdentifier(roomIdentifier);
+      await repairManagedAgentDeliveryFromSnapshot(
+        roomIdentifier,
+        options.selectedSnapshot.value,
+        nextSnapshot,
+        roomKey ? pendingDeliveryRepairs.get(roomKey)?.token ?? null : null,
+      );
+      if (requestId !== selectedSnapshotRequestId || options.activeEntry.value.id !== selectedRoomEntry.id) return;
       setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, nextSnapshot), { cacheAlias: roomIdentifier });
       finishRoomSnapshotBarrier(roomIdentifier, barrierToken);
     } finally {
@@ -354,13 +525,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     );
     if (!preserveDegradedStream) {
       pendingVerifiedRecoveries.clear();
+      clearPendingDeliveryRepairs();
       degradedStreamRooms.clear();
     }
     const token = ++streamReconcileGeneration;
     activeStreamRoom = roomIdentifier;
     if (!preserveDegradedStream) activeStreamToken = token;
     streamReconcileRoom = roomIdentifier;
-    bufferedStreamEvents = [];
+    resetBufferedStreamEvents();
     try {
       await options.syncRoomStream(roomIdentifier, null);
       return token;
@@ -377,9 +549,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       activeStreamRoom = null;
       activeStreamToken = 0;
       streamReconcileRoom = null;
-      bufferedStreamEvents = [];
+      resetBufferedStreamEvents();
       degradedStreamRooms.clear();
       pendingVerifiedRecoveries.clear();
+      clearPendingDeliveryRepairs();
       await options.syncRoomStream(null);
       return;
     }
@@ -388,9 +561,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       activeStreamRoom = roomIdentifier;
       activeStreamToken = token;
       streamReconcileRoom = null;
-      bufferedStreamEvents = [];
+      resetBufferedStreamEvents();
       degradedStreamRooms.clear();
       pendingVerifiedRecoveries.clear();
+      clearPendingDeliveryRepairs();
     }
     await options.syncRoomStream(roomIdentifier);
   }
@@ -408,8 +582,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       token !== streamReconcileGeneration
       || normalizeRoomIdentifier(streamReconcileRoom) !== normalizeRoomIdentifier(roomIdentifier)
     ) return;
-    const pending = bufferedStreamEvents;
-    bufferedStreamEvents = [];
+    const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
+    const overflowed = streamBufferOverflow;
+    resetBufferedStreamEvents();
     streamReconcileRoom = null;
     for (const buffered of pending) handleRoomStreamEvent(buffered);
     const roomKey = normalizeRoomIdentifier(roomIdentifier);
@@ -418,6 +593,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       && normalizeRoomIdentifier(activeStreamRoom) === roomKey
       && pendingVerifiedRecoveries.get(roomKey) === activeStreamToken
     )) {
+      scheduleRoomStreamReconciliation(roomIdentifier);
+    }
+    if (overflowed && normalizeRoomIdentifier(activeStreamRoom) === roomKey) {
       scheduleRoomStreamReconciliation(roomIdentifier);
     }
   }
@@ -461,7 +639,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   function handleRoomStreamEvent(event: DesktopRoomStreamEvent): void {
     if (streamReconcileRoom && event.type !== "open") {
       if (normalizeRoomIdentifier(streamReconcileRoom) === normalizeRoomIdentifier(event.roomIdentifier)) {
-        bufferedStreamEvents.push(event);
+        bufferStreamEvent(event);
       }
       return;
     }
@@ -473,6 +651,9 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       // replayed over it. This covers every snapshot resource, not only chat.
       const roomKey = normalizeRoomIdentifier(event.roomIdentifier);
       if (!roomKey || normalizeRoomIdentifier(activeStreamRoom) !== roomKey) return;
+      if (event.gap && event.verified && typeof event.deliveryRepairToken === "number") {
+        setPendingDeliveryRepair(event.roomIdentifier, event.deliveryRepairToken);
+      }
       if (event.gap && normalizeRoomIdentifier(streamReconcileRoom) === roomKey) {
         degradedStreamRooms.set(roomKey, activeStreamToken);
         return;
@@ -512,6 +693,21 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       if (messageReferencesMissingThreadContext(event.message, priorMessages)) {
         options.scheduleLiveMetadataRefresh();
       }
+      return;
+    }
+
+    if (event.type === "message_window") {
+      const snapshot = options.selectedSnapshot.value;
+      if (snapshot) setSelectedSnapshot({ ...snapshot, messages: event.messages });
+      return;
+    }
+
+    if (event.type === "message_batch") {
+      const snapshot = options.selectedSnapshot.value;
+      if (snapshot) setSelectedSnapshot({
+        ...snapshot,
+        messages: mergeDesktopRoomMessages(snapshot.messages, event.messages),
+      });
       return;
     }
 
@@ -559,30 +755,63 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
 
   async function reconcileRoomStreamSnapshot(roomIdentifier: string): Promise<void> {
     const generation = ++streamReconcileGeneration;
+    const roomKey = normalizeRoomIdentifier(roomIdentifier);
+    const deliveryRepairToken = roomKey
+      ? pendingDeliveryRepairs.get(roomKey)?.token ?? null
+      : null;
     streamReconcileRoom = roomIdentifier;
-    bufferedStreamEvents = [];
+    resetBufferedStreamEvents();
     try {
       const snapshot = await getRoomSnapshot(roomIdentifier);
       if (
         generation !== streamReconcileGeneration
-        || !snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)
+        || !roomKey
+        || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
+      ) return;
+      const previousSnapshot = options.selectedSnapshot.value;
+      await repairManagedAgentDeliveryFromSnapshot(
+        roomIdentifier,
+        previousSnapshot,
+        snapshot,
+        deliveryRepairToken,
+      );
+      if (
+        generation !== streamReconcileGeneration
+        || normalizeRoomIdentifier(activeStreamRoom) !== roomKey
       ) return;
       setSelectedSnapshot(mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot));
-      const pending = bufferedStreamEvents;
-      bufferedStreamEvents = [];
+      const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
+      const overflowed = streamBufferOverflow;
+      resetBufferedStreamEvents();
       streamReconcileRoom = null;
       for (const buffered of pending) handleRoomStreamEvent(buffered);
-      const roomKey = normalizeRoomIdentifier(roomIdentifier);
+      if (overflowed) scheduleRoomStreamReconciliation(roomIdentifier);
       if (roomKey) {
         degradedStreamRooms.delete(roomKey);
         pendingVerifiedRecoveries.delete(roomKey);
       }
     } finally {
       if (generation === streamReconcileGeneration) {
-        const pending = bufferedStreamEvents;
-        bufferedStreamEvents = [];
+        const pending = streamBufferOverflow ? [] : bufferedStreamEvents;
+        const overflowed = streamBufferOverflow;
+        resetBufferedStreamEvents();
         streamReconcileRoom = null;
         for (const buffered of pending) handleRoomStreamEvent(buffered);
+        if (overflowed && normalizeRoomIdentifier(activeStreamRoom) === roomKey) {
+          scheduleRoomStreamReconciliation(roomIdentifier);
+        }
+      }
+      if (
+        roomKey
+        && deliveryRepairToken !== null
+        && pendingDeliveryRepairs.has(roomKey)
+        && normalizeRoomIdentifier(activeStreamRoom) === roomKey
+      ) {
+        const pendingToken = pendingDeliveryRepairs.get(roomKey)?.token;
+        if (pendingToken !== undefined) {
+          if (pendingToken !== deliveryRepairToken) scheduleRoomStreamReconciliation(roomIdentifier);
+          else schedulePendingDeliveryRepair(roomIdentifier, deliveryRepairToken);
+        }
       }
     }
   }

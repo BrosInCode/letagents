@@ -19,19 +19,37 @@ import {
   type AuthenticatedRequest,
 } from "../../../http/helpers.js";
 import {
-  beginRoomAgentDelivery,
   InvalidRoomAgentDeliverySessionError,
 } from "../../../rooms/agent-delivery.js";
 import { resolveMessageActivationIdentity } from "./activation-identity.js";
 import { isDesktopHumanClient } from "./request-identity.js";
 import { attachReceiptAuthorityActivations } from "./receipt-activation.js";
 import { resolveParticipantRoom } from "./helpers.js";
-import type { ResolvedRequestAgentIdentity } from "../../../request/agent-identity.js";
-import type {
-  MessageCreatedEvent,
-  RoomMessageRouteDeps,
-} from "./types.js";
+import type { RoomMessageRouteDeps } from "./types.js";
 import { parsePositivePgIntegerScopedId } from "../../../../shared/scoped-ids.js";
+import type { RoomEventSubscription } from "../../../server/room-event-broker.js";
+import { createTrailingSingleFlight } from "../../../single-flight.js";
+import { createBoundedExecutor } from "../../../bounded-async.js";
+import { getCanonicalRoomMessageCatchUp } from "../../../server/room-message-catchup.js";
+import { resolveRequestProjectRepoAccessRoomName } from "../../../rooms/access.js";
+import {
+  openLiveRoomDeliveryController,
+  subscribeVisibleRoomEvents,
+  type LiveRoomDeliveryController,
+} from "./live-controller.js";
+import {
+  hydrateLiveMessageForSubscriber,
+  hydrateLiveMessagesForSubscriber,
+  isMessageVisibleToCurrentWorker,
+  resolveLiveMessageOverlayTarget,
+} from "./live-message-delivery.js";
+
+const runPollOverlay = createBoundedExecutor({
+  label: "room message poll activation overlay",
+  maxConcurrent: 64,
+  maxQueued: 512,
+  timeoutMs: 8_000,
+});
 
 export function registerMessageHistoryRoutes(
   app: Express,
@@ -124,45 +142,78 @@ export function registerMessageHistoryRoutes(
     if (!project) return;
 
     const projectId = project.id;
+    const accessRoomName = await (
+      deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
+    )(req, project);
     const after = typeof req.query.after === "string" ? req.query.after : undefined;
     const timeoutMs = parsePollTimeout(typeof req.query.timeout === "string" ? req.query.timeout : undefined);
     const limit = parseLimit(typeof req.query.limit === "string" ? req.query.limit : undefined);
     const includePromptOnly = deps.shouldIncludePromptOnlyMessages(req);
     const accountId = req.sessionAccount?.account_id ?? null;
     const accountAgentRouting = isDesktopHumanClient(req);
-    let activationIdentity: ResolvedRequestAgentIdentity | null = null;
     let settled = false;
+    let resolving = false;
     let timeout: ReturnType<typeof setTimeout> | null = null;
-    let endDelivery: (() => Promise<void>) | null = null;
-    if (!isDesktopHumanClient(req)) {
-      try {
-        const delivery = await beginRoomAgentDelivery({
-          req,
-          roomId: project.id,
-          transport: "long_poll",
-          onSessionDisconnected: () => resolveRequest([]),
-        });
-        endDelivery = delivery?.end ?? null;
-        activationIdentity = delivery?.identity.session_kind === "worker" ? delivery.identity : null;
-      } catch (error) {
+    let subscription: RoomEventSubscription | null = null;
+    let live: LiveRoomDeliveryController | null = null;
+    try {
+      live = await openLiveRoomDeliveryController({
+        req,
+        project,
+        accessRoomName,
+        transport: "long_poll",
+        trackDelivery: !isDesktopHumanClient(req),
+        onSessionDisconnected: resolveDisconnectedRequest,
+        onAuthorizationDenied: denyRequest,
+        reauthorize: deps.reauthorizeGitRoomParticipant,
+        onEndError: (error) => {
+          console.error(`[room messages poll] failed to end agent delivery for ${projectId}`, error);
+        },
+        beginDelivery: deps.beginRoomAgentDelivery,
+      });
+    } catch (error) {
         if (error instanceof InvalidRoomAgentDeliverySessionError) {
           res.status(401).json({ error: error.message });
           return;
         }
         throw error;
-      }
     }
-    function cleanup() {
+    if (!live) return;
+    const liveController = live;
+    const messageOverlayTarget = resolveLiveMessageOverlayTarget(
+      req,
+      liveController.activationIdentity,
+    );
+    async function cleanup() {
       if (timeout) {
         clearTimeout(timeout);
       }
-      deps.messageEvents.off("message:created", onMessageCreated);
+      subscription?.close();
+      subscription = null;
       req.off("close", onClientClose);
-      if (endDelivery) {
-        void endDelivery().catch((error: unknown) => {
-          console.error(`[room messages poll] failed to end agent delivery for ${projectId}`, error);
-        });
-      }
+      await liveController.close();
+    }
+
+    function denyRequest() {
+      void denyRequestAsync();
+    }
+
+    async function denyRequestAsync() {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      if (!res.headersSent) res.status(403).json({ error: "Room access is no longer authorized." });
+    }
+
+    function resolveDisconnectedRequest() {
+      void resolveDisconnectedRequestAsync();
+    }
+
+    async function resolveDisconnectedRequestAsync() {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      res.json({ room_id: projectId, messages: [], has_more: false });
     }
 
     function resolveRequest(
@@ -183,11 +234,22 @@ export function registerMessageHistoryRoutes(
       hasMore = false,
       options?: { includeTaskOwnerLeases?: boolean }
     ) {
-      if (settled) return;
-      settled = true;
-      cleanup();
+      if (settled || resolving) return;
+      resolving = true;
       try {
-        const attached = await attachReceiptAuthorityActivations(projectId, activationIdentity, msgs, options);
+        if (!(await liveController.check())) {
+          await denyRequestAsync();
+          return;
+        }
+        const attached = await runPollOverlay(
+          () => attachReceiptAuthorityActivations(projectId, liveController.activationIdentity, msgs, options),
+        );
+        if (!(await liveController.check())) {
+          await denyRequestAsync();
+          return;
+        }
+        settled = true;
+        await cleanup();
         res.json({
           room_id: projectId,
           messages: attached,
@@ -195,41 +257,171 @@ export function registerMessageHistoryRoutes(
         });
       } catch (error) {
         console.error(`[room messages poll] failed to resolve poll for ${projectId}`, error);
+        if (!settled) {
+          settled = true;
+          await cleanup();
+        }
         if (!res.headersSent) {
           res.status(500).json({ error: "Messages could not be fetched." });
         }
+      } finally {
+        resolving = false;
       }
     }
 
-    async function onMessageCreated({ projectId: eventProjectId }: MessageCreatedEvent) {
-      if (eventProjectId !== projectId) return;
-      const next = await getMessagesAfter(projectId, after, {
+    async function resolveBrokerClosedRequestAsync() {
+      if (settled) return;
+      settled = true;
+      await cleanup();
+      res.json({ room_id: projectId, messages: [], has_more: false });
+    }
+
+    async function resolveCanonicalEventAsync(message: Message) {
+      if (settled || resolving) return;
+      resolving = true;
+      try {
+        if (!(await liveController.check())) {
+          await denyRequestAsync();
+          return;
+        }
+        // Normal broker delivery is already bounded/coalesced across every
+        // subscriber. Keep the executor for backlog pages, not this shared
+        // canonical event, or large poll populations fail before batching.
+        const attached = await hydrateLiveMessageForSubscriber({
+          roomId: projectId,
+          message,
+          identity: liveController.activationIdentity,
+          target: messageOverlayTarget,
+          broker: deps.roomEventBroker,
+          batcher: deps.roomMessageOverlayBatcher,
+        });
+        if (!(await liveController.check())) {
+          await denyRequestAsync();
+          return;
+        }
+        settled = true;
+        await cleanup();
+        res.json({ room_id: projectId, messages: [attached], has_more: false });
+      } catch (error) {
+        console.error(`[room messages poll] failed to hydrate broker message for ${projectId}`, error);
+        if (!settled) {
+          settled = true;
+          await cleanup();
+        }
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      } finally {
+        resolving = false;
+      }
+    }
+
+    async function resolveCanonicalCatchUpAsync(msgs: Message[], hasMore: boolean) {
+      if (settled || resolving) return;
+      resolving = true;
+      try {
+        if (!(await liveController.check())) return void await denyRequestAsync();
+        const hydratedPage = await hydrateLiveMessagesForSubscriber({
+          roomId: projectId,
+          messages: msgs,
+          identity: liveController.activationIdentity,
+          target: messageOverlayTarget,
+          broker: deps.roomEventBroker,
+          batcher: deps.roomMessageOverlayBatcher,
+          allowSilentPromptOnly: true,
+        });
+        const attached: Message[] = [];
+        for (const hydrated of hydratedPage) {
+          if (!liveController.activationIdentity
+            || isMessageVisibleToCurrentWorker(hydrated)) attached.push(hydrated);
+        }
+        if (!(await liveController.check())) return void await denyRequestAsync();
+        settled = true;
+        await cleanup();
+        res.json({
+          room_id: projectId,
+          messages: attached,
+          has_more: hasMore,
+          last_observed_message_id: msgs.at(-1)?.id ?? null,
+        });
+      } catch (error) {
+        console.error(`[room messages poll] failed canonical gap catch-up for ${projectId}`, error);
+        if (!settled) { settled = true; await cleanup(); }
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      } finally {
+        resolving = false;
+      }
+    }
+
+    const runRefreshAfterCursor = createTrailingSingleFlight(async () => {
+      if (settled) return;
+      if (!(await liveController.check())) {
+        await denyRequestAsync();
+        return;
+      }
+      const next = await getCanonicalRoomMessageCatchUp({
+        roomId: projectId,
+        after,
         limit,
-        include_prompt_only: includePromptOnly,
-        account_id: accountId,
-        account_agent_routing: accountAgentRouting,
+        includePromptOnly,
+        load: deps.getMessagesAfter ?? getMessagesAfter,
       });
       if (next.messages.length > 0) {
-        resolveRequest(next.messages, next.has_more);
+        await resolveCanonicalCatchUpAsync(next.messages, next.has_more);
+      }
+    });
+    const refreshAfterCursor = () => runRefreshAfterCursor();
+
+    async function pumpMessageEvents() {
+      while (!settled && subscription) {
+        const delivery = await subscription.next();
+        if (!delivery) {
+          await resolveBrokerClosedRequestAsync();
+          return;
+        }
+        if (settled) return;
+        if (delivery.type === "gap") {
+          await refreshAfterCursor();
+          continue;
+        }
+        if (delivery.envelope.event.kind === "message_created") {
+          await resolveCanonicalEventAsync(delivery.envelope.event.message);
+        }
       }
     }
 
     function onClientClose() {
       if (settled) return;
       settled = true;
-      cleanup();
+      void cleanup();
     }
+
+    liveController.activate();
+    if (settled) return;
 
     // Subscribe before the initial fetch so a message created while the fetch
     // is in flight wakes this poll instead of waiting out the full timeout.
     timeout = setTimeout(() => {
       resolveRequest([]);
     }, timeoutMs);
-    deps.messageEvents.on("message:created", onMessageCreated);
+    subscription = subscribeVisibleRoomEvents({
+      broker: deps.roomEventBroker,
+      roomId: projectId,
+      includePromptOnly,
+      activationIdentity: liveController.activationIdentity,
+      messageOnly: true,
+      messageOverlayTarget,
+    });
     req.on("close", onClientClose);
+    void pumpMessageEvents().catch(async (error: unknown) => {
+      console.error(`[room messages poll] failed to observe room event for ${projectId}`, error);
+      if (!settled) {
+        settled = true;
+        await cleanup();
+        if (!res.headersSent) res.status(500).json({ error: "Messages could not be fetched." });
+      }
+    });
 
     try {
-      const existing = await getMessagesAfter(projectId, after, {
+      const existing = await (deps.getMessagesAfter ?? getMessagesAfter)(projectId, after, {
         limit,
         include_prompt_only: includePromptOnly,
         account_id: accountId,
@@ -244,7 +436,7 @@ export function registerMessageHistoryRoutes(
     } catch (error) {
       if (!settled) {
         settled = true;
-        cleanup();
+        await cleanup();
         respondWithInternalError(
           res,
           "GET /rooms/:room_id/messages/poll",

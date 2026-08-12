@@ -237,6 +237,8 @@ export const room_agent_delivery_sessions = pgTable(
     session_kind: roomAgentSessionKindEnum("session_kind").notNull().default("controller"),
     runtime: text("runtime").notNull().default("unknown"),
     transport: roomAgentDeliveryTransportEnum("transport").notNull(),
+    credential_fingerprint: text("credential_fingerprint"),
+    credential_epoch: integer("credential_epoch"),
     active_connection_count: integer("active_connection_count").notNull().default(0),
     last_connected_at: timestamp("last_connected_at", { mode: "string", withTimezone: true }).notNull(),
     last_disconnected_at: timestamp("last_disconnected_at", { mode: "string", withTimezone: true }),

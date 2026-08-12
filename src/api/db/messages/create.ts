@@ -28,6 +28,7 @@ import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
   MessageAttachmentRow,
+  MessageRecipientAgentTarget,
   MessageRow,
 } from "../types.js";
 import { nextRoomScopedNumber, parseScopedId } from "../utils.js";
@@ -137,11 +138,16 @@ export interface AddMessageResult {
   message: Message;
   canonical_message: Message;
   created: boolean;
+  /** Durable recipients resolved in the same transaction as the message. */
+  recipientAgentKeys: readonly string[];
+  recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
 interface AddMessageTransactionResult {
   messageRow: MessageRow;
   created: boolean;
+  recipientAgentKeys: readonly string[];
+  recipientAgentTargets: readonly MessageRecipientAgentTarget[];
 }
 
 export async function addMessageWithCreateStatus(
@@ -184,6 +190,8 @@ export async function addMessageWithCreateStatus(
         return {
           messageRow: existingMessage,
           created: false,
+          recipientAgentKeys: [],
+          recipientAgentTargets: [],
         };
       }
     }
@@ -272,6 +280,8 @@ export async function addMessageWithCreateStatus(
         return {
           messageRow: existingMessage,
           created: false,
+          recipientAgentKeys: [],
+          recipientAgentTargets: [],
         };
       }
       createdMessage = insertedMessage;
@@ -511,6 +521,8 @@ export async function addMessageWithCreateStatus(
     }
 
     let receiptCount = 0;
+    let recipientAgentKeys: readonly string[] = [];
+    let recipientAgentTargets: readonly MessageRecipientAgentTarget[] = [];
 
     if (activeSessions.length > 0) {
       // Resolve routing against every overlapping session identity first.
@@ -687,6 +699,13 @@ export async function addMessageWithCreateStatus(
         throw new RequestValidationError("Message fanout exceeds the bounded desktop routing envelope.");
       }
       receiptCount = receiptRowsToInsert.length;
+      recipientAgentKeys = receiptRowsToInsert.map((receipt) => receipt.agent_key);
+      recipientAgentTargets = receiptRowsToInsert.map((receipt) => ({
+        agent_key: receipt.agent_key,
+        agent_session_id: receipt.agent_session_id,
+        owner_account_id: sessionsByAgentKey.get(receipt.agent_key)!.sessions
+          .find((session) => session.session_id === receipt.agent_session_id)!.owner_account_id,
+      }));
       await insertMessageReceiptRows(tx, receiptRowsToInsert);
     }
 
@@ -763,6 +782,8 @@ export async function addMessageWithCreateStatus(
     return {
       messageRow: createdMessage,
       created: true,
+      recipientAgentKeys,
+      recipientAgentTargets,
     };
   });
   if (repliedReceiptTargets.size > 0) {
@@ -806,6 +827,8 @@ export async function addMessageWithCreateStatus(
     message,
     canonical_message: canonicalMessage,
     created: result.created,
+    recipientAgentKeys: result.recipientAgentKeys,
+    recipientAgentTargets: result.recipientAgentTargets,
   };
 }
 

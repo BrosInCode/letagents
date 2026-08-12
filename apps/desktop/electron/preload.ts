@@ -100,6 +100,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:room:discard-attachment", roomIdentifier, uploadId),
     startStream: (roomIdentifier: string, afterMessageId?: string | null) =>
       ipcRenderer.invoke("desktop:room:start-stream", roomIdentifier, afterMessageId ?? null),
+    repairStreamDelivery: (roomIdentifier, repair) =>
+      ipcRenderer.invoke("desktop:room:repair-stream-delivery", roomIdentifier, repair),
     stopStream: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:stop-stream", roomIdentifier ?? null),
     onStreamEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

@@ -47,7 +47,9 @@ export type SupervisedTurnConfigurationResolver = (
 
 export type SupervisedPollResponse = {
   messages?: Array<Record<string, unknown>>;
-  /** REST poll pagination fact. The response deliberately has no MCP cursor. */
+  /** Durable progress across rows hidden by worker activation authority. */
+  last_observed_message_id?: string | null;
+  /** REST poll pagination fact. */
   has_more?: boolean;
 };
 
@@ -483,11 +485,12 @@ export class SupervisedAgentDelivery {
         agent_id: agent.agentId,
         room_id: agent.roomId,
         expected_cursor: cursor?.last_observed_message_id ?? null,
-        // REST poll returns no last_observed_message_id. Every returned
-        // message still advances the durable cursor, including silent and
-        // unaddressed messages, so they remain observed context without
-        // becoming paid model work.
-        last_observed_message_id: lastMessageId(response.messages ?? []),
+        // A worker-authenticated gap page can contain only prompt rows that
+        // fresh authority classifies as silent. The server omits those bodies
+        // but returns the last durable id so this exact generation advances
+        // without re-reading the same hidden row forever.
+        last_observed_message_id:
+          response.last_observed_message_id ?? lastMessageId(response.messages ?? []),
         messages,
         observed_messages: observedMessages(response.messages ?? []),
       });

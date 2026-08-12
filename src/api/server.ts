@@ -1,8 +1,15 @@
 import { createApiApp } from "./server/app.js";
-import { startRoomEventBridge } from "./server/event-bridge.js";
-import { startLivenessSweep } from "./server/liveness.js";
+import { startRoomEventBridge, stopRoomEventBridge } from "./server/event-bridge.js";
+import { startLivenessSweep, stopLivenessSweep } from "./server/liveness.js";
 import { startDesktopPushWorker } from "./notifications/worker.js";
 import { assertMessageThreadProjectionReady } from "./db/messages/projection-readiness.js";
+import { closeApiRouteEventBroker } from "./server/routes.js";
+import { pool } from "./db/client.js";
+import { waitForSseCleanupDrain } from "./http/sse.js";
+import {
+  closeHttpServerIntake,
+  createGracefulShutdownController,
+} from "./server/graceful-shutdown.js";
 
 const app = createApiApp();
 
@@ -17,7 +24,8 @@ startRoomEventBridge();
 // Announces worker-agent deaths and recoveries into rooms. Started from the
 // server entry point only, so tests and embedders opt in explicitly.
 startLivenessSweep();
-startDesktopPushWorker();
+const stopDesktopPushWorker = startDesktopPushWorker();
+process.once("exit", closeApiRouteEventBroker);
 
 const PORT = parseInt(process.env.PORT || "3001", 10);
 const HOST = process.env.HOST;
@@ -26,8 +34,23 @@ const onListen = () => {
   console.log(`🚀 Let Agents Chat API running on http://${listenLabel}:${PORT}`);
 };
 
-if (HOST) {
-  app.listen(PORT, HOST, onListen);
-} else {
-  app.listen(PORT, onListen);
-}
+const server = HOST
+  ? app.listen(PORT, HOST, onListen)
+  : app.listen(PORT, onListen);
+
+const stopIntake = () => closeHttpServerIntake(server);
+
+const shutdown = createGracefulShutdownController({
+  stopIntake,
+  stopWorkers: async () => {
+    await Promise.all([stopLivenessSweep(), stopDesktopPushWorker()]);
+  },
+  stopBridge: stopRoomEventBridge,
+  closeBroker: closeApiRouteEventBroker,
+  drainConnections: waitForSseCleanupDrain,
+  closeDatabase: () => pool.end(),
+  forceClose: () => server.closeAllConnections?.(),
+  exit: (code) => process.exit(code),
+  onError: (error) => console.error("API graceful shutdown failed:", error),
+});
+shutdown.install();

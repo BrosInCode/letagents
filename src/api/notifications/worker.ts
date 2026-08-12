@@ -358,45 +358,53 @@ async function cleanupTerminalNotifications(): Promise<void> {
   `);
 }
 
-export function startDesktopPushWorker(): () => void {
+export function startDesktopPushWorker(): () => Promise<void> {
   let credentials;
   try {
     credentials = readApnsCredentials();
   } catch (error) {
     console.error(`[desktop-push] APNs credentials could not be loaded; delivery worker is disabled: ${error instanceof Error ? error.message : String(error)}`);
-    return () => undefined;
+    return async () => undefined;
   }
   if (!credentials) {
     console.warn("[desktop-push] APNs credentials are not configured; delivery worker is disabled.");
-    return () => undefined;
+    return async () => undefined;
   }
   const client = new ApnsClient(credentials);
   const workerId = randomUUID();
   let running = false;
+  let runningPromise: Promise<void> | null = null;
   let stopped = false;
   let lastCleanupAt = 0;
 
-  const tick = async () => {
+  const tick = () => {
     if (stopped || running) return;
     running = true;
-    try {
+    const run = (async () => {
+      try {
       if (Date.now() - lastCleanupAt >= CLEANUP_INTERVAL_MS) {
         await cleanupTerminalNotifications();
         lastCleanupAt = Date.now();
       }
       await processBatch(client, workerId);
-    } catch (error) {
+      } catch (error) {
       console.error(`[desktop-push] Worker iteration failed: ${error instanceof Error ? error.message : String(error)}`);
-    } finally {
+      } finally {
       running = false;
-    }
+      }
+    })();
+    const pending = run.finally(() => {
+      if (runningPromise === pending) runningPromise = null;
+    });
+    runningPromise = pending;
   };
   const interval = setInterval(() => void tick(), POLL_INTERVAL_MS);
   interval.unref();
   void tick();
-  return () => {
+  return async () => {
     stopped = true;
     clearInterval(interval);
+    await runningPromise;
     client.close();
   };
 }

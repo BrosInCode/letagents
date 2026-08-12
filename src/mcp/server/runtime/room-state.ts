@@ -180,7 +180,13 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
     (_message: Message) => {
       touchRoomSession(state.room_id);
       mcpServer?.server.sendResourceListChanged();
-    }
+    },
+    () => {
+      // The SSE cursor crossed a broker/bridge loss boundary. MCP resources
+      // are pull-based, so invalidating the list is the full-state repair.
+      touchRoomSession(state.room_id);
+      mcpServer?.server.sendResourceListChanged();
+    },
   );
   return state;
 }

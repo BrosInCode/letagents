@@ -175,8 +175,14 @@ test("non-worker identities never receive activation envelopes from receipts", (
 test("every delivery surface routes through the single receipt authority", () => {
   const history = routeSource("../routes/rooms/messages/history.ts");
   const stream = routeSource("../routes/rooms/messages/stream.ts");
-  for (const source of [history, stream]) {
-    assert.match(source, /attachReceiptAuthorityActivations/);
+  const liveDelivery = routeSource("../routes/rooms/messages/live-message-delivery.ts");
+  const receiptAuthority = routeSource("../routes/rooms/messages/receipt-activation.ts");
+
+  assert.match(history, /attachReceiptAuthorityActivations/);
+  assert.match(stream, /hydrateLiveMessageForSubscriber/);
+  assert.match(liveDelivery, /attachAccountRoutingAuthorityActivation/);
+  assert.match(receiptAuthority, /attachAgentMessageActivationsFromReceipts/);
+  for (const source of [history, stream, liveDelivery]) {
     assert.doesNotMatch(source, /attachAgentMessageActivations\(/);
     assert.doesNotMatch(source, /attachAgentMessageActivation\(/);
   }

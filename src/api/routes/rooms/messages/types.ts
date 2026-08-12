@@ -1,60 +1,33 @@
-import type { EventEmitter } from "events";
 import type { Request, Response } from "express";
 
 import type {
   Message,
   Project,
-  GitHubRoomEvent,
-  ReasoningSession,
-  ReasoningSessionUpdate,
-  RoomSharedArtifact,
-  Task,
 } from "../../../db.js";
 import type { AuthenticatedRequest } from "../../../http/helpers.js";
 import type { NormalizedMessageAttachmentReference } from "../../../messages/attachments.js";
 import type { AgentPromptKind } from "../../../../shared/room-agent-prompts.js";
-
-export interface MessageCreatedEvent {
-  projectId: string;
-  message: Message;
-}
-
-export interface TaskUpdatedEvent {
-  projectId: string;
-  task: Task;
-}
-
-export interface GitHubRoomEventUpdatedEvent {
-  projectId: string;
-  event: GitHubRoomEvent;
-}
-
-export interface ReasoningSessionUpdatedEvent {
-  projectId: string;
-  session: ReasoningSession;
-  update?: ReasoningSessionUpdate | null;
-}
-
-export interface ReasoningSessionRemovedEvent {
-  projectId: string;
-  session_id: string;
-}
-
-export interface RoomArtifactUpdatedEvent {
-  projectId: string;
-  artifact: RoomSharedArtifact | null;
-}
+import type { RoomEventBroker } from "../../../server/room-event-broker.js";
+import type { RoomMessageOverlayBatcher } from "../../../server/room-message-overlays.js";
 
 export interface RoomMessageRouteDeps {
-  messageEvents: EventEmitter;
-  taskEvents: EventEmitter;
-  githubRoomEvents?: EventEmitter;
-  reasoningEvents: EventEmitter;
-  artifactEvents?: EventEmitter;
-  rentalActivityEvents?: EventEmitter;
+  roomEventBroker: RoomEventBroker;
+  roomMessageOverlayBatcher: RoomMessageOverlayBatcher;
+  resolveRequestProjectRepoAccessRoomName?(
+    req: AuthenticatedRequest,
+    project: Project,
+  ): Promise<string>;
+  reauthorizeGitRoomParticipant?(
+    req: AuthenticatedRequest,
+    project: Project,
+  ): Promise<boolean>;
+  getMessageStreamCheckpoint?(
+    roomId: string,
+    options: { requestedCursor?: string | null; includePromptOnly?: boolean },
+  ): Promise<{ checkpoint: string | null; cursorExists: boolean }>;
   beginRoomAgentDelivery?: typeof import("../../../rooms/agent-delivery.js").beginRoomAgentDelivery;
   attachReceiptAuthorityActivations?: typeof import("./receipt-activation.js").attachReceiptAuthorityActivations;
-  getMessageById?: typeof import("../../../db.js").getMessageById;
+  getMessagesAfter?: typeof import("../../../db.js").getMessagesAfter;
   getMessageThreads?: typeof import("../../../db.js").getMessageThreads;
   getMessageThread?: typeof import("../../../db.js").getMessageThread;
   resolveMessageActivationIdentity?: typeof import("./activation-identity.js").resolveMessageActivationIdentity;

@@ -1,8 +1,11 @@
 export { addMessage, addMessageWithCreateStatus } from "./messages/create.js";
+export { getMessageStreamCheckpoint } from "./messages/checkpoint.js";
 export type { MessageCreateTransaction } from "./messages/create.js";
 export {
   getLatestMessages,
   getMessageById,
+  getMessageRecipientAgentKeys,
+  getMessageRecipientAgentTargets,
   getMessageThread,
   getMessageThreads,
   getMessages,

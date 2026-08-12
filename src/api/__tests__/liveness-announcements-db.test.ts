@@ -14,6 +14,7 @@ if (testDatabaseUrl) {
 
 const dbClientModule = testDatabaseUrl ? await import("../db/client.js") : null;
 const dbModule = testDatabaseUrl ? await import("../db.js") : null;
+const dbUtilsModule = testDatabaseUrl ? await import("../db/utils.js") : null;
 
 const db = dbClientModule?.db;
 const pool = dbClientModule?.pool;
@@ -24,6 +25,7 @@ const listLivenessAnnouncementCandidates = dbModule?.listLivenessAnnouncementCan
 const getLivenessAnnouncementCandidate = dbModule?.getLivenessAnnouncementCandidate;
 const markAgentOfflineAnnounced = dbModule?.markAgentOfflineAnnounced;
 const markAgentRecoveryAnnounced = dbModule?.markAgentRecoveryAnnounced;
+const hashToken = dbUtilsModule?.hashToken;
 
 async function resetDatabase(): Promise<void> {
   if (!db || !pool) {
@@ -349,18 +351,25 @@ test(
       owner_label: "EmmyMay",
       ide_label: "Codex",
     });
+    if (!hashToken) throw new Error("DB-backed liveness tests require TEST_DB_URL");
+    const credentialFence = {
+      kind: "session_token" as const,
+      token_hash: hashToken(session.session_token),
+    };
     await markRoomAgentDeliveryConnected!({
       room_id: project.id,
       actor_label: ACTOR_LABEL,
       agent_session_id: session.session_id,
       session_kind: "worker",
       display_name: "FieldSignal",
+      credential_fence: credentialFence,
       transport: "long_poll",
     });
     const disconnected = await markRoomAgentDeliveryDisconnected!({
       room_id: project.id,
       actor_label: ACTOR_LABEL,
       agent_session_id: session.session_id,
+      credential_fence: credentialFence,
     });
     const deliveryKey = disconnected!.delivery_key;
     await backdateDelivery(project.id, deliveryKey, {

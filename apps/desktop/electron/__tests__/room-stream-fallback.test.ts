@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test, { mock } from "node:test";
 
 import { createElectronTestEnv } from "./harness.js";
-import type { DesktopRoomStreamEvent } from "../ipc-types.js";
+import type { DesktopRoomDeliveryRepair, DesktopRoomStreamEvent } from "../ipc-types.js";
 
 // `paths.ts` reads LETAGENTS_API_URL once at module-eval time; the shared
 // harness pins it to an unroutable address so any un-stubbed fetch fails fast
@@ -27,6 +27,7 @@ test.after(() => {
 // the real emitted sequence, including any duplicates. `dispatchRoomStreamEvent`
 // to managed agents is left real — with no registered runtimes it is a no-op.
 const emitted: DesktopRoomStreamEvent[] = [];
+const managedEmitted: DesktopRoomStreamEvent[] = [];
 mock.module("../main/window.js", {
   namedExports: {
     emitToMainWindow: (channel: string, payload: unknown) => {
@@ -40,8 +41,24 @@ mock.module("../main/window.js", {
     createWindow: () => {},
   },
 });
+mock.module("../main/agents/codex-supervisor.js", {
+  namedExports: {
+    dispatchRoomStreamEventToManagedAgents: (event: DesktopRoomStreamEvent) => {
+      managedEmitted.push(event);
+    },
+    listDesktopManagedAgentSessionPopulationForRoom: () => ({
+      sessions: [],
+      complete: true,
+    }),
+  },
+});
 
-const { startDesktopRoomStream, stopDesktopRoomStream, getActiveRoomIdentifier } =
+const {
+  startDesktopRoomStream,
+  stopDesktopRoomStream,
+  getActiveRoomIdentifier,
+  repairDesktopRoomStreamManagedDelivery,
+} =
   await import("../main/room-stream.js");
 
 const ROOM = "focus_fallback_room";
@@ -52,14 +69,16 @@ type StreamHandler =
   | { kind: "hang" };
 
 type PollRecord = { url: string; after: string | null; timeout: string | null; signal: AbortSignal };
-type StreamRecord = { url: string; signal: AbortSignal };
+type StreamRecord = { url: string; signal: AbortSignal; headers: Headers };
 
 interface ControllableSse {
   response: Response;
-  pushMessage(id: string, text?: string): void;
-  pushRoomSync(checkpoint: string | null, gap?: boolean): void;
+  pushMessage(id: string, text?: string, eventCursor?: string): void;
+  pushTask(task: Record<string, unknown>, eventCursor?: string): void;
+  pushRoomSync(checkpoint: string | null, gap?: boolean, eventCursor?: string | null): void;
   close(): void;
   error(err?: Error): void;
+  pushRaw(chunk: string): void;
 }
 
 function makeSse(): ControllableSse {
@@ -75,8 +94,9 @@ function makeSse(): ControllableSse {
       status: 200,
       headers: { "Content-Type": "text/event-stream" },
     }),
-    pushMessage(id: string, text = "hi") {
+    pushMessage(id: string, text = "hi", eventCursor?: string) {
       const frame =
+        (eventCursor ? `id: ${eventCursor}\n` : "") +
         `event: message\n` +
         `data: ${JSON.stringify({
           id,
@@ -86,10 +106,19 @@ function makeSse(): ControllableSse {
         })}\n\n`;
       controller.enqueue(encoder.encode(frame));
     },
-    pushRoomSync(checkpoint: string | null, gap = false) {
+    pushTask(task: Record<string, unknown>, eventCursor?: string) {
+      controller.enqueue(encoder.encode(
+        (eventCursor ? `id: ${eventCursor}\n` : "")
+        + `event: task_update\n`
+        + `data: ${JSON.stringify(task)}\n\n`,
+      ));
+    },
+    pushRoomSync(checkpoint: string | null, gap = false, eventCursor?: string | null) {
+      const payload: Record<string, unknown> = { room_id: ROOM, checkpoint, gap };
+      if (eventCursor !== undefined) payload.event_cursor = eventCursor;
       controller.enqueue(encoder.encode(
         `event: room_sync\n` +
-        `data: ${JSON.stringify({ room_id: ROOM, checkpoint, gap })}\n\n`,
+        `data: ${JSON.stringify(payload)}\n\n`,
       ));
     },
     close() {
@@ -98,11 +127,17 @@ function makeSse(): ControllableSse {
     error(err = new Error("sse dropped")) {
       controller.error(err);
     },
+    pushRaw(chunk: string) {
+      controller.enqueue(encoder.encode(chunk));
+    },
   };
 }
 
-type MessagePage = { id: string; text?: string }[];
-type CatchUpHandler = { kind: "page"; messages: MessagePage; hasMore?: boolean } | { kind: "fail"; status: number };
+type MessagePage = Array<{ id: string; text?: string; [key: string]: unknown }>;
+type CatchUpHandler =
+  | { kind: "page"; messages: MessagePage; hasMore?: boolean }
+  | { kind: "fail"; status: number }
+  | { kind: "deferred"; response: Promise<Response> };
 
 /**
  * Fetch router shared by every test. Stream fetches are answered from a FIFO of
@@ -121,6 +156,7 @@ function installFetchRouter(): {
   enqueueLatestFailure(status?: number): void;
   enqueueCatchUp(messages: MessagePage, hasMore?: boolean): void;
   enqueueCatchUpFailure(status?: number): void;
+  enqueueDeferredCatchUp(): (messages?: MessagePage, hasMore?: boolean) => void;
   streamCalls: StreamRecord[];
   pollCalls: PollRecord[];
   restore(): void;
@@ -149,7 +185,11 @@ function installFetchRouter(): {
     const signal = (init?.signal ?? (input instanceof Request ? input.signal : null)) as AbortSignal;
 
     if (url.includes("/messages/stream")) {
-      streamCalls.push({ url, signal });
+      streamCalls.push({
+        url,
+        signal,
+        headers: new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined)),
+      });
       const handler = streamQueue.shift() ?? { kind: "fail", status: 503 };
       if (handler.kind === "hang") return hangUntilAborted(signal);
       if (handler.kind === "fail") {
@@ -172,6 +212,7 @@ function installFetchRouter(): {
         if (handler?.kind === "fail") {
           return new Response(null, { status: handler.status });
         }
+        if (handler?.kind === "deferred") return handler.response;
         if (handler) {
           return new Response(
             JSON.stringify({ room_id: ROOM, messages: handler.messages, has_more: handler.hasMore === true }),
@@ -211,6 +252,17 @@ function installFetchRouter(): {
     enqueueLatestFailure: (status = 500) => latestQueue.push({ status }),
     enqueueCatchUp: (messages, hasMore = false) => catchUpQueue.push({ kind: "page", messages, hasMore }),
     enqueueCatchUpFailure: (status = 500) => catchUpQueue.push({ kind: "fail", status }),
+    enqueueDeferredCatchUp: () => {
+      let resolveResponse!: (response: Response) => void;
+      const response = new Promise<Response>((resolve) => { resolveResponse = resolve; });
+      catchUpQueue.push({ kind: "deferred", response });
+      return (messages: MessagePage = [], hasMore = false) => {
+        resolveResponse(new Response(
+          JSON.stringify({ room_id: ROOM, messages, has_more: hasMore }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ));
+      };
+    },
     streamCalls,
     pollCalls,
     restore: () => {
@@ -232,9 +284,21 @@ async function waitUntil(predicate: () => boolean, timeoutMs = 2000): Promise<vo
 }
 
 function messageIds(): string[] {
-  return emitted
-    .filter((event): event is Extract<DesktopRoomStreamEvent, { type: "message" }> => event.type === "message")
-    .map((event) => event.message.id);
+  return emitted.flatMap((event) => {
+    if (event.type === "message") return [event.message.id];
+    if (event.type === "message_batch") return event.messages.map((message) => message.id);
+    return [];
+  });
+}
+
+function lastDeliveryRepairToken(): number | undefined {
+  for (let index = emitted.length - 1; index >= 0; index -= 1) {
+    const event = emitted[index];
+    if (event?.type === "open" && event.deliveryRepairToken !== undefined) {
+      return event.deliveryRepairToken;
+    }
+  }
+  return undefined;
 }
 
 function emittedMessage(id: string) {
@@ -321,6 +385,187 @@ test("SSE catch-up paginates until a reconnect backlog is exhausted", async () =
     const catchUps = router.pollCalls.filter((call) => call.timeout === "0");
     assert.deepEqual(catchUps.map((call) => call.after), ["msg_1", "msg_150"]);
     assert.deepEqual(messageIds(), ["msg_150", "msg_151"]);
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("SSE reader drains into a bounded queue while durable catch-up is blocked", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    const releaseCatchUp = router.enqueueDeferredCatchUp();
+
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.pollCalls.some((call) => call.timeout === "0"));
+    sse.pushRoomSync("msg_1", false, "broker_1");
+    sse.pushMessage("msg_2", "live during repair", "broker_2");
+    await sleep(20);
+    assert.deepEqual(messageIds(), [], "newer SSE bodies wait behind durable history repair");
+
+    releaseCatchUp([{ id: "msg_old", text: "durable first" }]);
+    await starting;
+    await waitUntil(() => messageIds().includes("msg_2"));
+    assert.deepEqual(messageIds(), ["msg_old", "msg_2"]);
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("SSE queue overflow releases frames and forces authoritative gap repair", async () => {
+  const router = installFetchRouter();
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    const releaseCatchUp = router.enqueueDeferredCatchUp();
+    // The synthetic overflow gap performs one new durable repair pass.
+    router.enqueueCatchUp([]);
+
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.pollCalls.some((call) => call.timeout === "0"));
+    sse.pushRoomSync("msg_1", false, "broker_0");
+    for (let index = 0; index < 300; index += 1) {
+      sse.pushTask({
+        id: `task_${index}`,
+        title: `Task ${index}`,
+        status: "in_progress",
+        updated_at: "2026-08-11T10:00:00.000Z",
+      }, `broker_${index + 1}`);
+    }
+    await sleep(20);
+    assert.equal(emitted.some((event) => event.type === "task_update"), false);
+
+    releaseCatchUp([]);
+    await starting;
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ));
+    assert.equal(
+      emitted.some((event) => event.type === "task_update"),
+      false,
+      "overflowed frame bodies are discarded instead of replayed",
+    );
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("unterminated SSE frame overflow clears the broker cursor and repairs authoritatively", async () => {
+  const router = installFetchRouter();
+  try {
+    const first = makeSse();
+    const second = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: first }, { kind: "ok", sse: second });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.pollCalls.some((call) => call.timeout === "0"));
+    first.pushRoomSync("msg_1", false, "broker_before_overflow");
+    await starting;
+    first.pushRaw(`data: ${"x".repeat(1024 * 1024 + 1)}`);
+    await waitUntil(() => emitted.some((event) =>
+      event.type === "open" && event.gap === true && event.deliveryRepairToken !== undefined));
+    const gap = [...emitted].reverse().find((event) =>
+      event.type === "open" && event.gap === true && event.deliveryRepairToken !== undefined);
+    assert.equal(gap?.type, "open");
+    if (gap?.type !== "open" || gap.deliveryRepairToken === undefined) {
+      throw new Error("expected an overflow repair token");
+    }
+    repairDesktopRoomStreamManagedDelivery(ROOM, {
+      token: gap.deliveryRepairToken,
+      messages: [],
+      tasks: [],
+    });
+    await waitUntil(() => router.streamCalls.length >= 2);
+    assert.equal(
+      router.streamCalls[1]?.headers.get("Last-Event-ID"),
+      null,
+      "the unparsed frame makes the prior broker cursor unsafe",
+    );
+    second.pushRoomSync("msg_1", false, "broker_after_repair");
+    await sleep(10);
+    second.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("huge durable catch-up yields in bounded passes and windows only human history", async () => {
+  const router = installFetchRouter();
+  const managedStart = managedEmitted.length;
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    for (let index = 2; index <= 7; index += 1) {
+      router.enqueueCatchUp([{ id: `msg_${index}`, text: `backlog ${index}` }], index < 7);
+    }
+    router.enqueueLatest([{ id: "msg_7", text: "authoritative tail" }]);
+
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => emitted.some((event) => event.type === "message_window"));
+    const catchUps = router.pollCalls.filter((call) => call.timeout === "0");
+    assert.equal(catchUps.length, 6, "managed delivery advances through every durable page");
+    assert.equal(
+      emitted.filter((event) => event.type === "message_window").length,
+      1,
+      "renderer receives one bounded authoritative tail after the threshold",
+    );
+    assert.deepEqual(
+      managedEmitted.slice(managedStart)
+        .filter((event): event is Extract<DesktopRoomStreamEvent, { type: "message" }> => event.type === "message")
+        .map((event) => event.message.id),
+      ["msg_2", "msg_3", "msg_4", "msg_5", "msg_6", "msg_7"],
+      "windowing never skips managed-agent delivery",
+    );
+    sse.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("failed latest-window hydration remains pending after the durable catch-up cursor advances", async () => {
+  const router = installFetchRouter();
+  const managedStart = managedEmitted.length;
+  try {
+    const sse = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    for (let index = 2; index <= 7; index += 1) {
+      router.enqueueCatchUp([{ id: `msg_${index}`, text: `backlog ${index}` }], index < 7);
+    }
+    router.enqueueLatestFailure();
+    // The scheduled retry resumes from msg_7. There is no further history,
+    // but the renderer still requires the authoritative latest window that
+    // failed after the first catch-up had already advanced the durable cursor.
+    router.enqueueCatchUp([]);
+    router.enqueueLatest([{ id: "msg_7", text: "authoritative tail" }]);
+
+    await startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => emitted.some((event) => event.type === "message_window"), 5_000);
+
+    const catchUps = router.pollCalls.filter((call) => call.timeout === "0");
+    assert.equal(catchUps.length, 7, "the retry runs even though the first pass advanced to the tail");
+    assert.equal(catchUps.at(-1)?.after, "msg_7", "the retry resumes from the durable tail cursor");
+    assert.equal(
+      emitted.filter((event) => event.type === "message_window").length,
+      1,
+      "the recovered renderer receives exactly one authoritative window",
+    );
+    assert.deepEqual(
+      managedEmitted.slice(managedStart)
+        .filter((event): event is Extract<DesktopRoomStreamEvent, { type: "message" }> => event.type === "message")
+        .map((event) => event.message.id),
+      ["msg_2", "msg_3", "msg_4", "msg_5", "msg_6", "msg_7"],
+      "managed delivery remains exactly once while renderer recovery retries",
+    );
     sse.close();
   } finally {
     await stopDesktopRoomStream();
@@ -581,5 +826,235 @@ test("stopDesktopRoomStream aborts both the SSE and the fallback poll", async ()
   } finally {
     await stopDesktopRoomStream();
     router.restore();
+  }
+});
+
+test("SSE reconnect preserves the last broker event cursor", async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse();
+    const reconnected = makeSse();
+    const repaired = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial });
+    router.streamQueue.push({ kind: "ok", sse: reconnected });
+    router.streamQueue.push({ kind: "ok", sse: repaired });
+
+    await startDesktopRoomStream("focus_cursor_room");
+    await waitUntil(() => emitted.some((event) => event.type === "open"));
+    initial.pushMessage("msg_1", "hello", "broker_17");
+    await waitUntil(() => messageIds().includes("msg_1"));
+    router.enqueueCatchUp([]);
+    initial.error();
+
+    await waitUntil(() => router.streamCalls.length === 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_17");
+    const verifiedGapCount = emitted.filter(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ).length;
+    router.enqueueCatchUp([]);
+    reconnected.pushRoomSync("msg_1", true, null);
+    await waitUntil(() => emitted.filter(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ).length > verifiedGapCount);
+    const resetRepairToken = lastDeliveryRepairToken();
+    assert.equal(typeof resetRepairToken, "number");
+    repairDesktopRoomStreamManagedDelivery("focus_cursor_room", {
+      token: resetRepairToken as number,
+      messages: [],
+      tasks: [],
+    });
+    await waitUntil(() => router.pollCalls.filter((call) => call.timeout === "0").length >= 2);
+    reconnected.error();
+    await waitUntil(() => router.streamCalls.length === 3, 4_000);
+    assert.equal(
+      router.streamCalls[2]?.headers.get("Last-Event-ID"),
+      null,
+      "an explicit null repair cursor clears stale desktop replay state",
+    );
+    repaired.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a semantically malformed typed frame gaps instead of committing its broker cursor", async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    await startDesktopRoomStream(ROOM, "msg_1");
+    initial.pushTask({ id: "task_valid", status: "open" }, "broker_valid");
+    await waitUntil(() => emitted.some((event) => event.type === "task_update"));
+    initial.pushTask({ status: "open" }, "broker_malformed");
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ));
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(
+      router.streamCalls[1]?.headers.get("Last-Event-ID"),
+      "broker_valid",
+      "an unapplied typed frame cannot become a reconnect boundary",
+    );
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("message-info invalidations advance without a room repair while malformed payloads gap", async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    await startDesktopRoomStream(ROOM, "msg_1");
+    const gapCount = emitted.filter(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ).length;
+    initial.pushRaw(
+      `id: broker_info\nevent: message_info_updated\ndata: ${JSON.stringify({
+        room_id: ROOM,
+        message_ids: ["msg_7"],
+      })}\n\n`,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(emitted.filter(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ).length, gapCount);
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_info");
+    reconnected.pushRaw(
+      "id: broker_bad_info\nevent: message_info_updated\ndata: {\"message_ids\":\"bad\"}\n\n",
+    );
+    await waitUntil(() => emitted.filter(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ).length > gapCount);
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("a live broker gap repairs missed targeted messages and tasks exactly once", async () => {
+  const router = installFetchRouter();
+  const managedStart = managedEmitted.length;
+  try {
+    const sse = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse });
+    router.streamQueue.push({ kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    sse.pushRoomSync("msg_1", false, "broker_repair_1");
+    await starting;
+
+    const liveTask = {
+      id: "task_live",
+      title: "Already delivered",
+      status: "in_progress",
+      updated_at: "2026-08-11T10:00:00.000Z",
+    };
+    sse.pushMessage("msg_2", "already delivered");
+    sse.pushTask(liveTask, "broker_repair_2");
+    await waitUntil(() => managedEmitted.slice(managedStart).some(
+      (event) => event.type === "message" && event.message.id === "msg_2",
+    ));
+
+    router.enqueueCatchUp([
+      { id: "msg_2", sender: "human", source: "browser", text: "duplicate" },
+      {
+        id: "msg_3",
+        sender: "EmmyMay",
+        source: "browser",
+        text: "[Agent delivery prompt | mention | recipients: Codex] recovered target",
+        agent_prompt_kind: "mention",
+      },
+    ]);
+    sse.pushRoomSync("msg_3", true, "broker_repair_3");
+    await waitUntil(() => managedEmitted.slice(managedStart).some(
+      (event) => event.type === "message" && event.message.id === "msg_3",
+    ));
+    sse.pushTask({
+      id: "task_after_gap",
+      title: "Live while repair is pending",
+      status: "in_progress",
+      updated_at: "2026-08-11T10:00:30.000Z",
+    }, "broker_repair_4");
+
+    const recoveredTask = {
+      id: "task_recovered",
+      title: "Recovered task",
+      description: null,
+      status: "accepted",
+      assignee: "Codex",
+      assigneeAgentKey: "emmymay/codex",
+      createdBy: "EmmyMay",
+      prUrl: null,
+      workflowArtifacts: [],
+      workflowRefs: [],
+      activeLeases: [],
+      activeLocks: [],
+      stalePromptState: null,
+      createdAt: "2026-08-11T09:00:00.000Z",
+      updatedAt: "2026-08-11T10:01:00.000Z",
+    };
+    const deliveryRepairToken = lastDeliveryRepairToken();
+    assert.equal(typeof deliveryRepairToken, "number");
+    const repair: DesktopRoomDeliveryRepair = {
+      token: deliveryRepairToken as number,
+      messages: [{
+        id: "msg_3",
+        sender: "EmmyMay",
+        source: "browser",
+        text: "recovered target",
+        timestamp: "2026-08-11T10:01:00.000Z",
+        agentPromptKind: "mention",
+        actorLabel: "EmmyMay",
+        agentIdentity: null,
+        replyTo: null,
+        threadRootId: "",
+        threadReplyToId: null,
+        thread: null,
+        attachments: [],
+      }],
+      tasks: [recoveredTask],
+    };
+    repairDesktopRoomStreamManagedDelivery(ROOM, repair);
+    repairDesktopRoomStreamManagedDelivery(ROOM, repair);
+
+    const repairedEvents = managedEmitted.slice(managedStart);
+    assert.equal(repairedEvents.filter(
+      (event) => event.type === "message" && event.message.id === "msg_2",
+    ).length, 1);
+    assert.equal(repairedEvents.filter(
+      (event) => event.type === "message" && event.message.id === "msg_3",
+    ).length, 1);
+    assert.equal(repairedEvents.filter(
+      (event) => event.type === "task_update" && event.task.id === "task_recovered",
+    ).length, 1);
+
+    router.enqueueCatchUp([]);
+    sse.error();
+    await waitUntil(() => router.streamCalls.length === 2, 4_000);
+    assert.equal(
+      router.streamCalls[1]?.headers.get("Last-Event-ID"),
+      "broker_repair_4",
+      "later live cursors stay staged until both managed-delivery repairs finish",
+    );
+    reconnected.close();
+  } finally {
+    router.restore();
+    await stopDesktopRoomStream();
   }
 });

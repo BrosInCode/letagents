@@ -49,16 +49,12 @@ export async function fetchMessages(
     before,
   })
 
-  try {
-    const data = await apiFetch(
-      `${roomPath(roomIdentifier)}/messages?${params.toString()}`,
-    )
-    return {
-      messages: data.messages || [],
-      hasOlder: Boolean(data.has_older ?? data.has_more),
-    }
-  } catch {
-    return { messages: [], hasOlder: false }
+  const data = await apiFetch(
+    `${roomPath(roomIdentifier)}/messages?${params.toString()}`,
+  )
+  return {
+    messages: data.messages || [],
+    hasOlder: Boolean(data.has_older ?? data.has_more),
   }
 }
 

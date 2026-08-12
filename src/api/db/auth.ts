@@ -14,6 +14,75 @@ import {
 } from "../../shared/agent-presence.js";
 import { DEFAULT_AGENT_SESSION_BEARER_CAPABILITIES, getAgentSessionBearerTtlMs, isAgentSessionBearerFeatureEnabled, type AgentSessionBearerCapability } from "../../shared/agent-session-bearer.js";
 import { RequestValidationError } from "../validation-error.js";
+import {
+  bearerDeliveryCredentialFingerprint,
+  emitRoomAgentCredentialInvalidationLocal,
+  queueRoomAgentCredentialInvalidationsTx,
+  sessionTokenDeliveryCredentialFingerprint,
+  type RoomAgentCredentialInvalidation,
+} from "../rooms/agent-credential-events.js";
+
+const MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION = 128;
+
+async function collectSessionCredentialFingerprintsTx(
+  tx: any,
+  sessions: readonly Pick<RoomAgentSessionRow, "session_id" | "token_hash">[],
+): Promise<Map<string, string[]>> {
+  const bySession = new Map<string, string[]>();
+  if (sessions.length === 0) return bySession;
+  if (sessions.length > MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION) {
+    throw new Error("Too many active agent sessions to retire atomically.");
+  }
+  for (const session of sessions) {
+    bySession.set(session.session_id, [sessionTokenDeliveryCredentialFingerprint(session.token_hash)]);
+  }
+  const bearerRows = await tx
+    .select({
+      session_id: room_agent_session_bearers.session_id,
+      bearer_id: room_agent_session_bearers.bearer_id,
+      generation: room_agent_session_bearers.generation,
+    })
+    .from(room_agent_session_bearers)
+    .where(and(
+      inArray(room_agent_session_bearers.session_id, sessions.map((session) => session.session_id)),
+      isNull(room_agent_session_bearers.revoked_at),
+    ))
+    .orderBy(desc(room_agent_session_bearers.generation))
+    .limit(MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION + 1);
+  if (bearerRows.length > MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION) {
+    throw new Error("Too many active agent credentials to retire atomically.");
+  }
+  for (const bearer of bearerRows) {
+    bySession.get(bearer.session_id)?.push(
+      bearerDeliveryCredentialFingerprint(bearer.bearer_id, bearer.generation),
+    );
+  }
+  return bySession;
+}
+
+async function retireRoomAgentDeliveryTx(
+  tx: any,
+  sessionIds: readonly string[],
+  now: string,
+): Promise<void> {
+  if (sessionIds.length === 0) return;
+  await tx.update(room_agent_delivery_sessions)
+    .set({
+      active_connection_count: 0,
+      last_disconnected_at: now,
+      reconnect_grace_expires_at: now,
+      updated_at: now,
+    })
+    .where(inArray(room_agent_delivery_sessions.agent_session_id, [...sessionIds]));
+  await tx.delete(room_agent_presence)
+    .where(inArray(room_agent_presence.agent_session_id, [...sessionIds]));
+}
+
+function emitCommittedCredentialInvalidations(
+  invalidations: readonly RoomAgentCredentialInvalidation[],
+): void {
+  for (const invalidation of invalidations) emitRoomAgentCredentialInvalidationLocal(invalidation);
+}
 
 export async function createAuthState(state: string, redirectTo?: string): Promise<AuthState> {
   const now = new Date();
@@ -673,7 +742,7 @@ export async function createFencedRoomAgentSession(
     };
   }
 
-  return db.transaction(async (tx) => {
+  const committed = await db.transaction(async (tx) => {
     if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new Error("Supervisor grant fence is stale.");
     }
@@ -690,7 +759,13 @@ export async function createFencedRoomAgentSession(
         eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
         isNull(room_agent_sessions.ended_at),
       ))
-      .orderBy(desc(room_agent_sessions.last_seen_at));
+      .orderBy(desc(room_agent_sessions.last_seen_at))
+      .limit(MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION + 1)
+      .for("update");
+
+    if (predecessors.length > MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION) {
+      throw new Error("Too many active agent sessions to replace atomically.");
+    }
 
     const nowMs = Date.now();
     for (const row of predecessors) {
@@ -708,6 +783,10 @@ export async function createFencedRoomAgentSession(
       replacementProofMatches(row, replacementProof)
     ) ?? predecessors[0] ?? null;
     const replacedSessionIds = predecessors.map((row: RoomAgentSessionRow) => row.session_id);
+    const retiredCredentials = await collectSessionCredentialFingerprintsTx(
+      tx,
+      predecessors as RoomAgentSessionRow[],
+    );
     if (replacedSessionIds.length > 0) {
       const now = new Date(nowMs).toISOString();
       const supersededSessionIds = replacedSessionIds.filter(
@@ -727,32 +806,35 @@ export async function createFencedRoomAgentSession(
           inArray(room_agent_session_bearers.session_id, replacedSessionIds),
           isNull(room_agent_session_bearers.revoked_at),
         ));
-      await tx.update(room_agent_delivery_sessions)
-        .set({
-          active_connection_count: 0,
-          last_disconnected_at: now,
-          reconnect_grace_expires_at: now,
-          updated_at: now,
-        })
-        .where(inArray(room_agent_delivery_sessions.agent_session_id, replacedSessionIds));
+      await retireRoomAgentDeliveryTx(tx, replacedSessionIds, now);
       // Presence is actor-label keyed. Clear the replaced projection so an
       // intentional rename cannot leave an old-label ghost; the stable session
       // id keeps task leases, Board Manager authority, and liveness lineage.
-      await tx.delete(room_agent_presence)
-        .where(inArray(room_agent_presence.agent_session_id, replacedSessionIds));
     }
 
+    const invalidations = (predecessors as RoomAgentSessionRow[]).map((previous) => ({
+      room_id: previous.room_id,
+      agent_session_id: previous.session_id,
+      credential_fingerprints: retiredCredentials.get(previous.session_id) ?? [],
+      reason: "replaced" as const,
+    }));
+    await queueRoomAgentCredentialInvalidationsTx(tx, invalidations);
     return {
-      session: replacementTarget
-        ? await rotateRoomAgentSessionTx(
-            tx,
-            replacementTarget as RoomAgentSessionRow,
-            { ...input, agent_instance_id: instanceId },
-          )
-        : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId }),
-      replaced_session_ids: replacedSessionIds,
+      result: {
+        session: replacementTarget
+          ? await rotateRoomAgentSessionTx(
+              tx,
+              replacementTarget as RoomAgentSessionRow,
+              { ...input, agent_instance_id: instanceId },
+            )
+          : await insertRoomAgentSessionTx(tx, { ...input, agent_instance_id: instanceId }),
+        replaced_session_ids: replacedSessionIds,
+      },
+      invalidations,
     };
   });
+  emitCommittedCredentialInvalidations(committed.invalidations);
+  return committed.result;
 }
 
 /**
@@ -775,7 +857,7 @@ export async function createOrRotateSupervisorWorkerSession(
   const instanceId = input.agent_instance_id.trim();
   if (!instanceId) throw new Error("Supervisor worker agent_instance_id is required.");
 
-  return db.transaction(async (tx) => {
+  const committed = await db.transaction(async (tx) => {
     if (!(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new SupervisorGrantFenceStaleError();
     }
@@ -791,9 +873,18 @@ export async function createOrRotateSupervisorWorkerSession(
         eq(room_agent_sessions.session_kind, "worker" as RoomAgentSessionKind),
         isNull(room_agent_sessions.ended_at),
       ))
-      .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id));
+      .orderBy(asc(room_agent_sessions.created_at), asc(room_agent_sessions.session_id))
+      .limit(MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION + 1)
+      .for("update");
+    if (existing.length > MAX_SESSION_CREDENTIAL_INVALIDATIONS_PER_MUTATION) {
+      throw new Error("Too many active supervisor sessions to rotate atomically.");
+    }
     const retained = existing[0] ?? null;
     const duplicateSessionIds = existing.slice(1).map((row: RoomAgentSessionRow) => row.session_id);
+    const retiredCredentials = await collectSessionCredentialFingerprintsTx(
+      tx,
+      existing as RoomAgentSessionRow[],
+    );
     if (duplicateSessionIds.length > 0) {
       const now = new Date().toISOString();
       await tx.update(room_agent_sessions)
@@ -808,16 +899,14 @@ export async function createOrRotateSupervisorWorkerSession(
           inArray(room_agent_session_bearers.session_id, duplicateSessionIds),
           isNull(room_agent_session_bearers.revoked_at),
         ));
-      await tx.update(room_agent_delivery_sessions)
-        .set({
-          active_connection_count: 0,
-          last_disconnected_at: now,
-          reconnect_grace_expires_at: now,
-          updated_at: now,
-        })
-        .where(inArray(room_agent_delivery_sessions.agent_session_id, duplicateSessionIds));
-      await tx.delete(room_agent_presence)
-        .where(inArray(room_agent_presence.agent_session_id, duplicateSessionIds));
+      await retireRoomAgentDeliveryTx(tx, duplicateSessionIds, now);
+    }
+    if (retained) {
+      // The bearer rotates in place on a stable session id. Retire the prior
+      // process's durable delivery lease in the same transaction so another
+      // API instance cannot keep presenting it as reachable after rotation.
+      const now = new Date().toISOString();
+      await retireRoomAgentDeliveryTx(tx, [retained.session_id], now);
     }
     const session = retained
       ? await rotateRoomAgentSessionTx(tx, retained as RoomAgentSessionRow, { ...input, agent_instance_id: instanceId })
@@ -829,8 +918,20 @@ export async function createOrRotateSupervisorWorkerSession(
       isNull(room_agent_session_bearers.revoked_at),
     )).limit(1);
     if (!bearer) throw new Error("Worker bearer was not persisted.");
-    return { session, bearer: toRoomAgentSessionBearer(bearer) };
+    const invalidations = (existing as RoomAgentSessionRow[]).map((previous) => ({
+      room_id: previous.room_id,
+      agent_session_id: previous.session_id,
+      credential_fingerprints: retiredCredentials.get(previous.session_id) ?? [],
+      reason: "replaced" as const,
+    }));
+    await queueRoomAgentCredentialInvalidationsTx(tx, invalidations);
+    return {
+      result: { session, bearer: toRoomAgentSessionBearer(bearer) },
+      invalidations,
+    };
   });
+  emitCommittedCredentialInvalidations(committed.invalidations);
+  return committed.result;
 }
 
 export async function createSupervisorHostGrant(input: {
@@ -1109,14 +1210,33 @@ export async function revokeRoomAgentSessionBearer(input: {
   bearer_id: string;
   session_id?: string;
 }): Promise<RoomAgentSessionBearer | null> {
-  const conditions = [eq(room_agent_session_bearers.bearer_id, input.bearer_id), isNull(room_agent_session_bearers.revoked_at)];
-  if (input.session_id) conditions.push(eq(room_agent_session_bearers.session_id, input.session_id));
-  const [row] = await db
-    .update(room_agent_session_bearers)
-    .set({ revoked_at: new Date().toISOString() })
-    .where(and(...conditions))
-    .returning();
-  return row ? toRoomAgentSessionBearer(row) : null;
+  const committed = await db.transaction(async (tx) => {
+    const conditions = [eq(room_agent_session_bearers.bearer_id, input.bearer_id), isNull(room_agent_session_bearers.revoked_at)];
+    if (input.session_id) conditions.push(eq(room_agent_session_bearers.session_id, input.session_id));
+    const now = new Date().toISOString();
+    const [row] = await tx
+      .update(room_agent_session_bearers)
+      .set({ revoked_at: now })
+      .where(and(...conditions))
+      .returning();
+    if (!row) return { result: null, invalidation: null };
+    await retireRoomAgentDeliveryTx(tx, [row.session_id], now);
+    const invalidation = {
+      room_id: row.room_id,
+      agent_session_id: row.session_id,
+      credential_fingerprints: [
+        bearerDeliveryCredentialFingerprint(row.bearer_id, row.generation),
+      ],
+      reason: "revoked" as const,
+    };
+    await queueRoomAgentCredentialInvalidationsTx(tx, [invalidation]);
+    return {
+      result: toRoomAgentSessionBearer(row),
+      invalidation,
+    };
+  });
+  if (committed.invalidation) emitRoomAgentCredentialInvalidationLocal(committed.invalidation);
+  return committed.result;
 }
 
 export async function rotateRoomAgentSessionBearer(input: {
@@ -1127,7 +1247,7 @@ export async function rotateRoomAgentSessionBearer(input: {
   supervisor_grant_id?: string;
   supervisor_grant_fence?: SupervisorGrantFence;
 }): Promise<{ bearer: RoomAgentSessionBearer; token: string } | null> {
-  return db.transaction(async (tx) => {
+  const committed = await db.transaction(async (tx) => {
     if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
       throw new SupervisorGrantFenceStaleError();
     }
@@ -1142,13 +1262,14 @@ export async function rotateRoomAgentSessionBearer(input: {
         ...(input.supervisor_grant_id ? [eq(room_agent_session_bearers.supervisor_grant_id, input.supervisor_grant_id)] : []),
       ))
       .limit(1);
-    if (!current) return null;
+    if (!current) return { result: null, invalidation: null };
 
     const nowDate = new Date();
     const now = nowDate.toISOString();
     await tx.update(room_agent_session_bearers)
       .set({ revoked_at: now })
       .where(eq(room_agent_session_bearers.bearer_id, current.bearer_id));
+    await retireRoomAgentDeliveryTx(tx, [current.session_id], now);
 
     const token = makeAgentSessionBearerToken();
     const next = {
@@ -1166,8 +1287,22 @@ export async function rotateRoomAgentSessionBearer(input: {
       created_at: now,
     };
     const [created] = await tx.insert(room_agent_session_bearers).values(next).returning();
-    return { bearer: toRoomAgentSessionBearer(created), token };
+    const invalidation = {
+      room_id: current.room_id,
+      agent_session_id: current.session_id,
+      credential_fingerprints: [
+        bearerDeliveryCredentialFingerprint(current.bearer_id, current.generation),
+      ],
+      reason: "rotated" as const,
+    };
+    await queueRoomAgentCredentialInvalidationsTx(tx, [invalidation]);
+    return {
+      result: { bearer: toRoomAgentSessionBearer(created), token },
+      invalidation,
+    };
   });
+  if (committed.invalidation) emitRoomAgentCredentialInvalidationLocal(committed.invalidation);
+  return committed.result;
 }
 
 export async function touchRoomAgentSession(sessionId: string): Promise<void> {
@@ -1190,6 +1325,7 @@ export async function endRoomAgentSession(input: {
 }): Promise<RoomAgentSession | null> {
   const unavailableReceiptTargets: number[] = [];
   let unavailableReceiptRoom: string | null = null;
+  const credentialInvalidations: RoomAgentCredentialInvalidation[] = [];
   const ended = await db.transaction(async (tx) => {
   if (input.supervisor_grant_fence && !(await assertSupervisorGrantFenceTx(tx, input.supervisor_grant_fence))) {
     throw new SupervisorGrantFenceStaleError();
@@ -1234,12 +1370,24 @@ export async function endRoomAgentSession(input: {
   if (!row && input.supervisor_grant_id) throw new SupervisorGrantFenceStaleError();
 
   if (row) {
+    const retiredCredentials = await collectSessionCredentialFingerprintsTx(
+      tx,
+      [row as RoomAgentSessionRow],
+    );
     await tx.update(room_agent_session_bearers)
       .set({ revoked_at: now })
       .where(and(
         eq(room_agent_session_bearers.session_id, row.session_id),
         isNull(room_agent_session_bearers.revoked_at),
       ));
+    await retireRoomAgentDeliveryTx(tx, [row.session_id], now);
+    credentialInvalidations.push({
+      room_id: row.room_id,
+      agent_session_id: row.session_id,
+      credential_fingerprints: retiredCredentials.get(row.session_id) ?? [],
+      reason: "ended",
+    });
+    await queueRoomAgentCredentialInvalidationsTx(tx, credentialInvalidations.slice(-1));
     unavailableReceiptTargets.push(
       ...await markUnresolvedReceiptsUnavailableTx(tx, row as RoomAgentSessionRow, now),
     );
@@ -1248,6 +1396,7 @@ export async function endRoomAgentSession(input: {
 
   return row ? toRoomAgentSession(row as RoomAgentSessionRow) : null;
   });
+  emitCommittedCredentialInvalidations(credentialInvalidations);
   if (unavailableReceiptRoom && unavailableReceiptTargets.length > 0) {
     // Dynamic import: the server event module transitively imports this file.
     // Room-level so the shared stream never enumerates ids that may be

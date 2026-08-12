@@ -554,6 +554,13 @@
       "when": 1786492800000,
       "tag": "0078_materialized_thread_summaries",
       "breakpoints": true
+    },
+    {
+      "idx": 79,
+      "version": "7",
+      "when": 1786579200000,
+      "tag": "0079_delivery_credential_fence",
+      "breakpoints": true
     }
   ]
 }

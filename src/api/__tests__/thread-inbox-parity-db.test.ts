@@ -57,6 +57,8 @@ const getMessageThread = dbModule?.getMessageThread;
 const getMessageThreads = dbModule?.getMessageThreads;
 const getMessageById = dbModule?.getMessageById;
 const getMessages = dbModule?.getMessages;
+const getMessageRecipientAgentKeys = dbModule?.getMessageRecipientAgentKeys;
+const getMessageRecipientAgentTargets = dbModule?.getMessageRecipientAgentTargets;
 const getMessageThreadReadOverlays = dbModule?.getMessageThreadReadOverlays;
 const markMessageThreadRead = dbModule?.markMessageThreadRead;
 const attachReceiptAuthorityActivations = receiptActivationModule?.attachReceiptAuthorityActivations;
@@ -1441,6 +1443,7 @@ test("PG send-time routing resolves aliases globally before account filtering", 
     recipient_agent_sessions: [{
       agent_key: "test/alice-oak",
       agent_session_id: "global_oak_alice",
+      activation_reason: "explicit_mention",
     }],
     control_authorized: true,
   });
@@ -1467,7 +1470,6 @@ test("PG send-time routing resolves aliases globally before account filtering", 
     false,
     "an account-owned worker publication is not human stop-control authority",
   );
-
   const legacyNumber = Number(workerStop.id.slice(4)) + 1;
   await pool!.query(
     `INSERT INTO messages (
@@ -1747,6 +1749,7 @@ test("PG send-time routing unions rotation aliases before choosing one durable r
     recipient_agent_sessions: [{
       agent_key: "test/rotated",
       agent_session_id: "rotation_old",
+      activation_reason: "explicit_mention",
     }],
     control_authorized: false,
   });
@@ -1865,6 +1868,7 @@ test("PG send-time routing unions rotation aliases before choosing one durable r
     recipient_agent_sessions: [{
       agent_key: "test/rotated",
       agent_session_id: "rotation_old",
+      activation_reason: "thread_participant",
     }],
     control_authorized: false,
   }, "an ended capture with ambiguous live successors has no inferred desktop target");
@@ -1932,9 +1936,20 @@ test("PG send-time routing unions rotation aliases before choosing one durable r
       agent_key: "test/rotated",
       agent_session_id: "rotation_old",
       successor_agent_session_id: "rotation_new",
+      activation_reason: "thread_participant",
     }],
     control_authorized: false,
   }, "the server names the exact same-owner successor only after the capture ends");
+  assert.deepEqual(
+    await getMessageRecipientAgentTargets!(room.id, Number(continuation.id.slice(4))),
+    [{
+      agent_key: "test/rotated",
+      agent_session_id: "rotation_old",
+      owner_account_id: owner,
+      successor_agent_session_id: "rotation_new",
+    }],
+    "cross-instance prompt visibility carries the same captured/successor authority",
+  );
 
   const conflicted = await addMessage!(room.id, "Human", "@ConflictNew inspect", { source: "browser" });
   const conflictCount = await pool!.query<{ count: number }>(
@@ -2030,6 +2045,20 @@ test("PG send-time routing persists a 6,000-recipient broadcast in bounded chunk
     [room.id, Number(broadcast.id.slice(4))],
   );
   assert.equal(receiptCount.rows[0]?.count, 6_000);
+  assert.equal(
+    (await getMessageRecipientAgentKeys!(room.id, Number(broadcast.id.slice(4)))).length,
+    6_000,
+    "cross-instance bridge hydration accepts every supported receipt target",
+  );
+  const exactBridgeTargets = await getMessageRecipientAgentTargets!(
+    room.id,
+    Number(broadcast.id.slice(4)),
+  );
+  assert.equal(exactBridgeTargets.length, 6_000);
+  assert.ok(exactBridgeTargets.every((target: {
+    owner_account_id: string;
+    agent_session_id: string;
+  }) => target.owner_account_id === owner && target.agent_session_id.startsWith("broadcast_6000_")));
   const overlayStartedAt = performance.now();
   const broadcastOverlay = await getMessageById!(room.id, broadcast.id, {
     account_id: owner,
@@ -2489,8 +2518,8 @@ test("PG thread routing: high-cardinality membership stays indexed beyond the di
     authority: "receipts",
     recipient_agent_keys: ["test/old-agent", "test/prompt-agent"],
     recipient_agent_sessions: [
-      { agent_key: "test/old-agent", agent_session_id: "routing_old" },
-      { agent_key: "test/prompt-agent", agent_session_id: "routing_prompt" },
+      { agent_key: "test/old-agent", agent_session_id: "routing_old", activation_reason: "thread_participant" },
+      { agent_key: "test/prompt-agent", agent_session_id: "routing_prompt", activation_reason: "thread_participant" },
     ],
     control_authorized: false,
   });
@@ -2534,8 +2563,9 @@ test("PG thread routing: high-cardinality membership stays indexed beyond the di
         agent_key: "test/old-agent",
         agent_session_id: "routing_old",
         successor_agent_session_id: "routing_old_rotated",
+        activation_reason: "thread_participant",
       },
-      { agent_key: "test/prompt-agent", agent_session_id: "routing_prompt" },
+      { agent_key: "test/prompt-agent", agent_session_id: "routing_prompt", activation_reason: "thread_participant" },
     ],
     control_authorized: false,
   }, "the server explicitly names the sole same-owner successor after capture end");

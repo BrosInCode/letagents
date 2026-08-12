@@ -1,6 +1,7 @@
 import type {
   DesktopManagedAgentSession,
   DesktopRentalActivityEvent,
+  DesktopRoomDeliveryRepair,
   DesktopRoomMessage,
   DesktopRoomStreamEvent,
   DesktopTaskSummary,
@@ -49,9 +50,27 @@ let activeRoomStream: {
   pollAbortController: AbortController | null;
   retryMs: number;
   lastMessageId: string | null;
+  lastEventCursor: string | null;
   localRoomIdentifier: string | null;
   managedMessageDeliveryTracker: ManagedMessageDeliveryTracker;
+  managedTaskDeliveryTracker: ManagedMessageDeliveryTracker;
   localUiMessageTracker: ManagedMessageDeliveryTracker;
+  messageRepairRequestedGeneration: number;
+  messageRepairCompletedGeneration: number;
+  messageRepairPromise: Promise<void> | null;
+  // Large catch-up suppresses intermediate renderer pages and finishes with
+  // one authoritative latest window. Keep this durable for the stream
+  // generation so a failed final window cannot be forgotten after the
+  // managed-delivery cursor has already advanced.
+  rendererWindowRefreshNeeded: boolean;
+  gapRepairGeneration: number;
+  pendingGapRepair: {
+    token: number;
+    cursorPresent: boolean;
+    cursor: string | null;
+    messagesRepaired: boolean;
+    snapshotRepaired: boolean;
+  } | null;
   stopped: boolean;
   // Cloud rooms deliver live messages over SSE. The HTTP long-poll is a
   // *fallback* transport that only runs while SSE is disconnected; `pollActive`
@@ -67,7 +86,66 @@ let activeRoomStream: {
   readyPromise: Promise<void>;
   resolveReady: (() => void) | null;
   readyTimer: NodeJS.Timeout | null;
+  deferSseFrames: boolean;
+  bufferedSseFrames: Array<{
+    eventName: string;
+    data: string;
+    eventCursor: string | null;
+    bytes: number;
+  }>;
+  bufferedSseFrameBytes: number;
+  bufferedSseFrameOverflow: boolean;
 } | null = null;
+
+const roomEventCursors = new Map<string, string>();
+const MAX_NATIVE_SSE_FRAME_BYTES = 1024 * 1024;
+const MAX_REMEMBERED_ROOM_EVENT_CURSORS = 32;
+const MAX_DEFERRED_SSE_FRAMES = 256;
+const MAX_DEFERRED_SSE_FRAME_BYTES = 1024 * 1024;
+const MAX_CATCH_UP_PAGES_PER_PASS = 4;
+const MAX_CATCH_UP_MESSAGES_PER_PASS = 400;
+const MAX_CATCH_UP_BYTES_PER_PASS = 2 * 1024 * 1024;
+const MAX_CATCH_UP_WORK_MS_PER_PASS = 100;
+
+function rememberRoomEventCursor(roomIdentifier: string, cursor: string | null): void {
+  if (!cursor) return;
+  roomEventCursors.delete(roomIdentifier);
+  roomEventCursors.set(roomIdentifier, cursor);
+  while (roomEventCursors.size > MAX_REMEMBERED_ROOM_EVENT_CURSORS) {
+    const oldest = roomEventCursors.keys().next().value as string | undefined;
+    if (!oldest) break;
+    roomEventCursors.delete(oldest);
+  }
+  if (activeRoomStream?.roomIdentifier === roomIdentifier) {
+    activeRoomStream.lastEventCursor = cursor;
+  }
+}
+
+function clearRoomEventCursor(roomIdentifier: string): void {
+  roomEventCursors.delete(roomIdentifier);
+  if (activeRoomStream?.roomIdentifier === roomIdentifier) {
+    activeRoomStream.lastEventCursor = null;
+  }
+}
+
+function stageOrApplyRoomEventCursor(
+  roomIdentifier: string,
+  cursorPresent: boolean,
+  cursor: string | null,
+): void {
+  if (!cursorPresent) return;
+  const stream = activeRoomStream;
+  if (stream?.roomIdentifier === roomIdentifier && stream.pendingGapRepair) {
+    // Keep advancing the staged boundary while the authoritative message and
+    // task repair runs. Committing any later live cursor first would make a
+    // reconnect skip the still-unrepaired broker gap.
+    stream.pendingGapRepair.cursorPresent = true;
+    stream.pendingGapRepair.cursor = cursor;
+    return;
+  }
+  if (cursor) rememberRoomEventCursor(roomIdentifier, cursor);
+  else clearRoomEventCursor(roomIdentifier);
+}
 
 // Retry cadence for a failed SSE-open catch-up (see `openDesktopRoomStream`).
 // Read once at module evaluation, like `apiUrl`; the env override exists so
@@ -466,6 +544,59 @@ function shouldDeliverManagedMessageEvent(
   return activeRoomStream?.managedMessageDeliveryTracker.remember(roomIdentifier, messageId) ?? true;
 }
 
+function shouldDeliverManagedTaskEvent(
+  roomIdentifier: string,
+  task: DesktopTaskSummary,
+): boolean {
+  return activeRoomStream?.managedTaskDeliveryTracker.remember(
+    roomIdentifier,
+    `${task.id}@${task.updatedAt}`,
+  ) ?? true;
+}
+
+/**
+ * Replays only deltas found by the renderer's authoritative gap snapshot. The
+ * renderer already owns UI reconciliation; this path restores the managed
+ * agent delivery that a broker gap could otherwise silently skip.
+ */
+export function repairDesktopRoomStreamManagedDelivery(
+  roomIdentifier: string,
+  repair: DesktopRoomDeliveryRepair,
+): void {
+  const stream = activeRoomStream;
+  if (!stream || !isCurrentRoomStream(stream) || stream.roomIdentifier !== roomIdentifier.trim()) return;
+  for (const message of repair.messages) {
+    if (!shouldDeliverManagedMessageEvent(roomIdentifier, message.id)) continue;
+    try {
+      dispatchRoomStreamEventToManagedAgents({ type: "message", roomIdentifier, message });
+    } catch {
+      // A managed runtime must not break later repaired deliveries.
+    }
+  }
+  for (const task of repair.tasks) {
+    if (!shouldDeliverManagedTaskEvent(roomIdentifier, task)) continue;
+    try {
+      dispatchRoomStreamEventToManagedAgents({ type: "task_update", roomIdentifier, task });
+    } catch {
+      // A managed runtime must not break later repaired deliveries.
+    }
+  }
+  if (stream.pendingGapRepair?.token === repair.token) {
+    stream.pendingGapRepair.snapshotRepaired = true;
+    commitCompletedGapRepair(stream);
+  }
+}
+
+function commitCompletedGapRepair(stream: NonNullable<typeof activeRoomStream>): void {
+  const repair = stream.pendingGapRepair;
+  if (!repair?.messagesRepaired || !repair.snapshotRepaired) return;
+  if (repair.cursorPresent) {
+    if (repair.cursor) rememberRoomEventCursor(stream.roomIdentifier, repair.cursor);
+    else clearRoomEventCursor(stream.roomIdentifier);
+  }
+  if (stream.pendingGapRepair === repair) stream.pendingGapRepair = null;
+}
+
 function mapRoomStreamTaskPayload(task: {
   id?: string;
   title?: string;
@@ -516,17 +647,53 @@ function readPatchIdFromActivityPayload(payload: unknown): string | null {
       : null;
 }
 
+function repairMalformedRoomStreamFrame(
+  roomIdentifier: string,
+  eventCursor: string | null,
+): void {
+  const stream = activeRoomStream;
+  if (!stream || !isCurrentRoomStream(stream) || stream.roomIdentifier !== roomIdentifier) return;
+  if (stream.pendingGapRepair) {
+    repairDurableMessagesAfterBrokerGap(stream, stream.pendingGapRepair.token);
+    return;
+  }
+  const gapRepairToken = ++stream.gapRepairGeneration;
+  stream.pendingGapRepair = {
+    token: gapRepairToken,
+    // The frame identified by eventCursor was not applied. Repair from the
+    // last known-good cursor; never bless the malformed frame as a boundary.
+    cursorPresent: false,
+    cursor: null,
+    messagesRepaired: false,
+    snapshotRepaired: false,
+  };
+  emitRoomStreamEvent({
+    type: "open",
+    roomIdentifier,
+    checkpoint: stream.lastMessageId,
+    gap: true,
+    verified: true,
+    deliveryRepairToken: gapRepairToken,
+  }, { deliverToManagedAgents: false });
+  repairDurableMessagesAfterBrokerGap(stream, gapRepairToken);
+}
+
 function handleRoomStreamFrame(
   roomIdentifier: string,
   eventName: string,
   data: string,
+  eventCursor: string | null,
 ): void {
-  if (!data.trim()) return;
+  if (!data.trim()) {
+    repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+    return;
+  }
 
   let payload: Record<string, unknown>;
   try {
     payload = JSON.parse(data) as Record<string, unknown>;
   } catch {
+    repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
 
@@ -535,16 +702,30 @@ function handleRoomStreamFrame(
   if (eventName === "task_update") {
     const task = mapRoomStreamTaskPayload(payload);
     if (task) {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
       emitRoomStreamEvent({
         type: "task_update",
         roomIdentifier: eventRoomIdentifier,
         task,
-      });
-    }
+      }, { deliverToManagedAgents: shouldDeliverManagedTaskEvent(eventRoomIdentifier, task) });
+    } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
 
   if (eventName === "room_sync") {
+    const cursorPresent = Object.prototype.hasOwnProperty.call(payload, "event_cursor")
+      || eventCursor !== null;
+    const syncCursor = typeof payload.event_cursor === "string"
+      ? payload.event_cursor
+      : payload.event_cursor === null
+        ? null
+        : eventCursor;
+    const gapRepairToken = payload.gap === true && activeRoomStream?.roomIdentifier === roomIdentifier
+      ? ++activeRoomStream.gapRepairGeneration
+      : null;
+    if (gapRepairToken === null && cursorPresent) {
+      stageOrApplyRoomEventCursor(roomIdentifier, true, syncCursor);
+    }
     if (activeRoomStream?.roomIdentifier === roomIdentifier) {
       activeRoomStream.handshakeReceived = true;
       if (activeRoomStream.handshakeTimer) clearTimeout(activeRoomStream.handshakeTimer);
@@ -554,25 +735,44 @@ function handleRoomStreamFrame(
       if (activeRoomStream.readyTimer) clearTimeout(activeRoomStream.readyTimer);
       activeRoomStream.readyTimer = null;
     }
+    const gapRepairStream = gapRepairToken !== null
+      && activeRoomStream?.roomIdentifier === roomIdentifier
+      ? activeRoomStream
+      : null;
+    if (gapRepairStream) {
+      const activeGapRepairToken = gapRepairToken as number;
+      gapRepairStream.pendingGapRepair = {
+        token: activeGapRepairToken,
+        cursorPresent,
+        cursor: syncCursor,
+        messagesRepaired: false,
+        snapshotRepaired: false,
+      };
+    }
     emitRoomStreamEvent({
       type: "open",
       roomIdentifier: eventRoomIdentifier,
       checkpoint: typeof payload.checkpoint === "string" ? payload.checkpoint : null,
       gap: payload.gap === true,
       verified: true,
+      deliveryRepairToken: gapRepairToken ?? undefined,
     }, { deliverToManagedAgents: false });
+    if (gapRepairStream) {
+      repairDurableMessagesAfterBrokerGap(gapRepairStream, gapRepairToken as number);
+    }
     return;
   }
 
   if (eventName === "github_event") {
     const event = mapGitHubRoomEventPayload(payload);
     if (event) {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
       emitRoomStreamEvent({
         type: "github_event",
         roomIdentifier: eventRoomIdentifier,
         event,
       });
-    }
+    } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
 
@@ -582,13 +782,18 @@ function handleRoomStreamFrame(
         ? payload.artifact as Parameters<typeof mapRoomArtifactPayload>[0]
         : null,
     );
+    const artifactIdentityKey = typeof payload.artifact_identity_key === "string"
+      ? payload.artifact_identity_key
+      : artifact?.identityKey ?? null;
+    if (!artifact && !artifactIdentityKey) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
     emitRoomStreamEvent({
       type: "artifact_update",
       roomIdentifier: eventRoomIdentifier,
-      artifactIdentityKey:
-        typeof payload.artifact_identity_key === "string"
-          ? payload.artifact_identity_key
-          : artifact?.identityKey ?? null,
+      artifactIdentityKey,
       artifact,
     });
     return;
@@ -601,6 +806,7 @@ function handleRoomStreamFrame(
       typeof session === "object" &&
       typeof (session as { id?: unknown }).id === "string"
     ) {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
       emitRoomStreamEvent({
         type: "reasoning_update",
         roomIdentifier: eventRoomIdentifier,
@@ -608,7 +814,7 @@ function handleRoomStreamFrame(
           session as Parameters<typeof mapDesktopReasoningSessionPayload>[0],
         ),
       });
-    }
+    } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
 
@@ -620,29 +826,36 @@ function handleRoomStreamFrame(
           ? payload.id
           : null;
     if (sessionId) {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
       emitRoomStreamEvent({
         type: "reasoning_remove",
         roomIdentifier: eventRoomIdentifier,
         sessionId,
       });
-    }
+    } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
 
   if (eventName === "rental_activity") {
     const activity = readStreamActivity(payload);
     if (activity) {
+      stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
       emitRoomStreamEvent({
         type: "rental_activity",
         roomIdentifier: eventRoomIdentifier,
         activity,
       });
-    }
+    } else repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
 
   if (eventName === "rental_patch") {
     const activity = readStreamActivity(payload);
+    if (!activity) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
     emitRoomStreamEvent({
       type: "rental_patch",
       roomIdentifier: eventRoomIdentifier,
@@ -654,6 +867,11 @@ function handleRoomStreamFrame(
 
   if (eventName === "rental_usage") {
     const activity = readStreamActivity(payload);
+    if (!activity) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
     emitRoomStreamEvent({
       type: "rental_usage",
       roomIdentifier: eventRoomIdentifier,
@@ -664,6 +882,7 @@ function handleRoomStreamFrame(
   }
 
   if (eventName === "session_disconnect") {
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
     emitRoomStreamEvent({
       type: "session_disconnect",
       roomIdentifier: eventRoomIdentifier,
@@ -672,8 +891,29 @@ function handleRoomStreamFrame(
     return;
   }
 
+  if (eventName === "message_info_updated") {
+    if (
+      !Array.isArray(payload.message_ids)
+      || payload.message_ids.some((messageId) => typeof messageId !== "string" || !messageId)
+    ) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    // Desktop Message Info is fetched on demand and has no live invalidation
+    // surface yet. Treat the bounded server invalidation as a valid no-op so
+    // it advances the broker cursor without turning every read receipt into a
+    // full room gap/snapshot repair. Malformed typed frames still fail closed.
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+    return;
+  }
+
   if (eventName === "message") {
     const messageId = typeof payload.id === "string" ? payload.id : null;
+    if (!messageId) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
     if (
       activeRoomStream?.roomIdentifier === roomIdentifier &&
       messageId
@@ -688,6 +928,66 @@ function handleRoomStreamFrame(
         payload as Parameters<typeof mapRoomMessagePayload>[0],
       ),
     }, { deliverToManagedAgents: shouldDeliverToManagedAgents });
+    return;
+  }
+  repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+}
+
+function queueOrHandleRoomStreamFrame(
+  stream: NonNullable<typeof activeRoomStream>,
+  eventName: string,
+  data: string,
+  eventCursor: string | null,
+): void {
+  if (!stream.deferSseFrames) {
+    handleRoomStreamFrame(stream.roomIdentifier, eventName, data, eventCursor);
+    return;
+  }
+  if (stream.bufferedSseFrameOverflow) return;
+  const bytes = Buffer.byteLength(eventName) + Buffer.byteLength(data)
+    + (eventCursor ? Buffer.byteLength(eventCursor) : 0);
+  if (
+    stream.bufferedSseFrames.length >= MAX_DEFERRED_SSE_FRAMES
+    || stream.bufferedSseFrameBytes + bytes > MAX_DEFERRED_SSE_FRAME_BYTES
+  ) {
+    // Release potentially large payload strings immediately. The durable
+    // message cursor plus the renderer snapshot are the authoritative repair.
+    stream.bufferedSseFrames = [];
+    stream.bufferedSseFrameBytes = 0;
+    stream.bufferedSseFrameOverflow = true;
+    return;
+  }
+  stream.bufferedSseFrames.push({ eventName, data, eventCursor, bytes });
+  stream.bufferedSseFrameBytes += bytes;
+}
+
+function finishDeferredSseFrames(
+  stream: NonNullable<typeof activeRoomStream>,
+): void {
+  stream.deferSseFrames = false;
+  const overflowed = stream.bufferedSseFrameOverflow;
+  const frames = stream.bufferedSseFrames;
+  stream.bufferedSseFrames = [];
+  stream.bufferedSseFrameBytes = 0;
+  stream.bufferedSseFrameOverflow = false;
+  if (!isCurrentRoomStream(stream)) return;
+  if (overflowed) {
+    handleRoomStreamFrame(
+      stream.roomIdentifier,
+      "room_sync",
+      JSON.stringify({ gap: true, event_cursor: stream.lastEventCursor }),
+      stream.lastEventCursor,
+    );
+    return;
+  }
+  for (const frame of frames) {
+    if (!isCurrentRoomStream(stream)) return;
+    handleRoomStreamFrame(
+      stream.roomIdentifier,
+      frame.eventName,
+      frame.data,
+      frame.eventCursor,
+    );
   }
 }
 
@@ -702,7 +1002,13 @@ async function fetchRoomMessagePollPage(
   after: string | null,
   timeoutMs: number,
   signal: AbortSignal,
-): Promise<{ hasMore: boolean; lastMessageId: string | null }> {
+  options: { emitToRenderer?: boolean; batchRenderer?: boolean } = {},
+): Promise<{
+  hasMore: boolean;
+  lastMessageId: string | null;
+  messageCount: number;
+  serializedBytes: number;
+}> {
   const storedAuth = await readStoredAuth();
   const requestHeaders = new Headers({
     Accept: "application/json",
@@ -729,23 +1035,72 @@ async function fetchRoomMessagePollPage(
     has_more?: boolean;
   };
   if (!isCurrentRoomStream(stream)) {
-    return { hasMore: false, lastMessageId: stream.lastMessageId };
+    return {
+      hasMore: false,
+      lastMessageId: stream.lastMessageId,
+      messageCount: 0,
+      serializedBytes: 0,
+    };
   }
+  let messageCount = 0;
+  let serializedBytes = 0;
+  const rendererMessages: DesktopRoomMessage[] = [];
   for (const rawMessage of page.messages || []) {
     if (!isCurrentRoomStream(stream)) {
-      return { hasMore: false, lastMessageId: stream.lastMessageId };
+      return { hasMore: false, lastMessageId: stream.lastMessageId, messageCount, serializedBytes };
     }
     if (typeof rawMessage.id === "string") {
       stream.lastMessageId = rawMessage.id;
     }
     const roomIdentifier = page.room_id || stream.roomIdentifier;
+    const message = mapCloudRoomMessagePayload(rawMessage);
+    messageCount += 1;
+    try {
+      serializedBytes += Buffer.byteLength(JSON.stringify(rawMessage));
+    } catch {
+      serializedBytes = MAX_CATCH_UP_BYTES_PER_PASS + 1;
+    }
+    const shouldDeliver = shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id);
+    if (options.emitToRenderer === false) {
+      if (shouldDeliver) {
+        try {
+          dispatchRoomStreamEventToManagedAgents({ type: "message", roomIdentifier, message });
+        } catch {
+          // One managed runtime must not break exact progress for later ids.
+        }
+      }
+      continue;
+    }
+    if (options.batchRenderer) {
+      rendererMessages.push(message);
+      if (shouldDeliver) {
+        try {
+          dispatchRoomStreamEventToManagedAgents({ type: "message", roomIdentifier, message });
+        } catch {
+          // One managed runtime must not break exact progress for later ids.
+        }
+      }
+      continue;
+    }
     emitRoomStreamEvent({
       type: "message",
       roomIdentifier,
-      message: mapCloudRoomMessagePayload(rawMessage),
-    }, { deliverToManagedAgents: shouldDeliverManagedMessageEvent(roomIdentifier, rawMessage.id) });
+      message,
+    }, { deliverToManagedAgents: shouldDeliver });
   }
-  return { hasMore: page.has_more === true, lastMessageId: stream.lastMessageId };
+  if (rendererMessages.length > 0) {
+    emitRoomStreamEvent({
+      type: "message_batch",
+      roomIdentifier: page.room_id || stream.roomIdentifier,
+      messages: rendererMessages,
+    }, { deliverToManagedAgents: false });
+  }
+  return {
+    hasMore: page.has_more === true,
+    lastMessageId: stream.lastMessageId,
+    messageCount,
+    serializedBytes,
+  };
 }
 
 // Fallback transport: a 25s server-held long-poll re-issued forever, but ONLY
@@ -831,28 +1186,121 @@ function stopFallbackPoll(
   stream.pollAbortController = null;
 }
 
-// One non-blocking gap-fill fetch run the instant SSE (re)connects. The server
-// keeps no SSE replay, so a fresh/reconnected SSE reader only sees events from
-// now on; this closes the gap between the last delivered message and stream
-// start using the same `after={lastMessageId}` cursor the fallback poll uses.
+// One non-blocking durable-message reconciliation run the instant SSE
+// (re)connects. Broker replay covers its bounded in-memory window; this closes
+// older gaps and remains the durable fallback for process restarts.
 async function catchUpAfterSseOpen(
   stream: NonNullable<typeof activeRoomStream>,
 ): Promise<void> {
   let after = stream.lastMessageId;
   if (!after) return;
-  do {
-    const page = await fetchRoomMessagePollPage(
-      stream,
-      after,
-      0,
-      stream.abortController.signal,
+  while (isCurrentRoomStream(stream)) {
+    const passStartedAt = Date.now();
+    let passPages = 0;
+    let passMessages = 0;
+    let passBytes = 0;
+    let complete = false;
+    do {
+      const page = await fetchRoomMessagePollPage(
+        stream,
+        after,
+        0,
+        stream.abortController.signal,
+        { emitToRenderer: !stream.rendererWindowRefreshNeeded, batchRenderer: true },
+      );
+      passPages += 1;
+      passMessages += page.messageCount;
+      passBytes += page.serializedBytes;
+      if (!isCurrentRoomStream(stream)) return;
+      if (!page.hasMore) {
+        complete = true;
+        break;
+      }
+      if (!page.lastMessageId || page.lastMessageId === after) {
+        throw new Error("Room catch-up did not advance its cursor.");
+      }
+      after = page.lastMessageId;
+    } while (
+      passPages < MAX_CATCH_UP_PAGES_PER_PASS
+      && passMessages < MAX_CATCH_UP_MESSAGES_PER_PASS
+      && passBytes < MAX_CATCH_UP_BYTES_PER_PASS
+      && Date.now() - passStartedAt < MAX_CATCH_UP_WORK_MS_PER_PASS
     );
-    if (!isCurrentRoomStream(stream) || !page.hasMore) return;
-    if (!page.lastMessageId || page.lastMessageId === after) {
-      throw new Error("Room catch-up did not advance its cursor.");
+
+    if (complete) {
+      if (stream.rendererWindowRefreshNeeded) {
+        await emitLatestRoomMessageWindow(stream);
+        stream.rendererWindowRefreshNeeded = false;
+      }
+      return;
     }
-    after = page.lastMessageId;
-  } while (true);
+    stream.rendererWindowRefreshNeeded = true;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+}
+
+async function emitLatestRoomMessageWindow(
+  stream: NonNullable<typeof activeRoomStream>,
+): Promise<void> {
+  const storedAuth = await readStoredAuth();
+  const headers = new Headers({ Accept: "application/json", "X-LetAgents-Desktop-Client": "1" });
+  if (storedAuth.token) headers.set("Authorization", `Bearer ${storedAuth.token}`);
+  const response = await fetch(
+    `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages?limit=${roomMessageHistoryPageSize}&before=latest`,
+    { headers, signal: stream.abortController.signal },
+  );
+  if (!response.ok) throw new Error(`Room latest-window fetch failed with HTTP ${response.status}.`);
+  const page = await response.json() as {
+    room_id?: string;
+    messages?: Parameters<typeof mapRoomMessagePayload>[0][];
+  };
+  if (!isCurrentRoomStream(stream)) return;
+  emitRoomStreamEvent({
+    type: "message_window",
+    roomIdentifier: page.room_id || stream.roomIdentifier,
+    messages: (page.messages || []).map(mapRoomMessagePayload),
+  }, { deliverToManagedAgents: false });
+}
+
+function requestDurableMessageRepair(
+  stream: NonNullable<typeof activeRoomStream>,
+): Promise<void> {
+  stream.messageRepairRequestedGeneration += 1;
+  if (stream.messageRepairPromise) return stream.messageRepairPromise;
+  const drain = async () => {
+    while (
+      isCurrentRoomStream(stream)
+      && stream.messageRepairCompletedGeneration < stream.messageRepairRequestedGeneration
+    ) {
+      const generation = stream.messageRepairRequestedGeneration;
+      await catchUpAfterSseOpen(stream);
+      stream.messageRepairCompletedGeneration = generation;
+    }
+  };
+  const pending = drain().finally(() => {
+    if (stream.messageRepairPromise === pending) stream.messageRepairPromise = null;
+  });
+  stream.messageRepairPromise = pending;
+  return pending;
+}
+
+function repairDurableMessagesAfterBrokerGap(
+  stream: NonNullable<typeof activeRoomStream>,
+  gapRepairToken: number,
+): void {
+  // Keep one durable fallback alive until the bounded catch-up closes the
+  // broker gap. Both channels share by-id managed-agent dedupe.
+  startFallbackPoll(stream);
+  void requestDurableMessageRepair(stream).then(() => {
+    if (!isCurrentRoomStream(stream)) return;
+    if (stream.pendingGapRepair?.token === gapRepairToken) {
+      stream.pendingGapRepair.messagesRepaired = true;
+      commitCompletedGapRepair(stream);
+    }
+    stopFallbackPoll(stream);
+  }).catch(() => {
+    if (isCurrentRoomStream(stream) && stream.pollActive) scheduleCatchUpRetry(stream);
+  });
 }
 
 function clearCatchUpRetry(
@@ -880,8 +1328,12 @@ function scheduleCatchUpRetry(
     void (async () => {
       if (!isCurrentRoomStream(stream) || !stream.pollActive) return;
       try {
-        await catchUpAfterSseOpen(stream);
+        await requestDurableMessageRepair(stream);
         if (!isCurrentRoomStream(stream)) return;
+        if (stream.pendingGapRepair) {
+          stream.pendingGapRepair.messagesRepaired = true;
+          commitCompletedGapRepair(stream);
+        }
         stopFallbackPoll(stream);
       } catch {
         if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
@@ -951,13 +1403,17 @@ async function pollLocalDesktopRoomMessages(
   }
 }
 
-function parseRoomStreamChunk(roomIdentifier: string, chunk: string): string {
+function parseRoomStreamChunk(
+  stream: NonNullable<typeof activeRoomStream>,
+  chunk: string,
+): string {
   const frames = chunk.split(/\n\n/);
   const remainder = frames.pop() || "";
 
   for (const frame of frames) {
     const lines = frame.split(/\r?\n/);
     let eventName = "message";
+    let eventCursor: string | null = null;
     const dataLines: string[] = [];
     for (const line of lines) {
       if (!line || line.startsWith(":")) continue;
@@ -965,14 +1421,65 @@ function parseRoomStreamChunk(roomIdentifier: string, chunk: string): string {
         eventName = line.slice("event:".length).trim() || "message";
         continue;
       }
+      if (line.startsWith("id:")) {
+        eventCursor = line.slice("id:".length).trim() || null;
+        continue;
+      }
       if (line.startsWith("data:")) {
         dataLines.push(line.slice("data:".length).trimStart());
       }
     }
-    handleRoomStreamFrame(roomIdentifier, eventName, dataLines.join("\n"));
+    queueOrHandleRoomStreamFrame(stream, eventName, dataLines.join("\n"), eventCursor);
   }
 
   return remainder;
+}
+
+async function readDesktopRoomStreamBody(
+  stream: NonNullable<typeof activeRoomStream>,
+  body: ReadableStream<Uint8Array>,
+): Promise<void> {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let bufferBytes = 0;
+  while (isCurrentRoomStream(stream)) {
+    const { done, value } = await reader.read();
+    if (!isCurrentRoomStream(stream) || done) break;
+    const decoded = decoder.decode(value, { stream: true });
+    const combined = buffer + decoded;
+    bufferBytes += value.byteLength;
+    buffer = parseRoomStreamChunk(
+      stream,
+      combined,
+    );
+    if (buffer.length < combined.length) bufferBytes = Buffer.byteLength(buffer, "utf8");
+    if (bufferBytes > MAX_NATIVE_SSE_FRAME_BYTES) {
+      // Treat an unterminated oversized frame exactly like a broker gap. Do
+      // not reconnect with a cursor that may have skipped its hidden event.
+      stream.lastEventCursor = null;
+      clearRoomEventCursor(stream.roomIdentifier);
+      const gapRepairToken = ++stream.gapRepairGeneration;
+      stream.pendingGapRepair = {
+        token: gapRepairToken,
+        cursorPresent: false,
+        cursor: null,
+        messagesRepaired: false,
+        snapshotRepaired: false,
+      };
+      emitRoomStreamEvent({
+        type: "open",
+        roomIdentifier: stream.roomIdentifier,
+        checkpoint: stream.lastMessageId,
+        gap: true,
+        verified: true,
+        deliveryRepairToken: gapRepairToken,
+      }, { deliverToManagedAgents: false });
+      repairDurableMessagesAfterBrokerGap(stream, gapRepairToken);
+      await reader.cancel("SSE frame exceeded bounded size").catch(() => undefined);
+      throw new Error("Room stream frame exceeded bounded size.");
+    }
+  }
 }
 
 async function openDesktopRoomStream(
@@ -985,6 +1492,9 @@ async function openDesktopRoomStream(
   });
   if (storedAuth.token) {
     requestHeaders.set("Authorization", `Bearer ${storedAuth.token}`);
+  }
+  if (stream.lastEventCursor) {
+    requestHeaders.set("Last-Event-ID", stream.lastEventCursor);
   }
 
   try {
@@ -1026,11 +1536,25 @@ async function openDesktopRoomStream(
       stream.resolveReady = null;
     }, roomSyncHandshakeTimeoutMs);
 
+    // Begin draining the socket immediately. Durable catch-up may span
+    // multiple pages, so leaving the body unread can overflow transport/server
+    // buffers. Frames are held in a bounded local queue until catch-up closes
+    // the older history gap, then replayed in wire order.
+    stream.deferSseFrames = true;
+    stream.bufferedSseFrames = [];
+    stream.bufferedSseFrameBytes = 0;
+    stream.bufferedSseFrameOverflow = false;
+    const readerOutcome = readDesktopRoomStreamBody(stream, response.body).then(
+      () => null,
+      (error: unknown) => error,
+    );
+
     // --- SSE just (re)connected: close the gap, then retire the fallback. ---
     // Ordering is what keeps this lossless and (near) duplicate-free across the
     // hand-off from the fallback long-poll back to SSE:
-    //   1. We have NOT started reading `response.body` yet, so no SSE `message`
-    //      frame can be emitted during the catch-up — the socket just buffers.
+    //   1. The body reader is already draining the socket, but every parsed
+    //      frame stays in the bounded deferred queue above. No SSE `message`
+    //      frame can be emitted into application state during the catch-up.
     //   2. The catch-up fetches `after={lastMessageId}`, so it delivers exactly
     //      the messages the server holds beyond our cursor (the SSE-replay gap),
     //      advancing `lastMessageId` as it goes.
@@ -1048,30 +1572,26 @@ async function openDesktopRoomStream(
     //      succeeds and retires the poll — otherwise a single failed catch-up
     //      would pin the duplicated-transport state until the next SSE drop.
     try {
-      await catchUpAfterSseOpen(stream);
+      await requestDurableMessageRepair(stream);
       if (!isCurrentRoomStream(stream)) return;
+      if (stream.pendingGapRepair) {
+        stream.pendingGapRepair.messagesRepaired = true;
+        commitCompletedGapRepair(stream);
+      }
       stopFallbackPoll(stream);
     } catch {
       if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
         return;
-      // Keep the fallback poll alive; the SSE reader still runs below.
-      if (stream.pollActive) {
-        scheduleCatchUpRetry(stream);
-      }
+      // A first-connect catch-up may fail before any fallback exists. Bring the
+      // durable lane up in both initial and reconnect cases, then keep retrying
+      // until the message cursor *and* any pending renderer window are repaired.
+      startFallbackPoll(stream);
+      scheduleCatchUpRetry(stream);
     }
 
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-    while (isCurrentRoomStream(stream)) {
-      const { done, value } = await reader.read();
-      if (!isCurrentRoomStream(stream)) break;
-      if (done) break;
-      buffer = parseRoomStreamChunk(
-        stream.roomIdentifier,
-        buffer + decoder.decode(value, { stream: true }),
-      );
-    }
+    finishDeferredSseFrames(stream);
+    const readerError = await readerOutcome;
+    if (readerError) throw readerError;
   } catch (error) {
     if (!isCurrentRoomStream(stream) || stream.abortController.signal.aborted)
       return;
@@ -1143,9 +1663,17 @@ export async function startDesktopRoomStream(
     pollAbortController: null,
     retryMs: 1000,
     lastMessageId: afterMessageId || null,
+    lastEventCursor: roomEventCursors.get(trimmedRoomIdentifier) ?? null,
     localRoomIdentifier: null,
     managedMessageDeliveryTracker: createManagedMessageDeliveryTracker(),
+    managedTaskDeliveryTracker: createManagedMessageDeliveryTracker(),
     localUiMessageTracker: createManagedMessageDeliveryTracker(),
+    messageRepairRequestedGeneration: 0,
+    messageRepairCompletedGeneration: 0,
+    messageRepairPromise: null,
+    rendererWindowRefreshNeeded: false,
+    gapRepairGeneration: 0,
+    pendingGapRepair: null,
     stopped: false,
     pollActive: false,
     catchUpRetryTimer: null,
@@ -1154,6 +1682,10 @@ export async function startDesktopRoomStream(
     readyPromise,
     resolveReady,
     readyTimer: null,
+    deferSseFrames: false,
+    bufferedSseFrames: [],
+    bufferedSseFrameBytes: 0,
+    bufferedSseFrameOverflow: false,
   };
   const startingStream = activeRoomStream;
   startingStream.readyTimer = setTimeout(() => {

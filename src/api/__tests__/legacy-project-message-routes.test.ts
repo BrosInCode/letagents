@@ -6,14 +6,67 @@ import { fileURLToPath } from "node:url";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerLegacyProjectMessageRoutes } = await import("../routes/legacy/messages.js");
+const { createRoomEventBroker } = await import("../server/room-event-broker.js");
 
 function createDeps() {
   const unused = async () => {
     throw new Error("not invoked");
   };
 
-  return {
+  const eventSources = {
     messageEvents: new EventEmitter(),
+    taskEvents: new EventEmitter(),
+    githubRoomEvents: new EventEmitter(),
+    reasoningEvents: new EventEmitter(),
+    artifactEvents: new EventEmitter(),
+    rentalActivityEvents: new EventEmitter(),
+    messageInfoEvents: new EventEmitter(),
+  };
+  return {
+    ...eventSources,
+    roomEventBroker: createRoomEventBroker(eventSources),
+    roomMessageOverlayBatcher: {
+      async prepare(input: {
+        message: { id?: string };
+        targets: Array<{ accountId: string }>;
+      }) {
+        return new Map(input.targets.map((target) => [target.accountId, {
+          account_agent_routing: {
+            version: 1 as const,
+            authority: "receipts" as const,
+            recipient_agent_keys: [],
+            recipient_agent_sessions: [],
+            control_authorized: false,
+          },
+        }]));
+      },
+      async prepareMany(input: {
+        messages: Array<{ id: string }>;
+        targets: Array<{ accountId: string }>;
+      }) {
+        return new Map(input.messages.map((message) => [Number(message.id.slice(4)),
+          new Map(input.targets.map((target) => [target.accountId, {
+            account_agent_routing: {
+              version: 1 as const, authority: "receipts" as const,
+              recipient_agent_keys: [], recipient_agent_sessions: [], control_authorized: false,
+            },
+          }]))]));
+      },
+      close() {},
+    },
+    resolveRequestProjectRepoAccessRoomName: async (_req: unknown, project: { id: string }) => project.id,
+    reauthorizeGitRoomParticipant: async () => true,
+    beginRoomAgentDelivery: async () => ({
+      identity: {
+        actor_label: "Agent",
+        agent_key: "owner/agent",
+        agent_session_id: "session_1",
+        owner_account_id: "account_1",
+        session_kind: "worker",
+      },
+      checkCredential: async () => true,
+      end: async () => {},
+    }),
     resolveCanonicalRoomRequestId: unused,
     requireParticipant: unused,
     parseOptionalAgentPromptKind: () => null,
@@ -45,6 +98,46 @@ async function openLegacyStream(
       _identity: unknown,
       messages: Array<{ id?: string }>,
     ) => await attach(messages),
+    roomMessageOverlayBatcher: {
+      async prepare(input: {
+        message: { id?: string };
+        targets: Array<{ accountId: string }>;
+      }) {
+        await attach([input.message]);
+        return new Map(input.targets.map((target) => [target.accountId, {
+          account_agent_routing: {
+            version: 1 as const,
+            authority: "receipts" as const,
+            recipient_agent_keys: ["owner/agent"],
+            recipient_agent_sessions: [{
+              agent_key: "owner/agent",
+              agent_session_id: "session_1",
+              activation_reason: "explicit_mention",
+            }],
+            control_authorized: false,
+          },
+        }]));
+      },
+      async prepareMany(input: {
+        messages: Array<{ id: string }>;
+        targets: Array<{ accountId: string }>;
+      }) {
+        await attach(input.messages);
+        return new Map(input.messages.map((message) => [Number(message.id.slice(4)),
+          new Map(input.targets.map((target) => [target.accountId, {
+            account_agent_routing: {
+              version: 1 as const, authority: "receipts" as const,
+              recipient_agent_keys: ["owner/agent"],
+              recipient_agent_sessions: [{
+                agent_key: "owner/agent", agent_session_id: "session_1",
+                activation_reason: "explicit_mention",
+              }],
+              control_authorized: false,
+            },
+          }]))]));
+      },
+      close() {},
+    },
   };
   registerLegacyProjectMessageRoutes(app as never, deps as never);
   let closeHandler: (() => void) | null = null;
@@ -100,13 +193,10 @@ test("legacy worker message surfaces preserve exact publisher and receipt author
   assert.match(source, /publisher_agent_key: workerIdentity\.identity\.agent_key/);
   assert.match(source, /publisher_agent_session_id: workerIdentity\.identity\.agent_session_id/);
   assert.match(source, /workerIdentity\.identity\.owner_account_id/);
-  assert.ok(
-    (source.match(/attachActivations\(/g) ?? []).length >= 4,
-    "history, stream, existing poll, and live poll must share receipt authority",
-  );
-  assert.match(source, /let messageWriteQueue = Promise\.resolve\(\)/);
-  assert.match(source, /messageWriteQueue = messageWriteQueue[\s\S]*writeMessageCreated/);
-  assert.match(source, /if \(streamClosed\) return;[\s\S]*res\.end\(\)/);
+  assert.match(source, /hydrateLiveMessageForSubscriber\(/);
+  assert.match(source, /messageOverlayTarget/);
+  assert.match(source, /while \(!streamClosed\)[\s\S]*subscription\.next\(\)/);
+  assert.match(source, /failed to hydrate message[\s\S]*connection\?\.close\(\)/);
 });
 
 test("legacy SSE serializes authority hydration in message order", async () => {
@@ -154,6 +244,7 @@ test("legacy SSE closes once and drops pending frames after authority failure", 
   assert.equal(calls, 1);
   assert.equal(stream.res.writableEnded, true);
   assert.doesNotMatch(stream.res.writes.join(""), /msg_1|msg_2/);
+  assert.match(stream.res.writes.join(""), /event: room_sync[\s\S]*"gap":true/);
   stream.close();
 });
 
@@ -249,4 +340,148 @@ test("legacy agent-session bearer writes cannot impersonate an ordinary sender",
     publisher_agent_session_id: "agent_session_worker",
     account_id: "acct_owner",
   });
+});
+
+test("one legacy broker gap coalesces a thousand poll catch-ups", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: string, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path, handler);
+    },
+    post() {},
+  };
+  let historyReads = 0;
+  let gapPhase = false;
+  let releaseGap!: () => void;
+  const gapGate = new Promise<void>((resolve) => { releaseGap = resolve; });
+  const deps = {
+    ...createDeps(),
+    getProjectById: async () => ({ id: "room_1", display_name: "Room" }),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    requireParticipant: async () => true,
+    getMessagesAfter: async () => {
+      historyReads += 1;
+      if (gapPhase) {
+        await gapGate;
+        return {
+            messages: [{
+              id: "msg_7", sender: "System", text: "", source: "system",
+              agent_prompt_kind: "auto", timestamp: new Date().toISOString(),
+              routing_snapshot_version: 1,
+            }],
+            has_more: false,
+          };
+      }
+      return { messages: [], has_more: false };
+    },
+  };
+  registerLegacyProjectMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/projects/:id/messages/poll");
+  assert.ok(handler);
+
+  const responses = Array.from({ length: 1_000 }, () => {
+    const requestEvents = new EventEmitter();
+    let resolveBody!: (body: {
+      messages: Array<{ id?: string }>;
+      last_observed_message_id?: string | null;
+    }) => void;
+    const body = new Promise<{
+      messages: Array<{ id?: string }>;
+      last_observed_message_id?: string | null;
+    }>((resolve) => {
+      resolveBody = resolve;
+    });
+    const req = {
+      params: { id: "room_1" }, query: { after: "msg_6", timeout: "60000" },
+      headers: {}, authKind: "session", sessionAccount: { account_id: "acct_1" },
+      get() { return undefined; },
+      on: requestEvents.on.bind(requestEvents),
+      off: requestEvents.off.bind(requestEvents),
+    };
+    const res = {
+      headersSent: false,
+      status() { return this; },
+      json(payload: { messages: Array<{ id?: string }> }) {
+        this.headersSent = true;
+        resolveBody(payload);
+        return this;
+      },
+    };
+    return { request: handler(req, res), body };
+  });
+  await Promise.all(responses.map(({ request }) => request));
+  const initialHistoryReads = historyReads;
+  assert.ok(initialHistoryReads > 0);
+
+  gapPhase = true;
+  deps.roomEventBroker.markGap("room_1");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(historyReads, initialHistoryReads + 1, "legacy gap waiters share one canonical durable read");
+  releaseGap();
+  const bodies = await Promise.all(responses.map(({ body }) => body));
+  assert.ok(bodies.every((body) => (
+    body.messages.length === 0 && body.last_observed_message_id === "msg_7"
+  )), "legacy silent prompt rows advance every worker cursor without exposing the body");
+  deps.roomEventBroker.close();
+});
+
+test("legacy poll timeout cannot overtake an in-flight canonical hydration", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: string, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path, handler);
+    },
+    post() {},
+  };
+  let releaseOverlay!: () => void;
+  const overlayGate = new Promise<void>((resolve) => { releaseOverlay = resolve; });
+  let responseCount = 0;
+  let responseBody: { messages?: Array<{ id?: string }> } | null = null;
+  const deps = {
+    ...createDeps(),
+    getProjectById: async () => ({ id: "room_1", display_name: "Room" }),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    requireParticipant: async () => true,
+    getMessagesAfter: async () => ({ messages: [], has_more: false }),
+    roomMessageOverlayBatcher: {
+      async prepare(input: { message: { id: string }; targets: Array<{ accountId: string }> }) {
+        await overlayGate;
+        return new Map(input.targets.map((target) => [target.accountId, {
+          account_agent_routing: {
+            version: 1 as const, authority: "receipts" as const,
+            recipient_agent_keys: [], recipient_agent_sessions: [], control_authorized: false,
+          },
+        }]));
+      },
+      async prepareMany() { return new Map(); },
+      close() {},
+    },
+  };
+  registerLegacyProjectMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/projects/:id/messages/poll");
+  assert.ok(handler);
+  const events = new EventEmitter();
+  const req = {
+    params: { id: "room_1" }, query: { after: "msg_6", timeout: "5" }, headers: {},
+    authKind: "session", sessionAccount: { account_id: "acct_1" }, get() { return undefined; },
+    on: events.on.bind(events), off: events.off.bind(events),
+  };
+  const res = {
+    headersSent: false,
+    status() { return this; },
+    json(payload: { messages?: Array<{ id?: string }> }) {
+      responseCount += 1; responseBody = payload; this.headersSent = true; return this;
+    },
+  };
+  await handler(req, res);
+  deps.messageEvents.emit("message:created", {
+    projectId: "room_1", message: { id: "msg_7", sender: "Human", text: "hello" },
+  });
+  await new Promise((resolve) => setTimeout(resolve, 15));
+  assert.equal(responseCount, 0, "timeout defers while canonical authority owns settlement");
+  releaseOverlay();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(responseCount, 1);
+  assert.equal(responseBody?.messages?.[0]?.id, "msg_7");
+  deps.roomEventBroker.close();
 });
