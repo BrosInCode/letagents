@@ -5,6 +5,7 @@ import {
   assertDesktopArchitecture,
   assertDesktopVersion,
   createDesktopReleaseManifest,
+  createElectronUpdaterMacManifest,
   createSquirrelMacReleaseManifest,
   desktopAssetNames,
   desktopMetadataNames,
@@ -22,11 +23,50 @@ test("release metadata names remain distinct when architecture artifacts are mer
   assert.deepEqual(desktopMetadataNames({ arch: "arm64" }), {
     releaseManifest: "desktop-release-arm64.json",
     squirrelManifest: "RELEASES-arm64.json",
+    updaterManifest: "latest-mac-arm64.yml",
   });
   assert.deepEqual(desktopMetadataNames({ arch: "x64" }), {
     releaseManifest: "desktop-release-x64.json",
     squirrelManifest: "RELEASES-x64.json",
+    updaterManifest: "latest-mac-x64.yml",
   });
+});
+
+test("electron-updater metadata seals the immutable ZIP size and SHA-512 digest", () => {
+  assert.deepEqual(createElectronUpdaterMacManifest({
+    version: "0.1.0",
+    arch: "arm64",
+    baseUrl: "https://downloads.letagents.chat/desktop/v0.1.0",
+    publishedAt: "2026-08-10T12:00:00Z",
+    notes: "First desktop release",
+    zipArtifact: {
+      name: "LetAgents-0.1.0-darwin-arm64.zip",
+      bytes: 1234,
+      sha512: "YWJjMTIz",
+    },
+  }), {
+    version: "0.1.0",
+    files: [{
+      url: "https://downloads.letagents.chat/desktop/v0.1.0/LetAgents-0.1.0-darwin-arm64.zip",
+      sha512: "YWJjMTIz",
+      size: 1234,
+    }],
+    path: "https://downloads.letagents.chat/desktop/v0.1.0/LetAgents-0.1.0-darwin-arm64.zip",
+    sha512: "YWJjMTIz",
+    releaseName: "LetAgents 0.1.0",
+    releaseNotes: "First desktop release",
+    releaseDate: "2026-08-10T12:00:00.000Z",
+  });
+});
+
+test("electron-updater metadata rejects an unsealed ZIP", () => {
+  assert.throws(() => createElectronUpdaterMacManifest({
+    version: "0.1.0",
+    arch: "arm64",
+    baseUrl: "https://downloads.letagents.chat/desktop/v0.1.0",
+    publishedAt: "2026-08-10T12:00:00Z",
+    zipArtifact: { name: "LetAgents-0.1.0-darwin-arm64.zip", bytes: 1234 },
+  }), /base64 SHA-512/);
 });
 
 test("Squirrel.Mac metadata points at the signed ZIP", () => {

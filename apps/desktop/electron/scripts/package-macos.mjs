@@ -9,10 +9,12 @@ import { promisify } from "node:util";
 import { notarize } from "@electron/notarize";
 import { sign } from "@electron/osx-sign";
 
+import { createDifferentialBlockmap } from "./differential-blockmap.mjs";
 import {
   assertDesktopArchitecture,
   assertDesktopVersion,
   createDesktopReleaseManifest,
+  createElectronUpdaterMacManifest,
   createSquirrelMacReleaseManifest,
   desktopAssetNames,
   desktopMetadataNames,
@@ -31,6 +33,7 @@ const assets = desktopAssetNames({ version, arch });
 const metadata = desktopMetadataNames({ arch });
 const dmg = join(artifactsDirectory, assets.dmg);
 const zip = join(artifactsDirectory, assets.zip);
+const blockmap = `${zip}.blockmap`;
 const identity = process.env.MACOS_SIGNING_IDENTITY?.trim();
 const provisioningProfile = process.env.MACOS_PROVISIONING_PROFILE_PATH?.trim();
 const entitlements = join(root, "electron", "entitlements.mac.plist");
@@ -81,6 +84,12 @@ async function sha256(path) {
   return hash.digest("hex");
 }
 
+async function sha512(path) {
+  const hash = createHash("sha512");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("base64");
+}
+
 async function describeArtifact(kind, path) {
   const info = await stat(path);
   return {
@@ -88,6 +97,7 @@ async function describeArtifact(kind, path) {
     name: basename(path),
     bytes: info.size,
     sha256: await sha256(path),
+    sha512: await sha512(path),
   };
 }
 
@@ -122,6 +132,7 @@ if (credentials) {
 }
 
 await execFileAsync("ditto", ["-c", "-k", "--sequesterRsrc", "--keepParent", packagedApp, zip]);
+await createDifferentialBlockmap(zip, blockmap);
 
 const dmgSource = join(release, "dmg-source");
 await rm(dmgSource, { recursive: true, force: true });
@@ -158,6 +169,7 @@ if (credentials) {
 const artifacts = [
   await describeArtifact("installer", dmg),
   await describeArtifact("update", zip),
+  await describeArtifact("blockmap", blockmap),
 ];
 for (const artifact of artifacts) {
   await writeFile(join(artifactsDirectory, `${artifact.name}.sha256`), `${artifact.sha256}  ${artifact.name}\n`);
@@ -168,6 +180,15 @@ await writeFile(join(artifactsDirectory, metadata.squirrelManifest), `${JSON.str
   baseUrl: releaseBaseUrl,
   publishedAt,
   notes: releaseNotes,
+}), null, 2)}\n`);
+const zipArtifact = artifacts.find((artifact) => artifact.kind === "update");
+await writeFile(join(artifactsDirectory, metadata.updaterManifest), `${JSON.stringify(createElectronUpdaterMacManifest({
+  version,
+  arch,
+  baseUrl: releaseBaseUrl,
+  publishedAt,
+  notes: releaseNotes,
+  zipArtifact,
 }), null, 2)}\n`);
 await writeFile(join(artifactsDirectory, metadata.releaseManifest), `${JSON.stringify(createDesktopReleaseManifest({
   version,

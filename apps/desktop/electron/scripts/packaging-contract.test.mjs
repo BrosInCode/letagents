@@ -76,7 +76,10 @@ test("release workflow builds, attests, and publishes independent public R2 feed
   assert.match(workflow, /R2_ACCESS_KEY_ID: \$\{\{ secrets\.R2_ACCESS_KEY_ID \}\}/);
   assert.match(workflow, /R2_SECRET_ACCESS_KEY: \$\{\{ secrets\.R2_SECRET_ACCESS_KEY \}\}/);
   assert.match(workflow, /desktop\/v\$\{DESKTOP_VERSION\}/);
-  assert.match(workflow, /desktop\/feeds\/\$\{arch\}\/RELEASES\.json/);
+  assert.match(workflow, /feed_key="desktop\/feeds\/\$\{arch\}\/\$\{public_name\}"/);
+  assert.match(workflow, /RELEASES-\$\{arch\}\.json\|RELEASES\.json\|application\/json/);
+  assert.match(workflow, /latest-mac-\$\{arch\}\.yml\|latest-mac\.yml\|application\/yaml/);
+  assert.match(workflow, /\*\.blockmap\) content_type="application\/octet-stream"/);
   assert.match(workflow, /public,max-age=31536000,immutable/);
   assert.match(workflow, /public,max-age=60,must-revalidate/);
   assert.match(workflow, /Immutable R2 object/);
