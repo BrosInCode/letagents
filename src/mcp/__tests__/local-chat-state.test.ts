@@ -22,12 +22,14 @@ const {
   addLocalTask,
   getLatestLocalChatMessages,
   getLocalChatMessages,
+  getLocalChatRoomWriteSequenceValue,
   getLocalChatThreadRoutingMembership,
   ensureLocalThreadRoutingProjection,
   getLocalTask,
   isLocalChatStorageEnabled,
   isLocalRoomStorageEnabled,
   listLocalTasks,
+  setLocalChatWriteNotificationObserversForTest,
   updateLocalTask,
   waitForLocalChatMessages,
 } = await import("../local-state/local-chat.js");
@@ -54,6 +56,10 @@ const {
   runLocalThreadRoutingBackfillBatch,
   scheduleLocalThreadRoutingBackfill,
 } = await import("../../../shared/sqlite-thread-routing.mjs");
+const {
+  ensureLocalChatWriteNotificationSchema,
+  getLocalChatRoomWriteSequence,
+} = await import("../../../shared/sqlite-local-write-notifications.mjs");
 
 type SendToolHandler = (
   input: Record<string, unknown>,
@@ -75,7 +81,7 @@ function captureSendThreadMessageHandler(): SendToolHandler {
   return captureMessageToolHandler("send_thread_message");
 }
 
-function openSqliteDb() {
+function openSqliteDb(path = process.env.LETAGENTS_LOCAL_CHAT_DB!) {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => {
       exec: (sql: string) => void;
@@ -86,10 +92,54 @@ function openSqliteDb() {
       };
     };
   };
-  const db = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  const db = new DatabaseSync(path);
   db.exec("PRAGMA busy_timeout = 5000");
   return db;
 }
+
+test("local write notification schema rejects malformed tables, stale triggers, and corrupt sequences", () => {
+  for (const definition of [
+    "room_id TEXT PRIMARY KEY",
+    "room_id TEXT, write_sequence INTEGER NOT NULL CHECK (write_sequence >= 0)",
+  ]) {
+    const malformedDatabase = openSqliteDb(":memory:");
+    malformedDatabase.exec(`
+      CREATE TABLE local_chat_messages (room_id TEXT NOT NULL);
+      CREATE TABLE local_chat_room_write_sequences_v1 (${definition});
+    `);
+    assert.throws(
+      () => ensureLocalChatWriteNotificationSchema(malformedDatabase),
+      /notification table v1 is invalid/,
+    );
+  }
+
+  const database = openSqliteDb(":memory:");
+  database.exec("CREATE TABLE local_chat_messages (room_id TEXT NOT NULL)");
+  ensureLocalChatWriteNotificationSchema(database);
+  database.exec("INSERT INTO local_chat_messages (room_id) VALUES ('room_valid')");
+  assert.equal(getLocalChatRoomWriteSequence(database, "room_valid"), 1);
+
+  database.exec(`
+    DROP TRIGGER local_chat_messages_notify_insert_v1;
+    CREATE TRIGGER local_chat_messages_notify_insert_v1
+    AFTER INSERT ON local_chat_messages
+    BEGIN
+      SELECT 1;
+    END;
+  `);
+  assert.throws(
+    () => ensureLocalChatWriteNotificationSchema(database),
+    /notification trigger v1 is invalid/,
+  );
+  database.prepare(`
+    INSERT INTO local_chat_room_write_sequences_v1 (room_id, write_sequence)
+    VALUES (?, ?)
+  `).run("room_corrupt", Number.MAX_SAFE_INTEGER + 1);
+  assert.throws(
+    () => getLocalChatRoomWriteSequence(database, "room_corrupt"),
+    /write sequence is invalid/,
+  );
+});
 
 test.after(() => {
   delete process.env.LETAGENTS_CHAT_STORAGE;
@@ -119,6 +169,86 @@ test("MCP local chat state follows setting and supports message wait", async () 
     timeoutMs: 1,
   });
   assert.deepEqual(emptyPoll.messages, []);
+});
+
+test("MCP local waits wake from commit notifications and persist the shared sequence", async () => {
+  const roomId = "mcp_local_write_notification";
+  assert.equal(await getLocalChatRoomWriteSequenceValue(roomId), 0);
+  let resolveWaitScheduled!: () => void;
+  const waitScheduled = new Promise<void>((resolve) => {
+    resolveWaitScheduled = resolve;
+  });
+  const waitResults: boolean[] = [];
+  setLocalChatWriteNotificationObserversForTest({
+    waitScheduled: (waitingRoomId) => {
+      if (waitingRoomId === roomId) resolveWaitScheduled();
+    },
+    waitResolved: (waitingRoomId, notified) => {
+      if (waitingRoomId === roomId) waitResults.push(notified);
+    },
+  });
+  const waiting = waitForLocalChatMessages(roomId, {
+    timeoutMs: 2_000,
+  });
+  try {
+    await waitScheduled;
+    await addLocalChatMessage(roomId, {
+      sender: "Agent",
+      text: "wake now",
+      source: "agent",
+    });
+    const page = await waiting;
+    assert.deepEqual(page.messages.map((message) => message.text), ["wake now"]);
+    assert.deepEqual(waitResults, [true], "the in-process notification resolves the active wait");
+    assert.equal(await getLocalChatRoomWriteSequenceValue(roomId), 1);
+  } finally {
+    setLocalChatWriteNotificationObserversForTest(null);
+  }
+});
+
+test("MCP local waits close the write-between-sequence-and-wait race", async () => {
+  const roomId = "mcp_local_write_lost_wake";
+  let sequenceReads = 0;
+  let scheduledWaits = 0;
+  setLocalChatWriteNotificationObserversForTest({
+    sequenceRead: async (readRoomId) => {
+      if (readRoomId !== roomId || ++sequenceReads !== 2) return;
+      await addLocalChatMessage(roomId, {
+        sender: "Agent",
+        text: "between read and wait",
+        source: "agent",
+      });
+    },
+    waitScheduled: (waitingRoomId) => {
+      if (waitingRoomId === roomId) scheduledWaits += 1;
+    },
+  });
+  try {
+    const page = await waitForLocalChatMessages(roomId, { timeoutMs: 2_000 });
+    assert.deepEqual(page.messages.map((message) => message.text), ["between read and wait"]);
+    assert.equal(scheduledWaits, 0, "the generation recheck observes the interleaved write");
+  } finally {
+    setLocalChatWriteNotificationObserversForTest(null);
+  }
+});
+
+test("MCP local waits detect writes from another SQLite connection through the sequence", async () => {
+  const roomId = "mcp_external_write_notification";
+  assert.equal(await getLocalChatRoomWriteSequenceValue(roomId), 0);
+  const waiting = waitForLocalChatMessages(roomId, { timeoutMs: 2_000 });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  const external = openSqliteDb();
+  external.prepare(`
+    INSERT INTO local_chat_messages (
+      room_id, number, reply_to_number, thread_root_number, sender, text,
+      agent_prompt_kind, source, timestamp
+    )
+    VALUES (?, 1, NULL, NULL, 'External', 'cross-process wake', NULL, 'browser', ?)
+  `).run(roomId, new Date().toISOString());
+
+  const page = await waiting;
+  assert.deepEqual(page.messages.map((message) => message.text), ["cross-process wake"]);
+  assert.equal(await getLocalChatRoomWriteSequenceValue(roomId), 1);
 });
 
 test("MCP local wait exposes bounded truncation for tail and explicit cursor pages", async () => {

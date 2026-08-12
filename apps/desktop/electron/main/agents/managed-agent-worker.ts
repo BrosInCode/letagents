@@ -14,6 +14,7 @@ import {
 import {
   desktopManagedAgentReplyTargetForMessage,
   persistDesktopManagedAgentLocalReply,
+  persistDesktopManagedAgentLocalReplyWithDeferredWriteNotification,
   type DesktopManagedAgentReplyTarget,
 } from "./managed-agent-local-replies.js";
 import {
@@ -24,6 +25,7 @@ import {
 import {
   buildDesktopManagedAgentReplyChangeContext,
   localDesktopManagedAgentReplyChangeAttachments,
+  prepareDesktopManagedAgentReplyChangeSummaryArtifactWrite,
   publishDesktopManagedAgentReplyChangeSummaryArtifact,
   rememberDesktopManagedAgentReplyChangeAttachment,
   stageDesktopManagedAgentReplyChangeAttachment,
@@ -680,17 +682,11 @@ export async function publishDesktopManagedWorkerReply(input: {
     session: input.publicSession(),
     beforeSignature: input.beforeChangeSignature ?? null,
   });
-  const localReply = await persistDesktopManagedAgentLocalReply({
-    roomIdentifier: input.roomIdentifier,
-    storage: input.storage,
-    workerSession,
-    replyTo: replyTarget.replyTo,
-    threadRootId: replyTarget.threadRootId,
-    text,
-    attachments: localDesktopManagedAgentReplyChangeAttachments(changeContext),
-  });
-  if (localReply) {
-    await publishDesktopManagedAgentReplyChangeSummaryArtifact({
+  if (input.storage.effectiveMode === "local") {
+    // The message INSERT advances the durable delivery sequence, so the local
+    // workflow artifact must share that SQLite transaction. Once the commit is
+    // visible, every poll and in-process wake observes both records together.
+    const preparedArtifact = await prepareDesktopManagedAgentReplyChangeSummaryArtifactWrite({
       sessionKey: input.sessionKey,
       roomIdentifier: input.roomIdentifier,
       storage: input.storage,
@@ -698,9 +694,29 @@ export async function publishDesktopManagedWorkerReply(input: {
       event: input.event,
       context: changeContext,
     });
+    const localReply = await persistDesktopManagedAgentLocalReplyWithDeferredWriteNotification({
+      roomIdentifier: input.roomIdentifier,
+      storage: input.storage,
+      workerSession,
+      replyTo: replyTarget.replyTo,
+      threadRootId: replyTarget.threadRootId,
+      text,
+      attachments: localDesktopManagedAgentReplyChangeAttachments(changeContext),
+      writeInTransaction: preparedArtifact
+        ? (database) => {
+            if (database !== preparedArtifact.database) {
+              throw new Error("Local reply and workflow artifact must share one SQLite transaction.");
+            }
+            preparedArtifact.writeInCurrentTransaction();
+          }
+        : undefined,
+    });
+    if (!localReply) {
+      throw new Error("Local managed-agent reply was not persisted in local storage.");
+    }
+    await preparedArtifact?.finalizeAfterCommit();
+    localReply.publishWriteNotification();
     rememberDesktopManagedAgentReplyChangeAttachment(input.sessionKey, changeContext.attachmentDraft);
-    const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
-    emitPersistedLocalRoomMessage(input.roomIdentifier, localReply);
     return;
   }
 
@@ -767,8 +783,6 @@ export async function publishDesktopManagedWorkerFailure(input: {
     idempotencyKey: `managed_agent_failure:${workerSession.session_id}:${input.failure.eventId || "turn"}:${input.failure.code}`,
   });
   if (localMessage) {
-    const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
-    emitPersistedLocalRoomMessage(input.session.room_identifier, localMessage);
     return;
   }
 

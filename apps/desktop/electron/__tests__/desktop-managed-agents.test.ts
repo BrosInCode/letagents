@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { Buffer } from "node:buffer";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import test from "node:test";
 
@@ -11,6 +12,7 @@ const { tempDir, statePath, resetState } = createElectronTestEnv({
   prefix: "letagents-desktop-managed-agents-",
   paths: ["state", "chatStorage", "localChatDb"],
 });
+const nodeRequire = createRequire(import.meta.url);
 
 const {
   bindCodexLiveSessionToWorker,
@@ -107,6 +109,16 @@ const {
   desktopManagedAgentReplyTargetForMessage,
   persistDesktopManagedAgentLocalReply,
 } = await import("../main/agents/managed-agent-local-replies.js");
+const {
+  publishDesktopManagedWorkerReply,
+} = await import("../main/agents/managed-agent-worker.js");
+const {
+  setLocalAccountAgentRoutingHydratorForTest,
+  setLocalRoomMessagePollDependenciesForTest,
+  setManagedAgentRoomStreamDispatcherForTest,
+  startDesktopRoomStream,
+  stopDesktopRoomStream,
+} = await import("../main/room-stream.js");
 const {
   buildManagedAgentChangeSummaryWorkflowArtifact,
   publishManagedAgentLocalChangeSummaryArtifact,
@@ -2010,6 +2022,162 @@ test("desktop managed agent local replies preserve change summary attachments", 
   const savedPayload = JSON.parse(Buffer.from(result?.attachments[0]?.contentBase64 ?? "", "base64").toString("utf8"));
   assert.equal("sessionId" in savedPayload.summary, false);
   assert.equal("repoRootPath" in savedPayload.summary, false);
+});
+
+test("local managed replies atomically commit artifacts before the ordered poll can activate them", async () => {
+  const localRoomIdentifier = "local_reply_artifact_order";
+  const roomIdentifier = "room_reply_artifact_order";
+  await createLocalRoom({
+    roomIdentifier: localRoomIdentifier,
+    cloudRoomIdentifier: roomIdentifier,
+    displayName: "Reply Artifact Order",
+  });
+  await setLocalAwareRoomStorageMode(roomIdentifier, "local");
+  const storage = await resolveLocalAwareRoomStorageMode(roomIdentifier);
+  const repo = mkdtempSync(join(tempDir, "reply-artifact-order-repo-"));
+  git(repo, ["init", "-q"]);
+  git(repo, ["config", "user.email", "agent@example.com"]);
+  git(repo, ["config", "user.name", "Agent"]);
+  writeFileSync(join(repo, "tracked.txt"), "one\n");
+  git(repo, ["add", "tracked.txt"]);
+  git(repo, ["commit", "-qm", "init"]);
+  writeFileSync(join(repo, "tracked.txt"), "one\ntwo\n");
+
+  const event = messageEvent({
+    roomIdentifier,
+    message: {
+      ...messageEvent().message,
+      id: "msg_reply_artifact_order",
+      threadRootId: "msg_reply_artifact_order",
+    },
+  });
+  const provider = {
+    ideLabel: "Codex",
+    runtimePrefix: "codex",
+    instancePrefix: "desktop-codex",
+    livenessCapability: "desktop_supervised_codex_app_server",
+    identityNameFallback: "desktop-codex",
+    signInErrorMessage: "sign in",
+    unusableIdentityErrorMessage: "identity unavailable",
+    missingActorKeyErrorMessage: "actor key missing",
+    replyWarnLabel: "Codex",
+  };
+  const publicSession = publicManagedAgentSession({
+    roomIdentifier,
+    repoRootPath: repo,
+    repoBranch: "feature/artifact-order",
+  });
+  const invalidSession = saveAgentSession(managedWorkerSession({
+    session_id: "agent_session_artifact_order_invalid",
+    session_token: "invalid_token",
+    room_id: roomIdentifier,
+    actor_label: `${"x".repeat(2_100)} | owner | Codex`,
+  }));
+
+  await assert.rejects(
+    publishDesktopManagedWorkerReply({
+      provider,
+      sessionToken: "runtime_invalid",
+      agentSessionId: invalidSession.session_id,
+      sessionKey: "artifact-order-invalid",
+      publicSession: () => publicSession,
+      roomIdentifier,
+      storage,
+      event,
+      text: "This reply must fail before publishing an artifact.",
+      onMissingWorkerSession: () => assert.fail("worker session should exist"),
+    }),
+    /Message sender must not exceed/,
+  );
+  assert.deepEqual((await getLocalRoomArtifacts(localRoomIdentifier)).artifacts, []);
+  assert.deepEqual((await getLocalChatMessages(localRoomIdentifier)).messages, []);
+
+  const workerSession = saveAgentSession(managedWorkerSession({
+    session_id: "agent_session_artifact_order_valid",
+    session_token: "valid_token",
+    room_id: roomIdentifier,
+    actor_label: "StoneForge | owner | Codex",
+  }));
+  let resolveArtifactObserved!: (value: boolean) => void;
+  const artifactObservedAtActivation = new Promise<boolean>((resolve) => {
+    resolveArtifactObserved = resolve;
+  });
+  let resolvePollWaiting!: () => void;
+  const pollWaiting = new Promise<void>((resolve) => {
+    resolvePollWaiting = resolve;
+  });
+  setLocalRoomMessagePollDependenciesForTest({
+    onWaitScheduled: () => resolvePollWaiting(),
+  });
+  setLocalAccountAgentRoutingHydratorForTest(async (_room, _localRoom, messages) =>
+    messages.map((message) => ({
+      ...message,
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy" as const,
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: false,
+      },
+    })));
+  setManagedAgentRoomStreamDispatcherForTest((streamEvent) => {
+    if (streamEvent.type !== "message") return;
+    void getLocalRoomArtifacts(localRoomIdentifier).then((response) => {
+      resolveArtifactObserved(Boolean(
+        response.artifacts?.some((artifact) => artifact.kind === "change_summary"),
+      ));
+    });
+  });
+  const { DatabaseSync } = nodeRequire("node:sqlite") as {
+    DatabaseSync: new (path: string) => { exec: (sql: string) => void; close: () => void };
+  };
+  const blocker = new DatabaseSync(process.env.LETAGENTS_LOCAL_CHAT_DB!);
+  try {
+    await startDesktopRoomStream(roomIdentifier);
+    await pollWaiting;
+    blocker.exec("PRAGMA busy_timeout = 0; BEGIN IMMEDIATE");
+    let publishSettled = false;
+    const publishing = publishDesktopManagedWorkerReply({
+      provider,
+      sessionToken: "runtime_valid",
+      agentSessionId: workerSession.session_id,
+      sessionKey: "artifact-order-valid",
+      publicSession: () => publicSession,
+      roomIdentifier,
+      storage,
+      event,
+      text: "Persisted before artifact; activated afterward.",
+      onMissingWorkerSession: () => assert.fail("worker session should exist"),
+    }).finally(() => {
+      publishSettled = true;
+    });
+    await new Promise((resolve) => setTimeout(resolve, 40));
+    assert.equal(publishSettled, false, "the held atomic write has not published a reply");
+    assert.deepEqual((await getLocalChatMessages(localRoomIdentifier)).messages, []);
+    assert.deepEqual((await getLocalRoomArtifacts(localRoomIdentifier)).artifacts, []);
+    blocker.exec("COMMIT");
+    await publishing;
+    assert.equal(
+      await artifactObservedAtActivation,
+      true,
+      "the ordered poll observes the artifact from the same committed transaction",
+    );
+    assert.deepEqual(
+      (await getLocalChatMessages(localRoomIdentifier)).messages.map((message) => message.text),
+      ["Persisted before artifact; activated afterward."],
+    );
+  } finally {
+    try {
+      blocker.exec("ROLLBACK");
+    } catch {
+      // The test normally commits before cleanup.
+    }
+    blocker.close();
+    await stopDesktopRoomStream(roomIdentifier);
+    setLocalRoomMessagePollDependenciesForTest(null);
+    setLocalAccountAgentRoutingHydratorForTest(null);
+    setManagedAgentRoomStreamDispatcherForTest(null);
+  }
 });
 
 test("desktop managed agent change summaries publish stable local workflow artifacts", async () => {

@@ -33,6 +33,13 @@ test("packaging rejects a non-square application icon before generating the icon
   assert.match(packager, /assertSquareImageDimensions\(parseSipsDimensions\(sourceMetadata\), source\)/);
 });
 
+test("packaging seals every shared SQLite runtime imported by local rooms", async () => {
+  const packager = await source(join(scriptsDirectory, "package-artifact.mjs"));
+
+  assert.match(packager, /"shared\/sqlite-local-write-notifications\.mjs"/);
+  assert.match(packager, /"shared\/sqlite-thread-routing\.mjs"/);
+});
+
 test("signed release packaging requires and embeds the APNs provisioning contract", async () => {
   const [packager, entitlements, workflow] = await Promise.all([
     source(join(scriptsDirectory, "package-macos.mjs")),

@@ -392,6 +392,29 @@ export async function publishLocalRoomWorkflowArtifact(input: {
   });
 }
 
+export type PreparedLocalRoomWorkflowArtifactWrite = {
+  database: SqliteDatabase;
+  writeInCurrentTransaction: () => void;
+  finalizeAfterCommit: () => Promise<{
+    room_id: string;
+    artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number];
+  }>;
+};
+
+export async function prepareLocalRoomWorkflowArtifactWrite(input: {
+  roomId: string;
+  artifact: Record<string, unknown>;
+  taskId?: string | null;
+  linkedTaskIds?: unknown[];
+  replaceLinkedTaskIds?: boolean;
+}): Promise<PreparedLocalRoomWorkflowArtifactWrite> {
+  return prepareLocalRoomArtifactUpsert({
+    ...input,
+    source: "task_workflow_artifact",
+    requireStableIdentity: true,
+  });
+}
+
 async function upsertLocalRoomArtifact(input: {
   roomId: string;
   artifact: Record<string, unknown>;
@@ -401,6 +424,27 @@ async function upsertLocalRoomArtifact(input: {
   source: DesktopRoomSharedArtifactSource;
   requireStableIdentity: boolean;
 }): Promise<{ room_id: string; artifact: NonNullable<RoomArtifactsResponse["artifacts"]>[number] }> {
+  const prepared = await prepareLocalRoomArtifactUpsert(input);
+  beginImmediate(prepared.database);
+  try {
+    prepared.writeInCurrentTransaction();
+    prepared.database.exec("COMMIT");
+  } catch (error) {
+    rollback(prepared.database);
+    throw error;
+  }
+  return prepared.finalizeAfterCommit();
+}
+
+async function prepareLocalRoomArtifactUpsert(input: {
+  roomId: string;
+  artifact: Record<string, unknown>;
+  taskId?: string | null;
+  linkedTaskIds?: unknown[];
+  replaceLinkedTaskIds?: boolean;
+  source: DesktopRoomSharedArtifactSource;
+  requireStableIdentity: boolean;
+}): Promise<PreparedLocalRoomWorkflowArtifactWrite> {
   const roomId = input.roomId.trim();
   if (!roomId) throw new Error("Choose a room before publishing an artifact.");
   const artifact = normalizeLocalArtifact(input.artifact, {
@@ -428,8 +472,7 @@ async function upsertLocalRoomArtifact(input: {
     detailAction === "preserve" ? "" : "detail = excluded.detail,\n          ";
   const database = await getDb();
   const now = new Date().toISOString();
-  beginImmediate(database);
-  try {
+  const writeInCurrentTransaction = () => {
     database
       .prepare(`
         INSERT INTO local_room_artifacts (
@@ -523,16 +566,17 @@ async function upsertLocalRoomArtifact(input: {
         database.prepare(deleteBase).run(roomId, identityKey, input.source);
       }
     }
-    database.exec("COMMIT");
-  } catch (error) {
-    rollback(database);
-    throw error;
-  }
-
-  const published = await getLocalRoomArtifactByIdentityKey(roomId, identityKey);
-  if (!published) throw new Error("Local room artifact could not be published.");
-  await emitLocalRoomArtifactUpdate(roomId, published);
-  return { room_id: roomId, artifact: published };
+  };
+  return {
+    database,
+    writeInCurrentTransaction,
+    finalizeAfterCommit: async () => {
+      const published = await getLocalRoomArtifactByIdentityKey(roomId, identityKey);
+      if (!published) throw new Error("Local room artifact could not be published.");
+      await emitLocalRoomArtifactUpdate(roomId, published);
+      return { room_id: roomId, artifact: published };
+    },
+  };
 }
 
 async function emitLocalRoomArtifactUpdate(

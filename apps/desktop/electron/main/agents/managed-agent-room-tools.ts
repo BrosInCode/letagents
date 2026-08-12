@@ -1,7 +1,6 @@
 import { createHash } from "node:crypto";
 
 import type {
-  DesktopRoomMessage,
   DesktopRoomStorageState,
 } from "../../ipc-types.js";
 import { apiFetch, DesktopApiError } from "../auth.js";
@@ -325,7 +324,6 @@ async function executeLocalRoomTool(
         publisher_agent_session_id: workerSession.session_id,
       });
       const mapped = mapRoomMessagePayload(message);
-      await emitLocalRoomMessage(roomIdentifier, mapped);
       return { message: toAgentReadableRoomMessage(mapped) };
     }
     case "send_thread_message": {
@@ -343,7 +341,6 @@ async function executeLocalRoomTool(
         publisher_agent_session_id: workerSession.session_id,
       });
       const mapped = mapRoomMessagePayload(message);
-      await emitLocalRoomMessage(roomIdentifier, mapped);
       return { message: toAgentReadableRoomMessage(mapped) };
     }
     case "post_status": {
@@ -356,7 +353,6 @@ async function executeLocalRoomTool(
         publisher_agent_session_id: workerSession.session_id,
       });
       const mapped = mapRoomMessagePayload(message);
-      await emitLocalRoomMessage(roomIdentifier, mapped);
       return { status_posted: status, message: toAgentReadableRoomMessage(mapped) };
     }
     case "get_board":
@@ -790,14 +786,6 @@ function bridgeClientId(request: ManagedAgentRoomToolRequest): string | null {
     .digest("hex")
     .slice(0, 32);
   return `desktop-room-tool:${digest}`;
-}
-
-async function emitLocalRoomMessage(
-  roomIdentifier: string,
-  message: DesktopRoomMessage,
-): Promise<void> {
-  const { emitPersistedLocalRoomMessage } = await import("../room-stream.js");
-  emitPersistedLocalRoomMessage(roomIdentifier, message);
 }
 
 function requiredString(args: Record<string, unknown>, key: string): string {

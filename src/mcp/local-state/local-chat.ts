@@ -14,6 +14,10 @@ import {
   scheduleLocalThreadRoutingBackfill,
 } from "../../../shared/sqlite-thread-routing.mjs";
 import {
+  ensureLocalChatWriteNotificationSchema,
+  getLocalChatRoomWriteSequence,
+} from "../../../shared/sqlite-local-write-notifications.mjs";
+import {
   MESSAGE_SENDER_MAX_CODE_POINTS,
   MESSAGE_SENDER_MAX_UTF8_BYTES,
   POSTGRES_INTEGER_MAX,
@@ -168,6 +172,67 @@ let db: SqliteDatabase | null = null;
 let dbInitialization: Promise<SqliteDatabase> | null = null;
 let databaseInitializationObserverForTest: (() => void) | null = null;
 let schemaInitializationObserverForTest: (() => void) | null = null;
+let localChatWriteGeneration = 0;
+const localChatWriteWaiters = new Map<string, Set<() => void>>();
+let localChatWriteSequenceReadObserverForTest:
+  | ((roomId: string, sequence: number) => void | Promise<void>)
+  | null = null;
+let localChatWriteWaitScheduledObserverForTest:
+  | ((roomId: string, timeoutMs: number) => void)
+  | null = null;
+let localChatWriteWaitResolvedObserverForTest:
+  | ((roomId: string, notified: boolean) => void)
+  | null = null;
+
+export function setLocalChatWriteNotificationObserversForTest(observers: {
+  sequenceRead?: ((roomId: string, sequence: number) => void | Promise<void>) | null;
+  waitScheduled?: ((roomId: string, timeoutMs: number) => void) | null;
+  waitResolved?: ((roomId: string, notified: boolean) => void) | null;
+} | null): void {
+  localChatWriteSequenceReadObserverForTest = observers?.sequenceRead ?? null;
+  localChatWriteWaitScheduledObserverForTest = observers?.waitScheduled ?? null;
+  localChatWriteWaitResolvedObserverForTest = observers?.waitResolved ?? null;
+}
+
+function publishLocalChatWrite(roomId: string): void {
+  localChatWriteGeneration += 1;
+  const waiters = localChatWriteWaiters.get(roomId);
+  if (!waiters) return;
+  localChatWriteWaiters.delete(roomId);
+  for (const wake of waiters) wake();
+}
+
+function waitForLocalChatWrite(
+  roomId: string,
+  generation: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (localChatWriteGeneration !== generation) {
+    return Promise.resolve(true);
+  }
+  localChatWriteWaitScheduledObserverForTest?.(roomId, timeoutMs);
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (notified: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const waiters = localChatWriteWaiters.get(roomId);
+      waiters?.delete(onWrite);
+      if (waiters?.size === 0) localChatWriteWaiters.delete(roomId);
+      localChatWriteWaitResolvedObserverForTest?.(roomId, notified);
+      resolve(notified);
+    };
+    const onWrite = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    const waiters = localChatWriteWaiters.get(roomId) ?? new Set<() => void>();
+    waiters.add(onWrite);
+    localChatWriteWaiters.set(roomId, waiters);
+    if (localChatWriteGeneration !== generation) {
+      finish(true);
+    }
+  });
+}
 
 export function setLocalChatInitializationObserversForTest(observers: {
   database?: (() => void) | null;
@@ -448,7 +513,8 @@ async function initializeDb(): Promise<SqliteDatabase> {
       updated_at TEXT NOT NULL,
       PRIMARY KEY (room_id, task_id)
     );
-  `);
+    `);
+      ensureLocalChatWriteNotificationSchema(database);
       addColumnIfMissing(database, "local_chat_messages", "sync_key", "TEXT");
       addColumnIfMissing(database, "local_chat_messages", "sync_started_at", "TEXT");
       addColumnIfMissing(database, "local_chat_messages", "thread_root_number", "INTEGER");
@@ -809,10 +875,19 @@ export async function addLocalChatMessage(
     return insertedRow;
   });
 
+  publishLocalChatWrite(trimmedRoomId);
   return {
     room_id: trimmedRoomId,
     ...toMessage(row, replyTarget),
   };
+}
+
+export async function getLocalChatRoomWriteSequenceValue(roomId: string): Promise<number> {
+  const database = await getDb();
+  const trimmedRoomId = roomId.trim();
+  const sequence = getLocalChatRoomWriteSequence(database, trimmedRoomId);
+  await localChatWriteSequenceReadObserverForTest?.(trimmedRoomId, sequence);
+  return sequence;
 }
 
 export async function getLocalChatThreadRoutingMembership(
@@ -908,16 +983,42 @@ export async function waitForLocalChatMessages(
   },
 ): Promise<LocalChatMessagePage> {
   const deadline = Date.now() + Math.max(0, options.timeoutMs);
+  let observedWriteSequence = await getLocalChatRoomWriteSequenceValue(roomId);
+  let emptyCheckDelayMs = 50;
+  let page = await getLocalChatMessages(roomId, {
+    after: options.after,
+    limit: options.limit,
+    include_prompt_only: options.include_prompt_only,
+  });
   for (;;) {
-    const page = await getLocalChatMessages(roomId, {
-      after: options.after,
-      limit: options.limit,
-      include_prompt_only: options.include_prompt_only,
-    });
     if (page.messages.length > 0 || Date.now() >= deadline) {
       return page;
     }
-    await new Promise((resolve) => setTimeout(resolve, Math.min(500, deadline - Date.now())));
+
+    const generation = localChatWriteGeneration;
+    const settledWriteSequence = await getLocalChatRoomWriteSequenceValue(roomId);
+    if (settledWriteSequence !== observedWriteSequence) {
+      observedWriteSequence = settledWriteSequence;
+      emptyCheckDelayMs = 50;
+      page = await getLocalChatMessages(roomId, {
+        after: options.after,
+        limit: options.limit,
+        include_prompt_only: options.include_prompt_only,
+      });
+      continue;
+    }
+
+    const remainingMs = Math.max(0, deadline - Date.now());
+    const notified = await waitForLocalChatWrite(
+      roomId,
+      generation,
+      Math.min(emptyCheckDelayMs, remainingMs),
+    );
+    if (notified) {
+      emptyCheckDelayMs = 50;
+    } else {
+      emptyCheckDelayMs = Math.min(2_000, emptyCheckDelayMs * 2);
+    }
   }
 }
 

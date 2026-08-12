@@ -16,8 +16,10 @@ import {
 } from "./rooms/local-store.js";
 import {
   getLocalChatMessages,
+  getLocalChatRoomWriteSequenceValue,
   getLocalChatThreadRoutingAgentKeysForRoots,
 } from "./rooms/messages/local-store.js";
+import { subscribeToLocalChatMessageWrites } from "./rooms/messages/local-write-notifications.js";
 import { resolveLocalThreadReaderKey } from "./rooms/messages/thread-reader.js";
 import {
   mapDesktopReasoningSessionPayload,
@@ -55,6 +57,8 @@ let activeRoomStream: {
   managedMessageDeliveryTracker: ManagedMessageDeliveryTracker;
   managedTaskDeliveryTracker: ManagedMessageDeliveryTracker;
   localUiMessageTracker: ManagedMessageDeliveryTracker;
+  localWriteNotificationGeneration: number;
+  localWriteWake: (() => void) | null;
   messageRepairRequestedGeneration: number;
   messageRepairCompletedGeneration: number;
   messageRepairPromise: Promise<void> | null;
@@ -106,6 +110,21 @@ const MAX_CATCH_UP_PAGES_PER_PASS = 4;
 const MAX_CATCH_UP_MESSAGES_PER_PASS = 400;
 const MAX_CATCH_UP_BYTES_PER_PASS = 2 * 1024 * 1024;
 const MAX_CATCH_UP_WORK_MS_PER_PASS = 100;
+const LOCAL_WRITE_SEQUENCE_POLL_INITIAL_MS = 250;
+const LOCAL_WRITE_SEQUENCE_POLL_MAX_MS = 5_000;
+
+subscribeToLocalChatMessageWrites(({ localRoomIdentifier }) => {
+  const stream = activeRoomStream;
+  if (
+    !stream
+    || stream.stopped
+    || stream.localRoomIdentifier !== localRoomIdentifier
+  ) {
+    return;
+  }
+  stream.localWriteNotificationGeneration += 1;
+  stream.localWriteWake?.();
+});
 
 function rememberRoomEventCursor(roomIdentifier: string, cursor: string | null): void {
   if (!cursor) return;
@@ -466,6 +485,13 @@ async function attachLocalAccountAgentRouting(
 type LocalAccountAgentRoutingHydrator = typeof attachLocalAccountAgentRouting;
 let localAccountAgentRoutingHydrator: LocalAccountAgentRoutingHydrator =
   attachLocalAccountAgentRouting;
+type LocalMessagePageReader = typeof getLocalChatMessages;
+type LocalWriteSequenceReader = typeof getLocalChatRoomWriteSequenceValue;
+let localMessagePageReader: LocalMessagePageReader = getLocalChatMessages;
+let localWriteSequenceReader: LocalWriteSequenceReader = getLocalChatRoomWriteSequenceValue;
+let localWriteWaiterForTest: ((timeoutMs: number) => Promise<boolean>) | null = null;
+let localWriteWaitScheduledObserverForTest: ((timeoutMs: number) => void) | null = null;
+let localWriteWaitResolvedObserverForTest: ((notified: boolean) => void) | null = null;
 
 type ManagedAgentRoomStreamDispatcher = typeof dispatchRoomStreamEventToManagedAgents;
 let managedAgentRoomStreamDispatcher: ManagedAgentRoomStreamDispatcher =
@@ -477,39 +503,25 @@ export function setLocalAccountAgentRoutingHydratorForTest(
   localAccountAgentRoutingHydrator = hydrator ?? attachLocalAccountAgentRouting;
 }
 
+export function setLocalRoomMessagePollDependenciesForTest(dependencies: {
+  readMessages?: LocalMessagePageReader;
+  readWriteSequence?: LocalWriteSequenceReader;
+  wait?: (timeoutMs: number) => Promise<boolean>;
+  onWaitScheduled?: (timeoutMs: number) => void;
+  onWaitResolved?: (notified: boolean) => void;
+} | null): void {
+  localMessagePageReader = dependencies?.readMessages ?? getLocalChatMessages;
+  localWriteSequenceReader =
+    dependencies?.readWriteSequence ?? getLocalChatRoomWriteSequenceValue;
+  localWriteWaiterForTest = dependencies?.wait ?? null;
+  localWriteWaitScheduledObserverForTest = dependencies?.onWaitScheduled ?? null;
+  localWriteWaitResolvedObserverForTest = dependencies?.onWaitResolved ?? null;
+}
+
 export function setManagedAgentRoomStreamDispatcherForTest(
   dispatcher: ManagedAgentRoomStreamDispatcher | null,
 ): void {
   managedAgentRoomStreamDispatcher = dispatcher ?? dispatchRoomStreamEventToManagedAgents;
-}
-
-export function emitPersistedLocalRoomMessage(
-  roomIdentifier: string,
-  message: DesktopRoomMessage,
-): void {
-  const trimmedRoomIdentifier = roomIdentifier.trim();
-  const stream = activeRoomStream;
-  if (
-    !stream ||
-    stream.roomIdentifier !== trimmedRoomIdentifier ||
-    stream.stopped ||
-    !stream.localRoomIdentifier
-  ) {
-    return;
-  }
-
-  // The renderer gets the locally persisted message immediately, but the
-  // durable poll remains responsible for advancing the room cursor. Managed
-  // delivery starts now for low latency and is deduped against the later poll;
-  // if projection is temporarily unavailable, leaving the cursor untouched
-  // guarantees that the persisted row is retried in order.
-  stream.localUiMessageTracker.remember(trimmedRoomIdentifier, message.id);
-  emitRoomStreamEvent({
-    type: "message",
-    roomIdentifier: trimmedRoomIdentifier,
-    message,
-  }, { deliverToManagedAgents: false });
-  void deliverDesktopRoomMessageToManagedAgents(trimmedRoomIdentifier, message);
 }
 
 export function emitPersistedLocalRoomArtifactUpdate(
@@ -1355,39 +1367,122 @@ async function pollLocalDesktopRoomMessages(
     roomIdentifier: stream.roomIdentifier,
   });
 
+  let observedWriteSequence = -1;
+  let needsMessageDrain = true;
+  let emptyCheckDelayMs = LOCAL_WRITE_SEQUENCE_POLL_INITIAL_MS;
+
   while (isCurrentRoomStream(stream)) {
     try {
-      const page = await getLocalChatMessages(localRoomIdentifier, {
-        after: stream.lastMessageId,
-        limit: roomMessageHistoryPageSize,
-        readerKey: await resolveLocalThreadReaderKey(),
-      });
-      if (!isCurrentRoomStream(stream)) return;
-      const pageMessages = await localAccountAgentRoutingHydrator(
-        stream.roomIdentifier,
-        localRoomIdentifier,
-        page.messages.map(mapRoomMessagePayload),
-      );
-      if (pageMessages.some((message) => message.accountAgentRouting?.authority === "invalid")) {
-        throw new Error("Local message routing authority is temporarily unavailable.");
-      }
-      for (const message of pageMessages) {
-        if (!isCurrentRoomStream(stream)) return;
-        const shouldEmitToRenderer = stream.localUiMessageTracker.remember(
-          stream.roomIdentifier,
-          message.id,
+      if (needsMessageDrain) {
+        const targetWriteSequence = await localWriteSequenceReader(
+          localRoomIdentifier,
         );
-        if (shouldEmitToRenderer) {
-          emitRoomStreamEvent({
-            type: "message",
-            roomIdentifier: stream.roomIdentifier,
-            message,
-          }, { deliverToManagedAgents: false });
+        let deliveredAnyMessage = false;
+        let drainComplete = false;
+        let drainedPages = 0;
+        let drainedMessages = 0;
+        let drainedBytes = 0;
+        const drainStartedAt = Date.now();
+        for (;;) {
+          const page = await localMessagePageReader(localRoomIdentifier, {
+            after: stream.lastMessageId,
+            limit: roomMessageHistoryPageSize,
+            readerKey: await resolveLocalThreadReaderKey(),
+          });
+          if (!isCurrentRoomStream(stream)) return;
+          const pageMessages = await localAccountAgentRoutingHydrator(
+            stream.roomIdentifier,
+            localRoomIdentifier,
+            page.messages.map(mapRoomMessagePayload),
+          );
+          if (pageMessages.some(
+            (message) => message.accountAgentRouting?.authority === "invalid",
+          )) {
+            throw new Error("Local message routing authority is temporarily unavailable.");
+          }
+          for (const message of pageMessages) {
+            if (!isCurrentRoomStream(stream)) return;
+            const shouldEmitToRenderer = stream.localUiMessageTracker.remember(
+              stream.roomIdentifier,
+              message.id,
+            );
+            if (shouldEmitToRenderer) {
+              emitRoomStreamEvent({
+                type: "message",
+                roomIdentifier: stream.roomIdentifier,
+                message,
+              }, { deliverToManagedAgents: false });
+            }
+            await deliverDesktopRoomMessageToManagedAgents(stream.roomIdentifier, message);
+            stream.lastMessageId = message.id;
+            deliveredAnyMessage = true;
+          }
+          drainedPages += 1;
+          drainedMessages += pageMessages.length;
+          drainedBytes += pageMessages.reduce(
+            (total, message) => total + Buffer.byteLength(JSON.stringify(message), "utf8"),
+            0,
+          );
+          if (!page.has_more) {
+            drainComplete = true;
+            break;
+          }
+          if (
+            drainedPages >= MAX_CATCH_UP_PAGES_PER_PASS
+            || drainedMessages >= MAX_CATCH_UP_MESSAGES_PER_PASS
+            || drainedBytes >= MAX_CATCH_UP_BYTES_PER_PASS
+            || Date.now() - drainStartedAt >= MAX_CATCH_UP_WORK_MS_PER_PASS
+          ) {
+            await new Promise<void>((resolve) => setImmediate(resolve));
+            break;
+          }
         }
-        await deliverDesktopRoomMessageToManagedAgents(stream.roomIdentifier, message);
-        stream.lastMessageId = message.id;
+        if (!drainComplete) {
+          // Retain the durable message cursor and yield between bounded passes
+          // so a large or continuously growing backlog cannot monopolize the
+          // Electron main loop or delay a room switch.
+          continue;
+        }
+
+        const settledWriteSequence = await localWriteSequenceReader(
+          localRoomIdentifier,
+        );
+        if (settledWriteSequence !== targetWriteSequence) {
+          // A writer committed while the page was being drained. Keep the
+          // cursor and immediately drain the newly signalled suffix.
+          continue;
+        }
+        observedWriteSequence = settledWriteSequence;
+        needsMessageDrain = false;
+        if (deliveredAnyMessage) {
+          emptyCheckDelayMs = LOCAL_WRITE_SEQUENCE_POLL_INITIAL_MS;
+        }
       }
-      await new Promise((resolve) => setTimeout(resolve, page.messages.length ? 250 : 1500));
+
+      const notificationGeneration = stream.localWriteNotificationGeneration;
+      const currentWriteSequence = await localWriteSequenceReader(
+        localRoomIdentifier,
+      );
+      if (currentWriteSequence !== observedWriteSequence) {
+        needsMessageDrain = true;
+        emptyCheckDelayMs = LOCAL_WRITE_SEQUENCE_POLL_INITIAL_MS;
+        continue;
+      }
+
+      const notified = await waitForLocalWriteNotification(
+        stream,
+        notificationGeneration,
+        emptyCheckDelayMs,
+      );
+      if (notified) {
+        needsMessageDrain = true;
+        emptyCheckDelayMs = LOCAL_WRITE_SEQUENCE_POLL_INITIAL_MS;
+      } else {
+        emptyCheckDelayMs = Math.min(
+          LOCAL_WRITE_SEQUENCE_POLL_MAX_MS,
+          emptyCheckDelayMs * 2,
+        );
+      }
     } catch (error) {
       if (!isCurrentRoomStream(stream)) return;
       emitRoomStreamEvent({
@@ -1398,9 +1493,47 @@ async function pollLocalDesktopRoomMessages(
             ? error.message
             : "Local room polling disconnected.",
       });
-      await new Promise((resolve) => setTimeout(resolve, 2500));
+      await waitForLocalWriteNotification(
+        stream,
+        stream.localWriteNotificationGeneration,
+        2_500,
+      );
+      needsMessageDrain = true;
     }
   }
+}
+
+function waitForLocalWriteNotification(
+  stream: NonNullable<typeof activeRoomStream>,
+  notificationGeneration: number,
+  timeoutMs: number,
+): Promise<boolean> {
+  if (!isCurrentRoomStream(stream)) return Promise.resolve(false);
+  if (stream.localWriteNotificationGeneration !== notificationGeneration) {
+    return Promise.resolve(true);
+  }
+  localWriteWaitScheduledObserverForTest?.(timeoutMs);
+  if (localWriteWaiterForTest) {
+    return localWriteWaiterForTest(timeoutMs);
+  }
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (notified: boolean) => {
+      if (settled) return;
+      settled = true;
+      localWriteWaitResolvedObserverForTest?.(notified);
+      clearTimeout(timer);
+      if (stream.localWriteWake === onWrite) stream.localWriteWake = null;
+      resolve(notified);
+    };
+    const onWrite = () => finish(true);
+    const timer = setTimeout(() => finish(false), timeoutMs);
+    timer.unref?.();
+    stream.localWriteWake = onWrite;
+    if (stream.localWriteNotificationGeneration !== notificationGeneration) {
+      finish(true);
+    }
+  });
 }
 
 function parseRoomStreamChunk(
@@ -1668,6 +1801,8 @@ export async function startDesktopRoomStream(
     managedMessageDeliveryTracker: createManagedMessageDeliveryTracker(),
     managedTaskDeliveryTracker: createManagedMessageDeliveryTracker(),
     localUiMessageTracker: createManagedMessageDeliveryTracker(),
+    localWriteNotificationGeneration: 0,
+    localWriteWake: null,
     messageRepairRequestedGeneration: 0,
     messageRepairCompletedGeneration: 0,
     messageRepairPromise: null,
@@ -1743,6 +1878,8 @@ export async function stopDesktopRoomStream(
 
   clearLocalManagedMessageDeliveryRetries(activeRoomStream.roomIdentifier);
   activeRoomStream.stopped = true;
+  activeRoomStream.localWriteWake?.();
+  activeRoomStream.localWriteWake = null;
   activeRoomStream.resolveReady?.();
   activeRoomStream.resolveReady = null;
   if (activeRoomStream.readyTimer) {
