@@ -4,14 +4,41 @@ import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 
 import { AuditLog } from "./audit-log.js";
+import {
+  hostGrantApiOrigin,
+  lastRoomMessageId,
+  NATIVE_LIVENESS_STALE_AFTER_MS,
+  publishWorkerNativeActivity,
+  productionSupervisedDeliveryHttp,
+  productionSupervisorGrantHttp,
+  supervisedProviderLabel,
+  SupervisorGrantRequestError,
+  workplaceLivenessStaleAfterMs,
+  type SupervisorGrantHttp,
+} from "./cloud-http.js";
 import { DaemonControlSocket } from "./control-socket.js";
+import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { WorkDurabilityStore } from "./durability-store.js";
 import { EphemeralWorkspaceProvisioner, isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
+import { projectDeliveryReceipts, projectDeliveryTurn } from "./manifest-view-projection.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
 import { assertMacOS } from "./platform.js";
+import { sameProcessBirthIdentity } from "./process-identity.js";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal, type ProviderTurnControlResult } from "./provider-action-port.js";
+import { isAllowedCursorProviderStateTransition, isIdleCursorConnection, isLiveCursorConnection } from "./provider-state-policy.js";
+import {
+  isAgentInspectorLiveDisplayEvent,
+  isCorrelatedNonemptyWaitResult,
+  isHumanRoomActivityEvent,
+  isSupervisedQuietPollContinuation,
+  isSupervisedWaitProviderEvent,
+  providerStreamLifecycle,
+  resolveReadyReachedAt,
+  supervisedWaitEvidenceFromProviderEvent,
+  type SupervisedWaitEvidence,
+} from "./provider-stream-policy.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
 import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
@@ -30,8 +57,24 @@ import {
 } from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
-import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord, type SupervisedInboxReceiptWithTimeline } from "./supervised-agent-inbox-store.js";
-import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedDeliveryInterruptReservation, type SupervisedIngressAgent, type SupervisedPollResponse } from "./supervised-agent-delivery.js";
+import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord } from "./supervised-agent-inbox-store.js";
+import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedDeliveryInterruptReservation, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+
+export {
+  productionSupervisedDeliveryHttp,
+  SupervisorGrantRequestError,
+  workplaceLivenessStaleAfterMs,
+  type SupervisorGrantHttp,
+} from "./cloud-http.js";
+export {
+  isSupervisedQuietPollContinuation,
+  isSupervisedWaitProviderEvent,
+  providerStreamLifecycle,
+  resolveReadyReachedAt,
+  supervisedWaitCursorFromProviderEvent,
+  supervisedWaitEvidenceFromProviderEvent,
+} from "./provider-stream-policy.js";
+export { sameProcessBirthIdentity } from "./process-identity.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 type LiveBindingIdentity = { agentSessionId: string; executionGenerationId: string; updatedAt: string };
@@ -43,30 +86,11 @@ type PendingResumeBinding = {
   agentSessionId: string;
   providerContinuationId: string;
 };
-type SupervisedWaitEvidence = { roomCursor: string; agentSessionId: string };
 type RecoveryClock = {
   nowMs?: () => number;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
 };
-export interface SupervisorGrantHttp {
-  createWorkerSession(input: {
-    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
-    provider: string; displayName: string; signal?: AbortSignal;
-  }): Promise<{ sessionId: string; bearer: string; bearerId: string; expiresAt: string | null }>;
-  endWorkerSession?(input: {
-    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; sessionId: string;
-  }): Promise<void>;
-  renewHostGrant?(input: {
-    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
-    hostId: string; installationId: string; ttlMs: number;
-  }): Promise<{ grantId: string; supervisorGrant: string; grantGeneration: number; expiresAt: string }>;
-}
-export class SupervisorGrantRequestError extends Error {
-  constructor(readonly status: number, operation: string) {
-    super(`${operation} failed with HTTP ${status}.`);
-  }
-}
 class InvalidSupervisorGrantRenewalError extends Error {}
 type InstalledHostGrant = {
   entryId: string; roomId: string; agentKey: string; grantId: string; supervisorGrant: string;
@@ -92,20 +116,15 @@ type BootstrapOperation = {
   operation: Promise<unknown>;
 };
 
-const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
-const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const MAX_TURN_CONTROL_CORRECTION_BYTES = 32 * 1024;
 const MAX_TURN_CONTROL_ACTION_ID_BYTES = 256;
 const TURN_CONTROL_ADMISSION_WINDOW_MS = 60_000;
 const MAX_NEW_TURN_CONTROLS_PER_WINDOW = 24;
-const CURSOR_PENDING_CONTINUATION_PREFIX = "cursor-pending:";
 // Ephemeral per-agent live feed: how many recent events to retain in memory,
 // and the most to return in one long-poll response (bounded to fit the
 // control socket's 64 KB frame; the client re-polls for the remainder).
 const AGENT_STREAM_BUFFER_LIMIT = 400;
 const AGENT_STREAM_MAX_BATCH = 64;
-const LIVENESS_GRACE_MS = 30_000;
-const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const WORKER_BEARER_ROTATION_LEAD_MS = 60_000;
 const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
 const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
@@ -141,19 +160,6 @@ export function continuationRepairMissingContinuation(
 
 export function continuationRepairExhaustionNeedsPersistence(lastError: string | null): boolean {
   return lastError !== CONTINUATION_REPAIR_EXHAUSTED_ERROR;
-}
-
-function supervisedProviderLabel(provider: string): string {
-  switch (provider.trim().toLowerCase()) {
-    case "codex": return "Codex";
-    case "claude":
-    case "claude-code": return "Claude Code";
-    case "antigravity": return "Antigravity";
-    case "cursor": return "Cursor";
-    case "open-model":
-    case "open_model": return "Open Model";
-    default: return provider.trim() || "Agent";
-  }
 }
 
 function schedulerErrorDetail(error: unknown, depth = 0): string {
@@ -225,168 +231,6 @@ function providerRuntimeGoneFailure(error: unknown): boolean {
   return false;
 }
 
-function supervisedRoomPath(roomId: string): string {
-  return roomId.split("/").map(encodeURIComponent).join("/");
-}
-
-function hostGrantApiOrigin(value: string): string {
-  const url = new URL(value);
-  const loopback = url.hostname === "127.0.0.1" || url.hostname === "[::1]" || url.hostname === "::1";
-  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
-    throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP.");
-  }
-  return url.origin;
-}
-
-function lastRoomMessageId(messages: readonly Record<string, unknown>[]): string | null {
-  for (let index = messages.length - 1; index >= 0; index -= 1) {
-    const id = messages[index]?.id;
-    if (typeof id === "string" && id.trim()) return id;
-  }
-  return null;
-}
-
-// Cloud requests hold daemon serialization locks while they run, and a fetch
-// with no deadline waits ~300s for headers by default. On a degraded network
-// (observed live: six hung HTTPS connections wedging every convergence tick
-// and starving local RPCs mid-launch) that freezes the whole daemon. Every
-// cloud request therefore carries a bounded deadline composed with whatever
-// caller signal already exists; the room long-poll gets its designed window
-// plus a grace buffer.
-const CLOUD_REQUEST_TIMEOUT_MS = 20_000;
-
-function boundedCloudSignal(signal?: AbortSignal, timeoutMs = CLOUD_REQUEST_TIMEOUT_MS): AbortSignal {
-  const deadline = AbortSignal.timeout(timeoutMs);
-  return signal ? AbortSignal.any([signal, deadline]) : deadline;
-}
-
-/** The daemon talks to the room API only through the live worker bearer. */
-export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
-  admissionOwnsInitialCursor: true,
-  async poll(input) {
-    const query = new URLSearchParams({ timeout: String(DEFAULT_ROOM_POLL_MAX_MS) });
-    if (input.afterMessageId) query.set("after", input.afterMessageId);
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
-      headers: { authorization: `Bearer ${input.bearer}` },
-      signal: boundedCloudSignal(input.signal, DEFAULT_ROOM_POLL_MAX_MS + 20_000),
-    });
-    if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
-    return await response.json() as SupervisedPollResponse;
-  },
-  async latest(input) {
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages?limit=1&before=latest`, {
-      headers: { authorization: `Bearer ${input.bearer}` }, signal: boundedCloudSignal(input.signal),
-    });
-    if (!response.ok) throw new Error(`Supervised room tail read failed with HTTP ${response.status}.`);
-    return await response.json() as { messages?: Array<Record<string, unknown>> };
-  },
-  async joinRoom(input) {
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/join`, {
-      method: "POST", headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" }, body: "{}", signal: boundedCloudSignal(input.signal),
-    });
-    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Destination room join");
-    const body = await response.json().catch(() => ({})) as Record<string, unknown>;
-    const roomId = typeof body.room_id === "string" && body.room_id.trim() ? body.room_id.trim()
-      : typeof body.id === "string" && body.id.trim() ? body.id.trim() : input.roomId;
-    return { roomId };
-  },
-  async publish(input) {
-    const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ sender: "supervised-daemon", text: input.text, client_message_id: input.clientMessageId }),
-      signal: boundedCloudSignal(input.signal),
-    });
-    if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
-    const message = await response.json() as Record<string, unknown>;
-    const messageId = typeof message.id === "string" && message.id.trim() ? message.id : null;
-    const roomId = typeof message.room_id === "string" && message.room_id.trim() ? message.room_id : null;
-    if (!messageId || !roomId || roomId !== input.roomId) throw new Error("Supervised room publication response omitted its canonical message identity.");
-    return { messageId, roomId };
-  },
-};
-
-/** Host grants and worker bearers are process-memory values, never daemon state. */
-const productionSupervisorGrantHttp: SupervisorGrantHttp = {
-  async createWorkerSession(input) {
-    const ideLabel = supervisedProviderLabel(input.provider);
-    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
-      body: JSON.stringify({
-        generation: input.grantGeneration,
-        room_id: input.roomId,
-        agent_key: input.agentKey,
-        agent_instance_id: input.agentInstanceId,
-        display_name: input.displayName,
-        runtime: input.provider,
-        ide_label: ideLabel,
-      }),
-      signal: boundedCloudSignal(input.signal),
-    });
-    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session mint");
-    const body = await response.json() as Record<string, unknown>;
-    const requireString = (name: string) => {
-      const value = body[name];
-      if (typeof value !== "string" || !value.trim()) throw new Error(`Supervisor worker session response omitted ${name}.`);
-      return value;
-    };
-    return {
-      sessionId: requireString("session_id"), bearer: requireString("worker_bearer"), bearerId: requireString("worker_bearer_id"),
-      expiresAt: typeof body.worker_bearer_expires_at === "string" ? body.worker_bearer_expires_at : null,
-    };
-  },
-  async endWorkerSession(input) {
-    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/end`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
-      body: JSON.stringify({ generation: input.grantGeneration }),
-      signal: boundedCloudSignal(),
-    });
-    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor worker session end");
-  },
-  async renewHostGrant(input) {
-    const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/renew`, {
-      method: "POST",
-      headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
-      body: JSON.stringify({
-        generation: input.grantGeneration, host_id: input.hostId,
-        installation_id: input.installationId, ttl_ms: input.ttlMs,
-      }),
-      signal: boundedCloudSignal(),
-    });
-    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Supervisor host grant renewal");
-    const body = await response.json() as Record<string, unknown>;
-    const requireString = (name: string) => {
-      const value = body[name];
-      if (typeof value !== "string" || !value.trim()) throw new Error(`Supervisor grant renewal response omitted ${name}.`);
-      return value;
-    };
-    const generation = Number(body.current_generation);
-    if (!Number.isSafeInteger(generation) || generation < 1) throw new Error("Supervisor grant renewal response omitted current_generation.");
-    return {
-      grantId: requireString("grant_id"), supervisorGrant: requireString("supervisor_grant"),
-      grantGeneration: generation, expiresAt: requireString("expires_at"),
-    };
-  },
-};
-
-/** Room waits are normally long polls, so a healthy worker can be silent for
- * the entire configured poll window. Reachability must not expire before that
- * request can return and publish its next exact-binding heartbeat. */
-export function workplaceLivenessStaleAfterMs(rawPollMaxMs = process.env.LETAGENTS_POLL_MAX_MS): number {
-  // Match src/shared/poll-timeout-cap.ts exactly. The desktop daemon is a
-  // separately-built executable, so importing that source would escape its
-  // rootDir; keeping the grammar explicit here prevents a malformed operator
-  // value from making liveness expire before the real MCP/API poll cap.
-  const parsed = rawPollMaxMs == null || rawPollMaxMs === ""
-    ? Number.NaN
-    : Number.parseInt(String(rawPollMaxMs), 10);
-  const pollMaxMs = Number.isNaN(parsed) || parsed < 1_000
-    ? DEFAULT_ROOM_POLL_MAX_MS
-    : Math.min(parsed, MAX_ROOM_POLL_MAX_MS);
-  return Math.max(NATIVE_LIVENESS_STALE_AFTER_MS, pollMaxMs + LIVENESS_GRACE_MS);
-}
 type DaemonTurnControlResult = ProviderTurnControlResult & {
   entryId: string;
   workAttemptId: string;
@@ -405,311 +249,6 @@ export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState"
 class ReplacementListenerInstallError extends Error {}
 class DeliveryCutoverObservationDetached extends Error {}
 
-export function providerStreamLifecycle(event: ProviderActionStreamEvent): "failed" | "terminal" | "idle" | "working" {
-  const method = event.method.trim();
-  const payload = event.payload && typeof event.payload === "object" && !Array.isArray(event.payload)
-    ? event.payload as Record<string, unknown>
-    : {};
-  const nestedStatus = (value: unknown): unknown[] => {
-    if (!value || typeof value !== "object" || Array.isArray(value)) return [value];
-    const record = value as Record<string, unknown>;
-    return [value, record.type, record.status];
-  };
-  const statuses = [
-    payload.status,
-    payload.subtype,
-    payload.threadStatus,
-    payload.turnStatus,
-    (payload.thread as Record<string, unknown> | undefined)?.status,
-    (payload.turn as Record<string, unknown> | undefined)?.status,
-    (payload.latestTurn as Record<string, unknown> | undefined)?.status,
-    (payload.item as Record<string, unknown> | undefined)?.status,
-  ].flatMap(nestedStatus);
-  const item = payload.item as Record<string, unknown> | undefined;
-  const failedMcpToolCall = /^item\/completed$/i.test(method)
-    && item?.type === "mcpToolCall"
-    && (item.status === "failed" || Boolean(item.error));
-  // A tool can fail while the provider process and persistent worker turn are
-  // healthy. In particular, a room long-poll or local supervisor checkpoint
-  // timeout is retryable coordination evidence, never a process terminal.
-  if (failedMcpToolCall) {
-    const failedToolName = [item?.tool, item?.name, item?.toolName, item?.tool_name];
-    const failedRoomWait = failedToolName.some((value) => typeof value === "string"
-      && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages"));
-    return failedRoomWait ? "idle" : "working";
-  }
-  // A `tool_lifecycle` event carries ONE tool call's own status. An errored or
-  // aborted tool (a tool crash, a permission denial, or a tool aborted by a
-  // user Stop) leaves the provider process and the bounded turn healthy, so its
-  // payload.status must never be sniffed as a turn/process failure — otherwise
-  // it would classify the whole agent "failed" and fence (SIGKILL) the session
-  // mid-turn. (Failed mcpToolCall lifecycle is already handled above.)
-  const failedStatus = event.kind !== "tool_lifecycle"
-    && statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
-  const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
-  const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
-  const failedItem = /^item\/completed$/i.test(method)
-    && Boolean((payload.item as Record<string, unknown> | undefined)?.error);
-  if (failedMethod
-    || failedResult
-    || failedItem
-    || failedStatus && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)
-    || event.kind === "error" && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)) return "failed";
-  if (/^(?:result(?:\/success)?|turn\/completed|thread\/completed)$/i.test(method)) return "terminal";
-  if (/(?:completed|finished|idle|stopped|interrupted)$/i.test(method)) return "idle";
-  return "working";
-}
-
-function isHumanRoomActivityEvent(event: ProviderActionStreamEvent): boolean {
-  const method = event.method.trim().toLowerCase();
-  return method !== "thread/read"
-    && method !== "account/ratelimits/updated";
-}
-
-function isAgentInspectorLiveDisplayEvent(event: ProviderActionStreamEvent): boolean {
-  return event.method === "reasoning/summaryTextDelta"
-    || event.method === "item/reasoning/summaryTextDelta"
-    || event.method === "item/agentMessage/delta"
-    || event.method === "item/toolCall/updated";
-}
-
-/**
- * Recognize a structured LetAgents room wait across native provider payloads.
- * Free text is deliberately ignored: only an actual tool-use envelope (Claude)
- * or an MCP tool lifecycle event (Codex and compatible adapters) can make the
- * supervised worker project as quietly polling.
- */
-/**
- * Durable, set-once "reached ready" stamp for a manifest entry. Once an entry
- * has reached ready (running + unblocked + live, with this bind restoring
- * reachability), the timestamp is fixed and never cleared, so a later
- * degradation followed by Stop reads as a lifecycle event rather than a
- * cancelled launch. `clearsCoordinationLatch` is true when this bind clears the
- * normal pre-bind coordination latch (running + coordination_blocked).
- */
-export function resolveReadyReachedAt(
-  current: Pick<DaemonManifestEntry, "desired_state" | "observed_state" | "condition" | "ready_reached_at">,
-  clearsCoordinationLatch: boolean,
-  now: string,
-): string | null {
-  if (current.ready_reached_at) return current.ready_reached_at;
-  const resultingObserved = clearsCoordinationLatch ? "working" : current.observed_state;
-  const resultingCondition = clearsCoordinationLatch ? "none" : current.condition;
-  const reachedReady = current.desired_state === "running"
-    && resultingCondition === "none"
-    && (resultingObserved === "working" || resultingObserved === "idle" || resultingObserved === "checkpointing");
-  return reachedReady ? now : null;
-}
-
-export function isSupervisedWaitProviderEvent(event: ProviderActionStreamEvent): boolean {
-  const isWaitName = (value: unknown): boolean => typeof value === "string"
-    && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages");
-  const visit = (value: unknown, depth: number): boolean => {
-    if (depth > 8 || !value || typeof value !== "object") return false;
-    if (Array.isArray(value)) return value.some((item) => visit(item, depth + 1));
-    const record = value as Record<string, unknown>;
-    if (record.type === "tool_use" && isWaitName(record.name)) return true;
-    if (event.method === "item/started" && record.type === "mcpToolCall") {
-      if ([record.tool, record.name, record.toolName, record.tool_name].some(isWaitName)) return true;
-    }
-    return Object.values(record).some((child) => visit(child, depth + 1));
-  };
-  return visit(event.payload, 0);
-}
-
-type PollActivityLike = Pick<ProviderActionStreamEvent, "method" | "payload">;
-
-function supervisedWaitToolUseIds(event: PollActivityLike): Set<string> {
-  const ids = new Set<string>();
-  const isWaitName = (value: unknown): boolean => typeof value === "string"
-    && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages");
-  const visit = (value: unknown, depth: number): void => {
-    if (depth > 8 || !value || typeof value !== "object") return;
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    const waitTool = record.type === "tool_use" && isWaitName(record.name)
-      || event.method === "item/started" && record.type === "mcpToolCall"
-        && [record.tool, record.name, record.toolName, record.tool_name].some(isWaitName);
-    if (waitTool) {
-      for (const candidate of [record.id, record.tool_use_id, record.callId, record.call_id, record.toolCallId, record.tool_call_id]) {
-        if (typeof candidate === "string" && candidate.trim()) ids.add(candidate.trim());
-      }
-    }
-    for (const child of Object.values(record)) visit(child, depth + 1);
-  };
-  visit(event.payload, 0);
-  return ids;
-}
-
-function parsedWaitResult(value: unknown, depth = 0): { empty: boolean } | null {
-  if (depth > 8 || value === null || value === undefined) return null;
-  if (typeof value === "string") {
-    const trimmed = value.trim();
-    if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return null;
-    try { return parsedWaitResult(JSON.parse(trimmed), depth + 1); } catch { return null; }
-  }
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const result = parsedWaitResult(item, depth + 1);
-      if (result) return result;
-    }
-    return null;
-  }
-  if (typeof value !== "object") return null;
-  const record = value as Record<string, unknown>;
-  if (record.is_error === true || record.error) return null;
-  if (Array.isArray(record.messages)) return { empty: record.messages.length === 0 };
-  for (const key of ["content", "text", "tool_use_result", "result", "structuredContent", "output"]) {
-    const result = parsedWaitResult(record[key], depth + 1);
-    if (result) return result;
-  }
-  return null;
-}
-
-function supervisedToolResults(event: PollActivityLike): Array<{ toolUseId: string; empty: boolean }> {
-  const results: Array<{ toolUseId: string; empty: boolean }> = [];
-  const visit = (value: unknown, depth: number): void => {
-    if (depth > 8 || !value || typeof value !== "object") return;
-    if (Array.isArray(value)) {
-      for (const item of value) visit(item, depth + 1);
-      return;
-    }
-    const record = value as Record<string, unknown>;
-    if (record.type === "tool_result" && typeof record.tool_use_id === "string") {
-      const parsed = parsedWaitResult(record);
-      if (parsed) results.push({ toolUseId: record.tool_use_id, empty: parsed.empty });
-    }
-    if (event.method === "item/completed"
-      && record.type === "mcpToolCall"
-      && typeof record.id === "string"
-      && record.status !== "failed"
-      && !record.error) {
-      const parsed = parsedWaitResult(record.result);
-      if (parsed) results.push({ toolUseId: record.id, empty: parsed.empty });
-    }
-    for (const child of Object.values(record)) visit(child, depth + 1);
-  };
-  visit(event.payload, 0);
-  return results;
-}
-
-function isThinkingOnlyAssistantEvent(event: PollActivityLike): boolean {
-  if (event.method !== "assistant" || !event.payload || typeof event.payload !== "object") return false;
-  const payload = event.payload as Record<string, unknown>;
-  const message = payload.message;
-  if (!message || typeof message !== "object") return false;
-  const content = (message as Record<string, unknown>).content;
-  return Array.isArray(content) && content.length > 0 && content.every((item) =>
-    item && typeof item === "object" && (item as Record<string, unknown>).type === "thinking");
-}
-
-function correlatedWaitResult(event: PollActivityLike, history: readonly PollActivityLike[]): "empty" | "nonempty" | null {
-  const waitIds = new Set(history.flatMap((candidate) => [...supervisedWaitToolUseIds(candidate)]));
-  const correlated = supervisedToolResults(event).filter((result) => waitIds.has(result.toolUseId));
-  if (correlated.some((result) => !result.empty)) return "nonempty";
-  return correlated.some((result) => result.empty) ? "empty" : null;
-}
-
-function isCorrelatedEmptyWaitResult(event: PollActivityLike, history: readonly PollActivityLike[]): boolean {
-  return correlatedWaitResult(event, history) === "empty";
-}
-
-function isCorrelatedNonemptyWaitResult(event: PollActivityLike, history: readonly PollActivityLike[]): boolean {
-  return correlatedWaitResult(event, history) === "nonempty";
-}
-
-function isCorrelatedWaitProgress(event: PollActivityLike, history: readonly PollActivityLike[]): boolean {
-  if (event.method !== "item/mcpToolCall/progress" || !event.payload || typeof event.payload !== "object") return false;
-  const itemId = (event.payload as Record<string, unknown>).itemId;
-  if (typeof itemId !== "string" || !itemId.trim()) return false;
-  const waitIds = new Set(history.flatMap((candidate) => [...supervisedWaitToolUseIds(candidate)]));
-  return waitIds.has(itemId.trim());
-}
-
-/**
- * Keep the whole empty room-poll handoff quiet, not only the wait tool-use.
- * Claude emits wait tool-use -> user tool-result -> a thinking-only assistant
- * beat -> the next wait. Correlating the exact tool_use_id avoids treating a
- * real addressed result (or an unrelated tool) as idle, and the persisted
- * activity window makes the decision survive a daemon restart mid-poll.
- */
-export function isSupervisedQuietPollContinuation(
-  event: PollActivityLike,
-  history: readonly PollActivityLike[],
-): boolean {
-  const recent = history.slice(-8);
-  if (isCorrelatedWaitProgress(event, recent)) return true;
-  if (isCorrelatedEmptyWaitResult(event, recent)) return true;
-  if (!isThinkingOnlyAssistantEvent(event)) return false;
-  const prior = recent.at(-1);
-  return prior ? isCorrelatedEmptyWaitResult(prior, recent.slice(0, -1)) : false;
-}
-
-/**
- * Compatibility cursor evidence for the currently published MCP runtime.
- * Its explicit wait cursor is the worker's assertion that every earlier room
- * message was consumed, even when that runtime predates the daemon checkpoint
- * RPC. Newer runtimes also call the RPC; checkpointing is idempotent below.
- */
-export function supervisedWaitEvidenceFromProviderEvent(event: ProviderActionStreamEvent): SupervisedWaitEvidence | null {
-  const visit = (value: unknown, depth: number): SupervisedWaitEvidence | null => {
-    if (depth > 8 || !value || typeof value !== "object") return null;
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        const cursor = visit(item, depth + 1);
-        if (cursor) return cursor;
-      }
-      return null;
-    }
-    const record = value as Record<string, unknown>;
-    const input = record.input;
-    const name = typeof record.name === "string" ? record.name : "";
-    if (record.type === "tool_use"
-      && (name === "wait_for_messages" || name === "mcp__letagents__wait_for_messages")
-      && input && typeof input === "object" && !Array.isArray(input)) {
-      const cursor = (input as Record<string, unknown>).after_message_id;
-      const agentSessionId = (input as Record<string, unknown>).agent_session_id;
-      if (typeof cursor === "string" && /^msg_\d+$/.test(cursor)
-        && typeof agentSessionId === "string" && agentSessionId.trim()) {
-        return { roomCursor: cursor, agentSessionId: agentSessionId.trim() };
-      }
-    }
-    for (const child of Object.values(record)) {
-      const cursor = visit(child, depth + 1);
-      if (cursor) return cursor;
-    }
-    return null;
-  };
-  return visit(event.payload, 0);
-}
-
-export function supervisedWaitCursorFromProviderEvent(event: ProviderActionStreamEvent): string | null {
-  return supervisedWaitEvidenceFromProviderEvent(event)?.roomCursor ?? null;
-}
-
-const PS_LONG_START_PREFIX = /^\S+\s+\S+\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4}/;
-
-/**
- * Compare the stable birth portion of a process identity. Electron records the
- * owner identity as `ps -o lstart=` (start time only) via defaultGetProcessIdentity
- * because argv/command is mutable; the daemon must therefore compare on that same
- * stable start-time prefix rather than whole-string equality, or a live owner reads
- * dead and its reservation is dropped before activate. Accepting a legacy prefix
- * (pre-2.0.12 identities also appended argv/command) keeps a live upgrade safe.
- * This mirrors sameProcessBirthIdentity in electron/main/agents/provider-evidence.ts;
- * the daemon tsconfig rootDir forbids importing it, so keep the two in sync.
- */
-export function sameProcessBirthIdentity(current: string, recorded: string): boolean {
-  // When ps output does not match the expected start-time prefix (unexpected/
-  // malformed), fall back to exact-match rather than treating everything as equal.
-  // This deliberately errs toward "not the same process"; isProcessOwnerLive's outer
-  // kill(0) EPERM/ESRCH check is the safety net for genuinely-live-but-unreadable pids.
-  const stable = (value: string) => value.trim().match(PS_LONG_START_PREFIX)?.[0].replace(/\s+/g, " ") ?? value.trim();
-  return stable(current) === stable(recorded);
-}
 
 export class SupervisorDaemon {
   private manifestGeneration = 0;
@@ -893,401 +432,61 @@ export class SupervisorDaemon {
         (input) => this.checkpointPreparedCursorTurn(input),
       )
       : null;
-    this.socket = new DaemonControlSocket(paths.socketPath, async (request) => {
-      await this.singleton.assertCurrent();
-      const isLifecycleRequest = request.method === "daemon.negotiate"
-        || request.method === "daemon.status"
-        || request.method === "daemon.prepare_handoff"
-        || request.method === "manifest.watch_state";
-      if (this.handoffScheduled && !isLifecycleRequest) {
-        throw new Error("Supervisor handoff has fenced new daemon mutations.");
-      }
-      await this.controlRequestBarrier?.(request);
-      // A request may have been admitted before prepare_handoff and paused in
-      // an injected/native barrier. Re-check after that await so it cannot
-      // perform provider effects once handoff begins.
-      if (this.handoffScheduled && !isLifecycleRequest) {
-        throw new Error("Supervisor handoff has fenced new daemon mutations.");
-      }
-      if (request.method === "daemon.negotiate") return this.status();
-      if (request.method === "daemon.status") return this.status();
-      if (request.method === "daemon.prepare_handoff") {
-        await this.prepareHandoff();
-        return { accepted: true, generation: this.singleton.currentGeneration };
-      }
-      if (request.method === "manifest.list") return this.entriesWithDerivedLiveness((await this.store.load()).entries);
-      if (request.method === "manifest.watch_state") {
-        const params = this.paramsRecord(request.params);
-        return this.watchState({
-          afterDaemonGeneration: Number(params.after_daemon_generation ?? 0),
-          afterSequence: Number(params.after_sequence ?? 0),
-          waitMs: Number(params.wait_ms ?? 25_000),
-        });
-      }
-      if (request.method === "supervisor.watch_agent_stream") {
-        const params = this.paramsRecord(request.params);
-        return this.watchAgentStream({
-          entryId: String(params.entry_id ?? ""),
-          afterSequence: Number(params.after_sequence ?? 0),
-          waitMs: Number(params.wait_ms ?? 25_000),
-        });
-      }
-      if (request.method === "supervisor.retry_room_delivery") {
-        const params = this.paramsRecord(request.params);
-        await this.retryRoomDelivery({
-          entryId: String(params.entry_id ?? ""),
-          roomId: String(params.room_id ?? ""),
-          sourceMessageId: String(params.source_message_id ?? ""),
-          workAttemptId: String(params.work_attempt_id ?? ""),
-          executionGenerationId: String(params.execution_generation_id ?? ""),
-          agentSessionId: String(params.agent_session_id ?? ""),
-          daemonGeneration: Number(params.daemon_generation ?? NaN),
-        });
-        return { accepted: true };
-      }
-      if (request.method === "supervisor.restore_agent_conversation") {
-        const params = this.paramsRecord(request.params);
-        await this.restoreAgentConversation({
-          entryId: String(params.entry_id ?? ""),
-          roomId: String(params.room_id ?? ""),
-          sourceMessageId: String(params.source_message_id ?? ""),
-          workAttemptId: String(params.work_attempt_id ?? ""),
-          executionGenerationId: String(params.execution_generation_id ?? ""),
-          agentSessionId: String(params.agent_session_id ?? ""),
-          daemonGeneration: Number(params.daemon_generation ?? NaN),
-        });
-        return { accepted: true };
-      }
-      if (request.method === "supervisor.skip_room_delivery") {
-        const params = this.paramsRecord(request.params);
-        await this.skipRoomDelivery({
-          entryId: String(params.entry_id ?? ""),
-          roomId: String(params.room_id ?? ""),
-          sourceMessageId: String(params.source_message_id ?? ""),
-          workAttemptId: String(params.work_attempt_id ?? ""),
-          executionGenerationId: String(params.execution_generation_id ?? ""),
-          agentSessionId: String(params.agent_session_id ?? ""),
-          daemonGeneration: Number(params.daemon_generation ?? NaN),
-        });
-        return { accepted: true };
-      }
-      if (request.method === "supervisor.get_agent_inspector_detail") {
-        const params = this.paramsRecord(request.params);
-        const entryId = params.entry_id;
-        const roomId = params.room_id;
-        const sourceMessageId = params.source_message_id;
-        if (typeof entryId !== "string" || typeof roomId !== "string"
-          || !Object.hasOwn(params, "source_message_id")
-          || !(sourceMessageId === null || typeof sourceMessageId === "string")) {
-          throw new Error("Agent inspector detail requires string entry_id, string room_id, and source_message_id as string or null.");
-        }
-        return this.getAgentInspectorDetail(entryId, roomId, sourceMessageId);
-      }
-      if (request.method === "supervisor.prepare_bounded_effect") {
-        const params = this.paramsRecord(request.params);
-        return this.prepareBoundedEffect({
-          entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
-          executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
-          providerTurnId: String(params.provider_turn_id ?? ""),
-          mcpRequestId: String(params.mcp_request_id ?? ""), toolName: String(params.tool_name ?? ""),
-          input: params.input, mutation: params.mutation === true,
-        });
-      }
-      if (request.method === "supervisor.complete_bounded_effect") {
-        const params = this.paramsRecord(request.params);
-        return this.completeBoundedEffect({
-          entryId: String(params.entry_id ?? ""), workAttemptId: String(params.work_attempt_id ?? ""),
-          executionGenerationId: String(params.execution_generation_id ?? ""), daemonGeneration: Number(params.daemon_generation ?? NaN),
-          providerTurnId: String(params.provider_turn_id ?? ""),
-          effectId: String(params.effect_id ?? ""), result: params.result,
-          error: typeof params.error === "string" ? params.error : undefined,
-        });
-      }
-      if (request.method === "supervisor.get_agent_configuration") {
-        const params = this.paramsRecord(request.params);
-        return this.getAgentConfiguration(
-          this.requiredStringParam(params, "entry_id", "Agent configuration requires exact typed coordinates."),
-          this.positiveIntegerParam(params, "daemon_generation", "Agent configuration requires exact typed coordinates."),
-        );
-      }
-      if (request.method === "supervisor.update_agent_configuration") {
-        const params = this.paramsRecord(request.params);
-        if (params.configuration === null || typeof params.configuration !== "object" || Array.isArray(params.configuration)) throw new Error("Agent configuration update requires exact typed coordinates.");
-        return this.updateAgentConfiguration({
-          entryId: this.requiredStringParam(params, "entry_id", "Agent configuration update requires exact typed coordinates."),
-          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", "Agent configuration update requires exact typed coordinates."),
-          expectedRevision: this.positiveIntegerParam(params, "expected_revision", "Agent configuration update requires exact typed coordinates."),
-          configuration: this.paramsRecord(params.configuration),
-        });
-      }
-      if (request.method === "supervisor.prepare_room_move") {
-        const params = this.paramsRecord(request.params);
-        const error = "Room-move preparation requires exact typed coordinates.";
-        return this.prepareInspectorRoomMove({
-          entryId: this.requiredStringParam(params, "entry_id", error),
-          destinationRoomId: this.requiredStringParam(params, "destination_room_id", error),
-          requestId: this.requiredStringParam(params, "request_id", error),
-          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
-        });
-      }
-      if (request.method === "supervisor.commit_room_move") {
-        const params = this.paramsRecord(request.params);
-        const error = "Room-move commit requires exact typed coordinates.";
-        return this.commitInspectorRoomMove({
-          operationId: this.requiredStringParam(params, "operation_id", error),
-          entryId: this.requiredStringParam(params, "entry_id", error),
-          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
-        });
-      }
-      if (request.method === "supervisor.acknowledge_room_move_source_revocation") {
-        const params = this.paramsRecord(request.params);
-        const error = "Room-move credential acknowledgement requires exact typed coordinates.";
-        return this.acknowledgeInspectorRoomMoveSourceRevocation({
-          operationId: this.requiredStringParam(params, "operation_id", error),
-          entryId: this.requiredStringParam(params, "entry_id", error),
-          sourceAgentSessionId: this.requiredStringParam(params, "source_agent_session_id", error),
-          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
-        });
-      }
-      if (request.method === "supervisor.rollback_room_move") {
-        const params = this.paramsRecord(request.params);
-        const error = "Room-move rollback requires exact typed coordinates.";
-        return this.rollbackInspectorRoomMove({
-          operationId: this.requiredStringParam(params, "operation_id", error),
-          entryId: this.requiredStringParam(params, "entry_id", error),
-          detail: this.requiredStringParam(params, "error", error),
-          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
-        });
-      }
-      if (request.method === "supervisor.get_room_move") {
-        const params = this.paramsRecord(request.params);
-        const error = "Room-move status requires exact typed coordinates.";
-        return this.getInspectorRoomMove({
-          operationId: this.requiredStringParam(params, "operation_id", error),
-          entryId: this.requiredStringParam(params, "entry_id", error),
-          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
-        });
-      }
-      if (request.method === "supervisor.get_current_room_move") {
-        const params = this.paramsRecord(request.params);
-        const error = "Current room-move discovery requires exact typed coordinates.";
-        return this.getCurrentInspectorRoomMove({
-          entryId: this.requiredStringParam(params, "entry_id", error),
-          daemonGeneration: this.positiveIntegerParam(params, "daemon_generation", error),
-        });
-      }
-      if (request.method === "supervisor.recover_agent_runtime") {
-        const params = this.paramsRecord(request.params);
-        const error = "Agent runtime recovery requires exact typed coordinates.";
-        return this.recoverAgentRuntime(
-          this.requiredStringParam(params, "entry_id", error),
-          this.positiveIntegerParam(params, "daemon_generation", error),
-        );
-      }
-      if (request.method === "supervisor.retire_agent") {
-        const params = this.paramsRecord(request.params);
-        const error = "Retire requires exact typed coordinates.";
-        return this.retireAgent(
-          this.requiredStringParam(params, "entry_id", error),
-          this.positiveIntegerParam(params, "daemon_generation", error),
-        );
-      }
-      if (request.method === "supervisor.purge_agent") {
-        const params = this.paramsRecord(request.params);
-        const error = "Purge requires exact typed coordinates.";
-        if (!(params.revoked_agent_session_id === undefined || params.revoked_agent_session_id === null
-          || (typeof params.revoked_agent_session_id === "string" && params.revoked_agent_session_id.trim()
-            && params.revoked_agent_session_id === params.revoked_agent_session_id.trim()))) throw new Error(error);
-        if (!(params.grant_revoked_without_worker_session === undefined || params.grant_revoked_without_worker_session === false
-          || params.grant_revoked_without_worker_session === true)
-          || (typeof params.revoked_agent_session_id === "string" && params.grant_revoked_without_worker_session === true)) {
-          throw new Error(error);
-        }
-        return this.purgeAgent(
-          this.requiredStringParam(params, "entry_id", error),
-          this.positiveIntegerParam(params, "daemon_generation", error),
-          typeof params.revoked_agent_session_id === "string" ? params.revoked_agent_session_id : null,
-          params.grant_revoked_without_worker_session === true,
-        );
-      }
-      if (request.method === "manifest.put") return this.putManifestEntry(this.paramsEntry(request.params));
-      if (request.method === "manifest.set_desired_state") {
-        const params = this.paramsRecord(request.params);
-        const error = "Agent lifecycle requires an exact identity and desired state.";
-        const updated = await this.setDesiredState(
-          this.requiredStringParam(params, "id", error),
-          this.desiredStateParam(params, "desired_state", error),
-        );
-        return this.entryWithDerivedLiveness(updated);
-      }
-      if (request.method === "manifest.set_display_name") {
-        const params = this.paramsRecord(request.params);
-        const error = "Agent naming requires an exact identity and display name.";
-        const updated = await this.setDisplayName(
-          this.requiredStringParam(params, "id", error),
-          this.requiredStringParam(params, "display_name", error),
-        );
-        return this.entryWithDerivedLiveness(updated);
-      }
-      if (request.method === "manifest.compare_and_set_desired_state") {
-        const params = this.paramsRecord(request.params);
-        const error = "Agent lifecycle compare-and-set requires exact typed fields.";
-        const result = await this.compareAndSetDesiredState(
-          this.requiredStringParam(params, "id", error),
-          this.desiredStateParam(params, "expected_desired_state", error),
-          this.desiredStateParam(params, "desired_state", error),
-        );
-        return { applied: result.applied, entry: await this.entryWithDerivedLiveness(result.entry) };
-      }
-      if (request.method === "manifest.control_turn") {
-        const params = this.paramsRecord(request.params);
-        return this.controlTurn({
-          entryId: String(params.id ?? ""),
-          daemonGeneration: Number(params.daemon_generation ?? 0),
-          roomId: String(params.room_id ?? ""),
-          workAttemptId: String(params.work_attempt_id ?? ""),
-          executionGenerationId: String(params.execution_generation_id ?? ""),
-          providerContinuationId: String(params.provider_continuation_id ?? ""),
-          providerTurnId: String(params.provider_turn_id ?? ""),
-          inboxItemId: String(params.inbox_item_id ?? ""),
-          sourceMessageId: String(params.source_message_id ?? ""),
-          actionId: String(params.action_id ?? ""),
-          actionSequence: Number(params.action_sequence ?? 0),
-          correction: typeof params.correction === "string" ? params.correction : null,
-        });
-      }
-      if (request.method === "manifest.resolve_turn_control") {
-        const params = this.paramsRecord(request.params);
-        return this.resolveTurnControl({
-          entryId: String(params.id ?? ""),
-          workAttemptId: String(params.work_attempt_id ?? ""),
-          executionGenerationId: String(params.execution_generation_id ?? ""),
-          actionId: String(params.action_id ?? ""),
-          resolution: String(params.resolution ?? "") as "not_applied" | "applied",
-        });
-      }
-      if (request.method === "lane.reserve_legacy") {
-        const params = this.paramsRecord(request.params);
-        return this.reserveLegacyLane({
-          reservation_id: String(params.reservation_id ?? ""),
-          room_id: String(params.room_id ?? ""),
-          provider: String(params.provider ?? ""),
-          owner_pid: Number(params.owner_pid ?? 0),
-          owner_process_identity: String(params.owner_process_identity ?? ""),
-        });
-      }
-      if (request.method === "lane.activate_legacy") {
-        const params = this.paramsRecord(request.params);
-        return this.activateLegacyLane(String(params.reservation_id ?? ""), String(params.session_id ?? ""));
-      }
-      if (request.method === "lane.release_legacy") {
-        const params = this.paramsRecord(request.params);
-        return this.releaseLegacyLane({
-          reservation_id: typeof params.reservation_id === "string" ? params.reservation_id : null,
-          session_id: typeof params.session_id === "string" ? params.session_id : null,
-          room_id: typeof params.room_id === "string" ? params.room_id : null,
-          provider: typeof params.provider === "string" ? params.provider : null,
-        });
-      }
-      if (request.method === "manifest.append_activity") {
-        const params = this.paramsRecord(request.params);
-        return this.appendActivity(String(params.id ?? ""), params.event as DaemonActivityEvent);
-      }
-      if (request.method === "manifest.update_workplace_liveness") {
-        const params = this.paramsRecord(request.params);
-        return this.updateWorkplaceLiveness(
-          String(params.id ?? ""),
-          String(params.state ?? "unknown") as "reachable" | "stale" | "unknown",
-          typeof params.detail === "string" ? params.detail : null,
-          typeof params.observed_at === "string" ? params.observed_at : new Date().toISOString(),
-        );
-      }
-      if (request.method === "supervisor.bind_worker_session") {
-        const params = this.paramsRecord(request.params);
-        return this.bindWorkerSession({
-          entry_id: String(params.entry_id ?? ""),
-          room_id: String(params.room_id ?? ""),
-          work_attempt_id: String(params.work_attempt_id ?? ""),
-          execution_generation_id: String(params.execution_generation_id ?? ""),
-          agent_session_id: String(params.agent_session_id ?? ""),
-          agent_session_token: String(params.agent_session_token ?? ""),
-          api_url: String(params.api_url ?? ""),
-        });
-      }
-      if (request.method === "supervisor.verify_worker_session") {
-        const params = this.paramsRecord(request.params);
-        return this.verifyWorkerSession({
-          entry_id: String(params.entry_id ?? ""),
-          room_id: String(params.room_id ?? ""),
-          work_attempt_id: String(params.work_attempt_id ?? ""),
-          execution_generation_id: String(params.execution_generation_id ?? ""),
-          agent_session_id: String(params.agent_session_id ?? ""),
-          agent_session_token: String(params.agent_session_token ?? ""),
-          api_url: String(params.api_url ?? ""),
-        });
-      }
-      if (request.method === "supervisor.install_worker_credential") {
-        const params = this.paramsRecord(request.params);
-        return this.installWorkerCredential({
-          entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
-          work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
-          agent_session_id: String(params.agent_session_id ?? ""), agent_session_token: String(params.agent_session_token ?? ""),
-          daemon_generation: Number(params.daemon_generation ?? 0),
-        });
-      }
-      if (request.method === "supervisor.install_host_grant") {
-        const params = this.paramsRecord(request.params);
-        return this.installHostGrant({
-          entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""), agent_key: String(params.agent_key ?? ""),
-          grant_id: String(params.grant_id ?? ""), supervisor_grant: String(params.supervisor_grant ?? ""),
-          grant_generation: Number(params.grant_generation ?? NaN), api_url: String(params.api_url ?? ""),
-          host_id: String(params.host_id ?? ""), installation_id: String(params.installation_id ?? ""),
-          grant_expires_at: String(params.grant_expires_at ?? ""),
-          daemon_generation: Number(params.daemon_generation ?? NaN),
-          credential_only: params.credential_only === true,
-          recovery_only: params.recovery_only === true,
-        });
-      }
-      if (request.method === "supervisor.install_open_model_credential") {
-        const params = this.paramsRecord(request.params);
-        return this.installOpenModelCredential({
-          entry_id: String(params.entry_id ?? ""),
-          api_key: params.api_key === null ? null : String(params.api_key ?? ""),
-          base_url: String(params.base_url ?? ""),
-          model: String(params.model ?? ""),
-          daemon_generation: Number(params.daemon_generation ?? NaN),
-        });
-      }
-      if (request.method === "supervisor.bootstrap_room_ingress") {
-        const params = this.paramsRecord(request.params);
-        return this.beginBootstrap(this.bootstrapRoomIngress.bind(this), {
-          entry_id: String(params.entry_id ?? ""),
-          daemon_generation: Number(params.daemon_generation ?? NaN),
-        });
-      }
-      if (request.method === "supervisor.borrow_worker_credential") {
-        const params = this.paramsRecord(request.params);
-        return this.borrowWorkerCredential({
-          entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
-          work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
-          agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
-          provider_turn_id: String(params.provider_turn_id ?? ""),
-          api_url: String(params.api_url ?? ""),
-        });
-      }
-      if (request.method === "supervisor.checkpoint_worker_cursor") {
-        const params = this.paramsRecord(request.params);
-        return this.checkpointWorkerCursor({
-          entry_id: String(params.entry_id ?? ""),
-          work_attempt_id: String(params.work_attempt_id ?? ""),
-          execution_generation_id: String(params.execution_generation_id ?? ""),
-          agent_session_id: String(params.agent_session_id ?? ""),
-          room_cursor: String(params.room_cursor ?? ""),
-        });
-      }
-      if (request.method === "attempt.read") return this.readAttempt(String(this.paramsRecord(request.params).id ?? ""));
-      throw new Error(`Unsupported daemon method: ${request.method}`);
-    }, async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); });
+    const controlOperations = {
+      acknowledgeInspectorRoomMoveSourceRevocation: this.acknowledgeInspectorRoomMoveSourceRevocation.bind(this),
+      activateLegacyLane: this.activateLegacyLane.bind(this),
+      appendActivity: this.appendActivity.bind(this),
+      bindWorkerSession: this.bindWorkerSession.bind(this),
+      bootstrapRoomIngress: (input) => this.beginBootstrap(this.bootstrapRoomIngress.bind(this), input),
+      borrowWorkerCredential: this.borrowWorkerCredential.bind(this),
+      checkpointWorkerCursor: this.checkpointWorkerCursor.bind(this),
+      commitInspectorRoomMove: this.commitInspectorRoomMove.bind(this),
+      compareAndSetDesiredState: this.compareAndSetDesiredState.bind(this),
+      completeBoundedEffect: this.completeBoundedEffect.bind(this),
+      controlTurn: this.controlTurn.bind(this),
+      entryWithDerivedLiveness: this.entryWithDerivedLiveness.bind(this),
+      getAgentConfiguration: this.getAgentConfiguration.bind(this),
+      getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
+      getCurrentInspectorRoomMove: this.getCurrentInspectorRoomMove.bind(this),
+      getInspectorRoomMove: this.getInspectorRoomMove.bind(this),
+      installHostGrant: this.installHostGrant.bind(this),
+      installOpenModelCredential: this.installOpenModelCredential.bind(this),
+      installWorkerCredential: this.installWorkerCredential.bind(this),
+      listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
+      prepareBoundedEffect: this.prepareBoundedEffect.bind(this),
+      prepareHandoff: this.prepareHandoff.bind(this),
+      prepareInspectorRoomMove: this.prepareInspectorRoomMove.bind(this),
+      purgeAgent: this.purgeAgent.bind(this),
+      putManifestEntry: this.putManifestEntry.bind(this),
+      readAttempt: this.readAttempt.bind(this),
+      recoverAgentRuntime: this.recoverAgentRuntime.bind(this),
+      releaseLegacyLane: this.releaseLegacyLane.bind(this),
+      reserveLegacyLane: this.reserveLegacyLane.bind(this),
+      resolveTurnControl: this.resolveTurnControl.bind(this),
+      restoreAgentConversation: this.restoreAgentConversation.bind(this),
+      retireAgent: this.retireAgent.bind(this),
+      retryRoomDelivery: this.retryRoomDelivery.bind(this),
+      rollbackInspectorRoomMove: this.rollbackInspectorRoomMove.bind(this),
+      setDesiredState: this.setDesiredState.bind(this),
+      setDisplayName: this.setDisplayName.bind(this),
+      skipRoomDelivery: this.skipRoomDelivery.bind(this),
+      status: this.status.bind(this),
+      updateAgentConfiguration: this.updateAgentConfiguration.bind(this),
+      updateWorkplaceLiveness: this.updateWorkplaceLiveness.bind(this),
+      verifyWorkerSession: this.verifyWorkerSession.bind(this),
+      watchAgentStream: this.watchAgentStream.bind(this),
+      watchState: this.watchState.bind(this),
+    } satisfies DaemonControlOperations;
+    this.socket = new DaemonControlSocket(
+      paths.socketPath,
+      createDaemonControlRequestHandler({
+        assertCurrent: () => this.singleton.assertCurrent(),
+        currentGeneration: () => this.singleton.currentGeneration,
+        isHandoffScheduled: () => this.handoffScheduled,
+        requestBarrier: this.controlRequestBarrier,
+      }, controlOperations),
+      async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); },
+    );
     this.nowMs = recoveryClock.nowMs ?? Date.now;
     this.setRecoveryTimeout = recoveryClock.setTimeout ?? setTimeout;
     this.clearRecoveryTimeout = recoveryClock.clearTimeout ?? clearTimeout;
@@ -3493,35 +2692,6 @@ export class SupervisorDaemon {
     return result;
   }
 
-  private paramsRecord(value: unknown): Record<string, unknown> {
-    if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("Daemon request params must be an object.");
-    return value as Record<string, unknown>;
-  }
-
-  private requiredStringParam(params: Record<string, unknown>, key: string, error: string): string {
-    const value = params[key];
-    if (typeof value !== "string" || !value.trim() || value !== value.trim()) throw new Error(error);
-    return value;
-  }
-
-  private positiveIntegerParam(params: Record<string, unknown>, key: string, error: string): number {
-    const value = params[key];
-    if (!Number.isSafeInteger(value) || (value as number) < 1) throw new Error(error);
-    return value as number;
-  }
-
-  private desiredStateParam(params: Record<string, unknown>, key: string, error: string): DesiredState {
-    const value = params[key];
-    if (value !== "running" && value !== "paused" && value !== "stopped") throw new Error(error);
-    return value;
-  }
-
-  private paramsEntry(value: unknown): DaemonManifestEntry {
-    const params = this.paramsRecord(value);
-    const entry = params.entry;
-    if (!entry || typeof entry !== "object" || Array.isArray(entry)) throw new Error("manifest.put requires an entry.");
-    return entry as DaemonManifestEntry;
-  }
 
   private validateEntry(entry: DaemonManifestEntry): void {
     for (const field of ["id", "room_id", "display_name", "provider", "charter", "created_by", "created_at"] as const) {
@@ -6822,22 +5992,17 @@ export class SupervisorDaemon {
     }, async ({ binding, sequence, observed_at }) => {
       const credential = await this.workerBindings.credentialFor(binding);
       if (!credential) throw new Error("Worker credential is unavailable until desktop credential delivery.");
-      const roomPath = binding.room_id.split("/").map(encodeURIComponent).join("/");
-      const endpoint = `${binding.api_url}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(binding.agent_session_id)}/native-activity`;
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          observed_at,
-          sequence,
-          method,
-          status: "working",
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) throw new Error(`Native activity endpoint rejected resumed credential verification with HTTP ${response.status}.`);
-      const payload = await response.json() as { accepted?: boolean };
-      return { accepted: payload.accepted !== false };
+      return { accepted: await publishWorkerNativeActivity({
+        apiUrl: binding.api_url,
+        roomId: binding.room_id,
+        agentSessionId: binding.agent_session_id,
+        bearer: credential,
+        observedAt: observed_at,
+        sequence,
+        method,
+        status: "working",
+        operation: "resumed credential verification",
+      }) };
     });
     if (!result.accepted) throw new Error("Native activity endpoint rejected the retained worker credential.");
     const verified = result.binding;
@@ -7922,22 +7087,17 @@ export class SupervisorDaemon {
     const publication = await this.workerBindings.publish(entryId, observedMs, async ({ binding, sequence, observed_at }) => {
       const credential = await this.workerBindings.credentialFor(binding);
       if (!credential) throw new Error("Worker credential is unavailable until desktop credential delivery.");
-      const roomPath = binding.room_id.split("/").map(encodeURIComponent).join("/");
-      const endpoint = `${binding.api_url}/rooms/${roomPath}/agent-sessions/${encodeURIComponent(binding.agent_session_id)}/native-activity`;
-      const response = await fetch(endpoint, {
-        method: "POST",
-        headers: { authorization: `Bearer ${credential}`, "content-type": "application/json" },
-        body: JSON.stringify({
-          observed_at,
-          sequence,
-          method: safeMethod,
-          status,
-        }),
-        signal: AbortSignal.timeout(10_000),
-      });
-      if (!response.ok) throw new Error(`Native activity endpoint rejected the daemon bridge with HTTP ${response.status}.`);
-      const result = await response.json() as { accepted?: boolean };
-      return { accepted: result.accepted !== false };
+      return { accepted: await publishWorkerNativeActivity({
+        apiUrl: binding.api_url,
+        roomId: binding.room_id,
+        agentSessionId: binding.agent_session_id,
+        bearer: credential,
+        observedAt: observed_at,
+        sequence,
+        method: safeMethod,
+        status,
+        operation: "the daemon bridge",
+      }) };
     });
     if (!publication) return false;
     if (!publication.accepted) throw new Error("Native activity endpoint rejected a stale daemon observation.");
@@ -8530,91 +7690,6 @@ export class SupervisorDaemon {
       }
     }
   }
-}
-
-function isIdleCursorConnection(connection: ProviderActionConnectionRef | null | undefined): connection is Extract<ProviderActionConnectionRef, { kind: "cursor_cli" }> {
-  return connection?.kind === "cursor_cli"
-    && connection.pid === null
-    && (connection.processIdentity ?? null) === null;
-}
-
-function isLiveCursorConnection(connection: ProviderActionConnectionRef | null | undefined): connection is Extract<ProviderActionConnectionRef, { kind: "cursor_cli" }> {
-  return connection?.kind === "cursor_cli"
-    && connection.pid !== null
-    && Boolean(connection.processIdentity?.trim());
-}
-
-function isAllowedCursorProviderStateTransition(
-  expectedContinuationId: string | null,
-  expectedConnection: ProviderActionConnectionRef | null | undefined,
-  nextContinuationId: string,
-  nextConnection: ProviderActionConnectionRef,
-): boolean {
-  if (!expectedContinuationId || expectedConnection?.kind !== "cursor_cli" || nextConnection.kind !== "cursor_cli") return false;
-  const expectedIdle = isIdleCursorConnection(expectedConnection);
-  const nextIdle = isIdleCursorConnection(nextConnection);
-  const expectedLive = isLiveCursorConnection(expectedConnection);
-  const nextLive = isLiveCursorConnection(nextConnection);
-  if ((!expectedIdle && !expectedLive) || (!nextIdle && !nextLive)) return false;
-  const sameContinuation = expectedContinuationId === nextContinuationId;
-  const initializesPendingContinuation = expectedContinuationId.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX)
-    && !nextContinuationId.startsWith(CURSOR_PENDING_CONTINUATION_PREFIX);
-  if (!sameContinuation && !initializesPendingContinuation) return false;
-  if (expectedLive && nextLive) {
-    return sameProviderActionConnectionSnapshot(expectedConnection, nextConnection);
-  }
-  // A prepared wrapper may retire to idle, including recovery that adopts the
-  // real session proved by its init. Idle-to-idle is an idempotent/recovery
-  // convergence. Idle-to-live belongs exclusively to the atomic prepared-turn
-  // transaction and is never admitted by this generic transition path.
-  return (expectedLive && nextIdle) || (expectedIdle && nextIdle);
-}
-
-function projectDeliveryReceipts(receipts: readonly SupervisedInboxReceiptWithTimeline[], restoringInboxItemId: string | null): DaemonManifestEntryView["delivery_receipts"] {
-  const sourceMessageByInboxId = new Map(receipts.map((receipt) => [receipt.inbox_item_id, receipt.source_message_id]));
-  return receipts.map((receipt) => ({
-    inbox_item_id: receipt.inbox_item_id,
-    source_message_id: receipt.source_message_id,
-    reply_client_message_id: receipt.reply_client_message_id,
-    canonical_message_id: receipt.canonical_message_id,
-    state: receipt.inbox_item_id === restoringInboxItemId ? "restoring_conversation" : receipt.receipt_state,
-    attempt_count: receipt.attempt_count,
-    provider_turn_id: receipt.provider_turn_id,
-    // Inbox ids are daemon-private. The projection exposes only the public
-    // source message id needed by the renderer's "view earlier message" link.
-    blocked_by_message_id: receipt.blocked_by_inbox_item_id
-      ? sourceMessageByInboxId.get(receipt.blocked_by_inbox_item_id) ?? null
-      : null,
-    error: receipt.last_error,
-    failure_code: receipt.failure_code,
-    terminal_reason: receipt.terminal_reason,
-    updated_at: receipt.updated_at,
-    timeline: receipt.timeline,
-  }));
-}
-
-function projectDeliveryTurn(head: SupervisedInboxReceiptWithTimeline | null, activeTurn: { inboxItemId: string; sourceMessageId: string; phase: "dispatching" | "responding" | "publishing" } | null): NonNullable<DaemonManifestEntryView["room_agent_state"]>["turn"] {
-  if (!head) return { state: "idle", inbox_item_id: null, source_message_id: null, provider_turn_id: null, detail: null };
-  // A persisted dispatch marker is recovery evidence, not proof that this
-  // daemon is currently running the provider turn. Never call it responding
-  // until an exact live handle, current binding, and memory credential exist.
-  if (!activeTurn || activeTurn.inboxItemId !== head.inbox_item_id) {
-    return {
-      state: head.state === "blocked" ? "failed" : head.state === "result_recovery" ? "retrying" : "idle",
-      inbox_item_id: head.inbox_item_id,
-      source_message_id: head.source_message_id,
-      provider_turn_id: head.provider_turn_id,
-      detail: head.last_error ?? "No current delivery operation is running.",
-    };
-  }
-  const state = activeTurn.phase;
-  return {
-    state,
-    inbox_item_id: head.inbox_item_id,
-    source_message_id: head.source_message_id,
-    provider_turn_id: head.provider_turn_id,
-    detail: head.last_error,
-  };
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
