@@ -96,7 +96,7 @@ const introCopy = computed(() => {
     return "Restart the app you selected. Your agent will see LetAgents the next time it starts.";
   }
 
-  return "Pick where your agents run. For Codex, LetAgents installs the CLI if it is missing. For every selected platform, it adds the MCP bridge for rooms.";
+  return "Pick where your agents run. Provider CLIs stay user-managed; LetAgents adds the MCP bridge for rooms to every selected app.";
 });
 
 const progressSteps = computed<Array<{ id: DesktopMcpWizardStep; step: string; label: string; complete: boolean }>>(() => [

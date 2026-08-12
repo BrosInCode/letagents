@@ -1070,9 +1070,7 @@ export function agentSetupConfirmationMessage(
 ): string {
   const name = provider?.name?.trim() || "this provider";
   if (action === "install_runtime") {
-    return provider?.id === "codex"
-      ? "LetAgents will install the official Codex CLI runtime on this machine after confirmation."
-      : `LetAgents will install the official ${name} runtime on this machine after confirmation.`;
+    return `LetAgents will install its managed ${name} execution engine on this machine after confirmation. External provider CLIs remain user-managed.`;
   }
   return `LetAgents will update ${name}'s agent app configuration to add the LetAgents connection after confirmation.`;
 }

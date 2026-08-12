@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { closeSync, constants as fsConstants, fstatSync, mkdtempSync, openSync, readSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import {
   buildCodexStartPrompt,
@@ -687,7 +688,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private readonly handles = new Map<string, CursorProviderHandle>();
 
   constructor(options: CursorProviderAdapterOptions = {}) {
-    this.cursorBin = options.cursorBin || process.env.LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
+    this.cursorBin = options.cursorBin || desktopRuntimeEnvironment().LETAGENTS_CURSOR_AGENT_BIN || "cursor-agent";
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;

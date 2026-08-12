@@ -170,10 +170,10 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           addAgentRoomLabel: false,
           codexProvider: false,
           codexMissingRuntime: false,
-          codexInstallConfirmation: false,
+          codexInstallGuidance: false,
           managedSessionCodename: false,
           addAgentStopAgentOnly: false,
-          setupConfirmationClears: false,
+          installGuidanceClears: false,
           setupConfirmationClearsOnClose: false,
           deliveryControls: false,
           externalProviderInstruction: false,
@@ -345,7 +345,8 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         const modalText = () => document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "";
         await waitFor("codex missing runtime", () =>
           modalText().includes("Codex is not installed.") &&
-          modalText().includes("Install Codex")
+          modalText().includes("Copy install command") &&
+          modalText().includes("Install command")
         );
         result.codexMissingRuntime = true;
         await waitFor("managed session codename", () =>
@@ -379,14 +380,8 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
           return overflows && scrolled && rectInsideViewport(status);
         })();
 
-        const installCodexButton = Array.from(document.querySelectorAll('[data-testid="desktop-add-agent-modal"] button'))
-          .find((button) => button.textContent?.trim() === "Install Codex");
-        installCodexButton?.click();
-        await waitFor("codex install confirmation", () =>
-          modalText().includes("Confirm install Codex") &&
-          modalText().includes("official Codex CLI runtime")
-        );
-        result.codexInstallConfirmation = true;
+        result.codexInstallGuidance = modalText().includes("Open installation guide") &&
+          modalText().includes("LetAgents does not install or update external provider CLIs");
 
         const antigravityProvider = document.querySelector('[data-testid="desktop-add-agent-provider-antigravity"]');
         if (antigravityProvider) {
@@ -408,31 +403,36 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
             modalText().includes("Examples: MapleRidge, CedarVista, DawnWinter, GardenFern, SilverHarbor") &&
             modalText().includes("Do not call yourself Antigravity, Antigravity 1, Antigravity 2");
           result.bridgeOnlyRepoCopy = modalText().includes("Handled by provider app");
-          result.setupConfirmationClears = !modalText().includes("Confirm install Codex");
+          result.installGuidanceClears = !modalText().includes("Copy install command");
         } else {
           // Antigravity is intentionally hidden in current builds. Still
           // exercise provider-switch cleanup before returning to Codex.
           document.querySelector('[data-testid="desktop-add-agent-provider-claude-code"]')?.click();
-          await waitFor("provider switch clears setup confirmation", () =>
-            modalText().includes("Claude Code") && !modalText().includes("Confirm install Codex")
+          await waitFor("provider switch clears Codex install guidance", () =>
+            modalText().includes("Claude Code") && !modalText().includes("Copy install command")
           );
           result.externalProviderInstruction = true;
           result.externalJoinPrompt = true;
           result.bridgeOnlyRepoCopy = true;
-          result.setupConfirmationClears = true;
+          result.installGuidanceClears = true;
         }
 
         const codexProviderAgain = document.querySelector('[data-testid="desktop-add-agent-provider-codex"]');
         codexProviderAgain?.click();
-        await waitFor("codex install action after provider switch", () =>
+        await waitFor("codex install guidance after provider switch", () =>
           modalText().includes("Codex is not installed.") &&
-          modalText().includes("Install Codex") &&
-          !modalText().includes("Confirm install Codex")
+          modalText().includes("Copy install command") &&
+          modalText().includes("Install command")
         );
-        const installCodexButtonAgain = Array.from(document.querySelectorAll('[data-testid="desktop-add-agent-modal"] button'))
-          .find((button) => button.textContent?.trim() === "Install Codex");
-        installCodexButtonAgain?.click();
-        await waitFor("codex install confirmation before close", () => modalText().includes("Confirm install Codex"));
+        document.querySelector('[data-testid="desktop-add-agent-provider-open-model"]')?.click();
+        await waitFor("Open Model managed install action", () => modalText().includes("Install Open Model"));
+        const installOpenModelButton = Array.from(document.querySelectorAll('[data-testid="desktop-add-agent-modal"] button'))
+          .find((button) => button.textContent?.trim() === "Install Open Model");
+        installOpenModelButton?.click();
+        await waitFor("Open Model install confirmation before close", () =>
+          modalText().includes("Confirm install Open Model") &&
+          modalText().includes("managed Open Model execution engine")
+        );
 
         const addAgentModal = document.querySelector('[data-testid="desktop-add-agent-modal"]');
         const addAgentClose = addAgentModal?.querySelector('button.desktop-modal-close[aria-label="Close add agent dialog"]');
@@ -440,9 +440,9 @@ function installSmokeCheck(window: ElectronBrowserWindow): void {
         await waitFor("add-agent modal closed", () => !document.querySelector('[data-testid="desktop-add-agent-modal"]'));
         addAgentButton.click();
         await waitFor("add-agent modal reopened", () => document.querySelector('[data-testid="desktop-add-agent-modal"]'));
-        await waitFor("codex install confirmation cleared on close", () =>
-          (document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Install Codex") &&
-          !(document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Confirm install Codex")
+        await waitFor("Open Model install confirmation cleared on close", () =>
+          (document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Install Open Model") &&
+          !(document.querySelector('[data-testid="desktop-add-agent-modal"]')?.textContent || "").includes("Confirm install Open Model")
         );
         result.setupConfirmationClearsOnClose = true;
         document.querySelector('[data-testid="desktop-add-agent-modal"] button.desktop-modal-close[aria-label="Close add agent dialog"]')?.click();

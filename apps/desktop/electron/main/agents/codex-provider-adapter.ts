@@ -6,6 +6,7 @@ import {
   type CodexAppServerLaunch,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
   CodexRpcClient,
   type RpcNotification,
@@ -380,7 +381,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private resumeSupported = true;
 
   constructor(options: CodexProviderAdapterOptions = {}) {
-    this.codexBin = options.codexBin || resolveCodexExecutable();
+    this.codexBin = options.codexBin || resolveCodexExecutable({ env: desktopRuntimeEnvironment() });
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;

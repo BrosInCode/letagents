@@ -24,11 +24,7 @@ import {
   firstRedactedCodexAppServerOutputLine,
   sensitiveCodexAppServerEnvValues,
 } from "./codex-app-server.js";
-import { codexInstallCommand } from "./codex-install.js";
-import {
-  pinInstalledCodexExecutable,
-  resolveCodexExecutable,
-} from "./codex-executable.js";
+import { resolveCodexExecutable } from "./codex-executable.js";
 import {
   openCodeInstallCommand,
   resolveOpenCodeBinary,
@@ -50,6 +46,13 @@ import {
   isDesktopAgentProviderId,
 } from "./provider-registry.js";
 import { providerSetupConfirmationResult } from "./provider-setup-confirmation.js";
+import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
+import {
+  desktopRuntimeEnvironment,
+  desktopShellEnvironmentReady,
+  refreshDesktopShellEnvironment,
+} from "../desktop-shell-environment.js";
+import { supervisorDaemonClient } from "../supervisor-daemon.js";
 
 export { listDesktopAgentProviders } from "./provider-registry.js";
 
@@ -176,19 +179,11 @@ async function codexPreflight(
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const command = resolveCodexExecutable();
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const resolvedCommand = resolveCodexExecutable({ env: runtimeEnv });
+  const versionResult = await execFileWithTimeout(resolvedCommand, ["--version"], { timeoutMs, env: runtimeEnv });
   if (commandMissing(versionResult)) {
-    return {
-      providerId: provider.id,
-      status: "missing_runtime",
-      canStart: false,
-      message: "Codex is not installed.",
-      detail: "Install the official Codex CLI runtime before starting a local Codex room agent.",
-      nextAction: "install_runtime",
-      version: null,
-      mcpStatus,
-    };
+    return missingExternalRuntimePreflight(provider, mcpStatus);
   }
   if (!versionResult.ok) {
     return {
@@ -204,7 +199,7 @@ async function codexPreflight(
   }
 
   const version = firstOutputLine(versionResult);
-  const authResult = await execFileWithTimeout(command, ["login", "status"], { timeoutMs });
+  const authResult = await execFileWithTimeout(resolvedCommand, ["login", "status"], { timeoutMs, env: runtimeEnv });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -262,22 +257,14 @@ async function claudeCodePreflight(
   mcpStatus: DesktopMcpInstallTarget["status"] | null,
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
-  const command = process.env.LETAGENTS_CLAUDE_CODE_BIN ||
-    process.env.LETAGENTS_CLAUDE_BIN ||
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const command = runtimeEnv.LETAGENTS_CLAUDE_CODE_BIN ||
+    runtimeEnv.LETAGENTS_CLAUDE_BIN ||
     provider.runtimeCommand ||
     "claude";
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
   if (commandMissing(versionResult)) {
-    return {
-      providerId: provider.id,
-      status: "missing_runtime",
-      canStart: false,
-      message: "Claude Code is not installed.",
-      detail: "Install the official Claude Code runtime before starting a local Claude Code room agent.",
-      nextAction: null,
-      version: null,
-      mcpStatus,
-    };
+    return missingExternalRuntimePreflight(provider, mcpStatus);
   }
   if (!versionResult.ok) {
     return {
@@ -306,7 +293,7 @@ async function claudeCodePreflight(
       mcpStatus,
     };
   }
-  const authResult = await execFileWithTimeout(command, ["auth", "status"], { timeoutMs });
+  const authResult = await execFileWithTimeout(command, ["auth", "status"], { timeoutMs, env: runtimeEnv });
   if (!authResult.ok) {
     return {
       providerId: provider.id,
@@ -436,6 +423,14 @@ export async function runDesktopAgentProviderPreflight(
   input: DesktopAgentProviderPreflightInput = {},
   options: DesktopAgentProviderPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
+  if (input.refreshEnvironment) {
+    const refresh = await refreshDesktopShellEnvironment();
+    if (refresh.changed && (process.platform === "darwin" || process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON === "1")) {
+      await supervisorDaemonClient.restartForEnvironmentRefresh();
+    }
+  } else {
+    await desktopShellEnvironmentReady();
+  }
   assertAgentProviderId(providerId);
   const provider = findAgentProvider(providerId);
   const withManagedRuntimeValidation = async (
@@ -483,16 +478,19 @@ export async function runDesktopAgentProviderPreflight(
   };
   if (isDesktopSmokeCheck()) {
     if (provider.id === "codex") {
-      return withManagedRuntimeValidation({
+      return withManagedRuntimeValidation(missingExternalRuntimePreflight(provider, "installed"));
+    }
+    if (provider.id === "open-model") {
+      return {
         providerId: provider.id,
         status: "missing_runtime",
         canStart: false,
-        message: "Codex is not installed.",
-        detail: "Install the official Codex CLI runtime before starting a local Codex room agent.",
+        message: "The OpenCode execution engine is not installed.",
+        detail: "Smoke mode exposes the managed runtime confirmation flow.",
         nextAction: "install_runtime",
         version: null,
-        mcpStatus: "installed",
-      });
+        mcpStatus: null,
+      };
     }
     return withManagedRuntimeValidation({
       providerId: provider.id,
@@ -568,59 +566,6 @@ async function resolveManagedAgentPreflightGitRoom(
   return localRoom?.gitRoom ?? null;
 }
 
-async function installCodexRuntime(
-  confirmed: boolean | undefined,
-  provider: DesktopAgentProvider,
-): Promise<DesktopAgentProviderSetupResult> {
-  if (!confirmed) {
-    return providerSetupConfirmationResult({ id: provider.id, name: provider.name }, "install_runtime");
-  }
-
-  if (isDesktopSmokeCheck()) {
-    return {
-      providerId: provider.id,
-      action: "install_runtime",
-      success: true,
-      message: "Codex was installed.",
-      detail: "Smoke mode skipped the Codex installer.",
-    };
-  }
-
-  const install = codexInstallCommand();
-  await new Promise<void>((resolve, reject) => {
-    const child = spawn(install.command, install.args, {
-      stdio: ["ignore", "pipe", "pipe"],
-      detached: false,
-    });
-    let output = "";
-    const capture = (chunk: Buffer | string) => {
-      output = `${output}${String(chunk)}`.slice(-8_000);
-    };
-    child.stdout?.on("data", capture);
-    child.stderr?.on("data", capture);
-    child.on("error", reject);
-    child.on("exit", (code) => {
-      if (code === 0) {
-        resolve();
-        return;
-      }
-      const detail = output.trim();
-      reject(new Error(
-        `Codex installer exited with code ${code ?? "unknown"}${detail ? `: ${detail}` : "."}`,
-      ));
-    });
-  });
-  const executable = pinInstalledCodexExecutable();
-
-  return {
-    providerId: provider.id,
-    action: "install_runtime",
-    success: true,
-    message: "Codex was installed.",
-    detail: `${install.detail} LetAgents verified ${executable}.`,
-  };
-}
-
 async function installOpenCodeRuntime(
   confirmed: boolean | undefined,
   provider: DesktopAgentProvider,
@@ -681,9 +626,6 @@ export async function runDesktopAgentProviderSetup(
     };
   }
 
-  if (input.action === "install_runtime" && provider.id === "codex") {
-    return installCodexRuntime(input.confirmed, provider);
-  }
   if (input.action === "install_runtime" && provider.id === "open-model") {
     return installOpenCodeRuntime(input.confirmed, provider);
   }

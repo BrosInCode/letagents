@@ -36,6 +36,8 @@ import {
 import { managedAgentPermissionProfileForProvider } from "./managed-agent-permission-profiles.js";
 import { assertSupervisedWorkspaceGenerationSupported } from "./supervised-workspace-generation.js";
 import { apiUrl as desktopApiUrl, workspaceRoot as sourceWorkspaceRoot } from "../paths.js";
+import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
+import { missingExternalRuntimePreflight } from "./external-runtime-preflight.js";
 
 type ExecResult = {
   ok: boolean;
@@ -73,21 +75,13 @@ export async function runDesktopCursorProviderPreflight(
   options: DesktopCursorPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   const timeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
-  const command = process.env.LETAGENTS_CURSOR_AGENT_BIN ||
+  const runtimeEnv = desktopRuntimeEnvironment();
+  const command = runtimeEnv.LETAGENTS_CURSOR_AGENT_BIN ||
     provider.runtimeCommand ||
     "cursor-agent";
-  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs });
+  const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
   if (commandMissing(versionResult)) {
-    return {
-      providerId: provider.id,
-      status: "missing_runtime",
-      canStart: false,
-      message: "Cursor Agent is not installed.",
-      detail: "Install Cursor Agent before starting a local Cursor room agent.",
-      nextAction: null,
-      version: null,
-      mcpStatus,
-    };
+    return missingExternalRuntimePreflight(provider, mcpStatus);
   }
   if (!versionResult.ok) {
     return {

@@ -34,6 +34,7 @@ import {
   waitForLaunchedCodexAppServer,
 } from "./codex-app-server.js";
 import { resolveCodexExecutable } from "./codex-executable.js";
+import { desktopRuntimeEnvironment, desktopShellEnvironmentReady } from "../desktop-shell-environment.js";
 import {
   buildCodexStartPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
@@ -1071,7 +1072,7 @@ async function startDesktopManagedCodexEngineAgent(
   const repoBranch = await buildRepoStatus(cwd)
     .then((status) => status.branch)
     .catch(() => null);
-  const codexBin = resolveCodexExecutable();
+  const codexBin = resolveCodexExecutable({ env: desktopRuntimeEnvironment() });
   const permissionProfile = assertManagedAgentPermissionProfileAvailable(engine.providerId, input.permissionProfileId);
   const preflight = await runDesktopAgentProviderPreflight(engine.providerId, {
     roomIdentifier,
@@ -1238,6 +1239,7 @@ async function startDesktopManagedCodexEngineAgent(
 export async function startDesktopManagedAgent(
   input: DesktopManagedAgentStartInput,
 ): Promise<DesktopManagedAgentStartResult> {
+  await desktopShellEnvironmentReady();
   if (input.supervisorEntryId || (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1")) {
     return desktopManagedAgentRuntimes.start(input);
   }
