@@ -161,8 +161,8 @@ describe("sidebar room context menu items", () => {
       entry: roomEntry({
         roomIdentifier: null,
         pinned: true,
-        pinTargetRoomIdentifier: "git-room:github.com:acme/widgets:branch:abc",
-        pinnedAccountRoomIdentifiers: ["git-room:github.com:acme/widgets:branch:abc"],
+        pinTargetRoomIdentifier: "focus_37",
+        pinnedAccountRoomIdentifiers: ["focus_37"],
       }),
       isPrimaryRoom: false,
       hasProjectChildren: true,
@@ -184,6 +184,34 @@ describe("sidebar room context menu items", () => {
     assert.ok(ids.includes("open-on-github"));
     assert.ok(!ids.includes("archive-room"));
     assert.ok(!ids.includes("rename-room"));
+  });
+
+  it("offers copy-branch for canonical Git focus rows", () => {
+    const groups = buildSidebarRoomContextMenuItems({
+      entry: roomEntry({
+        kind: "focus",
+        roomIdentifier: "focus_37",
+        parentRoomIdentifier: "github.com/acme/widgets",
+        focusKey: "git:branch:ZmVhdHVyZS9sb2dpbg",
+        gitRoom: gitRoom(),
+      }),
+      isPrimaryRoom: false,
+      hasProjectChildren: false,
+      projectCollapsed: false,
+    });
+    assert.ok(menuIds(groups).includes("copy-branch-name"));
+
+    const syntheticRepoParent = buildSidebarRoomContextMenuItems({
+      entry: roomEntry({
+        kind: "parent",
+        roomIdentifier: null,
+        gitRoom: gitRoom(),
+      }),
+      isPrimaryRoom: false,
+      hasProjectChildren: true,
+      projectCollapsed: false,
+    });
+    assert.ok(!menuIds(syntheticRepoParent).includes("copy-branch-name"));
   });
 
   it("offers active focus rooms conclude and hide actions only when lineage is known", () => {
@@ -269,14 +297,14 @@ describe("room pin mutations", () => {
         pinned: true,
         pinnedAccountRoomIdentifiers: [
           "github.com/acme/widgets",
-          "git-room:github.com:acme/widgets:branch:abc",
+          "focus_37",
         ],
       })),
       {
         pinned: false,
         roomIdentifiers: [
           "github.com/acme/widgets",
-          "git-room:github.com:acme/widgets:branch:abc",
+          "focus_37",
         ],
       },
     );

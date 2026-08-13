@@ -109,7 +109,7 @@ test("joinRoomIdentifier can request an existing-only room join", async () => {
       method: options?.method,
     });
     return new Response(JSON.stringify({
-      room_id: "git-room:github.com:brosincode/letagents:branch:Y29kZXg",
+      room_id: "focus_37",
       display_name: "Branch: codex",
       git_room: {
         provider: "github",
@@ -122,17 +122,17 @@ test("joinRoomIdentifier can request an existing-only room join", async () => {
   };
 
   const joined = await joinRoomIdentifier(
-    "git-room:github.com:brosincode/letagents:branch:Y29kZXg",
+    "github.com/brosincode/letagents/focus/git:branch:Y29kZXg",
     "git-remote",
     { allowCreate: false }
   );
 
   assert.equal(
     calls[0]?.url,
-    "http://127.0.0.1:39999/rooms/git-room%3Agithub.com%3Abrosincode/letagents%3Abranch%3AY29kZXg/join?create=false"
+    "http://127.0.0.1:39999/rooms/github.com/brosincode/letagents/focus/git%3Abranch%3AY29kZXg/join?create=false"
   );
   assert.equal(calls[0]?.method, "POST");
-  assert.equal(joined.room.room_id, "git-room:github.com:brosincode/letagents:branch:Y29kZXg");
+  assert.equal(joined.room.room_id, "focus_37");
   assert.equal(joined.room.joined_via, "git-remote");
 });
 
@@ -148,7 +148,7 @@ test("existing-only joins do not fall back to legacy room creation on 404", asyn
 
   await assert.rejects(
     joinRoomIdentifier(
-      "git-room:github.com:brosincode/letagents:branch:bWlzc2luZw",
+      "github.com/brosincode/letagents/focus/git:branch:bWlzc2luZw",
       "git-remote",
       { allowCreate: false }
     ),
@@ -156,11 +156,11 @@ test("existing-only joins do not fall back to legacy room creation on 404", asyn
   );
 
   assert.deepEqual(calls, [
-    "http://127.0.0.1:39999/rooms/git-room%3Agithub.com%3Abrosincode/letagents%3Abranch%3AbWlzc2luZw/join?create=false",
+    "http://127.0.0.1:39999/rooms/github.com/brosincode/letagents/focus/git%3Abranch%3AbWlzc2luZw/join?create=false",
   ]);
 });
 
-test("generated git ref joins use existing-only room joins", async () => {
+test("contextual git ref joins use existing-only room joins", async () => {
   const calls: Array<{ url: string; method: string | undefined }> = [];
   globalThis.fetch = async (url, options) => {
     calls.push({
@@ -168,7 +168,7 @@ test("generated git ref joins use existing-only room joins", async () => {
       method: options?.method,
     });
     return new Response(JSON.stringify({
-      room_id: "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZQ",
+      room_id: "focus_38",
       display_name: "Branch: feature",
       git_room: {
         provider: "github",
@@ -181,19 +181,19 @@ test("generated git ref joins use existing-only room joins", async () => {
   };
 
   const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
-    "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZQ",
+    "github.com/brosincode/letagents/focus/git:branch:ZmVhdHVyZQ",
     "git-remote"
   );
 
   assert.equal(
     calls[0]?.url,
-    "http://127.0.0.1:39999/rooms/git-room%3Agithub.com%3Abrosincode/letagents%3Abranch%3AZmVhdHVyZQ/join?create=false"
+    "http://127.0.0.1:39999/rooms/github.com/brosincode/letagents/focus/git%3Abranch%3AZmVhdHVyZQ/join?create=false"
   );
   assert.equal(calls[0]?.method, "POST");
-  assert.equal(joined.room.room_id, "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZQ");
+  assert.equal(joined.room.room_id, "focus_38");
 });
 
-test("missing generated git ref joins reject without legacy creation when fallback is disabled", async () => {
+test("missing contextual git ref joins reject without room creation when fallback is disabled", async () => {
   const calls: string[] = [];
   globalThis.fetch = async (url) => {
     calls.push(String(url));
@@ -205,18 +205,18 @@ test("missing generated git ref joins reject without legacy creation when fallba
 
   await assert.rejects(
     joinRoomIdentifierWithoutImplicitGitRefCreate(
-      "git-room:github.com:brosincode/letagents:branch:bWlzc2luZw",
+      "github.com/brosincode/letagents/focus/git:branch:bWlzc2luZw",
       "git-remote"
     ),
     /ROOM_NOT_FOUND/
   );
 
   assert.deepEqual(calls, [
-    "http://127.0.0.1:39999/rooms/git-room%3Agithub.com%3Abrosincode/letagents%3Abranch%3AbWlzc2luZw/join?create=false",
+    "http://127.0.0.1:39999/rooms/github.com/brosincode/letagents/focus/git%3Abranch%3AbWlzc2luZw/join?create=false",
   ]);
 });
 
-test("missing generated git ref joins can fall back to the repo room", async () => {
+test("missing contextual git ref joins can fall back to the repo room", async () => {
   const calls: Array<{ url: string; method: string | undefined }> = [];
   globalThis.fetch = async (url, options) => {
     calls.push({
@@ -244,7 +244,7 @@ test("missing generated git ref joins can fall back to the repo room", async () 
   };
 
   const joined = await joinRoomIdentifierWithoutImplicitGitRefCreate(
-    "git-room:github.com:brosincode/letagents:branch:bWlzc2luZw",
+    "github.com/brosincode/letagents/focus/git:branch:bWlzc2luZw",
     "git-remote",
     { fallbackToRepo: true }
   );
@@ -252,7 +252,7 @@ test("missing generated git ref joins can fall back to the repo room", async () 
   assert.deepEqual(
     calls.slice(0, 2).map((call) => call.url),
     [
-      "http://127.0.0.1:39999/rooms/git-room%3Agithub.com%3Abrosincode/letagents%3Abranch%3AbWlzc2luZw/join?create=false",
+      "http://127.0.0.1:39999/rooms/github.com/brosincode/letagents/focus/git%3Abranch%3AbWlzc2luZw/join?create=false",
       "http://127.0.0.1:39999/rooms/github.com/brosincode/letagents/join",
     ]
   );

@@ -48,6 +48,10 @@ export const rooms = pgTable(
       .on(table.parent_room_id, table.source_task_id)
       .where(sql`${table.kind} = 'focus' AND ${table.focus_status} = 'active' AND ${table.focus_archived_at} IS NULL`),
     kind_check: check("rooms_kind_check", sql`${table.kind} IN ('main', 'focus')`),
+    focus_id_check: check(
+      "rooms_focus_id_check",
+      sql`${table.kind} <> 'focus' OR ${table.id} ~ '^focus_[1-9][0-9]*$'`
+    ),
     focus_status_check: check(
       "rooms_focus_status_check",
       sql`${table.focus_status} IS NULL OR ${table.focus_status} IN ('active', 'concluded')`

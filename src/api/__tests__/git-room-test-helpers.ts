@@ -17,13 +17,13 @@ export const PR_URL = "https://github.com/BrosInCode/letagents/pull/42";
 export const PR_MERGED_SUMMARY = "Pull request #42 merged.";
 
 export const WEBHOOK_BRANCH = "codex/GitRooms";
-export const WEBHOOK_BRANCH_ROOM_ID =
-  "git-room:github.com:brosincode/letagents:branch:Y29kZXgvR2l0Um9vbXM";
+export const WEBHOOK_BRANCH_ROOM_ID = "focus_101";
 export const WEBHOOK_BRANCH_FOCUS_KEY = "git:branch:Y29kZXgvR2l0Um9vbXM";
+export const WEBHOOK_BRANCH_ROOM_LOCATOR =
+  `github.com/brosincode/letagents/focus/${WEBHOOK_BRANCH_FOCUS_KEY}`;
 
 export const TASK_BRANCH = "codex/git-rooms";
-export const TASK_BRANCH_ROOM_ID =
-  "git-room:github.com:brosincode/letagents:branch:Y29kZXgvZ2l0LXJvb21z";
+export const TASK_BRANCH_ROOM_ID = "focus_102";
 export const TASK_BRANCH_FOCUS_KEY = "git:branch:Y29kZXgvZ2l0LXJvb21z";
 
 type GitHubWebhookHeadRepository = NonNullable<

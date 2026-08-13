@@ -14,6 +14,8 @@ import assert from "node:assert/strict";
 import http from "node:http";
 import { isRentalParticipantProvisionableStatus } from "../rental/room-provisioning-policy.js";
 
+process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+
 // ===== Provisioning Logic Tests (unit, no DB) =====
 
 describe("rental room provisioning (p1.4)", () => {
@@ -24,20 +26,6 @@ describe("rental room provisioning (p1.4)", () => {
     for (const status of ["accepted", "provisioning", "active"]) {
       assert.equal(isRentalParticipantProvisionableStatus(status), true, status);
     }
-  });
-
-  it("generates unique room IDs with rroom_ prefix", () => {
-    const ids = new Set<string>();
-    for (let i = 0; i < 100; i++) {
-      const timestamp = Date.now().toString(36);
-      const random = Math.random().toString(36).slice(2, 8);
-      const id = `rroom_${timestamp}_${random}`;
-      assert.ok(id.startsWith("rroom_"));
-      assert.ok(id.length > 10);
-      ids.add(id);
-    }
-    // All should be unique
-    assert.strictEqual(ids.size, 100);
   });
 
   it("generates unique participant IDs with rpart_ prefix", () => {

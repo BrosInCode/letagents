@@ -589,6 +589,13 @@
       "when": 1786924800000,
       "tag": "0083_desktop_release_high_water",
       "breakpoints": true
+    },
+    {
+      "idx": 84,
+      "version": "7",
+      "when": 1787011200000,
+      "tag": "0084_canonical_focus_room_ids",
+      "breakpoints": true
     }
   ]
 }

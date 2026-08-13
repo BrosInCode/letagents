@@ -128,7 +128,7 @@ export function registerGetOnboardingStatusTool(server: McpServer): void {
       const storedAuth = getStoredAuth();
       const pendingAuth = getPendingDeviceAuth();
       const savedCurrentRoom = getStoredCurrentRoom();
-      const detectedRoom = configGitContext?.activeRoom ?? gitContext?.activeRoom ?? null;
+      const detectedRoom = configGitContext?.activeRoomLocator ?? gitContext?.activeRoomLocator ?? null;
       const api_health = await checkOnboardingApiHealth();
       const authenticated = Boolean(process.env.LETAGENTS_TOKEN || storedAuth);
 
@@ -161,10 +161,10 @@ export function registerGetOnboardingStatusTool(server: McpServer): void {
         saved_current_room: toPublicStoredRoomSession(savedCurrentRoom),
         detected_room_from_context: detectedRoom,
         configured_room_from_file: configRoom,
-        configured_active_room_from_context: configGitContext?.activeRoom ?? null,
+        configured_active_room_from_context: configGitContext?.activeRoomLocator ?? null,
         derived_repo_room_from_git: gitContext?.repoRoom ?? null,
-        derived_active_git_room: gitContext?.activeRoom ?? null,
-        derived_branch_room_from_git: gitContext?.activeRefRoom ?? null,
+        derived_active_git_room: gitContext?.activeRoomLocator ?? null,
+        derived_branch_room_from_git: gitContext?.activeRefRoomLocator ?? null,
         git_current_branch: gitContext?.currentBranch ?? configGitContext?.currentBranch ?? null,
         git_default_branch: gitContext?.defaultBranch ?? configGitContext?.defaultBranch ?? null,
         repo_root: repoRoot,

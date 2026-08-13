@@ -171,7 +171,7 @@ test("resolveActiveProjectRootPath returns the stored durable root when present"
 
 test("repository bindings survive recent-room eviction and apply to parent, branch, and focus rooms", () => {
   const bindings = bindRepositoryRoot({}, room({
-    identifier: "git-room:github.com:owner/project:branch:ZmVhdHVyZQ",
+    identifier: "focus_37",
     gitRoom: { ...projectGitRoom, host: "github.com" },
   }), "/project/main");
   assert.equal(resolveActiveProjectRootPath({
@@ -191,7 +191,7 @@ test("repository binding storage normalizes values and migrates existing recent 
     }),
   };
   assert.deepEqual(readRepositoryRootBindings(storage, "bindings", [
-    { identifier: "git-room:github.com:legacy/repo:branch:bWFpbg", rootPath: "/project/legacy" },
+    { identifier: "github.com/legacy/repo", rootPath: "/project/legacy" },
   ]), {
     "github.com/legacy/repo": "/project/legacy",
     "github.com/owner/project": "/project/new",
@@ -284,7 +284,7 @@ const githubGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
 
 test("canonicalRepoIdentity reduces a branch-scoped git-room id to its repository", () => {
   assert.equal(
-    canonicalRepoIdentity("git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw"),
+    canonicalRepoIdentity("github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw"),
     "github.com/brosincode/letagents",
   );
   assert.equal(canonicalRepoIdentity("github.com/brosincode/letagents"), "github.com/brosincode/letagents");
@@ -302,7 +302,7 @@ test("resolveActiveProjectRootPath self-heals a BASE repo room from a non-defaul
     activeRootGitRoom: githubGitRoom,
     recentRootRooms: [{ identifier: "github.com/brosincode/letagents", rootPath: null }],
     workspaceRepoStatus: workspaceStatus(
-      "git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw",
+      "github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw",
       "/Users/emmy/Projects/letagents",
     ),
   }), "/Users/emmy/Projects/letagents");
@@ -314,7 +314,7 @@ test("resolveActiveProjectRootPath fails closed when a branch-scoped workspace i
     activeRootGitRoom: githubGitRoom,
     recentRootRooms: [{ identifier: "github.com/brosincode/letagents", rootPath: null }],
     workspaceRepoStatus: workspaceStatus(
-      "git-room:github.com:someoneelse/otherrepo:branch:c3RhZ2luZw",
+      "github.com/someoneelse/otherrepo/focus/git:branch:c3RhZ2luZw",
       "/Users/emmy/Projects/other",
     ),
   }), null);
@@ -358,7 +358,7 @@ test("RiverRiver repro: grouped focus room heals from a staging workspace despit
       { identifier: "github.com/brosincode/letagents", rootPath: null },
     ],
     workspaceRepoStatus: workspaceStatus(
-      "git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw",
+      "github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw",
       "/Users/emmy/Projects/letagents",
     ),
   }), "/Users/emmy/Projects/letagents");
@@ -371,7 +371,7 @@ test("RiverRiver repro: an unrelated workspace repo still fails closed for the g
     activeRootGitRoom: ctx?.gitRoom,
     recentRootRooms: [{ identifier: "github.com/brosincode/letagents", rootPath: null }],
     workspaceRepoStatus: workspaceStatus(
-      "git-room:github.com:someoneelse/otherrepo:branch:c3RhZ2luZw",
+      "github.com/someoneelse/otherrepo/focus/git:branch:c3RhZ2luZw",
       "/Users/emmy/Projects/other",
     ),
   }), null);
@@ -396,7 +396,7 @@ test("a grouped non-repo room keeps its own null context and never inherits a st
     activeRootGitRoom: ctx ? ctx.gitRoom : githubGitRoom,
     recentRootRooms: [{ identifier: "frost-spring", rootPath: null }],
     workspaceRepoStatus: workspaceStatus(
-      "git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw",
+      "github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw",
       "/Users/emmy/Projects/letagents",
     ),
   }), null);

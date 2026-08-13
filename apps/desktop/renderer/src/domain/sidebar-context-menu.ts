@@ -75,7 +75,7 @@ export function buildSidebarRoomContextMenuItems(input: {
   if (selectable) {
     clipboard.push({ id: "copy-room-url", label: "Copy URL" });
   }
-  if (entry.kind === "branch" && entry.gitRoom?.ref.name) {
+  if (entry.kind !== "parent" && entry.gitRoom?.ref.type === "branch" && entry.gitRoom.ref.name) {
     clipboard.push({ id: "copy-branch-name", label: "Copy branch name" });
   }
   if (buildGitRoomWebUrl(entry.gitRoom ?? null)) {

@@ -13,6 +13,7 @@ import {
 import {
   currentAgentIdentity,
   currentAgentIdentityKey,
+  currentRoomMatchesLocator,
   currentRoom,
   getConversationIdentity,
   getCurrentLiveSessionPayload,
@@ -130,10 +131,8 @@ function getRepoInspectionPayload(targetDir?: string) {
         defaultBranch: repoRoot ? getGitDefaultBranch(repoRoot) : null,
       })
     : null;
-  const detectedRoom = configGitContext?.activeRoom ?? gitContext?.activeRoom ?? null;
-  const currentRoomMatchesContext = Boolean(
-    currentRoom && detectedRoom && currentRoom.room_id === detectedRoom
-  );
+  const detectedRoom = configGitContext?.activeRoomLocator ?? gitContext?.activeRoomLocator ?? null;
+  const currentRoomMatchesContext = currentRoomMatchesLocator(detectedRoom);
 
   return {
     cwd: startDir,
@@ -142,10 +141,10 @@ function getRepoInspectionPayload(targetDir?: string) {
     config_file: configPath ?? null,
     config_contents: readConfigContents(configPath),
     configured_room_from_file: configuredRoom ?? null,
-    configured_active_room_from_context: configGitContext?.activeRoom ?? null,
-    derived_room_from_git: gitContext?.activeRoom ?? null,
+    configured_active_room_from_context: configGitContext?.activeRoomLocator ?? null,
+    derived_room_from_git: gitContext?.activeRoomLocator ?? null,
     derived_repo_room_from_git: gitContext?.repoRoom ?? null,
-    derived_branch_room_from_git: gitContext?.activeRefRoom ?? null,
+    derived_branch_room_from_git: gitContext?.activeRefRoomLocator ?? null,
     git_current_branch: gitContext?.currentBranch ?? configGitContext?.currentBranch ?? null,
     git_default_branch: gitContext?.defaultBranch ?? configGitContext?.defaultBranch ?? null,
     detected_room_from_context: detectedRoom ?? null,

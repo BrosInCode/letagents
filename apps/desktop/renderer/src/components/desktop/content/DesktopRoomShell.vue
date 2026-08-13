@@ -371,7 +371,7 @@ import {
   managedAgentSessionListsEqual,
   withUpsertedManagedAgentSession,
 } from "../../../domain/managed-agents";
-import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
@@ -696,10 +696,16 @@ let supervisorStateSequence = 0;
 let pendingSupervisorStateSnapshot: DesktopSupervisorStateSnapshot | null = null;
 let supervisorStateFrame: number | null = null;
 let environmentRepoStatusRefreshRequestId = 0;
-const roomUrl = computed(() =>
-  buildLetAgentsRoomCopyValue(props.room.identifier, {
-    localOnly: props.storage.localRoom?.publishStatus === "local_only",
-  })
+const roomUrl = computed(() => props.room.kind === "focus"
+  ? buildLetAgentsFocusRoomUrl({
+      roomIdentifier: props.room.identifier,
+      parentRoomId: props.room.parentRoomId,
+      focusKey: props.room.focusKey,
+      sourceTaskId: props.room.sourceTaskId,
+    })
+  : buildLetAgentsRoomCopyValue(props.room.identifier, {
+      localOnly: props.storage.localRoom?.publishStatus === "local_only",
+    })
 );
 const localGitRoom = computed(() => isLocalGitRoom(props.room));
 const isLocalRoom = computed(() => props.storage.effectiveMode === "local");

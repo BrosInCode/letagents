@@ -49,8 +49,13 @@ export function createRoomAccess(
   };
 }
 
-function roomInfoCacheKey(value: string | null | undefined): string | null {
-  const normalized = value?.trim().toLowerCase();
+export function roomInfoCacheKey(value: string | null | undefined): string | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  const focusLocator = /^(github\.com\/[^/]+\/[^/]+\/focus\/)(.+)$/i.exec(trimmed);
+  const normalized = focusLocator
+    ? `${focusLocator[1].toLowerCase()}${focusLocator[2]}`
+    : trimmed.toLowerCase();
   return normalized || null;
 }
 

@@ -27,6 +27,7 @@ let sseClient: SseClient | null = null;
 
 export interface RoomState {
   room_id: string;
+  navigation_locator?: string | null;
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
@@ -71,6 +72,7 @@ function getCurrentStreamAgentIdentity():
 
 export function toRoomState(input: {
   room_id: string;
+  navigation_locator?: string | null;
   project_id?: string | null;
   code?: string | null;
   display_name?: string | null;
@@ -80,6 +82,7 @@ export function toRoomState(input: {
 }): RoomState {
   return {
     room_id: input.room_id,
+    navigation_locator: input.navigation_locator ?? null,
     project_id: input.project_id ?? null,
     code: input.code ?? null,
     display_name: input.display_name ?? null,
@@ -87,6 +90,13 @@ export function toRoomState(input: {
     joined_via: input.joined_via,
     is_local: input.is_local ?? false,
   };
+}
+
+export function currentRoomMatchesLocator(locator: string | null): boolean {
+  const value = locator?.trim();
+  return Boolean(value && currentRoom && (
+    currentRoom.room_id === value || currentRoom.navigation_locator === value
+  ));
 }
 
 function getCanonicalRoomWebUrl(roomId: string): string {

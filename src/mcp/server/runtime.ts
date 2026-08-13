@@ -79,6 +79,7 @@ export {
 } from "./runtime/messages.js";
 export {
   currentRoom,
+  currentRoomMatchesLocator,
   attachMcpServer,
   getCurrentSupervisedRoomAuthority,
   getFallbackProjectId,

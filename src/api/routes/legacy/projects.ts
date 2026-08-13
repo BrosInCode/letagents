@@ -22,7 +22,7 @@ import {
   formatGitRoomSummary,
   formatManualGitRoomSummaryForRoomId,
 } from "../../rooms/formatting.js";
-import { isInviteCode, normalizeRoomId } from "../../rooms/routing.js";
+import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId } from "../../rooms/routing.js";
 import { isMessageSenderWithinBounds } from "../../../../shared/message-contracts.mjs";
 
 export interface LegacyProjectRouteDeps {
@@ -133,6 +133,11 @@ export function registerLegacyProjectRoutes(
     const name = decodeURIComponent(String(req.params.name));
     const requestedRoomId = normalizeRoomId(name);
     const roomId = await deps.resolveCanonicalRoomRequestId(requestedRoomId);
+
+    if (isReservedMainRoomCreationId(roomId)) {
+      res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
+      return;
+    }
 
     if (deps.isRepoBackedRoomId(roomId)) {
       const decision = await deps.resolveRepoRoomAccessDecision({

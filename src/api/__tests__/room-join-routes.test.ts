@@ -3,7 +3,7 @@ import test from "node:test";
 
 process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 const { registerRoomJoinRoutes } = await import("../routes/rooms/join.js");
-const { buildGitHubRefRoomId } = await import("../github/git-room-routing.js");
+const { buildGitHubRefRoomLocator } = await import("../github/git-room-routing.js");
 
 function createDeps() {
   const unused = async () => {
@@ -69,7 +69,7 @@ test("join route can resolve existing rooms without creating missing ones", asyn
   };
   const resolveOptions: unknown[] = [];
   const project = {
-    id: "git-room:github.com:brosincode/letagents:branch:Y29kZXg",
+    id: "focus_37",
     display_name: "Branch: codex",
   };
 
@@ -220,7 +220,7 @@ test("join route applies repo access denial before resolving room", async () => 
   });
 });
 
-test("join route applies repo access denial before resolving generated Git ref room", async () => {
+test("join route applies repo access denial before resolving a contextual Git ref locator", async () => {
   let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
   const app = {
     post(_path: RegExp, registeredHandler: typeof handler) {
@@ -239,7 +239,7 @@ test("join route applies repo access denial before resolving generated Git ref r
       return this;
     },
   };
-  const roomId = buildGitHubRefRoomId({
+  const roomId = buildGitHubRefRoomLocator({
     repositoryFullName: "BrosInCode/private-repo",
     refType: "branch",
     refName: "feature/private-room",
@@ -349,7 +349,7 @@ test("non-repo joins initialize first admin without forcing every joiner to admi
   });
 });
 
-test("join route prefers current Git Room binding over parent repo binding", async () => {
+test("canonical focus joins authorize after resolution and prefer the current Git Room binding", async () => {
   let handler: ((req: Record<string, unknown>, res: Record<string, unknown>) => Promise<void>) | undefined;
   const app = {
     post(_path: RegExp, registeredHandler: typeof handler) {
@@ -369,7 +369,7 @@ test("join route prefers current Git Room binding over parent repo binding", asy
     },
   };
   const project = {
-    id: "git-room:github.com:brosincode/letagents:branch:Y29kZXgvR2l0Um9vbXM",
+    id: "focus_42",
     parent_room_id: "github.com/brosincode/letagents",
     display_name: "Branch Room",
   };
@@ -419,7 +419,7 @@ test("join route prefers current Git Room binding over parent repo binding", asy
   );
 
   assert.equal(response.statusCode, 200);
-  assert.deepEqual(accessChecks, [project.parent_room_id]);
+  assert.deepEqual(accessChecks, []);
   assert.deepEqual(response.body, {
     id: project.id,
     gitRoomBinding: branchBinding,

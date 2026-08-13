@@ -1,11 +1,11 @@
 import { and, asc, eq, inArray } from "drizzle-orm";
 
 import { generateRoomDisplayName, normalizeRoomDisplayName } from "../rooms/display-name.js";
-import { isInviteCode, normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
+import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId, normalizeRoomName } from "../rooms/routing.js";
 import { db } from "./client.js";
 import { ensureGitHubRepoRoomBinding } from "./git-room-bindings.js";
 import { id_sequences, room_aliases, rooms } from "./schema.js";
-import { generateCode, getRoomScopedSequenceNames, isUniqueConstraintError, type RoomSequenceExecutor } from "./utils.js";
+import { generateCode, getRoomScopedSequenceNames, isUniqueConstraintError, nextPrefixedId, type RoomSequenceExecutor } from "./utils.js";
 import { toProject, toRoomAlias } from "./mappers.js";
 import type { Project, RoomAlias } from "./types.js";
 
@@ -70,6 +70,9 @@ export async function getOrCreateProjectByName(
 export async function getOrCreateCanonicalRoom(
   canonicalId: string
 ): Promise<{ room: Project; created: boolean }> {
+  if (isReservedMainRoomCreationId(canonicalId)) {
+    throw new Error(`'${canonicalId}' is a focus-room locator or reserved room id`);
+  }
   const existing = await getProjectById(canonicalId);
   if (existing) {
     await ensureGitHubRepoRoomBinding(existing.id);
@@ -123,85 +126,70 @@ export async function getOrCreateCanonicalRoom(
 }
 
 export async function getOrCreateGitChildRoom(input: {
-  roomId: string;
   parentRoomId: string;
   focusKey: string;
   displayName?: string | null;
 }): Promise<{ room: Project; created: boolean }> {
-  const existing = await getProjectById(input.roomId);
-  if (existing) {
-    return { room: existing, created: false };
-  }
-
   const parent = await getProjectById(input.parentRoomId);
   if (!parent) {
     throw new Error(`Parent room '${input.parentRoomId}' does not exist`);
   }
 
-  const created_at = new Date().toISOString();
-  const display_name = input.displayName?.trim() || generateRoomDisplayName(input.roomId);
-  try {
-    const created = await db.transaction(async (tx) => {
-      const [row] = await tx
-        .insert(rooms)
-        .values({
-          id: input.roomId,
-          display_name,
-          kind: "focus",
-          parent_room_id: parent.id,
-          focus_key: input.focusKey,
-          focus_status: "active",
-          created_at,
-        })
-        .returning();
+  const existing = await getGitChildRoom({
+    parentRoomId: parent.id,
+    focusKey: input.focusKey,
+  });
+  if (existing) {
+    return { room: existing, created: false };
+  }
 
-      await tx
-        .delete(id_sequences)
-        .where(inArray(id_sequences.name, getRoomScopedSequenceNames(input.roomId)));
+  while (true) {
+    const roomId = await buildFocusRoomId();
+    const created_at = new Date().toISOString();
+    const display_name = input.displayName?.trim() || generateRoomDisplayName(input.focusKey);
+    try {
+      const created = await db.transaction(async (tx) => {
+        const [row] = await tx
+          .insert(rooms)
+          .values({
+            id: roomId,
+            display_name,
+            kind: "focus",
+            parent_room_id: parent.id,
+            focus_key: input.focusKey,
+            focus_status: "active",
+            created_at,
+          })
+          .returning();
 
-      return row;
-    });
+        await tx
+          .delete(id_sequences)
+          .where(inArray(id_sequences.name, getRoomScopedSequenceNames(roomId)));
 
-    return { room: toProject(created), created: true };
-  } catch (error) {
-    if (isUniqueConstraintError(error)) {
-      const retriedById = await getProjectById(input.roomId);
-      if (retriedById) {
-        return { room: retriedById, created: false };
+        return row;
+      });
+
+      return { room: toProject(created), created: true };
+    } catch (error) {
+      if (!isUniqueConstraintError(error)) {
+        throw error;
       }
 
-      const [retriedByKey] = await db
-        .select()
-        .from(rooms)
-        .where(and(
-          eq(rooms.parent_room_id, parent.id),
-          eq(rooms.focus_key, input.focusKey),
-          eq(rooms.kind, "focus")
-        ))
-        .limit(1);
+      const retriedByKey = await getGitChildRoom({
+        parentRoomId: parent.id,
+        focusKey: input.focusKey,
+      });
       if (retriedByKey) {
-        return { room: toProject(retriedByKey), created: false };
+        return { room: retriedByKey, created: false };
       }
     }
-
-    throw error;
   }
 }
 
 export async function getGitChildRoom(input: {
-  roomId: string;
   parentRoomId: string;
   focusKey: string;
 }): Promise<Project | undefined> {
-  const room = await getProjectById(input.roomId);
-  if (
-    room?.kind === "focus" &&
-    room.parent_room_id === input.parentRoomId &&
-    room.focus_key === input.focusKey
-  ) {
-    return room;
-  }
-
   const [fallback] = await db
     .select()
     .from(rooms)
@@ -213,6 +201,10 @@ export async function getGitChildRoom(input: {
     .limit(1);
 
   return fallback ? toProject(fallback) : undefined;
+}
+
+export async function buildFocusRoomId(executor: RoomSequenceExecutor = db): Promise<string> {
+  return nextPrefixedId("focus_rooms", "focus", executor);
 }
 
 export async function getProjectByName(name: string): Promise<Project | undefined> {
