@@ -121,21 +121,25 @@ async function withStoreLock<T>(
       if ((error as NodeJS.ErrnoException)?.code !== "EEXIST" || Date.now() >= deadline) {
         throw new Error("Project bindings are busy in another LetAgents process.", { cause: error });
       }
+      let ownerPid: number | null = null;
       try {
-        const ownerPid = Number((await readFile(join(lockPath, "owner"), "utf8")).trim());
-        if (Number.isInteger(ownerPid) && ownerPid > 0) process.kill(ownerPid, 0);
+        const parsedOwner = Number((await readFile(join(lockPath, "owner"), "utf8")).trim());
+        ownerPid = Number.isInteger(parsedOwner) && parsedOwner > 0 ? parsedOwner : null;
+        if (ownerPid) process.kill(ownerPid, 0);
       } catch (ownerError) {
         if ((ownerError as NodeJS.ErrnoException)?.code === "ESRCH") {
           await unlink(join(lockPath, "owner")).catch(() => undefined);
           await rmdir(lockPath).catch(() => undefined);
           continue;
         }
-        if ((ownerError as NodeJS.ErrnoException)?.code === "ENOENT") {
-          const lockAge = Date.now() - (await stat(lockPath)).mtimeMs;
-          if (lockAge > 2_000) {
-            await rmdir(lockPath).catch(() => undefined);
-            continue;
-          }
+        if ((ownerError as NodeJS.ErrnoException)?.code !== "ENOENT") throw ownerError;
+      }
+      if (!ownerPid) {
+        const lockAge = Date.now() - (await stat(lockPath)).mtimeMs;
+        if (lockAge > 2_000) {
+          await unlink(join(lockPath, "owner")).catch(() => undefined);
+          await rmdir(lockPath).catch(() => undefined);
+          continue;
         }
       }
       await new Promise((resolve) => setTimeout(resolve, 25));
