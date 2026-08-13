@@ -33,6 +33,15 @@
     </div>
 
     <div class="desktop-room-header-actions">
+      <button
+        v-if="projectConnectionNeeded"
+        class="desktop-room-project-connect"
+        type="button"
+        data-testid="desktop-room-connect-project"
+        @click="emit('connectProject')"
+      >
+        Connect project
+      </button>
       <div
         ref="overflowMenuRoot"
         class="desktop-room-overflow"
@@ -193,6 +202,7 @@ const props = defineProps<{
   activeTab: RoomTabId;
   searchOpen: boolean;
   actionPanelOpen: boolean;
+  projectConnectionNeeded?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -200,6 +210,7 @@ const emit = defineEmits<{
   toggleSearch: [];
   toggleActionPanel: [];
   selectTab: [tabId: RoomTabId];
+  connectProject: [];
 }>();
 
 const overflowMenuOpen = ref(false);

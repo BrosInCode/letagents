@@ -15,6 +15,8 @@ import { runGitStdout } from "./main/git-exec.js";
 
 export type RepoStatusBuildOptions = {
   signal?: AbortSignal;
+  /** Project ownership checks must derive identity from Git, never repository config. */
+  ignoreConfiguredRoom?: boolean;
 };
 
 function throwIfAborted(options: RepoStatusBuildOptions): void {
@@ -849,7 +851,9 @@ export async function resolveRoomIdentifierFromPath(
   const defaultBranch = routingDefaultBranch || fallbackDefaultBranch(localBranches);
   throwIfAborted(options);
 
-  const configured = readConfiguredRoomIdentifierAt(repoRoot);
+  const configured = options.ignoreConfiguredRoom
+    ? null
+    : readConfiguredRoomIdentifierAt(repoRoot);
   if (configured) {
     return {
       repoRoot,

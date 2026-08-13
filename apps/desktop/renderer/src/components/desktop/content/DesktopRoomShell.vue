@@ -13,10 +13,12 @@
       :active-tab="activeTab"
       :search-open="searchOpen"
       :action-panel-open="actionPanelOpen"
+      :project-connection-needed="Boolean(projectRoom && !durableProjectRootPath)"
       @cycle-sidebar="emit('cycle-sidebar')"
       @toggle-search="toggleSearchTool"
       @toggle-action-panel="toggleActionPanel"
       @select-tab="selectTab"
+      @connect-project="emit('connect-project')"
     />
 
     <DesktopRoomControlRail
@@ -315,7 +317,6 @@
       :repo-root-path="managedAgentRepoRootPath"
       :repo-status="managedAgentRepoStatus"
       @close="addAgentModalOpen = false"
-      @choose-repo="openAgentRepoPicker"
       @choose-worktree="openAgentWorktree"
       @managed-session-started="upsertManagedAgentSession"
     />
@@ -492,6 +493,7 @@ const props = defineProps<{
   repoStatus: RepoStatus;
   gitRoomMatchesActiveRepo: boolean;
   durableProjectRootPath?: string | null;
+  projectRoom?: boolean;
   homePath?: string | null;
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
@@ -512,9 +514,8 @@ const emit = defineEmits<{
   "open-focus-room": [roomIdentifier: string];
   "request-focus-room-conclusion": [focusRoom: DesktopFocusRoomInfo];
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
-  "choose-repo": [];
+  "connect-project": [];
   "choose-worktree": [rootPath: string];
-  "project-root-recovery-requested": [];
   "open-repo-root": [rootPath: string];
   "add-agent-open-request-consumed": [];
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
@@ -973,7 +974,6 @@ watch(() => props.repoStatus, () => {
 
 watch(addAgentModalOpen, (open) => {
   if (open) {
-    emit("project-root-recovery-requested");
     void refreshManagedAgentSessions();
   }
 });
@@ -995,7 +995,7 @@ watch(
 
 watch(() => props.openAddAgentRequested, (requested) => {
   if (!requested) return;
-  addAgentModalOpen.value = true;
+  openAddAgentModal();
   emit("add-agent-open-request-consumed");
 }, { immediate: true });
 
@@ -1364,6 +1364,10 @@ function openRules(): void {
 }
 
 function openAddAgentModal(): void {
+  if (props.projectRoom && !props.durableProjectRootPath) {
+    pushActionToast("Connect this room to its local project before adding an agent.", "info", 6_000);
+    return;
+  }
   addAgentModalOpen.value = true;
 }
 
@@ -2790,11 +2794,6 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
 function openReasoningFromAgentDetail(sessionId: string): void {
   closeAgentDetail();
   openReasoningInspector(sessionId);
-}
-
-function openAgentRepoPicker(): void {
-  addAgentModalOpen.value = false;
-  emit("choose-repo");
 }
 
 function openAgentWorktree(rootPath: string): void {

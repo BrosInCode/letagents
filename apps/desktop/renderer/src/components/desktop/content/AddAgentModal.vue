@@ -160,7 +160,6 @@
               @copy-install-command="copyAgentAuthCommand(installCommand)"
               @open-install-guide="openProviderInstallGuide"
               @refresh="retryProviderSetup"
-              @choose-repo="emit('choose-repo')"
               @create-worktree="createWorktree"
               @start="startManagedAgent"
               @recover-launch="handleRecoverSupervisedLaunch"

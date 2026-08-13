@@ -60,9 +60,9 @@
       v-else-if="preflight?.nextAction === 'choose_repo'"
       type="button"
       class="desktop-add-agent-primary"
-      @click="emit('choose-repo')"
+      disabled
     >
-      Choose project folder
+      Connect project from the room
     </button>
     <button
       v-else-if="preflight?.nextAction === 'choose_worktree' && canCreateWorktree && matchingWorktreeCount === 0"
@@ -190,7 +190,6 @@ const emit = defineEmits<{
   "copy-install-command": [];
   "open-install-guide": [];
   refresh: [];
-  "choose-repo": [];
   "create-worktree": [];
   start: [];
   "recover-launch": [];
