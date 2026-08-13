@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -81,7 +81,7 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
       realpathSync(rootPath),
     );
     assert.equal((await listProjectBindings({ storePath })).length, 1);
-    assert.equal(JSON.parse(readFileSync(storePath, "utf8")).version, 1);
+    assert.equal(readFileSync(storePath).subarray(0, 16).toString(), "SQLite format 3\0");
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -371,7 +371,6 @@ test("failed legacy migration keys are retained for a later launch", async () =>
 
 test("separate desktop processes serialize whole-store updates", async () => {
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-processes-"));
-  const storePath = join(temporary, "bindings.json");
   const moduleUrl = new URL("../main/project-bindings-store.ts", import.meta.url).href;
   const script = `
     const { bindProjectRoot } = await import(process.env.BINDINGS_MODULE_URL);
@@ -382,53 +381,30 @@ test("separate desktop processes serialize whole-store updates", async () => {
     }, { storePath: process.env.STORE_PATH });
   `;
   try {
-    const roots = Array.from({ length: 8 }, (_value, index) => {
-      const rootPath = join(temporary, `project-${index}`);
-      mkdirSync(rootPath);
-      return rootPath;
-    });
-    await Promise.all(roots.map((rootPath, index) => execFileAsync(
-      process.execPath,
-      ["--import", "tsx", "--input-type=module", "--eval", script],
-      {
-        cwd: process.cwd(),
-        env: {
-          ...process.env,
-          BINDINGS_MODULE_URL: moduleUrl,
-          ROOM_ID: `local-project-${index}-1111111111`,
-          ROOT_PATH: rootPath,
-          STORE_PATH: storePath,
+    for (let round = 0; round < 6; round += 1) {
+      const roundRoot = join(temporary, `round-${round}`);
+      const storePath = join(roundRoot, "bindings.sqlite");
+      mkdirSync(roundRoot);
+      const roots = Array.from({ length: 16 }, (_value, index) => {
+        const rootPath = join(roundRoot, `project-${index}`);
+        mkdirSync(rootPath);
+        return rootPath;
+      });
+      await Promise.all(roots.map((rootPath, index) => execFileAsync(
+        process.execPath,
+        ["--import", "tsx", "--input-type=module", "--eval", script],
+        {
+          cwd: process.cwd(),
+          env: {
+            ...process.env,
+            BINDINGS_MODULE_URL: moduleUrl,
+            ROOM_ID: `local-project-${round}-${index}-1111111111`,
+            ROOT_PATH: rootPath,
+            STORE_PATH: storePath,
+          },
         },
-      },
-    )));
-    assert.equal((await listProjectBindings({ storePath })).length, roots.length);
-  } finally {
-    rmSync(temporary, { recursive: true, force: true });
-  }
-});
-
-test("stale ownerless and malformed interprocess locks recover without manual deletion", async () => {
-  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-stale-lock-"));
-  try {
-    for (const [index, owner] of ["", "not-a-pid"].entries()) {
-      const rootPath = join(temporary, `project-${index}`);
-      const storePath = join(temporary, `bindings-${index}.json`);
-      const lockPath = `${storePath}.lock`;
-      mkdirSync(rootPath);
-      mkdirSync(lockPath);
-      writeFileSync(join(lockPath, "owner"), owner);
-      const stale = new Date(Date.now() - 60_000);
-      utimesSync(lockPath, stale, stale);
-
-      const startedAt = Date.now();
-      const binding = await bindProjectRoot({
-        context: { roomIdentifier: `local-stale-${index}-1111111111` },
-        rootPath,
-        source: "local_folder",
-      }, { storePath });
-
-      assert.equal(binding.rootPath, realpathSync(rootPath));
-      assert.ok(Date.now() - startedAt < 1_000);
+      )));
+      assert.equal((await listProjectBindings({ storePath })).length, roots.length);
     }
   } finally {
     rmSync(temporary, { recursive: true, force: true });
