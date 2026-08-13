@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { chmodSync, existsSync } from "node:fs";
 import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
@@ -91,6 +92,9 @@ function openStore(options: ProjectBindingsStoreOptions = {}): SqliteDatabase {
       updated_at TEXT NOT NULL
     ) STRICT
   `);
+  for (const path of [storePath, `${storePath}-wal`, `${storePath}-shm`]) {
+    if (existsSync(path)) chmodSync(path, 0o600);
+  }
   return database;
 }
 
