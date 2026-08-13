@@ -391,3 +391,85 @@ test("closing the modal does not unlock duplicate provider setup side effects", 
   await first;
   assert.equal(setup.setupBusy.value, false);
 });
+
+test("successful secure-storage recovery clears only its own stale warning", async () => {
+  let storageAvailable = false;
+  Object.assign(globalThis, {
+    window: {
+      clearTimeout: () => undefined,
+      setTimeout: () => 1,
+      addEventListener: () => undefined,
+      removeEventListener: () => undefined,
+      letagentsDesktop: {
+        workers: {
+          runAgentProviderPreflight: async () => ({
+            providerId: "codex",
+            status: "ready",
+            canStart: true,
+            message: "Ready",
+            detail: null,
+            nextAction: null,
+            version: "1",
+            mcpStatus: "installed",
+          }),
+        },
+        supervisorGrant: {
+          getStorageStatus: async () => ({
+            available: storageAvailable,
+            detail: storageAvailable ? "Secure storage ready" : "Unlock your login Keychain",
+            canOpenCredentialStorage: !storageAvailable,
+          }),
+        },
+      },
+    },
+  });
+  let open = true;
+  const launchMode = ref<"legacy" | "supervised">("supervised");
+  const setup = useAddAgentSetup();
+  const selectedProvider = computed(() => provider("codex"));
+  const actions = setup.bind({
+    open: () => open,
+    roomIdentifier: () => "room-1",
+    roomGitRoom: () => null,
+    repoRootPath: () => "/repo",
+    selectedProvider,
+    selectedPermissionProfile: computed(() => null),
+    expectedWorktreeBranch: computed(() => null),
+    authCommand: computed(() => null),
+    externalJoinPrompt: computed(() => null),
+    selectedCursorMcpPolicy: ref("filter_letagents"),
+    selectedModel: computed(() => null),
+    selectedModelSource: computed(() => null),
+    selectedEffort: ref(""),
+    launchMode,
+    loadOpenModelSettings: async () => undefined,
+    loadProviderModels: async () => undefined,
+    syncPermissionProfileSelection: () => undefined,
+    syncDeliveryModeSelection: () => undefined,
+    invalidateConfigurationRequests: () => undefined,
+    resetConfigurationModelSelection: () => undefined,
+    resetConfigurationTransientState: () => undefined,
+    onDetectRecoverableLaunch: () => undefined,
+    onResetSupervisedLaunch: () => undefined,
+    onCleanupSupervisedLaunch: () => undefined,
+    onResetStartingAgent: () => undefined,
+    onChooseWorktree: () => undefined,
+  });
+  setup.providers.value = [provider("codex")];
+  setup.selectedProviderId.value = "codex";
+
+  await actions.runPreflight();
+  assert.equal(setup.secureStorageStatus.value?.available, false);
+  setup.setSecureStorageRecoveryMessage("Unlock, then return");
+  storageAvailable = true;
+  await actions.runPreflight();
+  assert.equal(setup.secureStorageStatus.value?.available, true);
+  assert.equal(setup.setupMessage.value, null);
+
+  setup.setSecureStorageRecoveryMessage("Unlock, then return");
+  setup.setSetupMessage("An unrelated provider warning", "error");
+  await actions.runPreflight();
+  assert.equal(setup.setupMessage.value, "An unrelated provider warning");
+  open = false;
+  actions.resetTransientState();
+});

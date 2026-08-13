@@ -122,6 +122,13 @@ test("Keychain recovery opens the native credential manager without weakening st
   assert.match(progressSource, /supervised-launch-keychain-retry/);
 });
 
+test("a concurrent successful storage recheck cannot be overwritten by stale recovery guidance", () => {
+  assert.match(
+    controllerSource,
+    /await desktopIpc\.app\.openCredentialStorage\(\);[\s\S]*?if \(secureStorageStatus\.value\?\.available !== true\) \{[\s\S]*?setSecureStorageRecoveryMessage/,
+  );
+});
+
 test("Try again converges a durable launch entry instead of creating a second agent", () => {
   assert.match(controllerSource, /onRetry: \(\) => retrySupervisedLaunch\(\)/);
   const retryBody = controllerSource.slice(

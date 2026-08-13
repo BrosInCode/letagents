@@ -159,6 +159,7 @@ const {
   setupMessage,
   setupMessageTone,
   setSetupMessage,
+  setSecureStorageRecoveryMessage,
 } = setup;
 const configuration = useAddAgentConfiguration();
 const {
@@ -364,11 +365,13 @@ async function openProviderInstallGuide(): Promise<void> {
 async function openSecureCredentialStorage(): Promise<void> {
   if (!secureStorageStatus.value?.canOpenCredentialStorage) return;
   try {
+    setupActions.armSecureStorageFocusRecheck();
     await desktopIpc.app.openCredentialStorage();
-    setSetupMessage(
-      "Unlock your login Keychain, then return to LetAgents. Setup will check it again automatically.",
-      "warning",
-    );
+    if (secureStorageStatus.value?.available !== true) {
+      setSecureStorageRecoveryMessage(
+        "Unlock your login Keychain, then return to LetAgents. Setup will check it again automatically.",
+      );
+    }
   } catch (error) {
     setSetupMessage(contextualAddAgentError(
       "Couldn't open secure credential storage",

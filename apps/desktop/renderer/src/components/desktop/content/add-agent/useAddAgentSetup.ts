@@ -78,6 +78,7 @@ export function useAddAgentSetup() {
   const loadError = ref<string | null>(null);
   const setupMessage = ref<string | null>(null);
   const setupMessageTone = ref<AddAgentFeedbackTone>("status");
+  const secureStorageRecoveryMessage = ref<string | null>(null);
   let setupVersion = 0;
   let preflightRequestId = 0;
   let providerRequestId = 0;
@@ -85,6 +86,7 @@ export function useAddAgentSetup() {
   let modelPreflightTimer: number | null = null;
   let setupActionInFlight = false;
   let worktreeOperationInFlight = false;
+  let secureStorageFocusRecheckArmed = false;
 
   function currentVersion(): number {
     return setupVersion;
@@ -93,6 +95,11 @@ export function useAddAgentSetup() {
   function setSetupMessage(message: string | null, tone: AddAgentFeedbackTone = "status"): void {
     setupMessage.value = message;
     setupMessageTone.value = tone;
+  }
+
+  function setSecureStorageRecoveryMessage(message: string): void {
+    secureStorageRecoveryMessage.value = message;
+    setSetupMessage(message, "warning");
   }
 
   function bind(bindings: SetupBindings) {
@@ -128,6 +135,10 @@ export function useAddAgentSetup() {
       }, MODEL_PREFLIGHT_DEBOUNCE_MS);
     }
 
+    function armSecureStorageFocusRecheck(): void {
+      secureStorageFocusRecheckArmed = true;
+    }
+
     async function runPreflight(options: { refreshModels?: boolean; refreshEnvironment?: boolean } = {}): Promise<void> {
       if (!selectedProviderId.value) return;
       clearScheduledModelPreflight();
@@ -160,6 +171,10 @@ export function useAddAgentSetup() {
         if (isCurrentRequest(version) && requestId === preflightRequestId && selectedProviderId.value === providerId) {
           preflight.value = result;
           secureStorageStatus.value = storageStatus;
+          if (storageStatus?.available && secureStorageRecoveryMessage.value) {
+            if (setupMessage.value === secureStorageRecoveryMessage.value) setSetupMessage(null);
+            secureStorageRecoveryMessage.value = null;
+          }
         }
       } catch (error) {
         if (isCurrentRequest(version) && requestId === preflightRequestId && selectedProviderId.value === providerId) {
@@ -405,6 +420,8 @@ export function useAddAgentSetup() {
       copyingExternalPrompt.value = false;
       setupConfirmation.value = null;
       loadError.value = null;
+      secureStorageRecoveryMessage.value = null;
+      secureStorageFocusRecheckArmed = false;
       setSetupMessage(null);
       bindings.onResetStartingAgent();
       bindings.onCleanupSupervisedLaunch();
@@ -438,11 +455,16 @@ export function useAddAgentSetup() {
     });
     const recheckUnlockedStorage = (): void => {
       if (
+        secureStorageFocusRecheckArmed
+        &&
         bindings.open()
         && bindings.launchMode.value === "supervised"
         && secureStorageStatus.value?.available === false
         && !loadingPreflight.value
-      ) void runPreflight({ refreshEnvironment: true });
+      ) {
+        secureStorageFocusRecheckArmed = false;
+        void runPreflight({ refreshEnvironment: true });
+      }
     };
     if (typeof window.addEventListener === "function") {
       window.addEventListener("focus", recheckUnlockedStorage);
@@ -460,6 +482,7 @@ export function useAddAgentSetup() {
       currentVersion,
       isCurrentRequest,
       requestPreflight,
+      armSecureStorageFocusRecheck,
       runPreflight,
       refreshSelectedProvider,
       retryProviderSetup,
@@ -491,6 +514,7 @@ export function useAddAgentSetup() {
     setupMessage,
     setupMessageTone,
     setSetupMessage,
+    setSecureStorageRecoveryMessage,
     currentVersion,
     bind,
   };
