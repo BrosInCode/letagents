@@ -87,7 +87,7 @@ test("a Keychain failure during encryption remains a typed recoverable storage f
   );
 });
 
-test("supervisor grant storage readiness performs a real round-trip", () => {
+test("supervisor grant storage readiness performs the exact synchronous persistence round-trip", () => {
   let encrypted = false;
   const available = getDesktopSupervisorGrantStorageStatus({
     isEncryptionAvailable: () => true,

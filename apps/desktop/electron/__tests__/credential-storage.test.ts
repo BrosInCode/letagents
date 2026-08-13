@@ -6,7 +6,7 @@ import {
   openDesktopCredentialStorage,
 } from "../main/credential-storage.js";
 
-test("opens the system Keychain Access application", async () => {
+test("opens the CoreServices Keychain Access application used by current macOS", async () => {
   const opened: string[] = [];
   await openDesktopCredentialStorage({
     platform: "darwin",
@@ -27,7 +27,7 @@ test("falls back to the legacy Keychain Access location", async () => {
     shell: {
       openPath: async (path) => {
         opened.push(path);
-        return opened.length === 1 ? "not found" : "";
+        return opened.length < MACOS_KEYCHAIN_ACCESS_PATHS.length ? "not found" : "";
       },
     },
   });

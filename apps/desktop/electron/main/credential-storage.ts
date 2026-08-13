@@ -5,6 +5,7 @@ type CredentialStorageShell = Pick<typeof import("electron").shell, "openPath">;
 const { shell } = electron as typeof import("electron");
 
 export const MACOS_KEYCHAIN_ACCESS_PATHS = [
+  "/System/Library/CoreServices/Applications/Keychain Access.app",
   "/System/Applications/Utilities/Keychain Access.app",
   "/Applications/Utilities/Keychain Access.app",
 ] as const;
