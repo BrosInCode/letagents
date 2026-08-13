@@ -1,4 +1,5 @@
 const ELECTRON_INVOKE_PREFIX = /^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/i;
+const DESKTOP_API_ERROR_PREFIX = /^DesktopApiError:\s*/i;
 const AUTHORIZATION_HEADER = /\bauthorization\s*([:=])\s*(?:"[^"]*"|'[^']*'|(?:bearer\s+)?[^\s,;]+)/gi;
 const BEARER_CREDENTIAL = /\bbearer\s+[A-Za-z0-9._~+/=-]+/gi;
 const AUTH_SCHEME_CREDENTIAL = /\b(bearer|basic)\s+[A-Za-z0-9._~+/-]{8,}={0,2}/gi;
@@ -16,6 +17,7 @@ export function safeUserVisibleErrorDetail(error: unknown, fallback: string): st
       : "";
   const detail = raw
     .replace(ELECTRON_INVOKE_PREFIX, "")
+    .replace(DESKTOP_API_ERROR_PREFIX, "")
     .replace(AUTHORIZATION_HEADER, (_match, separator: string) => `Authorization${separator}[redacted]`)
     .replace(AUTH_SCHEME_CREDENTIAL, (_match, scheme: string) => `${scheme} [redacted]`)
     .replace(BEARER_CREDENTIAL, "Bearer [redacted]")

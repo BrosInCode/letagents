@@ -332,6 +332,26 @@ export async function clearStoredAuth(): Promise<void> {
   cachedAuth = emptyStoredAuth();
 }
 
+/**
+ * End the server-side desktop session and always remove the local credential.
+ * A network or API failure must never strand someone in a locally signed-in
+ * state after they explicitly chose Log out.
+ */
+export async function signOutDesktopAuth(): Promise<void> {
+  try {
+    await apiFetch<{ success: boolean }>(
+      "/auth/logout",
+      { method: "POST" },
+      { timeoutMs: 3_000 },
+    );
+  } catch {
+    // Server revocation is best-effort when the app is offline. Local logout
+    // remains authoritative for this device and must complete immediately.
+  } finally {
+    await clearStoredAuth();
+  }
+}
+
 function buildAuthStatus(input: {
   storedAuth: StoredDesktopAuth;
   account?: DesktopAuthAccount | null;

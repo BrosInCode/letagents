@@ -114,6 +114,22 @@ describe("sidebar room context menu items", () => {
     assert.ok(!menuIds(read).includes("mark-room-read"));
   });
 
+  it("keeps local navigation but hides account mutations while signed out", () => {
+    const groups = buildSidebarRoomContextMenuItems({
+      entry: roomEntry(),
+      isPrimaryRoom: false,
+      hasProjectChildren: true,
+      projectCollapsed: false,
+      canManageRooms: false,
+    });
+    assert.deepEqual(menuIds(groups), [
+      "open-room",
+      "select-room",
+      "copy-room-url",
+      "toggle-project",
+    ]);
+  });
+
   it("labels pinning from the entry's pinned state", () => {
     const pinned = buildSidebarRoomContextMenuItems({
       entry: roomEntry({ pinned: true, pinnedAccountRoomIdentifiers: ["ABCD-1234"] }),

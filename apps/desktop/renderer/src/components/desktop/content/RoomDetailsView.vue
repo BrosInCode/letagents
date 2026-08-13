@@ -490,6 +490,7 @@ import {
 import { shouldShowRepoEnvironmentForRoom } from "../../../domain/repo-environment";
 import { buildLetAgentsFocusRoomUrl } from "../../../domain/room-urls";
 import { formatShortDateTime } from "../../../domain/time";
+import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import DesktopSegmentedControl from "../controls/DesktopSegmentedControl.vue";
 import DesktopSelectField from "../controls/DesktopSelectField.vue";
 import FocusRoomQuickCloseOption from "../controls/FocusRoomQuickCloseOption.vue";
@@ -1110,7 +1111,7 @@ function setFeedback(message: string | null, state: FeedbackState = "info"): voi
 }
 
 function errorMessage(error: unknown, fallback: string): string {
-  return error instanceof Error && error.message ? error.message : fallback;
+  return safeUserVisibleErrorDetail(error, fallback);
 }
 
 function handleGlobalKeydown(event: KeyboardEvent): void {

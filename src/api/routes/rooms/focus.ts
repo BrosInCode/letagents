@@ -338,6 +338,17 @@ export function registerRoomFocusRoutes(
 
     const requestBody = (req.body ?? {}) as Record<string, unknown>;
     const desktopHumanWrite = isDesktopHumanWrite(req, requestBody);
+    if (
+      requestBody.quick_close === true
+      && requestBody.desktop_human_client === true
+      && !desktopHumanWrite
+    ) {
+      res.status(401).json({
+        error: "Connect GitHub to close this Focus Room.",
+        code: "DESKTOP_AUTH_REQUIRED",
+      });
+      return;
+    }
     const workerWriteIdentity = await resolveOwnerTokenWorkerWriteIdentity({
       req,
       res,
