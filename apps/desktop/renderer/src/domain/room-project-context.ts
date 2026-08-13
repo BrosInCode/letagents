@@ -1,5 +1,9 @@
 import type { DesktopRoomInfo } from "../../../electron/ipc-types";
 
+export type RepositoryRootBindings = Record<string, string>;
+
+type KeyValueStorage = Pick<Storage, "getItem" | "setItem">;
+
 function normalizeRoomIdentifier(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
 }
@@ -66,6 +70,63 @@ export function gitRoomIdentityKeys(
 }
 
 /**
+ * Repository roots are device-local authority, not navigation history. Keep a
+ * small branch-independent binding so reopening a parent, branch, or focus room
+ * resolves the same checkout even after the recent-room list is reordered or
+ * truncated.
+ */
+export function readRepositoryRootBindings(
+  storage: Pick<KeyValueStorage, "getItem">,
+  storageKey: string,
+  recentRooms: ReadonlyArray<{ identifier: string; rootPath: string | null }> = [],
+): RepositoryRootBindings {
+  const migrated = Object.fromEntries(recentRooms.flatMap((room) => {
+    const identity = canonicalRepoIdentity(room.identifier);
+    const rootPath = room.rootPath?.trim();
+    return identity && rootPath ? [[identity, rootPath]] : [];
+  }));
+  try {
+    const parsed = JSON.parse(storage.getItem(storageKey) || "{}");
+    if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) return migrated;
+    return { ...migrated, ...Object.fromEntries(Object.entries(parsed).flatMap(([identity, value]) => {
+      const key = canonicalRepoIdentity(identity);
+      const rootPath = typeof value === "string" ? value.trim() : "";
+      return key && rootPath ? [[key, rootPath]] : [];
+    })) };
+  } catch {
+    return migrated;
+  }
+}
+
+export function bindRepositoryRoot(
+  bindings: RepositoryRootBindings,
+  room: Pick<DesktopRoomInfo, "identifier" | "gitRoom"> | null | undefined,
+  rootPath: string | null | undefined,
+): RepositoryRootBindings {
+  const path = rootPath?.trim();
+  if (!path || !room?.gitRoom) return bindings;
+  let next = bindings;
+  for (const identity of gitRoomIdentityKeys(room.gitRoom, room.identifier)) {
+    if (next[identity] === path) continue;
+    if (next === bindings) next = { ...bindings };
+    next[identity] = path;
+  }
+  return next;
+}
+
+export function rememberRepositoryRootBindings(
+  storage: Pick<KeyValueStorage, "setItem">,
+  storageKey: string,
+  bindings: RepositoryRootBindings,
+): void {
+  try {
+    storage.setItem(storageKey, JSON.stringify(bindings));
+  } catch {
+    // Losing optional local persistence must not block room navigation.
+  }
+}
+
+/**
  * Resolve the durable project root for the active root room.
  *
  * The stored root recorded when the project room was opened always wins. If a
@@ -111,6 +172,7 @@ export function resolveActiveProjectRootPath(input: {
   activeRootIdentifier: string | null | undefined;
   activeRootGitRoom?: DesktopRoomInfo["gitRoom"] | null;
   recentRootRooms: ReadonlyArray<{ identifier: string; rootPath: string | null }>;
+  repositoryRootBindings?: RepositoryRootBindings;
   workspaceRepoStatus?: { rootPath: string; roomIdentifier?: string | null; isGitRepo?: boolean } | null;
 }): string | null {
   const identifier = normalizeRoomIdentifier(input.activeRootIdentifier);
@@ -119,6 +181,13 @@ export function resolveActiveProjectRootPath(input: {
     (entry) => normalizeRoomIdentifier(entry.identifier) === identifier,
   )?.rootPath?.trim() || null;
   if (stored) return stored;
+
+  if (input.activeRootGitRoom) {
+    for (const identity of gitRoomIdentityKeys(input.activeRootGitRoom, input.activeRootIdentifier)) {
+      const boundRoot = input.repositoryRootBindings?.[identity]?.trim();
+      if (boundRoot) return boundRoot;
+    }
+  }
 
   // Self-heal only a repo-backed room, and only from an identity-matched
   // workspace. Anything else fails closed at the repo-room boundary.

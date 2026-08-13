@@ -11,6 +11,11 @@ import type { ProjectGroup, RoomEntry, SidebarEntry, SidebarMode } from "../comp
 import { rentMarketplaceEntry, systemEntries } from "../domain/desktop-navigation";
 import { readStoredString } from "../domain/desktop-storage";
 import {
+  bindRepositoryRoot,
+  rememberRepositoryRootBindings,
+  type RepositoryRootBindings,
+} from "../domain/room-project-context";
+import {
   buildSidebarProjectGroups,
   normalizeRoomIdentifier,
   rememberRecentRootRooms,
@@ -28,6 +33,8 @@ interface DesktopNavigationStateOptions {
   appInfo: Ref<DesktopAppInfo | null>;
   recentRootRooms: Ref<RecentRootRoom[]>;
   recentRootRoomsStorageKey: string;
+  repositoryRootBindings?: Ref<RepositoryRootBindings>;
+  repositoryRootBindingsStorageKey?: string;
   repoStatus: Ref<RepoStatus | null>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedRootRoomIdentifier: Ref<string | null>;
@@ -195,6 +202,22 @@ export function useDesktopNavigationState(options: DesktopNavigationStateOptions
     });
     options.recentRootRooms.value = nextRooms;
     rememberRecentRootRooms(options.recentRootRoomsStorageKey, nextRooms);
+    const bindings = options.repositoryRootBindings;
+    const bindingsStorageKey = options.repositoryRootBindingsStorageKey;
+    if (!bindings || !bindingsStorageKey) return;
+    const nextBindings = bindRepositoryRoot(
+      bindings.value,
+      snapshot.room,
+      rootPath,
+    );
+    if (nextBindings !== bindings.value) {
+      bindings.value = nextBindings;
+      rememberRepositoryRootBindings(
+        window.localStorage,
+        bindingsStorageKey,
+        nextBindings,
+      );
+    }
   }
 
   const currentProjectMeta = computed(() => {
