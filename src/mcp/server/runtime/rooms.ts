@@ -70,7 +70,7 @@ function isNotFoundApiError(error: unknown): boolean {
 function parseGeneratedGitRefRoomIdentifier(
   identifier: string
 ): GeneratedGitRefRoomIdentifier | null {
-  const match = /^git-room:github\.com:([^/:\s]+\/[^/:\s]+):(branch|tag):[A-Za-z0-9_-]+$/.exec(
+  const match = /^github\.com\/([^/\s]+\/[^/\s]+)\/focus\/git:(branch|tag):[A-Za-z0-9_-]+$/.exec(
     identifier.trim()
   );
   if (!match) {
@@ -138,6 +138,7 @@ export async function joinRoomIdentifier(
     const room = rememberRoom(
       toRoomState({
         room_id: joinedRoomId,
+        navigation_locator: joinedRoomId === roomId ? null : roomId,
         project_id: typeof response.project_id === "string" ? response.project_id : null,
         code:
           typeof response.code === "string"
@@ -390,7 +391,33 @@ export async function joinNamedRoom(
   });
 }
 
-function bindWorkerRoomFromContext(): { room: RoomState; source: string } | null {
+async function bindWorkerRoomLocator(
+  roomLocator: string,
+  source: string,
+): Promise<{ room: RoomState; source: string }> {
+  const response = await apiCall<Record<string, unknown>>(
+    `/rooms/resolve/${encodeURIComponent(roomLocator)}`,
+  );
+  if (response.room_exists !== true) {
+    throw new ApiError(404, JSON.stringify({ error: "Room not found", code: "ROOM_NOT_FOUND" }));
+  }
+  const roomId = typeof response.canonical_room_id === "string"
+    ? response.canonical_room_id
+    : roomLocator;
+  return {
+    room: rememberRoom(toRoomState({
+      room_id: roomId,
+      navigation_locator: roomId === roomLocator ? null : roomLocator,
+      project_id: roomId,
+      display_name: roomId,
+      git_room: response.git_room ?? null,
+      joined_via: source === ".letagents.json" ? "config" : "git-remote",
+    })),
+    source,
+  };
+}
+
+async function bindWorkerRoomFromContext(): Promise<{ room: RoomState; source: string } | null> {
   const configRoom = getRoomFromConfig();
   if (configRoom) {
     const gitContext = buildActiveGitRoomContext({
@@ -398,27 +425,23 @@ function bindWorkerRoomFromContext(): { room: RoomState; source: string } | null
       currentBranch: getGitCurrentBranch(),
       defaultBranch: getGitDefaultBranch(),
     });
-    const roomId = gitContext.activeRoom ?? configRoom;
-    return {
-      room: rememberRoom(toRoomState({
-        room_id: roomId,
-        display_name: roomId,
-        joined_via: "config",
-      })),
-      source: ".letagents.json",
-    };
+    const roomId = gitContext.activeRoomLocator ?? configRoom;
+    try {
+      return await bindWorkerRoomLocator(roomId, ".letagents.json");
+    } catch (error) {
+      if (roomId === configRoom || !isNotFoundApiError(error)) throw error;
+      return bindWorkerRoomLocator(configRoom, ".letagents.json");
+    }
   }
 
   const gitContext = getGitRoomContext();
-  if (gitContext.activeRoom) {
-    return {
-      room: rememberRoom(toRoomState({
-        room_id: gitContext.activeRoom,
-        display_name: gitContext.activeRoom,
-        joined_via: "git-remote",
-      })),
-      source: "git remote",
-    };
+  if (gitContext.activeRoomLocator) {
+    try {
+      return await bindWorkerRoomLocator(gitContext.activeRoomLocator, "git remote");
+    } catch (error) {
+      if (!gitContext.repoRoom || !isNotFoundApiError(error)) throw error;
+      return bindWorkerRoomLocator(gitContext.repoRoom, "git remote");
+    }
   }
 
   const savedCurrentRoom = getStoredCurrentRoom();
@@ -449,9 +472,9 @@ export async function autoJoinFromContext(): Promise<void> {
       return;
     }
     if (workerRuntime.mode === "worker") {
-      const bound = bindWorkerRoomFromContext();
+      const bound = await bindWorkerRoomFromContext();
       if (bound) {
-        console.error(`🏠 Bound worker bearer to room '${bound.room.room_id}' (from ${bound.source}; no join/create request).`);
+        console.error(`🏠 Bound worker bearer to existing room '${bound.room.room_id}' (from ${bound.source}).`);
       } else {
         console.error("ℹ️ Worker bearer has no .letagents.json, git remote, or saved room to bind locally.");
       }
@@ -465,18 +488,18 @@ export async function autoJoinFromContext(): Promise<void> {
         currentBranch: getGitCurrentBranch(),
         defaultBranch: getGitDefaultBranch(),
       });
-      if (gitContext.activeRefRoom && gitContext.currentBranch) {
-        const joinedBranchRoom = await joinExistingRoomIdentifier(gitContext.activeRefRoom, "config");
+      if (gitContext.activeRefRoomLocator && gitContext.currentBranch) {
+        const joinedBranchRoom = await joinExistingRoomIdentifier(gitContext.activeRefRoomLocator, "config");
         if (joinedBranchRoom) {
           await ensureAgentIdentity();
-          console.error(`🏠 Auto-joined existing branch room '${gitContext.activeRefRoom}' (from .letagents.json + branch '${gitContext.currentBranch}')`);
+          console.error(`🏠 Auto-joined existing branch room '${gitContext.activeRefRoomLocator}' (from .letagents.json + branch '${gitContext.currentBranch}')`);
           return;
         }
       }
 
       await joinRoomIdentifier(configRoom, "config");
       await ensureAgentIdentity();
-      const branchNote = gitContext.activeRefRoom && gitContext.currentBranch
+      const branchNote = gitContext.activeRefRoomLocator && gitContext.currentBranch
         ? `; branch '${gitContext.currentBranch}' has no existing Git Room`
         : "";
       console.error(`🏠 Auto-joined room '${configRoom}' (from .letagents.json${branchNote})`);
@@ -485,18 +508,18 @@ export async function autoJoinFromContext(): Promise<void> {
 
     const gitContext = getGitRoomContext();
     if (gitContext.repoRoom) {
-      if (gitContext.activeRefRoom && gitContext.currentBranch) {
-        const joinedBranchRoom = await joinExistingRoomIdentifier(gitContext.activeRefRoom, "git-remote");
+      if (gitContext.activeRefRoomLocator && gitContext.currentBranch) {
+        const joinedBranchRoom = await joinExistingRoomIdentifier(gitContext.activeRefRoomLocator, "git-remote");
         if (joinedBranchRoom) {
           await ensureAgentIdentity();
-          console.error(`🏠 Auto-joined existing branch room '${gitContext.activeRefRoom}' (inferred from git remote and branch '${gitContext.currentBranch}' — consider adding a .letagents.json)`);
+          console.error(`🏠 Auto-joined existing branch room '${gitContext.activeRefRoomLocator}' (inferred from git remote and branch '${gitContext.currentBranch}' — consider adding a .letagents.json)`);
           return;
         }
       }
 
       await joinRoomIdentifier(gitContext.repoRoom, "git-remote");
       await ensureAgentIdentity();
-      const branchNote = gitContext.activeRefRoom && gitContext.currentBranch
+      const branchNote = gitContext.activeRefRoomLocator && gitContext.currentBranch
         ? `; branch '${gitContext.currentBranch}' has no existing Git Room`
         : "";
       console.error(`🏠 Auto-joined room '${gitContext.repoRoom}' (inferred from git remote${branchNote} — consider adding a .letagents.json)`);

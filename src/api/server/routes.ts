@@ -40,6 +40,7 @@ import {
 } from "../rooms/access.js";
 import {
   resolveCanonicalRoomRequestId,
+  resolveExistingRoomRequest,
   resolveRoomOrReply,
 } from "../rooms/resolution.js";
 import { normalizeOptionalString } from "../tasks/coordination-inputs.js";
@@ -228,6 +229,7 @@ export function registerApiRoutes(app: Express): void {
   const roomMessageOverlayBatcher = sharedRoomMessageOverlayBatcher;
   const roomEntryRouteDeps = {
     getProjectById,
+    resolveExistingRoomRequest,
     getGitRoomBindingForRoom,
     isRepoBackedRoomId,
     resolveGitHubRoomEntryDecision,

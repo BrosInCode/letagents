@@ -10,6 +10,7 @@ import {
   REPO_ROOM_ID,
   WEBHOOK_BRANCH,
   WEBHOOK_BRANCH_FOCUS_KEY,
+  WEBHOOK_BRANCH_ROOM_LOCATOR,
   WEBHOOK_BRANCH_ROOM_ID,
   gitFocusRoom,
   githubRepository,
@@ -23,9 +24,9 @@ process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 
 const {
   buildGitHubRefFocusKey,
-  buildGitHubRefRoomId,
+  buildGitHubRefRoomLocator,
   getExistingGitHubEventRefRoom,
-  parseGitHubRefRoomId,
+  parseGitHubRefRoomLocator,
   selectGitHubEventRefRoomTarget,
 } = await import("../github/git-room-routing.js");
 const { materializeGitHubWebhookEvent } = await import("../github-room-events.js");
@@ -60,18 +61,18 @@ function expectedWebhookBinding(roomId = WEBHOOK_BRANCH_ROOM_ID) {
   };
 }
 
-test("buildGitHubRefRoomId keeps branch names opaque and case-preserving", () => {
-  const roomId = buildGitHubRefRoomId({
+test("buildGitHubRefRoomLocator keeps branch names opaque and case-preserving", () => {
+  const roomLocator = buildGitHubRefRoomLocator({
     repositoryFullName: REPO_FULL_NAME,
     refType: "branch",
     refName: "Feature/Caps",
   });
 
-  assert.match(roomId, /^git-room:github\.com:brosincode\/letagents:branch:/);
-  assert.equal(roomId.includes("Feature/Caps"), false);
+  assert.match(roomLocator, /^github\.com\/brosincode\/letagents\/focus\/git:branch:/);
+  assert.equal(roomLocator.includes("Feature/Caps"), false);
   assert.notEqual(
-    roomId,
-    buildGitHubRefRoomId({
+    roomLocator,
+    buildGitHubRefRoomLocator({
       repositoryFullName: REPO_FULL_NAME,
       refType: "branch",
       refName: "feature/caps",
@@ -83,21 +84,21 @@ test("buildGitHubRefRoomId keeps branch names opaque and case-preserving", () =>
   );
 });
 
-test("parseGitHubRefRoomId decodes canonical generated branch room ids", () => {
-  assert.deepEqual(parseGitHubRefRoomId(WEBHOOK_BRANCH_ROOM_ID), {
+test("parseGitHubRefRoomLocator decodes contextual branch-room locators", () => {
+  assert.deepEqual(parseGitHubRefRoomLocator(WEBHOOK_BRANCH_ROOM_LOCATOR), {
     repositoryFullName: "brosincode/letagents",
     refType: "branch",
     refName: WEBHOOK_BRANCH,
   });
 });
 
-test("parseGitHubRefRoomId rejects malformed encoded refs", () => {
+test("parseGitHubRefRoomLocator rejects malformed encoded refs", () => {
   assert.equal(
-    parseGitHubRefRoomId("git-room:github.com:brosincode/letagents:branch:not/canonical"),
+    parseGitHubRefRoomLocator("github.com/brosincode/letagents/focus/git:branch:not/canonical"),
     null
   );
   assert.equal(
-    parseGitHubRefRoomId("git-room:github.com:brosincode/letagents:branch:%%%"),
+    parseGitHubRefRoomLocator("github.com/brosincode/letagents/focus/git:branch:%%%"),
     null
   );
 });
@@ -160,7 +161,6 @@ test("webhook ref routing does not create missing branch rooms", async () => {
 
   assert.equal(result, null);
   assert.deepEqual(childLookups, [{
-    roomId: WEBHOOK_BRANCH_ROOM_ID,
     parentRoomId: REPO_ROOM_ID,
     focusKey: WEBHOOK_BRANCH_FOCUS_KEY,
   }]);

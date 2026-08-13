@@ -3,9 +3,9 @@ import { test } from "node:test";
 
 import { friendlyRoomLabel } from "../src/domain/git-rooms";
 
-test("friendlyRoomLabel decodes git-room branch identifiers to repo · branch", () => {
+test("friendlyRoomLabel decodes contextual branch locators to repo · branch", () => {
   assert.equal(
-    friendlyRoomLabel("git-room:github.com:brosincode/letagents:branch:c3RhZ2luZw"),
+    friendlyRoomLabel("github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw"),
     "letagents · staging"
   );
 });
@@ -18,7 +18,7 @@ test("friendlyRoomLabel decodes base64url refs with url-safe characters", () => 
     .replace(/\//g, "_")
     .replace(/=+$/g, "");
   assert.equal(
-    friendlyRoomLabel(`git-room:github.com:brosincode/letagents:branch:${encoded}`),
+    friendlyRoomLabel(`github.com/brosincode/letagents/focus/git:branch:${encoded}`),
     "letagents · codex/premium-sidebar-ui"
   );
 });
@@ -30,7 +30,7 @@ test("friendlyRoomLabel passes friendly names through untouched", () => {
 
 test("friendlyRoomLabel leaves identifiers with undecodable refs untouched", () => {
   assert.equal(
-    friendlyRoomLabel("git-room:github.com:brosincode/letagents:branch:!!!!"),
-    "git-room:github.com:brosincode/letagents:branch:!!!!"
+    friendlyRoomLabel("github.com/brosincode/letagents/focus/git:branch:!!!!"),
+    "github.com/brosincode/letagents/focus/git:branch:!!!!"
   );
 });

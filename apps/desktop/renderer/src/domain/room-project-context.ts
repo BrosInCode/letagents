@@ -34,14 +34,16 @@ export function roomWithInheritedProjectContext(
  * two references to the same repo compare equal regardless of the checked-out
  * ref or worktree. A branch/ref/tag-scoped git-room identifier keeps only its
  * repository portion:
- *   git-room:github.com:owner/repo:branch:<ref>  ->  github.com/owner/repo
+ *   github.com/owner/repo/focus/git:branch:<ref> -> github.com/owner/repo
  *   git-room:local:<id>:branch:<ref>             ->  local/<id>
  * A base identifier (github.com/owner/repo) passes through normalized.
  */
 export function canonicalRepoIdentity(value: string | null | undefined): string | null {
   const normalized = normalizeRoomIdentifier(value);
   if (!normalized) return null;
-  const gitRoom = /^git-room:([^:\s]+):(.+?)(?::(?:branch|ref|tag):[a-z0-9_-]+)?$/.exec(normalized);
+  const focusParent = normalized.match(/^(.+)\/focus\/[^/]+$/)?.[1];
+  if (focusParent) return focusParent;
+  const gitRoom = /^git-room:(local):(.+?)(?::(?:branch|ref|tag):[a-z0-9_-]+)?$/.exec(normalized);
   if (gitRoom) return `${gitRoom[1]}/${gitRoom[2]}`;
   return normalized;
 }

@@ -4,7 +4,7 @@ import test from "node:test";
 import { mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
-import { canonicalJoinedRoomIdentifier, roomInfoCacheKeys } from "../main/rooms/room-info.js";
+import { canonicalJoinedRoomIdentifier, roomInfoCacheKey, roomInfoCacheKeys } from "../main/rooms/room-info.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
 
 const emptySnapshotData: RoomSnapshotData = {
@@ -39,6 +39,17 @@ test("focus-room snapshot loading follows the canonical joined room id without c
     "focus_37",
     "github.com/owner/project/focus/focus_37",
   ]);
+});
+
+test("joined-room cache preserves case-sensitive focus locator keys", () => {
+  assert.notEqual(
+    roomInfoCacheKey("github.com/Owner/Repo/focus/git:branch:YWFh"),
+    roomInfoCacheKey("github.com/owner/repo/focus/git:branch:YWFH"),
+  );
+  assert.equal(
+    roomInfoCacheKey("github.com/Owner/Repo/focus/git:branch:YWFh"),
+    "github.com/owner/repo/focus/git:branch:YWFh",
+  );
 });
 
 test("mapDesktopGitRoomPayload accepts locally persisted desktop Git metadata", () => {

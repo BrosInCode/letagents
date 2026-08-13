@@ -16,6 +16,7 @@ import { sendAppPage } from "../web/index.js";
 
 export interface RoomEntryRouteDeps {
   getProjectById(roomId: string): Promise<Project | null | undefined>;
+  resolveExistingRoomRequest(roomId: string): Promise<Project | null | undefined>;
   getGitRoomBindingForRoom?(roomId: string): Promise<GitRoomBinding | null>;
   isRepoBackedRoomId(roomId: string): boolean;
   resolveGitHubRoomEntryDecision(input: {
@@ -58,25 +59,26 @@ async function resolveRoomGitSummary(
 
 export async function buildApiRoomResolvePayload(
   identifier: string,
-  deps: Pick<RoomEntryRouteDeps, "getProjectById" | "getGitRoomBindingForRoom">
+  deps: Pick<RoomEntryRouteDeps, "resolveExistingRoomRequest" | "getGitRoomBindingForRoom">
 ): Promise<Record<string, unknown>> {
   const resolved = resolveRoomIdentifier(identifier);
   if (resolved.type === "invite") {
     return resolved;
   }
 
-  const project = await deps.getProjectById(resolved.name);
+  const project = await deps.resolveExistingRoomRequest(resolved.name);
   const canonicalRoomId = project?.id ?? resolved.name;
   return {
     ...resolved,
     canonical_room_id: canonicalRoomId,
+    room_exists: Boolean(project),
     git_room: await resolveRoomGitSummary(canonicalRoomId, deps),
   };
 }
 
 export async function buildPublicRoomResolvePayload(
   identifier: string,
-  deps: Pick<RoomEntryRouteDeps, "getProjectById" | "getGitRoomBindingForRoom">
+  deps: Pick<RoomEntryRouteDeps, "resolveExistingRoomRequest" | "getGitRoomBindingForRoom">
 ): Promise<Record<string, unknown>> {
   const normalized = normalizeRoomId(identifier);
   const resolved = resolveRoomIdentifier(normalized);
@@ -84,13 +86,14 @@ export async function buildPublicRoomResolvePayload(
     return { input: identifier, normalized, resolved };
   }
 
-  const project = await deps.getProjectById(resolved.name);
+  const project = await deps.resolveExistingRoomRequest(resolved.name);
   const canonicalRoomId = project?.id ?? resolved.name;
   return {
     input: identifier,
     normalized,
     resolved,
     canonical_room_id: canonicalRoomId,
+    room_exists: Boolean(project),
     git_room: await resolveRoomGitSummary(canonicalRoomId, deps),
   };
 }
@@ -121,7 +124,7 @@ export function registerRoomEntryRoutes(
     const resolved = resolveRoomIdentifier(roomIdentifier);
 
     if (resolved.type === "room") {
-      const project = await deps.getProjectById(resolved.name);
+      const project = await deps.resolveExistingRoomRequest(resolved.name);
       const canonicalRoomId = project?.id ?? resolved.name;
       const redirectTo = buildRoomEntryPath(canonicalRoomId, req.originalUrl);
 

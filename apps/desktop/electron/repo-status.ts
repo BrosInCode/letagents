@@ -738,7 +738,7 @@ export function buildGitHubBranchRoomIdentifier(
   const repositoryFullName = githubRepositoryFullNameFromRoom(repoRoom);
   const refName = branchName?.trim();
   if (!repositoryFullName || !refName) return null;
-  return `git-room:github.com:${repositoryFullName.toLowerCase()}:branch:${encodeRefForRoomId(refName)}`;
+  return `github.com/${repositoryFullName.toLowerCase()}/focus/git:branch:${encodeRefForRoomId(refName)}`;
 }
 
 export function activeGitHubRoomIdentifier(input: {

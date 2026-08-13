@@ -84,8 +84,11 @@ export function normalizeRoomName(name: string): string {
   const provider = parts[0]?.toLowerCase();
 
   if (provider && CASE_INSENSITIVE_PROVIDERS.has(provider)) {
-    // Lowercase everything for case-insensitive providers
-    normalized = normalized.toLowerCase();
+    // Repository coordinates are case-insensitive, but a parent-scoped focus
+    // key is opaque and may contain case-sensitive encoded data.
+    normalized = parts.length > 4 && parts[3]?.toLowerCase() === "focus"
+      ? [...parts.slice(0, 3).map((part) => part.toLowerCase()), "focus", ...parts.slice(4)].join("/")
+      : normalized.toLowerCase();
   } else if (provider && KNOWN_PROVIDERS.has(provider)) {
     // Normalize provider hostname only, preserve rest
     parts[0] = provider;
@@ -109,6 +112,31 @@ export function normalizeRoomId(identifier: string): string {
     return trimmed.toUpperCase();
   }
   return normalizeRoomName(trimmed);
+}
+
+export function parseFocusRoomLocator(
+  roomLocator: string
+): { parentRoomId: string; focusKey: string } | null {
+  const marker = "/focus/";
+  const index = roomLocator.lastIndexOf(marker);
+  if (index < 0) {
+    return null;
+  }
+
+  const parentRoomId = roomLocator.slice(0, index);
+  const focusKey = roomLocator.slice(index + marker.length);
+  if (!parentRoomId || !focusKey || focusKey.includes("/")) {
+    return null;
+  }
+
+  return { parentRoomId, focusKey };
+}
+
+export function isReservedMainRoomCreationId(roomId: string): boolean {
+  const normalized = roomId.trim();
+  return /^focus_\d+$/.test(normalized)
+    || /^git-room:github\.com:/i.test(normalized)
+    || /(?:^|\/)focus\//i.test(normalized);
 }
 
 /**

@@ -593,15 +593,21 @@ test("worker bearer startup binds its configured room locally for omitted-room t
   const originalStatePath = process.env.LETAGENTS_STATE_PATH;
   const tempDir = mkdtempSync(join(tmpdir(), "letagents-worker-bearer-"));
   const requests: string[] = [];
+  const locator = "github.com/brosincode/letagents/focus/git:branch:Y29kZXgvY2Fub25pY2Fs";
   try {
-    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: "room_autobind" }));
+    writeFileSync(join(tempDir, ".letagents.json"), JSON.stringify({ room: locator }));
     process.env.LETAGENTS_STATE_PATH = join(tempDir, "state.json");
     process.chdir(tempDir);
     await withAuthEnv({ bearer: "worker-secret", owner: undefined }, async () => {
       globalThis.fetch = async (url) => {
         const requestUrl = String(url);
         requests.push(requestUrl);
-        assert.doesNotMatch(requestUrl, /\/(?:join|projects)(?:\/|$)/, "worker auto-bind must not join or create");
+        if (requestUrl.endsWith(`/rooms/resolve/${encodeURIComponent(locator)}`)) {
+          return new Response(JSON.stringify({
+            canonical_room_id: "focus_37",
+            room_exists: true,
+          }), { status: 200 });
+        }
         if (requestUrl.includes("room_outside_scope")) {
           return new Response(JSON.stringify({ error: "worker bearer room scope mismatch" }), { status: 403 });
         }
@@ -628,11 +634,13 @@ test("worker bearer startup binds its configured room locally for omitted-room t
         (error: unknown) => error instanceof ApiError && error.status === 403,
       );
     });
-    assert.ok(requests.some((url) => url.includes("/rooms/room_autobind/messages")));
+    assert.ok(requests.some((url) => url.includes("/rooms/focus_37/messages")));
+    assert.ok(requests.some((url) => url.endsWith(`/rooms/resolve/${encodeURIComponent(locator)}`)));
+    assert.ok(!requests.some((url) => url.includes("/join?create=false")));
     // No-cursor wait autobinds to the configured room and reads its bounded
     // recent tail (before=/limit=), not the long-poll endpoint.
     assert.ok(requests.some((url) =>
-      url.includes("/rooms/room_autobind/messages?") && url.includes("before=") && url.includes("limit=")
+      url.includes("/rooms/focus_37/messages?") && url.includes("before=") && url.includes("limit=")
     ));
   } finally {
     globalThis.fetch = originalFetch;
