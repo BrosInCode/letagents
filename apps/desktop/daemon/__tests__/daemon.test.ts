@@ -1090,6 +1090,103 @@ test("daemon is visibly gated to macOS", () => {
   assert.throws(() => assertMacOS("linux"), /macOS only/);
 });
 
+test("shutdown_if_idle retires a daemon whose manifest has no active execution", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  let handedOff = false;
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", {
+      entry: { ...entry, desired_state: "stopped", observed_state: "stopped" },
+    });
+    const completion = daemon.waitForHandoff().then(() => { handedOff = true; });
+    const response = await daemonRequest(paths.socketPath, "daemon.shutdown_if_idle");
+    assert.equal(response.ok, true);
+    assert.deepEqual(
+      response.result,
+      { outcome: "shutting_down", generation: 1 },
+    );
+    await within(completion, "idle daemon shutdown", 1_000);
+  } finally {
+    if (!handedOff) await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("shutdown_if_idle preserves daemon authority and reports active agents", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin");
+  try {
+    await daemon.start();
+    await daemonRequest(paths.socketPath, "manifest.put", { entry });
+    const response = await daemonRequest(paths.socketPath, "daemon.shutdown_if_idle");
+    assert.equal(response.ok, true);
+    assert.deepEqual(response.result, {
+      outcome: "active",
+      active_agents: [{
+        id: entry.id,
+        display_name: entry.display_name,
+        desired_state: entry.desired_state,
+        observed_state: entry.observed_state,
+      }],
+      generation: 1,
+    });
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.status")).ok, true);
+  } finally {
+    await daemon.stop();
+    await env.cleanup();
+  }
+});
+
+test("shutdown_if_idle fences a mutating request paused before the idle decision", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  let mutationEntered!: () => void;
+  const entered = new Promise<void>((resolve) => { mutationEntered = resolve; });
+  let releaseMutation!: () => void;
+  const gate = new Promise<void>((resolve) => { releaseMutation = resolve; });
+  const daemon = new SupervisorDaemon(
+    paths,
+    "darwin",
+    undefined,
+    false,
+    15_000,
+    async (request) => {
+      if (request.method !== "manifest.put") return;
+      mutationEntered();
+      await gate;
+    },
+  );
+  let handedOff = false;
+  try {
+    await daemon.start();
+    const delayedMutation = daemonRequest(paths.socketPath, "manifest.put", { entry });
+    await entered;
+    const completion = daemon.waitForHandoff().then(() => { handedOff = true; });
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.shutdown_if_idle")).ok, true);
+    releaseMutation();
+    const rejected = await delayedMutation;
+    assert.equal(rejected.ok, false);
+    assert.match(rejected.error || "", /handoff has fenced new daemon mutations/i);
+    await within(completion, "idle decision mutation fence", 1_000);
+  } finally {
+    releaseMutation?.();
+    if (!handedOff) await daemon.stop();
+    await env.cleanup();
+  }
+});
+
 test("failed room waits remain retryable for one healthy provider execution", async () => {
   const env = await fixture();
   const paths = {

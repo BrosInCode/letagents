@@ -151,6 +151,129 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
   }
 });
 
+test("desktop quit retires an idle daemon without spawning a replacement", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let daemonAlive = true;
+  let spawns = 0;
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    24,
+    () => {
+      daemonAlive = false;
+      void closeServer(server, env.socketPath);
+    },
+  );
+  server = wire.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      inspectDaemonProcess: () => daemonAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 100,
+      spawnDaemon: () => { spawns += 1; return fakeChild(); },
+    });
+    assert.deepEqual(await client.prepareForDesktopQuitIfIdle(), { outcome: "shutting_down" });
+    assert.equal(spawns, 0);
+    assert.deepEqual(wire.requests.map((request) => request.method).slice(0, 2), [
+      "daemon.negotiate",
+      "daemon.shutdown_if_idle",
+    ]);
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("desktop quit reports active daemon agents without disturbing them", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 25);
+  wire.entries.push({
+    id: "agent_active",
+    display_name: "Oak",
+    desired_state: "running",
+    observed_state: "working",
+  });
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      inspectDaemonProcess: () => fakeDaemonProcessIdentity(),
+    });
+    assert.deepEqual(await client.prepareForDesktopQuitIfIdle(), {
+      outcome: "active",
+      activeAgents: [{
+        id: "agent_active",
+        displayName: "Oak",
+        desiredState: "running",
+        observedState: "working",
+      }],
+    });
+    assert.equal(wire.server.listening, true);
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("stop-and-quit stops exact active agents before retiring the daemon", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let daemonAlive = true;
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    26,
+    () => {
+      daemonAlive = false;
+      void closeServer(server, env.socketPath);
+    },
+  );
+  server = wire.server;
+  wire.entries.push({
+    id: "agent_active",
+    display_name: "Oak",
+    desired_state: "running",
+    observed_state: "working",
+  });
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      inspectDaemonProcess: () => daemonAlive ? fakeDaemonProcessIdentity() : null,
+      handoffTimeoutMs: 100,
+      quitAgentStopPollMs: 1,
+      quitAgentStopTimeoutMs: 1_000,
+    });
+    const first = await client.prepareForDesktopQuitIfIdle();
+    assert.equal(first.outcome, "active");
+    if (first.outcome !== "active") assert.fail("expected active agents");
+    assert.deepEqual(await client.stopAgentsAndPrepareForDesktopQuit(first.activeAgents), {
+      outcome: "shutting_down",
+    });
+    assert.deepEqual(
+      wire.requests.filter((request) => request.method === "manifest.set_desired_state").map((request) => request.params),
+      [{ id: "agent_active", desired_state: "stopped" }],
+    );
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("state-watch retry delay backs off exponentially and remains bounded", () => {
   assert.equal(supervisorStateWatchRetryDelay(1), 1_000);
   assert.equal(supervisorStateWatchRetryDelay(2), 2_000);
@@ -191,6 +314,25 @@ async function startWireDaemon(
         result = { accepted: true };
         handoffPrepared = true;
         setTimeout(() => onPrepare?.(), 5);
+      } else if (request.method === "daemon.shutdown_if_idle") {
+        const active = entries.filter((entry) => entry.desired_state === "running"
+          || !["paused", "stopped"].includes(entry.observed_state));
+        result = active.length > 0
+          ? {
+            outcome: "active",
+            active_agents: active.map((entry) => ({
+              id: entry.id,
+              display_name: entry.display_name,
+              desired_state: entry.desired_state,
+              observed_state: entry.observed_state,
+            })),
+            generation,
+          }
+          : { outcome: "shutting_down", generation };
+        if (active.length === 0) {
+          handoffPrepared = true;
+          setTimeout(() => onPrepare?.(), 5);
+        }
       } else if (request.method === "manifest.list") {
         result = entries;
         responseDelayMs = manifestListDelayMs;
@@ -204,6 +346,7 @@ async function startWireDaemon(
       } else if (request.method === "manifest.set_desired_state") {
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
         entry.desired_state = request.params!.desired_state;
+        if (entry.desired_state === "stopped") entry.observed_state = "stopped";
         result = entry;
       } else if (request.method === "manifest.compare_and_set_desired_state") {
         const entry = entries.find((candidate) => candidate.id === request.params!.id)!;
@@ -1275,7 +1418,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.101");
+    assert.equal(status.implementationVersion, "2.0.102");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

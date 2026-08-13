@@ -11,6 +11,7 @@ const expectedControlMethods = [
   "attempt.read",
   "daemon.negotiate",
   "daemon.prepare_handoff",
+  "daemon.shutdown_if_idle",
   "daemon.status",
   "lane.activate_legacy",
   "lane.release_legacy",

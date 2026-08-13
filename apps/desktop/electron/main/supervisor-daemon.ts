@@ -28,7 +28,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.101";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.102";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -61,6 +61,8 @@ const STATE_WATCH_RETRY_MAX_MS = 30_000;
  * a daemon that answers an ended feed immediately.
  */
 const AGENT_STREAM_REOPEN_POLL_MS = 1_000;
+const DESKTOP_QUIT_AGENT_STOP_TIMEOUT_MS = 30_000;
+const DESKTOP_QUIT_AGENT_STOP_POLL_MS = 100;
 const activityEmitter = new EventEmitter();
 const stateEmitter = new EventEmitter();
 const agentStreamEmitter = new EventEmitter();
@@ -163,6 +165,18 @@ type WireEntry = {
     timeline?: Array<{ phase: string; observed_at: string; detail: string | null }>;
   }>;
 };
+
+export type DesktopSupervisorQuitAgent = {
+  id: string;
+  displayName: string;
+  desiredState: DesktopSupervisorDesiredState;
+  observedState: DesktopSupervisorManifestEntry["observedState"];
+};
+
+export type DesktopSupervisorQuitPreparation =
+  | { outcome: "no_daemon" }
+  | { outcome: "active"; activeAgents: DesktopSupervisorQuitAgent[] }
+  | { outcome: "shutting_down" };
 type WireActivityEvent = {
   observed_at: string;
   sequence: number;
@@ -264,6 +278,8 @@ export interface SupervisorDaemonLifecycleOptions {
   startTimeoutMs?: number;
   requestTimeoutMs?: number;
   turnControlRequestTimeoutMs?: number;
+  quitAgentStopTimeoutMs?: number;
+  quitAgentStopPollMs?: number;
   now?: () => Date;
 }
 
@@ -302,6 +318,8 @@ export class SupervisorDaemonClient {
   private readonly startTimeoutMs: number;
   private readonly requestTimeoutMs: number;
   private readonly turnControlRequestTimeoutMs: number;
+  private readonly quitAgentStopTimeoutMs: number;
+  private readonly quitAgentStopPollMs: number;
   private readonly now: () => Date;
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
@@ -326,6 +344,8 @@ export class SupervisorDaemonClient {
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
+    this.quitAgentStopTimeoutMs = options.quitAgentStopTimeoutMs ?? DESKTOP_QUIT_AGENT_STOP_TIMEOUT_MS;
+    this.quitAgentStopPollMs = options.quitAgentStopPollMs ?? DESKTOP_QUIT_AGENT_STOP_POLL_MS;
     this.now = options.now ?? (() => new Date());
     this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
       const child = spawn(process.execPath, [scriptPath], {
@@ -414,6 +434,81 @@ export class SupervisorDaemonClient {
     } catch (error) {
       if (isConnectionUnavailable(error)) return null;
       throw error;
+    }
+  }
+
+  /**
+   * Ask the currently-serving daemon to retire only if no agent execution
+   * requires it. This path never starts a daemon merely because the app is
+   * quitting. An acknowledged shutdown is followed by the same exact-PID,
+   * socket-release enforcement used for application updates.
+   */
+  async prepareForDesktopQuitIfIdle(): Promise<DesktopSupervisorQuitPreparation> {
+    if (process.platform !== "darwin" && process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON !== "1") {
+      return { outcome: "no_daemon" };
+    }
+    if (this.ensureOperation) {
+      try {
+        await this.ensureOperation;
+      } catch (error) {
+        if (isConnectionUnavailable(error)) return { outcome: "no_daemon" };
+        throw error;
+      }
+    }
+    let negotiated: Record<string, unknown>;
+    try {
+      negotiated = await this.request<Record<string, unknown>>(
+        "daemon.negotiate",
+        undefined,
+        SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      );
+    } catch (error) {
+      if (isConnectionUnavailable(error)) return { outcome: "no_daemon" };
+      throw error;
+    }
+    const status = mapStatus(negotiated);
+    if (status.protocolVersion !== SUPERVISOR_DAEMON_PROTOCOL_VERSION
+      || status.implementationVersion !== SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION) {
+      throw new Error("The running supervisor daemon does not support safe application quit. Reopen LetAgents and try again.");
+    }
+    const retired = this.captureRetiredDaemon(negotiated);
+    const response = mapDesktopQuitPreparation(await this.request<Record<string, unknown>>(
+      "daemon.shutdown_if_idle",
+      undefined,
+      status.protocolVersion,
+      RECOVERY_REQUEST_TIMEOUT_MS,
+    ));
+    if (response.outcome === "active") return response;
+    await this.enforceRetiredDaemonExit(retired, status.protocolVersion, status.implementationVersion);
+    return { outcome: "shutting_down" };
+  }
+
+  /** Stop every agent reported by the atomic idle gate, then retry that gate. */
+  async stopAgentsAndPrepareForDesktopQuit(
+    initialAgents: readonly DesktopSupervisorQuitAgent[],
+  ): Promise<Exclude<DesktopSupervisorQuitPreparation, { outcome: "active" }>> {
+    const deadline = Date.now() + this.quitAgentStopTimeoutMs;
+    const stopRequested = new Set<string>();
+    let activeAgents = [...initialAgents];
+    while (true) {
+      for (const agent of activeAgents) {
+        if (stopRequested.has(agent.id)) continue;
+        await this.request<WireEntry>("manifest.set_desired_state", {
+          id: agent.id,
+          desired_state: "stopped",
+        }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, Math.min(
+          RECOVERY_REQUEST_TIMEOUT_MS,
+          Math.max(1, deadline - Date.now()),
+        ));
+        stopRequested.add(agent.id);
+      }
+      if (Date.now() >= deadline) {
+        throw new Error("Timed out waiting for supervised agents to stop. LetAgents is still open.");
+      }
+      await delay(this.quitAgentStopPollMs);
+      const preparation = await this.prepareForDesktopQuitIfIdle();
+      if (preparation.outcome !== "active") return preparation;
+      activeAgents = preparation.activeAgents;
     }
   }
 
@@ -1363,6 +1458,28 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
   };
+}
+
+function mapDesktopQuitPreparation(value: Record<string, unknown>): Exclude<DesktopSupervisorQuitPreparation, { outcome: "no_daemon" }> {
+  if (value.outcome === "shutting_down") return { outcome: "shutting_down" };
+  if (value.outcome !== "active" || !Array.isArray(value.active_agents) || value.active_agents.length > 10_000) {
+    throw new Error("Supervisor returned an invalid application-quit response.");
+  }
+  const activeAgents = value.active_agents.map((candidate): DesktopSupervisorQuitAgent => {
+    const row = record(candidate);
+    const id = nonEmptyString(row?.id);
+    const displayName = nonEmptyString(row?.display_name);
+    const desiredState = enumValue(row?.desired_state, ["running", "paused", "stopped"] as const);
+    const observedState = enumValue(row?.observed_state, [
+      "absent", "starting", "idle", "working", "checkpointing", "pausing", "paused",
+      "recovering", "stopping", "stopped", "failed",
+    ] as const);
+    if (!id || !displayName || !desiredState || !observedState) {
+      throw new Error("Supervisor returned an invalid active-agent quit response.");
+    }
+    return { id, displayName, desiredState, observedState };
+  });
+  return { outcome: "active", activeAgents };
 }
 
 function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, daemonGeneration: number): import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration {
