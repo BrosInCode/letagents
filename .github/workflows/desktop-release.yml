@@ -7,7 +7,8 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: desktop-release-${{ github.ref }}
+  # Serialize releases so an older tag cannot publish after a newer release.
+  group: desktop-release
   cancel-in-progress: false
 
 jobs:
@@ -241,6 +242,7 @@ jobs:
               exit 1
             fi
           done
+
           if [[ ! "${R2_ACCOUNT_ID}" =~ ^[0-9a-f]{32}$ ]]; then
             echo "R2_ACCOUNT_ID must be the 32-character Cloudflare account identifier." >&2
             exit 1
@@ -253,6 +255,18 @@ jobs:
           echo "R2_ENDPOINT_URL=https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" >> "${GITHUB_ENV}"
           echo "R2_BUCKET_NAME=${R2_BUCKET_NAME}" >> "${GITHUB_ENV}"
           echo "R2_PUBLIC_BASE_URL=${R2_PUBLIC_BASE_URL}" >> "${GITHUB_ENV}"
+
+      - name: Create public website release manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          node apps/desktop/electron/scripts/public-release-manifest.mjs \
+            "${DESKTOP_VERSION}" \
+            "${R2_PUBLIC_BASE_URL}" \
+            release-artifacts \
+            release-artifacts/release.json \
+            release-artifacts/checksums.txt
+          node -e 'const manifest = require("./release-artifacts/release.json"); if (manifest.version !== process.env.DESKTOP_VERSION) process.exit(1)'
 
       - name: Publish immutable versioned artifacts to R2
         shell: bash
@@ -302,6 +316,7 @@ jobs:
               *.blockmap) content_type="application/octet-stream" ;;
               *.json) content_type="application/json" ;;
               *.yml) content_type="application/yaml" ;;
+              *.txt) content_type="text/plain" ;;
               *.sha256) content_type="text/plain" ;;
               *) content_type="application/octet-stream" ;;
             esac
@@ -312,6 +327,26 @@ jobs:
               --metadata "sha256=${local_sha256}" \
               --no-progress
           done
+
+      - name: Validate mutable release monotonicity
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          # AWS CLI pagination is intentionally enabled. Any authorization or
+          # network failure aborts instead of being mistaken for an empty bucket.
+          aws s3api list-objects-v2 \
+            --endpoint-url "${R2_ENDPOINT_URL}" \
+            --bucket "${R2_BUCKET_NAME}" \
+            --prefix "desktop/v" \
+            --output json > published-desktop-objects.json
+          node apps/desktop/electron/scripts/release-monotonicity.mjs \
+            "${DESKTOP_VERSION}" \
+            published-desktop-objects.json
 
       - name: Publish immutable versioned release
         shell: bash
@@ -392,3 +427,38 @@ jobs:
               echo "Published ${R2_PUBLIC_BASE_URL}/${feed_key}."
             done
           done
+
+      - name: Advance public website release pointer
+        shell: bash
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          AWS_EC2_METADATA_DISABLED: "true"
+        run: |
+          set -euo pipefail
+          manifest_path="release-artifacts/release.json"
+          current_key="desktop/current.json"
+          if [[ ! -s "${manifest_path}" ]]; then
+            echo "Missing verified website release manifest ${manifest_path}." >&2
+            exit 1
+          fi
+
+          manifest_sha256=$(sha256sum "${manifest_path}" | awk '{print $1}')
+          aws s3 cp "${manifest_path}" "s3://${R2_BUCKET_NAME}/${current_key}" \
+            --endpoint-url "${R2_ENDPOINT_URL}" \
+            --cache-control "public,max-age=60,must-revalidate" \
+            --content-type "application/json" \
+            --metadata "sha256=${manifest_sha256}" \
+            --no-progress
+          remote_sha256=$(aws s3api head-object \
+            --endpoint-url "${R2_ENDPOINT_URL}" \
+            --bucket "${R2_BUCKET_NAME}" \
+            --key "${current_key}" \
+            --query 'Metadata.sha256' \
+            --output text)
+          if [[ "${remote_sha256}" != "${manifest_sha256}" ]]; then
+            echo "R2 website release pointer verification failed." >&2
+            exit 1
+          fi
+          echo "Published ${R2_PUBLIC_BASE_URL}/${current_key}."

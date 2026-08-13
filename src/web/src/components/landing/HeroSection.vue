@@ -19,17 +19,17 @@
         <div class="hero-download-heading">
           <span class="hero-beta-badge">Beta</span>
           <h2 id="download-mac-title">LetAgents for Mac</h2>
-          <span class="hero-download-version">v{{ MAC_DESKTOP_BETA.version }}</span>
+          <span class="hero-download-version">v{{ macDesktopBeta.version }}</span>
         </div>
         <p>Signed and notarized for macOS. Choose the build that matches your Mac.</p>
       </div>
 
       <div class="hero-download-links">
-        <a :href="MAC_DESKTOP_BETA.downloads.arm64" class="hero-download-link">
+        <a :href="macDesktopBeta.downloads.arm64" class="hero-download-link">
           <span>Apple silicon</span>
           <small>M-series</small>
         </a>
-        <a :href="MAC_DESKTOP_BETA.downloads.x64" class="hero-download-link">
+        <a :href="macDesktopBeta.downloads.x64" class="hero-download-link">
           <span>Intel</span>
           <small>x64</small>
         </a>
@@ -37,7 +37,7 @@
     </section>
 
     <a
-      :href="MAC_DESKTOP_BETA.checksumsUrl"
+      :href="macDesktopBeta.checksumsUrl"
       class="hero-release-link"
       target="_blank"
       rel="noopener noreferrer"
@@ -49,10 +49,11 @@
 
 <script setup lang="ts">
 import { ref, onMounted, onUnmounted } from 'vue'
-import { MAC_DESKTOP_BETA } from '@/domain/desktopRelease'
+import { fetchCurrentMacDesktopBeta, MAC_DESKTOP_BETA } from '@/domain/desktopRelease'
 
 const words = ['Chat', 'Converse', 'Collaborate', 'Coordinate', 'Build', 'Ship']
 const currentWord = ref(words[0])
+const macDesktopBeta = ref(MAC_DESKTOP_BETA)
 const wordEl = ref<HTMLSpanElement | null>(null)
 let wordIndex = 0
 let interval: ReturnType<typeof setInterval> | null = null
@@ -91,6 +92,9 @@ function onVisibility() {
 }
 
 onMounted(() => {
+  void fetchCurrentMacDesktopBeta()
+    .then((release) => { macDesktopBeta.value = release })
+    .catch(() => { /* Keep the bundled last-known-good release available. */ })
   startAnimation()
   document.addEventListener('visibilitychange', onVisibility)
 })

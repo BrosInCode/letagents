@@ -80,12 +80,31 @@ test("release workflow builds, attests, and publishes independent public R2 feed
   assert.match(workflow, /R2_ACCESS_KEY_ID: \$\{\{ secrets\.R2_ACCESS_KEY_ID \}\}/);
   assert.match(workflow, /R2_SECRET_ACCESS_KEY: \$\{\{ secrets\.R2_SECRET_ACCESS_KEY \}\}/);
   assert.match(workflow, /desktop\/v\$\{DESKTOP_VERSION\}/);
+  assert.match(workflow, /public-release-manifest\.mjs/);
+  assert.match(workflow, /current_key="desktop\/current\.json"/);
   assert.match(workflow, /feed_key="desktop\/feeds\/\$\{arch\}\/\$\{public_name\}"/);
   assert.match(workflow, /RELEASES-\$\{arch\}\.json\|RELEASES\.json\|application\/json/);
   assert.match(workflow, /latest-mac-\$\{arch\}\.yml\|latest-mac\.yml\|application\/yaml/);
   assert.match(workflow, /\*\.blockmap\) content_type="application\/octet-stream"/);
+  assert.match(workflow, /\*\.txt\) content_type="text\/plain"/);
   assert.match(workflow, /public,max-age=31536000,immutable/);
   assert.match(workflow, /public,max-age=60,must-revalidate/);
+  assert.ok(
+    workflow.indexOf("Advance public website release pointer")
+      > workflow.indexOf("Advance public architecture-specific update feeds"),
+    "the website pointer must advance only after both architecture update feeds",
+  );
+  assert.ok(
+    workflow.indexOf("Validate mutable release monotonicity")
+      < workflow.indexOf("Publish immutable versioned release"),
+    "the downgrade guard must run before GitHub or updater feed publication",
+  );
+  const monotonicityGuard = await readFile(
+    new URL("./release-monotonicity.mjs", import.meta.url),
+    "utf8",
+  );
+  assert.match(monotonicityGuard, /Refusing to publish mutable channels/);
+  assert.doesNotMatch(workflow, /if aws s3api head-object/);
   assert.match(workflow, /Immutable R2 object/);
   assert.match(workflow, /RELEASES-\$\{arch\}\.json/);
   assert.match(workflow, /GITHUB_REF_NAME}" --draft=false --prerelease --latest=false/);
