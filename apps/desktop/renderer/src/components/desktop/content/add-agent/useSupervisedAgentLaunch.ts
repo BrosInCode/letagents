@@ -315,6 +315,28 @@ export function useSupervisedAgentLaunch(options: {
       options.onCopyAuthCommand(command);
       return;
     }
+    if (action === "open_keychain") {
+      recoveryPending.value = true;
+      try {
+        await desktopIpc.app.openCredentialStorage();
+        options.onMessage(
+          "Unlock the login keychain in Keychain Access, then return here and choose Try again.",
+          "status",
+        );
+      } catch (error) {
+        options.onMessage(
+          contextualAddAgentError(
+            "Keychain Access could not be opened",
+            error,
+            "Open Keychain Access from Spotlight, unlock the login keychain, then try again.",
+          ),
+          "error",
+        );
+      } finally {
+        recoveryPending.value = false;
+      }
+      return;
+    }
     if (activeLaunchId.value) creationRequestId.value = activeLaunchId.value;
     recoveryPending.value = true;
     try {
