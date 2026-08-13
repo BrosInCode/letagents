@@ -33,8 +33,8 @@
     },
     {
       "name": "nanoid",
-      "version": "3.3.17",
-      "reason": "Exact patched release required to remediate GHSA-2v37-7h3g-55p8 (pinned via src/web overrides over vite/postcss) before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-10 when the cooldown is naturally satisfied."
+      "version": "3.3.18",
+      "reason": "Exact patched release required to remediate the updated affected range for GHSA-2v37-7h3g-55p8 across web and desktop before the normal cooldown expires; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-08-14 when the cooldown is naturally satisfied."
     },
     {
       "name": "@typescript-eslint/parser",
