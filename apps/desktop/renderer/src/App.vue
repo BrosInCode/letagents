@@ -363,7 +363,7 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
-import { activeRepoRoomContext, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import { activeRepoRoomContext, readRepositoryRootBindings, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
 import type {
   FocusRoomConcludedEvent,
   FocusRoomConclusionInput,
@@ -443,6 +443,7 @@ const authStatus = ref<DesktopAuthStatus | null>(null);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
 const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
+const repositoryRootBindingsStorageKey = "letagents-desktop:repository-root-bindings";
 const readRoomMessagesStorageKey = "letagents-desktop:read-room-message-ids";
 const sidebarWidthStorageKey = "letagents-desktop:sidebar-width";
 const sidebarRoomOrderStorageKey = "letagents-desktop:sidebar-room-order";
@@ -456,6 +457,11 @@ const sidebarDefaultWidth = 296;
 const SIDEBAR_METADATA_REFRESH_INTERVAL_MS = 15_000;
 const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedRootRoomStorageKey));
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
+const repositoryRootBindings = ref(readRepositoryRootBindings(
+  window.localStorage,
+  repositoryRootBindingsStorageKey,
+  recentRootRooms.value,
+));
 const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, readRoomMessagesStorageKey));
 const sidebarWidth = ref(readStoredSidebarWidth());
 const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
@@ -519,6 +525,8 @@ const {
   appInfo,
   recentRootRooms,
   recentRootRoomsStorageKey,
+  repositoryRootBindings,
+  repositoryRootBindingsStorageKey,
   repoStatus,
   rootRoomSnapshot,
   selectedRootRoomIdentifier,
@@ -786,6 +794,7 @@ function activeProjectRootPath(): string | null {
       ? context.gitRoom
       : rootRoomSnapshot.value?.room?.gitRoom ?? null,
     recentRootRooms: recentRootRooms.value,
+    repositoryRootBindings: repositoryRootBindings.value,
     workspaceRepoStatus: workspaceRepoStatus.value,
   });
 }

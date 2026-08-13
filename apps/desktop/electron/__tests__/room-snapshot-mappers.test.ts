@@ -4,6 +4,7 @@ import test from "node:test";
 import { mapRoomArtifactPayload, mapRoomArtifacts, mapSnapshotData } from "../main/rooms/snapshot/mappers.js";
 import { mapDesktopGitRoomPayload } from "../main/rooms/git-room.js";
 import { readySourceStates } from "../main/rooms/snapshot/snapshots.js";
+import { canonicalJoinedRoomIdentifier, roomInfoCacheKeys } from "../main/rooms/room-info.js";
 import type { RoomSnapshotData } from "../main/rooms/snapshot/payloads.js";
 
 const emptySnapshotData: RoomSnapshotData = {
@@ -23,6 +24,22 @@ const emptySnapshotData: RoomSnapshotData = {
   githubEventsData: null,
   sourceStates: readySourceStates(),
 };
+
+test("focus-room snapshot loading follows the canonical joined room id without caching non-unique labels", () => {
+  const joined = {
+    room_id: "github.com/owner/project/focus/focus_37",
+    name: "sky-lake",
+    code: "FOCUS-37",
+  };
+  assert.equal(
+    canonicalJoinedRoomIdentifier("focus_37", joined),
+    "github.com/owner/project/focus/focus_37",
+  );
+  assert.deepEqual(roomInfoCacheKeys("focus_37", joined), [
+    "focus_37",
+    "github.com/owner/project/focus/focus_37",
+  ]);
+});
 
 test("mapDesktopGitRoomPayload accepts locally persisted desktop Git metadata", () => {
   const gitRoom = mapDesktopGitRoomPayload({
