@@ -7,11 +7,11 @@ import { MAC_DESKTOP_BETA } from '../src/domain/desktopRelease'
 
 test('Mac beta links use public immutable R2 assets', () => {
   assert.deepEqual(MAC_DESKTOP_BETA, {
-    version: '0.1.4',
-    checksumsUrl: '/downloads/mac/v0.1.4/checksums',
+    version: '0.1.5',
+    checksumsUrl: '/downloads/mac/v0.1.5/checksums',
     downloads: {
-      arm64: 'https://downloads.letagents.chat/desktop/v0.1.4/LetAgents-0.1.4-darwin-arm64.dmg',
-      x64: 'https://downloads.letagents.chat/desktop/v0.1.4/LetAgents-0.1.4-darwin-x64.dmg',
+      arm64: 'https://downloads.letagents.chat/desktop/v0.1.5/LetAgents-0.1.5-darwin-arm64.dmg',
+      x64: 'https://downloads.letagents.chat/desktop/v0.1.5/LetAgents-0.1.5-darwin-x64.dmg',
     },
   })
   assert.doesNotMatch(JSON.stringify(MAC_DESKTOP_BETA), /github\.com/)
