@@ -514,6 +514,7 @@ const emit = defineEmits<{
   "chat-scroll-position": [roomIdentifier: string, scrollTop: number];
   "choose-repo": [];
   "choose-worktree": [rootPath: string];
+  "project-root-recovery-requested": [];
   "open-repo-root": [rootPath: string];
   "add-agent-open-request-consumed": [];
   /** Placeholder until the daemon exposes a receipt retry control endpoint. */
@@ -972,6 +973,7 @@ watch(() => props.repoStatus, () => {
 
 watch(addAgentModalOpen, (open) => {
   if (open) {
+    emit("project-root-recovery-requested");
     void refreshManagedAgentSessions();
   }
 });

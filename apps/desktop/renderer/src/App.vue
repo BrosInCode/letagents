@@ -174,6 +174,7 @@
           @cycle-sidebar="cycleSidebar"
           @choose-repo="pickRepoRoomForAgent"
           @choose-worktree="openWorktreeForAgent"
+          @project-root-recovery-requested="recoverActiveProjectRootFromAgentHistory"
           @open-repo-root="openWorkspaceGitRoom"
           @add-agent-open-request-consumed="openAddAgentAfterRepoPick = false"
         />
@@ -363,7 +364,15 @@ import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
 import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vue";
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
-import { activeRepoRoomContext, readRepositoryRootBindings, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "./domain/room-project-context";
+import {
+  activeRepoRoomContext,
+  bindRepositoryRoot,
+  readRepositoryRootBindings,
+  recoverProjectRootFromAgentHistory,
+  rememberRepositoryRootBindings,
+  resolveActiveProjectRootPath,
+  roomWithInheritedProjectContext,
+} from "./domain/room-project-context";
 import type {
   FocusRoomConcludedEvent,
   FocusRoomConclusionInput,
@@ -543,6 +552,7 @@ let accountRoomsRefreshInterval: number | null = null;
 let sidebarMetadataRefreshInFlight = false;
 let repoStatusRefreshInFlight = false;
 let repoStatusWatchRootPath: string | null = null;
+let projectRootRecoveryRequestId = 0;
 let repoStatusWatchRequestId = 0;
 
 const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
@@ -797,6 +807,42 @@ function activeProjectRootPath(): string | null {
     repositoryRootBindings: repositoryRootBindings.value,
     workspaceRepoStatus: workspaceRepoStatus.value,
   });
+}
+
+async function recoverActiveProjectRootFromAgentHistory(): Promise<void> {
+  const requestId = ++projectRootRecoveryRequestId;
+  if (activeProjectRootPath() || !desktopIpc.supervisor?.listAgents) return;
+  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
+  const roomIdentifier = context?.roomIdentifier
+    ?? selectedRootRoomIdentifier.value
+    ?? rootRoomSnapshot.value?.roomIdentifier
+    ?? null;
+  const gitRoom = context?.gitRoom ?? rootRoomSnapshot.value?.room?.gitRoom ?? null;
+  if (!roomIdentifier || !gitRoom) return;
+
+  const entries = await desktopIpc.supervisor.listAgents(roomIdentifier).catch(() => null);
+  if (!entries || requestId !== projectRootRecoveryRequestId || activeProjectRootPath()) return;
+  const recovered = await recoverProjectRootFromAgentHistory({
+    roomIdentifier,
+    gitRoom,
+    entries,
+    getRepoStatus: (rootPath) => desktopIpc.repos.getStatus(rootPath).catch(() => null),
+  });
+  if (!recovered || requestId !== projectRootRecoveryRequestId || activeProjectRootPath()) return;
+
+  const nextBindings = bindRepositoryRoot(
+    repositoryRootBindings.value,
+    { identifier: roomIdentifier, gitRoom },
+    recovered.rootPath,
+  );
+  if (nextBindings === repositoryRootBindings.value) return;
+  repositoryRootBindings.value = nextBindings;
+  rememberRepositoryRootBindings(
+    window.localStorage,
+    repositoryRootBindingsStorageKey,
+    nextBindings,
+  );
+  repoStatus.value = recovered.repoStatus;
 }
 
 async function refreshWorkspaceRepoStatus(force = false): Promise<void> {
@@ -2217,6 +2263,33 @@ watch(
     void restartRepoStatusWatch(rootPath);
   },
   { immediate: true }
+);
+
+watch(
+  [
+    () => activeProjectRootPath(),
+    () => selectedRoomInfo.value.identifier,
+    () => selectedRootRoomIdentifier.value,
+    () => projectEntries.value.map((group) => [
+      group.parent.id,
+      group.parent.gitRoom?.repository.id ?? "",
+      group.parent.gitRoom?.host ?? "",
+      group.parent.gitRoom?.repository.fullName ?? "",
+    ].join(":")).join("|"),
+    () => {
+      const rootRoom = rootRoomSnapshot.value?.room;
+      return [
+        rootRoomSnapshot.value?.roomIdentifier ?? "",
+        rootRoom?.gitRoom?.repository.id ?? "",
+        rootRoom?.gitRoom?.host ?? "",
+        rootRoom?.gitRoom?.repository.fullName ?? "",
+      ].join(":");
+    },
+  ],
+  ([rootPath]) => {
+    if (!rootPath) void recoverActiveProjectRootFromAgentHistory();
+  },
+  { immediate: true },
 );
 
 watch(

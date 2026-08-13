@@ -394,7 +394,12 @@ test("local supervisor activity subscribers receive only the canonical redacted 
 });
 
 test("causal manifest projection accepts a fully valid room state and receipt timeline", () => {
-  const projected = mapEntry(wireEntryWithCausalProjection());
+  const wire = wireEntryWithCausalProjection();
+  wire.source_repo_path = "/Users/test/project";
+  wire.workspace_path = "/Users/test/.letagents/worktrees/project/private-attempt";
+  const projected = mapEntry(wire);
+  assert.equal(projected.sourceRepoPath, "/Users/test/project");
+  assert.equal(projected.workspacePath, "/Users/test/.letagents/worktrees/project/private-attempt");
   assert.equal(projected.roomAgentState?.connection.state, "connected");
   assert.equal(projected.roomAgentState?.inbox.pendingCount, 2);
   assert.deepEqual(projected.deliveryReceipts, [{
