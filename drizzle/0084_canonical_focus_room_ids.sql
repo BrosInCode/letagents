@@ -14,6 +14,17 @@ DROP CONSTRAINT "rental_activity_events_room_fk",
 ADD CONSTRAINT "rental_activity_events_room_fk"
   FOREIGN KEY ("room_id") REFERENCES "rooms"("id") ON UPDATE CASCADE;--> statement-breakpoint
 
+-- Updating rooms.id fans out through both the message hierarchy and the
+-- projected-message idempotency rows. PostgreSQL is free to visit those
+-- cascading paths in either order, so the projected row can briefly carry the
+-- new room id before its composite participant-agent parent does. Defer this
+-- cross-path check only while this migration performs the cascades; runtime
+-- writes retain the original immediate integrity contract afterward.
+ALTER TABLE "message_thread_projected_messages"
+ALTER CONSTRAINT "message_thread_projected_messages_participant_agent_fk"
+DEFERRABLE INITIALLY IMMEDIATE;--> statement-breakpoint
+SET CONSTRAINTS "message_thread_projected_messages_participant_agent_fk" DEFERRED;--> statement-breakpoint
+
 DO $$
 DECLARE
   next_focus_number integer;
@@ -91,6 +102,12 @@ BEGIN
   SET "value" = EXCLUDED."value";
 END
 $$;--> statement-breakpoint
+
+-- Validate the settled cascade before restoring the canonical runtime schema.
+SET CONSTRAINTS "message_thread_projected_messages_participant_agent_fk" IMMEDIATE;--> statement-breakpoint
+ALTER TABLE "message_thread_projected_messages"
+ALTER CONSTRAINT "message_thread_projected_messages_participant_agent_fk"
+NOT DEFERRABLE;--> statement-breakpoint
 
 ALTER TABLE "rooms"
 ADD CONSTRAINT "rooms_focus_id_check"
