@@ -37,8 +37,10 @@ export function buildSidebarRoomContextMenuItems(input: {
   isPrimaryRoom: boolean;
   hasProjectChildren: boolean;
   projectCollapsed: boolean;
+  canManageRooms?: boolean;
 }): SidebarRoomMenuItem[][] {
   const { entry } = input;
+  const canManageRooms = input.canManageRooms !== false;
   const selectable = Boolean(entry.roomIdentifier);
   const groups: SidebarRoomMenuItem[][] = [];
 
@@ -55,14 +57,15 @@ export function buildSidebarRoomContextMenuItems(input: {
   if (navigation.length) groups.push(navigation);
 
   const management: SidebarRoomMenuItem[] = [];
-  if (entry.kind === "parent" && buildRoomPinMutation(entry)) {
+  if (canManageRooms && entry.kind === "parent" && buildRoomPinMutation(entry)) {
     management.push({ id: "pin-room", label: entry.pinned ? "Unpin room" : "Pin room" });
   }
-  if (entry.kind === "parent" && selectable && entry.source !== "recent") {
+  if (canManageRooms && entry.kind === "parent" && selectable && entry.source !== "recent") {
     management.push({ id: "rename-room", label: "Rename room..." });
   }
   if (
-    entry.kind === "focus"
+    canManageRooms
+    && entry.kind === "focus"
     && entry.focusStatus !== "concluded"
     && entry.focusKey
     && entry.parentRoomIdentifier
@@ -91,10 +94,10 @@ export function buildSidebarRoomContextMenuItems(input: {
   }
 
   const destructive: SidebarRoomMenuItem[] = [];
-  if (entry.kind === "focus" && entry.focusKey && entry.parentRoomIdentifier) {
+  if (canManageRooms && entry.kind === "focus" && entry.focusKey && entry.parentRoomIdentifier) {
     destructive.push({ id: "archive-focus-room", label: "Hide focus room", danger: true });
   }
-  if (entry.kind === "parent" && selectable && !input.isPrimaryRoom) {
+  if (canManageRooms && entry.kind === "parent" && selectable && !input.isPrimaryRoom) {
     destructive.push({
       id: "archive-room",
       label: entry.source === "recent" ? "Remove from my rooms" : "Hide room",

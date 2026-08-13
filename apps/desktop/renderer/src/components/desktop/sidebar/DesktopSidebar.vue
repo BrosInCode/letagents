@@ -601,13 +601,11 @@
     </div>
     <div v-else class="sidebar-footer">
       <button
-        class="sidebar-row sidebar-settings-row"
-        :class="{ 'sidebar-update-row': updatePresentation.active }"
-        :data-active="!updatePresentation.active && (activeEntry.id === settingsEntry.id || activeEntry.type === 'system')"
+        v-if="updatePresentation.active"
+        class="sidebar-row sidebar-settings-row sidebar-update-row"
         :data-update-state="updatePresentation.state"
-        :aria-current="!updatePresentation.active && (activeEntry.id === settingsEntry.id || activeEntry.type === 'system') ? 'page' : undefined"
         type="button"
-        data-testid="sidebar-settings"
+        data-testid="sidebar-update-status"
         @click="handleSettingsRowClick"
       >
         <span class="system-icon" aria-hidden="true">
@@ -615,7 +613,6 @@
           <CircleCheck v-else-if="updatePresentation.state === 'ready'" />
           <RefreshCw v-else-if="updatePresentation.state === 'installing'" />
           <TriangleAlert v-else-if="updatePresentation.state === 'error'" />
-          <Settings v-else />
         </span>
         <span class="system-copy">
           <span>{{ updatePresentation.title }}</span>
@@ -633,6 +630,13 @@
           <span :style="{ width: `${updatePresentation.percent ?? 14}%` }"></span>
         </span>
       </button>
+      <SidebarAccountMenu
+        :auth-status="authStatus"
+        :busy="authBusy"
+        @open-settings="$emit('open-settings')"
+        @connect="$emit('connect-account')"
+        @sign-out="$emit('sign-out')"
+      />
     </div>
 
     <DesktopContextMenu
@@ -676,7 +680,6 @@ import {
   Plus,
   RefreshCw,
   Search,
-  Settings,
   TriangleAlert,
   X,
 } from "@lucide/vue";
@@ -710,9 +713,10 @@ import {
   type SidebarRoomMenuActionId,
 } from "../../../domain/sidebar-context-menu";
 import DesktopContextMenu, { type DesktopContextMenuItem } from "../controls/DesktopContextMenu.vue";
+import SidebarAccountMenu from "./SidebarAccountMenu.vue";
 import type { ProjectGroup, SidebarEntry, SystemEntry, RoomEntry } from "../types";
 import { desktopIpc } from "../../../ipc/index.js";
-import type { DesktopUpdateStatus } from "../../../../../electron/ipc-types";
+import type { DesktopAuthStatus, DesktopUpdateStatus } from "../../../../../electron/ipc-types";
 
 const props = defineProps<{
   activeEntry: SidebarEntry;
@@ -727,6 +731,8 @@ const props = defineProps<{
   batchActionBusy: SidebarRoomBatchActionId | null;
   rentalRequestCount?: number;
   updateStatus: DesktopUpdateStatus | null;
+  authStatus: DesktopAuthStatus | null;
+  authBusy: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -734,6 +740,9 @@ const emit = defineEmits<{
   "new-room": [];
   "open-rent": [];
   "open-updates": [];
+  "open-settings": [];
+  "connect-account": [];
+  "sign-out": [];
   "archive-room": [entry: RoomEntry];
   "archive-focus-room": [entry: RoomEntry];
   "conclude-focus-room": [entry: RoomEntry];
@@ -785,11 +794,7 @@ const suppressedActivationEntryId = ref<string | null>(null);
 const updatePresentation = computed(() => desktopUpdateSidebarPresentation(props.updateStatus));
 
 function handleSettingsRowClick(): void {
-  if (updatePresentation.value.active) {
-    emit("open-updates");
-    return;
-  }
-  emit("select-entry", props.settingsEntry);
+  emit("open-updates");
 }
 
 const roomReorderEnabled = computed(() => isSidebarRoomReorderEnabled(
@@ -884,6 +889,7 @@ function roomMenuGroupsFor(entry: RoomEntry, projectId: string | null): DesktopC
     isPrimaryRoom: entry.id === props.primaryRoom.id,
     hasProjectChildren: Boolean(project),
     projectCollapsed: Boolean(project && props.collapsedProjects[project.id]),
+    canManageRooms: props.authStatus?.authenticated === true,
   }).map((group) => group.map((item) => ({
     ...item,
     icon: item.id === "pin-room" && entry.pinned ? PinOff : roomMenuIcons[item.id],
@@ -1326,11 +1332,15 @@ function selectOrToggleProject(project: ProjectGroup): void {
 }
 
 function batchResolution(action: SidebarRoomBatchActionId) {
-  return resolveSidebarRoomBatchAction({
+  const resolution = resolveSidebarRoomBatchAction({
     action,
     entries: selectedEntries.value,
     primaryRoomId: props.primaryRoom.id,
   });
+  if (!props.authStatus?.authenticated && action !== "mark-read") {
+    return { ...resolution, targets: [] };
+  }
+  return resolution;
 }
 
 function batchActionLabel(label: string, targetCount: number): string {

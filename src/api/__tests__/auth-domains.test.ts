@@ -19,7 +19,11 @@ const domainDeclarations = {
     "getSessionAccountByToken:export",
     "deleteSessionByToken:export",
   ],
-  "owner-tokens": ["createOwnerToken:export", "getOwnerTokenAccountByToken:export"],
+  "owner-tokens": [
+    "createOwnerToken:export",
+    "getOwnerTokenAccountByToken:export",
+    "deleteOwnerTokenById:export",
+  ],
   "agent-identities": [
     "registerAgentIdentity:export",
     "getAgentIdentityByCanonicalKey:export",
