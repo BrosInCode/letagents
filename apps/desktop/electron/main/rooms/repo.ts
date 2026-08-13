@@ -142,7 +142,9 @@ export async function connectProjectToRoom(
     return { canceled: true, binding: null, repoStatus: null, error: null };
   }
   try {
-    const resolved = await resolveRoomIdentifierFromPath(result.filePaths[0]);
+    const resolved = await resolveRoomIdentifierFromPath(result.filePaths[0], {
+      ignoreConfiguredRoom: true,
+    });
     const resolvedContext: DesktopProjectBindingContext = {
       roomIdentifier: resolved.roomIdentifier,
       gitRoom: resolved.gitRoom,

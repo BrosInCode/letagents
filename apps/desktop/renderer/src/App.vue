@@ -821,6 +821,7 @@ async function initializeProjectBindings(): Promise<void> {
   }
   const candidates = [
     ...Object.entries(legacyRepositoryRootBindings).map(([roomIdentifier, rootPath]) => ({
+      legacyKey: roomIdentifier,
       context: { roomIdentifier },
       rootPath,
     })),
@@ -830,8 +831,22 @@ async function initializeProjectBindings(): Promise<void> {
     }] : []),
   ];
   try {
-    projectBindings.value = await desktopIpc.repos.migrateProjectBindings(candidates);
-    window.localStorage.removeItem(legacyRepositoryRootBindingsStorageKey);
+    const migration = await desktopIpc.repos.migrateProjectBindings(candidates);
+    projectBindings.value = migration.bindings;
+    const retryBindings = Object.fromEntries(
+      migration.retryLegacyKeys.flatMap((key) => {
+        const rootPath = legacyRepositoryRootBindings[key];
+        return rootPath ? [[key, rootPath]] : [];
+      }),
+    );
+    if (Object.keys(retryBindings).length) {
+      window.localStorage.setItem(
+        legacyRepositoryRootBindingsStorageKey,
+        JSON.stringify(retryBindings),
+      );
+    } else {
+      window.localStorage.removeItem(legacyRepositoryRootBindingsStorageKey);
+    }
   } catch {
     await refreshProjectBindings();
   }

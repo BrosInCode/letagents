@@ -714,6 +714,10 @@ export interface DesktopProjectBindingContext {
 /** The durable, device-local representation of a project room. */
 export interface DesktopProjectBinding {
   id: string;
+  /** Immutable room-side identity used to replace, never merge, bindings. */
+  identityKey: string;
+  /** Filesystem-derived identities that must still match before use. */
+  verificationKeys: string[];
   aliases: string[];
   rootPath: string;
   source: DesktopProjectBindingSource;
@@ -722,8 +726,14 @@ export interface DesktopProjectBinding {
 }
 
 export interface DesktopLegacyProjectBindingCandidate {
+  legacyKey?: string | null;
   context: DesktopProjectBindingContext;
   rootPath: string;
+}
+
+export interface DesktopProjectBindingMigrationResult {
+  bindings: DesktopProjectBinding[];
+  retryLegacyKeys: string[];
 }
 
 export interface DesktopProjectConnectionResult {

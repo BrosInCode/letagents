@@ -72,6 +72,9 @@ function binding(
 ): DesktopProjectBinding {
   return {
     id: "binding_1",
+    identityKey: projectBindingAliases(context).find((alias) => alias.startsWith("repository-id:"))
+      || projectBindingAliases(context).find((alias) => alias.startsWith("project-room:"))!,
+    verificationKeys: projectBindingAliases(context).filter((alias) => alias.startsWith("project-room:")),
     aliases: projectBindingAliases(context),
     rootPath,
     source: context.gitRoom?.host === "github.com" ? "git_remote" : "local_git",
