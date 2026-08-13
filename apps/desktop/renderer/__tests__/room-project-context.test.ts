@@ -8,7 +8,7 @@ import {
   preferredManagedAgentRepoRootPath,
   supervisedProviderLaunchPolicy,
 } from "../src/domain/managed-agents";
-import { activeRepoRoomContext, canonicalRepoIdentity, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "../src/domain/room-project-context";
+import { activeRepoRoomContext, bindRepositoryRoot, canonicalRepoIdentity, readRepositoryRootBindings, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "../src/domain/room-project-context";
 
 const projectGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
   provider: "git",
@@ -167,6 +167,35 @@ test("resolveActiveProjectRootPath returns the stored durable root when present"
     recentRootRooms: [{ identifier: "github.com/owner/project", rootPath: "/project/main" }],
     workspaceRepoStatus: workspaceStatus("github.com/owner/project"),
   }), "/project/main");
+});
+
+test("repository bindings survive recent-room eviction and apply to parent, branch, and focus rooms", () => {
+  const bindings = bindRepositoryRoot({}, room({
+    identifier: "git-room:github.com:owner/project:branch:ZmVhdHVyZQ",
+    gitRoom: { ...projectGitRoom, host: "github.com" },
+  }), "/project/main");
+  assert.equal(resolveActiveProjectRootPath({
+    activeRootIdentifier: "github.com/owner/project",
+    activeRootGitRoom: { ...projectGitRoom, host: "github.com" },
+    recentRootRooms: [],
+    repositoryRootBindings: bindings,
+    workspaceRepoStatus: null,
+  }), "/project/main");
+});
+
+test("repository binding storage normalizes values and migrates existing recent project roots", () => {
+  const storage = {
+    getItem: () => JSON.stringify({
+      "GITHUB.COM/OWNER/PROJECT": " /project/new ",
+      invalid: " ",
+    }),
+  };
+  assert.deepEqual(readRepositoryRootBindings(storage, "bindings", [
+    { identifier: "git-room:github.com:legacy/repo:branch:bWFpbg", rootPath: "/project/legacy" },
+  ]), {
+    "github.com/legacy/repo": "/project/legacy",
+    "github.com/owner/project": "/project/new",
+  });
 });
 
 test("resolveActiveProjectRootPath self-heals a lost durable root from an identity-matched workspace", () => {

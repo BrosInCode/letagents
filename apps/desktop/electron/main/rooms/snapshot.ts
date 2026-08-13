@@ -9,7 +9,7 @@ import {
   listLocalTasks,
   resolveLocalAwareRoomStorageMode,
 } from "./local-store.js";
-import { getJoinedRoomInfo } from "./room-info.js";
+import { canonicalJoinedRoomIdentifier, getJoinedRoomInfo } from "./room-info.js";
 import { desktopSmokeRoomSnapshot, isDesktopSmokeCheck } from "../smoke.js";
 import { getLatestLocalChatMessages } from "./messages/local-store.js";
 import { resolveLocalThreadReaderKey } from "./messages/thread-reader.js";
@@ -74,8 +74,9 @@ export async function fetchRoomSnapshot(
 
     const cloudRoomIdentifier = cloudRoomIdentifierForStorage(storage, roomIdentifier);
     const joined = await getJoinedRoomInfo(cloudRoomIdentifier);
-    const snapshotData = await fetchRoomSnapshotData(cloudRoomIdentifier);
-    return createReadyRoomSnapshot(cloudRoomIdentifier, joined, snapshotData, storage);
+    const canonicalRoomIdentifier = canonicalJoinedRoomIdentifier(cloudRoomIdentifier, joined);
+    const snapshotData = await fetchRoomSnapshotData(canonicalRoomIdentifier);
+    return createReadyRoomSnapshot(canonicalRoomIdentifier, joined, snapshotData, storage);
   } catch (error) {
     if (error instanceof DesktopApiError) {
       return createApiErrorRoomSnapshot(roomIdentifier, error);
