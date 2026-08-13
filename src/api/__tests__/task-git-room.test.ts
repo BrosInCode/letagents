@@ -107,7 +107,6 @@ test("ensureTaskGitRoomForActiveWorkLease skips generated branch room creation",
     skipped: "missing_existing_branch_room",
   });
   assert.deepEqual(branchLookups, [{
-    roomId: TASK_BRANCH_ROOM_ID,
     parentRoomId: PARENT_ROOM_ID,
     focusKey: TASK_BRANCH_FOCUS_KEY,
   }]);

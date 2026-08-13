@@ -683,7 +683,7 @@ import {
 import { computed, nextTick, ref, watch, type Component } from "vue";
 import { copyTextToClipboard } from "../../../domain/clipboard";
 import { desktopUpdateSidebarPresentation } from "../../../domain/desktop-update-status";
-import { buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
+import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import {
   SIDEBAR_PROJECT_ROOM_PREVIEW_LIMIT,
   previewSidebarProjectRooms,
@@ -925,6 +925,17 @@ function closeRoomContextMenu(): void {
   roomContextMenu.value = null;
 }
 
+function roomCopyValue(entry: RoomEntry): string {
+  return entry.kind === "focus"
+    ? buildLetAgentsFocusRoomUrl({
+        roomIdentifier: entry.roomIdentifier,
+        parentRoomId: entry.parentRoomIdentifier,
+        focusKey: entry.focusKey,
+        sourceTaskId: entry.sourceTaskId,
+      })
+    : buildLetAgentsRoomCopyValue(entry.roomIdentifier);
+}
+
 function openBackgroundContextMenu(event: MouseEvent): void {
   roomContextMenu.value = null;
   backgroundContextMenu.value = { x: event.clientX, y: event.clientY };
@@ -944,7 +955,7 @@ function handleRoomContextMenuSelect(item: DesktopContextMenuItem): void {
     "pin-room": () => emit("pin-room", menu.entry),
     "rename-room": () => emit("rename-room", menu.entry),
     "copy-room-url": () =>
-      void copyText(menu.entry.roomIdentifier ? buildLetAgentsRoomCopyValue(menu.entry.roomIdentifier) : null),
+      void copyText(roomCopyValue(menu.entry)),
     "copy-branch-name": () => void copyText(menu.entry.gitRoom?.ref.name ?? null),
     "open-on-github": () => {
       const url = buildGitRoomWebUrl(menu.entry.gitRoom ?? null);

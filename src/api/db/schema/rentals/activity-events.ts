@@ -43,7 +43,7 @@ export const rental_activity_events = pgTable(
       name: "rental_activity_events_room_fk",
       columns: [table.room_id],
       foreignColumns: [rooms.id as AnyPgColumn],
-    }),
+    }).onUpdate("cascade"),
     index("rental_activity_events_session_id_idx").on(table.session_id),
     index("rental_activity_events_room_id_idx").on(table.room_id),
     index("rental_activity_events_event_type_idx").on(table.event_type),

@@ -7,29 +7,20 @@ import {
   getProjectById,
   type Project,
 } from "../db.js";
-import { getOrCreateGitHubRefRoomFromId } from "../github/git-room-routing.js";
-import { isInviteCode, normalizeRoomId } from "./routing.js";
-
-export function parseFocusRoomLocator(
-  roomId: string
-): { parentRoomId: string; focusKey: string } | null {
-  const marker = "/focus/";
-  const index = roomId.lastIndexOf(marker);
-  if (index < 0) {
-    return null;
-  }
-
-  const parentRoomId = roomId.slice(0, index);
-  const focusKey = roomId.slice(index + marker.length);
-  if (!parentRoomId || !focusKey || focusKey.includes("/")) {
-    return null;
-  }
-
-  return { parentRoomId, focusKey };
-}
+import { getOrCreateGitHubRefRoomFromLocator } from "../github/git-room-routing.js";
+import { isInviteCode, isReservedMainRoomCreationId, normalizeRoomId, parseFocusRoomLocator } from "./routing.js";
 
 export function isReservedRoomId(roomId: string): boolean {
   return /^focus_\d+$/.test(roomId);
+}
+
+export async function resolveExistingRoomRequest(roomId: string): Promise<Project | undefined> {
+  const normalizedRoomId = normalizeRoomId(roomId);
+  const locator = parseFocusRoomLocator(normalizedRoomId);
+  if (!locator) return getProjectById(normalizedRoomId);
+
+  const parent = await getProjectById(normalizeRoomId(locator.parentRoomId));
+  return parent ? getFocusRoomByKey(parent.id, locator.focusKey) : undefined;
 }
 
 export async function resolveRoomOrReply(
@@ -44,11 +35,18 @@ export async function resolveRoomOrReply(
     );
     const parent = await getProjectById(parentRoomId);
     if (!parent) {
+      const createdGitRefRoom = allowCreate
+        ? await getOrCreateGitHubRefRoomFromLocator(roomId)
+        : null;
+      if (createdGitRefRoom) {
+        return createdGitRefRoom;
+      }
       res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
       return null;
     }
 
-    const focusRoom = await getFocusRoomByKey(parent.id, focusLocator.focusKey);
+    const focusRoom = await getFocusRoomByKey(parent.id, focusLocator.focusKey)
+      ?? (allowCreate ? await getOrCreateGitHubRefRoomFromLocator(roomId) : null);
     if (!focusRoom) {
       res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
       return null;
@@ -67,18 +65,13 @@ export async function resolveRoomOrReply(
   }
 
   if (allowCreate) {
-    if (isReservedRoomId(roomId)) {
+    if (isReservedMainRoomCreationId(roomId)) {
       const found = await getProjectById(roomId);
       if (!found) {
         res.status(404).json({ error: "Room not found", code: "ROOM_NOT_FOUND" });
         return null;
       }
       return found;
-    }
-
-    const gitRefRoom = await getOrCreateGitHubRefRoomFromId(roomId);
-    if (gitRefRoom) {
-      return gitRefRoom;
     }
 
     const { room } = await getOrCreateCanonicalRoom(roomId);

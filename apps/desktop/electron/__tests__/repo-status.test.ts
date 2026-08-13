@@ -55,7 +55,7 @@ test("activeGitHubRoomIdentifier routes non-default branches to GitHub branch ro
       currentBranch: "feature/git-rooms",
       defaultBranch: "main",
     }),
-    "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9naXQtcm9vbXM",
+    "github.com/brosincode/letagents/focus/git:branch:ZmVhdHVyZS9naXQtcm9vbXM",
   );
 
   assert.equal(

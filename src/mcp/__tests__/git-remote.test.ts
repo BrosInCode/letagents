@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import {
   buildActiveGitRoomContext,
-  buildGitRefRoomIdentity,
+  buildGitRefRoomLocator,
   normalizeGitRemote,
 } from "../git-remote.js";
 
@@ -78,21 +78,21 @@ describe("normalizeGitRemote", () => {
   });
 });
 
-describe("buildGitRefRoomIdentity", () => {
-  it("builds the same opaque GitHub branch room id as webhook routing", () => {
+describe("buildGitRefRoomLocator", () => {
+  it("builds the same contextual GitHub branch locator as webhook routing", () => {
     assert.equal(
-      buildGitRefRoomIdentity({
+      buildGitRefRoomLocator({
         repoRoom: "github.com/BrosInCode/letagents",
         refType: "branch",
         refName: "codex/GitRooms",
       }),
-      "git-room:github.com:brosincode/letagents:branch:Y29kZXgvR2l0Um9vbXM"
+      "github.com/brosincode/letagents/focus/git:branch:Y29kZXgvR2l0Um9vbXM"
     );
   });
 
   it("does not derive branch rooms for unsupported repo room shapes", () => {
     assert.equal(
-      buildGitRefRoomIdentity({
+      buildGitRefRoomLocator({
         repoRoom: "not-a-repo-room",
         refType: "branch",
         refName: "feature/git-rooms",
@@ -114,8 +114,8 @@ describe("buildActiveGitRoomContext", () => {
         repoRoom: "github.com/BrosInCode/letagents",
         currentBranch: "main",
         defaultBranch: "main",
-        activeRefRoom: null,
-        activeRoom: "github.com/BrosInCode/letagents",
+        activeRefRoomLocator: null,
+        activeRoomLocator: "github.com/BrosInCode/letagents",
         activeRoomKind: "repo",
       }
     );
@@ -132,8 +132,8 @@ describe("buildActiveGitRoomContext", () => {
         repoRoom: "github.com/BrosInCode/letagents",
         currentBranch: "feature/git-rooms",
         defaultBranch: "main",
-        activeRefRoom: "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9naXQtcm9vbXM",
-        activeRoom: "git-room:github.com:brosincode/letagents:branch:ZmVhdHVyZS9naXQtcm9vbXM",
+        activeRefRoomLocator: "github.com/brosincode/letagents/focus/git:branch:ZmVhdHVyZS9naXQtcm9vbXM",
+        activeRoomLocator: "github.com/brosincode/letagents/focus/git:branch:ZmVhdHVyZS9naXQtcm9vbXM",
         activeRoomKind: "branch",
       }
     );
@@ -145,7 +145,7 @@ describe("buildActiveGitRoomContext", () => {
         repoRoom: "github.com/brosincode/letagents",
         currentBranch: "main",
         defaultBranch: null,
-      }).activeRoom,
+      }).activeRoomLocator,
       "github.com/brosincode/letagents"
     );
   });
@@ -161,8 +161,8 @@ describe("buildActiveGitRoomContext", () => {
         repoRoom: "github.com/BrosInCode/letagents",
         currentBranch: "codex/git-rooms-event-spine",
         defaultBranch: null,
-        activeRefRoom: "git-room:github.com:brosincode/letagents:branch:Y29kZXgvZ2l0LXJvb21zLWV2ZW50LXNwaW5l",
-        activeRoom: "git-room:github.com:brosincode/letagents:branch:Y29kZXgvZ2l0LXJvb21zLWV2ZW50LXNwaW5l",
+        activeRefRoomLocator: "github.com/brosincode/letagents/focus/git:branch:Y29kZXgvZ2l0LXJvb21zLWV2ZW50LXNwaW5l",
+        activeRoomLocator: "github.com/brosincode/letagents/focus/git:branch:Y29kZXgvZ2l0LXJvb21zLWV2ZW50LXNwaW5l",
         activeRoomKind: "branch",
       }
     );

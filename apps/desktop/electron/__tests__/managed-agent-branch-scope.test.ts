@@ -99,7 +99,7 @@ test("branchScopedGitRoomName only scopes branch Git Rooms", () => {
   assert.equal(branchScopedGitRoomName(null), null);
 });
 
-test("gitRoomFromBranchRoomIdentifier decodes branch room ids", () => {
+test("gitRoomFromBranchRoomIdentifier decodes branch room locators", () => {
   const branch = "feature/player-3d-presentation";
   const encodedBranch = Buffer.from(branch, "utf8").toString("base64url");
 
@@ -109,7 +109,7 @@ test("gitRoomFromBranchRoomIdentifier decodes branch room ids", () => {
   assert.equal(local?.ref.type, "branch");
   assert.equal(local?.ref.name, branch);
 
-  const github = gitRoomFromBranchRoomIdentifier(`git-room:github.com:brosincode/letagents:branch:${encodedBranch}`);
+  const github = gitRoomFromBranchRoomIdentifier(`github.com/brosincode/letagents/focus/git:branch:${encodedBranch}`);
   assert.equal(github?.provider, "github");
   assert.equal(github?.repository.fullName, "brosincode/letagents");
   assert.equal(github?.ref.name, branch);

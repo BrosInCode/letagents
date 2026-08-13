@@ -92,12 +92,14 @@ export async function joinRoomSession(
     method: 'POST',
   })) as RoomJoinResponse
 
+  const canonicalIdentifier = project.room_id || roomIdentifier
+
   return {
-    projectId: project.room_id || roomIdentifier,
-    identifier: roomIdentifier,
+    projectId: canonicalIdentifier,
+    identifier: canonicalIdentifier,
     code: project.code || '',
-    name: project.name || roomIdentifier,
-    displayName: project.display_name || project.name || roomIdentifier,
+    name: project.name || canonicalIdentifier,
+    displayName: project.display_name || project.name || canonicalIdentifier,
     role: project.role || 'participant',
     authenticated: !!project.authenticated,
     kind: project.kind || 'main',
