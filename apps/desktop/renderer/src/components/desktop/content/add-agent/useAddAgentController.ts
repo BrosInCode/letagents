@@ -39,7 +39,6 @@ export interface AddAgentModalProps {
 
 export interface AddAgentModalEvents {
   close: [];
-  "choose-repo": [];
   "choose-worktree": [rootPath: string];
   "managed-session-started": [session: DesktopManagedAgentSession];
 }
@@ -274,7 +273,10 @@ const supervisedLaunch = useSupervisedAgentLaunch({
   authCommandForProvider,
   currentVersion: setup.currentVersion,
   isCurrentRequest: (version) => props.open && version === setup.currentVersion(),
-  onChooseRepo: () => emit("choose-repo"),
+  onChooseRepo: () => setSetupMessage(
+    "Connect this room to its local project before adding an agent.",
+    "warning",
+  ),
   onCopyAuthCommand: (command) => void setupActions.copyAgentAuthCommand(command),
   onRetry: () => retrySupervisedLaunch(),
   onMessage: setSetupMessage,

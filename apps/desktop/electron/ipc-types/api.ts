@@ -74,6 +74,11 @@ import type {
   DesktopRoomStorageOverrideMode,
   DesktopRoomStorageState,
   DesktopInviteRoomCreation,
+  DesktopLegacyProjectBindingCandidate,
+  DesktopProjectBinding,
+  DesktopProjectBindingContext,
+  DesktopProjectBindingMigrationResult,
+  DesktopProjectConnectionResult,
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
@@ -309,6 +314,13 @@ export interface DesktopApi {
     onStatusChanged: (callback: (status: RepoStatus) => void) => () => void;
     openRoom: (rootPath: string) => Promise<DesktopRepoRoomSelection>;
     pickRoom: () => Promise<DesktopRepoRoomSelection>;
+    listProjectBindings: () => Promise<DesktopProjectBinding[]>;
+    migrateProjectBindings: (
+      candidates: DesktopLegacyProjectBindingCandidate[],
+    ) => Promise<DesktopProjectBindingMigrationResult>;
+    connectProject: (
+      context: DesktopProjectBindingContext,
+    ) => Promise<DesktopProjectConnectionResult>;
     createWorktree: (repoRoot: string, branch: string) => Promise<DesktopRepoWorktreeResult>;
   };
   workers: {
