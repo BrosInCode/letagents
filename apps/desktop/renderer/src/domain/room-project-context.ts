@@ -1,4 +1,4 @@
-import type { DesktopRoomInfo } from "../../../electron/ipc-types";
+import type { DesktopRoomInfo, RepoStatus } from "../../../electron/ipc-types";
 
 export type RepositoryRootBindings = Record<string, string>;
 
@@ -126,6 +126,48 @@ export function rememberRepositoryRootBindings(
   } catch {
     // Losing optional local persistence must not block room navigation.
   }
+}
+
+/**
+ * Recover a missing device-local project binding from supervisor-owned agent
+ * history. A historical workspace is only a candidate: re-probe it and require
+ * its current canonical Git identity to match the room before returning it.
+ * This lets upgrades repair context that older desktop builds failed to retain
+ * without scanning the filesystem or trusting a stale/arbitrary path.
+ */
+export async function recoverProjectRootFromAgentHistory(input: {
+  roomIdentifier: string | null | undefined;
+  gitRoom: DesktopRoomInfo["gitRoom"] | null | undefined;
+  entries: ReadonlyArray<{
+    roomId: string;
+    sourceRepoPath?: string | null;
+    workspacePath?: string | null;
+    createdAt: string;
+  }>;
+  getRepoStatus: (rootPath: string) => Promise<RepoStatus | null>;
+}): Promise<{ rootPath: string; repoStatus: RepoStatus } | null> {
+  if (!input.gitRoom) return null;
+  const roomIdentifier = normalizeRoomIdentifier(input.roomIdentifier);
+  if (!roomIdentifier) return null;
+  const roomIdentities = new Set(gitRoomIdentityKeys(input.gitRoom, input.roomIdentifier));
+  const candidates = [...input.entries]
+    .filter((entry) => normalizeRoomIdentifier(entry.roomId) === roomIdentifier)
+    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
+  const checked = new Set<string>();
+  for (const entry of candidates) {
+    // Never recover from workspacePath: it is a daemon-provisioned private
+    // work attempt, not the user-selected source checkout. Older daemon entries
+    // that do not project sourceRepoPath deliberately fail closed.
+    const rootPath = entry.sourceRepoPath?.trim();
+    if (!rootPath || checked.has(rootPath)) continue;
+    checked.add(rootPath);
+    const status = await input.getRepoStatus(rootPath).catch(() => null);
+    const identity = status?.isGitRepo ? canonicalRepoIdentity(status.roomIdentifier) : null;
+    if (status && identity && roomIdentities.has(identity)) {
+      return { rootPath, repoStatus: status };
+    }
+  }
+  return null;
 }
 
 /**

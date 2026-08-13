@@ -586,6 +586,8 @@ export interface DesktopSupervisorManifestEntry {
   deliveryMode: DesktopManagedAgentDeliveryMode;
   createdBy: string;
   createdAt: string;
+  /** User-selected source checkout. Distinct from the daemon's private work-attempt workspace. */
+  sourceRepoPath?: string | null;
   workspacePath: string | null;
   workAttemptId: string | null;
   /** Exact current or last-verified room worker used for control routing. */
