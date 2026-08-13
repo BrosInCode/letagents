@@ -155,6 +155,7 @@
           :repo-status="repoStatusValue"
           :git-room-matches-active-repo="selectedGitRoomMatchesActiveRepo"
           :durable-project-root-path="selectedRoomProjectRootPath"
+          :project-room="selectedRoomIsProject"
           :home-path="appInfo?.homePath || null"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
@@ -172,9 +173,8 @@
           @open-focus-room="openFocusRoomFromRoomsTab"
           @request-focus-room-conclusion="openRoomDetailsFocusRoomConclusion"
           @cycle-sidebar="cycleSidebar"
-          @choose-repo="pickRepoRoomForAgent"
+          @connect-project="connectActiveRoomProject"
           @choose-worktree="openWorktreeForAgent"
-          @project-root-recovery-requested="recoverActiveProjectRootFromAgentHistory"
           @open-repo-root="openWorkspaceGitRoom"
           @add-agent-open-request-consumed="openAddAgentAfterRepoPick = false"
         />
@@ -344,6 +344,7 @@ import type {
   DesktopMcpInstallTargetId,
   DesktopUpdateStatus,
   DesktopNotificationTarget,
+  DesktopProjectBinding,
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
@@ -366,10 +367,7 @@ import FirstRunSplashView from "./components/desktop/setup/FirstRunSplashView.vu
 import type { ProjectGroup, RoomEntry, SidebarEntry } from "./components/desktop/types";
 import {
   activeRepoRoomContext,
-  bindRepositoryRoot,
   readRepositoryRootBindings,
-  recoverProjectRootFromAgentHistory,
-  rememberRepositoryRootBindings,
   resolveActiveProjectRootPath,
   roomWithInheritedProjectContext,
 } from "./domain/room-project-context";
@@ -441,10 +439,6 @@ const loading = ref(false);
 const appInfo = ref<DesktopAppInfo | null>(null);
 const updateStatus = ref<DesktopUpdateStatus | null>(null);
 const repoStatus = ref<RepoStatus | null>(null);
-// Canonical status of the launched desktop workspace, used only to identity-match
-// a repo-backed room's self-heal target so it never inherits an unrelated repo.
-const workspaceRepoStatus = ref<RepoStatus | null>(null);
-let workspaceRepoStatusRootPath: string | null = null;
 const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
@@ -452,7 +446,7 @@ const authStatus = ref<DesktopAuthStatus | null>(null);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
 const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
-const repositoryRootBindingsStorageKey = "letagents-desktop:repository-root-bindings";
+const legacyRepositoryRootBindingsStorageKey = "letagents-desktop:repository-root-bindings";
 const readRoomMessagesStorageKey = "letagents-desktop:read-room-message-ids";
 const sidebarWidthStorageKey = "letagents-desktop:sidebar-width";
 const sidebarRoomOrderStorageKey = "letagents-desktop:sidebar-room-order";
@@ -466,11 +460,12 @@ const sidebarDefaultWidth = 296;
 const SIDEBAR_METADATA_REFRESH_INTERVAL_MS = 15_000;
 const selectedRootRoomIdentifier = ref<string | null>(readStoredString(selectedRootRoomStorageKey));
 const recentRootRooms = ref(readStoredRecentRootRooms(recentRootRoomsStorageKey));
-const repositoryRootBindings = ref(readRepositoryRootBindings(
+const legacyRepositoryRootBindings = readRepositoryRootBindings(
   window.localStorage,
-  repositoryRootBindingsStorageKey,
+  legacyRepositoryRootBindingsStorageKey,
   recentRootRooms.value,
-));
+);
+const projectBindings = ref<DesktopProjectBinding[]>([]);
 const readRoomMessageIds = ref(readStoredRoomMessageIds(window.localStorage, readRoomMessagesStorageKey));
 const sidebarWidth = ref(readStoredSidebarWidth());
 const sidebarRoomOrder = ref(readStoredSidebarRoomOrder(window.localStorage, sidebarRoomOrderStorageKey));
@@ -534,8 +529,6 @@ const {
   appInfo,
   recentRootRooms,
   recentRootRoomsStorageKey,
-  repositoryRootBindings,
-  repositoryRootBindingsStorageKey,
   repoStatus,
   rootRoomSnapshot,
   selectedRootRoomIdentifier,
@@ -552,7 +545,6 @@ let accountRoomsRefreshInterval: number | null = null;
 let sidebarMetadataRefreshInFlight = false;
 let repoStatusRefreshInFlight = false;
 let repoStatusWatchRootPath: string | null = null;
-let projectRootRecoveryRequestId = 0;
 let repoStatusWatchRequestId = 0;
 
 const { actionToasts, dismissActionToast, pushActionToast } = useDesktopActionToasts();
@@ -622,6 +614,19 @@ const selectedGitRoomMatchesActiveRepo = computed(() => {
 });
 
 const selectedRoomProjectRootPath = computed(() => activeProjectRootPath());
+const selectedRoomIsProject = computed(() => {
+  if (selectedRoomWithProjectContext.value.gitRoom || selectedRoomProjectRootPath.value) return true;
+  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
+  const identifier = normalizeRoomIdentifier(
+    context?.roomIdentifier
+      ?? selectedRootRoomIdentifier.value
+      ?? rootRoomSnapshot.value?.roomIdentifier,
+  );
+  if (!identifier) return false;
+  return recentRootRooms.value.some((room) =>
+    room.kind === "project" && normalizeRoomIdentifier(room.identifier) === identifier
+  );
+});
 
 function gitRoomsShareRepo(
   left: NonNullable<DesktopRoomSnapshot["room"]>["gitRoom"],
@@ -797,63 +802,39 @@ function activeProjectRootPath(): string | null {
     activeRootIdentifier: context
       ? context.roomIdentifier
       : selectedRootRoomIdentifier.value ?? rootRoomSnapshot.value?.roomIdentifier,
-    // A repo-backed room whose durable root was lost self-heals from the
-    // workspace ONLY when their canonical Git identity matches; otherwise it
-    // fails closed so a focus room never launches in an unrelated repo.
     activeRootGitRoom: context
       ? context.gitRoom
       : rootRoomSnapshot.value?.room?.gitRoom ?? null,
-    recentRootRooms: recentRootRooms.value,
-    repositoryRootBindings: repositoryRootBindings.value,
-    workspaceRepoStatus: workspaceRepoStatus.value,
+    projectBindings: projectBindings.value,
   });
 }
 
-async function recoverActiveProjectRootFromAgentHistory(): Promise<void> {
-  const requestId = ++projectRootRecoveryRequestId;
-  if (activeProjectRootPath() || !desktopIpc.supervisor?.listAgents) return;
-  const context = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
-  const roomIdentifier = context?.roomIdentifier
-    ?? selectedRootRoomIdentifier.value
-    ?? rootRoomSnapshot.value?.roomIdentifier
-    ?? null;
-  const gitRoom = context?.gitRoom ?? rootRoomSnapshot.value?.room?.gitRoom ?? null;
-  if (!roomIdentifier || !gitRoom) return;
-
-  const entries = await desktopIpc.supervisor.listAgents(roomIdentifier).catch(() => null);
-  if (!entries || requestId !== projectRootRecoveryRequestId || activeProjectRootPath()) return;
-  const recovered = await recoverProjectRootFromAgentHistory({
-    roomIdentifier,
-    gitRoom,
-    entries,
-    getRepoStatus: (rootPath) => desktopIpc.repos.getStatus(rootPath).catch(() => null),
-  });
-  if (!recovered || requestId !== projectRootRecoveryRequestId || activeProjectRootPath()) return;
-
-  const nextBindings = bindRepositoryRoot(
-    repositoryRootBindings.value,
-    { identifier: roomIdentifier, gitRoom },
-    recovered.rootPath,
-  );
-  if (nextBindings === repositoryRootBindings.value) return;
-  repositoryRootBindings.value = nextBindings;
-  rememberRepositoryRootBindings(
-    window.localStorage,
-    repositoryRootBindingsStorageKey,
-    nextBindings,
-  );
-  repoStatus.value = recovered.repoStatus;
+async function refreshProjectBindings(): Promise<void> {
+  if (!desktopIpc.repos?.listProjectBindings) return;
+  projectBindings.value = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
 }
 
-async function refreshWorkspaceRepoStatus(force = false): Promise<void> {
-  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
-  if (!workspaceRoot) return;
-  // Re-probe on force (e.g. window focus) so a branch/worktree switch can't leave
-  // a stale identity authorizing the wrong ref; otherwise load once per workspace.
-  if (!force && workspaceRepoStatusRootPath === workspaceRoot && workspaceRepoStatus.value) return;
-  workspaceRepoStatusRootPath = workspaceRoot;
-  const status = await desktopIpc.repos.getStatus(workspaceRoot).catch(() => null);
-  if (workspaceRepoStatusRootPath === workspaceRoot) workspaceRepoStatus.value = status;
+async function initializeProjectBindings(): Promise<void> {
+  if (!desktopIpc.repos?.migrateProjectBindings) {
+    await refreshProjectBindings();
+    return;
+  }
+  const candidates = [
+    ...Object.entries(legacyRepositoryRootBindings).map(([roomIdentifier, rootPath]) => ({
+      context: { roomIdentifier },
+      rootPath,
+    })),
+    ...recentRootRooms.value.flatMap((room) => room.rootPath ? [{
+      context: { roomIdentifier: room.identifier },
+      rootPath: room.rootPath,
+    }] : []),
+  ];
+  try {
+    projectBindings.value = await desktopIpc.repos.migrateProjectBindings(candidates);
+    window.localStorage.removeItem(legacyRepositoryRootBindingsStorageKey);
+  } catch {
+    await refreshProjectBindings();
+  }
 }
 
 async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
@@ -872,11 +853,6 @@ async function restartRepoStatusWatch(rootPath: string | null): Promise<void> {
 }
 
 function handleRepoStatusChanged(nextStatus: RepoStatus): void {
-  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
-  if (workspaceRoot && nextStatus.rootPath === workspaceRoot) {
-    workspaceRepoStatusRootPath = workspaceRoot;
-    workspaceRepoStatus.value = nextStatus;
-  }
   const rootPath = activeProjectRootPath();
   if (rootPath && nextStatus.rootPath !== rootPath) return;
   repoStatus.value = nextStatus;
@@ -886,8 +862,7 @@ function refreshForegroundData(): void {
   // The main-process Git watcher retains invalidations while hidden and drains
   // them on BrowserWindow focus/show. Avoid racing it with a second full status
   // reconstruction from the renderer.
-  const workspaceRoot = appInfo.value?.workspaceRoot?.trim() || null;
-  void refreshWorkspaceRepoStatus(repoStatusWatchRootPath !== workspaceRoot);
+  void refreshProjectBindings();
   void refreshSidebarRoomMetadata();
   // Poll-only metadata catch-up: the periodic tick early-returns while hidden,
   // so refresh once on foreground return. Metadata-only, NOT the full snapshot —
@@ -1687,12 +1662,30 @@ async function startFirstRunRoomAuth(): Promise<void> {
   await startAuthFlow();
 }
 
-async function pickRepoRoomForAgent(): Promise<void> {
-  openAddAgentAfterRepoPick.value = false;
-  const openedRoom = await pickRepoRoom();
-  if (openedRoom) {
-    openAddAgentAfterRepoPick.value = true;
+async function connectActiveRoomProject(): Promise<void> {
+  const groupedContext = activeRepoRoomContext(activeEntry.value?.id, projectEntries.value);
+  const context = groupedContext || {
+    roomIdentifier: selectedRoomWithProjectContext.value.identifier,
+    gitRoom: selectedRoomWithProjectContext.value.gitRoom,
+  };
+  if (!desktopIpc.repos?.connectProject) {
+    pushActionToast("Restart LetAgents Desktop to connect this project.", "error");
+    return;
   }
+  const result = await desktopIpc.repos.connectProject(context).catch((error) => ({
+    canceled: false,
+    binding: null,
+    repoStatus: null,
+    error: error instanceof Error ? error.message : "LetAgents could not connect that project.",
+  }));
+  if (result.canceled) return;
+  if (result.error || !result.binding) {
+    pushActionToast(result.error || "LetAgents could not connect that project.", "error", 6_000);
+    return;
+  }
+  await refreshProjectBindings();
+  if (result.repoStatus) repoStatus.value = result.repoStatus;
+  pushActionToast("This room is now connected to its local project.", "success");
 }
 
 async function openWorktreeForAgent(rootPath: string): Promise<void> {
@@ -2250,14 +2243,6 @@ watch(
 );
 
 watch(
-  () => appInfo.value?.workspaceRoot || null,
-  () => {
-    void refreshWorkspaceRepoStatus();
-  },
-  { immediate: true }
-);
-
-watch(
   () => activeProjectRootPath(),
   (rootPath) => {
     void restartRepoStatusWatch(rootPath);
@@ -2265,32 +2250,9 @@ watch(
   { immediate: true }
 );
 
-watch(
-  [
-    () => activeProjectRootPath(),
-    () => selectedRoomInfo.value.identifier,
-    () => selectedRootRoomIdentifier.value,
-    () => projectEntries.value.map((group) => [
-      group.parent.id,
-      group.parent.gitRoom?.repository.id ?? "",
-      group.parent.gitRoom?.host ?? "",
-      group.parent.gitRoom?.repository.fullName ?? "",
-    ].join(":")).join("|"),
-    () => {
-      const rootRoom = rootRoomSnapshot.value?.room;
-      return [
-        rootRoomSnapshot.value?.roomIdentifier ?? "",
-        rootRoom?.gitRoom?.repository.id ?? "",
-        rootRoom?.gitRoom?.host ?? "",
-        rootRoom?.gitRoom?.repository.fullName ?? "",
-      ].join(":");
-    },
-  ],
-  ([rootPath]) => {
-    if (!rootPath) void recoverActiveProjectRootFromAgentHistory();
-  },
-  { immediate: true },
-);
+watch(recentRootRooms, () => {
+  void refreshProjectBindings();
+}, { deep: true });
 
 watch(
   [
@@ -2356,7 +2318,9 @@ onMounted(() => {
   void loadChatStorageSettings();
   void loadAppAgentSettingsStatus();
   void loadAppAgentActions();
-  void loadFirstRunSetup();
+  void initializeProjectBindings().finally(() => {
+    void loadFirstRunSetup();
+  });
   void refreshRentalRequestCount();
   void refreshDesktopUpdateStatus();
 });

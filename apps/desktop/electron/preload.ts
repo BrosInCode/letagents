@@ -260,6 +260,11 @@ const api: DesktopApi = {
     },
     openRoom: (rootPath) => ipcRenderer.invoke("desktop:repos:open-room", rootPath),
     pickRoom: () => ipcRenderer.invoke("desktop:repos:pick-room"),
+    listProjectBindings: () => ipcRenderer.invoke("desktop:repos:list-project-bindings"),
+    migrateProjectBindings: (candidates) =>
+      ipcRenderer.invoke("desktop:repos:migrate-project-bindings", candidates),
+    connectProject: (context) =>
+      ipcRenderer.invoke("desktop:repos:connect-project", context),
     createWorktree: (repoRoot, branch) =>
       ipcRenderer.invoke("desktop:repos:create-worktree", repoRoot, branch),
   },

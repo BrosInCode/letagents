@@ -2,14 +2,21 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-import type { DesktopRoomInfo } from "../../electron/ipc-types";
+import type { DesktopProjectBinding, DesktopRoomInfo } from "../../electron/ipc-types";
+import { projectBindingAliases } from "../../electron/project-bindings";
 import {
   managedAgentRootPathForRoom,
   managedAgentRepoStatusForRoom,
   preferredManagedAgentRepoRootPath,
   supervisedProviderLaunchPolicy,
 } from "../src/domain/managed-agents";
-import { activeRepoRoomContext, bindRepositoryRoot, canonicalRepoIdentity, readRepositoryRootBindings, recoverProjectRootFromAgentHistory, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "../src/domain/room-project-context";
+import {
+  activeRepoRoomContext,
+  canonicalRepoIdentity,
+  readRepositoryRootBindings,
+  resolveActiveProjectRootPath,
+  roomWithInheritedProjectContext,
+} from "../src/domain/room-project-context";
 
 const projectGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
   provider: "git",
@@ -20,6 +27,17 @@ const projectGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
   accessMode: "local",
   isDefault: false,
   source: "local_git",
+};
+
+const githubGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
+  provider: "github",
+  host: "github.com",
+  repository: { id: "gh_1", fullName: "brosincode/letagents", owner: "brosincode", name: "letagents" },
+  ref: { type: "branch", name: "main", defaultBranch: "main", baseRef: null, headRef: null, headRepository: null },
+  visibility: "private",
+  accessMode: "connected",
+  isDefault: true,
+  source: "git_remote",
 };
 
 function room(overrides: Partial<DesktopRoomInfo> = {}): DesktopRoomInfo {
@@ -48,85 +66,24 @@ function room(overrides: Partial<DesktopRoomInfo> = {}): DesktopRoomInfo {
   };
 }
 
-test("a listed focus room inherits its parent project Git context for Add Agent", () => {
+function binding(
+  context: { roomIdentifier: string; gitRoom?: DesktopRoomInfo["gitRoom"] },
+  rootPath = "/project/main",
+): DesktopProjectBinding {
+  return {
+    id: "binding_1",
+    aliases: projectBindingAliases(context),
+    rootPath,
+    source: context.gitRoom?.host === "github.com" ? "git_remote" : "local_git",
+    createdAt: "2026-08-13T12:00:00.000Z",
+    updatedAt: "2026-08-13T12:00:00.000Z",
+  };
+}
+
+test("a listed focus room inherits its parent project Git context", () => {
   const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
   const inherited = roomWithInheritedProjectContext(room(), parent, true);
   assert.equal(inherited.gitRoom, projectGitRoom);
-  assert.equal(inherited.gitRoom?.ref.name, "feature/launch");
-});
-
-test("recoverProjectRootFromAgentHistory reuses a same-room workspace only after Git identity verification", async () => {
-  const result = await recoverProjectRootFromAgentHistory({
-    roomIdentifier: "project_room",
-    gitRoom: projectGitRoom,
-    entries: [{
-      roomId: "PROJECT_ROOM",
-      sourceRepoPath: "/project/feature-launch",
-      createdAt: "2026-08-13T12:00:00.000Z",
-    }],
-    getRepoStatus: async (rootPath) => ({
-      rootPath,
-      isGitRepo: true,
-      branch: "feature/launch",
-      roomIdentifier: "local/owner/project",
-      worktrees: [],
-    }),
-  });
-
-  assert.equal(result?.rootPath, "/project/feature-launch");
-});
-
-test("recoverProjectRootFromAgentHistory fails closed for stale or unrelated workspaces", async () => {
-  const checked: string[] = [];
-  const result = await recoverProjectRootFromAgentHistory({
-    roomIdentifier: "project_room",
-    gitRoom: projectGitRoom,
-    entries: [
-      { roomId: "other_room", sourceRepoPath: "/project/right", createdAt: "2026-08-13T14:00:00.000Z" },
-      { roomId: "project_room", sourceRepoPath: "/project/missing", createdAt: "2026-08-13T13:00:00.000Z" },
-      { roomId: "project_room", sourceRepoPath: "/project/wrong", createdAt: "2026-08-13T12:00:00.000Z" },
-    ],
-    getRepoStatus: async (rootPath) => {
-      checked.push(rootPath);
-      if (rootPath.endsWith("missing")) throw new Error("gone");
-      return {
-        rootPath,
-        isGitRepo: true,
-        branch: "main",
-        roomIdentifier: "github.com/someone/else",
-        worktrees: [],
-      };
-    },
-  });
-
-  assert.equal(result, null);
-  assert.deepEqual(checked, ["/project/missing", "/project/wrong"]);
-});
-
-test("recoverProjectRootFromAgentHistory never treats a daemon private workspace as the source repo", async () => {
-  let probes = 0;
-  const result = await recoverProjectRootFromAgentHistory({
-    roomIdentifier: "project_room",
-    gitRoom: projectGitRoom,
-    entries: [{
-      roomId: "project_room",
-      workspacePath: "/Users/test/.letagents/worktrees/project/private-attempt",
-      createdAt: "2026-08-13T15:00:00.000Z",
-    }],
-    getRepoStatus: async () => {
-      probes += 1;
-      return null;
-    },
-  });
-  assert.equal(result, null);
-  assert.equal(probes, 0);
-});
-
-test("opening Add Agent retries project-root recovery after an earlier transient miss", () => {
-  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
-  const app = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
-  assert.match(shell, /watch\(addAgentModalOpen,[\s\S]*emit\("project-root-recovery-requested"\)/);
-  assert.match(app, /@project-root-recovery-requested="recoverActiveProjectRootFromAgentHistory"/);
 });
 
 test("a focus room never inherits an unrelated parent project", () => {
@@ -134,16 +91,15 @@ test("a focus room never inherits an unrelated parent project", () => {
   assert.equal(roomWithInheritedProjectContext(room(), parent).gitRoom, null);
 });
 
-test("a reopened focus room restores the matching parent project context", () => {
+test("an explicit focus Git context wins over its parent context", () => {
   const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
-  const restoredFocusRoom = room({ parentRoomId: "PROJECT_ROOM" });
-  assert.equal(roomWithInheritedProjectContext(restoredFocusRoom, parent).gitRoom, projectGitRoom);
+  const ownGitRoom = { ...projectGitRoom, ref: { ...projectGitRoom.ref, name: "feature/focus" } };
+  assert.equal(roomWithInheritedProjectContext(room({ gitRoom: ownGitRoom }), parent, true).gitRoom, ownGitRoom);
 });
 
-test("a restored branch focus room starts from its verified parent worktree", () => {
+test("a restored branch focus room starts from its matching worktree", () => {
   const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
-  const restoredFocusRoom = room({ parentRoomId: "project_room" });
-  const focusRoom = roomWithInheritedProjectContext(restoredFocusRoom, parent);
+  const focusRoom = roomWithInheritedProjectContext(room({ parentRoomId: "project_room" }), parent);
   const repoStatus = {
     rootPath: "/project/main",
     mainRootPath: "/project/main",
@@ -156,21 +112,17 @@ test("a restored branch focus room starts from its verified parent worktree", ()
       isMain: false,
     }],
   };
-
-  const verifiedRepoStatus = managedAgentRepoStatusForRoom(repoStatus, focusRoom, true);
-  assert.equal(preferredManagedAgentRepoRootPath(verifiedRepoStatus, focusRoom.gitRoom), "/project/feature-launch");
+  const verified = managedAgentRepoStatusForRoom(repoStatus, focusRoom, true);
+  assert.equal(preferredManagedAgentRepoRootPath(verified, focusRoom.gitRoom), "/project/feature-launch");
   assert.equal(managedAgentRepoStatusForRoom(repoStatus, focusRoom, false), null);
 });
 
-test("an explicit focus Git context wins over its parent context", () => {
-  const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
-  const ownGitRoom = { ...projectGitRoom, ref: { ...projectGitRoom.ref, name: "feature/focus" } };
-  assert.equal(roomWithInheritedProjectContext(room({ gitRoom: ownGitRoom }), parent, true).gitRoom, ownGitRoom);
-});
-
-test("Add Agent keeps a focus room on its durable project root when active repo status is missing", () => {
-  const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
-  const focusRoom = roomWithInheritedProjectContext(room(), parent, true);
+test("Add Agent consumes the durable project root when live Git status is absent", () => {
+  const focusRoom = roomWithInheritedProjectContext(
+    room(),
+    room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom }),
+    true,
+  );
   assert.equal(managedAgentRootPathForRoom({
     room: focusRoom,
     repoStatus: null,
@@ -180,21 +132,19 @@ test("Add Agent keeps a focus room on its durable project root when active repo 
   }), "/project/main");
 });
 
-test("Add Agent preserves branch worktree matching ahead of the durable project fallback", () => {
-  const parent = room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom });
-  const focusRoom = roomWithInheritedProjectContext(room(), parent, true);
+test("Add Agent uses a matching branch worktree ahead of the source project root", () => {
+  const focusRoom = roomWithInheritedProjectContext(
+    room(),
+    room({ identifier: "project_room", kind: "main", parentRoomId: null, gitRoom: projectGitRoom }),
+    true,
+  );
   assert.equal(managedAgentRootPathForRoom({
     room: focusRoom,
     repoStatus: {
       rootPath: "/project/main",
       mainRootPath: "/project/main",
       defaultBranch: "main",
-      worktrees: [{
-        path: "/project/feature-launch",
-        branch: "feature/launch",
-        head: "abc1234",
-        isCurrent: false,
-      }],
+      worktrees: [{ path: "/project/feature-launch", branch: "feature/launch", head: "abc", isCurrent: false }],
     },
     gitRoomMatchesActiveRepo: true,
     durableProjectRootPath: "/project/main",
@@ -202,63 +152,30 @@ test("Add Agent preserves branch worktree matching ahead of the durable project 
   }), "/project/feature-launch");
 });
 
-test("Add Agent uses home for a room without Git or project context", () => {
-  assert.equal(managedAgentRootPathForRoom({
-    room: room({ kind: "main", parentRoomId: null, gitRoom: null }),
-    repoStatus: {
-      rootPath: "/application/startup-repo",
-      mainRootPath: "/application/startup-repo",
-      defaultBranch: "main",
-      worktrees: [],
-    },
-    gitRoomMatchesActiveRepo: false,
-    durableProjectRootPath: null,
-    homePath: "/Users/emmy",
-  }), "/Users/emmy");
-});
-
-test("Add Agent never replaces a durable local project root with stale repo status", () => {
-  assert.equal(managedAgentRootPathForRoom({
-    room: room({ kind: "main", parentRoomId: null, gitRoom: null }),
-    repoStatus: {
-      rootPath: "/unrelated/repo",
-      mainRootPath: "/unrelated/repo",
-      defaultBranch: "main",
-      worktrees: [],
-    },
-    gitRoomMatchesActiveRepo: false,
-    durableProjectRootPath: "/project/local-folder",
-    homePath: "/Users/emmy",
-  }), "/project/local-folder");
-});
-
-const workspaceStatus = (roomIdentifier: string | null, rootPath = "/Users/emmy/Projects/project", isGitRepo = true) =>
-  ({ rootPath, roomIdentifier, isGitRepo });
-
-test("resolveActiveProjectRootPath returns the stored durable root when present", () => {
+test("runtime project resolution uses only the authoritative desktop binding", () => {
+  const durable = binding({ roomIdentifier: "github.com/brosincode/letagents", gitRoom: githubGitRoom });
   assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/owner/project",
-    activeRootGitRoom: projectGitRoom,
-    recentRootRooms: [{ identifier: "github.com/owner/project", rootPath: "/project/main" }],
-    workspaceRepoStatus: workspaceStatus("github.com/owner/project"),
-  }), "/project/main");
-});
-
-test("repository bindings survive recent-room eviction and apply to parent, branch, and focus rooms", () => {
-  const bindings = bindRepositoryRoot({}, room({
-    identifier: "focus_37",
-    gitRoom: { ...projectGitRoom, host: "github.com" },
+    activeRootIdentifier: "github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw",
+    activeRootGitRoom: githubGitRoom,
+    projectBindings: [durable],
   }), "/project/main");
   assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/owner/project",
-    activeRootGitRoom: { ...projectGitRoom, host: "github.com" },
-    recentRootRooms: [],
-    repositoryRootBindings: bindings,
-    workspaceRepoStatus: null,
+    activeRootIdentifier: "github.com/brosincode/letagents",
+    activeRootGitRoom: githubGitRoom,
+    projectBindings: [],
+  }), null);
+});
+
+test("a display-name room alias resolves through stable repository identity", () => {
+  const durable = binding({ roomIdentifier: "github.com/brosincode/letagents", gitRoom: githubGitRoom });
+  assert.equal(resolveActiveProjectRootPath({
+    activeRootIdentifier: "sky-lake",
+    activeRootGitRoom: githubGitRoom,
+    projectBindings: [durable],
   }), "/project/main");
 });
 
-test("repository binding storage normalizes values and migrates existing recent project roots", () => {
+test("legacy renderer roots are parsed only as migration input", () => {
   const storage = {
     getItem: () => JSON.stringify({
       "GITHUB.COM/OWNER/PROJECT": " /project/new ",
@@ -273,126 +190,23 @@ test("repository binding storage normalizes values and migrates existing recent 
   });
 });
 
-test("resolveActiveProjectRootPath self-heals a lost durable root from an identity-matched workspace", () => {
-  // Regression (task_60 follow-up): a focus room whose parent repo room lost its
-  // durable root (an older account/app-agent reopen wiped it) inherits the
-  // workspace instead of prompting — but only because the workspace's canonical
-  // identity matches the room's repo.
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/owner/project",
-    activeRootGitRoom: projectGitRoom,
-    recentRootRooms: [{ identifier: "github.com/owner/project", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus("github.com/owner/project"),
-  }), "/Users/emmy/Projects/project");
+test("project association is room-level and Add Agent cannot open a folder picker", () => {
+  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
+  const actionBar = readFileSync(new URL("../src/components/desktop/content/add-agent/AddAgentActionBar.vue", import.meta.url), "utf8");
+  assert.match(shell, /project-connection-needed/);
+  assert.match(shell, /Connect this room to its local project before adding an agent/);
+  assert.doesNotMatch(shell, /@choose-repo/);
+  assert.match(actionBar, /Connect project from the room/);
+  assert.doesNotMatch(actionBar, /emit\('choose-repo'\)/);
 });
 
-test("resolveActiveProjectRootPath matches a local git room by host/fullName identity", () => {
-  // projectGitRoom is host "local", fullName "owner/project" → identity key
-  // "local/owner/project". A local workspace whose roomIdentifier is that key heals.
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "sky-lake",
-    activeRootGitRoom: projectGitRoom,
-    recentRootRooms: [{ identifier: "sky-lake", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus("local/owner/project"),
-  }), "/Users/emmy/Projects/project");
-});
-
-test("resolveActiveProjectRootPath self-heals after a relaunch rehydrates a wiped repo entry", () => {
-  // A relaunch reloads recentRootRooms from storage; the wiped entry looks like a
-  // plain room (rootPath null) but the live snapshot still reports the gitRoom.
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/owner/project",
-    activeRootGitRoom: projectGitRoom,
-    recentRootRooms: [
-      { identifier: "other-room", rootPath: null },
-      { identifier: "github.com/owner/project", rootPath: null },
-    ],
-    workspaceRepoStatus: workspaceStatus("github.com/owner/project"),
-  }), "/Users/emmy/Projects/project");
-});
-
-test("resolveActiveProjectRootPath FAILS CLOSED when the workspace is a different repo", () => {
-  // The core blocker: never inherit a valid-but-unrelated repository. A mismatched
-  // workspace identity must resolve to null so the repo-room boundary requires a pick.
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/owner/project",
-    activeRootGitRoom: projectGitRoom,
-    recentRootRooms: [{ identifier: "github.com/owner/project", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus("github.com/owner/unrelated", "/Users/emmy/Projects/unrelated"),
-  }), null);
-});
-
-test("resolveActiveProjectRootPath leaves a genuinely repo-less room unresolved", () => {
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "invite-room",
-    activeRootGitRoom: null,
-    recentRootRooms: [{ identifier: "invite-room", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus("github.com/owner/project"),
-  }), null);
-});
-
-test("resolveActiveProjectRootPath does not self-heal when the workspace status is missing or non-git", () => {
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/owner/project",
-    activeRootGitRoom: projectGitRoom,
-    recentRootRooms: [{ identifier: "github.com/owner/project", rootPath: null }],
-    workspaceRepoStatus: null,
-  }), null);
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/owner/project",
-    activeRootGitRoom: projectGitRoom,
-    recentRootRooms: [{ identifier: "github.com/owner/project", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus("github.com/owner/project", "/Users/emmy/Projects/project", false),
-  }), null);
-});
-
-const githubGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
-  provider: "github",
-  host: "github.com",
-  repository: { id: "gh_1", fullName: "brosincode/letagents", owner: "brosincode", name: "letagents" },
-  ref: { type: "branch", name: "main", defaultBranch: "main", baseRef: null, headRef: null, headRepository: null },
-  visibility: "private",
-  accessMode: "connected",
-  isDefault: true,
-  source: "git_remote",
-};
-
-test("canonicalRepoIdentity reduces a branch-scoped git-room id to its repository", () => {
+test("canonicalRepoIdentity reduces branch-scoped identifiers", () => {
   assert.equal(
     canonicalRepoIdentity("github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw"),
     "github.com/brosincode/letagents",
   );
-  assert.equal(canonicalRepoIdentity("github.com/brosincode/letagents"), "github.com/brosincode/letagents");
   assert.equal(canonicalRepoIdentity("git-room:local:my-checkout:branch:ZmVhdA"), "local/my-checkout");
   assert.equal(canonicalRepoIdentity(null), null);
-});
-
-test("resolveActiveProjectRootPath self-heals a BASE repo room from a non-default-branch workspace", () => {
-  // RiverRiver's exact reproduction: the focus room is under the BASE repo room
-  // while the launched checkout is on `staging`, so the workspace roomIdentifier
-  // is branch-scoped. Repository identity matches branch-independently -> heal,
-  // no folder prompt.
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/brosincode/letagents",
-    activeRootGitRoom: githubGitRoom,
-    recentRootRooms: [{ identifier: "github.com/brosincode/letagents", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus(
-      "github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw",
-      "/Users/emmy/Projects/letagents",
-    ),
-  }), "/Users/emmy/Projects/letagents");
-});
-
-test("resolveActiveProjectRootPath fails closed when a branch-scoped workspace is a different repo", () => {
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: "github.com/brosincode/letagents",
-    activeRootGitRoom: githubGitRoom,
-    recentRootRooms: [{ identifier: "github.com/brosincode/letagents", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus(
-      "github.com/someoneelse/otherrepo/focus/git:branch:c3RhZ2luZw",
-      "/Users/emmy/Projects/other",
-    ),
-  }), null);
 });
 
 const skyLakeGroup = {
@@ -405,75 +219,30 @@ const skyLakeGroup = {
   focusRooms: [{ id: "room:focus:focus_37" }],
 };
 
-test("activeRepoRoomContext resolves a focus room to its project-group parent, ignoring the stale global root", () => {
-  const ctx = activeRepoRoomContext("room:focus:focus_37", [
+test("a focus room resolves the binding of its project-group parent", () => {
+  const context = activeRepoRoomContext("room:focus:focus_37", [
     { parent: { id: "room:parent:frost-spring", roomIdentifier: "frost-spring", gitRoom: null }, branchRooms: [], focusRooms: [] },
     skyLakeGroup,
   ]);
-  assert.equal(ctx?.roomIdentifier, "github.com/brosincode/letagents");
-  assert.equal(ctx?.gitRoom, githubGitRoom);
-});
-
-test("activeRepoRoomContext returns null when the active entry is in no project group", () => {
-  assert.equal(activeRepoRoomContext("room:focus:orphan", [skyLakeGroup]), null);
-  assert.equal(activeRepoRoomContext(null, [skyLakeGroup]), null);
-});
-
-test("RiverRiver repro: grouped focus room heals from a staging workspace despite a stale non-repo selected root", () => {
-  // focus_37 is grouped under the sky-lake repo project even though the last-opened
-  // global root is the unrelated non-repo frost-spring. Deriving context from the
-  // group yields the repo gitRoom, so the branch-scoped staging workspace self-heals
-  // to the repo root — no per-focus folder prompt.
-  const ctx = activeRepoRoomContext("room:focus:focus_37", [skyLakeGroup]);
+  assert.equal(context?.roomIdentifier, "github.com/brosincode/letagents");
   assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: ctx?.roomIdentifier,
-    activeRootGitRoom: ctx?.gitRoom,
-    recentRootRooms: [
-      { identifier: "frost-spring", rootPath: null },
-      { identifier: "github.com/brosincode/letagents", rootPath: null },
-    ],
-    workspaceRepoStatus: workspaceStatus(
-      "github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw",
-      "/Users/emmy/Projects/letagents",
-    ),
-  }), "/Users/emmy/Projects/letagents");
+    activeRootIdentifier: context?.roomIdentifier,
+    activeRootGitRoom: context?.gitRoom,
+    projectBindings: [binding({ roomIdentifier: "github.com/brosincode/letagents", gitRoom: githubGitRoom })],
+  }), "/project/main");
 });
 
-test("RiverRiver repro: an unrelated workspace repo still fails closed for the grouped focus room", () => {
-  const ctx = activeRepoRoomContext("room:focus:focus_37", [skyLakeGroup]);
-  assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: ctx?.roomIdentifier,
-    activeRootGitRoom: ctx?.gitRoom,
-    recentRootRooms: [{ identifier: "github.com/brosincode/letagents", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus(
-      "github.com/someoneelse/otherrepo/focus/git:branch:c3RhZ2luZw",
-      "/Users/emmy/Projects/other",
-    ),
-  }), null);
-});
-
-test("a grouped non-repo room keeps its own null context and never inherits a stale repo root", () => {
-  // Boundary: the active room is explicitly in a NON-repo group. activeRepoRoomContext
-  // returns a present-but-null context, so App.vue's presence check (ctx ? … : fallback)
-  // uses it instead of falling through to a stale repo snapshot. A null gitRoom then
-  // resolves to null — no stale-repo inheritance even with a repo workspace present.
-  const nonRepoGroup = {
+test("a grouped non-project room never inherits another project's binding", () => {
+  const nonProjectGroup = {
     parent: { id: "room:parent:frost-spring", roomIdentifier: "frost-spring", gitRoom: null },
     branchRooms: [] as { id: string }[],
     focusRooms: [{ id: "room:focus:focus_99" }],
   };
-  const ctx = activeRepoRoomContext("room:focus:focus_99", [skyLakeGroup, nonRepoGroup]);
-  assert.notEqual(ctx, null);
-  assert.equal(ctx?.roomIdentifier, "frost-spring");
-  assert.equal(ctx?.gitRoom, null);
+  const context = activeRepoRoomContext("room:focus:focus_99", [skyLakeGroup, nonProjectGroup]);
   assert.equal(resolveActiveProjectRootPath({
-    activeRootIdentifier: ctx ? ctx.roomIdentifier : "github.com/brosincode/letagents",
-    activeRootGitRoom: ctx ? ctx.gitRoom : githubGitRoom,
-    recentRootRooms: [{ identifier: "frost-spring", rootPath: null }],
-    workspaceRepoStatus: workspaceStatus(
-      "github.com/brosincode/letagents/focus/git:branch:c3RhZ2luZw",
-      "/Users/emmy/Projects/letagents",
-    ),
+    activeRootIdentifier: context?.roomIdentifier,
+    activeRootGitRoom: context?.gitRoom,
+    projectBindings: [binding({ roomIdentifier: "github.com/brosincode/letagents", gitRoom: githubGitRoom })],
   }), null);
 });
 
