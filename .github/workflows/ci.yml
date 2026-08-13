@@ -210,6 +210,8 @@ jobs:
           node
           --import ./node_modules/tsx/dist/loader.mjs
           --test
+          --test-concurrency=1
+          src/api/__tests__/canonical-focus-id-migration.test.ts
           src/api/__tests__/github-repo-migration.test.ts
 
       - name: Run workflow lookup tests
