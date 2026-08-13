@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, rmdir, stat, unlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
@@ -21,9 +21,27 @@ import { buildRepoStatus, resolveRoomIdentifierFromPath } from "../repo-status.j
 
 const require = createRequire(import.meta.url);
 
-interface PersistedProjectBindings {
-  version: 1;
-  bindings: DesktopProjectBinding[];
+interface SqliteStatement {
+  all: (...values: unknown[]) => unknown[];
+  get: (...values: unknown[]) => unknown;
+  run: (...values: unknown[]) => unknown;
+}
+
+interface SqliteDatabase {
+  close: () => void;
+  exec: (sql: string) => void;
+  prepare: (sql: string) => SqliteStatement;
+}
+
+interface ProjectBindingRow {
+  id: string;
+  identity_key: string;
+  verification_keys_json: string;
+  aliases_json: string;
+  root_path: string;
+  source: DesktopProjectBindingSource;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface ProjectBindingsStoreOptions {
@@ -48,120 +66,85 @@ export function getProjectBindingsStorePath(
     || process.env.LETAGENTS_PROJECT_BINDINGS_PATH
     || join(
       getElectronMain().app?.getPath("userData") || homedir(),
-      "letagents-desktop-project-bindings.json",
+      "letagents-desktop-project-bindings.sqlite",
     );
 }
 
-function validBinding(value: unknown): value is DesktopProjectBinding {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
-  const binding = value as Partial<DesktopProjectBinding>;
-  return typeof binding.id === "string" && binding.id.length > 0
-    && typeof binding.identityKey === "string" && binding.identityKey.length > 0
-    && Array.isArray(binding.verificationKeys)
-    && binding.verificationKeys.every((key) => typeof key === "string" && key.length > 0)
-    && Array.isArray(binding.aliases)
-    && binding.aliases.every((alias) => typeof alias === "string" && alias.length > 0)
-    && typeof binding.rootPath === "string" && binding.rootPath.length > 0
-    && ["configured", "git_remote", "local_git", "local_folder"].includes(binding.source || "")
-    && typeof binding.createdAt === "string" && Number.isFinite(Date.parse(binding.createdAt))
-    && typeof binding.updatedAt === "string" && Number.isFinite(Date.parse(binding.updatedAt));
+function openStore(options: ProjectBindingsStoreOptions = {}): SqliteDatabase {
+  const storePath = getProjectBindingsStorePath(options);
+  require("node:fs").mkdirSync(dirname(storePath), { recursive: true });
+  const { DatabaseSync } = require("node:sqlite") as {
+    DatabaseSync: new (path: string) => SqliteDatabase;
+  };
+  const database = new DatabaseSync(storePath);
+  database.exec("PRAGMA busy_timeout = 10000");
+  database.exec("PRAGMA journal_mode = WAL");
+  database.exec(`
+    CREATE TABLE IF NOT EXISTS project_bindings (
+      id TEXT PRIMARY KEY NOT NULL,
+      identity_key TEXT NOT NULL UNIQUE,
+      verification_keys_json TEXT NOT NULL,
+      aliases_json TEXT NOT NULL,
+      root_path TEXT NOT NULL,
+      source TEXT NOT NULL CHECK (source IN ('configured', 'git_remote', 'local_git', 'local_folder')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    ) STRICT
+  `);
+  return database;
 }
 
-async function readStore(
-  options: ProjectBindingsStoreOptions = {},
-): Promise<PersistedProjectBindings> {
+function parseStringArray(value: string): string[] | null {
   try {
-    const parsed = JSON.parse(
-      await readFile(getProjectBindingsStorePath(options), "utf8"),
-    ) as Partial<PersistedProjectBindings>;
-    return {
-      version: 1,
-      bindings: Array.isArray(parsed.bindings)
-        ? parsed.bindings.filter(validBinding)
-        : [],
-    };
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) && parsed.every((item) => typeof item === "string" && item.length > 0)
+      ? [...new Set(parsed)].sort()
+      : null;
   } catch {
-    return { version: 1, bindings: [] };
+    return null;
   }
 }
 
-async function writeStore(
-  store: PersistedProjectBindings,
-  options: ProjectBindingsStoreOptions = {},
-): Promise<void> {
-  const storePath = getProjectBindingsStorePath(options);
-  const temporaryPath = `${storePath}.${process.pid}.${randomUUID()}.tmp`;
-  await mkdir(dirname(storePath), { recursive: true });
-  await writeFile(temporaryPath, `${JSON.stringify(store, null, 2)}\n`, {
-    encoding: "utf8",
-    mode: 0o600,
-  });
+function mapRow(row: unknown): DesktopProjectBinding | null {
+  if (!row || typeof row !== "object") return null;
+  const value = row as Partial<ProjectBindingRow>;
+  const aliases = typeof value.aliases_json === "string" ? parseStringArray(value.aliases_json) : null;
+  const verificationKeys = typeof value.verification_keys_json === "string"
+    ? parseStringArray(value.verification_keys_json)
+    : null;
+  if (
+    typeof value.id !== "string" || !value.id
+    || typeof value.identity_key !== "string" || !value.identity_key
+    || !aliases || !verificationKeys
+    || typeof value.root_path !== "string" || !value.root_path
+    || !["configured", "git_remote", "local_git", "local_folder"].includes(value.source || "")
+    || typeof value.created_at !== "string" || !Number.isFinite(Date.parse(value.created_at))
+    || typeof value.updated_at !== "string" || !Number.isFinite(Date.parse(value.updated_at))
+  ) return null;
+  return {
+    id: value.id,
+    identityKey: value.identity_key,
+    verificationKeys,
+    aliases,
+    rootPath: value.root_path,
+    source: value.source!,
+    createdAt: value.created_at,
+    updatedAt: value.updated_at,
+  };
+}
+
+function readBindings(options: ProjectBindingsStoreOptions = {}): DesktopProjectBinding[] {
+  const database = openStore(options);
   try {
-    await rename(temporaryPath, storePath);
+    return database.prepare(`
+      SELECT id, identity_key, verification_keys_json, aliases_json,
+             root_path, source, created_at, updated_at
+      FROM project_bindings
+      ORDER BY created_at ASC
+    `).all().map(mapRow).filter((binding): binding is DesktopProjectBinding => Boolean(binding));
   } finally {
-    await unlink(temporaryPath).catch(() => undefined);
+    database.close();
   }
-}
-
-let mutationQueue = Promise.resolve();
-
-async function withStoreLock<T>(
-  options: ProjectBindingsStoreOptions,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const storePath = getProjectBindingsStorePath(options);
-  const lockPath = `${storePath}.lock`;
-  await mkdir(dirname(storePath), { recursive: true });
-  const deadline = Date.now() + 10_000;
-  while (true) {
-    try {
-      await mkdir(lockPath, { mode: 0o700 });
-      break;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException)?.code !== "EEXIST" || Date.now() >= deadline) {
-        throw new Error("Project bindings are busy in another LetAgents process.", { cause: error });
-      }
-      let ownerPid: number | null = null;
-      try {
-        const parsedOwner = Number((await readFile(join(lockPath, "owner"), "utf8")).trim());
-        ownerPid = Number.isInteger(parsedOwner) && parsedOwner > 0 ? parsedOwner : null;
-        if (ownerPid) process.kill(ownerPid, 0);
-      } catch (ownerError) {
-        if ((ownerError as NodeJS.ErrnoException)?.code === "ESRCH") {
-          await unlink(join(lockPath, "owner")).catch(() => undefined);
-          await rmdir(lockPath).catch(() => undefined);
-          continue;
-        }
-        if ((ownerError as NodeJS.ErrnoException)?.code !== "ENOENT") throw ownerError;
-      }
-      if (!ownerPid) {
-        const lockAge = Date.now() - (await stat(lockPath)).mtimeMs;
-        if (lockAge > 2_000) {
-          await unlink(join(lockPath, "owner")).catch(() => undefined);
-          await rmdir(lockPath).catch(() => undefined);
-          continue;
-        }
-      }
-      await new Promise((resolve) => setTimeout(resolve, 25));
-    }
-  }
-  try {
-    await writeFile(join(lockPath, "owner"), `${process.pid}\n`, { mode: 0o600 });
-    return await operation();
-  } finally {
-    await unlink(join(lockPath, "owner")).catch(() => undefined);
-    await rmdir(lockPath).catch(() => undefined);
-  }
-}
-
-function serializeMutation<T>(
-  options: ProjectBindingsStoreOptions,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const guarded = () => withStoreLock(options, operation);
-  const result = mutationQueue.then(guarded, guarded);
-  mutationQueue = result.then(() => undefined, () => undefined);
-  return result;
 }
 
 async function canonicalDirectory(rootPath: string): Promise<string> {
@@ -208,7 +191,7 @@ async function deriveFilesystemContext(rootPath: string): Promise<{
 export async function listProjectBindings(
   options: ProjectBindingsStoreOptions = {},
 ): Promise<DesktopProjectBinding[]> {
-  const bindings = (await readStore(options)).bindings;
+  const bindings = readBindings(options);
   const available = await Promise.all(bindings.map(async (binding) => {
     try {
       const rootPath = await canonicalDirectory(binding.rootPath);
@@ -239,29 +222,60 @@ export async function bindProjectRoot(input: {
     throw new Error("The selected folder does not prove this project room's identity.");
   }
   const verificationKeys = await filesystemVerificationKeys(rootPath, filesystem.context);
-
-  return serializeMutation(options, async () => {
-    const store = await readStore(options);
-    const matches = store.bindings.filter((binding) => binding.identityKey === identityKey);
-    const now = new Date().toISOString();
-    const existing = matches.sort((left, right) => left.createdAt.localeCompare(right.createdAt))[0];
+  const now = new Date().toISOString();
+  const database = openStore(options);
+  try {
+    database.exec("BEGIN IMMEDIATE");
+    const existing = database.prepare(`
+      SELECT id, identity_key, verification_keys_json, aliases_json,
+             root_path, source, created_at, updated_at
+      FROM project_bindings
+      WHERE identity_key = ?
+    `).get(identityKey);
+    const current = mapRow(existing);
     const binding: DesktopProjectBinding = {
-      id: existing?.id || randomUUID(),
+      id: current?.id || randomUUID(),
       identityKey,
       verificationKeys,
       aliases,
       rootPath,
       source: input.source,
-      createdAt: existing?.createdAt || now,
+      createdAt: current?.createdAt || now,
       updatedAt: now,
     };
-    store.bindings = [
-      ...store.bindings.filter((candidate) => !matches.includes(candidate)),
-      binding,
-    ];
-    await writeStore(store, options);
+    database.prepare(`
+      INSERT INTO project_bindings (
+        id, identity_key, verification_keys_json, aliases_json,
+        root_path, source, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(identity_key) DO UPDATE SET
+        verification_keys_json = excluded.verification_keys_json,
+        aliases_json = excluded.aliases_json,
+        root_path = excluded.root_path,
+        source = excluded.source,
+        updated_at = excluded.updated_at
+    `).run(
+      binding.id,
+      binding.identityKey,
+      JSON.stringify(binding.verificationKeys),
+      JSON.stringify(binding.aliases),
+      binding.rootPath,
+      binding.source,
+      binding.createdAt,
+      binding.updatedAt,
+    );
+    database.exec("COMMIT");
     return binding;
-  });
+  } catch (error) {
+    try {
+      database.exec("ROLLBACK");
+    } catch {
+      // Preserve the transaction's original failure.
+    }
+    throw error;
+  } finally {
+    database.close();
+  }
 }
 
 export function projectBindingContextsOverlap(
@@ -307,9 +321,6 @@ export async function migrateLegacyProjectBindings(
         source: resolved.source || "local_folder",
       }, options);
     } catch {
-      // Legacy hints are optional migration input; one bad path must not block
-      // startup or prevent other valid projects from migrating. Failed keys are
-      // returned so the renderer retains them for a later launch.
       if (candidate.legacyKey) retryLegacyKeys.add(candidate.legacyKey);
     }
   }
