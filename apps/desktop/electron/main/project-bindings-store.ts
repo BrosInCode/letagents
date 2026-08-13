@@ -169,12 +169,12 @@ async function filesystemVerificationKeys(
   rootPath: string,
   context: DesktopProjectBindingContext,
 ): Promise<string[]> {
-  const rootStats = await stat(rootPath);
+  const rootStats = await stat(rootPath, { bigint: true });
   const keys = new Set(projectBindingVerificationKeys(context));
-  keys.add(`fs-root:${rootStats.dev}:${rootStats.ino}`);
+  keys.add(`fs-root:${rootStats.dev}:${rootStats.ino}:${rootStats.birthtimeNs}`);
   try {
-    const gitStats = await stat(join(rootPath, ".git"));
-    keys.add(`fs-git:${gitStats.dev}:${gitStats.ino}`);
+    const gitStats = await stat(join(rootPath, ".git"), { bigint: true });
+    keys.add(`fs-git:${gitStats.dev}:${gitStats.ino}:${gitStats.birthtimeNs}`);
   } catch {
     // Plain folders have no Git identity axis.
   }

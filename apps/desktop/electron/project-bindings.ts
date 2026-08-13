@@ -83,6 +83,11 @@ export function findProjectBinding(
   if (identityKey) {
     const exact = bindings.find((binding) => binding.identityKey === identityKey);
     if (exact) return exact;
+    // A stable hosted repository identity must never fall back to a mutable
+    // name-only legacy binding. A rename/reuse requires explicit reconnect.
+    if (identityKey.startsWith("repository-id:") && !identityKey.startsWith("repository-id:local:")) {
+      return null;
+    }
   }
   const aliases = new Set(projectBindingAliases(context));
   if (!aliases.size) return null;
