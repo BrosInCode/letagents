@@ -37,6 +37,7 @@ const api: DesktopApi = {
     getInfo: () => ipcRenderer.invoke("desktop:app:get-info"),
     openGitHubUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-github-url", url),
     openExternalUrl: (url: string) => ipcRenderer.invoke("desktop:app:open-external-url", url),
+    openCredentialStorage: () => ipcRenderer.invoke("desktop:app:open-credential-storage"),
     getGitHubPullRequestStats: (url: string) =>
       ipcRenderer.invoke("desktop:app:get-github-pull-request-stats", url),
   },
@@ -234,6 +235,7 @@ const api: DesktopApi = {
   },
   supervisorGrant: {
     get: () => ipcRenderer.invoke("desktop:supervisor-grant:get"),
+    getStorageStatus: () => ipcRenderer.invoke("desktop:supervisor-grant:get-storage-status"),
     provision: (input) => ipcRenderer.invoke("desktop:supervisor-grant:provision", input),
     revoke: () => ipcRenderer.invoke("desktop:supervisor-grant:revoke"),
   },

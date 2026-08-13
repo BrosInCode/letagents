@@ -147,6 +147,7 @@ const {
   providers,
   selectedProviderId,
   preflight,
+  secureStorageStatus,
   loadingProviders,
   loadingPreflight,
   setupBusy,
@@ -158,6 +159,7 @@ const {
   setupMessage,
   setupMessageTone,
   setSetupMessage,
+  setSecureStorageRecoveryMessage,
 } = setup;
 const configuration = useAddAgentConfiguration();
 const {
@@ -197,6 +199,10 @@ const {
   runtimeLabel,
   bridgeLabel,
   repoLabel,
+  showSecureStorage,
+  secureStorageLabel,
+  secureStorageNeedsAttention,
+  canOpenSecureStorage,
   expectedWorktreeBranch,
   matchingWorktrees,
   showWorktreePicker,
@@ -356,6 +362,25 @@ async function openProviderInstallGuide(): Promise<void> {
   }
 }
 
+async function openSecureCredentialStorage(): Promise<void> {
+  if (!secureStorageStatus.value?.canOpenCredentialStorage) return;
+  try {
+    setupActions.armSecureStorageFocusRecheck();
+    await desktopIpc.app.openCredentialStorage();
+    if (secureStorageStatus.value?.available !== true) {
+      setSecureStorageRecoveryMessage(
+        "Unlock your login Keychain, then return to LetAgents. Setup will check it again automatically.",
+      );
+    }
+  } catch (error) {
+    setSetupMessage(contextualAddAgentError(
+      "Couldn't open secure credential storage",
+      error,
+      "Open Keychain Access, unlock your login Keychain, then choose Check again.",
+    ), "error");
+  }
+}
+
 /**
  * A launch card with a manifest entry represents a durable saved agent. Its
  * retry is an explicit same-entry convergence request, not another create
@@ -421,6 +446,13 @@ async function startManagedAgent(
   setSetupMessage(null);
   try {
     if (requestLaunchMode === "supervised") {
+      const latestStorageStatus = await desktopIpc.supervisorGrant.getStorageStatus();
+      if (!setupActions.isCurrentRequest(requestVersion)) return;
+      secureStorageStatus.value = latestStorageStatus;
+      if (!latestStorageStatus.available) {
+        setSetupMessage(latestStorageStatus.detail, "warning");
+        return;
+      }
       const scanAllowsNewLaunch = recoveryScanAllowsNewLaunch(supervisedRecoveryScanStatus.value);
       if (!scanAllowsNewLaunch) {
         throw new Error("Check for previous supervised agents before starting a new one.");
@@ -543,5 +575,5 @@ async function startManagedAgent(
   }
 }
 
-  return { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, showDeliverySelector, deliveryMode, deliveryModeDescription, selectedPermissionProfiles, selectedPermissionProfile, showCursorMcpPolicySelector, selectedCursorMcpPolicy, selectedCursorMcpPolicyDescription, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, createWorktree, startManagedAgent };
+  return { roomLabel, providers, selectedProviderId, selectProvider, selectedProvider, preflight, secureStorageStatus, loadingProviders, loadingPreflight, loadError, statusTitle, statusDescription, preflightStatusLabel, runtimeLabel, bridgeLabel, repoLabel, showSecureStorage, secureStorageLabel, secureStorageNeedsAttention, canOpenSecureStorage, showWorktreePicker, matchingWorktrees, worktreePickerDescription, authCommand, installCommand, installUrl, retryProviderSetup, chooseWorktree, showOpenModelConfig, openModelBaseUrl, openModelModel, openModelApiKey, openModelStatus, openModelError, savingOpenModelSettings, saveOpenModelSettings, clearOpenModelApiKey, showModelSelector, loadingProviderModels, selectedModelChoice, modelSelectOptions, selectedModelMode, customModelId, modelSelectorDescription, showEffortSelector, selectedEffort, effortSelectOptions, effortSelectorDescription, providerModelCatalogLabel, providerModelCatalogIsError, refreshProviderModels, handleModelChoiceValue, handleEffortValue, launchMode, lifecycleDescription, supervisedCharter, showDeliverySelector, deliveryMode, deliveryModeDescription, selectedPermissionProfiles, selectedPermissionProfile, showCursorMcpPolicySelector, selectedCursorMcpPolicy, selectedCursorMcpPolicyDescription, externalJoinPrompt, copyingExternalPrompt, selectPermissionProfile, copyExternalJoinPrompt, setupMessage, setupMessageTone, supervisedUi, setupBusy, setupActionButtonText, copyingAuthCommand, canCreateWorktree, creatingWorktree, createWorktreeButtonLabel, canStartManagedAgent, startingAgent, activeSetupConfirmation, selectedPermissionProfileWarning, runSetupAction, copyAgentAuthCommand, openProviderInstallGuide, openSecureCredentialStorage, createWorktree, startManagedAgent };
 }
