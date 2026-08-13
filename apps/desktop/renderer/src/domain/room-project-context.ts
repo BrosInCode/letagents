@@ -1,8 +1,9 @@
-import type { DesktopRoomInfo, RepoStatus } from "../../../electron/ipc-types";
+import type { DesktopProjectBinding, DesktopRoomInfo } from "../../../electron/ipc-types";
+import { findProjectBinding } from "../../../electron/project-bindings";
 
 export type RepositoryRootBindings = Record<string, string>;
 
-type KeyValueStorage = Pick<Storage, "getItem" | "setItem">;
+type KeyValueStorage = Pick<Storage, "getItem">;
 
 function normalizeRoomIdentifier(value: string | null | undefined): string {
   return String(value || "").trim().toLowerCase();
@@ -48,35 +49,7 @@ export function canonicalRepoIdentity(value: string | null | undefined): string 
   return normalized;
 }
 
-/**
- * Branch-independent repository identities under which a repo room can be
- * recognized: its room identifier, its stable repository id, and its
- * host/fullName pair — each reduced to a canonical repository key. Used to
- * decide whether a local checkout genuinely belongs to a repo room, without
- * caring which branch/worktree that checkout currently has.
- */
-export function gitRoomIdentityKeys(
-  gitRoom: DesktopRoomInfo["gitRoom"] | null | undefined,
-  roomIdentifier?: string | null,
-): string[] {
-  const keys = new Set<string>();
-  const roomKey = canonicalRepoIdentity(roomIdentifier);
-  if (roomKey) keys.add(roomKey);
-  if (gitRoom) {
-    const repoId = normalizeRoomIdentifier(gitRoom.repository.id);
-    if (repoId) keys.add(repoId);
-    const hostFullName = canonicalRepoIdentity(`${gitRoom.host}/${gitRoom.repository.fullName}`);
-    if (hostFullName) keys.add(hostFullName);
-  }
-  return [...keys];
-}
-
-/**
- * Repository roots are device-local authority, not navigation history. Keep a
- * small branch-independent binding so reopening a parent, branch, or focus room
- * resolves the same checkout even after the recent-room list is reordered or
- * truncated.
- */
+/** Parse renderer-era roots once as candidates for the main-process migration. */
 export function readRepositoryRootBindings(
   storage: Pick<KeyValueStorage, "getItem">,
   storageKey: string,
@@ -100,90 +73,6 @@ export function readRepositoryRootBindings(
   }
 }
 
-export function bindRepositoryRoot(
-  bindings: RepositoryRootBindings,
-  room: Pick<DesktopRoomInfo, "identifier" | "gitRoom"> | null | undefined,
-  rootPath: string | null | undefined,
-): RepositoryRootBindings {
-  const path = rootPath?.trim();
-  if (!path || !room?.gitRoom) return bindings;
-  let next = bindings;
-  for (const identity of gitRoomIdentityKeys(room.gitRoom, room.identifier)) {
-    if (next[identity] === path) continue;
-    if (next === bindings) next = { ...bindings };
-    next[identity] = path;
-  }
-  return next;
-}
-
-export function rememberRepositoryRootBindings(
-  storage: Pick<KeyValueStorage, "setItem">,
-  storageKey: string,
-  bindings: RepositoryRootBindings,
-): void {
-  try {
-    storage.setItem(storageKey, JSON.stringify(bindings));
-  } catch {
-    // Losing optional local persistence must not block room navigation.
-  }
-}
-
-/**
- * Recover a missing device-local project binding from supervisor-owned agent
- * history. A historical workspace is only a candidate: re-probe it and require
- * its current canonical Git identity to match the room before returning it.
- * This lets upgrades repair context that older desktop builds failed to retain
- * without scanning the filesystem or trusting a stale/arbitrary path.
- */
-export async function recoverProjectRootFromAgentHistory(input: {
-  roomIdentifier: string | null | undefined;
-  gitRoom: DesktopRoomInfo["gitRoom"] | null | undefined;
-  entries: ReadonlyArray<{
-    roomId: string;
-    sourceRepoPath?: string | null;
-    workspacePath?: string | null;
-    createdAt: string;
-  }>;
-  getRepoStatus: (rootPath: string) => Promise<RepoStatus | null>;
-}): Promise<{ rootPath: string; repoStatus: RepoStatus } | null> {
-  if (!input.gitRoom) return null;
-  const roomIdentifier = normalizeRoomIdentifier(input.roomIdentifier);
-  if (!roomIdentifier) return null;
-  const roomIdentities = new Set(gitRoomIdentityKeys(input.gitRoom, input.roomIdentifier));
-  const candidates = [...input.entries]
-    .filter((entry) => normalizeRoomIdentifier(entry.roomId) === roomIdentifier)
-    .sort((left, right) => right.createdAt.localeCompare(left.createdAt));
-  const checked = new Set<string>();
-  for (const entry of candidates) {
-    // Never recover from workspacePath: it is a daemon-provisioned private
-    // work attempt, not the user-selected source checkout. Older daemon entries
-    // that do not project sourceRepoPath deliberately fail closed.
-    const rootPath = entry.sourceRepoPath?.trim();
-    if (!rootPath || checked.has(rootPath)) continue;
-    checked.add(rootPath);
-    const status = await input.getRepoStatus(rootPath).catch(() => null);
-    const identity = status?.isGitRepo ? canonicalRepoIdentity(status.roomIdentifier) : null;
-    if (status && identity && roomIdentities.has(identity)) {
-      return { rootPath, repoStatus: status };
-    }
-  }
-  return null;
-}
-
-/**
- * Resolve the durable project root for the active root room.
- *
- * The stored root recorded when the project room was opened always wins. If a
- * repo-backed root room has no stored root — e.g. an older build's
- * account/app-agent reopen cleared it, or the entry rehydrated from storage
- * after a relaunch without one — a focus room must NOT fall back to a per-room
- * folder prompt. It self-heals from the active desktop workspace, but ONLY when
- * the workspace's canonical Git identity matches the room's repo. On any
- * mismatch (or missing identity) it fails closed and returns null, so the
- * repo-room boundary requires an explicit selection and we never launch a
- * supervised agent in a valid-but-unrelated repository. A room with no repo
- * context at all also resolves to null.
- */
 /**
  * The repo-room project context for whichever room is active, derived from the
  * sidebar project GROUP that actually contains that room — its parent repo room
@@ -215,32 +104,12 @@ export function activeRepoRoomContext(
 export function resolveActiveProjectRootPath(input: {
   activeRootIdentifier: string | null | undefined;
   activeRootGitRoom?: DesktopRoomInfo["gitRoom"] | null;
-  recentRootRooms: ReadonlyArray<{ identifier: string; rootPath: string | null }>;
-  repositoryRootBindings?: RepositoryRootBindings;
-  workspaceRepoStatus?: { rootPath: string; roomIdentifier?: string | null; isGitRepo?: boolean } | null;
+  projectBindings: readonly DesktopProjectBinding[];
 }): string | null {
-  const identifier = normalizeRoomIdentifier(input.activeRootIdentifier);
-  if (!identifier) return null;
-  const stored = input.recentRootRooms.find(
-    (entry) => normalizeRoomIdentifier(entry.identifier) === identifier,
-  )?.rootPath?.trim() || null;
-  if (stored) return stored;
-
-  if (input.activeRootGitRoom) {
-    for (const identity of gitRoomIdentityKeys(input.activeRootGitRoom, input.activeRootIdentifier)) {
-      const boundRoot = input.repositoryRootBindings?.[identity]?.trim();
-      if (boundRoot) return boundRoot;
-    }
-  }
-
-  // Self-heal only a repo-backed room, and only from an identity-matched
-  // workspace. Anything else fails closed at the repo-room boundary.
-  if (!input.activeRootGitRoom) return null;
-  const workspace = input.workspaceRepoStatus;
-  const workspaceRoot = workspace?.rootPath?.trim();
-  if (!workspace?.isGitRepo || !workspaceRoot) return null;
-  const workspaceIdentity = canonicalRepoIdentity(workspace.roomIdentifier);
-  if (!workspaceIdentity) return null;
-  const roomIdentities = gitRoomIdentityKeys(input.activeRootGitRoom, input.activeRootIdentifier);
-  return roomIdentities.includes(workspaceIdentity) ? workspaceRoot : null;
+  // Runtime resolution has exactly one authority: the main-process binding
+  // store. Navigation history, startup cwd, and agent workspaces are excluded.
+  return findProjectBinding(input.projectBindings, {
+    roomIdentifier: input.activeRootIdentifier,
+    gitRoom: input.activeRootGitRoom,
+  })?.rootPath || null;
 }

@@ -692,6 +692,45 @@ export interface DesktopRepoRoomSelection {
   snapshot: DesktopRoomSnapshot | null;
   error: string | null;
   warning: string | null;
+  projectBinding: DesktopProjectBinding | null;
+}
+
+export type DesktopProjectBindingSource =
+  | "configured"
+  | "git_remote"
+  | "local_git"
+  | "local_folder";
+
+/**
+ * Device-local context used to resolve a room to its project folder. Branch and
+ * focus room identifiers are aliases of the same project, never independent
+ * folder selections.
+ */
+export interface DesktopProjectBindingContext {
+  roomIdentifier?: string | null;
+  gitRoom?: DesktopGitRoomInfo | null;
+}
+
+/** The durable, device-local representation of a project room. */
+export interface DesktopProjectBinding {
+  id: string;
+  aliases: string[];
+  rootPath: string;
+  source: DesktopProjectBindingSource;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface DesktopLegacyProjectBindingCandidate {
+  context: DesktopProjectBindingContext;
+  rootPath: string;
+}
+
+export interface DesktopProjectConnectionResult {
+  canceled: boolean;
+  binding: DesktopProjectBinding | null;
+  repoStatus: RepoStatus | null;
+  error: string | null;
 }
 
 export interface DesktopInviteRoomCreation {

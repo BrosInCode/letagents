@@ -150,6 +150,23 @@
   flex: 0 0 auto;
 }
 
+.desktop-room-project-connect {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid color-mix(in srgb, var(--amber) 55%, var(--border));
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--amber) 12%, var(--bg-elevated));
+  color: var(--text);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 800;
+  cursor: pointer;
+}
+
+.desktop-room-project-connect:hover {
+  background: color-mix(in srgb, var(--amber) 20%, var(--bg-elevated));
+}
+
 .desktop-room-overflow {
   position: relative;
   z-index: 2;
