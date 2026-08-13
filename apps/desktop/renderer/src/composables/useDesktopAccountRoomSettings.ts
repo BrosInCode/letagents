@@ -3,6 +3,7 @@ import type { DesktopAccountRoomEntry, DesktopRoomInfo, DesktopRoomSnapshot } fr
 import type { RoomEntry, SidebarEntry } from "../components/desktop/types";
 import { desktopIpc } from "../ipc/index.js";
 import type { FocusRoomConclusionInput } from "../domain/focus-room-conclusion";
+import { safeUserVisibleErrorDetail } from "../domain/user-visible-error";
 import {
   buildRoomPinMutation,
   normalizeRoomIdentifier,
@@ -221,7 +222,7 @@ export function useDesktopAccountRoomSettings(options: DesktopAccountRoomSetting
         input.quickClose,
       );
     } catch (caught) {
-      const error = caught instanceof Error ? caught.message : `Could not conclude ${displayName}.`;
+      const error = safeUserVisibleErrorDetail(caught, `Could not conclude ${displayName}.`);
       settingsRoomActionBusyKey.value = null;
       return { ok: false, error };
     }

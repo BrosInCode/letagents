@@ -54,7 +54,7 @@ test("sidebar turns the settings row into a compact live transfer instrument", (
   assert.equal(formatUpdateBytes(1_572_864), "1.5 MB");
 });
 
-test("sidebar stays as Settings for routine checks and becomes the restart action when ready", () => {
+test("sidebar update presentation stays inactive for routine checks and becomes the restart action when ready", () => {
   assert.equal(desktopUpdateSidebarPresentation(status({ phase: "checking" })).active, false);
   assert.deepEqual(desktopUpdateSidebarPresentation(status({
     phase: "ready",
@@ -96,7 +96,7 @@ test("installing presentation describes the supervisor handoff", () => {
   assert.match(presentation.detail, /supervisor dispatch/i);
 });
 
-test("update progress does not churn an atomic live region or leave stale page state", async () => {
+test("update progress does not churn an atomic live region or claim account navigation state", async () => {
   const [updatesPane, sidebar] = await Promise.all([
     readFile(new URL("../src/components/desktop/settings/panes/SettingsUpdatesPane.vue", import.meta.url), "utf8"),
     readFile(new URL("../src/components/desktop/sidebar/DesktopSidebar.vue", import.meta.url), "utf8"),
@@ -106,5 +106,6 @@ test("update progress does not churn an atomic live region or leave stale page s
     updatesPane,
     /<h2 role="status" aria-live="polite" aria-atomic="true">\{\{ presentation\.title \}\}<\/h2>/,
   );
-  assert.match(sidebar, /:aria-current="!updatePresentation\.active/);
+  assert.match(sidebar, /v-if="updatePresentation\.active"[\s\S]{0,320}data-testid="sidebar-update-status"/);
+  assert.doesNotMatch(sidebar, /:aria-current="!updatePresentation\.active/);
 });

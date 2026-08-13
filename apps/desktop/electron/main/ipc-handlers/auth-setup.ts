@@ -13,11 +13,11 @@ import type {
   DesktopSupervisorGrantMetadata,
 } from "../../ipc-types.js";
 import {
-  clearStoredAuth,
   getDesktopAuthStatus,
   pollDeviceAuthFlow,
   setAuthAuthorizedHandler,
   setAuthInvalidatedHandler,
+  signOutDesktopAuth,
   startDeviceAuthFlow,
 } from "../auth.js";
 import { openAllowedExternalUrl } from "../external-url.js";
@@ -77,8 +77,8 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
     "desktop:auth:sign-out",
     async (): Promise<DesktopAuthStatus> => {
       clearJoinedRoomInfoCache();
-      await unregisterDesktopNotificationAccount();
-      await clearStoredAuth();
+      await unregisterDesktopNotificationAccount().catch(() => {});
+      await signOutDesktopAuth();
       await refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
       return getDesktopAuthStatus();
     },
