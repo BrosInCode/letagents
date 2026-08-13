@@ -393,6 +393,34 @@ test("marked desktop humans can quick-close without a summary or structured deta
   assert.equal(conclusionInput?.[3], null);
 });
 
+test("signed-out desktop quick-close returns an actionable auth error", async () => {
+  let concludeCalled = false;
+  const concludeHandler = registerConclusionHandler({
+    concludeFocusRoom: async () => {
+      concludeCalled = true;
+      return null;
+    },
+  });
+  const res = responseRecorder();
+
+  await concludeHandler(
+    {
+      authKind: null,
+      headers: { "x-letagents-desktop-client": "1" },
+      params: { 0: "room_1", 1: "focus_1" },
+      body: { quick_close: true, desktop_human_client: true },
+    },
+    res,
+  );
+
+  assert.equal(res.statusCode, 401);
+  assert.deepEqual(res.body, {
+    error: "Connect GitHub to close this Focus Room.",
+    code: "DESKTOP_AUTH_REQUIRED",
+  });
+  assert.equal(concludeCalled, false);
+});
+
 test("quick-close does not bypass summary requirements for agent sessions", async () => {
   let concludeCalled = false;
   const concludeHandler = registerConclusionHandler({

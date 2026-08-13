@@ -65,10 +65,15 @@
           :selected-entry-ids="sidebarSelectedEntryIds"
           :batch-action-busy="sidebarBatchActionBusy"
           :update-status="updateStatus"
+          :auth-status="authStatus"
+          :auth-busy="authBusy || loading"
           @cycle-sidebar="cycleSidebar"
           @new-room="selectNewRoomEntry"
           @open-rent="openRentMarketplace"
           @open-updates="openUpdatesSurface"
+          @open-settings="openSettingsSurface"
+          @connect-account="startAuthFlow"
+          @sign-out="signOut"
           @archive-room="archiveSidebarRoom"
           @archive-focus-room="archiveSidebarFocusRoom"
           @conclude-focus-room="openSidebarFocusRoomConclusion"
@@ -1380,6 +1385,10 @@ const {
 
 async function handleSidebarBatchAction(action: SidebarRoomBatchActionId): Promise<void> {
   if (sidebarBatchActionBusy.value) return;
+  if (action !== "mark-read" && !authStatus.value?.authenticated) {
+    pushActionToast("Connect GitHub from the account menu to manage rooms.", "info");
+    return;
+  }
   const resolution = resolveSidebarRoomBatchAction({
     action,
     entries: sidebarSelectedEntries.value,
@@ -1553,6 +1562,10 @@ const sidebarFocusRoomConclusionBusy = computed(() => {
 });
 
 function openSidebarFocusRoomConclusion(entry: RoomEntry): void {
+  if (!authStatus.value?.authenticated) {
+    pushActionToast("Connect GitHub from the account menu to conclude this Focus Room.", "info");
+    return;
+  }
   if (
     entry.kind !== "focus"
     || entry.focusStatus === "concluded"
