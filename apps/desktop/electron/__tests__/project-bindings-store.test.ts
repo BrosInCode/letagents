@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -82,6 +82,7 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
     );
     assert.equal((await listProjectBindings({ storePath })).length, 1);
     assert.equal(readFileSync(storePath).subarray(0, 16).toString(), "SQLite format 3\0");
+    assert.equal(statSync(storePath).mode & 0o777, 0o600);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
