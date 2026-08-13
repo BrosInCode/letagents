@@ -76,8 +76,16 @@
           @click="emit('recover', progress.recovery)"
         >
           <span v-if="recovering" class="supervised-launch-button-spinner" aria-hidden="true" />
-          {{ recovering ? "Trying again…" : recoveryLabel(progress.recovery, progress.durable) }}
+          {{ recovering ? recoveryPendingLabel(progress.recovery) : recoveryLabel(progress.recovery, progress.durable) }}
         </button>
+        <button
+          v-if="progress.recovery === 'open_keychain'"
+          type="button"
+          class="supervised-launch-dismiss"
+          data-testid="supervised-launch-keychain-retry"
+          :disabled="recovering"
+          @click="emit('recover', 'retry')"
+        >Try again</button>
         <button
           v-if="inlineDismiss"
           type="button"
@@ -137,7 +145,12 @@ function recoveryLabel(action: DesktopLaunchRecoveryAction, durable: boolean): s
     case "reconnect": return "Reconnect";
     case "sign_in": return "Copy sign-in command";
     case "choose_project": return "Choose project";
+    case "open_keychain": return "Open Keychain Access";
   }
+}
+
+function recoveryPendingLabel(action: DesktopLaunchRecoveryAction): string {
+  return action === "open_keychain" ? "Opening…" : "Trying again…";
 }
 
 const visiblePhases = computed(() => {

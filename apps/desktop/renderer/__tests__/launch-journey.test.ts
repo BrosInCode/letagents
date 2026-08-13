@@ -176,6 +176,26 @@ test("a failure after connecting attributes to saving your agent", () => {
   assert.equal(view.recovery, "retry");
 });
 
+test("an unavailable login Keychain becomes a self-service blocked setup", () => {
+  const detail = "LetAgents needs access to your Mac login keychain to save this agent securely. Open Keychain Access, unlock the login keychain, then try again.";
+  const view = foldLaunchJourney({
+    events: [
+      evt("supervisor.connected"),
+      evt("launch.blocked", {
+        detail,
+        diagnostic: "macOS Keychain encryption is unavailable; host grant was not provisioned.",
+        recovery: "open_keychain",
+      }),
+    ],
+    provider: "codex",
+  });
+  assert.equal(view.status, "blocked");
+  assert.equal(stateOf(view, "saving_agent"), "failed");
+  assert.equal(view.headline, "Unlock Keychain to finish setup");
+  assert.equal(view.failureDetail, detail);
+  assert.equal(view.recovery, "open_keychain");
+});
+
 test("a user cancel is a cancelled journey, not a failure", () => {
   const view = foldLaunchJourney({
     events: [evt("supervisor.connected"), evt("agent.saved"), evt("launch.cancelled", { durable: true, detail: "You stopped this launch." })],

@@ -337,3 +337,22 @@ test("pre-durable failures are compact, actionable, and explicit that nothing ch
   assert.doesNotMatch(html, /Saving your agent/, "unreachable future steps should not remain in a terminal card");
   assert.match(html, /<summary[^>]*>Details<\/summary>/);
 });
+
+test("Keychain failures render self-service recovery and a separate retry", async () => {
+  const failed = failedController();
+  Object.assign(failed.controller.launch.view.value, {
+    currentPhaseId: "saving_agent",
+    headline: "Unlock Keychain to finish setup",
+    failureDetail: "LetAgents needs access to your Mac login keychain to save this agent securely.",
+    recovery: "open_keychain",
+  });
+  const html = await renderToString(createSSRApp({
+    render: () => h(AddAgentSupervisedLaunch, { controller: failed.controller }),
+  }));
+
+  assert.match(html, /Unlock Keychain to finish setup/);
+  assert.match(html, /Open Keychain Access<\/button>/);
+  assert.match(html, /supervised-launch-keychain-retry/);
+  assert.match(html, /Try again<\/button>/);
+  assert.match(html, /desktop-add-agent-dismiss-launch/);
+});

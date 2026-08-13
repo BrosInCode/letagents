@@ -353,11 +353,14 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       && terminal.recovery === "reconnect"
     );
     const savingFailed = !cancelled && boundaryIndex === SAVING;
+    const keychainBlocked = savingFailed && terminal.recovery === "open_keychain";
     const failureDetail = connectionFailed
       ? "LetAgents couldn’t start the local service that manages room agents."
-      : savingFailed
-        ? "LetAgents reached its background service but couldn’t save this agent."
-        : terminal.detail;
+      : keychainBlocked
+        ? terminal.detail
+        : savingFailed
+          ? "LetAgents reached its background service but couldn’t save this agent."
+          : terminal.detail;
     const failureDiagnostic = !cancelled
       ? terminal.diagnostic
         ?? ((terminal.detail && terminal.detail.trim() !== failureDetail?.trim())
@@ -377,9 +380,11 @@ export function foldLaunchJourney(input: LaunchJourneyInput): LaunchJourneyView 
       providerLabel,
       headline: connectionFailed
         ? "Background service didn’t start"
-        : savingFailed
-          ? "Agent setup stopped before it was saved"
-          : headlineFor(status, ctx),
+        : keychainBlocked
+          ? "Unlock Keychain to finish setup"
+          : savingFailed
+            ? "Agent setup stopped before it was saved"
+            : headlineFor(status, ctx),
       failureDetail,
       failureImpact: cancelled
         ? null

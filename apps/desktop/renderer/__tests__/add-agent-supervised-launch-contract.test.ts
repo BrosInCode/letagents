@@ -113,6 +113,15 @@ test("the sign-in recovery performs a real provider-auth action and does not sta
   assert.match(recoverBody, /creationRequestId\.value = activeLaunchId\.value;[\s\S]*?options\.onRetry\(\)/);
 });
 
+test("Keychain recovery opens the native credential manager without weakening storage", () => {
+  const recoverBody = launchSource.slice(launchSource.indexOf("async function handleRecover"));
+  assert.match(recoverBody, /action === "open_keychain"/);
+  assert.match(recoverBody, /desktopIpc\.app\.openCredentialStorage\(\)/);
+  assert.match(recoverBody, /unlock the login keychain/i);
+  assert.match(progressSource, /Open Keychain Access/);
+  assert.match(progressSource, /supervised-launch-keychain-retry/);
+});
+
 test("Try again converges a durable launch entry instead of creating a second agent", () => {
   assert.match(controllerSource, /onRetry: \(\) => retrySupervisedLaunch\(\)/);
   const retryBody = controllerSource.slice(
@@ -249,6 +258,14 @@ test("legacy start feedback is assigned only after the modal request guard", () 
   assert.match(setupSource, /onBeforeUnmount\(resetTransientState\)/);
 });
 
+test("supervised start rechecks secure storage before creating a launch", () => {
+  const storageCheck = controllerSource.indexOf("await desktopIpc.supervisorGrant.getStorageStatus()");
+  const launchBoundary = controllerSource.indexOf("supervisedLaunch.begin()", storageCheck);
+  assert.ok(storageCheck >= 0, "supervised Start should perform a secure-storage round-trip");
+  assert.ok(launchBoundary > storageCheck, "secure storage must be checked before the launch boundary");
+  assert.match(controllerSource, /if \(!latestStorageStatus\.available\) \{[\s\S]*?return;/);
+});
+
 test("an in-flight Start remains fenced across modal close and provider reset", () => {
   assert.match(controllerSource, /let startOperationInFlight = false/);
   assert.match(controllerSource, /if \(!selectedProviderId\.value \|\| !props\.repoRootPath \|\| startOperationInFlight\) return/);
@@ -277,7 +294,8 @@ test("the launch progress component exposes phased, accessible, honest UI hooks"
   assert.match(progressSource, /data-testid="supervised-launch-failure-impact"/);
   assert.match(progressSource, /v-for="phase in visiblePhases"/);
   assert.match(progressSource, /progress\.failureDiagnostic/);
-  assert.match(progressSource, /recovering \? "Trying again…"/);
+  assert.match(progressSource, /recovering \? recoveryPendingLabel/);
+  assert.match(progressSource, /"open_keychain" \? "Opening…" : "Trying again…"/);
   assert.match(progressSource, /progress\.durable/);
   assert.match(progressSource, /data-testid="supervised-launch-ready-name"/);
   assert.doesNotMatch(recoveryNoticeSource, /aria-live=/);

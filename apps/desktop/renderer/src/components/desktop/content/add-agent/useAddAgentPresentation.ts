@@ -45,6 +45,7 @@ export function useAddAgentPresentation(
     providers,
     selectedProviderId,
     preflight,
+    secureStorageStatus,
     loadingProviders,
     loadingPreflight,
     creatingWorktree,
@@ -84,6 +85,7 @@ export function useAddAgentPresentation(
   const canStartManagedAgent = computed(() =>
     Boolean(
       preflight.value?.canStart &&
+      (launchMode.value !== "supervised" || secureStorageStatus.value?.available === true) &&
       (!loadingPreflight.value || Boolean(preflight.value)) &&
       (selectedModelMode.value !== "option" || !loadingProviderModels.value) &&
       (
@@ -120,12 +122,18 @@ export function useAddAgentPresentation(
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking setup";
     if (loadError.value) return "Provider check failed";
     if (!preflight.value) return "Choose a provider";
+    if (launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+      return "Unlock secure credential storage";
+    }
     if (preflight.value.status === "ready") return "Choose how it works here";
     return safeUserVisibleErrorDetail(preflight.value.message, "Provider setup needs attention");
   });
   const statusDescription = computed(() => {
     if (loadError.value) return "We couldn't verify this provider's setup. Use Check again to retry.";
     if (!preflight.value) return "Checking provider readiness...";
+    if (launchMode.value === "supervised" && secureStorageStatus.value?.available === false) {
+      return secureStorageStatus.value.detail;
+    }
     if (preflight.value.status !== "ready") {
       return safeUserVisibleErrorDetail(
         preflight.value.detail || preflight.value.message,
@@ -145,6 +153,7 @@ export function useAddAgentPresentation(
   const preflightStatusLabel = computed(() => {
     if ((loadingProviders.value || loadingPreflight.value) && !preflight.value) return "Checking";
     if (loadError.value || preflight.value?.status === "error") return "Needs attention";
+    if (launchMode.value === "supervised" && secureStorageStatus.value?.available === false) return "Needs attention";
     if (preflight.value?.status === "ready") return "Ready";
     if (!preflight.value) return "Not checked";
     return "Setup needed";
@@ -178,6 +187,18 @@ export function useAddAgentPresentation(
     }
     return props.repoRootPath || "Required before local agents can start";
   });
+  const showSecureStorage = computed(() => launchMode.value === "supervised");
+  const secureStorageLabel = computed(() => {
+    if (!showSecureStorage.value) return null;
+    if (!secureStorageStatus.value) return "Checking";
+    return secureStorageStatus.value.available ? "Available" : "Unlock required";
+  });
+  const secureStorageNeedsAttention = computed(() =>
+    showSecureStorage.value && secureStorageStatus.value?.available === false
+  );
+  const canOpenSecureStorage = computed(() =>
+    secureStorageNeedsAttention.value && secureStorageStatus.value?.canOpenCredentialStorage === true
+  );
   const expectedWorktreeBranch = computed(() =>
     preflight.value?.branchMismatch?.expectedBranch ||
     branchScopedGitRoomExpectedBranch(props.roomGitRoom, props.repoStatus)
@@ -351,6 +372,10 @@ export function useAddAgentPresentation(
     runtimeLabel,
     bridgeLabel,
     repoLabel,
+    showSecureStorage,
+    secureStorageLabel,
+    secureStorageNeedsAttention,
+    canOpenSecureStorage,
     expectedWorktreeBranch,
     matchingWorktrees,
     showWorktreePicker,

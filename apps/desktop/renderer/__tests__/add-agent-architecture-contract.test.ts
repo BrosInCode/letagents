@@ -122,6 +122,13 @@ test("setup owns provider, preflight, authentication, and worktree lifecycles", 
   assert.match(setup, /onBeforeUnmount\(resetTransientState\)/);
 });
 
+test("secure credential storage is a supervised readiness prerequisite", () => {
+  assert.match(setup, /launchMode === "supervised"[\s\S]*?supervisorGrant\.getStorageStatus\(\)/);
+  assert.match(presentation, /launchMode\.value !== "supervised" \|\| secureStorageStatus\.value\?\.available === true/);
+  assert.match(setupStatus, /<dt>Secure storage<\/dt>/);
+  assert.match(setup, /window\.addEventListener\("focus", recheckUnlockedStorage\)/);
+});
+
 test("ready provider copy separates identity, state, and next action", () => {
   assert.match(presentation, /status === "ready"\) return "Choose how it works here"/);
   assert.match(presentation, /Set its model, lifecycle, and access before launch/);

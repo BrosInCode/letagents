@@ -15,6 +15,7 @@ import type {
 import { getAppAgentSettingsStatus, saveAppAgentSettings } from "../app-agent/settings.js";
 import { listDesktopAppAgentActions, runDesktopAppAgent } from "../app-agent/runner.js";
 import { getOpenModelSettingsStatus, saveOpenModelSettings } from "../agents/open-model-settings.js";
+import { openDesktopCredentialStorage } from "../credential-storage.js";
 import { openAllowedExternalUrl, openExternalWebUrl } from "../external-url.js";
 import { getGitHubPullRequestStats } from "../github-pr-stats.js";
 import {
@@ -76,6 +77,10 @@ export function registerDesktopAppIpcHandlers(targetIpcMain: IpcMain): void {
     async (_event, url: string): Promise<void> => {
       await openExternalWebUrl(url);
     },
+  );
+  targetIpcMain.handle(
+    "desktop:app:open-credential-storage",
+    async (): Promise<void> => openDesktopCredentialStorage(),
   );
   targetIpcMain.handle(
     "desktop:app:get-github-pull-request-stats",

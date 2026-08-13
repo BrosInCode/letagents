@@ -1,5 +1,5 @@
 <template>
-  <section class="desktop-add-agent-status" :data-state="preflight?.status || 'loading'">
+  <section class="desktop-add-agent-status" :data-state="secureStorageNeedsAttention ? 'error' : preflight?.status || 'loading'">
     <div class="desktop-add-agent-status-header">
       <div>
         <span>{{ providerName || "Provider" }}</span>
@@ -8,7 +8,7 @@
       <div class="desktop-add-agent-status-actions">
         <span
           class="desktop-add-agent-status-pill"
-          :data-state="preflight?.status || 'loading'"
+          :data-state="secureStorageNeedsAttention ? 'error' : preflight?.status || 'loading'"
         >{{ statusLabel }}</span>
         <button type="button" :disabled="loading" @click="emit('refresh')">
           {{ loading ? "Checking..." : providerName ? "Check again" : "Try again" }}
@@ -26,6 +26,18 @@
       <div><dt>Agent app</dt><dd>{{ runtimeLabel }}</dd></div>
       <div><dt>LetAgents connection</dt><dd>{{ bridgeLabel }}</dd></div>
       <div><dt>Project folder</dt><dd>{{ repoLabel }}</dd></div>
+      <div
+        v-if="showSecureStorage"
+        :data-attention="secureStorageNeedsAttention"
+      >
+        <dt>Secure storage</dt>
+        <dd>{{ secureStorageLabel }}</dd>
+        <button
+          v-if="secureStorageNeedsAttention && canOpenSecureStorage"
+          type="button"
+          @click="emit('open-secure-storage')"
+        >Open Keychain Access</button>
+      </div>
     </dl>
 
     <section
@@ -96,6 +108,10 @@ defineProps<{
   runtimeLabel: string;
   bridgeLabel: string;
   repoLabel: string;
+  showSecureStorage: boolean;
+  secureStorageLabel: string | null;
+  secureStorageNeedsAttention: boolean;
+  canOpenSecureStorage: boolean;
   showWorktrees: boolean;
   worktrees: RepoWorktreeEntry[];
   worktreeDescription: string;
@@ -106,6 +122,7 @@ defineProps<{
 const emit = defineEmits<{
   refresh: [];
   "choose-worktree": [path: string];
+  "open-secure-storage": [];
 }>();
 </script>
 <style scoped src="./AddAgentSetupStatus.css"></style>

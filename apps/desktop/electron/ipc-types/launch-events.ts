@@ -51,7 +51,8 @@ export type DesktopLaunchRecoveryAction =
   | "retry"
   | "reconnect"
   | "sign_in"
-  | "choose_project";
+  | "choose_project"
+  | "open_keychain";
 
 export interface DesktopLaunchEvent {
   /** Stable launch id; equals the supervised entry's `creationRequestId`. */

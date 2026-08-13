@@ -1,6 +1,10 @@
 import type { DesktopAuthPollResult, DesktopAuthStartResult, DesktopAuthStatus } from "./auth.js";
 import type { DesktopNotificationStatus, DesktopNotificationTarget } from "./notifications.js";
-import type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "./supervisor-grant.js";
+import type {
+  DesktopProvisionSupervisorGrantInput,
+  DesktopSecureStorageStatus,
+  DesktopSupervisorGrantMetadata,
+} from "./supervisor-grant.js";
 import type {
   DesktopAppInfo,
   DesktopGitHubPullRequestStats,
@@ -126,6 +130,7 @@ export interface DesktopApi {
     getInfo: () => Promise<DesktopAppInfo>;
     openGitHubUrl: (url: string) => Promise<void>;
     openExternalUrl: (url: string) => Promise<void>;
+    openCredentialStorage: () => Promise<void>;
     getGitHubPullRequestStats: (url: string) => Promise<DesktopGitHubPullRequestStats | null>;
   };
   updates?: {
@@ -287,6 +292,7 @@ export interface DesktopApi {
   };
   supervisorGrant: {
     get: () => Promise<DesktopSupervisorGrantMetadata | null>;
+    getStorageStatus: () => Promise<DesktopSecureStorageStatus>;
     provision: (input: DesktopProvisionSupervisorGrantInput) => Promise<DesktopSupervisorGrantMetadata>;
     revoke: () => Promise<void>;
   };

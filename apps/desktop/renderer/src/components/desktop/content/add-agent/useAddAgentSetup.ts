@@ -16,6 +16,7 @@ import type {
   DesktopGitRoomInfo,
   DesktopManagedAgentEffort,
   DesktopManagedAgentPermissionProfile,
+  DesktopSecureStorageStatus,
 } from "../../../../../../electron/ipc-types";
 import {
   agentSetupActionButtonLabel,
@@ -66,6 +67,7 @@ export function useAddAgentSetup() {
   const providers = ref<DesktopAgentProvider[]>([]);
   const selectedProviderId = ref<DesktopAgentProviderId | null>(null);
   const preflight = ref<DesktopAgentProviderPreflight | null>(null);
+  const secureStorageStatus = ref<DesktopSecureStorageStatus | null>(null);
   const loadingProviders = ref(false);
   const loadingPreflight = ref(false);
   const setupBusy = ref(false);
@@ -106,6 +108,7 @@ export function useAddAgentSetup() {
 
     function invalidateCurrentPreflight(): void {
       preflight.value = null;
+      secureStorageStatus.value = null;
       setupConfirmation.value = null;
       loadingPreflight.value = false;
       preflightRequestId += 1;
@@ -135,11 +138,13 @@ export function useAddAgentSetup() {
       loadError.value = null;
       setupConfirmation.value = null;
       try {
-        const result = await desktopIpc.workers.runAgentProviderPreflight(providerId, {
+        const launchMode = bindings.launchMode.value;
+        const [result, storageStatus] = await Promise.all([
+          desktopIpc.workers.runAgentProviderPreflight(providerId, {
           roomIdentifier: bindings.roomIdentifier(),
           roomGitRoom: bindings.roomGitRoom(),
           repoRootPath: bindings.repoRootPath(),
-          launchMode: bindings.launchMode.value,
+          launchMode,
           permissionProfileId: bindings.selectedPermissionProfile.value?.id ?? null,
           cursorMcpPolicy: providerId === "cursor" ? bindings.selectedCursorMcpPolicy.value : null,
           model: bindings.selectedModel.value,
@@ -147,9 +152,14 @@ export function useAddAgentSetup() {
           effort: bindings.selectedEffort.value || null,
           refreshModels: options.refreshModels,
           refreshEnvironment: options.refreshEnvironment,
-        });
+          }),
+          launchMode === "supervised"
+            ? desktopIpc.supervisorGrant.getStorageStatus()
+            : Promise.resolve(null),
+        ]);
         if (isCurrentRequest(version) && requestId === preflightRequestId && selectedProviderId.value === providerId) {
           preflight.value = result;
+          secureStorageStatus.value = storageStatus;
         }
       } catch (error) {
         if (isCurrentRequest(version) && requestId === preflightRequestId && selectedProviderId.value === providerId) {
@@ -192,6 +202,7 @@ export function useAddAgentSetup() {
         && roomIdentifier === bindings.roomIdentifier();
       loadingProviders.value = true;
       loadError.value = null;
+      secureStorageStatus.value = null;
       try {
         const nextProviders = visibleDesktopAgentProviders(await desktopIpc.workers.listAgentProviders());
         if (!isCurrent()) return;
@@ -425,7 +436,25 @@ export function useAddAgentSetup() {
       void loadProviders();
       bindings.onDetectRecoverableLaunch();
     });
-    if (getCurrentInstance()) onBeforeUnmount(resetTransientState);
+    const recheckUnlockedStorage = (): void => {
+      if (
+        bindings.open()
+        && bindings.launchMode.value === "supervised"
+        && secureStorageStatus.value?.available === false
+        && !loadingPreflight.value
+      ) void runPreflight({ refreshEnvironment: true });
+    };
+    if (typeof window.addEventListener === "function") {
+      window.addEventListener("focus", recheckUnlockedStorage);
+    }
+    if (getCurrentInstance()) {
+      onBeforeUnmount(() => {
+        if (typeof window.removeEventListener === "function") {
+          window.removeEventListener("focus", recheckUnlockedStorage);
+        }
+      });
+      onBeforeUnmount(resetTransientState);
+    }
 
     return {
       currentVersion,
@@ -450,6 +479,7 @@ export function useAddAgentSetup() {
     providers,
     selectedProviderId,
     preflight,
+    secureStorageStatus,
     loadingProviders,
     loadingPreflight,
     setupBusy,

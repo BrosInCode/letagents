@@ -10,6 +10,7 @@ import {
   resetLaunchEventsForTest,
   supervisedLaunchEverReady,
 } from "../main/launch-events.js";
+import { DesktopSecureStorageUnavailableError } from "../main/supervisor-grant.js";
 
 test.beforeEach(() => resetLaunchEventsForTest());
 
@@ -90,6 +91,16 @@ test("classifyLaunchFailure maps blocked errors to a product recovery", () => {
   assert.equal(blocked.type, "launch.blocked");
   assert.equal(blocked.recovery, "choose_project");
   assert.equal(blocked.detail, "Choose a cloud room.");
+});
+
+test("classifyLaunchFailure gives unavailable Keychain storage a self-service recovery", () => {
+  const failure = classifyLaunchFailure(new DesktopSecureStorageUnavailableError(
+    "macOS Keychain encryption is unavailable; host grant was not provisioned.",
+  ));
+  assert.equal(failure.type, "launch.blocked");
+  assert.equal(failure.recovery, "open_keychain");
+  assert.match(failure.detail, /Open Keychain Access/);
+  assert.match(String(failure.diagnostic), /host grant was not provisioned/);
 });
 
 test("classifyLaunchFailure maps unexpected errors to a safe generic failure", () => {
