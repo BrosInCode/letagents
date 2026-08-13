@@ -370,6 +370,40 @@ test("failed legacy migration keys are retained for a later launch", async () =>
   }
 });
 
+test("a migrated hosted name cannot satisfy a different stable repository id", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-legacy-reuse-"));
+  const storePath = join(temporary, "bindings.sqlite");
+  const rootPath = join(temporary, "legacy-checkout");
+  mkdirSync(rootPath);
+  execFileSync("git", ["init", "-b", "main"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:org/old.git"], { cwd: rootPath });
+  try {
+    const migration = await migrateLegacyProjectBindings([{
+      legacyKey: "github.com/org/old",
+      context: { roomIdentifier: "github.com/org/old" },
+      rootPath,
+    }], { storePath });
+    assert.equal(migration.bindings[0]?.identityKey, "project-room:github.com/org/old");
+
+    const reusedName = {
+      ...githubGitRoom(),
+      repository: {
+        ...githubGitRoom().repository,
+        id: "repo-id-2",
+        fullName: "org/old",
+        owner: "org",
+        name: "old",
+      },
+    };
+    assert.equal(findProjectBinding(migration.bindings, {
+      roomIdentifier: "github.com/org/old",
+      gitRoom: reusedName,
+    }), null);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
 test("separate desktop processes serialize whole-store updates", async () => {
   const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-processes-"));
   const moduleUrl = new URL("../main/project-bindings-store.ts", import.meta.url).href;
