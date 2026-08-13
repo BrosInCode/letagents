@@ -9,6 +9,7 @@ import type {
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
   DesktopProvisionSupervisorGrantInput,
+  DesktopSecureStorageStatus,
   DesktopSupervisorGrantMetadata,
 } from "../../ipc-types.js";
 import {
@@ -34,6 +35,7 @@ import {
 import { clearJoinedRoomInfoCache } from "../rooms.js";
 import {
   getDesktopSupervisorGrantMetadata,
+  getDesktopSupervisorGrantStorageStatus,
   provisionDesktopSupervisorGrant,
   revokeDesktopSupervisorGrant,
 } from "../supervisor-grant.js";
@@ -84,6 +86,10 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   targetIpcMain.handle(
     "desktop:supervisor-grant:get",
     async (): Promise<DesktopSupervisorGrantMetadata | null> => getDesktopSupervisorGrantMetadata(),
+  );
+  targetIpcMain.handle(
+    "desktop:supervisor-grant:get-storage-status",
+    async (): Promise<DesktopSecureStorageStatus> => getDesktopSupervisorGrantStorageStatus(),
   );
   targetIpcMain.handle(
     "desktop:supervisor-grant:provision",

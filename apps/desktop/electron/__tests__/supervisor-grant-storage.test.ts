@@ -12,6 +12,7 @@ import {
   encryptSupervisorGrantForStorage,
   getOrCreateDesktopSupervisorAgentIdentity,
   getOrProvisionDesktopSupervisorGrantForAgent,
+  getDesktopSupervisorGrantStorageStatus,
   provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
@@ -70,6 +71,44 @@ test("supervisor grant storage fails closed without Keychain encryption", () => 
   };
   assert.throws(() => encryptSupervisorGrantForStorage("lashg_secret", unavailable), /Keychain encryption is unavailable/);
   assert.equal(decryptSupervisorGrantFromStorage("plain:lashg_secret", unavailable), null);
+});
+
+test("a Keychain failure during encryption remains a typed recoverable storage failure", () => {
+  const locksBetweenCheckAndWrite = {
+    isEncryptionAvailable: () => true,
+    encryptString: (_value: string) => { throw new Error("errSecAuthFailed"); },
+    decryptString: (_value: Buffer) => "",
+  };
+  assert.throws(
+    () => encryptSupervisorGrantForStorage("lashg_secret", locksBetweenCheckAndWrite),
+    (error: unknown) => error instanceof Error
+      && error.name === "DesktopSecureStorageUnavailableError"
+      && !error.message.includes("lashg_secret"),
+  );
+});
+
+test("supervisor grant storage readiness performs the exact synchronous persistence round-trip", () => {
+  let encrypted = false;
+  const available = getDesktopSupervisorGrantStorageStatus({
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => {
+      encrypted = true;
+      return Buffer.from(`keychain:${value}`);
+    },
+    decryptString: (value: Buffer) => value.toString("utf8").replace("keychain:", ""),
+  }, "darwin");
+  assert.equal(encrypted, true);
+  assert.equal(available.available, true);
+  assert.equal(available.canOpenCredentialStorage, false);
+
+  const locked = getDesktopSupervisorGrantStorageStatus({
+    isEncryptionAvailable: () => true,
+    encryptString: () => { throw new Error("errSecAuthFailed"); },
+    decryptString: () => "",
+  }, "darwin");
+  assert.equal(locked.available, false);
+  assert.equal(locked.canOpenCredentialStorage, true);
+  assert.match(locked.detail, /login Keychain/);
 });
 
 test("supervisor grant registry keys are stable agent identities rather than display names", () => {
@@ -458,7 +497,9 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
     };
     await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent({
       hostId: "desktop_host", entryId: "entry-c", agentKey: "owner/agent-c", roomScopes: [roomScope("room-c")],
-    }, { storage: failingStorage, apiFetch }), /Keychain write failed/);
+    }, { storage: failingStorage, apiFetch }), (error: unknown) => error instanceof Error
+      && error.name === "DesktopSecureStorageUnavailableError"
+      && /OS-backed encryption became unavailable/.test(error.message));
     assert.deepEqual(revokedPaths, ["/supervisor-host-grants/grant_3"]);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, first.token);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, second.token);

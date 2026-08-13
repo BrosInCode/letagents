@@ -6,7 +6,11 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 import { apiFetch, DesktopApiError } from "./auth.js";
-import type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
+import type {
+  DesktopProvisionSupervisorGrantInput,
+  DesktopSecureStorageStatus,
+  DesktopSupervisorGrantMetadata,
+} from "../ipc-types/supervisor-grant.js";
 
 const require = createRequire(import.meta.url);
 
@@ -32,6 +36,20 @@ type StoredGrant = DesktopSupervisorGrantMetadata & {
   encryptedToken: string;
 };
 type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: string };
+
+/**
+ * The supervisor bearer is intentionally never persisted without OS-backed
+ * encryption. Callers use this typed failure to offer a self-service macOS
+ * Keychain recovery instead of reducing it to a generic launch error.
+ */
+export class DesktopSecureStorageUnavailableError extends Error {
+  readonly code = "desktop_secure_storage_unavailable";
+
+  constructor(message: string) {
+    super(message);
+    this.name = "DesktopSecureStorageUnavailableError";
+  }
+}
 /**
  * The entry map is intentionally separate from the encrypted bearer records:
  * it is durable, non-secret identity metadata used to recover a daemon-inbox
@@ -105,9 +123,48 @@ function storePath(): string {
 // passed through main-process functions and is never put in IPC return values.
 export function encryptSupervisorGrantForStorage(token: string, storage = getStorage()): string {
   if (!storage.isEncryptionAvailable()) {
-    throw new Error("macOS Keychain encryption is unavailable; host grant was not stored.");
+    throw new DesktopSecureStorageUnavailableError(
+      "macOS Keychain encryption is unavailable; host grant was not stored.",
+    );
   }
-  return `safe:${storage.encryptString(token).toString("base64")}`;
+  try {
+    return `safe:${storage.encryptString(token).toString("base64")}`;
+  } catch {
+    throw new DesktopSecureStorageUnavailableError(
+      "OS-backed encryption became unavailable while saving the host grant.",
+    );
+  }
+}
+
+/**
+ * Exercise the same encrypt/decrypt path used for a real supervisor bearer.
+ * `isEncryptionAvailable()` alone can report a false positive while the macOS
+ * login Keychain is locked or its password is out of sync.
+ */
+export function getDesktopSupervisorGrantStorageStatus(
+  storage = getStorage(),
+  platform = process.platform,
+): DesktopSecureStorageStatus {
+  const unavailable = (): DesktopSecureStorageStatus => ({
+    available: false,
+    detail: platform === "darwin"
+      ? "Unlock your macOS login Keychain, then check again."
+      : "Secure credential storage is unavailable. Unlock it, then check again.",
+    canOpenCredentialStorage: platform === "darwin",
+  });
+  if (!storage.isEncryptionAvailable()) return unavailable();
+  try {
+    const probe = `letagents-secure-storage-probe:${randomUUID()}`;
+    const encrypted = storage.encryptString(probe);
+    if (storage.decryptString(encrypted) !== probe) return unavailable();
+    return {
+      available: true,
+      detail: "Agent credentials can be stored securely on this computer.",
+      canOpenCredentialStorage: false,
+    };
+  } catch {
+    return unavailable();
+  }
 }
 
 export function decryptSupervisorGrantFromStorage(value: string, storage = getStorage()): string | null {
@@ -353,8 +410,10 @@ export async function provisionDesktopSupervisorGrant(
   options: GrantStorageOptions = {},
 ): Promise<DesktopSupervisorGrantMetadata> {
   const storage = options.storage ?? getStorage();
-  if (!storage.isEncryptionAvailable()) {
-    throw new Error("macOS Keychain encryption is unavailable; host grant was not provisioned.");
+  if (!getDesktopSupervisorGrantStorageStatus(storage).available) {
+    throw new DesktopSecureStorageUnavailableError(
+      "macOS Keychain encryption is unavailable; host grant was not provisioned.",
+    );
   }
   const request = options.apiFetch ?? apiFetch;
   return withRegistryMutation(async () => {
@@ -717,8 +776,10 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   lastInstalledDaemonGeneration: number | null;
 }> {
   const storage = options.storage ?? getStorage();
-  if (!storage.isEncryptionAvailable()) {
-    throw new Error("macOS Keychain encryption is unavailable; host grant was not provisioned.");
+  if (!getDesktopSupervisorGrantStorageStatus(storage).available) {
+    throw new DesktopSecureStorageUnavailableError(
+      "macOS Keychain encryption is unavailable; host grant was not provisioned.",
+    );
   }
   const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
   const entryId = input.entryId.trim();
