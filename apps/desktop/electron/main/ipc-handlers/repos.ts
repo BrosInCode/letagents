@@ -6,6 +6,7 @@ import type {
   DesktopLegacyProjectBindingCandidate,
   DesktopProjectBinding,
   DesktopProjectBindingContext,
+  DesktopProjectBindingMigrationResult,
   DesktopProjectConnectionResult,
   RepoStatus,
 } from "../../ipc-types.js";
@@ -49,7 +50,7 @@ export function registerDesktopRepoIpcHandlers(targetIpcMain: IpcMain): void {
     async (
       _event,
       candidates?: DesktopLegacyProjectBindingCandidate[] | null,
-    ): Promise<DesktopProjectBinding[]> =>
+    ): Promise<DesktopProjectBindingMigrationResult> =>
       migrateLegacyProjectBindings(Array.isArray(candidates) ? candidates : []),
   );
   targetIpcMain.handle(

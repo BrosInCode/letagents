@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { promisify } from "node:util";
 import test from "node:test";
 
 import type { DesktopGitRoomInfo } from "../ipc-types.js";
@@ -18,6 +19,8 @@ import {
   projectBindingAliases,
 } from "../project-bindings.js";
 import { resolveRoomIdentifierFromPath } from "../repo-status.js";
+
+const execFileAsync = promisify(execFile);
 
 function githubGitRoom(): DesktopGitRoomInfo {
   return {
@@ -49,6 +52,10 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
   const rootPath = join(temporary, "checkout");
   const storePath = join(temporary, "bindings.json");
   mkdirSync(rootPath);
+  execFileSync("git", ["init", "-b", "main"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:BrosInCode/LetAgents.git"], {
+    cwd: rootPath,
+  });
   try {
     const binding = await bindProjectRoot({
       context: {
@@ -62,6 +69,7 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
     assert.equal(
       findProjectBinding([binding], {
         roomIdentifier: "github.com/brosincode/letagents/focus/git:branch:ZmVhdHVyZQ",
+        gitRoom: githubGitRoom(),
       })?.rootPath,
       realpathSync(rootPath),
     );
@@ -152,11 +160,11 @@ test("migration records a repository's source checkout, never a linked execution
       stdio: "ignore",
     });
     const resolved = await resolveRoomIdentifierFromPath(linkedRoot);
-    const bindings = await migrateLegacyProjectBindings([{
+    const migration = await migrateLegacyProjectBindings([{
       context: { roomIdentifier: resolved.roomIdentifier, gitRoom: resolved.gitRoom },
       rootPath: linkedRoot,
     }], { storePath });
-    assert.equal(bindings[0]?.rootPath, realpathSync(mainRoot));
+    assert.equal(migration.bindings[0]?.rootPath, realpathSync(mainRoot));
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -185,7 +193,7 @@ test("legacy migration accepts identity matches and rejects unrelated folders", 
   });
   writeFileSync(join(managedWorktree, ".letagents-work-attempt.json"), "{}\n");
   try {
-    const bindings = await migrateLegacyProjectBindings([
+    const migration = await migrateLegacyProjectBindings([
       {
         context: { roomIdentifier: "github.com/brosincode/letagents" },
         rootPath: managedWorktree,
@@ -199,8 +207,8 @@ test("legacy migration accepts identity matches and rejects unrelated folders", 
         rootPath: matching,
       },
     ], { storePath });
-    assert.equal(bindings.length, 1);
-    assert.equal(bindings[0]?.rootPath, realpathSync(matching));
+    assert.equal(migration.bindings.length, 1);
+    assert.equal(migration.bindings[0]?.rootPath, realpathSync(matching));
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
@@ -269,6 +277,131 @@ test("concurrent project writes cannot lose another room and unavailable roots s
       (await listProjectBindings({ storePath })).map((entry) => entry.rootPath),
       [realpathSync(second)],
     );
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("mutable hosted names never merge distinct stable repository identities", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-rename-"));
+  const storePath = join(temporary, "bindings.json");
+  const first = join(temporary, "first");
+  const second = join(temporary, "second");
+  for (const rootPath of [first, second]) {
+    mkdirSync(rootPath);
+    execFileSync("git", ["init", "-b", "main"], { cwd: rootPath, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", "git@github.com:BrosInCode/LetAgents.git"], { cwd: rootPath });
+  }
+  try {
+    const firstRoom = githubGitRoom();
+    const secondRoom = {
+      ...githubGitRoom(),
+      repository: { ...githubGitRoom().repository, id: "different-stable-id" },
+    };
+    const firstBinding = await bindProjectRoot({
+      context: { roomIdentifier: "github.com/brosincode/letagents", gitRoom: firstRoom },
+      rootPath: first,
+      source: "git_remote",
+    }, { storePath });
+    await bindProjectRoot({
+      context: { roomIdentifier: "github.com/brosincode/letagents", gitRoom: secondRoom },
+      rootPath: second,
+      source: "git_remote",
+    }, { storePath });
+    const bindings = await listProjectBindings({ storePath });
+    assert.equal(bindings.length, 2);
+    assert.equal(findProjectBinding(bindings, { gitRoom: firstRoom })?.id, firstBinding.id);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a folder replaced at the same path loses its old binding", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-replaced-"));
+  const storePath = join(temporary, "bindings.json");
+  const rootPath = join(temporary, "project");
+  mkdirSync(rootPath);
+  try {
+    const resolved = await resolveRoomIdentifierFromPath(rootPath);
+    await bindProjectRoot({
+      context: { roomIdentifier: resolved.roomIdentifier },
+      rootPath,
+      source: "local_folder",
+    }, { storePath });
+    rmSync(rootPath, { recursive: true, force: true });
+    mkdirSync(rootPath);
+    assert.deepEqual(await listProjectBindings({ storePath }), []);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("configured room files cannot impersonate hosted Git identity", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-config-spoof-"));
+  const rootPath = join(temporary, "repo");
+  mkdirSync(rootPath);
+  execFileSync("git", ["init", "-b", "main"], { cwd: rootPath, stdio: "ignore" });
+  writeFileSync(join(rootPath, ".letagents.json"), '{"room":"github.com/brosincode/letagents"}\n');
+  try {
+    const selected = await resolveRoomIdentifierFromPath(rootPath, { ignoreConfiguredRoom: true });
+    assert.equal(selected.source, "local_git");
+    assert.equal(projectContextsCompatibleForConnection(
+      { roomIdentifier: "github.com/brosincode/letagents", gitRoom: githubGitRoom() },
+      { roomIdentifier: selected.roomIdentifier, gitRoom: selected.gitRoom },
+      selected.source,
+    ), false);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("failed legacy migration keys are retained for a later launch", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-retry-"));
+  try {
+    const result = await migrateLegacyProjectBindings([{
+      legacyKey: "github.com/brosincode/letagents",
+      context: { roomIdentifier: "github.com/brosincode/letagents" },
+      rootPath: join(temporary, "temporarily-missing"),
+    }], { storePath: join(temporary, "bindings.json") });
+    assert.deepEqual(result.retryLegacyKeys, ["github.com/brosincode/letagents"]);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("separate desktop processes serialize whole-store updates", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-processes-"));
+  const storePath = join(temporary, "bindings.json");
+  const moduleUrl = new URL("../main/project-bindings-store.ts", import.meta.url).href;
+  const script = `
+    const { bindProjectRoot } = await import(process.env.BINDINGS_MODULE_URL);
+    await bindProjectRoot({
+      context: { roomIdentifier: process.env.ROOM_ID },
+      rootPath: process.env.ROOT_PATH,
+      source: "local_folder",
+    }, { storePath: process.env.STORE_PATH });
+  `;
+  try {
+    const roots = Array.from({ length: 8 }, (_value, index) => {
+      const rootPath = join(temporary, `project-${index}`);
+      mkdirSync(rootPath);
+      return rootPath;
+    });
+    await Promise.all(roots.map((rootPath, index) => execFileAsync(
+      process.execPath,
+      ["--import", "tsx", "--input-type=module", "--eval", script],
+      {
+        cwd: process.cwd(),
+        env: {
+          ...process.env,
+          BINDINGS_MODULE_URL: moduleUrl,
+          ROOM_ID: `local-project-${index}-1111111111`,
+          ROOT_PATH: rootPath,
+          STORE_PATH: storePath,
+        },
+      },
+    )));
+    assert.equal((await listProjectBindings({ storePath })).length, roots.length);
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }

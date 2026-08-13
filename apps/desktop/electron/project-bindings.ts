@@ -52,14 +52,45 @@ export function projectBindingAliases(
   return [...aliases].sort();
 }
 
+/**
+ * The key that owns a binding. Hosted repository IDs win over mutable names;
+ * local projects fall back to their canonical project-room identity.
+ */
+export function projectBindingIdentityKey(
+  context: DesktopProjectBindingContext | null | undefined,
+): string | null {
+  const host = normalize(context?.gitRoom?.host);
+  const repositoryId = normalize(context?.gitRoom?.repository.id);
+  if (host && repositoryId) return `repository-id:${host}:${repositoryId}`;
+  const projectRoom = canonicalProjectRoomIdentifier(context?.roomIdentifier);
+  return projectRoom ? `project-room:${projectRoom}` : null;
+}
+
+/** Filesystem-observable keys used to prove that a stored path still belongs. */
+export function projectBindingVerificationKeys(
+  context: DesktopProjectBindingContext | null | undefined,
+): string[] {
+  return projectBindingAliases(context).filter(
+    (alias) => alias.startsWith("project-room:") || alias.startsWith("repository-id:local:"),
+  );
+}
+
 export function findProjectBinding(
   bindings: readonly DesktopProjectBinding[],
   context: DesktopProjectBindingContext | null | undefined,
 ): DesktopProjectBinding | null {
+  const identityKey = projectBindingIdentityKey(context);
+  if (identityKey) {
+    const exact = bindings.find((binding) => binding.identityKey === identityKey);
+    if (exact) return exact;
+  }
   const aliases = new Set(projectBindingAliases(context));
   if (!aliases.size) return null;
   return bindings
-    .filter((binding) => binding.aliases.some((alias) => aliases.has(alias)))
+    .filter((binding) => (
+      !binding.identityKey.startsWith("repository-id:")
+      && binding.aliases.some((alias) => aliases.has(alias))
+    ))
     .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0] || null;
 }
 
@@ -74,9 +105,16 @@ export function projectContextsCompatibleForConnection(
   selectedSource: DesktopProjectBindingSource,
 ): boolean {
   const selectedAliases = new Set(projectBindingAliases(selected));
-  if (projectBindingAliases(current).some((alias) => selectedAliases.has(alias))) return true;
+  const overlaps = projectBindingVerificationKeys(current).some(
+    (alias) => selectedAliases.has(alias),
+  );
+  const currentHost = normalize(current.gitRoom?.host);
+  if (currentHost && currentHost !== "local") {
+    return selectedSource === "git_remote" && overlaps;
+  }
+  if (selectedSource === "git_remote" && overlaps) return true;
   if (
-    normalize(current.gitRoom?.host) === "local"
+    currentHost === "local"
     && normalize(selected.gitRoom?.host) === "local"
     && selectedSource === "local_git"
   ) return true;

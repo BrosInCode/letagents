@@ -77,6 +77,7 @@ import type {
   DesktopLegacyProjectBindingCandidate,
   DesktopProjectBinding,
   DesktopProjectBindingContext,
+  DesktopProjectBindingMigrationResult,
   DesktopProjectConnectionResult,
   DesktopRepoRoomSelection,
   DesktopRoomInfo,
@@ -316,7 +317,7 @@ export interface DesktopApi {
     listProjectBindings: () => Promise<DesktopProjectBinding[]>;
     migrateProjectBindings: (
       candidates: DesktopLegacyProjectBindingCandidate[],
-    ) => Promise<DesktopProjectBinding[]>;
+    ) => Promise<DesktopProjectBindingMigrationResult>;
     connectProject: (
       context: DesktopProjectBindingContext,
     ) => Promise<DesktopProjectConnectionResult>;
