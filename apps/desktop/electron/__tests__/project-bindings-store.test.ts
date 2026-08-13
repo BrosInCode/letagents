@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { promisify } from "node:util";
@@ -402,6 +402,34 @@ test("separate desktop processes serialize whole-store updates", async () => {
       },
     )));
     assert.equal((await listProjectBindings({ storePath })).length, roots.length);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("stale ownerless and malformed interprocess locks recover without manual deletion", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-stale-lock-"));
+  try {
+    for (const [index, owner] of ["", "not-a-pid"].entries()) {
+      const rootPath = join(temporary, `project-${index}`);
+      const storePath = join(temporary, `bindings-${index}.json`);
+      const lockPath = `${storePath}.lock`;
+      mkdirSync(rootPath);
+      mkdirSync(lockPath);
+      writeFileSync(join(lockPath, "owner"), owner);
+      const stale = new Date(Date.now() - 60_000);
+      utimesSync(lockPath, stale, stale);
+
+      const startedAt = Date.now();
+      const binding = await bindProjectRoot({
+        context: { roomIdentifier: `local-stale-${index}-1111111111` },
+        rootPath,
+        source: "local_folder",
+      }, { storePath });
+
+      assert.equal(binding.rootPath, realpathSync(rootPath));
+      assert.ok(Date.now() - startedAt < 1_000);
+    }
   } finally {
     rmSync(temporary, { recursive: true, force: true });
   }
