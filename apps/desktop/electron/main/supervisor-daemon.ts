@@ -1489,6 +1489,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     deliveryMode: entry.delivery_mode ?? "mcp_polling",
     createdBy: entry.created_by,
     createdAt: entry.created_at,
+    sourceRepoPath: entry.source_repo_path ?? null,
     workspacePath: entry.workspace_path ?? null,
     workAttemptId: entry.work_attempt_id ?? null,
     agentSessionId: workerBinding?.agent_session_id ?? null,

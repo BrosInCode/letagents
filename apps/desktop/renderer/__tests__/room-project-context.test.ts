@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type { DesktopRoomInfo } from "../../electron/ipc-types";
@@ -8,7 +9,7 @@ import {
   preferredManagedAgentRepoRootPath,
   supervisedProviderLaunchPolicy,
 } from "../src/domain/managed-agents";
-import { activeRepoRoomContext, bindRepositoryRoot, canonicalRepoIdentity, readRepositoryRootBindings, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "../src/domain/room-project-context";
+import { activeRepoRoomContext, bindRepositoryRoot, canonicalRepoIdentity, readRepositoryRootBindings, recoverProjectRootFromAgentHistory, resolveActiveProjectRootPath, roomWithInheritedProjectContext } from "../src/domain/room-project-context";
 
 const projectGitRoom: NonNullable<DesktopRoomInfo["gitRoom"]> = {
   provider: "git",
@@ -52,6 +53,80 @@ test("a listed focus room inherits its parent project Git context for Add Agent"
   const inherited = roomWithInheritedProjectContext(room(), parent, true);
   assert.equal(inherited.gitRoom, projectGitRoom);
   assert.equal(inherited.gitRoom?.ref.name, "feature/launch");
+});
+
+test("recoverProjectRootFromAgentHistory reuses a same-room workspace only after Git identity verification", async () => {
+  const result = await recoverProjectRootFromAgentHistory({
+    roomIdentifier: "project_room",
+    gitRoom: projectGitRoom,
+    entries: [{
+      roomId: "PROJECT_ROOM",
+      sourceRepoPath: "/project/feature-launch",
+      createdAt: "2026-08-13T12:00:00.000Z",
+    }],
+    getRepoStatus: async (rootPath) => ({
+      rootPath,
+      isGitRepo: true,
+      branch: "feature/launch",
+      roomIdentifier: "local/owner/project",
+      worktrees: [],
+    }),
+  });
+
+  assert.equal(result?.rootPath, "/project/feature-launch");
+});
+
+test("recoverProjectRootFromAgentHistory fails closed for stale or unrelated workspaces", async () => {
+  const checked: string[] = [];
+  const result = await recoverProjectRootFromAgentHistory({
+    roomIdentifier: "project_room",
+    gitRoom: projectGitRoom,
+    entries: [
+      { roomId: "other_room", sourceRepoPath: "/project/right", createdAt: "2026-08-13T14:00:00.000Z" },
+      { roomId: "project_room", sourceRepoPath: "/project/missing", createdAt: "2026-08-13T13:00:00.000Z" },
+      { roomId: "project_room", sourceRepoPath: "/project/wrong", createdAt: "2026-08-13T12:00:00.000Z" },
+    ],
+    getRepoStatus: async (rootPath) => {
+      checked.push(rootPath);
+      if (rootPath.endsWith("missing")) throw new Error("gone");
+      return {
+        rootPath,
+        isGitRepo: true,
+        branch: "main",
+        roomIdentifier: "github.com/someone/else",
+        worktrees: [],
+      };
+    },
+  });
+
+  assert.equal(result, null);
+  assert.deepEqual(checked, ["/project/missing", "/project/wrong"]);
+});
+
+test("recoverProjectRootFromAgentHistory never treats a daemon private workspace as the source repo", async () => {
+  let probes = 0;
+  const result = await recoverProjectRootFromAgentHistory({
+    roomIdentifier: "project_room",
+    gitRoom: projectGitRoom,
+    entries: [{
+      roomId: "project_room",
+      workspacePath: "/Users/test/.letagents/worktrees/project/private-attempt",
+      createdAt: "2026-08-13T15:00:00.000Z",
+    }],
+    getRepoStatus: async () => {
+      probes += 1;
+      return null;
+    },
+  });
+  assert.equal(result, null);
+  assert.equal(probes, 0);
+});
+
+test("opening Add Agent retries project-root recovery after an earlier transient miss", () => {
+  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
+  const app = readFileSync(new URL("../src/App.vue", import.meta.url), "utf8");
+  assert.match(shell, /watch\(addAgentModalOpen,[\s\S]*emit\("project-root-recovery-requested"\)/);
+  assert.match(app, /@project-root-recovery-requested="recoverActiveProjectRootFromAgentHistory"/);
 });
 
 test("a focus room never inherits an unrelated parent project", () => {
