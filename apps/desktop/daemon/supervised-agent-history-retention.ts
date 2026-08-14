@@ -15,10 +15,13 @@ function run(statement: StatementSync, ...values: unknown[]): void {
 
 /**
  * Terminal inbox ownership proves that an ordinary prepared effect never won
- * its execution CAS. Settle those effects in the same SQLite transaction as
- * the terminal transition so they cannot become immortal retention pins or
- * exhaust the per-agent unresolved-effect budget. Room moves are excluded:
- * their prepared effect is the durable move journal until reconciliation.
+ * its execution CAS. It also makes an executing read irrelevant: reads are
+ * safely repeatable and cannot outlive their completed provider turn. Settle
+ * both in the same SQLite transaction so they cannot become immortal retention
+ * pins or exhaust the per-agent unresolved-effect budget. Executing mutations
+ * remain untouched because their outcome may be externally uncertain. Room
+ * moves are excluded: their prepared effect is the durable move journal until
+ * reconciliation.
  */
 export function settlePreparedSupervisedEffectsForTerminalItem(
   database: DatabaseSync,
@@ -35,9 +38,10 @@ export function settlePreparedSupervisedEffectsForTerminalItem(
     .get(item.inboxItemId) as Row | undefined;
   if (!binding) return;
   run(database.prepare(`UPDATE supervised_agent_effects
-    SET state='failed',error='The provider turn settled before this effect acquired execution authority.',updated_at=?
+    SET state='failed',error='The provider turn settled before this effect completed.',updated_at=?
     WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-      AND state='prepared' AND tool_name<>'join_room'`),
+      AND (state='prepared' OR (state='executing' AND mutation=0))
+      AND tool_name<>'join_room'`),
   timestamp, item.agentId, String(binding.origin_execution_generation_id), item.providerTurnId);
 }
 
