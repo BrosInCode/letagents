@@ -115,6 +115,7 @@ function birthIdentity(pid: number): string {
 function createHarness(options: HarnessOptions = {}) {
   const children: FakeClaudeChild[] = [];
   const launches: Array<{ claudeBin: string; args: string[]; cwd: string; env?: NodeJS.ProcessEnv }> = [];
+  const versionBins: string[] = [];
   const signals: Array<{ pid: number; signal: NodeJS.Signals }> = [];
   const identities = options.identities ?? new Map<number, string | null | undefined>();
   let nextPid = 4100;
@@ -122,8 +123,9 @@ function createHarness(options: HarnessOptions = {}) {
   let versionReads = 0;
 
   const dependencies: ClaudeCodeProviderAdapterDependencies = {
-    async readVersion() {
+    async readVersion(claudeBin) {
       versionReads += 1;
+      versionBins.push(claudeBin);
       return options.versionOutput ?? "2.1.220 (Claude Code)";
     },
     async createLetAgentsMcpConfig() {
@@ -211,6 +213,7 @@ function createHarness(options: HarnessOptions = {}) {
   return {
     children,
     launches,
+    versionBins,
     signals,
     identities,
     dependencies,
@@ -311,6 +314,27 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
   assert.doesNotMatch(prompt, /register_agent_session|wait_for_messages|join_room/);
 
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
+});
+
+test("preflight and launch use the exact configured Claude Code executable", async () => {
+  const previousExact = process.env.LETAGENTS_CLAUDE_CODE_BIN;
+  const previousLegacy = process.env.LETAGENTS_CLAUDE_BIN;
+  process.env.LETAGENTS_CLAUDE_CODE_BIN = "/custom/claude-code";
+  process.env.LETAGENTS_CLAUDE_BIN = "/different/claude";
+  try {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+
+    await adapter.spawn(spawnRequest());
+
+    assert.deepEqual(harness.versionBins, ["/custom/claude-code"]);
+    assert.equal(harness.launches[0]?.claudeBin, "/custom/claude-code");
+  } finally {
+    if (previousExact === undefined) delete process.env.LETAGENTS_CLAUDE_CODE_BIN;
+    else process.env.LETAGENTS_CLAUDE_CODE_BIN = previousExact;
+    if (previousLegacy === undefined) delete process.env.LETAGENTS_CLAUDE_BIN;
+    else process.env.LETAGENTS_CLAUDE_BIN = previousLegacy;
+  }
 });
 
 test("spawn blocks an outdated Claude CLI before creating credentials or a provider process", async () => {

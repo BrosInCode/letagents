@@ -167,6 +167,36 @@ test("a pre-provider provisioning failure is retryable and never described as re
   assert.match(progress.failureDetail ?? "", /prepare the private project area/i);
 });
 
+test("a missing provider executable explains the setup-to-supervisor mismatch", () => {
+  const progress = supervisedLaunchProgress(entry({
+    provider: "codex",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: Codex app-server exited before it became ready: spawn codex ENOENT",
+    workspacePath: "/tmp/wt",
+    providerPid: null,
+    providerContinuationId: null,
+    executionGenerationId: null,
+  }));
+
+  assert.equal(progress.failed, true);
+  assert.match(progress.failureDetail ?? "", /background service could not find a command needed to start Codex/i);
+  assert.doesNotMatch(progress.failureDetail ?? "", /private project area/i);
+});
+
+test("a missing helper command is not mislabeled as the provider executable", () => {
+  const progress = supervisedLaunchProgress(entry({
+    provider: "claude-code",
+    observedState: "starting",
+    condition: "coordination_blocked",
+    lastError: "convergence scheduler failure: spawn /Applications/Git Helper/bin/git ENOENT",
+    workspacePath: "/tmp/wt",
+  }));
+
+  assert.match(progress.failureDetail ?? "", /command needed to start Claude Code/i);
+  assert.doesNotMatch(progress.failureDetail ?? "", /Claude Code command that setup checked/i);
+});
+
 test("expected exact-bind coordination remains an in-progress registration", () => {
   const progress = supervisedLaunchProgress(entry({
     workspacePath: "/tmp/wt",

@@ -40,7 +40,7 @@ import {
   branchScopedGitRoomName,
   gitRoomFromBranchRoomIdentifier,
 } from "./managed-agent-branch-scope.js";
-import { inspectClaudeCodeVersion } from "./claude-code-version.js";
+import { inspectClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 import {
   getDesktopAgentProvider,
   isDesktopAgentProviderId,
@@ -258,10 +258,7 @@ async function claudeCodePreflight(
   timeoutMs?: number,
 ): Promise<DesktopAgentProviderPreflight> {
   const runtimeEnv = desktopRuntimeEnvironment();
-  const command = runtimeEnv.LETAGENTS_CLAUDE_CODE_BIN ||
-    runtimeEnv.LETAGENTS_CLAUDE_BIN ||
-    provider.runtimeCommand ||
-    "claude";
+  const command = resolveClaudeCodeExecutable(runtimeEnv, provider.runtimeCommand || "claude");
   const versionResult = await execFileWithTimeout(command, ["--version"], { timeoutMs, env: runtimeEnv });
   if (commandMissing(versionResult)) {
     return missingExternalRuntimePreflight(provider, mcpStatus);
