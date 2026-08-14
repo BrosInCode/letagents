@@ -16,6 +16,36 @@ import {
 import { jsonToolResponse, taskToolError } from "./response.js";
 import { boardIntentApprovalSchema, TASK_STATUSES, workerTaskIdentitySchema } from "./schemas.js";
 
+export const MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK = 4;
+export const MAX_BOARD_WORKFLOW_REFS_PER_TASK = 4;
+
+function compactBoardWorkflowArtifact(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const artifact = value as Record<string, unknown>;
+  // A change-summary detail may itself contain hundreds of files. The board is
+  // an index; callers that need complete artifact detail use get_room_artifacts.
+  return Object.fromEntries(Object.entries(artifact).filter(([key]) => key !== "detail"));
+}
+
+export function compactTaskForBoard(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return value;
+  const task = value as Record<string, unknown>;
+  const artifacts = Array.isArray(task.workflow_artifacts) ? task.workflow_artifacts : [];
+  const refs = Array.isArray(task.workflow_refs) ? task.workflow_refs : [];
+
+  return {
+    ...task,
+    workflow_artifacts: artifacts
+      .slice(-MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK)
+      .map(compactBoardWorkflowArtifact),
+    workflow_refs: refs.slice(-MAX_BOARD_WORKFLOW_REFS_PER_TASK),
+    workflow_artifact_count: artifacts.length,
+    workflow_ref_count: refs.length,
+    workflow_artifacts_truncated: artifacts.length > MAX_BOARD_WORKFLOW_ARTIFACTS_PER_TASK,
+    workflow_refs_truncated: refs.length > MAX_BOARD_WORKFLOW_REFS_PER_TASK,
+  };
+}
+
 export function registerTaskBoardTools(server: McpServer): void {
   server.tool(
     "add_task",
@@ -92,7 +122,7 @@ export function registerTaskBoardTools(server: McpServer): void {
         const result = await listTasks(target, qs);
 
         const tasks = result.tasks ?? [];
-        allTasks.push(...tasks);
+        allTasks.push(...tasks.map(compactTaskForBoard));
 
         if (!result.has_more || tasks.length === 0) break;
         const lastTask = tasks[tasks.length - 1];
@@ -102,7 +132,12 @@ export function registerTaskBoardTools(server: McpServer): void {
 
       await heartbeatRoomPresence(target.effectiveRoomId, await ensureAgentIdentity());
 
-      return jsonToolResponse({ success: true, tasks: allTasks }, 2);
+      return jsonToolResponse({
+        success: true,
+        tasks: allTasks,
+        artifact_detail_instruction:
+          "Board tasks contain bounded artifact summaries. Use get_room_artifacts for complete workflow artifact detail.",
+      }, 2);
     }
   );
 }
