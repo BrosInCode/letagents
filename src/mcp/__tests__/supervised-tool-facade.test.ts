@@ -46,6 +46,41 @@ test("supervised effects refuse a missing MCP request id before preparation", as
   assert.equal(prepared, false);
 });
 
+test("new runtimes let a capable daemon execute and checkpoint the tool atomically", async () => {
+  let prepared = false;
+  let callbackCount = 0;
+  const handler = registeredHandler({
+    executeTool: async (input) => {
+      assert.deepEqual(input, {
+        toolName: "send_message",
+        input: { text: "hello" },
+        mcpRequestId: "request_daemon",
+      });
+      return { state: "completed", roomId: "room_exact", result: result("daemon result") };
+    },
+    prepareEffect: async () => { prepared = true; throw new Error("must not prepare locally"); },
+    completeEffect: async () => {},
+    withRoom,
+  }, async () => { callbackCount += 1; return result("provider result"); });
+
+  assert.deepEqual(await handler({ text: "hello" }, { requestId: "request_daemon" }), result("daemon result"));
+  assert.equal(prepared, false);
+  assert.equal(callbackCount, 0);
+});
+
+test("new runtimes fall back to provider execution when attached to an older daemon", async () => {
+  let callbackCount = 0;
+  const handler = registeredHandler({
+    executeTool: async () => ({ state: "unsupported" }),
+    prepareEffect: async () => ({ state: "prepared", roomId: "room_exact", effectId: "effect_old_daemon", action: "execute" }),
+    completeEffect: async () => {},
+    withRoom,
+  }, async () => { callbackCount += 1; return result("provider result"); });
+
+  assert.deepEqual(await handler({}, { requestId: "request_old_daemon" }), result("provider result"));
+  assert.equal(callbackCount, 1);
+});
+
 test("completion transport failure never rewrites a successful callback as failed", async () => {
   let callbackCount = 0;
   const completions: Array<{ result?: unknown; error?: string }> = [];

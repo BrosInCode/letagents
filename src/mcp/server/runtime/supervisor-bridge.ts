@@ -83,6 +83,50 @@ export type PreparedSupervisedEffect =
   | { state: "prepared"; roomId: string; effectId: string; action: "use_final_answer"; sourceMessageId: string }
   | { state: "prepared"; roomId: string; effectId: string; action: "room_move_prepared"; destinationRoom: string };
 
+export type ExecutedSupervisedTool =
+  | { state: "unsupported" }
+  | { state: "completed"; roomId: string; result: unknown };
+
+export async function executeCurrentSupervisedTool(input: {
+  toolName: string;
+  input: unknown;
+  mcpRequestId: string;
+}, env: NodeJS.ProcessEnv = process.env, options: SupervisorBridgeOptions = {}): Promise<ExecutedSupervisedTool> {
+  const coordinates = await requireCurrentSupervisedCoordinates(env, options);
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const negotiated = await negotiateSupervisor(coordinates.socketPath, timeoutMs);
+  if (negotiated.generation === null) throw new Error("The supervised daemon generation is unavailable.");
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: negotiated.protocolVersion,
+    id: randomUUID(),
+    method: "supervisor.execute_bounded_tool",
+    params: {
+      entry_id: coordinates.entryId,
+      work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId,
+      ...(coordinates.providerTurnId ? { provider_turn_id: coordinates.providerTurnId } : {}),
+      daemon_generation: negotiated.generation,
+      mcp_request_id: input.mcpRequestId,
+      tool_name: input.toolName,
+      input: input.input,
+    },
+  }, null);
+  if (!response.ok) {
+    if (/Unsupported daemon method:\s*supervisor\.execute_bounded_tool/i.test(response.error ?? "")) {
+      return { state: "unsupported" };
+    }
+    throw new Error(response.error || "The daemon-owned supervised tool was rejected.");
+  }
+  const result = response.result && typeof response.result === "object"
+    ? response.result as Record<string, unknown>
+    : {};
+  const roomId = typeof result.room_id === "string" ? result.room_id.trim() : "";
+  if (!roomId || roomId.length > 1_024 || /[\u0000-\u001f\u007f]/.test(roomId)) {
+    throw new Error("The supervised daemon did not return valid exact room authority.");
+  }
+  return { state: "completed", roomId, result: result.result };
+}
+
 export async function prepareCurrentSupervisedEffect(input: {
   toolName: string;
   input: unknown;
@@ -820,20 +864,20 @@ async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promi
   return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null };
 }
 
-function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number): Promise<SupervisorResponse> {
+function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number | null): Promise<SupervisorResponse> {
   return new Promise((resolve, reject) => {
     const socket = createConnection(socketPath);
     let buffer = "";
     let finished = false;
-    const timer = setTimeout(() => {
+    const timer = timeoutMs === null ? null : setTimeout(() => {
       socket.destroy();
       finish(() => reject(new Error("Timed out communicating with the supervisor daemon.")));
     }, timeoutMs);
-    timer.unref();
+    timer?.unref();
     const finish = (operation: () => void) => {
       if (finished) return;
       finished = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       operation();
     };
     socket.setEncoding("utf8");

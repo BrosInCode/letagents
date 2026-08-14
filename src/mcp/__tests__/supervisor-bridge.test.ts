@@ -17,6 +17,7 @@ import {
   bindSupervisedWorkerSessionWithContext,
   checkpointSupervisedWorkerCursor,
   completeCurrentSupervisedEffect,
+  executeCurrentSupervisedTool,
   isRetryableSupervisorBridgeError,
   prepareCurrentSupervisedEffect,
   resolveCurrentSupervisedWorkerSession,
@@ -174,6 +175,89 @@ test("bounded effect completion survives a real handoff socket unlink and delaye
     if (successorTimer) clearTimeout(successorTimer);
     if (!firstClosed) await new Promise<void>((resolve) => first.close(() => resolve()));
     if (successorListening) await new Promise<void>((resolve) => successor.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon-owned tool execution has a bounded handshake but no correctness timeout", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-daemon-execute-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 31, pid: 123, started_at: "2026-08-14T00:00:00.000Z",
+        } })}\n`);
+        return;
+      }
+      setTimeout(() => socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+        room_id: session.room_id, result: { content: [{ type: "text", text: "finished slowly" }] },
+      } })}\n`), 75);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact", session.room_id, {
+      agent_session_id: session.session_id,
+      agent_display_name: session.display_name,
+    });
+    const output = await executeCurrentSupervisedTool({
+      toolName: "read_messages", input: {}, mcpRequestId: "request_slow",
+    }, { LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn" }, {
+      cwd: root, trustedDaemonSocketPath: socketPath, requestTimeoutMs: 25,
+    });
+    assert.deepEqual(output, {
+      state: "completed", roomId: session.room_id,
+      result: { content: [{ type: "text", text: "finished slowly" }] },
+    });
+    assert.equal(requests.at(-1)?.method, "supervisor.execute_bounded_tool");
+    assert.equal("mutation" in requests.at(-1).params, false);
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("daemon-owned tool execution recognizes an old daemon and permits compatibility fallback", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-old-daemon-"));
+  const socketPath = join(root, "daemon.sock");
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      if (request.method === "daemon.negotiate") {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result: {
+          protocol_version: 2, generation: 32, pid: 123, started_at: "2026-08-14T00:00:00.000Z",
+        } })}\n`);
+      } else {
+        socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: false,
+          error: "Unsupported daemon method: supervisor.execute_bounded_tool" })}\n`);
+      }
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    await writeSupervisorContext(root, "generation_exact", session.room_id, {
+      agent_session_id: session.session_id,
+      agent_display_name: session.display_name,
+    });
+    assert.deepEqual(await executeCurrentSupervisedTool({
+      toolName: "get_board", input: {}, mcpRequestId: "request_old",
+    }, { LETAGENTS_EXECUTION_PROFILE: "supervised_room_turn" }, {
+      cwd: root, trustedDaemonSocketPath: socketPath,
+    }), { state: "unsupported" });
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
     await rm(root, { recursive: true, force: true });
   }
 });

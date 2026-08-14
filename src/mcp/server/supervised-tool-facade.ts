@@ -5,6 +5,7 @@ import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
 import { runWithCurrentSupervisedRoom } from "./runtime/room-state.js";
 import {
   completeCurrentSupervisedEffect,
+  executeCurrentSupervisedTool,
   prepareCurrentSupervisedEffect,
   type PreparedSupervisedEffect,
 } from "./runtime/supervisor-bridge.js";
@@ -25,6 +26,10 @@ const READ_TOOLS = new Set([
   "rental_list_requests",
 ]);
 
+export function supervisedToolIsMutation(toolName: string): boolean {
+  return !READ_TOOLS.has(toolName);
+}
+
 // The desktop daemon's local control protocol intentionally uses small bounded
 // frames. A read result can be returned live to the provider without copying
 // the entire payload into the durable effect journal.
@@ -38,7 +43,7 @@ function instruction(text: string, data: Record<string, unknown> = {}): CallTool
   };
 }
 
-function durableCompletionResult(
+export function durableCompletionResult(
   result: CallToolResult,
   mutation: boolean,
 ): CallToolResult {
@@ -61,6 +66,11 @@ function durableCompletionResult(
  * Engine mechanics are not registered, so they are absent from discovery.
  */
 export interface SupervisedToolFacadeDependencies {
+  executeTool?: (input: {
+    toolName: string;
+    input: unknown;
+    mcpRequestId: string;
+  }) => Promise<{ state: "unsupported" } | { state: "completed"; roomId: string; result: unknown }>;
   prepareEffect: (input: {
     toolName: string;
     input: unknown;
@@ -72,6 +82,7 @@ export interface SupervisedToolFacadeDependencies {
 }
 
 const productionDependencies: SupervisedToolFacadeDependencies = {
+  executeTool: executeCurrentSupervisedTool,
   prepareEffect: prepareCurrentSupervisedEffect,
   completeEffect: completeCurrentSupervisedEffect,
   withRoom: runWithCurrentSupervisedRoom,
@@ -91,7 +102,7 @@ export function profileAwareToolServer(
         return typeof value === "function" ? value.bind(target) : value;
       }
       return (name: string, ...registration: unknown[]) => {
-        const mutation = !READ_TOOLS.has(name);
+        const mutation = supervisedToolIsMutation(name);
         const callback = registration.at(-1);
         if (typeof callback !== "function") throw new Error(`Tool ${name} has no callback.`);
         const wrapped = async (...call: unknown[]): Promise<CallToolResult> => {
@@ -100,12 +111,18 @@ export function profileAwareToolServer(
           if (extra.requestId === undefined || extra.requestId === null || String(extra.requestId).trim() === "") {
             throw new Error(`Supervised tool ${name} is missing its MCP request id; refusing an effect that cannot be deduplicated safely.`);
           }
-          const prepared = await dependencies.prepareEffect({
+          const executionRequest = {
             toolName: name,
             input,
             mcpRequestId: String(extra.requestId),
-            mutation,
-          });
+          };
+          if (dependencies.executeTool) {
+            const executed = await dependencies.executeTool(executionRequest);
+            if (executed.state === "completed") {
+              return dependencies.withRoom(executed.roomId, () => executed.result as CallToolResult);
+            }
+          }
+          const prepared = await dependencies.prepareEffect({ ...executionRequest, mutation });
           return dependencies.withRoom(prepared.roomId, async () => {
             if (prepared.state === "completed") return prepared.result as CallToolResult;
             if (prepared.state === "uncertain") {

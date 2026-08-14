@@ -1,3 +1,5 @@
+import { getDaemonToolExecutionContext } from "./daemon-tool-context.js";
+
 export const LETAGENTS_AGENT_SESSION_BEARER_ENV = "LETAGENTS_AGENT_SESSION_BEARER";
 export const LETAGENTS_SUPERVISED_BOUNDED_TURNS_ENV = "LETAGENTS_SUPERVISED_BOUNDED_TURNS";
 
@@ -20,6 +22,7 @@ export class WorkerBearerRuntimeConfigurationError extends Error {
 }
 
 export function getWorkerBearerRuntime(): WorkerBearerRuntime {
+  if (getDaemonToolExecutionContext()) return { mode: "supervised" };
   const bearer = process.env.LETAGENTS_AGENT_SESSION_BEARER?.trim();
   const supervised = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1";
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
@@ -113,7 +116,8 @@ export function workerModeDisabledToolResult(
 export function supervisedBoundedDeliveryDisabledToolResult(
   toolName = "wait_for_messages",
 ): Record<string, unknown> | null {
-  if (process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
+  if (!getDaemonToolExecutionContext()
+    && process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
     return null;
   }
   return {

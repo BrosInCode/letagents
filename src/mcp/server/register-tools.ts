@@ -20,8 +20,11 @@ export function registerTools(
   server: McpServer,
   profile: LetAgentsExecutionProfile = "autonomous_mcp_worker",
   supervisedProvider = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
+  options: { executionOwner?: "provider" | "daemon" } = {},
 ): void {
-  const tools = profileAwareToolServer(server, profile, undefined, supervisedProvider);
+  const tools = options.executionOwner === "daemon"
+    ? server
+    : profileAwareToolServer(server, profile, undefined, supervisedProvider);
   const surface = toolSurfaceForExecutionProfile(profile);
   registerRoomJoinTools(tools);
   if (surface.agentSessionLifecycle) registerAgentSessionTools(tools);
