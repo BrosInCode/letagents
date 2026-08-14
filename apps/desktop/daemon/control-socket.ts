@@ -19,6 +19,10 @@ export class DaemonControlSocket {
     this.server = createServer((socket) => {
       this.connections.add(socket);
       socket.once("close", () => this.connections.delete(socket));
+      // Requests deliberately outlive their provider socket. A provider may
+      // disconnect while the daemon finishes and journals a long tool call;
+      // EPIPE is transport loss, not a daemon-fatal execution error.
+      socket.on("error", () => undefined);
       let buffer = "";
       socket.setEncoding("utf8");
       socket.on("data", (chunk: string) => {
@@ -68,5 +72,8 @@ export class DaemonControlSocket {
     }
   }
 
-  private write(socket: import("node:net").Socket, response: DaemonResponse): void { socket.write(`${JSON.stringify(response)}\n`); }
+  private write(socket: import("node:net").Socket, response: DaemonResponse): void {
+    if (socket.destroyed || !socket.writable) return;
+    try { socket.write(`${JSON.stringify(response)}\n`); } catch { /* provider disconnected */ }
+  }
 }

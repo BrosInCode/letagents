@@ -257,6 +257,7 @@ async function startWireDaemon(
   agentLifecycleCapability = true,
   manifestListDelayMs = 0,
   runtimeEnvironmentFingerprint?: string,
+  prepareHandoffResponseDelayMs = 0,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
@@ -278,7 +279,8 @@ async function startWireDaemon(
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
-        setTimeout(() => onPrepare?.(), 5);
+        responseDelayMs = prepareHandoffResponseDelayMs;
+        setTimeout(() => onPrepare?.(), prepareHandoffResponseDelayMs + 5);
       } else if (request.method === "manifest.list") {
         result = entries;
         responseDelayMs = manifestListDelayMs;
@@ -1177,10 +1179,19 @@ test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches i
   const inherited = {
     LETAGENTS_API_URL: "https://letagents.chat",
     LETAGENTS_DEV_MCP_SERVER_ENTRY: "/tmp/unrelated-cwd/stale-cache/server.js",
+    LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY: "/tmp/untrusted/daemon-tool-executor.js",
+    LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256: "untrusted",
+    LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV: "1",
   };
 
   const packaged = supervisorDaemonSpawnEnvironment(inherited, sourceRoot);
   assert.equal(packaged.LETAGENTS_DEV_MCP_SERVER_ENTRY, undefined, "packaged launch keeps the installed MCP fallback");
+  assert.notEqual(packaged.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY, inherited.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY,
+    "packaged launch never trusts a caller-selected daemon executor");
+  assert.notEqual(packaged.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256, inherited.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256,
+    "daemon handoff fingerprints the Desktop-sealed runtime tree");
+  assert.equal(packaged.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV, undefined,
+    "a caller cannot disable the packaged runtime seal");
   assert.equal(packaged.LETAGENTS_API_URL, inherited.LETAGENTS_API_URL, "unrelated auth/runtime environment is preserved");
   assert.equal(
     packaged.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT,
@@ -1197,6 +1208,13 @@ test("desktop dev daemon uses the exact rebuilt repo MCP and packaged launches i
     join(sourceRoot, "dist", "mcp", "server.js"),
     "dev launch derives the exact repo build instead of trusting inherited cwd or cache state",
   );
+  assert.equal(
+    development.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY,
+    join(sourceRoot, "dist", "mcp", "server", "daemon-tool-executor.js"),
+    "dev daemon execution uses the same exact rebuilt MCP runtime",
+  );
+  assert.equal(development.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV, "1",
+    "only the Desktop-derived development runtime is explicitly unsealed");
   assert.equal(development.ELECTRON_RUN_AS_NODE, "1");
 });
 
@@ -1418,6 +1436,54 @@ test("application update handoff retires only the serving daemon and prevents re
   }
 });
 
+test("handoff drain is not abandoned at the ordinary control-request deadline", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let retiredAlive = true;
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    35,
+    () => {
+      retiredAlive = false;
+      void closeServer(server, env.socketPath);
+    },
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    true,
+    0,
+    undefined,
+    40,
+  );
+  server = wire.server;
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      requestTimeoutMs: 5,
+      handoffTimeoutMs: 100,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => retiredAlive ? fakeDaemonProcessIdentity() : null,
+      spawnDaemon: () => { throw new Error("application update must not spawn a replacement"); },
+    });
+    const startedAt = Date.now();
+    await client.prepareForApplicationUpdate();
+    assert.ok(Date.now() - startedAt >= 35, "handoff waits beyond the injected ordinary request deadline");
+    assert.deepEqual(wire.requests.slice(0, 2).map((request) => request.method), [
+      "daemon.negotiate",
+      "daemon.prepare_handoff",
+    ]);
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("application update proceeds when no supervisor daemon owns the socket", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -1486,7 +1552,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.103");
+    assert.equal(status.implementationVersion, "2.0.104");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

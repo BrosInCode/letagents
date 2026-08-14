@@ -21,6 +21,8 @@ import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { loadSupervisedToolRuntimeAt, type DaemonToolAgentSession } from "../supervised-tool-runtime.js";
+import { productionSupervisorGrantHttp } from "../cloud-http.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt",
@@ -90,6 +92,83 @@ const TEST_PROCESS_IDENTITY = execFileSync(
   ["-p", String(process.pid), "-o", "lstart=", "-o", "command="],
   { encoding: "utf8" },
 ).trim();
+
+test("daemon tool runtime loader requires a sealed package tree outside explicit development", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-tool-runtime-"));
+  try {
+    const valid = join(root, "daemon-tool-executor.mjs");
+    await writeFile(valid, "export async function executeDaemonTool() { return { liveResult: {}, durableResult: {} }; }\nexport function supervisedToolIsMutation() { return false; }\n", { mode: 0o600 });
+    await assert.rejects(() => loadSupervisedToolRuntimeAt(valid), /sealed package tree/i);
+    const runtime = await loadSupervisedToolRuntimeAt(valid, { allowUnsealedDevelopmentRuntime: true });
+    assert.equal(runtime.supervisedToolIsMutation("get_board"), false);
+
+    const redirected = join(root, "redirected.mjs");
+    await symlink(valid, redirected);
+    await assert.rejects(
+      () => loadSupervisedToolRuntimeAt(redirected, { allowUnsealedDevelopmentRuntime: true }),
+      /real file|canonical/i,
+    );
+
+    const incompatible = join(root, "incompatible.mjs");
+    await writeFile(incompatible, "export const nope = true;\n", { mode: 0o600 });
+    await assert.rejects(
+      () => loadSupervisedToolRuntimeAt(incompatible, { allowUnsealedDevelopmentRuntime: true }),
+      /incompatible contract/i,
+    );
+
+    const nodeModules = join(root, "sealed", "node_modules");
+    const executor = join(nodeModules, "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
+    const dependencyProof = join(nodeModules, "dependency-proof.txt");
+    const verifier = join(root, "runtime-verifier.mjs");
+    const sealedDigest = "a".repeat(64);
+    await mkdir(dirname(executor), { recursive: true });
+    await writeFile(executor, "export async function executeDaemonTool() { return { liveResult: {}, durableResult: {} }; }\nexport function supervisedToolIsMutation() { return false; }\n", { mode: 0o600 });
+    await writeFile(dependencyProof, sealedDigest, { mode: 0o600 });
+    await writeFile(verifier, `import { readFileSync } from "node:fs";\nimport { join } from "node:path";\nexport const LETAGENTS_MCP_RUNTIME_TREE_SHA256 = "${sealedDigest}";\nexport function computeLetAgentsMcpRuntimeTreeSha256(root) { return readFileSync(join(root, "dependency-proof.txt"), "utf8").trim(); }\n`, { mode: 0o600 });
+    const sealedRuntime = await loadSupervisedToolRuntimeAt(executor, {
+      verifierPath: verifier,
+      expectedTreeSha256: sealedDigest,
+    });
+    assert.equal(sealedRuntime.supervisedToolIsMutation("get_board"), false);
+    await writeFile(dependencyProof, "b".repeat(64), { mode: 0o600 });
+    await assert.rejects(
+      () => loadSupervisedToolRuntimeAt(executor, { verifierPath: verifier, expectedTreeSha256: sealedDigest }),
+      /complete tree integrity check/i,
+      "a changed dependency is rejected before the privileged executor import",
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("worker mint preserves the exact server-issued identity paired with its bearer", async () => {
+  const server = createHttpServer((_request, response) => {
+    response.writeHead(201, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      session_id: "session-exact", session_kind: "worker", room_id: "room-exact", runtime: "cursor",
+      actor_label: "CedarRidge | EmmyMay's agent | Cursor", agent_key: "emmymay/cedarridge",
+      agent_instance_id: "daemon:cedar", display_name: "CedarRidge", owner_label: "EmmyMay",
+      ide_label: "Cursor", created_at: "2026-08-14T00:00:00.000Z", updated_at: "2026-08-14T00:00:01.000Z",
+      last_seen_at: "2026-08-14T00:00:01.000Z", ended_at: null,
+      worker_bearer: "worker-secret", worker_bearer_id: "bearer-exact", worker_bearer_expires_at: null,
+    }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const minted = await productionSupervisorGrantHttp.createWorkerSession({
+      apiUrl: `http://127.0.0.1:${address.port}`, grantId: "grant", supervisorGrant: "grant-secret",
+      grantGeneration: 1, roomId: "room-exact", agentKey: "emmymay/cedarridge",
+      agentInstanceId: "daemon:cedar", provider: "cursor", displayName: "CedarRidge",
+    });
+    assert.equal(minted.agentSession?.agent_key, "emmymay/cedarridge");
+    assert.equal(minted.agentSession?.actor_label, "CedarRidge | EmmyMay's agent | Cursor");
+    assert.equal(minted.agentSession?.owner_label, "EmmyMay");
+    assert.equal(minted.agentSession?.session_id, minted.sessionId);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
 
 test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs(""), 210_000);
@@ -6756,9 +6835,37 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
     onExit: async () => () => {}, onStream: async () => () => {},
   };
+  const executedTools: Array<Record<string, unknown>> = [];
+  let releaseDisconnectedRead!: () => void;
+  const disconnectedReadGate = new Promise<void>((resolve) => { releaseDisconnectedRead = resolve; });
+  let releaseHandoffRead!: () => void;
+  const handoffReadGate = new Promise<void>((resolve) => { releaseHandoffRead = resolve; });
+  const toolRuntime = {
+    supervisedToolIsMutation: (toolName: string) => toolName !== "get_board",
+    executeDaemonTool: async (input: Record<string, unknown>) => {
+      executedTools.push(input);
+      if (input.requestId === "effect-disconnect") await disconnectedReadGate;
+      if (input.requestId === "effect-handoff") await handoffReadGate;
+      if (input.requestId === "effect-error") throw new Error("provider callback failed");
+      return {
+        liveResult: { content: [{ type: "text", text: `live:${String(input.requestId)}` }] },
+        durableResult: { content: [{ type: "text", text: `durable:${String(input.requestId)}` }] },
+      };
+    },
+  };
+  const exactAgentSession = (input: {
+    entryId: string; sessionId: string; roomId: string; runtime: string; displayName: string; agentKey: string;
+  }): DaemonToolAgentSession => ({
+    session_id: input.sessionId, session_token: "", room_id: input.roomId, session_kind: "worker",
+    runtime: input.runtime, actor_label: `${input.displayName} | EmmyMay's agent | ${input.runtime === "cursor" ? "Cursor" : "Codex"}`,
+    agent_key: input.agentKey, agent_instance_id: `daemon:${input.entryId}`, display_name: input.displayName,
+    owner_label: "EmmyMay", ide_label: input.runtime === "cursor" ? "Cursor" : "Codex",
+    created_at: "2026-08-14T00:00:00.000Z", updated_at: "2026-08-14T00:00:01.000Z",
+    last_seen_at: "2026-08-14T00:00:01.000Z", ended_at: null,
+  });
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 15_000, undefined, {}, {
     poll: async () => ({ messages: [] }), publish: async () => {},
-  });
+  }, undefined, async () => toolRuntime);
   try {
     await daemon.start();
     const execution = await (daemon as unknown as { durability: WorkDurabilityStore }).durability.startGeneration(
@@ -6781,6 +6888,14 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof handle>;
       workerBindings: WorkerBindingStore;
+      cachedWorkerAuthorizations: Map<string, {
+        agentSessionId: string; bearer: string; bearerId: string; agentKey: string;
+        roomId: string; agentSession: DaemonToolAgentSession;
+      }>;
+      completeBoundedEffectOnce: (
+        input: Record<string, unknown>,
+        admittedBeforeHandoff?: boolean,
+      ) => Promise<Record<string, unknown>>;
       supervisedInbox: SupervisedAgentInboxStore;
       supervisedDelivery: { activeTurn: (agent: { agentId: string }) => { inboxItemId: string; sourceMessageId: string; phase: "dispatching" } | null };
     };
@@ -6788,7 +6903,16 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     await internals.workerBindings.bind({
       entry_id: id, room_id: entry.room_id, work_attempt_id: attempt.work_attempt_id,
       execution_generation_id: execution.execution_generation_id, agent_session_id: "cursor-cap-worker",
-      agent_session_token: "cursor-cap-bearer", api_url: "https://letagents.example",
+      agent_session_token: "cursor-cap-bearer", credential_ref: "cursor-cap-bearer-id",
+      api_url: "https://letagents.example",
+    });
+    internals.cachedWorkerAuthorizations.set(id, {
+      agentSessionId: "cursor-cap-worker", bearer: "cursor-cap-bearer", bearerId: "cursor-cap-bearer-id",
+      agentKey: "emmymay/cedarridge", roomId: entry.room_id,
+      agentSession: exactAgentSession({
+        entryId: id, sessionId: "cursor-cap-worker", roomId: entry.room_id, runtime: "cursor",
+        displayName: "CedarRidge", agentKey: "emmymay/cedarridge",
+      }),
     });
     const [item] = await internals.supervisedInbox.ingestPoll({
       agent_id: id, room_id: entry.room_id, last_observed_message_id: "1",
@@ -6818,6 +6942,13 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     });
     assert.equal(staleEffect.ok, false);
     assert.match(staleEffect.error ?? "", /provider turn capability is stale/i);
+    const staleExecution = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      ...coordinates, provider_turn_id: "cursor-turn-prior", mcp_request_id: "execute-stale",
+      tool_name: "get_board", input: {},
+    });
+    assert.equal(staleExecution.ok, false);
+    assert.match(staleExecution.error ?? "", /provider turn capability is stale/i);
+    assert.equal(executedTools.length, 0, "stale authority is rejected before the runtime callback");
     const staleBorrow = await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", {
       ...coordinates, provider_turn_id: "cursor-turn-prior",
     });
@@ -6897,6 +7028,109 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     });
     assert.deepEqual(currentBorrow.result, { status: "available", credential: "cursor-cap-bearer" });
 
+    const executeParams = {
+      ...coordinates, provider_turn_id: "cursor-turn-current", mcp_request_id: "effect-daemon-owned",
+      tool_name: "get_board", input: {},
+    };
+    const daemonOwned = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", executeParams);
+    assert.equal(daemonOwned.ok, true, daemonOwned.error);
+    assert.deepEqual(daemonOwned.result, {
+      state: "completed", room_id: entry.room_id,
+      result: { content: [{ type: "text", text: "live:effect-daemon-owned" }] },
+    });
+    const exactDaemonOwnedRetry = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", executeParams);
+    assert.deepEqual(exactDaemonOwnedRetry.result, {
+      state: "completed", room_id: entry.room_id,
+      result: { content: [{ type: "text", text: "durable:effect-daemon-owned" }] },
+    }, "an exact replay returns the journal result without redriving the tool");
+    assert.equal(executedTools.filter((call) => call.requestId === "effect-daemon-owned").length, 1);
+    const exactCall = executedTools.find((call) => call.requestId === "effect-daemon-owned")!;
+    assert.equal(exactCall.provider, "cursor");
+    assert.equal(exactCall.roomId, entry.room_id);
+    assert.equal(exactCall.bearer, "cursor-cap-bearer");
+    assert.equal(exactCall.cwd, attempt.workspace_path);
+    assert.equal((exactCall.agentSession as { runtime: string }).runtime, "cursor");
+    assert.deepEqual(
+      {
+        agent_key: (exactCall.agentSession as DaemonToolAgentSession).agent_key,
+        actor_label: (exactCall.agentSession as DaemonToolAgentSession).actor_label,
+        owner_label: (exactCall.agentSession as DaemonToolAgentSession).owner_label,
+      },
+      {
+        agent_key: "emmymay/cedarridge",
+        actor_label: "CedarRidge | EmmyMay's agent | Cursor",
+        owner_label: "EmmyMay",
+      },
+      "task mutations receive the exact bearer identity instead of a synthesized desktop identity",
+    );
+
+    const originalCompletion = internals.completeBoundedEffectOnce.bind(daemon);
+    let rejectSuccessCheckpoint = true;
+    internals.completeBoundedEffectOnce = async (completionInput, admittedBeforeHandoff) => {
+      if (rejectSuccessCheckpoint && Object.hasOwn(completionInput, "result")) {
+        rejectSuccessCheckpoint = false;
+        throw new Error("injected successful-result checkpoint failure");
+      }
+      return originalCompletion(completionInput, admittedBeforeHandoff);
+    };
+    const checkpointFailureParams = {
+      ...executeParams, mcp_request_id: "effect-success-checkpoint-failure",
+      tool_name: "send_message", input: { text: "external effect succeeds once" },
+    };
+    const checkpointFailure = await daemonRequest(
+      paths.socketPath,
+      "supervisor.execute_bounded_tool",
+      checkpointFailureParams,
+    );
+    assert.equal(checkpointFailure.ok, false);
+    assert.match(checkpointFailure.error ?? "", /successful-result checkpoint failure/i);
+    const checkpointRetry = await daemonRequest(
+      paths.socketPath,
+      "supervisor.execute_bounded_tool",
+      checkpointFailureParams,
+    );
+    assert.equal(checkpointRetry.ok, true, checkpointRetry.error);
+    assert.match(JSON.stringify(checkpointRetry.result), /SUPERVISED_EFFECT_OUTCOME_UNCERTAIN/);
+    assert.equal(
+      executedTools.filter((call) => call.requestId === "effect-success-checkpoint-failure").length,
+      1,
+      "a successful mutation is never rerun or relabeled as callback failure when only checkpointing fails",
+    );
+
+    const failed = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      ...executeParams, mcp_request_id: "effect-error", tool_name: "post_status",
+    });
+    assert.equal(failed.ok, false);
+    assert.match(failed.error ?? "", /provider callback failed/);
+    const failedRetry = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      ...executeParams, mcp_request_id: "effect-error", tool_name: "post_status",
+    });
+    assert.equal(failedRetry.ok, false);
+    assert.match(failedRetry.error ?? "", /provider callback failed/i);
+    assert.equal(executedTools.filter((call) => call.requestId === "effect-error").length, 1);
+
+    const disconnectedParams = {
+      ...executeParams, mcp_request_id: "effect-disconnect", tool_name: "get_board",
+    };
+    const abandoned = createConnection(paths.socketPath);
+    await new Promise<void>((resolve, reject) => {
+      abandoned.once("connect", resolve);
+      abandoned.once("error", reject);
+    });
+    abandoned.write(`${JSON.stringify({
+      version: DAEMON_PROTOCOL_VERSION, id: "abandoned", method: "supervisor.execute_bounded_tool",
+      params: disconnectedParams,
+    })}\n`);
+    await eventually(() => executedTools.some((call) => call.requestId === "effect-disconnect"), "disconnected tool begins");
+    abandoned.destroy();
+    releaseDisconnectedRead();
+    await eventually(async () => {
+      const replay = await daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", disconnectedParams);
+      return replay.ok && JSON.stringify(replay.result).includes("durable:effect-disconnect");
+    }, "disconnected tool finishes durably");
+    assert.equal(executedTools.filter((call) => call.requestId === "effect-disconnect").length, 1,
+      "provider socket loss cannot cancel or duplicate daemon-owned work");
+
     // Completion is deliberately last for this exact provider turn. Once it
     // commits, production correctly rejects every new effect request.
     const completionProposal = await daemonRequest(paths.socketPath, "supervisor.prepare_bounded_effect", {
@@ -6955,7 +7189,15 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       work_attempt_id: providerNeutralAttempt.work_attempt_id,
       execution_generation_id: providerNeutralExecution.execution_generation_id,
       agent_session_id: "provider-neutral-worker", agent_session_token: "provider-neutral-bearer",
-      api_url: "https://letagents.example",
+      credential_ref: "provider-neutral-bearer-id", api_url: "https://letagents.example",
+    });
+    internals.cachedWorkerAuthorizations.set(providerNeutralId, {
+      agentSessionId: "provider-neutral-worker", bearer: "provider-neutral-bearer",
+      bearerId: "provider-neutral-bearer-id", agentKey: "emmymay/pinefield", roomId: "provider-neutral-room",
+      agentSession: exactAgentSession({
+        entryId: providerNeutralId, sessionId: "provider-neutral-worker", roomId: "provider-neutral-room", runtime: "codex",
+        displayName: "PineField", agentKey: "emmymay/pinefield",
+      }),
     });
     const [providerNeutralItem] = await internals.supervisedInbox.ingestPoll({
       agent_id: providerNeutralId, room_id: "provider-neutral-room", last_observed_message_id: "1",
@@ -6995,6 +7237,19 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       result: { claimed: true },
     });
     assert.equal(providerNeutralCompletion.ok, true, providerNeutralCompletion.error);
+
+    const handoffTool = daemonRequest(paths.socketPath, "supervisor.execute_bounded_tool", {
+      ...providerNeutralCoordinates, provider_turn_id: "", mcp_request_id: "effect-handoff",
+      tool_name: "get_board", input: {},
+    });
+    await eventually(() => executedTools.some((call) => call.requestId === "effect-handoff"), "handoff tool begins");
+    let handoffSettled = false;
+    const handoff = daemonRequest(paths.socketPath, "daemon.prepare_handoff").finally(() => { handoffSettled = true; });
+    await new Promise((resolve) => setTimeout(resolve, 30));
+    assert.equal(handoffSettled, false, "handoff waits for admitted daemon-owned tool execution");
+    releaseHandoffRead();
+    assert.equal((await handoffTool).ok, true);
+    assert.equal((await handoff).ok, true);
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();

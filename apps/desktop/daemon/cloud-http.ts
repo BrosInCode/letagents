@@ -1,4 +1,5 @@
 import type { SupervisedDeliveryHttp, SupervisedPollResponse } from "./supervised-agent-delivery.js";
+import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
@@ -10,7 +11,11 @@ export interface SupervisorGrantHttp {
   createWorkerSession(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; roomId: string; agentKey: string; agentInstanceId: string;
     provider: string; displayName: string; signal?: AbortSignal;
-  }): Promise<{ sessionId: string; bearer: string; bearerId: string; expiresAt: string | null }>;
+  }): Promise<{
+    sessionId: string; bearer: string; bearerId: string; expiresAt: string | null;
+    /** Exact public identity paired with the worker bearer by the server. */
+    agentSession?: DaemonToolAgentSession;
+  }>;
   endWorkerSession?(input: {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number; sessionId: string;
   }): Promise<void>;
@@ -139,9 +144,28 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp = {
       if (typeof value !== "string" || !value.trim()) throw new Error(`Supervisor worker session response omitted ${name}.`);
       return value;
     };
+    const sessionKind = requireString("session_kind");
+    if (sessionKind !== "worker") throw new Error("Supervisor worker session response returned a non-worker identity.");
+    const endedAt = body.ended_at;
+    if (endedAt !== null) throw new Error("Supervisor worker session response returned an ended identity.");
+    const agentSession: DaemonToolAgentSession = {
+      session_id: requireString("session_id"), session_token: "", room_id: requireString("room_id"),
+      session_kind: "worker", runtime: requireString("runtime"), actor_label: requireString("actor_label"),
+      agent_key: requireString("agent_key"), agent_instance_id: requireString("agent_instance_id"),
+      display_name: requireString("display_name"), owner_label: requireString("owner_label"),
+      ide_label: requireString("ide_label"), created_at: requireString("created_at"),
+      updated_at: requireString("updated_at"), last_seen_at: requireString("last_seen_at"), ended_at: null,
+    };
+    if (agentSession.room_id !== input.roomId
+      || agentSession.runtime !== input.provider
+      || agentSession.agent_key !== input.agentKey
+      || agentSession.agent_instance_id !== input.agentInstanceId) {
+      throw new Error("Supervisor worker session response returned a different authority identity.");
+    }
     return {
-      sessionId: requireString("session_id"), bearer: requireString("worker_bearer"), bearerId: requireString("worker_bearer_id"),
+      sessionId: agentSession.session_id, bearer: requireString("worker_bearer"), bearerId: requireString("worker_bearer_id"),
       expiresAt: typeof body.worker_bearer_expires_at === "string" ? body.worker_bearer_expires_at : null,
+      agentSession,
     };
   },
   async endWorkerSession(input) {

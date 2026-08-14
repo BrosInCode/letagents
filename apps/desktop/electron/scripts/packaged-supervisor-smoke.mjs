@@ -1,7 +1,7 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { createConnection } from "node:net";
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
@@ -13,6 +13,21 @@ const developmentDaemon = join(root, "dist-daemon", "main.js");
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 const socketPath = join(home, ".letagents", "daemon.sock");
 const protocolVersion = 2;
+
+async function assertPackagedDaemonExecutorSeal() {
+  const appRoot = join(bundle, "Contents", "Resources", "app");
+  const verifierPath = join(appRoot, "dist-electron", "main", "agents", "letagents-mcp-runtime.js");
+  const executorPath = join(appRoot, "runtime", "letagents", "node_modules", "letagents", "dist", "mcp", "server", "daemon-tool-executor.js");
+  const loader = await import(pathToFileURL(join(appRoot, "dist-daemon", "supervised-tool-runtime.js")).href);
+  const verifier = await import(pathToFileURL(verifierPath).href);
+  const runtime = await loader.loadSupervisedToolRuntimeAt(executorPath, {
+    verifierPath,
+    expectedTreeSha256: verifier.LETAGENTS_MCP_RUNTIME_TREE_SHA256,
+  });
+  if (typeof runtime.executeDaemonTool !== "function") {
+    throw new Error("packaged daemon executor did not pass its sealed runtime contract");
+  }
+}
 
 function request(method, params) {
   return new Promise((resolveRequest, reject) => {
@@ -88,6 +103,8 @@ async function launchDevelopmentDaemon() {
 }
 
 try {
+  console.log("packaged-smoke: sealed daemon executor");
+  await assertPackagedDaemonExecutorSeal();
   console.log("packaged-smoke: cross-install predecessor");
   const predecessor = await launchDevelopmentDaemon();
   console.log(`packaged-smoke: development daemon ${predecessor.pid} generation ${predecessor.generation}`);

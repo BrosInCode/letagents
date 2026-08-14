@@ -60,6 +60,7 @@ import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitC
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedDeliveryInterruptReservation, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+import { supervisedToolRuntime, type DaemonToolAgentSession, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 
 export {
   productionSupervisedDeliveryHttp,
@@ -110,7 +111,13 @@ type CachedWorkerAuthorization = {
   entryId: string; roomId: string; agentKey: string; workAttemptId: string | null;
   grantId: string; grantGeneration: number; daemonGeneration: number; apiUrl: string;
   agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; mintedAtMs: number;
+  /** Exact server-issued public identity paired with this bearer. */
+  agentSession?: DaemonToolAgentSession;
 };
+type MintedWorkerAuthorization = Pick<CachedWorkerAuthorization,
+  "agentSessionId" | "bearer" | "bearerId" | "expiresAt" | "agentSession"
+> & { apiUrl: string };
+type BoundWorkerAuthorization = MintedWorkerAuthorization & { executionGenerationId: string };
 type BootstrapOperation = {
   controller: AbortController;
   phase: "observing" | "committing";
@@ -342,6 +349,9 @@ export class SupervisorDaemon {
   private readonly workerMintRecoveryRetryAttempts = new Map<string, number>();
   /** Initial-tail reads are authority-bearing admission operations. */
   private readonly bootstrapOperations = new Set<BootstrapOperation>();
+  /** Tool work admitted by this generation survives provider socket loss and
+   * must settle its journal before daemon authority can hand off. */
+  private readonly boundedToolExecutions = new Set<Promise<void>>();
   private readonly nowMs: () => number;
   private readonly setRecoveryTimeout: typeof setTimeout;
   private readonly clearRecoveryTimeout: typeof clearTimeout;
@@ -366,7 +376,7 @@ export class SupervisorDaemon {
   private resolveHandoffCompletion!: () => void;
   private rejectHandoffCompletion!: (error: unknown) => void;
 
-  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp) {
+  constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp, private readonly loadSupervisedToolRuntime: () => Promise<SupervisedToolRuntime> = supervisedToolRuntime) {
     this.handoffCompletion = new Promise<void>((resolve, reject) => {
       this.resolveHandoffCompletion = resolve;
       this.rejectHandoffCompletion = reject;
@@ -444,6 +454,7 @@ export class SupervisorDaemon {
       commitInspectorRoomMove: this.commitInspectorRoomMove.bind(this),
       compareAndSetDesiredState: this.compareAndSetDesiredState.bind(this),
       completeBoundedEffect: this.completeBoundedEffect.bind(this),
+      executeBoundedTool: this.executeBoundedTool.bind(this),
       controlTurn: this.controlTurn.bind(this),
       entryWithDerivedLiveness: this.entryWithDerivedLiveness.bind(this),
       getAgentConfiguration: this.getAgentConfiguration.bind(this),
@@ -1131,7 +1142,7 @@ export class SupervisorDaemon {
       && input.providerTurnId !== inbox.provider_turn_id) {
       throw new Error("The supervised provider turn capability is stale.");
     }
-    return { entry, agent, active, inbox, providerTurnBinding };
+    return { entry, agent, binding, active, inbox, providerTurnBinding };
   }
 
   private prepareBoundedEffect(input: {
@@ -1140,6 +1151,99 @@ export class SupervisorDaemon {
     mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
   }): Promise<Record<string, unknown>> {
     return this.reserveBoundedEffectJournal(() => this.prepareBoundedEffectOnce(input));
+  }
+
+  private async executeBoundedTool(input: {
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown;
+  }): Promise<Record<string, unknown>> {
+    return this.reserveBoundedToolExecution(() => this.executeBoundedToolOnce(input));
+  }
+
+  private async executeBoundedToolOnce(input: {
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown;
+  }): Promise<Record<string, unknown>> {
+    const runtime = await this.loadSupervisedToolRuntime();
+    const mutation = runtime.supervisedToolIsMutation(input.toolName);
+    const prepared = await this.reserveBoundedEffectJournal(() => this.prepareBoundedEffectOnce({ ...input, mutation }));
+    const roomId = typeof prepared.room_id === "string" ? prepared.room_id : "";
+    if (prepared.state === "completed") return prepared;
+    if (prepared.state === "uncertain") {
+      return { state: "completed", room_id: roomId, result: this.supervisedInstruction(
+        "This mutating tool may already have completed, but its result was not durably checkpointed. Verify the external state before issuing a new request; this exact request will not be repeated automatically.",
+        { code: "SUPERVISED_EFFECT_OUTCOME_UNCERTAIN", effect_id: prepared.effect_id, detail: prepared.error },
+      ) };
+    }
+    if (prepared.action === "use_final_answer") {
+      const context = await this.exactActiveBoundedContext(input);
+      return { state: "completed", room_id: roomId, result: this.supervisedInstruction(
+        context.entry.provider === "cursor"
+          ? "Do not send the activating room reply with a message tool. Keep working, then record the one public answer with complete_room_turn; Cursor's aggregate final text is live evidence only."
+          : "Do not send the activating room reply with a message tool. Return it as your final answer; the daemon will publish it exactly once.",
+        { code: "USE_FINAL_ANSWER", source_message_id: prepared.source_message_id },
+      ) };
+    }
+    if (prepared.action === "room_move_prepared") {
+      const context = await this.exactActiveBoundedContext(input);
+      return { state: "completed", room_id: roomId, result: this.supervisedInstruction(
+        context.entry.provider === "cursor"
+          ? "The room move is prepared. Finish the work, then call complete_room_turn with the public response; the daemon will publish that proposal and then move the agent."
+          : "The room move is prepared. Finish this turn normally; the daemon will publish the activating response and then move the agent.",
+        { code: "ROOM_MOVE_PREPARED", destination_room: prepared.destination_room },
+      ) };
+    }
+    if (prepared.action !== "execute" || typeof prepared.effect_id !== "string") {
+      throw new Error("The supervised effect journal returned an unsupported execution state.");
+    }
+
+    // Re-resolve exact authority after journal preparation and before any I/O.
+    const context = await this.exactActiveBoundedContext(input);
+    const authorization = this.cachedWorkerAuthorizations.get(context.entry.id);
+    const session = authorization?.agentSession;
+    if (!authorization || !session
+      || authorization.agentSessionId !== context.agent.agentSessionId
+      || authorization.bearer !== context.agent.bearer
+      || authorization.bearerId !== context.binding.credential_ref
+      || authorization.roomId !== context.entry.room_id
+      || session.session_id !== context.agent.agentSessionId
+      || session.room_id !== context.entry.room_id
+      || session.runtime !== context.entry.provider
+      || session.agent_key !== authorization.agentKey
+      || session.agent_instance_id !== `daemon:${context.entry.id}`) {
+      throw new Error("The exact server-issued worker identity is unavailable for this supervised tool execution.");
+    }
+    let executed: Awaited<ReturnType<SupervisedToolRuntime["executeDaemonTool"]>>;
+    try {
+      executed = await runtime.executeDaemonTool({
+        provider: context.entry.provider, toolName: input.toolName, input: input.input,
+        requestId: input.mcpRequestId, roomId: context.entry.room_id, apiUrl: context.agent.apiUrl,
+        bearer: context.agent.bearer, cwd: context.entry.workspace_path ?? "", agentSession: session,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      try {
+        await this.reserveBoundedEffectJournal(() => this.completeBoundedEffectOnce({
+          ...input, effectId: prepared.effect_id as string, error: detail,
+        }, true));
+      } catch {
+        // Preserve the execution error. An unconfirmed journal completion is
+        // deliberately never redriven as a mutation by the same request id.
+      }
+      throw error;
+    }
+    // Execution and checkpointing are separate truth boundaries. If the
+    // external effect succeeded but this write fails, leave the journal in
+    // executing/uncertain state; never rewrite the real success as failure.
+    await this.reserveBoundedEffectJournal(() => this.completeBoundedEffectOnce({
+      ...input, effectId: prepared.effect_id as string, result: executed.durableResult,
+    }, true));
+    return { state: "completed", room_id: context.entry.room_id, result: executed.liveResult };
+  }
+
+  private supervisedInstruction(instruction: string, data: Record<string, unknown>): Record<string, unknown> {
+    const payload = { ...data, instruction };
+    return { content: [{ type: "text", text: JSON.stringify(payload, null, 2) }], structuredContent: payload };
   }
 
   private async prepareBoundedEffectOnce(input: {
@@ -1236,7 +1340,7 @@ export class SupervisorDaemon {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string;
     effectId: string; result?: unknown; error?: string;
-  }): Promise<{ completed: true }> {
+  }, admittedDaemonExecution = false): Promise<{ completed: true }> {
     await this.singleton.assertCurrent();
     if (!Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) {
       throw new Error("The supervised effect completion belongs to a stale daemon generation.");
@@ -1258,7 +1362,9 @@ export class SupervisorDaemon {
         work_attempt_id: input.workAttemptId,
         provider_turn_id: callerProviderTurnId,
       },
-    }, (commit) => this.fenceDaemonCommit(commit));
+    }, (commit) => admittedDaemonExecution
+      ? this.fenceAdmittedTransitionCommit(commit)
+      : this.fenceDaemonCommit(commit));
     return { completed: true };
   }
 
@@ -2495,7 +2601,7 @@ export class SupervisorDaemon {
             providerConnection,
             observedAt: new Date().toISOString(),
           }, (commit) => completingAdmittedCursorState
-            ? this.fenceAdmittedCursorTransitionCommit(commit)
+            ? this.fenceAdmittedTransitionCommit(commit)
             : this.fenceDaemonCommit(commit));
           this.manifestGeneration = checkpoint.generation;
         }
@@ -2673,6 +2779,7 @@ export class SupervisorDaemon {
     await Promise.all([...this.providerDispatchReservations]);
     if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
     await Promise.all([...this.boundedEffectJournalReservations]);
+    await Promise.all([...this.boundedToolExecutions]);
     this.handoffTeardownScheduled = true;
     // Delayed teardown exists only to flush the successful socket reply.
     setTimeout(() => {
@@ -4913,6 +5020,22 @@ export class SupervisorDaemon {
     });
   }
 
+  private reserveBoundedToolExecution<T>(operation: () => Promise<T>): Promise<T> {
+    let release!: () => void;
+    const reservation = new Promise<void>((resolve) => { release = resolve; });
+    this.boundedToolExecutions.add(reservation);
+    let result: Promise<T>;
+    try { result = operation(); } catch (error) {
+      this.boundedToolExecutions.delete(reservation);
+      release();
+      throw error;
+    }
+    return result.finally(() => {
+      this.boundedToolExecutions.delete(reservation);
+      release();
+    });
+  }
+
   /** Re-read durable intent after every delayed launch boundary. */
   private async launchEntryIfCurrent(entryId: string, expectedEpoch: number): Promise<DaemonManifestEntry | null> {
     if (this.handoffScheduled || this.currentEntryControlEpoch(entryId) !== expectedEpoch) return null;
@@ -6600,6 +6723,7 @@ export class SupervisorDaemon {
   /** Remote authorization happens before starting a durable provider generation. */
   private async mintHostWorkerAuthorization(entry: DaemonManifestEntry, signal?: AbortSignal, forceFresh = false): Promise<{
     agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string;
+    agentSession?: DaemonToolAgentSession;
   } | null> {
     const grant = this.currentHostGrant(entry);
     if (!grant) return null;
@@ -6610,7 +6734,7 @@ export class SupervisorDaemon {
     const cached = forceFresh ? null : this.cachedWorkerAuthorization(entry, grant);
     if (cached) return {
       agentSessionId: cached.agentSessionId, bearer: cached.bearer, bearerId: cached.bearerId,
-      expiresAt: cached.expiresAt, apiUrl: cached.apiUrl,
+      expiresAt: cached.expiresAt, apiUrl: cached.apiUrl, agentSession: cached.agentSession,
     };
     const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal);
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration) || this.hostGrants.get(entry.id) !== grant) {
@@ -6624,16 +6748,20 @@ export class SupervisorDaemon {
       workAttemptId: entry.work_attempt_id ?? null, grantId: grant.grantId, grantGeneration: grant.grantGeneration,
       daemonGeneration: grant.daemonGeneration, apiUrl: grant.apiUrl, agentSessionId: minted.sessionId,
       bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, mintedAtMs: this.nowMs(),
+      agentSession: minted.agentSession,
     });
-    return { agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, apiUrl: grant.apiUrl };
+    return {
+      agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId,
+      expiresAt: minted.expiresAt, apiUrl: grant.apiUrl, agentSession: minted.agentSession,
+    };
   }
 
   /** Bind public session metadata to the exact generation after it exists. */
-  private async recordMintedHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string, minted: {
-    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string;
-  }): Promise<{
-    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
-  } | null> {
+  private async recordMintedHostWorkerSession(
+    entry: DaemonManifestEntry,
+    executionGenerationId: string,
+    minted: MintedWorkerAuthorization,
+  ): Promise<BoundWorkerAuthorization | null> {
     const grant = this.currentHostGrant(entry);
     if (!grant || !entry.work_attempt_id || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return null;
     const current = await this.store.getEntry(entry.id);
@@ -6652,9 +6780,11 @@ export class SupervisorDaemon {
     return { ...minted, executionGenerationId };
   }
 
-  private async mintHostWorkerSession(entry: DaemonManifestEntry, executionGenerationId: string, forceFresh = false): Promise<{
-    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string; executionGenerationId: string;
-  } | null> {
+  private async mintHostWorkerSession(
+    entry: DaemonManifestEntry,
+    executionGenerationId: string,
+    forceFresh = false,
+  ): Promise<BoundWorkerAuthorization | null> {
     const minted = await this.mintHostWorkerAuthorization(entry, undefined, forceFresh);
     return minted ? this.recordMintedHostWorkerSession(entry, executionGenerationId, minted) : null;
   }
@@ -7580,12 +7710,12 @@ export class SupervisorDaemon {
   }
 
   /**
-   * Finish only the exact init or live->idle edge of a wrapper already admitted
-   * by this generation. Handoff has synchronously fenced new delivery, but the
-   * old daemon still owns the singleton and must leave that admitted turn's
-   * provider state honest before releasing the singleton to a successor.
+   * Finish only an exact provider transition or tool journal completion
+   * already admitted by this generation. Handoff has synchronously fenced new
+   * work, but the old daemon still owns the singleton and must leave admitted
+   * state honest before releasing it to a successor.
    */
-  private fenceAdmittedCursorTransitionCommit(commit: () => Promise<void>): Promise<void> {
+  private fenceAdmittedTransitionCommit(commit: () => Promise<void>): Promise<void> {
     return this.serializeManifestCommit(async () => {
       await this.singleton.assertCurrent();
       await commit();
