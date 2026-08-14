@@ -24,6 +24,7 @@ import { EphemeralWorkspaceProvisioner, isEphemeralWorkspaceMarker } from "./eph
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { projectDeliveryReceipts, projectDeliveryTurn } from "./manifest-view-projection.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
+import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { assertMacOS } from "./platform.js";
 import { sameProcessBirthIdentity } from "./process-identity.js";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal, type ProviderTurnControlResult } from "./provider-action-port.js";
@@ -7694,14 +7695,28 @@ export class SupervisorDaemon {
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
+  const paths = defaultDaemonPaths();
+  const lifecycle = new DaemonLifecycleLog(paths.lifecycleLogPath);
+  lifecycle.append({ event: "daemon_starting" });
+  process.on("uncaughtExceptionMonitor", (error) => {
+    lifecycle.append({ event: "fatal_exception", detail: daemonLifecycleErrorDetail(error) });
+  });
+  process.on("exit", (exitCode) => {
+    lifecycle.append({ event: "process_exit", exitCode });
+    lifecycle.close();
+  });
   void (async () => {
     const { ProviderActionPortRouter } = await import("./provider-action-port-router.js");
-    const daemon = new SupervisorDaemon(defaultDaemonPaths(), process.platform, new ProviderActionPortRouter(), true);
+    const daemon = new SupervisorDaemon(paths, process.platform, new ProviderActionPortRouter(), true);
     await daemon.start();
+    lifecycle.append({ event: "daemon_ready" });
     await daemon.waitForHandoff();
+    lifecycle.append({ event: "handoff_complete" });
     process.exit(0);
   })().catch((error) => {
-    console.error("Supervisor daemon handoff failed:", error);
+    const detail = daemonLifecycleErrorDetail(error);
+    lifecycle.append({ event: "entrypoint_failure", detail });
+    console.error("Supervisor daemon failed:", redactCredentialText(detail).value);
     process.exit(1);
   });
 }

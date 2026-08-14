@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
+import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -146,6 +147,91 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       await closeServer(wire.server, env.socketPath);
     }
   } finally {
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("desktop records the exact exit of a spawned daemon", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const lifecycleLogPath = join(env.root, "daemon-lifecycle.jsonl");
+  let wireServer: Server | null = null;
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperty(child, "pid", { value: 77 });
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      lifecycleLogPath,
+      spawnDaemon: () => {
+        void startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 24)
+          .then((started) => { wireServer = started.server; });
+        return child;
+      },
+    });
+    assert.equal((await client.ensureRunning()).generation, 24);
+    assert.equal((await client.ensureRunning()).generation, 24);
+    child.emit("exit", null, "SIGKILL");
+    await closeServer(wireServer, env.socketPath);
+    wireServer = null;
+    assert.equal(await client.connectIfRunning(), null);
+
+    const deadline = Date.now() + 1_000;
+    let recorded = "";
+    while (Date.now() < deadline) {
+      recorded = await readFile(lifecycleLogPath, "utf8").catch(() => "");
+      if (recorded.includes('"event":"daemon_exited"')) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.match(recorded, /"event":"daemon_spawned"/);
+    assert.match(recorded, /"event":"daemon_exited"/);
+    assert.match(recorded, /"pid":77/);
+    assert.match(recorded, /"signal":"SIGKILL"/);
+    assert.doesNotMatch(recorded, /"event":"daemon_disappeared"/);
+  } finally {
+    await closeServer(wireServer, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("a passive relaunched desktop records when its negotiated daemon abruptly disappears", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const lifecycleLogPath = join(env.root, "daemon-lifecycle.jsonl");
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 25);
+  let inspected: ReturnType<typeof fakeDaemonProcessIdentity> | null = fakeDaemonProcessIdentity();
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      lifecycleLogPath,
+      inspectDaemonProcess: () => inspected,
+      spawnDaemon: () => { throw new Error("an existing daemon must not be replaced"); },
+    });
+    assert.equal((await client.connectIfRunning())?.generation, 25);
+    inspected = null;
+    await closeServer(wire.server, env.socketPath);
+    wire = null;
+    assert.equal(await client.connectIfRunning(), null);
+
+    const deadline = Date.now() + 1_000;
+    let recorded = "";
+    while (Date.now() < deadline) {
+      recorded = await readFile(lifecycleLogPath, "utf8").catch(() => "");
+      if (recorded.includes('"event":"daemon_disappeared"')) break;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    assert.match(recorded, /"event":"daemon_disappeared"/);
+    assert.match(recorded, /"pid":77/);
+    assert.match(recorded, /"generation":25/);
+  } finally {
+    await closeServer(wire?.server ?? null, env.socketPath);
     if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
     else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
     await env.cleanup();
@@ -1400,7 +1486,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.102");
+    assert.equal(status.implementationVersion, "2.0.103");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {
