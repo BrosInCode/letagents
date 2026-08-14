@@ -40,8 +40,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     try {
       const result = await desktopIpc.auth.startDeviceFlow(options.getRoomIdentifier());
       authStatus.value = result.authStatus;
-      authFeedback.value = "GitHub is open. Enter the code here, then come back to LetAgents. This app will keep checking.";
-      await desktopIpc.auth.openVerification(result.pendingDeviceAuth.verificationUri);
+      authFeedback.value = "Your code is ready. Copy it, then open GitHub to finish connecting.";
       scheduleAuthPoll();
     } catch (error) {
       authFeedback.value = error instanceof Error ? error.message : "Could not start GitHub approval.";
