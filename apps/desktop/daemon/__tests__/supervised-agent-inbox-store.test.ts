@@ -2410,6 +2410,11 @@ test("room-turn completion waits until every already-executing effect has durabl
       request: { text: "side effect first" }, mutation: true,
     });
     await store.markEffectExecuting({ effect_id: mutation.effect.effect_id, ...authority });
+    const read = await store.prepareEffect({
+      ...authority, mcp_request_id: "oversized-read", tool_name: "get_board",
+      request: {}, mutation: false,
+    });
+    await store.markEffectExecuting({ effect_id: read.effect.effect_id, ...authority });
     await assert.rejects(store.prepareEffect({
       ...authority, mcp_request_id: "completion-too-early", tool_name: "complete_room_turn",
       request: { outcome: "no_reply" }, mutation: true,
@@ -2467,6 +2472,10 @@ test("reply publication settles unexecuted ordinary effects but preserves prepar
     const move = await store.prepareEffect({
       ...base, mcp_request_id: "move", tool_name: "join_room", request: { name: "next-room" },
     });
+    const read = await store.prepareEffect({
+      ...base, mcp_request_id: "large-board-read", tool_name: "get_board", request: {}, mutation: false,
+    });
+    await store.markEffectExecuting({ effect_id: read.effect.effect_id, ...base });
     await store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind: "reply", text: "answer" }));
     await store.transition(item!.inbox_item_id, "awaiting_result");
     await store.transition(item!.inbox_item_id, "publishing");
@@ -2477,6 +2486,9 @@ test("reply publication settles unexecuted ordinary effects but preserves prepar
     assert.equal((await store.prepareEffect({
       ...base, mcp_request_id: "use-final", tool_name: "send_message", request: { reply_to: "1", text: "answer" },
     })).effect.state, "failed");
+    assert.equal((await store.prepareEffect({
+      ...base, mcp_request_id: "large-board-read", tool_name: "get_board", request: {}, mutation: false,
+    })).effect.state, "failed", "terminal publication settles an abandoned read journal");
     assert.equal((await store.preparedRoomMoves("terminal-effect"))[0]?.effect_id, move.effect.effect_id,
       "the post-publication room-move journal remains available for reconciliation");
     assert.notEqual(ordinary.effect.effect_id, move.effect.effect_id);

@@ -25,12 +25,34 @@ const READ_TOOLS = new Set([
   "rental_list_requests",
 ]);
 
+// The desktop daemon's local control protocol intentionally uses small bounded
+// frames. A read result can be returned live to the provider without copying
+// the entire payload into the durable effect journal.
+const MAX_DURABLE_READ_RESULT_BYTES = 16 * 1024;
+
 function instruction(text: string, data: Record<string, unknown> = {}): CallToolResult {
   const payload = { ...data, instruction: text };
   return {
     content: [{ type: "text", text: JSON.stringify(payload, null, 2) }],
     structuredContent: payload,
   };
+}
+
+function durableCompletionResult(
+  result: CallToolResult,
+  mutation: boolean,
+): CallToolResult {
+  if (mutation) return result;
+  const serializedBytes = Buffer.byteLength(JSON.stringify(result), "utf8");
+  if (serializedBytes <= MAX_DURABLE_READ_RESULT_BYTES) return result;
+
+  return instruction(
+    "The read completed, but its large result was returned live instead of being copied into the durable journal. Issue a fresh read request if this exact request is replayed after a restart.",
+    {
+      code: "SUPERVISED_READ_RESULT_NOT_RETAINED",
+      serialized_bytes: serializedBytes,
+    },
+  );
 }
 
 /**
@@ -69,6 +91,7 @@ export function profileAwareToolServer(
         return typeof value === "function" ? value.bind(target) : value;
       }
       return (name: string, ...registration: unknown[]) => {
+        const mutation = !READ_TOOLS.has(name);
         const callback = registration.at(-1);
         if (typeof callback !== "function") throw new Error(`Tool ${name} has no callback.`);
         const wrapped = async (...call: unknown[]): Promise<CallToolResult> => {
@@ -81,7 +104,7 @@ export function profileAwareToolServer(
             toolName: name,
             input,
             mcpRequestId: String(extra.requestId),
-            mutation: !READ_TOOLS.has(name),
+            mutation,
           });
           return dependencies.withRoom(prepared.roomId, async () => {
             if (prepared.state === "completed") return prepared.result as CallToolResult;
@@ -122,7 +145,10 @@ export function profileAwareToolServer(
             }
             // Completion transport is deliberately outside the callback catch.
             // A reporting failure must never relabel a successful action failed.
-            await dependencies.completeEffect({ effectId: prepared.effectId, result });
+            await dependencies.completeEffect({
+              effectId: prepared.effectId,
+              result: durableCompletionResult(result, mutation),
+            });
             return result;
           });
         };
