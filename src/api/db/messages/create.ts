@@ -16,6 +16,9 @@ import {
   isMessageSenderWithinBounds,
 } from "../../../../shared/message-contracts.mjs";
 import {
+  isAgentDeliverySessionReachable,
+} from "../../../shared/agent-presence.js";
+import {
   createGlobalAgentAddressResolver,
   decideAgentMessageActivation,
   isUntrustedExternalActivationSource,
@@ -24,7 +27,7 @@ import {
 } from "../../../shared/activation-routing.js";
 import { RequestValidationError } from "../../validation-error.js";
 import { db } from "../client.js";
-import { message_attachment_uploads, message_attachments, messages, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
+import { message_attachment_uploads, message_attachments, messages, room_agent_delivery_sessions, room_agent_sessions, message_agent_receipts, message_agent_receipt_events } from "../schema.js";
 import { toMessageWithReply } from "../mappers.js";
 import type {
   Message,
@@ -504,6 +507,44 @@ export async function addMessageWithCreateStatus(
       throw new RequestValidationError("Room has too many active worker sessions to route a message safely.");
     }
 
+    const reachableAgentKeys = new Set<string>();
+    if (activeSessions.length > 0 && routingShape.hasMention) {
+      const activeDeliveryKeys = activeSessions.map((session) =>
+        `agent_session:${session.session_id}`);
+      const deliverySessions = await tx
+        .select({
+          agent_session_id: room_agent_delivery_sessions.agent_session_id,
+          active_connection_count: room_agent_delivery_sessions.active_connection_count,
+          updated_at: room_agent_delivery_sessions.updated_at,
+          reconnect_grace_expires_at: room_agent_delivery_sessions.reconnect_grace_expires_at,
+        })
+        .from(room_agent_delivery_sessions)
+        .where(and(
+          eq(room_agent_delivery_sessions.room_id, roomId),
+          // Probe the existing (room_id, delivery_key) primary key instead of
+          // scanning the unindexed agent_session_id column. Historical
+          // delivery summaries accumulate in long-lived rooms.
+          sql`${room_agent_delivery_sessions.delivery_key} IN (
+            SELECT value
+              FROM jsonb_array_elements_text(${JSON.stringify(activeDeliveryKeys)}::jsonb)
+          )`,
+        ));
+      const routingNow = Date.now();
+      const reachableSessionIds = new Set(deliverySessions
+        .filter((delivery) => isAgentDeliverySessionReachable({
+          activeConnectionCount: delivery.active_connection_count,
+          updatedAt: delivery.updated_at,
+          reconnectGraceExpiresAt: delivery.reconnect_grace_expires_at,
+        }, routingNow))
+        .map((delivery) => delivery.agent_session_id)
+        .filter((sessionId): sessionId is string => Boolean(sessionId)));
+      for (const session of activeSessions) {
+        if (reachableSessionIds.has(session.session_id)) {
+          reachableAgentKeys.add(session.agent_key);
+        }
+      }
+    }
+
     if (createdMessage.thread_root_number && activeSessions.length > 0) {
       threadRoutingProjection = await getMessageThreadRoutingProjection(
         tx,
@@ -571,7 +612,14 @@ export async function addMessageWithCreateStatus(
       );
       const ownedSessionGroups = [...sessionsByAgentKey]
         .filter(([, group]) => group.ownerAccountIds.size === 1);
-      const globalAddresses = createGlobalAgentAddressResolver(allRoutingIdentities)(messageForRouting);
+      const ownerScopeByAgentKey = new Map(ownedSessionGroups.map(([agentKey, group]) => [
+        agentKey,
+        group.ownerAccountIds.values().next().value!,
+      ]));
+      const globalAddresses = createGlobalAgentAddressResolver(allRoutingIdentities, {
+        preferredExplicitMentionAgentKeys: reachableAgentKeys,
+        explicitMentionOwnerScopeByAgentKey: ownerScopeByAgentKey,
+      })(messageForRouting);
       let exactReplySession: (typeof activeSessions)[number] | undefined;
       if (replyToMessage?.publisher_agent_key && replyToMessage.publisher_account_id) {
         globalAddresses.replyTargetKeys.clear();

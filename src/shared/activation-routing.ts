@@ -481,12 +481,28 @@ export function resolveGloballyAddressedAgentKeys(
   return createGlobalAgentAddressResolver(identities)(message);
 }
 
+export interface GlobalAgentAddressResolverOptions {
+  /**
+   * Break a duplicate friendly-name tie only when exactly one of the durable
+   * identities is currently reachable. Canonical agent-key aliases remain
+   * unique without this hint, and multiple reachable matches still fail
+   * closed.
+   */
+  preferredExplicitMentionAgentKeys?: ReadonlySet<string>;
+  /**
+   * Stable ownership boundary for each preferred key. Reachability may only
+   * break a tie when every colliding durable key belongs to the same scope.
+   */
+  explicitMentionOwnerScopeByAgentKey?: ReadonlyMap<string, string>;
+}
+
 /**
  * Build the room-wide alias authority once, then resolve a page of legacy
  * messages without rebuilding every active worker alias set per message.
  */
 export function createGlobalAgentAddressResolver(
   identities: readonly ActivationIdentity[],
+  options: GlobalAgentAddressResolverOptions = {},
 ): (message: Pick<MessageLike, "text" | "reply_to"> & Partial<Pick<MessageLike, "sender">>) => {
   broadcast: boolean;
   hasMention: boolean;
@@ -506,6 +522,23 @@ export function createGlobalAgentAddressResolver(
     }
   }
 
+  const resolveExplicitMentionKey = (keys: ReadonlySet<string> | undefined): string | null => {
+    if (!keys || keys.size === 0) return null;
+    if (keys.size === 1) return keys.values().next().value!;
+
+    const preferredMatches = [...keys].filter((key) =>
+      options.preferredExplicitMentionAgentKeys?.has(key));
+    if (preferredMatches.length !== 1) return null;
+
+    const ownerScopes = new Set<string>();
+    for (const key of keys) {
+      const scope = options.explicitMentionOwnerScopeByAgentKey?.get(key);
+      if (!scope) return null;
+      ownerScopes.add(scope);
+    }
+    return ownerScopes.size === 1 ? preferredMatches[0]! : null;
+  };
+
   return (message) => {
     const mentions = extractMentionHandles(message.text);
     const broadcast = mentions.some(isBroadcastHandle) || hasBroadcastAddress(message.text);
@@ -516,8 +549,8 @@ export function createGlobalAgentAddressResolver(
       if (isBroadcastHandle(mention)) continue;
       const alias = normalizeMentionIdentityHandle(mention);
       if (!alias) continue;
-      const keys = keysByAlias.get(alias);
-      if (keys?.size === 1) explicitMentionKeys.add(keys.values().next().value!);
+      const resolvedKey = resolveExplicitMentionKey(keysByAlias.get(alias));
+      if (resolvedKey) explicitMentionKeys.add(resolvedKey);
     }
 
     const replyTargetKeys = new Set<string>();
