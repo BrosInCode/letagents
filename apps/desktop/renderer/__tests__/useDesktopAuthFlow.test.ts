@@ -7,7 +7,7 @@ import type {
 } from "../../electron/ipc-types";
 import { useDesktopAuthFlow } from "../src/composables/useDesktopAuthFlow";
 
-test("startAuthFlow starts unscoped device auth when no room is selected", async () => {
+test("startAuthFlow surfaces an unscoped device code before explicit browser navigation", async () => {
   const receivedRoomIdentifiers: Array<string | null | undefined> = [];
   const openedUrls: string[] = [];
   const state = useDesktopAuthFlow({
@@ -39,6 +39,9 @@ test("startAuthFlow starts unscoped device auth when no room is selected", async
     },
     async () => {
       await state.startAuthFlow();
+      assert.equal(state.authStatus.value?.pendingDeviceAuth?.userCode, "ABCD-1234");
+      assert.deepEqual(openedUrls, []);
+      await state.openVerification("https://github.com/login/device");
       state.clearAuthPollTimer();
     },
   );

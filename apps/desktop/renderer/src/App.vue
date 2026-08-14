@@ -72,7 +72,7 @@
           @open-rent="openRentMarketplace"
           @open-updates="openUpdatesSurface"
           @open-settings="openSettingsSurface"
-          @connect-account="startAuthFlow"
+          @connect-account="openAccountAuthFlow"
           @sign-out="signOut"
           @archive-room="archiveSidebarRoom"
           @archive-focus-room="archiveSidebarFocusRoom"
@@ -233,7 +233,7 @@
         @toggle-pin-room="toggleAccountRoomPin"
         @refresh="refreshSettingsSurface"
         @sign-out="signOut"
-        @start-auth="startAuthFlow"
+        @start-auth="openAccountAuthFlow"
       />
 
       <RentMarketplaceView
@@ -312,6 +312,17 @@
       @after-leave="handleSidebarBatchDialogAfterLeave"
     />
 
+    <DesktopDeviceAuthDialog
+      :open="authDialogOpen"
+      :auth-status="authStatus"
+      :busy="authBusy"
+      :feedback="authFeedback"
+      @close="authDialogOpen = false"
+      @start-auth="startAuthFlow"
+      @open-verification="openVerification"
+      @poll-auth="pollAuthFlow"
+    />
+
     <div
       class="desktop-action-toasts"
       role="status"
@@ -363,6 +374,7 @@ import SidebarRoomBatchActionDialog from "./components/desktop/sidebar/SidebarRo
 import DesktopTopbar from "./components/desktop/content/DesktopTopbar.vue";
 import DesktopRoomShell from "./components/desktop/content/DesktopRoomShell.vue";
 import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModal.vue";
+import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
 import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboarding";
@@ -448,6 +460,7 @@ const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
+const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
 const recentRootRoomsStorageKey = "letagents-desktop:recent-root-rooms";
@@ -1300,6 +1313,15 @@ const {
   onAuthorized: () => refresh(),
   onSignedOut: () => refresh(),
 });
+
+async function openAccountAuthFlow(): Promise<void> {
+  authDialogOpen.value = true;
+  if (authStatus.value?.pendingDeviceAuth) {
+    scheduleAuthPoll();
+    return;
+  }
+  await startAuthFlow();
+}
 
 const {
   backFromSubstep,
@@ -2319,6 +2341,13 @@ watch(
     }
     clearAuthPollTimer();
   }
+);
+
+watch(
+  () => authStatus.value?.authenticated,
+  (authenticated) => {
+    if (authenticated) authDialogOpen.value = false;
+  },
 );
 
 onMounted(() => {
