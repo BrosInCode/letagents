@@ -2,7 +2,11 @@ import electron from "electron";
 import electronUpdaterModule, { type ProgressInfo, type UpdateInfo } from "electron-updater";
 
 import type { DesktopUpdateStatus } from "../ipc-types.js";
-import { DesktopUpdaterController, desktopUpdateFeedBaseUrl } from "./desktop-updater.js";
+import {
+  DesktopUpdaterController,
+  desktopUpdateFeedBaseUrl,
+  runDesktopUpdateCheck,
+} from "./desktop-updater.js";
 import { supervisorDaemonClient } from "./supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
 import { emitToMainWindow, focusMainWindow } from "./window.js";
@@ -84,7 +88,7 @@ export const desktopUpdater = new DesktopUpdaterController({
   currentVersion: app?.getVersion?.() || process.env.npm_package_version || "0.0.0",
   supported: updatesSupported(),
   unsupportedReason: unsupportedReason(),
-  checkForUpdates: () => desktopAutoUpdater().checkForUpdates(),
+  checkForUpdates: () => runDesktopUpdateCheck(() => desktopAutoUpdater().checkForUpdates()),
   prepareForInstall: () => supervisorDaemonClient.prepareForApplicationUpdate(),
   recoverAfterInstallFailure: async () => {
     await supervisorDaemonClient.resumeAfterApplicationUpdateFailure();
