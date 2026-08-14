@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   attachAgentMessageActivations,
+  createGlobalAgentAddressResolver,
   decideAgentMessageActivation,
 } from "../../shared/activation-routing.js";
 
@@ -145,6 +146,69 @@ test("activation routing activates explicit mentions and silences other mentions
       addressed: false,
     },
   );
+});
+
+test("global mention routing lets one reachable identity break a stale friendly-name tie", () => {
+  const staleGardenPoint = {
+    ...worker,
+    actor_label: "GardenPoint | EmmyMay's agent | Cursor",
+    agent_key: "EmmyMay/old-gardenpoint",
+    agent_instance_id: "agent_instance_old",
+    agent_session_id: "agent_session_old",
+    display_name: "GardenPoint",
+  };
+  const currentGardenPoint = {
+    ...staleGardenPoint,
+    agent_key: "EmmyMay/gardenpoint",
+    agent_instance_id: "agent_instance_current",
+    agent_session_id: "agent_session_current",
+  };
+  const message = { text: "@GardenPoint why did you have issues reading a file?", reply_to: null };
+
+  const withoutReachability = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ])(message);
+  assert.deepEqual([...withoutReachability.explicitMentionKeys], []);
+
+  const oneReachable = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ], {
+    preferredExplicitMentionAgentKeys: new Set([currentGardenPoint.agent_key]),
+    explicitMentionOwnerScopeByAgentKey: new Map([
+      [staleGardenPoint.agent_key, "account_emmy"],
+      [currentGardenPoint.agent_key, "account_emmy"],
+    ]),
+  })(message);
+  assert.deepEqual([...oneReachable.explicitMentionKeys], [currentGardenPoint.agent_key]);
+
+  const bothReachable = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ], {
+    preferredExplicitMentionAgentKeys: new Set([
+      staleGardenPoint.agent_key,
+      currentGardenPoint.agent_key,
+    ]),
+    explicitMentionOwnerScopeByAgentKey: new Map([
+      [staleGardenPoint.agent_key, "account_emmy"],
+      [currentGardenPoint.agent_key, "account_emmy"],
+    ]),
+  })(message);
+  assert.deepEqual([...bothReachable.explicitMentionKeys], []);
+
+  const differentOwners = createGlobalAgentAddressResolver([
+    staleGardenPoint,
+    currentGardenPoint,
+  ], {
+    preferredExplicitMentionAgentKeys: new Set([currentGardenPoint.agent_key]),
+    explicitMentionOwnerScopeByAgentKey: new Map([
+      [staleGardenPoint.agent_key, "account_old"],
+      [currentGardenPoint.agent_key, "account_emmy"],
+    ]),
+  })(message);
+  assert.deepEqual([...differentOwners.explicitMentionKeys], []);
 });
 
 test("activation routing activates full agent key mentions", () => {
