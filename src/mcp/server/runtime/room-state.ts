@@ -10,7 +10,7 @@ import {
   getCanonicalRoomWebPath,
   type JoinedVia,
 } from "../../room-id.js";
-import { API_URL, getLetagentsToken } from "./api.js";
+import { getApiUrl, getLetagentsToken } from "./api.js";
 import {
   AGENT_INSTANCE_UUID,
   currentAgentIdentity,
@@ -47,7 +47,7 @@ export function shutdownRuntime(): void {
 }
 
 function getSseClient(): SseClient {
-  sseClient ??= new SseClient(API_URL, () => getLetagentsToken());
+  sseClient ??= new SseClient(getApiUrl(), () => getLetagentsToken());
   return sseClient;
 }
 
@@ -100,7 +100,7 @@ export function currentRoomMatchesLocator(locator: string | null): boolean {
 }
 
 function getCanonicalRoomWebUrl(roomId: string): string {
-  return new URL(getCanonicalRoomWebPath(roomId), `${API_URL}/`).toString();
+  return new URL(getCanonicalRoomWebPath(roomId), `${getApiUrl()}/`).toString();
 }
 
 export function withCanonicalRoomLink<T extends Record<string, unknown>>(
