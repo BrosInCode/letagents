@@ -470,6 +470,7 @@ export class SupervisorDaemon {
       setDesiredState: this.setDesiredState.bind(this),
       setDisplayName: this.setDisplayName.bind(this),
       skipRoomDelivery: this.skipRoomDelivery.bind(this),
+      shutdownIfIdle: this.shutdownIfIdle.bind(this),
       status: this.status.bind(this),
       updateAgentConfiguration: this.updateAgentConfiguration.bind(this),
       updateWorkplaceLiveness: this.updateWorkplaceLiveness.bind(this),
@@ -2680,6 +2681,57 @@ export class SupervisorDaemon {
         (error) => this.rejectHandoffCompletion(error),
       );
     }, 25).unref();
+  }
+
+  /**
+   * Retire this detached daemon only when it has no provider execution left to
+   * supervise. The manifest check and public handoff fence share the manifest
+   * commit lane, so a concurrent lifecycle write cannot slip between them.
+   * Paused agents are durable state, not background work, and remain resumable
+   * when a later Desktop launch starts a fresh daemon generation.
+   */
+  private async shutdownIfIdle(): Promise<{
+    outcome: "active" | "shutting_down";
+    active_agents?: Array<{
+      id: string;
+      display_name: string;
+      desired_state: DesiredState;
+      observed_state: ObservedState;
+    }>;
+    generation: number;
+  }> {
+    if (this.handoffScheduled) {
+      return { outcome: "shutting_down", generation: this.singleton.currentGeneration };
+    }
+    let activeAgents: DaemonManifestEntry[] = [];
+    await this.serializeManifestCommit(async () => {
+      await this.singleton.assertCurrent();
+      const manifest = await this.store.load();
+      activeAgents = manifest.entries.filter((entry) =>
+        entry.desired_state === "running"
+        || !["paused", "stopped"].includes(entry.observed_state)
+        || this.liveHandles.has(entry.id)
+        || this.lifecycleActiveEntries.has(entry.id)
+      );
+      if (activeAgents.length > 0) return;
+      // This assignment is deliberately synchronous with the final manifest
+      // read. Router and commit fences reject every later mutating request.
+      this.handoffScheduled = true;
+    });
+    if (activeAgents.length > 0) {
+      return {
+        outcome: "active",
+        active_agents: activeAgents.map((entry) => ({
+          id: entry.id,
+          display_name: entry.display_name,
+          desired_state: entry.desired_state,
+          observed_state: entry.observed_state,
+        })),
+        generation: this.singleton.currentGeneration,
+      };
+    }
+    await this.prepareHandoff();
+    return { outcome: "shutting_down", generation: this.singleton.currentGeneration };
   }
 
   private beginBootstrap<T>(run: (input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation) => Promise<T>, input: { entry_id: string; daemon_generation: number }): Promise<T> {

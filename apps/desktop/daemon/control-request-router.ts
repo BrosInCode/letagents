@@ -7,6 +7,7 @@ import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredSt
 export interface DaemonControlOperations {
   status(): unknown;
   prepareHandoff(): unknown;
+  shutdownIfIdle(): unknown;
   listManifest(): unknown;
   watchState(input: { afterDaemonGeneration: number; afterSequence: number; waitMs: number }): unknown;
   watchAgentStream(input: { entryId: string; afterSequence: number; waitMs: number }): unknown;
@@ -132,6 +133,7 @@ export function createDaemonControlRequestHandler(
     const isLifecycleRequest = request.method === "daemon.negotiate"
       || request.method === "daemon.status"
       || request.method === "daemon.prepare_handoff"
+      || request.method === "daemon.shutdown_if_idle"
       || request.method === "manifest.watch_state";
     if (context.isHandoffScheduled() && !isLifecycleRequest) {
       throw new Error("Supervisor handoff has fenced new daemon mutations.");
@@ -149,6 +151,7 @@ export function createDaemonControlRequestHandler(
       await operations.prepareHandoff();
       return { accepted: true, generation: context.currentGeneration() };
     }
+    if (request.method === "daemon.shutdown_if_idle") return operations.shutdownIfIdle();
     if (request.method === "manifest.list") return operations.listManifest();
     if (request.method === "manifest.watch_state") {
       const params = paramsRecord(request.params);
