@@ -3,7 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createConnection } from "node:net";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { access, mkdir } from "node:fs/promises";
+import { access, appendFile, chmod, mkdir, stat } from "node:fs/promises";
 import { EventEmitter } from "node:events";
 
 import type {
@@ -31,7 +31,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.102";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.103";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -57,6 +57,49 @@ const KILL_EXIT_TIMEOUT_MS = 1_000;
 const PROCESS_POLL_INTERVAL_MS = 25;
 const STATE_WATCH_RETRY_BASE_MS = 1_000;
 const STATE_WATCH_RETRY_MAX_MS = 30_000;
+const DAEMON_LIFECYCLE_LOG_MAX_BYTES = 256 * 1024;
+const daemonLifecycleLogWrites = new Map<string, Promise<void>>();
+
+type DesktopDaemonLifecycleEvent = {
+  event: "daemon_spawned" | "daemon_spawn_error" | "daemon_exited" | "daemon_disappeared" | "daemon_identity_changed";
+  pid: number | null;
+  detail?: string | null;
+  exitCode?: number | null;
+  signal?: NodeJS.Signals | null;
+  generation?: number | null;
+};
+
+function appendDaemonLifecycleEvent(path: string, event: DesktopDaemonLifecycleEvent): void {
+  const previous = daemonLifecycleLogWrites.get(path) ?? Promise.resolve();
+  const operation = previous.then(async () => {
+    await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+    await chmod(dirname(path), 0o700);
+    try {
+      // Rotation belongs exclusively to the daemon process. Electron only
+      // appends below the cap so the two processes can never rename the file
+      // out from under one another.
+      if ((await stat(path)).size >= DAEMON_LIFECYCLE_LOG_MAX_BYTES) return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const detail = event.detail == null
+      ? null
+      : redactCredentialText(event.detail).value.slice(0, 4_096);
+    await appendFile(path, `${JSON.stringify({
+      at: new Date().toISOString(),
+      event: event.event,
+      pid: event.pid,
+      ...(detail ? { detail } : {}),
+      ...(event.exitCode === undefined ? {} : { exit_code: event.exitCode }),
+      ...(event.signal === undefined ? {} : { signal: event.signal }),
+      ...(event.generation === undefined ? {} : { generation: event.generation }),
+    })}\n`, { encoding: "utf8", mode: 0o600 });
+    await chmod(path, 0o600);
+  }).catch(() => undefined).finally(() => {
+    if (daemonLifecycleLogWrites.get(path) === operation) daemonLifecycleLogWrites.delete(path);
+  });
+  daemonLifecycleLogWrites.set(path, operation);
+}
 /**
  * While a focused agent's feed sits ended, re-poll at this cadence. The daemon
  * ends the feed when a provider generation exits but keeps the entry so the next
@@ -254,6 +297,7 @@ export interface SupervisorDaemonLifecycleOptions {
   socketPath?: string;
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
+  lifecycleLogPath?: string;
   spawnDaemon?: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
   /** @deprecated Prefer signalDaemon so tests can distinguish TERM from KILL. */
   terminateDaemon?: (pid: number) => void;
@@ -315,6 +359,7 @@ export class SupervisorDaemonClient {
   private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
   private readonly spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
   private readonly daemonWorkingDirectory: string;
+  private readonly lifecycleLogPath: string;
   private readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
   private readonly inspectDaemonProcess: (pid: number) => DaemonIdentityInspection | null | undefined;
   private readonly reportHandoffDiagnostic: (diagnostic: DaemonHandoffDiagnostic) => void;
@@ -326,11 +371,17 @@ export class SupervisorDaemonClient {
   private readonly requestTimeoutMs: number;
   private readonly turnControlRequestTimeoutMs: number;
   private readonly now: () => Date;
+  private attachedDaemonObservation: {
+    identity: DaemonProcessIdentity;
+    generation: number;
+  } | null = null;
+  private ownedDaemonPid: number | null = null;
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
     this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
+    this.lifecycleLogPath = options.lifecycleLogPath ?? join(dirname(this.socketPath), "daemon-lifecycle.jsonl");
     this.signalDaemon = options.signalDaemon ?? ((pid, signal) => {
       if (signal === "SIGTERM" && options.terminateDaemon) {
         options.terminateDaemon(pid);
@@ -434,9 +485,14 @@ export class SupervisorDaemonClient {
         undefined,
         SUPERVISOR_DAEMON_PROTOCOL_VERSION,
       );
-      return this.rememberReadyStatus(mapStatus(negotiated));
+      const status = mapStatus(negotiated);
+      this.observeAttachedDaemon(status);
+      return this.rememberReadyStatus(status);
     } catch (error) {
-      if (isConnectionUnavailable(error)) return null;
+      if (isConnectionUnavailable(error)) {
+        this.recordAttachedDaemonDisconnect();
+        return null;
+      }
       throw error;
     }
   }
@@ -1057,7 +1113,12 @@ export class SupervisorDaemonClient {
         daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
         && negotiated.runtime_environment_fingerprint === expectedRuntimeEnvironmentFingerprint
-      ) return mapStatus(negotiated);
+      ) {
+        const status = mapStatus(negotiated);
+        this.observeAttachedDaemon(status);
+        return status;
+      }
+      this.stopAttachedDaemonObservation();
       const retired = this.captureRetiredDaemon(negotiated);
       retiredGeneration = Number(negotiated.generation);
       // Handoff drains in-flight provider dispatch reservations, which can
@@ -1067,16 +1128,37 @@ export class SupervisorDaemonClient {
       await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
+      this.recordAttachedDaemonDisconnect();
     }
     await access(this.daemonScriptPath);
+    this.stopAttachedDaemonObservation();
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
-    child.once("error", () => undefined);
+    const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
+    this.ownedDaemonPid = childPid;
+    appendDaemonLifecycleEvent(this.lifecycleLogPath, { event: "daemon_spawned", pid: childPid });
+    child.once("error", (error) => {
+      appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+        event: "daemon_spawn_error",
+        pid: childPid,
+        detail: error instanceof Error ? error.stack || error.message : String(error),
+      });
+    });
+    child.once("exit", (exitCode, signal) => {
+      if (this.ownedDaemonPid === childPid) this.ownedDaemonPid = null;
+      appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+        event: "daemon_exited",
+        pid: childPid,
+        exitCode,
+        signal,
+      });
+    });
     return this.waitForHealthy(retiredGeneration, expectedRuntimeEnvironmentFingerprint);
   }
 
   private async prepareForApplicationUpdateOnce(): Promise<void> {
     if (this.ensureOperation) await this.ensureOperation;
+    this.stopAttachedDaemonObservation();
     let negotiated: Record<string, unknown>;
     try {
       negotiated = await this.request<Record<string, unknown>>(
@@ -1155,6 +1237,45 @@ export class SupervisorDaemonClient {
     // retain the current script path as the hard boundary for TERM/KILL: only
     // the exact executable this desktop expected to launch may be signalled.
     return { ...inspected, expectedScriptPath: this.daemonScriptPath };
+  }
+
+  private observeAttachedDaemon(status: DesktopSupervisorDaemonStatus): void {
+    if (status.pid === this.ownedDaemonPid) {
+      this.stopAttachedDaemonObservation();
+      return;
+    }
+    if (
+      this.attachedDaemonObservation?.identity.pid === status.pid
+      && this.attachedDaemonObservation.generation === status.generation
+    ) return;
+    this.stopAttachedDaemonObservation();
+    const inspected = this.safeInspectDaemon(status.pid);
+    if (!inspected || inspected.state !== "live" || inspected.pid !== status.pid) return;
+    const observation = {
+      identity: { ...inspected, expectedScriptPath: this.daemonScriptPath },
+      generation: status.generation,
+    };
+    this.attachedDaemonObservation = observation;
+  }
+
+  private recordAttachedDaemonDisconnect(): void {
+    const observation = this.attachedDaemonObservation;
+    if (!observation) return;
+    const current = this.observeRetiredDaemon(observation.identity);
+    if (current.kind === "same" || current.kind === "unverifiable") return;
+    this.attachedDaemonObservation = null;
+    appendDaemonLifecycleEvent(this.lifecycleLogPath, {
+      event: current.kind === "changed" ? "daemon_identity_changed" : "daemon_disappeared",
+      pid: observation.identity.pid,
+      generation: observation.generation,
+      detail: current.kind === "changed"
+        ? current.reason
+        : `Observed daemon became ${current.kind}.`,
+    });
+  }
+
+  private stopAttachedDaemonObservation(): void {
+    this.attachedDaemonObservation = null;
   }
 
   private async enforceRetiredDaemonExit(
