@@ -1150,9 +1150,10 @@ export class SupervisorDaemonClient {
     if (inspected.pid !== pid) {
       throw new Error("Refusing daemon handoff because the inspected daemon PID does not match the serving daemon.");
     }
-    if (!this.commandPointsAtExpectedDaemon(inspected.command)) {
-      throw new Error("Refusing daemon handoff because the serving PID does not point at the expected daemon script.");
-    }
+    // A prior app install or a local development build can legitimately own
+    // the stable daemon socket. Let that negotiated daemon retire itself, but
+    // retain the current script path as the hard boundary for TERM/KILL: only
+    // the exact executable this desktop expected to launch may be signalled.
     return { ...inspected, expectedScriptPath: this.daemonScriptPath };
   }
 
@@ -1176,6 +1177,12 @@ export class SupervisorDaemonClient {
       }
       this.emitHandoffDiagnostic(retired, implementationVersion, true, observation.kind, this.observationDetail(observation));
       return;
+    }
+
+    if (!this.commandPointsAtExpectedDaemon(retired.command, retired.expectedScriptPath)) {
+      throw new Error(authorityReleased
+        ? "A LetAgents daemon from another installation released its socket but did not exit; it was not signalled and the replacement was not started."
+        : "A LetAgents daemon from another installation did not retire after the negotiated handoff; it was not signalled and the replacement was not started.");
     }
 
     if (implementationVersion === "2.0.25" && authorityReleased) {
@@ -1264,9 +1271,6 @@ export class SupervisorDaemonClient {
     }
     if (current.state === "zombie") return { kind: "zombie" };
     if (current.command !== retired.command) return { kind: "changed", reason: "full command changed" };
-    if (!this.commandPointsAtExpectedDaemon(current.command, retired.expectedScriptPath)) {
-      return { kind: "changed", reason: "command no longer points at expected daemon script" };
-    }
     return { kind: "same", identity: retired };
   }
 

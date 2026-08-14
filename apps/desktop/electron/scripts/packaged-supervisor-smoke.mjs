@@ -9,6 +9,7 @@ import { randomUUID } from "node:crypto";
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const bundle = join(root, "release", "LetAgents-darwin", "LetAgents.app");
 const executable = join(bundle, "Contents", "MacOS", "LetAgents");
+const developmentDaemon = join(root, "dist-daemon", "main.js");
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 const socketPath = join(home, ".letagents", "daemon.sock");
 const protocolVersion = 2;
@@ -67,10 +68,35 @@ function launch() {
   });
 }
 
+async function launchDevelopmentDaemon() {
+  const child = spawn(process.execPath, [developmentDaemon], {
+    detached: true,
+    env: {
+      ...process.env,
+      HOME: home,
+      LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT: "packaged-smoke-stale-development-runtime",
+    },
+    stdio: "ignore",
+  });
+  child.unref();
+  const deadline = Date.now() + 5_000;
+  while (Date.now() < deadline) {
+    try { return await request("daemon.status"); }
+    catch { await new Promise((resolveWait) => setTimeout(resolveWait, 25)); }
+  }
+  throw new Error("development daemon did not become ready");
+}
+
 try {
-  console.log("packaged-smoke: first launch");
+  console.log("packaged-smoke: cross-install predecessor");
+  const predecessor = await launchDevelopmentDaemon();
+  console.log(`packaged-smoke: development daemon ${predecessor.pid} generation ${predecessor.generation}`);
+  console.log("packaged-smoke: first packaged launch");
   await launch();
   const first = await request("daemon.status");
+  if (first.pid === predecessor.pid || first.generation <= predecessor.generation) {
+    throw new Error(`packaged app did not replace the development daemon: ${JSON.stringify({ predecessor, first })}`);
+  }
   console.log(`packaged-smoke: daemon ${first.pid} generation ${first.generation} survived first app exit`);
   console.log("packaged-smoke: relaunch");
   await launch();
@@ -79,8 +105,8 @@ try {
     throw new Error(`daemon did not survive packaged app relaunch: ${JSON.stringify({ first, second })}`);
   }
   console.log(JSON.stringify({ packagedApp: bundle, daemonPid: first.pid, generation: first.generation, survivedRelaunch: true }));
-  await request("daemon.prepare_handoff");
 } finally {
+  await request("daemon.prepare_handoff").catch(() => undefined);
   await new Promise((resolveWait) => setTimeout(resolveWait, 100));
   await rm(home, { recursive: true, force: true });
 }
