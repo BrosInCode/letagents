@@ -32,6 +32,7 @@ const expectedControlMethods = [
   "supervisor.checkpoint_worker_cursor",
   "supervisor.commit_room_move",
   "supervisor.complete_bounded_effect",
+  "supervisor.execute_bounded_tool",
   "supervisor.get_agent_configuration",
   "supervisor.get_agent_inspector_detail",
   "supervisor.get_current_room_move",

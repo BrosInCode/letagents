@@ -78,7 +78,7 @@ const transcript = computed(() => foldAgentStreamEvents(props.feed.events, props
 const presented = computed((): { item: LiveTranscriptItem; tool: LiveToolPresentation | null }[] =>
   transcript.value.items.map((item) => ({
     item,
-    tool: item.kind === "tool" ? describeLiveToolCall(item.tool, item.input) : null,
+    tool: item.kind === "tool" ? describeLiveToolCall(item.tool, item.input, item) : null,
   })));
 
 function formatValue(input: unknown): string {

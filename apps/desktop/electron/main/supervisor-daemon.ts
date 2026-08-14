@@ -26,12 +26,13 @@ import {
 } from "./desktop-shell-environment.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
+import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "./agents/letagents-mcp-runtime.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.103";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.104";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -49,6 +50,10 @@ const INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS = 60_000;
 // restoration probes provider continuations at 0/1/3/7s offsets. Both exceed
 // the 3s control budget by design.
 const RECOVERY_REQUEST_TIMEOUT_MS = 30_000;
+// Once prepare_handoff is admitted, the daemon is fenced and must durably
+// drain every already-running tool before replacement. A client deadline here
+// would abandon a healthy long operation halfway through that protocol.
+const HANDOFF_DRAIN_REQUEST_TIMEOUT_MS = 0;
 const TURN_CONTROL_REQUEST_TIMEOUT_MS = 15_000;
 const START_TIMEOUT_MS = 8_000;
 const NATURAL_EXIT_TIMEOUT_MS = 2_000;
@@ -322,9 +327,20 @@ export function supervisorDaemonSpawnEnvironment(
   // Never trust a caller's cwd/cache-derived dev entry. The desktop's compiled
   // location is the authority for the repo build paired with this dev renderer.
   delete result.LETAGENTS_DEV_MCP_SERVER_ENTRY;
+  delete result.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY;
+  delete result.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256;
+  delete result.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV;
   if (env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()) {
     result.LETAGENTS_DEV_MCP_SERVER_ENTRY = join(sourceWorkspaceRoot, "dist", "mcp", "server.js");
+    result.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY = join(sourceWorkspaceRoot, "dist", "mcp", "server", "daemon-tool-executor.js");
+    result.LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV = "1";
+  } else if (typeof process.resourcesPath === "string" && process.resourcesPath.trim()) {
+    result.LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY = join(
+      process.resourcesPath, "app", "runtime", "letagents", "node_modules", "letagents",
+      "dist", "mcp", "server", "daemon-tool-executor.js",
+    );
   }
+  result.LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256 = LETAGENTS_MCP_RUNTIME_TREE_SHA256;
   result.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = supervisorRuntimeEnvironmentFingerprint(result);
   return result;
 }
@@ -337,6 +353,9 @@ const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
   "LETAGENTS_CLAUDE_CODE_BIN",
   "LETAGENTS_CURSOR_AGENT_BIN",
   "LETAGENTS_OPENCODE_BIN",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_ENTRY",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_TREE_SHA256",
+  "LETAGENTS_MCP_DAEMON_EXECUTOR_UNSEALED_DEV",
 ] as const;
 
 /** Opaque equality proof for every environment input that can select a provider executable. */
@@ -1124,7 +1143,7 @@ export class SupervisorDaemonClient {
       // Handoff drains in-flight provider dispatch reservations, which can
       // span a full provider launch; the tight control timeout aborted real
       // upgrades attempted while any agent was mid-launch.
-      await this.request("daemon.prepare_handoff", undefined, daemonVersion, RECOVERY_REQUEST_TIMEOUT_MS);
+      await this.request("daemon.prepare_handoff", undefined, daemonVersion, HANDOFF_DRAIN_REQUEST_TIMEOUT_MS);
       await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
     } catch (error) {
       if (!isConnectionUnavailable(error)) throw error;
@@ -1180,7 +1199,7 @@ export class SupervisorDaemonClient {
       "daemon.prepare_handoff",
       undefined,
       daemonVersion,
-      RECOVERY_REQUEST_TIMEOUT_MS,
+      HANDOFF_DRAIN_REQUEST_TIMEOUT_MS,
     );
     await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
   }

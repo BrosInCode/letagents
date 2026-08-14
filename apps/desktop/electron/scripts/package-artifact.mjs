@@ -229,6 +229,7 @@ const requiredAppFiles = [
   "LICENSE",
   "node_modules/vue/package.json",
   "runtime/letagents/node_modules/letagents/dist/mcp/server.js",
+  "runtime/letagents/node_modules/letagents/dist/mcp/server/daemon-tool-executor.js",
   "runtime/letagents/node_modules/letagents/package.json",
   "runtime/letagents/package-lock.json",
   "runtime/opencode",
