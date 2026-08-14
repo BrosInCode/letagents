@@ -4,6 +4,7 @@ import test from "node:test";
 import {
   DesktopUpdaterController,
   desktopUpdateFeedBaseUrl,
+  runDesktopUpdateCheck,
   versionFromReleaseName,
 } from "../main/desktop-updater.js";
 
@@ -45,6 +46,18 @@ test("desktop updater exposes a truthful unsupported state without touching the 
   });
   await updater.check();
   assert.equal(checks, 0);
+});
+
+test("desktop updater observes auto-download rejection instead of leaking an unhandled promise", async () => {
+  const { updater } = controller({
+    checkForUpdates: () => runDesktopUpdateCheck(async () => ({
+      downloadPromise: Promise.reject(new Error("missing app-update.yml")),
+    })),
+  });
+
+  const status = await updater.check();
+  assert.equal(status.phase, "error");
+  assert.match(status.error || "", /missing app-update\.yml/);
 });
 
 test("desktop updater tracks background download and release metadata", async () => {
