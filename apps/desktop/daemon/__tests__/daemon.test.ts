@@ -14,6 +14,7 @@ import { AuditLog } from "../audit-log.js";
 import { DaemonControlSocket } from "../control-socket.js";
 import { CorruptAttemptStoreError, ImmutableExecutionError, WorkDurabilityStore } from "../durability-store.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
+import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "../lifecycle-log.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { CONTINUATION_REPAIR_EXHAUSTED_ERROR, continuationRepairExhaustionNeedsPersistence, continuationRepairMissingContinuation, isSupervisedQuietPollContinuation, isSupervisedWaitProviderEvent, productionSupervisedDeliveryHttp, providerStreamLifecycle, resolveReadyReachedAt, SupervisorDaemon as ProductionSupervisorDaemon, SupervisorGrantRequestError, sameProcessBirthIdentity, supervisedWaitCursorFromProviderEvent, supervisedWaitEvidenceFromProviderEvent, workplaceLivenessStaleAfterMs } from "../main.js";
 import { assertMacOS } from "../platform.js";
@@ -4122,6 +4123,55 @@ test("audit transitions append and rotate instead of truncating", async () => {
     assert.doesNotMatch(await readFile(path, "utf8"), new RegExp(canary));
     assert.match(await readFile(path, "utf8"), /REDACTED/);
   } finally { await env.cleanup(); }
+});
+
+test("daemon lifecycle diagnostics are private, redacted, and strictly bounded", async () => {
+  const env = await fixture();
+  try {
+    const path = join(env.root, "daemon-lifecycle.jsonl");
+    const canary = "canary-not-a-real-lifecycle-secret-123456789";
+    const first = new DaemonLifecycleLog(path, 1);
+    first.append({ event: "daemon_starting" });
+    first.close();
+    const second = new DaemonLifecycleLog(path, 1);
+    second.append({
+      event: "fatal_exception",
+      detail: `Authorization: Bearer ${canary}`,
+    });
+    second.close();
+
+    assert.equal((await stat(env.root)).mode & 0o777, 0o700);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    assert.equal((await readdir(env.root)).filter((name) => name.startsWith("daemon-lifecycle.jsonl")).length, 2);
+    const current = await readFile(path, "utf8");
+    assert.match(current, /"event":"fatal_exception"/);
+    assert.match(current, /REDACTED/);
+    assert.doesNotMatch(current, new RegExp(canary));
+  } finally { await env.cleanup(); }
+});
+
+test("daemon lifecycle diagnostics never become a startup dependency", async () => {
+  const env = await fixture();
+  try {
+    const blockedPath = join(env.root, "not-a-directory");
+    await writeFile(blockedPath, "occupied", "utf8");
+    assert.doesNotThrow(() => {
+      const lifecycle = new DaemonLifecycleLog(join(blockedPath, "daemon-lifecycle.jsonl"));
+      lifecycle.append({ event: "daemon_starting" });
+      lifecycle.close();
+    });
+  } finally { await env.cleanup(); }
+});
+
+test("daemon lifecycle diagnostics retain nested aggregate causes", () => {
+  const detail = daemonLifecycleErrorDetail(new AggregateError([
+    new Error("provider cleanup failed", { cause: new Error("socket was closed") }),
+    new Error("workspace cleanup failed"),
+  ], "Supervisor handoff cleanup did not complete cleanly"));
+  assert.match(detail, /Supervisor handoff cleanup did not complete cleanly/);
+  assert.match(detail, /provider cleanup failed/);
+  assert.match(detail, /socket was closed/);
+  assert.match(detail, /workspace cleanup failed/);
 });
 
 test("control socket rejects protocol mismatch explicitly", async () => {
