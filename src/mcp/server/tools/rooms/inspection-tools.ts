@@ -24,6 +24,8 @@ import {
   withJoinRoomAgentPrompt,
 } from "../../runtime.js";
 import { requireValidWorkerBearerRuntime } from "../../runtime/worker-bearer.js";
+import { getDaemonToolExecutionContext, getRuntimeWorkingDirectory } from "../../runtime/daemon-tool-context.js";
+import { identityFromAgentSession } from "../../runtime/agent-sessions.js";
 import {
   findExistingConfig,
   resolveGitRoot,
@@ -70,6 +72,7 @@ export function registerRoomInspectionTools(server: McpServer): void {
 
 export async function getCurrentRoomPayload(conversationId?: string) {
   const runtime = requireValidWorkerBearerRuntime();
+  const daemonContext = getDaemonToolExecutionContext();
   const publicCurrentRoom = toPublicCurrentRoomState();
   const workerAuth = runtime.mode !== "owner"
     ? { source: runtime.mode === "worker" ? "worker_bearer" : "daemon_supervised", expires_at: null, account: null }
@@ -97,11 +100,11 @@ export async function getCurrentRoomPayload(conversationId?: string) {
     ...publicCurrentRoom,
     ...(runtime.mode === "supervised" ? { room_binding: "daemon_supervised" } : {}),
     ...localCodexDetails,
-    agent_identity: toPublicAgentIdentity(
-      getConversationIdentity(conversationId)
+    agent_identity: toPublicAgentIdentity(daemonContext
+      ? identityFromAgentSession(daemonContext.agentSession)
+      : getConversationIdentity(conversationId)
         ?? currentAgentIdentity
-        ?? getStoredAgentIdentity(currentAgentIdentityKey)
-    ),
+        ?? getStoredAgentIdentity(currentAgentIdentityKey)),
     auth: workerAuth ?? (auth
       ? {
           source: process.env.LETAGENTS_TOKEN ? "env" : "local_state",
@@ -118,7 +121,7 @@ export async function getCurrentRoomPayload(conversationId?: string) {
 
 function getRepoInspectionPayload(targetDir?: string) {
   const runtime = requireValidWorkerBearerRuntime();
-  const startDir = targetDir || process.cwd();
+  const startDir = targetDir || getRuntimeWorkingDirectory();
   const repoRoot = resolveGitRoot(startDir);
   const configDir = repoRoot ? findExistingConfig(startDir) : null;
   const configPath = configDir ? join(configDir, ".letagents.json") : null;
