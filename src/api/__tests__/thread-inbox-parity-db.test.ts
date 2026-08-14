@@ -1562,6 +1562,54 @@ test("PG send-time routing resolves aliases globally before account filtering", 
   }
 });
 
+test("PG send-time routing lets one reachable identity break a same-owner stale alias tie", runOptions, async () => {
+  const room = await createProjectWithName!("parity_reachable_receipt_alias");
+  const ownerAccount = await newReader();
+  const staleActorLabel = "GardenPoint | EmmyMay's agent | Agent";
+  const currentActorLabel = "GardenPoint | EmmyMay's agent | Cursor";
+  await pool!.query(
+    `INSERT INTO room_agent_sessions (
+       session_id, room_id, token_hash, session_kind, runtime, actor_label,
+       agent_key, agent_instance_id, display_name, owner_account_id,
+       owner_label, ide_label, created_at, updated_at, last_seen_at
+     ) VALUES
+       ('gardenpoint_stale', $1, 'gardenpoint_stale_hash', 'worker', 'test', $2,
+        'test/old-gardenpoint', 'gardenpoint-stale', 'GardenPoint', $4,
+        'EmmyMay', 'Agent', NOW() - INTERVAL '1 day', NOW(), NOW()),
+       ('gardenpoint_current', $1, 'gardenpoint_current_hash', 'worker', 'test', $3,
+        'test/gardenpoint', 'gardenpoint-current', 'GardenPoint', $4,
+        'EmmyMay', 'Cursor', NOW(), NOW(), NOW())`,
+    [room.id, staleActorLabel, currentActorLabel, ownerAccount],
+  );
+  await pool!.query(
+    `INSERT INTO room_agent_delivery_sessions (
+       room_id, delivery_key, actor_label, agent_key, agent_instance_id,
+       display_name, owner_label, ide_label, agent_session_id, session_kind,
+       runtime, transport, active_connection_count, last_connected_at,
+       created_at, updated_at
+     ) VALUES (
+       $1, 'agent_session:gardenpoint_current', $2, 'test/gardenpoint',
+       'gardenpoint-current', 'GardenPoint', 'EmmyMay', 'Cursor',
+       'gardenpoint_current', 'worker', 'test', 'long_poll', 1,
+       NOW(), NOW(), NOW()
+     )`,
+    [room.id, currentActorLabel],
+  );
+
+  const mention = await addMessage!(room.id, "EmmyMay", "@GardenPoint why did you have issues reading a file?", {
+    source: "browser",
+    account_id: ownerAccount,
+  });
+  const receipts = await pool!.query<{ agent_key: string; activation_reason: string }>(
+    `SELECT agent_key, activation_reason FROM message_agent_receipts
+      WHERE message_room_id = $1 AND message_number = $2 ORDER BY agent_key`,
+    [room.id, Number(mention.id.slice(4))],
+  );
+  assert.deepEqual(receipts.rows, [
+    { agent_key: "test/gardenpoint", activation_reason: "explicit_mention" },
+  ]);
+});
+
 test("PG legacy routing keeps multi-owner aliases in the global ambiguity set", runOptions, async () => {
   const room = await createProjectWithName!("parity_legacy_multi_owner_ambiguity");
   const ownerA = await newReader();
