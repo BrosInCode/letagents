@@ -310,6 +310,7 @@ async function closeServer(server: Server | null, socketPath: string): Promise<v
 async function runReleasedSocketHandoffScenario(input: {
   inspectAfterPrepare: (context: { signals: Array<"SIGTERM" | "SIGKILL">; inspection: number }) => Omit<DaemonProcessIdentity, "expectedScriptPath"> | null | undefined;
   implementationVersion?: string;
+  initialIdentity?: Omit<DaemonProcessIdentity, "expectedScriptPath">;
 }) {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -339,7 +340,7 @@ async function runReleasedSocketHandoffScenario(input: {
       killTimeoutMs: 0,
       processPollIntervalMs: 1,
       inspectDaemonProcess: () => {
-        if (!prepared) return fakeDaemonProcessIdentity();
+        if (!prepared) return input.initialIdentity ?? fakeDaemonProcessIdentity();
         inspection += 1;
         return input.inspectAfterPrepare({ signals, inspection });
       },
@@ -1199,6 +1200,45 @@ test("desktop safely replaces a same-version daemon with a stale provider runtim
   }
 });
 
+test("cross-install daemon that does not retire is never signalled or raced by a replacement", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let prepared = false;
+  let spawns = 0;
+  const signals: Array<"SIGTERM" | "SIGKILL"> = [];
+  const old = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    81,
+    () => { prepared = true; },
+    "2.0.101",
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      handoffTimeoutMs: 10,
+      processPollIntervalMs: 1,
+      inspectDaemonProcess: () => fakeDaemonProcessIdentity({
+        command: `${process.execPath} /another/LetAgents.app/dist-daemon/main.js`,
+      }),
+      signalDaemon: (_pid, signal) => signals.push(signal),
+      spawnDaemon: () => { spawns += 1; return fakeChild(); },
+    });
+
+    await assert.rejects(client.ensureRunning(), /another installation did not retire/i);
+    assert.equal(prepared, true, "the existing LetAgents daemon receives the graceful handoff request");
+    assert.equal(spawns, 0, "the replacement never races an owner that retained the socket");
+    assert.deepEqual(signals, [], "a daemon at an unexpected path is never force-signalled");
+  } finally {
+    await closeServer(old.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
 test("vN desktop performs negotiated handoff before spawning vN+1 daemon", async () => {
   const env = await fixture();
   const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
@@ -1513,6 +1553,15 @@ test("free socket plus unverifiable PID proceeds with a loud diagnostic", async 
   assert.equal(result.status.generation, 42);
   assert.deepEqual(result.signals, []);
   assert.equal(result.diagnostics.some((entry) => entry.outcome === "unverifiable" && entry.authorityReleased), true);
+});
+
+test("packaged desktop accepts a graceful handoff from a daemon launched by another installation", async () => {
+  const result = await runReleasedSocketHandoffScenario({
+    initialIdentity: fakeDaemonProcessIdentity({ command: `${process.execPath} /another/LetAgents.app/dist-daemon/main.js` }),
+    inspectAfterPrepare: () => null,
+  });
+  assert.equal(result.status.generation, 42);
+  assert.deepEqual(result.signals, [], "a cross-install daemon retires itself and is never signalled");
 });
 
 test("daemon signal guard refuses PID reuse before TERM", async () => {
