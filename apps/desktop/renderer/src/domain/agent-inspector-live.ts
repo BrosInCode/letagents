@@ -171,10 +171,14 @@ function stringArg(args: Record<string, unknown> | null, key: string): string | 
 function describeLetAgentsTool(
   bareTool: string,
   args: Record<string, unknown> | null,
+  outcome?: { status: string; output: unknown; error: string | null },
 ): LiveToolPresentation | null {
   switch (bareTool) {
     case "complete_room_turn": {
       const noReply = stringArg(args, "outcome") === "no_reply";
+      if (outcome?.status !== "completed" || outcome.error || !containsAcceptedResult(outcome.output)) {
+        return action(noReply ? "Tried to close the turn without a reply" : "Tried to reply to the room", args, bareTool);
+      }
       return {
         kind: "reply",
         headline: noReply ? "Closed the turn without a reply" : "Replied to the room",
@@ -208,6 +212,19 @@ function describeLetAgentsTool(
   }
 }
 
+function containsAcceptedResult(value: unknown, depth = 0): boolean {
+  if (depth > 8 || value === null || value === undefined) return false;
+  if (typeof value === "string") {
+    if (value.length > 64 * 1024) return false;
+    try { return containsAcceptedResult(JSON.parse(value), depth + 1); } catch { return false; }
+  }
+  if (Array.isArray(value)) return value.some((item) => containsAcceptedResult(item, depth + 1));
+  const valueRecord = record(value);
+  if (!valueRecord) return false;
+  if (valueRecord.accepted === true) return true;
+  return Object.values(valueRecord).some((item) => containsAcceptedResult(item, depth + 1));
+}
+
 function action(
   headline: string,
   args: Record<string, unknown> | null,
@@ -234,16 +251,20 @@ const NATIVE_TOOL_HEADLINES: Readonly<Record<string, string>> = {
  * wrapper is unwrapped first; hashed per-turn server aliases are stripped so
  * the reader sees `complete_room_turn`, never the transport identity.
  */
-export function describeLiveToolCall(tool: string, input: unknown): LiveToolPresentation {
+export function describeLiveToolCall(
+  tool: string,
+  input: unknown,
+  outcome?: { status: string; output: unknown; error: string | null },
+): LiveToolPresentation {
   const inputRecord = argsRecord(input);
   if (tool === "mcpToolCall" && inputRecord && typeof inputRecord.name === "string") {
     const bareTool = inputRecord.name.replace(MCP_SERVER_ALIAS_PREFIX, "");
     const args = argsRecord(inputRecord.args);
-    return describeLetAgentsTool(bareTool, args)
+    return describeLetAgentsTool(bareTool, args, outcome)
       ?? action(bareTool, args, bareTool);
   }
   const bareTool = tool.replace(MCP_SERVER_ALIAS_PREFIX, "");
-  const known = describeLetAgentsTool(bareTool, inputRecord);
+  const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
   const nativeHeadline = NATIVE_TOOL_HEADLINES[bareTool];
   if (nativeHeadline) return action(nativeHeadline, inputRecord, bareTool);

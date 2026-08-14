@@ -18,6 +18,10 @@ export interface DaemonControlOperations {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
   }): unknown;
+  executeBoundedTool(input: {
+    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
+    providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown;
+  }): unknown;
   completeBoundedEffect(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string; effectId: string; result: unknown; error?: string;
@@ -225,6 +229,20 @@ export function createDaemonControlRequestHandler(
         providerTurnId: String(params.provider_turn_id ?? ""),
         mcpRequestId: String(params.mcp_request_id ?? ""), toolName: String(params.tool_name ?? ""),
         input: params.input, mutation: params.mutation === true,
+      });
+    }
+    if (request.method === "supervisor.execute_bounded_tool") {
+      const params = paramsRecord(request.params);
+      const error = "Supervised tool execution requires exact typed coordinates.";
+      return operations.executeBoundedTool({
+        entryId: requiredStringParam(params, "entry_id", error),
+        workAttemptId: requiredStringParam(params, "work_attempt_id", error),
+        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
+        providerTurnId: typeof params.provider_turn_id === "string" ? params.provider_turn_id : "",
+        mcpRequestId: requiredStringParam(params, "mcp_request_id", error),
+        toolName: requiredStringParam(params, "tool_name", error),
+        input: params.input,
       });
     }
     if (request.method === "supervisor.complete_bounded_effect") {

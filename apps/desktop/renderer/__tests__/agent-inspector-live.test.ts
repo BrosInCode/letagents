@@ -155,7 +155,7 @@ test("describeLiveToolCall unwraps Cursor's mcpToolCall and strips the per-turn 
   const reply = describeLiveToolCall("mcpToolCall", {
     name: "letagents_supervised_c0a7e4ba0ff9289147837706-complete_room_turn",
     args: { outcome: "reply", text: "Today is Sunday, August 9, 2026." },
-  });
+  }, { status: "completed", output: { result: { content: [{ text: JSON.stringify({ accepted: true }) }] } }, error: null });
   assert.equal(reply.kind, "reply");
   assert.equal(reply.headline, "Replied to the room");
   assert.equal(reply.replyText, "Today is Sunday, August 9, 2026.");
@@ -166,7 +166,7 @@ test("describeLiveToolCall reads no_reply as a closed turn with no message conte
   const closed = describeLiveToolCall("mcpToolCall", {
     name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
     args: { outcome: "no_reply" },
-  });
+  }, { status: "completed", output: { accepted: true }, error: null });
   assert.equal(closed.kind, "reply");
   assert.equal(closed.headline, "Closed the turn without a reply");
   assert.equal(closed.replyText, null);
@@ -180,6 +180,25 @@ test("describeLiveToolCall gives room tools domain sentences with a salient deta
   assert.equal(status.kind, "action");
   assert.equal(status.headline, "Posted a status update");
   assert.equal(status.detail, "Reviewing PR #901 now");
+});
+
+test("complete_room_turn is a room reply only after the daemon accepted it", () => {
+  const input = {
+    name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
+    args: { outcome: "reply", text: "Done." },
+  };
+  const rejected = describeLiveToolCall("mcpToolCall", input, {
+    status: "completed", output: { result: { errorMessage: "Service temporarily unavailable" } }, error: null,
+  });
+  assert.equal(rejected.kind, "action");
+  assert.equal(rejected.headline, "Tried to reply to the room");
+  assert.equal(rejected.replyText, null);
+
+  const errored = describeLiveToolCall("mcpToolCall", input, {
+    status: "error", output: null, error: "transport failed",
+  });
+  assert.equal(errored.kind, "action");
+  assert.equal(errored.headline, "Tried to reply to the room");
 });
 
 test("describeLiveToolCall degrades unknown tools to their bare name, never the transport alias", () => {
@@ -206,7 +225,7 @@ test("describeLiveToolCall truncates long details but never truncates the room r
   const reply = describeLiveToolCall("mcpToolCall", {
     name: "letagents_supervised_ab12cd34ef56-complete_room_turn",
     args: { outcome: "reply", text: longText },
-  });
+  }, { status: "completed", output: { structuredContent: { accepted: true } }, error: null });
   assert.equal(reply.replyText, longText);
 });
 
