@@ -6,6 +6,10 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
 import { assertSquareImageDimensions, parseSipsDimensions } from "./packaging-validation.mjs";
+import {
+  assertDesktopArchitecture,
+  createDesktopUpdaterConfig,
+} from "./release-metadata.mjs";
 
 const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const release = join(root, "release", "LetAgents-darwin");
@@ -18,6 +22,7 @@ const bundleIdentifier = "chat.letagents.desktop";
 const packageJson = JSON.parse(await readFile(join(root, "package.json"), "utf8"));
 const workspacePackageJson = JSON.parse(await readFile(join(root, "..", "..", "package.json"), "utf8"));
 const desktopVersion = packageJson.version;
+const desktopArch = assertDesktopArchitecture(process.arch);
 const openCodeVersion = packageJson.letagentsRuntime?.openCodeVersion;
 const mcpVersion = packageJson.letagentsRuntime?.mcpVersion;
 const execFileAsync = promisify(execFile);
@@ -119,6 +124,10 @@ for (const key of [
   await removePlistKey(infoPlist, key);
 }
 await createApplicationIcon();
+await writeFile(
+  join(resources, "app-update.yml"),
+  `${JSON.stringify(createDesktopUpdaterConfig({ arch: desktopArch }), null, 2)}\n`,
+);
 await mkdir(app, { recursive: true });
 for (const directory of ["dist-electron", "dist-daemon", "dist-renderer"]) {
   await cp(join(root, directory), join(app, directory), { recursive: true });
@@ -229,6 +238,10 @@ const required = [
     absolutePath: join(app, relative),
     manifestPath: relative,
   })),
+  {
+    absolutePath: join(resources, "app-update.yml"),
+    manifestPath: "Contents/Resources/app-update.yml",
+  },
   ...[
     "shared/message-contracts.mjs",
     "shared/routing-aliases.mjs",

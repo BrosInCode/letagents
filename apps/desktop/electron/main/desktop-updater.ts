@@ -19,6 +19,18 @@ export interface DesktopUpdaterControllerOptions {
   now?: () => Date;
 }
 
+export interface DesktopUpdateCheckResult {
+  downloadPromise?: Promise<unknown> | null;
+}
+
+/** Observe electron-updater's separately returned auto-download promise. */
+export async function runDesktopUpdateCheck(
+  checkForUpdates: () => Promise<DesktopUpdateCheckResult | null>,
+): Promise<void> {
+  const result = await checkForUpdates();
+  if (result?.downloadPromise) await result.downloadPromise;
+}
+
 export interface DesktopDownloadedUpdate {
   releaseName?: string | null;
   releaseNotes?: string | null;
