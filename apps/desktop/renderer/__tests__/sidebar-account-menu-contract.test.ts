@@ -26,5 +26,7 @@ test("sidebar exposes an accessible account menu with functional auth actions", 
   assert.match(sidebarSource, /<SidebarAccountMenu/);
   assert.match(sidebarSource, /@sign-out="\$emit\('sign-out'\)"/);
   assert.match(appSource, /@sign-out="signOut"/);
-  assert.match(appSource, /@connect-account="startAuthFlow"/);
+  assert.match(componentSource, /pendingAuth \? "Show device code" : "Connect GitHub"/);
+  assert.match(componentSource, /Device code ready/);
+  assert.match(appSource, /@connect-account="openAccountAuthFlow"/);
 });

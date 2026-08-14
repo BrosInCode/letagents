@@ -54,7 +54,7 @@
           >
             <LoaderCircle v-if="busy" class="sidebar-account-spinner" aria-hidden="true" />
             <LogIn v-else aria-hidden="true" />
-            <span>{{ busy ? "Connecting..." : "Connect GitHub" }}</span>
+            <span>{{ busy ? "Connecting..." : pendingAuth ? "Show device code" : "Connect GitHub" }}</span>
           </button>
         </div>
       </div>
@@ -73,7 +73,7 @@
       <AccountAvatar :auth-status="authStatus" size="small" />
       <span class="sidebar-account-trigger-copy">
         <strong>{{ accountTitle }}</strong>
-        <small>{{ authenticated ? "GitHub connected" : "Signed out" }}</small>
+        <small>{{ authenticated ? "GitHub connected" : pendingAuth ? "Device code ready" : "Signed out" }}</small>
       </span>
       <ChevronUp class="sidebar-account-chevron" aria-hidden="true" />
     </button>
@@ -103,6 +103,7 @@ const menu = ref<HTMLElement | null>(null);
 const open = ref(false);
 const menuId = "sidebar-account-menu";
 const authenticated = computed(() => Boolean(props.authStatus?.authenticated && props.authStatus.account));
+const pendingAuth = computed(() => props.authStatus?.pendingDeviceAuth || null);
 const accountTitle = computed(() => {
   const account = props.authStatus?.account;
   return authenticated.value && account
@@ -111,7 +112,8 @@ const accountTitle = computed(() => {
 });
 const accountSubtitle = computed(() => {
   const account = props.authStatus?.account;
-  return authenticated.value && account ? `@${account.login}` : "Sign in to manage rooms";
+  if (authenticated.value && account) return `@${account.login}`;
+  return pendingAuth.value ? `Code ${pendingAuth.value.userCode} ready` : "Sign in to manage rooms";
 });
 
 const AccountAvatar = defineComponent({
