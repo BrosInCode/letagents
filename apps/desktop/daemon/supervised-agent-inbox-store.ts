@@ -680,7 +680,7 @@ export class SupervisedAgentInboxStore {
           if (!completion) throw new Error("The supervised room-turn completion proposal is malformed.");
           const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
             WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-              AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+              AND tool_name<>'complete_room_turn' AND state='executing' AND mutation=1 LIMIT 1`).get(
             input.agent_id, input.execution_generation_id, input.provider_turn_id,
           );
           if (executing) {
@@ -748,7 +748,7 @@ export class SupervisedAgentInboxStore {
           if (effect.state !== "completed") {
             const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
               WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-                AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+                AND tool_name<>'complete_room_turn' AND state='executing' AND mutation=1 LIMIT 1`).get(
               input.agent_id, input.execution_generation_id, input.provider_turn_id,
             );
             if (executing) {
@@ -765,7 +765,7 @@ export class SupervisedAgentInboxStore {
         }
         const executing = database.prepare(`SELECT effect_id FROM supervised_agent_effects
           WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=?
-            AND tool_name<>'complete_room_turn' AND state='executing' LIMIT 1`).get(
+            AND tool_name<>'complete_room_turn' AND state='executing' AND mutation=1 LIMIT 1`).get(
           input.agent_id, input.execution_generation_id, input.provider_turn_id,
         );
         if (executing) {

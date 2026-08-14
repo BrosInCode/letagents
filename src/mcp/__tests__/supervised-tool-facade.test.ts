@@ -64,6 +64,39 @@ test("completion transport failure never rewrites a successful callback as faile
   assert.deepEqual(completions[0]?.result, result("sent once"));
 });
 
+test("large read results are returned live but checkpointed as a bounded replay instruction", async () => {
+  const liveResult = result("x".repeat(80 * 1024));
+  let checkpointedResult: unknown;
+  const handler = registeredHandler({
+    prepareEffect: async () => ({
+      state: "prepared", roomId: "room_exact", effectId: "effect_large_read", action: "execute",
+    }),
+    completeEffect: async (completion) => { checkpointedResult = completion.result; },
+    withRoom,
+  }, async () => liveResult, "get_board");
+
+  assert.equal(await handler({}, { requestId: "request_large_read" }), liveResult);
+  const checkpoint = checkpointedResult as CallToolResult;
+  assert.equal(checkpoint.structuredContent?.code, "SUPERVISED_READ_RESULT_NOT_RETAINED");
+  assert.equal(typeof checkpoint.structuredContent?.serialized_bytes, "number");
+  assert.ok(Buffer.byteLength(JSON.stringify(checkpoint), "utf8") < 4 * 1024);
+});
+
+test("large mutation results retain their exact durable completion evidence", async () => {
+  const mutationResult = result("x".repeat(20 * 1024));
+  let checkpointedResult: unknown;
+  const handler = registeredHandler({
+    prepareEffect: async () => ({
+      state: "prepared", roomId: "room_exact", effectId: "effect_large_mutation", action: "execute",
+    }),
+    completeEffect: async (completion) => { checkpointedResult = completion.result; },
+    withRoom,
+  }, async () => mutationResult, "send_message");
+
+  assert.equal(await handler({}, { requestId: "request_large_mutation" }), mutationResult);
+  assert.equal(checkpointedResult, mutationResult);
+});
+
 test("failure-reporting errors do not mask the original callback error", async () => {
   const handler = registeredHandler({
     prepareEffect: async () => ({ state: "prepared", roomId: "room_exact", effectId: "effect_failed", action: "execute" }),
