@@ -66,6 +66,8 @@ export type DesktopCursorPreflightOptions = {
   personalIdentityAttestor?: typeof assertCursorPersonalIdentity;
   /** Lightweight Git/topology check; it must never inventory project files. */
   workspaceGenerationSupportChecker?: typeof assertSupervisedWorkspaceGenerationSupported;
+  /** Exact environment snapshot used by every executable probe; injectable for tests. */
+  runtimeEnvironment?: NodeJS.ProcessEnv;
 };
 
 export async function runDesktopCursorProviderPreflight(
@@ -75,7 +77,7 @@ export async function runDesktopCursorProviderPreflight(
   options: DesktopCursorPreflightOptions = {},
 ): Promise<DesktopAgentProviderPreflight> {
   const timeoutMs = options.commandTimeoutMs ?? COMMAND_TIMEOUT_MS;
-  const runtimeEnv = desktopRuntimeEnvironment();
+  const runtimeEnv = options.runtimeEnvironment ?? desktopRuntimeEnvironment();
   const command = runtimeEnv.LETAGENTS_CURSOR_AGENT_BIN ||
     provider.runtimeCommand ||
     "cursor-agent";
@@ -133,6 +135,7 @@ export async function runDesktopCursorProviderPreflight(
   if (supervised || launchOptions.force || launchOptions.sandbox) {
     const flagResult = await execFileWithTimeout(command, ["--help"], {
       cwd: workspaceRoot ?? undefined,
+      env: runtimeEnv,
       timeoutMs,
     });
     if (!flagResult.ok || !cursorHelpSupportsLaunchOptions(flagResult, launchOptions, supervised)) {

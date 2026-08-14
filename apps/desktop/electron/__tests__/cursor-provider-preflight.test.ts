@@ -64,6 +64,10 @@ if (args[0] === "--version") {
   process.exit(0);
 }
 if (args[0] === "--help") {
+  if (process.env.LETAGENTS_TEST_CURSOR_PROBE_ENV !== "present") {
+    console.error("missing exact probe environment");
+    process.exit(9);
+  }
   const fixture = path.join(process.cwd(), ".fake-cursor-help");
   console.log(fs.existsSync(fixture) ? fs.readFileSync(fixture, "utf-8") : "Usage: cursor-agent --force --sandbox <mode> --trust");
   process.exit(0);
@@ -169,6 +173,10 @@ function runPreflight(
       return { userId: 12345, email: "personal@example.test" };
     },
     workspaceGenerationSupportChecker,
+    runtimeEnvironment: {
+      ...process.env,
+      LETAGENTS_TEST_CURSOR_PROBE_ENV: "present",
+    },
   });
 }
 

@@ -8,6 +8,7 @@ import {
   inspectClaudeCodeVersion,
   MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION,
   requireSupportedClaudeCodeVersion,
+  resolveClaudeCodeExecutable,
 } from "../main/agents/claude-code-version.js";
 import { runDesktopAgentProviderPreflight } from "../main/agents/providers.js";
 
@@ -21,6 +22,21 @@ test("Claude Code version readiness accepts supported output and rejects old or 
   assert.equal(requireSupportedClaudeCodeVersion("claude 3.0.0"), "3.0.0");
   assert.match(inspectClaudeCodeVersion("2.1.69 (Claude Code)").error ?? "", /too old.*2\.1\.70/);
   assert.match(inspectClaudeCodeVersion("unknown build").error ?? "", /unreadable version/);
+});
+
+test("Claude Code executable resolution has one explicit precedence", () => {
+  assert.equal(resolveClaudeCodeExecutable({}, "configured-claude"), "configured-claude");
+  assert.equal(
+    resolveClaudeCodeExecutable({ LETAGENTS_CLAUDE_BIN: "/legacy/claude" }, "configured-claude"),
+    "/legacy/claude",
+  );
+  assert.equal(
+    resolveClaudeCodeExecutable({
+      LETAGENTS_CLAUDE_CODE_BIN: "/exact/claude",
+      LETAGENTS_CLAUDE_BIN: "/legacy/claude",
+    }, "configured-claude"),
+    "/exact/claude",
+  );
 });
 
 test("Claude Code preflight gives an update message before auth or launch", async () => {
