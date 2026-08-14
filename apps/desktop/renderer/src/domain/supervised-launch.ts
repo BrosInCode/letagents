@@ -118,6 +118,12 @@ function isBlockingCondition(entry: LaunchFields): boolean {
     || (entry.condition === "coordination_blocked" && !isExpectedCoordinationWait(entry.lastError));
 }
 
+function missingProviderRuntimeDetail(entry: LaunchFields, providerLabel: string): string | null {
+  const detail = entry.lastError?.trim();
+  if (!detail || !/\bspawn\b.*\bENOENT\b/i.test(detail)) return null;
+  return `The background service could not find a command needed to start ${providerLabel}. Check setup again after installing or moving the required command.`;
+}
+
 export function supervisedLaunchProviderLabel(provider: string): string {
   switch (provider.trim().toLowerCase()) {
     case "codex": return "Codex";
@@ -160,6 +166,7 @@ function reachedIndex(entry: LaunchFields): number {
 
 export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchProgress {
   const providerLabel = supervisedLaunchProviderLabel(entry.provider);
+  const missingRuntimeDetail = missingProviderRuntimeDetail(entry, providerLabel);
   const agentDisplayName = supervisedAgentDisplayLabel(entry.displayName, entry.id);
   const reached = reachedIndex(entry);
   const ownershipPaused = entry.desiredState === "paused";
@@ -214,7 +221,8 @@ export function supervisedLaunchProgress(entry: LaunchFields): SupervisedLaunchP
         : entry.condition === "coordination_blocked"
         ? entry.workspacePath == null
           ? "LetAgents couldn't prepare the private project area. Try this launch again or cancel it and start a new agent."
-          : `LetAgents couldn't start ${providerLabel} in the private project area. Try this launch again or cancel it and start a new agent.`
+          : missingRuntimeDetail
+            ?? `LetAgents couldn't start ${providerLabel} in the private project area. Try this launch again or cancel it and start a new agent.`
         : safeUserVisibleErrorDetail(entry.lastError, blockedConditionDetail(entry.condition)))
     : null;
 

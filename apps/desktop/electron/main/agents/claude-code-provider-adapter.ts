@@ -58,7 +58,7 @@ import {
 } from "./claude-room-turn-evidence.js";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import { apiUrl as desktopApiUrl } from "../paths.js";
-import { requireSupportedClaudeCodeVersion } from "./claude-code-version.js";
+import { requireSupportedClaudeCodeVersion, resolveClaudeCodeExecutable } from "./claude-code-version.js";
 
 // Claude Code through its native headless CLI. The daemon owns room ingress,
 // exact-turn dispatch, retry, credentials, and publication; this adapter owns
@@ -547,7 +547,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly exitPromises = new WeakMap<ClaudeProviderHandle, Promise<ProviderTerminalPayload>>();
 
   constructor(options: ClaudeCodeProviderAdapterOptions = {}) {
-    this.claudeBin = options.claudeBin || desktopRuntimeEnvironment().LETAGENTS_CLAUDE_BIN || "claude";
+    this.claudeBin = options.claudeBin || resolveClaudeCodeExecutable(desktopRuntimeEnvironment());
     this.deps = { ...DEFAULT_DEPENDENCIES, ...options.dependencies };
     this.activitySink = options.activitySink;
     this.streamSink = options.streamSink;

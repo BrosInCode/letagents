@@ -1,5 +1,15 @@
 export const MINIMUM_SUPERVISED_CLAUDE_CODE_VERSION = "2.1.70";
 
+/** One executable authority shared by desktop setup checks and daemon launch. */
+export function resolveClaudeCodeExecutable(
+  env: Readonly<NodeJS.ProcessEnv>,
+  fallback = "claude",
+): string {
+  return env.LETAGENTS_CLAUDE_CODE_BIN?.trim()
+    || env.LETAGENTS_CLAUDE_BIN?.trim()
+    || fallback;
+}
+
 export type ClaudeCodeVersionReadiness = {
   version: string | null;
   supported: boolean;

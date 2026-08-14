@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { createConnection } from "node:net";
@@ -20,7 +20,10 @@ import type {
   DesktopSupervisorTurnControlResult,
 } from "../ipc-types.js";
 import { apiUrl, desktopRoot, workspaceRoot } from "./paths.js";
-import { desktopRuntimeEnvironment } from "./desktop-shell-environment.js";
+import {
+  desktopRuntimeEnvironment,
+  desktopShellEnvironmentReady,
+} from "./desktop-shell-environment.js";
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
 
@@ -28,7 +31,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.101";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.102";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
@@ -251,7 +254,7 @@ export interface SupervisorDaemonLifecycleOptions {
   socketPath?: string;
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
-  spawnDaemon?: (scriptPath: string, cwd: string) => ChildProcess;
+  spawnDaemon?: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
   /** @deprecated Prefer signalDaemon so tests can distinguish TERM from KILL. */
   terminateDaemon?: (pid: number) => void;
   signalDaemon?: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
@@ -278,7 +281,27 @@ export function supervisorDaemonSpawnEnvironment(
   if (env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()) {
     result.LETAGENTS_DEV_MCP_SERVER_ENTRY = join(sourceWorkspaceRoot, "dist", "mcp", "server.js");
   }
+  result.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT = supervisorRuntimeEnvironmentFingerprint(result);
   return result;
+}
+
+const SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS = [
+  "PATH",
+  "CODEX_INSTALL_DIR",
+  "LETAGENTS_CODEX_BIN",
+  "LETAGENTS_CLAUDE_BIN",
+  "LETAGENTS_CLAUDE_CODE_BIN",
+  "LETAGENTS_CURSOR_AGENT_BIN",
+  "LETAGENTS_OPENCODE_BIN",
+] as const;
+
+/** Opaque equality proof for every environment input that can select a provider executable. */
+export function supervisorRuntimeEnvironmentFingerprint(
+  env: Readonly<NodeJS.ProcessEnv>,
+): string {
+  return createHash("sha256")
+    .update(JSON.stringify(SUPERVISOR_RUNTIME_ENVIRONMENT_KEYS.map((key) => [key, env[key] ?? null])))
+    .digest("hex");
 }
 
 export class SupervisorDaemonClient {
@@ -290,7 +313,7 @@ export class SupervisorDaemonClient {
   private applicationUpdatePrepared = false;
   private lastReadyGeneration: number | null = null;
   private readonly generationListeners = new Set<(status: DesktopSupervisorDaemonStatus) => void>();
-  private readonly spawnDaemon: (scriptPath: string, cwd: string) => ChildProcess;
+  private readonly spawnDaemon: (scriptPath: string, cwd: string, env: NodeJS.ProcessEnv) => ChildProcess;
   private readonly daemonWorkingDirectory: string;
   private readonly signalDaemon: (pid: number, signal: "SIGTERM" | "SIGKILL") => void;
   private readonly inspectDaemonProcess: (pid: number) => DaemonIdentityInspection | null | undefined;
@@ -327,12 +350,12 @@ export class SupervisorDaemonClient {
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
-    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd) => {
+    this.spawnDaemon = options.spawnDaemon ?? ((scriptPath, cwd, env) => {
       const child = spawn(process.execPath, [scriptPath], {
         cwd,
         detached: true,
         stdio: "ignore",
-        env: supervisorDaemonSpawnEnvironment(),
+        env,
       });
       child.unref();
       return child;
@@ -347,7 +370,8 @@ export class SupervisorDaemonClient {
       return Promise.reject(new Error("Supervisor startup is paused while LetAgents installs an application update."));
     }
     if (!this.ensureOperation) {
-      this.ensureOperation = this.ensureRunningOnce()
+      this.ensureOperation = desktopShellEnvironmentReady()
+        .then(() => this.ensureRunningOnce())
         .then((status) => this.rememberReadyStatus(status))
         .finally(() => { this.ensureOperation = null; });
     }
@@ -1022,6 +1046,8 @@ export class SupervisorDaemonClient {
   }
 
   private async ensureRunningOnce(): Promise<DesktopSupervisorDaemonStatus> {
+    const spawnEnvironment = supervisorDaemonSpawnEnvironment();
+    const expectedRuntimeEnvironmentFingerprint = spawnEnvironment.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT!;
     let retiredGeneration: number | undefined;
     try {
       const negotiated = await this.request<Record<string, unknown>>("daemon.negotiate", undefined, SUPERVISOR_DAEMON_PROTOCOL_VERSION);
@@ -1030,6 +1056,7 @@ export class SupervisorDaemonClient {
       if (
         daemonVersion === SUPERVISOR_DAEMON_PROTOCOL_VERSION
         && implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION
+        && negotiated.runtime_environment_fingerprint === expectedRuntimeEnvironmentFingerprint
       ) return mapStatus(negotiated);
       const retired = this.captureRetiredDaemon(negotiated);
       retiredGeneration = Number(negotiated.generation);
@@ -1043,9 +1070,9 @@ export class SupervisorDaemonClient {
     }
     await access(this.daemonScriptPath);
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
-    const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory);
+    const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
     child.once("error", () => undefined);
-    return this.waitForHealthy(retiredGeneration);
+    return this.waitForHealthy(retiredGeneration, expectedRuntimeEnvironmentFingerprint);
   }
 
   private async prepareForApplicationUpdateOnce(): Promise<void> {
@@ -1076,7 +1103,10 @@ export class SupervisorDaemonClient {
     await this.enforceRetiredDaemonExit(retired, daemonVersion, implementationVersion);
   }
 
-  private async waitForHealthy(retiredGeneration?: number): Promise<DesktopSupervisorDaemonStatus> {
+  private async waitForHealthy(
+    retiredGeneration: number | undefined,
+    expectedRuntimeEnvironmentFingerprint: string,
+  ): Promise<DesktopSupervisorDaemonStatus> {
     const deadline = Date.now() + this.startTimeoutMs;
     let lastError: unknown = null;
     while (Date.now() < deadline) {
@@ -1090,6 +1120,9 @@ export class SupervisorDaemonClient {
           throw new Error(
             `Replacement supervisor daemon is still ${status.implementationVersion}; expected ${SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION}. Rebuild the desktop daemon and try again.`,
           );
+        }
+        if (result.runtime_environment_fingerprint !== expectedRuntimeEnvironmentFingerprint) {
+          throw new Error("Replacement supervisor daemon did not inherit the current provider runtime environment.");
         }
         if (retiredGeneration !== undefined && status.generation <= retiredGeneration) {
           throw new Error(

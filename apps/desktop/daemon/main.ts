@@ -2626,6 +2626,7 @@ export class SupervisorDaemon {
       healthy: true,
       protocol_version: DAEMON_PROTOCOL_VERSION,
       implementation_version: DAEMON_IMPLEMENTATION_VERSION,
+      runtime_environment_fingerprint: process.env.LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT ?? null,
       capabilities: {
         room_delivery_retry: Boolean(this.supervisedDelivery && this.providerPort?.runRoomTurn),
         provider_continuation_repair: Boolean(this.supervisedDelivery && this.providerPort?.repairContinuation),
