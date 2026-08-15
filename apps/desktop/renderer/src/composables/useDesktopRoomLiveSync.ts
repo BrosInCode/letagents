@@ -14,6 +14,7 @@ interface DesktopRoomLiveSyncOptions {
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedRoomIdentifier: ComputedRef<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
+  sessionGeneration: Ref<number>;
   workers: Ref<WorkerSnapshot[]>;
 }
 
@@ -33,9 +34,14 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshSequence = 0;
   let periodicMetadataRefreshInFlight = false;
 
-  function isStaleRefresh(refreshSequence: number, roomIdentifier: string): boolean {
+  function isStaleRefresh(
+    refreshSequence: number,
+    roomIdentifier: string,
+    sessionGeneration: number,
+  ): boolean {
     return (
       refreshSequence !== liveMetadataRefreshSequence
+      || sessionGeneration !== options.sessionGeneration.value
       || normalizeRoomIdentifier(options.selectedRoomIdentifier.value) !== normalizeRoomIdentifier(roomIdentifier)
     );
   }
@@ -50,12 +56,13 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   async function refreshSelectedRoomSnapshotFromServer(): Promise<void> {
     const roomIdentifier = options.selectedRoomIdentifier.value;
     if (!roomIdentifier) return;
+    const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++liveMetadataRefreshSequence;
     const [snapshot, nextWorkers] = await Promise.all([
       desktopIpc.room.getSnapshot(roomIdentifier),
       desktopIpc.workers.list().catch(() => options.workers.value),
     ]);
-    if (isStaleRefresh(refreshSequence, roomIdentifier)) return;
+    if (isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration)) return;
     options.workers.value = nextWorkers;
     options.selectedSnapshot.value = mergeRoomSnapshotMessages(options.selectedSnapshot.value, snapshot);
     if (options.rootRoomSnapshot.value && roomSnapshotsMatch(options.rootRoomSnapshot.value, snapshot)) {
@@ -95,13 +102,14 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     if (!desktopIpc.room.getLiveMetadata) return;
     if (periodicMetadataRefreshInFlight) return;
     periodicMetadataRefreshInFlight = true;
+    const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++liveMetadataRefreshSequence;
     try {
       const [metadata, nextWorkers] = await Promise.all([
         desktopIpc.room.getLiveMetadata?.(roomIdentifier),
         desktopIpc.workers.list().catch(() => options.workers.value),
       ]);
-      if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier)) return;
+      if (!metadata || isStaleRefresh(refreshSequence, roomIdentifier, sessionGeneration)) return;
       options.workers.value = nextWorkers;
       options.selectedSnapshot.value = applyRoomLiveMetadata(options.selectedSnapshot.value, metadata);
       if (
