@@ -186,22 +186,22 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
       };
       launchFact("launch.requested", "You asked LetAgents to resume this saved launch.");
       try {
-        await supervisorDaemonClient.ensureRunning();
-        await supervisorGrantCoordinator.prepareEntryForActivation(entry);
-        launchFact("supervisor.connected", "Background agent management is available.");
-        launchFact("agent.saved", "Your saved launch is ready to resume.");
-        return await transferSupervisorOwnership({
-          claim: async () => entry,
-          listLegacy: () => listDesktopManagedAgentSessions(entry.roomId)
-            .filter((session) => session.providerId === entry.provider && !session.supervisorEntryId),
-          stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
-          activate: async (manifest) => {
-            const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
-            if (!activated) throw new Error("The saved launch changed while ownership was being resumed; it was not restarted.");
-            launchFact("launch.activated", "LetAgents resumed ownership of this agent.");
-            return activated;
-          },
-          rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
+        return await supervisorGrantCoordinator.activateEntry(entry, async () => {
+          launchFact("supervisor.connected", "Background agent management is available.");
+          launchFact("agent.saved", "Your saved launch is ready to resume.");
+          return transferSupervisorOwnership({
+            claim: async () => entry,
+            listLegacy: () => listDesktopManagedAgentSessions(entry.roomId)
+              .filter((session) => session.providerId === entry.provider && !session.supervisorEntryId),
+            stopLegacy: (session) => stopDesktopManagedAgent({ sessionId: session.id, stopMode: "worker" }).then(() => undefined),
+            activate: async (manifest) => {
+              const activated = await supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "running");
+              if (!activated) throw new Error("The saved launch changed while ownership was being resumed; it was not restarted.");
+              launchFact("launch.activated", "LetAgents resumed ownership of this agent.");
+              return activated;
+            },
+            rollback: (manifest) => supervisorDaemonClient.compareAndSetDesiredState(manifest.id, "paused", "stopped").then(() => undefined),
+          });
         });
       } catch (error) {
         const failure = classifyLaunchFailure(error);
@@ -231,7 +231,10 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
         if (entry.provider !== "claude-code") {
           await refreshInstalledLetAgentsMcpServerAuth();
         }
-        await supervisorGrantCoordinator.prepareEntryForActivation(entry);
+        return supervisorGrantCoordinator.activateEntry(
+          entry,
+          () => supervisorDaemonClient.setDesiredState(id, desiredState),
+        );
       }
       const updated = await supervisorDaemonClient.setDesiredState(id, desiredState);
       // Cancelling belongs to launch history only when the launch never reached
@@ -377,7 +380,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     supervisorDaemonClient.getCurrentRoomMove(input));
   targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
     assertDesktopUpdateMutationAllowed();
-    return supervisorDaemonClient.retireAgent(input.entryId, input.daemonGeneration);
+    return supervisorGrantCoordinator.retireEntry(input.entryId, input.daemonGeneration);
   });
   targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
     assertDesktopUpdateMutationAllowed();

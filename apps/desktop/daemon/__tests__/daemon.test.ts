@@ -4297,6 +4297,32 @@ test("lifecycle handlers advertise support and reject coercible or imprecise coo
       desired_state: "stopped",
       observed_state: "stopped",
     } })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id: "retire-live-authority",
+      delivery_mode: "daemon_inbox",
+      desired_state: "stopped",
+      observed_state: "stopped",
+    } })).ok, true);
+    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+      ...entry,
+      id: "retire-never-minted",
+      delivery_mode: "daemon_inbox",
+      desired_state: "stopped",
+      observed_state: "stopped",
+    } })).ok, true);
+    const workerBindings = (daemon as unknown as { workerBindings: WorkerBindingStore }).workerBindings;
+    await workerBindings.beginSupervisedWorkerSessionMint({
+      agent_id: "retire-live-authority",
+      room_id: entry.room_id,
+      agent_instance_id: "daemon:retire-live-authority",
+    });
+    await workerBindings.recordExactSupervisedWorkerSessionMint({
+      agent_id: "retire-live-authority",
+      room_id: entry.room_id,
+      agent_instance_id: "daemon:retire-live-authority",
+      agent_session_id: "session-to-retire",
+    });
 
     assert.equal((await daemonRequest(paths.socketPath, "manifest.set_desired_state", {
       id: 123,
@@ -4316,7 +4342,51 @@ test("lifecycle handlers advertise support and reject coercible or imprecise coo
       daemon_generation: status.generation,
       revoked_agent_session_id: null,
     })).ok, false, "whitespace-altered identities are rejected at the socket boundary");
-    const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
+    const retirementRequired = await daemonRequest(paths.socketPath, "supervisor.retire_agent", {
+      entry_id: "retire-live-authority",
+      daemon_generation: status.generation,
+      revoked_agent_session_id: null,
+      grant_revoked_without_worker_session: false,
+    });
+    assert.equal(retirementRequired.ok, true, retirementRequired.error);
+    assert.deepEqual(retirementRequired.result, {
+      outcome: "revocation_required",
+      revocation_kind: "worker_session",
+      agent_session_id: "session-to-retire",
+    });
+    const retired = await daemonRequest(paths.socketPath, "supervisor.retire_agent", {
+      entry_id: "retire-live-authority",
+      daemon_generation: status.generation,
+      revoked_agent_session_id: "session-to-retire",
+      grant_revoked_without_worker_session: false,
+    });
+    assert.equal(retired.ok, true, retired.error);
+    assert.equal((retired.result as { outcome: string }).outcome, "retired");
+    assert.equal(await workerBindings.supervisedWorkerSession("retire-live-authority"), null);
+    assert.equal(await workerBindings.supervisedWorkerMintState("retire-live-authority"), null);
+
+    const neverMintedRetirement = await daemonRequest(paths.socketPath, "supervisor.retire_agent", {
+      entry_id: "retire-never-minted",
+      daemon_generation: status.generation,
+      revoked_agent_session_id: null,
+      grant_revoked_without_worker_session: false,
+    });
+    assert.equal(neverMintedRetirement.ok, true, neverMintedRetirement.error);
+    assert.deepEqual(neverMintedRetirement.result, {
+      outcome: "revocation_required",
+      revocation_kind: "grant_only",
+    });
+    const neverMintedRetired = await daemonRequest(paths.socketPath, "supervisor.retire_agent", {
+      entry_id: "retire-never-minted",
+      daemon_generation: status.generation,
+      revoked_agent_session_id: null,
+      grant_revoked_without_worker_session: true,
+    });
+    assert.equal(neverMintedRetired.ok, true, neverMintedRetired.error);
+    assert.equal((neverMintedRetired.result as { outcome: string }).outcome, "retired");
+
+    const current = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
+      .find((candidate) => candidate.id === "strict-lifecycle")!;
     assert.equal(current.id, "strict-lifecycle");
     assert.equal(current.desired_state, "stopped");
   } finally {
