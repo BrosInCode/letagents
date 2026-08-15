@@ -321,6 +321,7 @@ const api: DesktopApi = {
     getRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-room-move", input),
     getCurrentRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-current-room-move", input),
     retireAgent: (input) => ipcRenderer.invoke("desktop:supervisor:retire-agent", input),
+    getRetirementStatus: (input) => ipcRenderer.invoke("desktop:supervisor:get-retirement-status", input),
     purgeAgent: (input) => ipcRenderer.invoke("desktop:supervisor:purge-agent", input),
     onActivity: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
@@ -331,6 +332,11 @@ const api: DesktopApi = {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
       ipcRenderer.on("desktop:supervisor:state", listener);
       return () => ipcRenderer.off("desktop:supervisor:state", listener);
+    },
+    onRetirement: (callback) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);
+      ipcRenderer.on("desktop:supervisor:retirement", listener);
+      return () => ipcRenderer.off("desktop:supervisor:retirement", listener);
     },
     onLaunchEvent: (callback) => {
       const listener = (_event: Electron.IpcRendererEvent, payload: Parameters<typeof callback>[0]) => callback(payload);

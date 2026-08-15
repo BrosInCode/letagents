@@ -35,6 +35,10 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.104";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
+// Retirement can queue behind one already-admitted worker mint (3 x 10s) so
+// its background completion channel needs a deadline that covers that safety
+// fence. The renderer no longer waits on this request.
+const RETIRE_REQUEST_TIMEOUT_MS = 60_000;
 // Room-ingress bootstrap is an authority-bearing admission that mints a
 // worker session and reads the initial room tail against the cloud. Each of
 // those daemon-side requests is bounded at 20s, so the client deadline must
@@ -963,7 +967,7 @@ export class SupervisorDaemonClient {
       daemon_generation: daemonGeneration,
       revoked_agent_session_id: revokedAgentSessionId,
       grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
-    });
+    }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, RETIRE_REQUEST_TIMEOUT_MS);
     if (result.outcome === "retired") return { outcome: "retired" };
     if (result.outcome === "revocation_required") {
       if (result.revocation_kind === "worker_session"

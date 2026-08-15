@@ -376,10 +376,12 @@ export interface DesktopApi {
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
     getRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
     getCurrentRoomMove: (input: DesktopSupervisorCurrentRoomMoveInput) => Promise<DesktopSupervisorRoomMove | null>;
-    retireAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<void>;
+    retireAgent: (input: import("./agents.js").DesktopSupervisorRetirementInput) => Promise<import("./agents.js").DesktopSupervisorRetirementReceipt>;
+    getRetirementStatus?: (input: { entryId: string; daemonGeneration: number }) => Promise<import("./agents.js").DesktopSupervisorRetirementStatus>;
     purgeAgent: (input: { entryId: string; daemonGeneration: number }) => Promise<{ outcome: "purged" | "invalid"; error?: string }>;
     onActivity: (callback: (event: { entryId: string; event: import("./agents.js").DesktopSupervisorActivityEvent }) => void) => () => void;
     onState: (callback: (snapshot: import("./agents.js").DesktopSupervisorStateSnapshot) => void) => () => void;
+    onRetirement?: (callback: (event: import("./agents.js").DesktopSupervisorRetirementEvent) => void) => () => void;
     /** Subscribe to ordered launch facts (task_84). Fold idempotently by `sequence`. */
     onLaunchEvent: (callback: (event: import("./launch-events.js").DesktopLaunchEvent) => void) => () => void;
     /** Replay a launch's facts after `afterSequence` (for modal reopen/restore). */

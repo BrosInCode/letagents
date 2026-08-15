@@ -1,6 +1,7 @@
 import type {
   DesktopSupervisorActivityEvent,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorRetirementEvent,
   DesktopSupervisorTurnControlInput,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
@@ -211,6 +212,37 @@ export interface AgentInspectorActionState {
   kind: AgentInspectorActionKind;
   status: "running" | "success" | "error";
   message: string | null;
+  /** Present for generation-fenced background operations such as retirement. */
+  daemonGeneration?: number;
+}
+
+/** Settle only the exact accepted retirement. Events for a previous Inspector
+ * selection, operation, entry, or daemon generation are intentionally inert. */
+export function settleAgentInspectorRetirementEvent(
+  state: AgentInspectorActionState | null,
+  event: DesktopSupervisorRetirementEvent,
+): AgentInspectorActionState | null {
+  if (!state || state.kind !== "retire_agent" || state.status !== "running"
+    || state.operationId !== event.operationId || state.entryId !== event.entryId
+    || state.daemonGeneration !== event.daemonGeneration) return state;
+  return {
+    ...state,
+    status: event.status === "completed" ? "success" : "error",
+    message: event.status === "completed"
+      ? "Agent retired. Its worktree is retained."
+      : event.error || "Agent retirement could not be completed.",
+  };
+}
+
+/** Missed-event fallback after main-process durable-state verification. */
+export function settleAgentInspectorRetirementCompletion(
+  state: AgentInspectorActionState | null,
+  input: { operationId: string; entryId: string; daemonGeneration: number },
+): AgentInspectorActionState | null {
+  if (!state || state.kind !== "retire_agent" || state.status !== "running"
+    || state.operationId !== input.operationId || state.entryId !== input.entryId
+    || state.daemonGeneration !== input.daemonGeneration) return state;
+  return { ...state, status: "success", message: "Agent retired. Its worktree is retained." };
 }
 
 /** Prevents an in-flight action for one agent from disabling or messaging another inspector. */
