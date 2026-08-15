@@ -10,6 +10,48 @@ interface AuthUser {
 const isSignedIn = ref(false)
 const user = ref<AuthUser | null>(null)
 const isLoading = ref(false)
+const isSigningIn = ref(false)
+const isCheckingSession = ref(false)
+const hasCheckedSession = ref(false)
+let sessionRequestVersion = 0
+let authSyncInstalled = false
+
+export const AUTH_SYNC_STORAGE_KEY = 'letagents:auth-sync'
+
+function clearLocalAuthState() {
+  sessionRequestVersion += 1
+  user.value = null
+  isSignedIn.value = false
+  hasCheckedSession.value = true
+  isCheckingSession.value = false
+}
+
+function installAuthSync() {
+  if (authSyncInstalled || typeof window === 'undefined') return
+  authSyncInstalled = true
+  window.addEventListener('storage', (event) => {
+    if (event.key !== AUTH_SYNC_STORAGE_KEY || !event.newValue) return
+    try {
+      const message = JSON.parse(event.newValue) as { type?: string }
+      if (message.type === 'signed_out') clearLocalAuthState()
+    } catch {
+      // Ignore malformed or unrelated local storage values.
+    }
+  })
+}
+
+function broadcastSignOut() {
+  if (typeof window === 'undefined') return
+  try {
+    window.localStorage.setItem(AUTH_SYNC_STORAGE_KEY, JSON.stringify({
+      type: 'signed_out',
+      at: Date.now(),
+      nonce: Math.random().toString(36).slice(2),
+    }))
+  } catch {
+    // Local logout still applies when storage is unavailable.
+  }
+}
 
 interface SignInLocation {
   pathname: string
@@ -74,12 +116,17 @@ export function resolveSignInRedirect(
  * Uses session cookies — calls the existing Express auth endpoints.
  */
 export function useAuth() {
+  installAuthSync()
+
   async function checkSession() {
+    const requestVersion = ++sessionRequestVersion
+    isCheckingSession.value = true
     try {
       const res = await fetch('/auth/session', { credentials: 'include' })
       if (res.ok) {
         const data = await res.json()
         if (data.authenticated && data.account) {
+          if (requestVersion !== sessionRequestVersion) return
           user.value = data.account
           isSignedIn.value = true
           return
@@ -87,13 +134,20 @@ export function useAuth() {
       }
     } catch {
       // silent — no session
+    } finally {
+      if (requestVersion === sessionRequestVersion) {
+        hasCheckedSession.value = true
+        isCheckingSession.value = false
+      }
     }
+    if (requestVersion !== sessionRequestVersion) return
     user.value = null
     isSignedIn.value = false
   }
 
   async function signIn(redirectTo?: string) {
     isLoading.value = true
+    isSigningIn.value = true
     try {
       const res = await fetch('/auth/github/login', {
         method: 'POST',
@@ -109,25 +163,30 @@ export function useAuth() {
       console.error('Sign in failed:', error)
     } finally {
       isLoading.value = false
+      isSigningIn.value = false
     }
   }
 
   async function signOut() {
+    clearLocalAuthState()
+    broadcastSignOut()
     isLoading.value = true
     try {
       await fetch('/auth/logout', { method: 'POST', credentials: 'include' })
     } catch {
       // silent
+    } finally {
+      isLoading.value = false
     }
-    user.value = null
-    isSignedIn.value = false
-    isLoading.value = false
   }
 
   return {
     isSignedIn: readonly(isSignedIn),
     user: readonly(user),
     isLoading: readonly(isLoading),
+    isSigningIn: readonly(isSigningIn),
+    isCheckingSession: readonly(isCheckingSession),
+    hasCheckedSession: readonly(hasCheckedSession),
     checkSession,
     signIn,
     signOut,
