@@ -664,16 +664,35 @@ async function ensureExactWorkerSessionAndGrantRevoked(input: {
       throw new Error(`Cannot revoke ${entryId}: the worker session belongs to another grant without a complete durable acknowledgement.`);
     }
   } else if (!progress.sessionEndedAt) {
-    const ended = await request<Record<string, unknown>>(
-      `/supervisor-host-grants/${encodeURIComponent(progress.grantId)}/worker-sessions/${encodeURIComponent(agentSessionId)}/end`,
-      {
-        method: "POST",
-        headers: { Authorization: `Bearer ${input.grant.token}` },
-        body: JSON.stringify({ generation: input.grant.metadata.generation }),
-      },
-    );
-    if (ended.session_id !== agentSessionId || typeof ended.ended_at !== "string" || !ended.ended_at.trim()) {
-      throw new Error(`Worker-session termination for ${entryId} returned an invalid exact-session acknowledgement.`);
+    let endedAt: string;
+    let ownerCascadeRevokedAt: string | null = null;
+    try {
+      const ended = await request<Record<string, unknown>>(
+        `/supervisor-host-grants/${encodeURIComponent(progress.grantId)}/worker-sessions/${encodeURIComponent(agentSessionId)}/end`,
+        {
+          method: "POST",
+          headers: { Authorization: `Bearer ${input.grant.token}` },
+          body: JSON.stringify({ generation: input.grant.metadata.generation }),
+        },
+      );
+      if (ended.session_id !== agentSessionId || typeof ended.ended_at !== "string" || !ended.ended_at.trim()) {
+        throw new Error(`Worker-session termination for ${entryId} returned an invalid exact-session acknowledgement.`);
+      }
+      endedAt = ended.ended_at;
+    } catch (error) {
+      if (!authoritativeProvisionFailure(error)) throw error;
+      // A stopped agent can retain a worker longer than its short-lived host
+      // grant. Owner revocation is the recovery authority: the server revokes
+      // the grant fence first and then ends every worker session owned by it.
+      // A 404 on retry is authoritative because that cascade is the only path
+      // that removes an owner-visible grant.
+      try {
+        await request(`/supervisor-host-grants/${encodeURIComponent(progress.grantId)}`, { method: "DELETE" });
+      } catch (revokeError) {
+        if (!(revokeError instanceof DesktopApiError && revokeError.status === 404)) throw revokeError;
+      }
+      ownerCascadeRevokedAt = new Date().toISOString();
+      endedAt = ownerCascadeRevokedAt;
     }
     await withRegistryMutation(async () => {
       const registry = await readRegistry();
@@ -685,7 +704,8 @@ async function ensureExactWorkerSessionAndGrantRevoked(input: {
         || current.agentSessionId !== agentSessionId) {
         throw new Error(`Worker-session termination for ${entryId} succeeded, but its durable acknowledgement journal changed.`);
       }
-      current.sessionEndedAt = ended.ended_at as string;
+      current.sessionEndedAt = endedAt;
+      if (ownerCascadeRevokedAt) current.grantRevokedAt = ownerCascadeRevokedAt;
       await writeRegistry(registry);
     });
     progress = (await readRegistry())?.credentialRevocations[grantId];
@@ -970,10 +990,27 @@ export async function revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(
     }
     const receipt = registry.purgeRevocationReceipts[normalizedEntryId];
     if (receipt) {
-      if (receipt.workerSessionAttestation !== "none" || receipt.agentSessionId !== null || receipt.sessionEndedAt !== null) {
-        throw new Error(`Cannot attest grant-only revocation for ${normalizedEntryId}: its durable receipt belongs to a worker-session purge.`);
+      const hasReplacementAuthority = Boolean(
+        registry.entryAgentKeys[normalizedEntryId]
+        || Object.values(registry.grants).some((grant) => grant.entryId?.trim() === normalizedEntryId),
+      );
+      if (hasReplacementAuthority) {
+        throw new Error(`Cannot attest grant-only revocation for ${normalizedEntryId}: replacement authority exists beside its durable receipt.`);
       }
-      return;
+      if (receipt.workerSessionAttestation === "none"
+        && receipt.agentSessionId === null && receipt.sessionEndedAt === null) {
+        return;
+      }
+      // Exact retirement is stronger than the later no-session observation:
+      // it proves both the worker END and parent-grant DELETE were durable.
+      // Resume/replacement clears this entry receipt before installing fresh
+      // authority, so an orphaned exact receipt is safe for restart or purge.
+      if (receipt.workerSessionAttestation === "exact"
+        && typeof receipt.agentSessionId === "string" && receipt.agentSessionId.trim()
+        && typeof receipt.sessionEndedAt === "string" && receipt.sessionEndedAt.trim()) {
+        return;
+      }
+      throw new Error(`Cannot attest grant-only revocation for ${normalizedEntryId}: its durable receipt is inconsistent.`);
     }
     const agentKey = registry.entryAgentKeys[normalizedEntryId];
     if (!agentKey) {

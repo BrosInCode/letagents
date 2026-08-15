@@ -181,6 +181,40 @@ export class WorkerBindingStore {
     });
   }
 
+  /**
+   * Remove only the live room authority for a retired durable agent. Historical
+   * publication watermarks remain intact, so a later resume cannot reuse an
+   * old sequence even though it mints a fresh worker session.
+   */
+  async retireSupervisedWorkerAuthority(
+    agentId: string,
+    expectedSessionId: string | null,
+  ): Promise<void> {
+    const retiredCredentialRefs = await this.withMutation(async (database) => this.transaction(database, () => {
+      const session = database.prepare("SELECT agent_session_id,credential_ref FROM supervised_worker_sessions WHERE agent_id=?")
+        .get(agentId) as Row | undefined;
+      const binding = database.prepare("SELECT agent_session_id,credential_ref FROM worker_session_bindings WHERE entry_id=?")
+        .get(agentId) as Row | undefined;
+      const observedIds = new Set(
+        [session?.agent_session_id, binding?.agent_session_id]
+          .filter((value): value is string => typeof value === "string" && Boolean(value.trim())),
+      );
+      if (expectedSessionId) {
+        if (observedIds.size > 0 && (observedIds.size !== 1 || !observedIds.has(expectedSessionId))) {
+          throw new Error("Retired worker authority changed before local cleanup.");
+        }
+      } else if (observedIds.size > 0) {
+        throw new Error("Retired worker authority requires an exact server-session acknowledgement.");
+      }
+      run(database.prepare("DELETE FROM worker_session_bindings WHERE entry_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_worker_sessions WHERE agent_id=?"), agentId);
+      run(database.prepare("DELETE FROM supervised_worker_mint_states WHERE agent_id=?"), agentId);
+      return [session?.credential_ref, binding?.credential_ref]
+        .filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    }));
+    for (const credentialRef of retiredCredentialRefs) this.credentials.delete(credentialRef);
+  }
+
   async bind(input: WorkerSessionBindingInput): Promise<WorkerSessionBinding> {
     this.validate(input);
     // Test/fence seam must remain outside the SQLite transaction: a stalled

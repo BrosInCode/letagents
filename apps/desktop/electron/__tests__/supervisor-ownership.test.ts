@@ -46,7 +46,7 @@ test("paused launch recovery reuses guarded ownership without requiring a user C
   assert.match(resumeHandler, /listDesktopManagedAgentSessions\(entry\.roomId\)/);
   assert.match(resumeHandler, /stopDesktopManagedAgent/);
   assert.match(resumeHandler, /compareAndSetDesiredState\(manifest\.id, "paused", "running"\)/);
-  assert.match(resumeHandler, /supervisorGrantCoordinator\.prepareEntryForActivation\(entry\)/);
+  assert.match(resumeHandler, /supervisorGrantCoordinator\.activateEntry\(entry/);
   assert.doesNotMatch(resumeHandler, /refreshInstalledLetAgentsMcpServerAuth/);
 });
 
