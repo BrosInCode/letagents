@@ -7,6 +7,8 @@ import type {
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorRetirementInput,
+  DesktopSupervisorRetirementStatus,
 } from "../../ipc-types.js";
 import { listDesktopManagedAgentSessions, stopDesktopManagedAgent } from "../agents/codex-supervisor.js";
 import { assertManagedAgentPermissionProfileAvailable } from "../agents/managed-agent-permission-profiles.js";
@@ -36,8 +38,13 @@ import {
 } from "../supervisor-daemon.js";
 import {
   readDesktopSupervisorGrantAgentKeysForEntries,
+  readDesktopSupervisorGrantRevocationAttestationForEntry,
 } from "../supervisor-grant.js";
 import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
+import {
+  desktopRetirementDurablyCompleted,
+  SupervisorRetirementOperations,
+} from "../supervisor-retirement-operations.js";
 import { transferSupervisorOwnership } from "../supervisor-ownership.js";
 import { assertDesktopUpdateMutationAllowed } from "../updates.js";
 import { emitToMainWindow } from "../window.js";
@@ -46,6 +53,14 @@ let supervisorActivityBridgeRegistered = false;
 let supervisorStateBridgeRegistered = false;
 let supervisorLaunchBridgeRegistered = false;
 let supervisorAgentStreamBridgeRegistered = false;
+
+const supervisorRetirementOperations = new SupervisorRetirementOperations({
+  retire: (entryId, daemonGeneration) => supervisorGrantCoordinator.retireEntry(entryId, daemonGeneration),
+  emit: (event) => emitToMainWindow("desktop:supervisor:retirement", {
+    ...event,
+    error: event.error ? redactCredentialText(event.error).value : null,
+  }),
+});
 
 /** A launch id shared by the durable entry (`supervised_<id>`) and every launch
  * fact. Must satisfy the daemon's creation-request-id shape; fall back to a
@@ -378,9 +393,31 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     supervisorDaemonClient.getRoomMove(input));
   targetIpcMain.handle("desktop:supervisor:get-current-room-move", async (_event, input: import("../../ipc-types.js").DesktopSupervisorCurrentRoomMoveInput) =>
     supervisorDaemonClient.getCurrentRoomMove(input));
-  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
+  targetIpcMain.handle("desktop:supervisor:retire-agent", async (_event, input: DesktopSupervisorRetirementInput) => {
     assertDesktopUpdateMutationAllowed();
-    return supervisorGrantCoordinator.retireEntry(input.entryId, input.daemonGeneration);
+    return supervisorRetirementOperations.start(input);
+  });
+  targetIpcMain.handle("desktop:supervisor:get-retirement-status", async (_event, input: { entryId: string; daemonGeneration: number }): Promise<DesktopSupervisorRetirementStatus> => {
+    if (!input || typeof input.entryId !== "string" || !input.entryId.trim()
+      || input.entryId !== input.entryId.trim()
+      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) {
+      throw new Error("Retirement status requires exact typed coordinates.");
+    }
+    const status = await supervisorDaemonClient.ensureRunning();
+    if (status.generation !== input.daemonGeneration) {
+      throw new Error("Background agent management changed generation during retirement.");
+    }
+    const entry = (await supervisorDaemonClient.list(null)).find((candidate) => candidate.id === input.entryId);
+    if (!entry) throw new Error("The saved agent no longer exists.");
+    const revocationAttestation = entry.deliveryMode === "daemon_inbox"
+      ? await readDesktopSupervisorGrantRevocationAttestationForEntry(input.entryId)
+      : null;
+    const completed = desktopRetirementDurablyCompleted(entry, revocationAttestation !== null);
+    return {
+      entryId: input.entryId,
+      daemonGeneration: input.daemonGeneration,
+      status: completed ? "completed" : "pending",
+    };
   });
   targetIpcMain.handle("desktop:supervisor:purge-agent", async (_event, input: { entryId: string; daemonGeneration: number }) => {
     assertDesktopUpdateMutationAllowed();

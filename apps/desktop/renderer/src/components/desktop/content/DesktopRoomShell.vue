@@ -347,6 +347,7 @@ import type {
   DesktopAgentStreamEvent,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorRoomMove,
+  DesktopSupervisorRetirementEvent,
   DesktopSupervisorStateSnapshot,
   DesktopTaskSummary,
   RepoStatus,
@@ -395,6 +396,8 @@ import {
   agentInspectorTurnControlActionId,
   agentInspectorTurnControlActionIdIfCurrent,
   agentInspectorRetryableTurnControlInput,
+  settleAgentInspectorRetirementCompletion,
+  settleAgentInspectorRetirementEvent,
   agentInspectorTurnControlFenceMatches,
   projectAgentInspectors,
   type AgentInspectorTurnControlFence,
@@ -690,6 +693,8 @@ let unsubscribeManagedAgentSessionUpdate: (() => void) | null = null;
 let unsubscribeSupervisorActivity: (() => void) | null = null;
 let unsubscribeSupervisorAgentStream: (() => void) | null = null;
 let unsubscribeSupervisorState: (() => void) | null = null;
+let unsubscribeSupervisorRetirement: (() => void) | null = null;
+let retirementStatusCheckOperationId: string | null = null;
 let supervisorStateSubscriptionActive = false;
 let supervisorStateLastSnapshotAtMs: number | null = null;
 let supervisorStateLastRepairAtMs: number | null = null;
@@ -1056,6 +1061,9 @@ onBeforeUnmount(() => {
   void desktopIpc.supervisor?.watchAgentStream?.(null);
   unsubscribeSupervisorState?.();
   unsubscribeSupervisorState = null;
+  unsubscribeSupervisorRetirement?.();
+  unsubscribeSupervisorRetirement = null;
+  retirementStatusCheckOperationId = null;
   supervisorStateSubscriptionActive = false;
   supervisorStateLastSnapshotAtMs = null;
   pendingSupervisorStateSnapshot = null;
@@ -1093,6 +1101,9 @@ onMounted(() => {
   unsubscribeSupervisorState = desktopIpc.supervisor?.onState?.((snapshot) => {
     supervisorStateLastSnapshotAtMs = Date.now();
     queueSupervisorStateSnapshot(snapshot);
+  }) || null;
+  unsubscribeSupervisorRetirement = desktopIpc.supervisor?.onRetirement?.((event) => {
+    acceptSupervisorRetirementEvent(event);
   }) || null;
   supervisorStateSubscriptionActive = Boolean(unsubscribeSupervisorState);
   unsubscribeSupervisorAgentStream = desktopIpc.supervisor?.onAgentStream?.((batch) => {
@@ -1165,6 +1176,53 @@ function acceptSupervisorStateSnapshot(snapshot: DesktopSupervisorStateSnapshot)
   // negotiation before generation-specific controls may be used.
   if (statusGeneration !== snapshot.daemonGeneration) {
     void refreshSupervisorStatus(snapshot.daemonGeneration);
+  }
+  void reconcilePendingRetirementFromDurableState(snapshot);
+}
+
+function acceptSupervisorRetirementEvent(event: DesktopSupervisorRetirementEvent): void {
+  const action = agentInspectorActionState.value;
+  const settled = settleAgentInspectorRetirementEvent(action, event);
+  if (settled === action) return;
+  retirementStatusCheckOperationId = null;
+  agentInspectorActionState.value = settled;
+  void refreshManagedAgentSessions();
+}
+
+/** State pushes are the missed-event/reconnect fallback. Completion is checked
+ * against both the durable daemon lifecycle and Electron's grant registry, so
+ * a merely stopped provider is never mistaken for fully revoked authority. */
+async function reconcilePendingRetirementFromDurableState(snapshot: DesktopSupervisorStateSnapshot): Promise<void> {
+  const action = agentInspectorActionState.value;
+  if (!action || action.kind !== "retire_agent" || action.status !== "running"
+    || action.daemonGeneration !== snapshot.daemonGeneration
+    || retirementStatusCheckOperationId === action.operationId
+    || typeof desktopIpc.supervisor?.getRetirementStatus !== "function") return;
+  const entry = snapshot.entries.find((candidate) => candidate.id === action.entryId);
+  if (!entry || entry.desiredState !== "stopped" || entry.observedState !== "stopped"
+    || entry.agentSessionId !== null || entry.agentSessionBindingState === "active") return;
+  retirementStatusCheckOperationId = action.operationId;
+  try {
+    const result = await desktopIpc.supervisor.getRetirementStatus({
+      entryId: action.entryId,
+      daemonGeneration: snapshot.daemonGeneration,
+    });
+    const current = agentInspectorActionState.value;
+    if (result.status === "completed" && current?.operationId === action.operationId
+      && current.kind === "retire_agent" && current.status === "running") {
+      agentInspectorActionState.value = settleAgentInspectorRetirementCompletion(current, {
+        operationId: action.operationId,
+        entryId: action.entryId,
+        daemonGeneration: snapshot.daemonGeneration,
+      });
+      void refreshManagedAgentSessions();
+    }
+  } catch {
+    // The explicit completion/failure event remains primary. A status read can
+    // race daemon handoff or temporarily unavailable secure storage, neither
+    // of which should turn an accepted retirement into a false UI failure.
+  } finally {
+    if (retirementStatusCheckOperationId === action.operationId) retirementStatusCheckOperationId = null;
   }
 }
 
@@ -2517,7 +2575,26 @@ async function runAgentInspectorAction(intent: AgentInspectorActionIntent): Prom
       if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
       if (!status?.capabilities.agentLifecycle || !desktopIpc.supervisor.retireAgent) throw new Error("This supervisor does not support durable retirement.");
       operationDaemonGeneration = status.generation;
-      await desktopIpc.supervisor.retireAgent({ entryId: intent.entryId, daemonGeneration: operationDaemonGeneration });
+      agentInspectorActionState.value = {
+        ...agentInspectorActionState.value!,
+        daemonGeneration: operationDaemonGeneration,
+      };
+      const receipt = await desktopIpc.supervisor.retireAgent({
+        operationId,
+        entryId: intent.entryId,
+        daemonGeneration: operationDaemonGeneration,
+      });
+      if (!currentAgentInspectorActionIdentity(operationId, intent, requestVersion)) return;
+      if (receipt.status !== "accepted" || receipt.operationId !== operationId
+        || receipt.entryId !== intent.entryId || receipt.daemonGeneration !== operationDaemonGeneration) {
+        throw new Error("The supervisor returned an invalid retirement receipt.");
+      }
+      if (agentInspectorActionState.value?.status !== "running") return;
+      agentInspectorActionState.value = {
+        ...agentInspectorActionState.value!,
+        message: "Retirement accepted. Finishing credential cleanup…",
+      };
+      return;
     } else if (intent.kind === "reconnect") {
       updated = await desktopIpc.supervisor.reconnectAgent({ entryId: intent.entryId });
     } else if (intent.kind === "stop_turn" || intent.kind === "steer_turn" || intent.kind === "retry_turn_control" || intent.kind === "resolve_turn_control") {

@@ -399,6 +399,41 @@ export interface DesktopSupervisorStateSnapshot {
   entries: DesktopSupervisorManifestEntry[];
 }
 
+/** One human retirement request. The renderer supplies the stable operation
+ * id before dispatch so a completion event cannot race ahead of correlation. */
+export interface DesktopSupervisorRetirementInput {
+  operationId: string;
+  entryId: string;
+  daemonGeneration: number;
+}
+
+/** Submission acknowledges only that Electron accepted responsibility for
+ * completing the durable retirement; it does not pretend cleanup is done. */
+export interface DesktopSupervisorRetirementReceipt {
+  operationId: string;
+  entryId: string;
+  daemonGeneration: number;
+  status: "accepted";
+}
+
+/** Explicit completion signal for the cross-process retirement operation. */
+export interface DesktopSupervisorRetirementEvent {
+  operationId: string;
+  entryId: string;
+  daemonGeneration: number;
+  status: "completed" | "failed";
+  error: string | null;
+  occurredAt: string;
+}
+
+/** Restart/missed-event fallback derived from the daemon's durable lifecycle
+ * and Electron's encrypted grant registry. */
+export interface DesktopSupervisorRetirementStatus {
+  entryId: string;
+  daemonGeneration: number;
+  status: "pending" | "completed";
+}
+
 /** Revisioned, daemon-owned Inspector configuration. Provider never changes after creation. */
 export interface DesktopSupervisorAgentConfiguration {
   entryId: string;

@@ -8,6 +8,8 @@ import {
   agentInspectorTurnControlFenceMatches,
   agentInspectorActionStateForEntry,
   clearAgentInspectorActionStateIfMatching,
+  settleAgentInspectorRetirementCompletion,
+  settleAgentInspectorRetirementEvent,
   agentInspectorOverallState,
   projectAgentInspector,
   projectAgentInspectorTurnControl,
@@ -980,6 +982,56 @@ test("switching agents hides the previous action and fences its late completion"
     roomIdentifier: "focus_1",
     inspectorRequestVersion: 4,
   }, "focus_1", 5), false);
+});
+
+test("retirement completion event settles only its exact accepted action", () => {
+  const pending: AgentInspectorActionState = {
+    operationId: "operation_retire_1",
+    entryId: "supervised_a",
+    kind: "retire_agent",
+    status: "running",
+    message: "Retirement accepted. Finishing credential cleanup…",
+    daemonGeneration: 12,
+  };
+  const event = {
+    operationId: "operation_retire_1",
+    entryId: "supervised_a",
+    daemonGeneration: 12,
+    status: "completed" as const,
+    error: null,
+    occurredAt: "2026-08-15T00:00:00.000Z",
+  };
+  assert.deepEqual(settleAgentInspectorRetirementEvent(pending, event), {
+    ...pending,
+    status: "success",
+    message: "Agent retired. Its worktree is retained.",
+  });
+  assert.equal(settleAgentInspectorRetirementEvent(pending, { ...event, daemonGeneration: 13 }), pending);
+  assert.equal(settleAgentInspectorRetirementEvent(pending, { ...event, operationId: "operation_other" }), pending);
+});
+
+test("retirement failure and missed-event durable completion settle without a socket timeout", () => {
+  const pending: AgentInspectorActionState = {
+    operationId: "operation_retire_2",
+    entryId: "supervised_b",
+    kind: "retire_agent",
+    status: "running",
+    message: "Retiring this saved agent…",
+    daemonGeneration: 14,
+  };
+  assert.deepEqual(settleAgentInspectorRetirementEvent(pending, {
+    operationId: pending.operationId,
+    entryId: pending.entryId,
+    daemonGeneration: 14,
+    status: "failed",
+    error: "Credential revocation failed.",
+    occurredAt: "2026-08-15T00:00:00.000Z",
+  }), { ...pending, status: "error", message: "Credential revocation failed." });
+  assert.deepEqual(settleAgentInspectorRetirementCompletion(pending, {
+    operationId: pending.operationId,
+    entryId: pending.entryId,
+    daemonGeneration: 14,
+  }), { ...pending, status: "success", message: "Agent retired. Its worktree is retained." });
 });
 
 test("duplicate supervised names resolve to exact canonical agent mentions", () => {
