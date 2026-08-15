@@ -87,7 +87,10 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
       }
       options.firstRunStage.value = nextMcpInstallState.completed ? "github" : "welcome";
 
-      if (nextMcpInstallState.completed) {
+      // A signed-out desktop is an auth surface, not a public-room preview.
+      // Do not load any room/account payload until GitHub authorization has
+      // completed; useDesktopAuthFlow performs the first refresh after that.
+      if (nextMcpInstallState.completed && nextAuthStatus.authenticated) {
         await waitForInitialRefresh(
           options.refresh,
           options.initialBootstrapTimeoutMs ?? defaultInitialBootstrapTimeoutMs,
