@@ -941,11 +941,43 @@ export class SupervisorDaemonClient {
     return result === null ? null : mapRoomMove(result, input.entryId);
   }
 
-  async retireAgent(entryId: string, daemonGeneration: number): Promise<void> {
-    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1) throw new Error("Retire requires exact typed coordinates.");
+  async retireAgent(
+    entryId: string,
+    daemonGeneration: number,
+    revokedAgentSessionId: string | null = null,
+    grantRevokedWithoutWorkerSession = false,
+  ): Promise<{
+    outcome: "retired" | "invalid" | "revocation_required";
+    revocationKind?: "worker_session" | "grant_only";
+    agentSessionId?: string;
+    error?: string;
+  }> {
+    if (!nonEmptyString(entryId) || !Number.isSafeInteger(daemonGeneration) || daemonGeneration < 1
+      || !(revokedAgentSessionId === null || nonEmptyString(revokedAgentSessionId))
+      || (revokedAgentSessionId !== null && grantRevokedWithoutWorkerSession)
+      || typeof grantRevokedWithoutWorkerSession !== "boolean") throw new Error("Retire requires exact typed coordinates.");
     const status = await this.ensureRunning();
     if (!status.capabilities.agentLifecycle) throw new Error("This supervisor is too old for durable agent lifecycle operations; rebuild the desktop daemon.");
-    await this.request("supervisor.retire_agent", { entry_id: entryId, daemon_generation: daemonGeneration });
+    const result = await this.request<Record<string, unknown>>("supervisor.retire_agent", {
+      entry_id: entryId,
+      daemon_generation: daemonGeneration,
+      revoked_agent_session_id: revokedAgentSessionId,
+      grant_revoked_without_worker_session: grantRevokedWithoutWorkerSession,
+    });
+    if (result.outcome === "retired") return { outcome: "retired" };
+    if (result.outcome === "revocation_required") {
+      if (result.revocation_kind === "worker_session"
+        && typeof result.agent_session_id === "string" && result.agent_session_id.trim()) {
+        return { outcome: "revocation_required", revocationKind: "worker_session", agentSessionId: result.agent_session_id };
+      }
+      if (result.revocation_kind === "grant_only" && result.agent_session_id === undefined) {
+        return { outcome: "revocation_required", revocationKind: "grant_only" };
+      }
+    }
+    if (result.outcome === "invalid" && typeof result.error === "string" && result.error.trim()) {
+      return { outcome: "invalid", error: result.error };
+    }
+    throw new Error("Supervisor returned an invalid retirement result.");
   }
 
   async purgeAgent(

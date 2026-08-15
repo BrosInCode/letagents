@@ -198,6 +198,34 @@ test("unbind and a delayed explicit rejection retain the global watermark across
   } finally { await env.cleanup(); }
 });
 
+test("retirement removes live worker authority while preserving publication watermarks", async () => {
+  const env = await fixture(); try {
+    const store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    await store.beginSupervisedWorkerSessionMint({ agent_id: "agent_a", room_id: "room", agent_instance_id: "instance_a" });
+    await store.recordExactSupervisedWorkerSessionMint({ agent_id: "agent_a", room_id: "room", agent_instance_id: "instance_a", agent_session_id: "session_a" });
+    await store.recordSupervisedWorkerSession({
+      agent_id: "agent_a", room_id: "room", agent_session_id: "session_a",
+      execution_generation_id: "run_1", credential_ref: "credential_a", expires_at: null,
+    });
+    await store.bind(input());
+    const published = await store.publish("agent_a", 1, async () => ({ accepted: true }));
+
+    await store.retireSupervisedWorkerAuthority("agent_a", "session_a");
+    assert.equal(await store.get("agent_a"), null);
+    assert.equal(await store.supervisedWorkerSession("agent_a"), null);
+    assert.equal(await store.supervisedWorkerMintState("agent_a"), null);
+
+    await store.bind(input("agent_a", "run_2", "session_b"));
+    const resumed = await store.publish("agent_a", 1, async () => ({ accepted: true }));
+    assert.ok(resumed!.sequence > published!.sequence, "fresh resume cannot reuse the retired worker sequence");
+    await assert.rejects(
+      () => store.retireSupervisedWorkerAuthority("agent_a", "session_a"),
+      /changed before local cleanup/,
+    );
+    await store.close();
+  } finally { await env.cleanup(); }
+});
+
 test("v4 upgrade reconstructs a deleted binding watermark from both reservation journals", async () => {
   const env = await fixture(); try {
     const initial = new WorkerBindingStore(env.legacy, undefined, env.database);

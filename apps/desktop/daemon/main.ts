@@ -3130,11 +3130,93 @@ export class SupervisorDaemon {
     return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(updated) };
   }
 
-  /** Retire preserves the identity, durable receipts, and on-disk worktree. */
-  private async retireAgent(entryId: string, daemonGeneration: number) {
-    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Retire is fenced by a stale daemon generation.");
-    const entry = await this.setDesiredState(entryId, "stopped");
-    return { outcome: "retired", entry: this.entryWithDerivedLiveness(entry) };
+  /** Retire preserves identity/history/worktree, but revokes live room authority. */
+  private async retireAgent(
+    entryId: string,
+    daemonGeneration: number,
+    revokedAgentSessionId: string | null = null,
+    grantRevokedWithoutWorkerSession = false,
+  ) {
+    if (!entryId || daemonGeneration !== this.singleton.currentGeneration
+      || !(revokedAgentSessionId === null || Boolean(revokedAgentSessionId.trim()))
+      || (revokedAgentSessionId !== null && grantRevokedWithoutWorkerSession)) {
+      throw new Error("Retire is fenced by stale or invalid lifecycle coordinates.");
+    }
+    const release = this.beginLifecycleExclusion(entryId);
+    try {
+      const stoppedEntry = await this.setDesiredStateExclusive(entryId, "stopped");
+      if (!this.requiresHostGrant(stoppedEntry)) {
+        return { outcome: "retired" as const, entry: await this.entryWithDerivedLiveness(stoppedEntry) };
+      }
+      // The entry tick is also the mint/bind lane. Waiting for it here makes
+      // an in-flight worker-session mint settle before we choose the exact
+      // revocation coordinate, and prevents a late mint from recreating local
+      // authority after retirement cleanup.
+      return await this.serializeEntryTick(entryId, async () => {
+        let entry = await this.store.getEntry(entryId);
+        if (!entry || entry.desired_state !== "stopped") {
+          return { outcome: "invalid" as const, error: "Agent lifecycle changed before retirement cleanup." };
+        }
+
+        const [session, binding, mint] = await Promise.all([
+          this.workerBindings.supervisedWorkerSession(entryId),
+          this.workerBindings.get(entryId),
+          this.workerBindings.supervisedWorkerMintState(entryId),
+        ]);
+        const sessionIds = new Set<string>();
+        if (session?.agent_session_id) sessionIds.add(session.agent_session_id);
+        if (binding?.agent_session_id) sessionIds.add(binding.agent_session_id);
+        if (mint?.phase === "exact" && mint.agent_session_id) sessionIds.add(mint.agent_session_id);
+        if (sessionIds.size > 1) {
+          return { outcome: "invalid" as const, error: "Retirement found conflicting worker-session identities; no authority was removed." };
+        }
+        const exactSessionId = sessionIds.size === 1 ? [...sessionIds][0]! : null;
+
+        if (exactSessionId && revokedAgentSessionId !== exactSessionId) {
+          if (revokedAgentSessionId) {
+            return { outcome: "invalid" as const, error: "Retirement acknowledgement belongs to a different worker session." };
+          }
+          return {
+            outcome: "revocation_required" as const,
+            revocation_kind: "worker_session" as const,
+            agent_session_id: exactSessionId,
+          };
+        }
+        // Even a never-minted agent retains a live parent grant in Electron's
+        // encrypted registry. Retirement revokes that latent mint authority,
+        // not only grants whose worker-session POST outcome is uncertain.
+        if (!exactSessionId && !grantRevokedWithoutWorkerSession) {
+          return { outcome: "revocation_required" as const, revocation_kind: "grant_only" as const };
+        }
+        if (!exactSessionId && revokedAgentSessionId) {
+          return { outcome: "invalid" as const, error: "Retirement no longer has the acknowledged worker session." };
+        }
+
+        const current = await this.store.getEntry(entryId);
+        if (!current || current.desired_state !== "stopped"
+          || daemonGeneration !== this.singleton.currentGeneration) {
+          return { outcome: "invalid" as const, error: "Agent lifecycle changed before retirement cleanup." };
+        }
+        await this.supervisedDelivery?.stop(entryId).catch(() => undefined);
+        await this.workerBindings.retireSupervisedWorkerAuthority(entryId, exactSessionId);
+        this.liveBindingIdentities.delete(entryId);
+        this.pendingResumeBindings.delete(entryId);
+        this.cachedWorkerAuthorizations.delete(entryId);
+        this.hostGrants.delete(entryId);
+        entry = await this.updateManifestEntry(entryId, (latest) => ({
+          ...latest,
+          last_worker_binding: null,
+          workplace_liveness: {
+            state: "stale",
+            observed_at: new Date(this.nowMs()).toISOString(),
+            detail: "Retired agent has no active room worker session.",
+          },
+        }));
+        return { outcome: "retired" as const, entry: await this.entryWithDerivedLiveness(entry) };
+      });
+    } finally {
+      release();
+    }
   }
 
   /** Purge is intentionally stricter than retire and never removes a worktree. */
@@ -7284,9 +7366,13 @@ export class SupervisorDaemon {
     for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
     this.liveDisposers.delete(entryId);
     // Provider execution and room observation are separate authorities. Keep
-    // the exact worker binding polling so routed work is durably queued while
-    // convergence restores the native runtime.
-    void this.startSupervisedDelivery(entryId).catch(() => undefined);
+    // polling only while the durable lifecycle still wants a provider. A
+    // retired agent must not recreate delivery after its stop raced terminal
+    // observation and worker-session revocation.
+    const lifecycle = await this.store.getEntry(entryId);
+    if (lifecycle?.desired_state === "running") {
+      void this.startSupervisedDelivery(entryId).catch(() => undefined);
+    }
     await this.serializeEntryTick(entryId, async () => {
       const entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
       const successorHandle = this.liveHandles.get(entryId);
