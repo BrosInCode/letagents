@@ -169,7 +169,7 @@ test("loadFirstRunSetup lands incomplete setup on welcome after setup check", as
   assert.equal(state.authStatus.value?.authenticated, false);
 });
 
-test("loadFirstRunSetup refreshes completed setup even when GitHub is skipped", async () => {
+test("loadFirstRunSetup does not load room data while GitHub is signed out", async () => {
   let refreshCount = 0;
   const installState = mcpInstallStateFixture({ completed: true });
   const state = makeSetupState({
@@ -188,7 +188,7 @@ test("loadFirstRunSetup refreshes completed setup even when GitHub is skipped", 
 
   assert.equal(state.firstRunStage.value, "github");
   assert.equal(state.onboarding.showFirstRunGate.value, false);
-  assert.equal(refreshCount, 1);
+  assert.equal(refreshCount, 0);
 });
 
 test("initial splash remains visible until the first room refresh completes", async () => {
@@ -202,7 +202,7 @@ test("initial splash remains visible until the first room refresh completes", as
       getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }),
     },
     authBridge: {
-      getStatus: async () => authStatusFixture({ authenticated: false }),
+      getStatus: async () => authStatusFixture(),
     },
   });
 
@@ -227,7 +227,7 @@ test("initial splash yields when the first room refresh stalls", async () => {
       getMcpInstallState: async () => mcpInstallStateFixture({ completed: true }),
     },
     authBridge: {
-      getStatus: async () => authStatusFixture({ authenticated: false }),
+      getStatus: async () => authStatusFixture(),
     },
   });
 

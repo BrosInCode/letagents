@@ -279,6 +279,7 @@ function createHarness() {
   const currentRoomId = ref<string | null>(null);
   const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
   const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
+  const sessionGeneration = ref(0);
   const workers = ref<WorkerSnapshot[]>([]);
 
   const getSnapshotRequests: Array<string | null> = [];
@@ -299,6 +300,7 @@ function createHarness() {
     rootRoomSnapshot,
     selectedRoomIdentifier: computed(() => currentRoomId.value),
     selectedSnapshot,
+    sessionGeneration,
     workers,
   });
 

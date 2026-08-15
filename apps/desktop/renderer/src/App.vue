@@ -38,6 +38,21 @@
   </main>
 
   <main
+    v-else-if="showSignedOutGate"
+    class="desktop-onboarding-shell desktop-signed-out-shell"
+    data-testid="desktop-signed-out-gate"
+  >
+    <DesktopSignedOutView
+      :auth-status="authStatus"
+      :busy="authBusy || loading"
+      :feedback="authFeedback"
+      @start-auth="startSignedOutAuthFlow"
+      @open-verification="openVerification"
+      @poll-auth="pollAuthFlow"
+    />
+  </main>
+
+  <main
     v-else
     class="desktop-shell"
     :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
@@ -377,6 +392,7 @@ import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModa
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
+import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboarding";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
@@ -460,6 +476,7 @@ const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
+const sessionGeneration = ref(0);
 const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
@@ -782,7 +799,7 @@ function setSidebarWidth(value: number): void {
 }
 
 async function refreshSidebarRoomMetadata(): Promise<void> {
-  if (showFirstRunGate.value || sidebarMetadataRefreshInFlight) return;
+  if (showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefreshInFlight) return;
   sidebarMetadataRefreshInFlight = true;
   try {
     await refreshAccountRooms().catch(() => undefined);
@@ -793,13 +810,16 @@ async function refreshSidebarRoomMetadata(): Promise<void> {
 }
 
 async function refreshActiveRepoStatus(): Promise<void> {
-  if (showFirstRunGate.value || repoStatusRefreshInFlight) return;
+  if (showFirstRunGate.value || !authStatus.value?.authenticated || repoStatusRefreshInFlight) return;
   const rootPath = activeProjectRootPath();
   if (!rootPath) return;
   repoStatusRefreshInFlight = true;
+  const generation = sessionGeneration.value;
   try {
     const nextRepoStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
-    if (nextRepoStatus) repoStatus.value = nextRepoStatus;
+    if (generation === sessionGeneration.value && authStatus.value?.authenticated && nextRepoStatus) {
+      repoStatus.value = nextRepoStatus;
+    }
   } finally {
     repoStatusRefreshInFlight = false;
   }
@@ -829,10 +849,14 @@ function activeProjectRootPath(): string | null {
 
 async function refreshProjectBindings(): Promise<void> {
   if (!desktopIpc.repos?.listProjectBindings) return;
-  projectBindings.value = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
+  const generation = sessionGeneration.value;
+  const nextBindings = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
+  if (generation !== sessionGeneration.value) return;
+  projectBindings.value = nextBindings;
 }
 
 async function initializeProjectBindings(): Promise<void> {
+  const generation = sessionGeneration.value;
   if (!desktopIpc.repos?.migrateProjectBindings) {
     await refreshProjectBindings();
     return;
@@ -850,6 +874,7 @@ async function initializeProjectBindings(): Promise<void> {
   ];
   try {
     const migration = await desktopIpc.repos.migrateProjectBindings(candidates);
+    if (generation !== sessionGeneration.value) return;
     projectBindings.value = migration.bindings;
     const retryBindings = Object.fromEntries(
       migration.retryLegacyKeys.flatMap((key) => {
@@ -866,6 +891,7 @@ async function initializeProjectBindings(): Promise<void> {
       window.localStorage.removeItem(legacyRepositoryRootBindingsStorageKey);
     }
   } catch {
+    if (generation !== sessionGeneration.value) return;
     await refreshProjectBindings();
   }
 }
@@ -892,6 +918,7 @@ function handleRepoStatusChanged(nextStatus: RepoStatus): void {
 }
 
 function refreshForegroundData(): void {
+  if (!authStatus.value?.authenticated || authSessionLocked.value) return;
   // The main-process Git watcher retains invalidations while hidden and drains
   // them on BrowserWindow focus/show. Avoid racing it with a second full status
   // reconstruction from the renderer.
@@ -915,9 +942,15 @@ function openRentalRequestInbox(): void {
 }
 
 async function refreshRentalRequestCount(): Promise<void> {
+  if (!authStatus.value?.authenticated || authSessionLocked.value) {
+    rentalRequestCount.value = 0;
+    return;
+  }
   if (!desktopIpc.rental?.getProviderDashboard) return;
+  const generation = sessionGeneration.value;
   try {
     const dashboard = await loadRentalProviderDashboard();
+    if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
     rentalRequestCount.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests.length : 0;
   } catch {
     rentalRequestCount.value = 0;
@@ -982,6 +1015,7 @@ function syncAppIdleAttribute(): void {
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
+  const generation = sessionGeneration.value;
   const roomIdentifiers = sidebarRoomIdentifiers();
   if (!roomIdentifiers.length) {
     sidebarLatestMessages.value = {};
@@ -1013,6 +1047,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
     }
   }
 
+  if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
   sidebarLatestMessages.value = nextLatestMessages;
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();
@@ -1246,6 +1281,7 @@ const {
   rootRoomSnapshot,
   selectedRoomIdentifier,
   selectedSnapshot,
+  sessionGeneration,
   workers,
 });
 
@@ -1255,6 +1291,7 @@ const {
   handleRefreshRoom,
   handleRoomRenamed,
   handleRoomStreamEvent,
+  invalidateSession,
   refresh,
   refreshAccountRooms,
   refreshSelectedSnapshot,
@@ -1278,6 +1315,7 @@ const {
   resolveSelectedRoomIdentifier,
   rootRoomSnapshot,
   scheduleLiveMetadataRefresh,
+  sessionGeneration,
   selectedMcpTargetIds,
   selectedRootRoomIdentifier,
   selectedSnapshot,
@@ -1297,6 +1335,7 @@ const authSnapshotPending = computed(() =>
 const {
   authBusy,
   authFeedback,
+  authSessionLocked,
   clearAuthPollTimer,
   openVerification,
   pollAuthFlow,
@@ -1311,8 +1350,34 @@ const {
     firstRunStage.value = "room";
   },
   onAuthorized: () => refresh(),
-  onSignedOut: () => refresh(),
+  onSigningOut: clearDesktopSessionState,
+  onSignedOut: async () => undefined,
 });
+
+const showSignedOutGate = computed(() => (
+  authSessionLocked.value || !authStatus.value?.authenticated
+));
+
+function startSignedOutAuthFlow(): Promise<void> {
+  return startAuthFlow(null);
+}
+
+function clearDesktopSessionState(): void {
+  invalidateSession();
+  clearLiveMetadataRefreshTimer();
+  clearLiveMetadataRefreshInterval();
+  rootRoomSnapshot.value = null;
+  selectedSnapshot.value = null;
+  workers.value = [];
+  accountRooms.value = [];
+  settingsAccountRooms.value = [];
+  sidebarLatestMessages.value = {};
+  rentalRequestCount.value = 0;
+  repoStatus.value = null;
+  authDialogOpen.value = false;
+  void syncSelectedRoomStream(null).catch(() => undefined);
+  void restartRepoStatusWatch(null);
+}
 
 async function openAccountAuthFlow(): Promise<void> {
   authDialogOpen.value = true;
