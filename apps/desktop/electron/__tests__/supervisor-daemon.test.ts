@@ -258,6 +258,7 @@ async function startWireDaemon(
   manifestListDelayMs = 0,
   runtimeEnvironmentFingerprint?: string,
   prepareHandoffResponseDelayMs = 0,
+  retireResponseDelayMs = 0,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
@@ -327,6 +328,7 @@ async function startWireDaemon(
       } else if (request.method === "supervisor.update_agent_configuration") {
         result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
       } else if (request.method === "supervisor.retire_agent") {
+        responseDelayMs = retireResponseDelayMs;
         result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
           ? { outcome: "retired" }
           : request.params!.entry_id === "agent_grant_only"
@@ -695,6 +697,42 @@ test("retirement RPC preserves exact worker-session and uncertain-mint grant rev
     ]);
     await assert.rejects(() => client.retireAgent("agent_exact", 40, "session_exact", true), /exact typed coordinates/);
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("retirement completion is not bound to the three-second control-request deadline", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    40,
+    undefined,
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    true,
+    0,
+    undefined,
+    0,
+    25,
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      requestTimeoutMs: 5,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    assert.deepEqual(await client.retireAgent("agent_exact", 40), {
+      outcome: "revocation_required", revocationKind: "worker_session", agentSessionId: "session_exact",
+    });
+  } finally {
+    await closeServer(wire.server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
 });
 
 test("purge RPC preserves exact worker-session and grant-only acknowledgement modes", async () => {
