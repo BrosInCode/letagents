@@ -27,5 +27,7 @@ test("signed-out surface owns the complete GitHub device flow without room chrom
   assert.match(signedOutSource, /data-testid="signed-out-device-code"/);
   assert.match(signedOutSource, /data-testid="signed-out-open-github"/);
   assert.match(signedOutSource, /data-testid="signed-out-check-now"/);
+  assert.match(signedOutSource, /aria-live="polite"/);
+  assert.match(signedOutSource, /GitHub device code copied/);
   assert.doesNotMatch(signedOutSource, /DesktopSidebar|DesktopRoomShell/);
 });

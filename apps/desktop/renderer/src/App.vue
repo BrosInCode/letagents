@@ -476,6 +476,7 @@ const workers = ref<WorkerSnapshot[]>([]);
 const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
 const authStatus = ref<DesktopAuthStatus | null>(null);
+const sessionGeneration = ref(0);
 const authDialogOpen = ref(false);
 const selectedRootRoomStorageKey = "letagents-desktop:selected-root-room";
 const activeEntryStorageKey = "letagents-desktop:active-entry";
@@ -813,9 +814,12 @@ async function refreshActiveRepoStatus(): Promise<void> {
   const rootPath = activeProjectRootPath();
   if (!rootPath) return;
   repoStatusRefreshInFlight = true;
+  const generation = sessionGeneration.value;
   try {
     const nextRepoStatus = await desktopIpc.repos.getStatus(rootPath).catch(() => null);
-    if (nextRepoStatus) repoStatus.value = nextRepoStatus;
+    if (generation === sessionGeneration.value && authStatus.value?.authenticated && nextRepoStatus) {
+      repoStatus.value = nextRepoStatus;
+    }
   } finally {
     repoStatusRefreshInFlight = false;
   }
@@ -845,10 +849,14 @@ function activeProjectRootPath(): string | null {
 
 async function refreshProjectBindings(): Promise<void> {
   if (!desktopIpc.repos?.listProjectBindings) return;
-  projectBindings.value = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
+  const generation = sessionGeneration.value;
+  const nextBindings = await desktopIpc.repos.listProjectBindings().catch(() => projectBindings.value);
+  if (generation !== sessionGeneration.value) return;
+  projectBindings.value = nextBindings;
 }
 
 async function initializeProjectBindings(): Promise<void> {
+  const generation = sessionGeneration.value;
   if (!desktopIpc.repos?.migrateProjectBindings) {
     await refreshProjectBindings();
     return;
@@ -866,6 +874,7 @@ async function initializeProjectBindings(): Promise<void> {
   ];
   try {
     const migration = await desktopIpc.repos.migrateProjectBindings(candidates);
+    if (generation !== sessionGeneration.value) return;
     projectBindings.value = migration.bindings;
     const retryBindings = Object.fromEntries(
       migration.retryLegacyKeys.flatMap((key) => {
@@ -882,6 +891,7 @@ async function initializeProjectBindings(): Promise<void> {
       window.localStorage.removeItem(legacyRepositoryRootBindingsStorageKey);
     }
   } catch {
+    if (generation !== sessionGeneration.value) return;
     await refreshProjectBindings();
   }
 }
@@ -937,8 +947,10 @@ async function refreshRentalRequestCount(): Promise<void> {
     return;
   }
   if (!desktopIpc.rental?.getProviderDashboard) return;
+  const generation = sessionGeneration.value;
   try {
     const dashboard = await loadRentalProviderDashboard();
+    if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
     rentalRequestCount.value = Array.isArray(dashboard.pendingRequests) ? dashboard.pendingRequests.length : 0;
   } catch {
     rentalRequestCount.value = 0;
@@ -1003,6 +1015,7 @@ function syncAppIdleAttribute(): void {
 }
 
 async function refreshSidebarLatestMessages(): Promise<void> {
+  const generation = sessionGeneration.value;
   const roomIdentifiers = sidebarRoomIdentifiers();
   if (!roomIdentifiers.length) {
     sidebarLatestMessages.value = {};
@@ -1034,6 +1047,7 @@ async function refreshSidebarLatestMessages(): Promise<void> {
     }
   }
 
+  if (generation !== sessionGeneration.value || !authStatus.value?.authenticated) return;
   sidebarLatestMessages.value = nextLatestMessages;
   seedReadMarkersForKnownRooms();
   markActiveRoomRead();
@@ -1267,6 +1281,7 @@ const {
   rootRoomSnapshot,
   selectedRoomIdentifier,
   selectedSnapshot,
+  sessionGeneration,
   workers,
 });
 
@@ -1276,6 +1291,7 @@ const {
   handleRefreshRoom,
   handleRoomRenamed,
   handleRoomStreamEvent,
+  invalidateSession,
   refresh,
   refreshAccountRooms,
   refreshSelectedSnapshot,
@@ -1299,6 +1315,7 @@ const {
   resolveSelectedRoomIdentifier,
   rootRoomSnapshot,
   scheduleLiveMetadataRefresh,
+  sessionGeneration,
   selectedMcpTargetIds,
   selectedRootRoomIdentifier,
   selectedSnapshot,
@@ -1346,9 +1363,9 @@ function startSignedOutAuthFlow(): Promise<void> {
 }
 
 function clearDesktopSessionState(): void {
+  invalidateSession();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();
-  clearSelectedSnapshotCache();
   rootRoomSnapshot.value = null;
   selectedSnapshot.value = null;
   workers.value = [];

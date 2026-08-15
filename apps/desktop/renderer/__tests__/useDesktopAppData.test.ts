@@ -1121,13 +1121,14 @@ function createHarness(options: {
   nextSelectedSnapshot: Promise<DesktopRoomSnapshot>;
   nextStreamReady: Promise<void>;
   repairStreamDeliveryAvailable: boolean;
-  rootRoomSnapshot: Ref<DesktopRoomSnapshot>;
+  rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
+  sessionGeneration: Ref<number>;
   settingsAccountRooms: Ref<DesktopAccountRoomEntry[]>;
   state: ReturnType<typeof useDesktopAppData>;
   windowBridge: object;
 } {
-  const rootRoomSnapshot = ref(roomSnapshot("room_parent", {
+  const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(roomSnapshot("room_parent", {
     focusRooms: [
       focusRoomInfo("focus_a", "Focus A"),
       focusRoomInfo("focus_b", "Focus B"),
@@ -1137,6 +1138,7 @@ function createHarness(options: {
   const activeEntry = ref<SidebarEntry>(focusEntry("focus_a", "Focus A"));
   const accountRooms = ref<DesktopAccountRoomEntry[]>([]);
   const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
+  const sessionGeneration = ref(0);
   const getSnapshotRequests: Array<string | null> = [];
   const deliveryRepairs: Array<{ roomIdentifier: string; repair: DesktopRoomDeliveryRepair }> = [];
   const getArtifactsRequests: Array<string> = [];
@@ -1173,6 +1175,7 @@ function createHarness(options: {
     scheduleLiveMetadataRefresh: (delayMs?: number) => {
       metadataRefreshCalls.push(delayMs);
     },
+    sessionGeneration,
     selectedMcpTargetIds: ref<DesktopMcpInstallTargetId[]>([]),
     selectedRootRoomIdentifier: ref("room_parent"),
     selectedSnapshot,
@@ -1235,6 +1238,7 @@ function createHarness(options: {
     },
     rootRoomSnapshot,
     selectedSnapshot,
+    sessionGeneration,
     settingsAccountRooms,
     state,
     windowBridge: {
@@ -1317,6 +1321,34 @@ async function withDesktopBridge<T>(
     }
   }
 }
+
+describe("useDesktopAppData session invalidation", () => {
+  it("drops a pre-sign-out root and account refresh that resolves after the session is cleared", async () => {
+    const harness = createHarness();
+    const appInfo = deferred<DesktopAppInfo>();
+    harness.nextAppInfo = appInfo.promise;
+    harness.nextAccountRooms = [accountRoomEntry("private_room")];
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      const refresh = harness.state.refresh();
+      await flushAsync();
+
+      harness.state.invalidateSession();
+      harness.rootRoomSnapshot.value = null;
+      harness.selectedSnapshot.value = null;
+      harness.accountRooms.value = [];
+      harness.settingsAccountRooms.value = [];
+
+      appInfo.resolve({} as DesktopAppInfo);
+      await refresh;
+    });
+
+    assert.equal(harness.rootRoomSnapshot.value, null);
+    assert.equal(harness.selectedSnapshot.value, null);
+    assert.deepEqual(harness.accountRooms.value, []);
+    assert.deepEqual(harness.settingsAccountRooms.value, []);
+  });
+});
 
 describe("useDesktopAppData refreshAccountRooms", () => {
   it("issues a single include-archived fetch and splits archived from visible rooms", async () => {

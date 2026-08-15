@@ -83,18 +83,12 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
       if (result.status === "authorized") {
         authFeedback.value = "Connected. Confirm the room and you are ready.";
         if (options.isFirstRunGate()) {
-          try {
-            await options.onFirstRunAuthorized();
-          } finally {
-            authSessionLocked.value = false;
-          }
+          await options.onFirstRunAuthorized();
+          authSessionLocked.value = false;
           return;
         }
-        try {
-          await options.onAuthorized();
-        } finally {
-          authSessionLocked.value = false;
-        }
+        await options.onAuthorized();
+        authSessionLocked.value = false;
         return;
       }
 
