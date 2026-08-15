@@ -1,5 +1,12 @@
 <template>
-  <div class="room-shell" :data-theme="theme">
+  <RoomAuthGate
+    v-if="roomAccessState !== 'authorized'"
+    :checking="roomAccessState === 'checking'"
+    :loading="auth.isSigningIn.value"
+    @signIn="handleSignIn"
+  />
+
+  <div v-else class="room-shell" :data-theme="theme">
     <!-- Drawer -->
     <RoomDrawer
       :open="drawerOpen"
@@ -151,8 +158,10 @@ import RoomRulesBoard from '@/components/room/RoomRulesBoard.vue'
 import ImageViewerModal from '@/components/room/ImageViewerModal.vue'
 import { messageThreadParentId } from '@/components/room/messageThreading'
 import RoomConnectionError from './room/RoomConnectionError.vue'
+import RoomAuthGate from './room/RoomAuthGate.vue'
 import RoomMobileNav from './room/RoomMobileNav.vue'
 import RoomTabPanels from './room/RoomTabPanels.vue'
+import { resolveRoomAccessState } from './room/roomAuth'
 import Composer from '@/components/room/Composer.vue'
 import { useFocusRoomNavigation } from './room/useFocusRoomNavigation'
 import { useRoomImages } from './room/useRoomImages'
@@ -209,6 +218,7 @@ const {
   shareFocusRoomResult,
   updateFocusRoomSettings,
   restoreSession,
+  leaveRoom,
   renameRoom,
   loadOlderMessages,
   loadActivityHistory,
@@ -222,6 +232,14 @@ const {
 } = useRoom()
 const auth = useAuth()
 const toast = useToast()
+const roomSessionValidated = ref(false)
+const roomAuthLifecycleReady = ref(false)
+
+const roomAccessState = computed(() => resolveRoomAccessState({
+  hasCheckedSession: roomSessionValidated.value && auth.hasCheckedSession.value,
+  isCheckingSession: auth.isCheckingSession.value,
+  isSignedIn: auth.isSignedIn.value,
+}))
 
 const drawerOpen = ref(false)
 const rulesBoardOpen = ref(false)
@@ -369,6 +387,14 @@ async function handleSignIn() {
 
 onMounted(async () => {
   await auth.checkSession()
+  roomSessionValidated.value = true
+
+  if (!auth.isSignedIn.value) {
+    leaveRoom()
+    roomAuthLifecycleReady.value = true
+    return
+  }
+
   const roomId = route.params.roomId as string
   if (roomId) {
     await joinRoom(roomId)
@@ -376,16 +402,42 @@ onMounted(async () => {
     await restoreSession()
   }
 
-  applyRouteTab(route.query.view)
+  if (auth.isSignedIn.value) {
+    applyRouteTab(route.query.view)
+  } else {
+    leaveRoom()
+  }
+  roomAuthLifecycleReady.value = true
 })
 
 watch(() => route.params.roomId, async (newId) => {
   selectedReply.value = null
+  if (!auth.isSignedIn.value) return
+
   if (newId) {
     await joinRoom(newId as string)
   }
 
   applyRouteTab(route.query.view)
+})
+
+watch(() => auth.isSignedIn.value, async (signedIn, wasSignedIn) => {
+  if (!roomAuthLifecycleReady.value || !auth.hasCheckedSession.value || signedIn === wasSignedIn) return
+
+  if (!signedIn) {
+    drawerOpen.value = false
+    rulesBoardOpen.value = false
+    selectedReply.value = null
+    leaveRoom()
+    return
+  }
+
+  const roomId = route.params.roomId as string
+  if (roomId) {
+    await joinRoom(roomId)
+  } else {
+    await restoreSession()
+  }
 })
 
 watch(activeTab, async (tab) => {
