@@ -37,7 +37,7 @@ export interface DaemonControlOperations {
   getInspectorRoomMove(input: RoomMoveIdentity): unknown;
   getCurrentInspectorRoomMove(input: { entryId: string; daemonGeneration: number }): unknown;
   recoverAgentRuntime(entryId: string, daemonGeneration: number): unknown;
-  retireAgent(entryId: string, daemonGeneration: number): unknown;
+  retireAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   purgeAgent(entryId: string, daemonGeneration: number, revokedAgentSessionId: string | null, grantRevokedWithoutWorkerSession: boolean): unknown;
   putManifestEntry(entry: DaemonManifestEntry): unknown;
   setDesiredState(id: string, desiredState: DesiredState): Promise<DaemonManifestEntry>;
@@ -339,9 +339,19 @@ export function createDaemonControlRequestHandler(
     if (request.method === "supervisor.retire_agent") {
       const params = paramsRecord(request.params);
       const error = "Retire requires exact typed coordinates.";
+      if (!(params.revoked_agent_session_id === undefined || params.revoked_agent_session_id === null
+        || (typeof params.revoked_agent_session_id === "string" && params.revoked_agent_session_id.trim()
+          && params.revoked_agent_session_id === params.revoked_agent_session_id.trim()))) throw new Error(error);
+      if (!(params.grant_revoked_without_worker_session === undefined || params.grant_revoked_without_worker_session === false
+        || params.grant_revoked_without_worker_session === true)
+        || (typeof params.revoked_agent_session_id === "string" && params.grant_revoked_without_worker_session === true)) {
+        throw new Error(error);
+      }
       return operations.retireAgent(
         requiredStringParam(params, "entry_id", error),
         positiveIntegerParam(params, "daemon_generation", error),
+        typeof params.revoked_agent_session_id === "string" ? params.revoked_agent_session_id : null,
+        params.grant_revoked_without_worker_session === true,
       );
     }
     if (request.method === "supervisor.purge_agent") {

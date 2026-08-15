@@ -13,6 +13,8 @@ import {
   readDesktopSupervisorGrantAgentKeyForEntry,
   readDesktopSupervisorGrantForAgent,
   replaceDesktopSupervisorGrantForAgent,
+  revokeDesktopSupervisorGrantForEntry,
+  revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
 } from "../main/supervisor-grant.js";
 import type { DesktopSupervisorManifestEntry } from "../ipc-types.js";
 
@@ -44,6 +46,10 @@ function storageOperations(): SupervisorGrantCoordinatorOperations {
     readEntryAgentKey: readDesktopSupervisorGrantAgentKeyForEntry,
     readGrant: async (agentKey) => readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }),
     replaceGrant: async (input) => replaceDesktopSupervisorGrantForAgent(input, { storage: keychain }),
+    revokeEntry: async (entryId, agentSessionId, options) =>
+      revokeDesktopSupervisorGrantForEntry(entryId, agentSessionId, { ...options, storage: keychain }),
+    revokeEntryWithoutWorkerSession: async (entryId, options) =>
+      revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, { ...options, storage: keychain }),
   };
 }
 
@@ -81,6 +87,12 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
       events.push(`bootstrap:${entryId}:${daemonGeneration}`);
       return "bootstrapped" as const;
     },
+    async retireAgent(id: string, generation: number, sessionId: string | null = null, grantOnly = false) {
+      events.push(`retire:${id}:${generation}:${sessionId ?? (grantOnly ? "grant" : "prepare")}`);
+      return sessionId || grantOnly
+        ? { outcome: "retired" as const }
+        : { outcome: "revocation_required" as const, revocationKind: "worker_session" as const, agentSessionId: "session_1" };
+    },
   };
   const operations: SupervisorGrantCoordinatorOperations = {
     async resolveIdentity(input) { events.push(`identity:${input.entryId}`); return `owner/${input.entryId}`; },
@@ -96,6 +108,8 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
       events.push(`replace:${input.lastInstalledDaemonGeneration ?? "none"}`);
       grants.set(input.agentKey, { metadata: input.metadata, token: input.token, entryId: input.entryId!, lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null });
     },
+    async revokeEntry(id, sessionId) { events.push(`revoke:${id}:${sessionId}`); },
+    async revokeEntryWithoutWorkerSession(id) { events.push(`revoke-grant:${id}`); },
     ...overrides,
   };
   const request = (async () => { throw new Error("unexpected request"); }) as never;
@@ -407,17 +421,157 @@ test("grant reconciliation follows daemon_inbox ownership instead of provider id
   assert.equal(h.events.some((event) => event.startsWith("bootstrap:")), true);
 });
 
-test("reconciliation admits a cursorless stopped entry without changing its lifecycle", async () => {
+test("reconciliation revokes a stopped entry instead of reinstalling ghost room authority", async () => {
   const h = harness();
   const stopped = { ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const, providerPid: null };
   h.grants.set("owner/supervised_launch_1234567", { metadata: metadata("owner/supervised_launch_1234567"), token: "secret_same", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 7 });
   const daemon = { ...h.daemon, async list() { h.events.push("list"); return [stopped]; } };
   const coordinator = new SupervisorGrantCoordinator(daemon as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", h.operations, async () => "room_1");
   await coordinator.reconcileDesiredRunning();
-  assert.deepEqual(h.events.filter((event) => event.startsWith("install:") || event.startsWith("bootstrap:") || event.startsWith("create:")), [
-    "install:7", "bootstrap:supervised_launch_1234567:7",
+  assert.deepEqual(h.events.filter((event) => event.startsWith("retire:") || event.startsWith("revoke:") || event.startsWith("install:") || event.startsWith("bootstrap:")), [
+    "retire:supervised_launch_1234567:7:prepare",
+    "revoke:supervised_launch_1234567:session_1",
+    "retire:supervised_launch_1234567:7:session_1",
   ]);
-  assert.equal(stopped.desiredState, "stopped", "cursor admission does not revive a stopped provider");
+  assert.equal(stopped.desiredState, "stopped", "retirement cleanup does not revive a stopped provider");
+});
+
+test("a stale startup cleanup cannot retire an entry while resume commits fresh authority", async () => {
+  const h = harness();
+  const stopped = { ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const, providerPid: null };
+  let current: DesktopSupervisorManifestEntry = stopped;
+  h.grants.set("owner/supervised_launch_1234567", {
+    metadata: metadata("owner/supervised_launch_1234567"),
+    token: "secret_same",
+    entryId: stopped.id,
+    lastInstalledDaemonGeneration: 7,
+  });
+  let releaseStartupList!: () => void;
+  let signalStartupList!: () => void;
+  const startupListEntered = new Promise<void>((resolve) => { signalStartupList = resolve; });
+  const startupListReleased = new Promise<void>((resolve) => { releaseStartupList = resolve; });
+  let releaseActivation!: () => void;
+  let signalActivation!: () => void;
+  const activationEntered = new Promise<void>((resolve) => { signalActivation = resolve; });
+  const activationReleased = new Promise<void>((resolve) => { releaseActivation = resolve; });
+  let firstList = true;
+  const daemon = {
+    ...h.daemon,
+    async list() {
+      if (firstList) {
+        firstList = false;
+        signalStartupList();
+        await startupListReleased;
+        return [stopped];
+      }
+      return [current];
+    },
+    async retireAgent() {
+      h.events.push("unexpected-retire");
+      return { outcome: "retired" as const };
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+  );
+  const startup = coordinator.reconcileDesiredRunning();
+  await startupListEntered;
+  const activation = coordinator.activateEntry(stopped, async () => {
+    signalActivation();
+    await activationReleased;
+    current = { ...stopped, desiredState: "running", observedState: "starting" };
+    return current;
+  });
+  await activationEntered;
+  releaseStartupList();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  releaseActivation();
+  assert.equal((await activation).desiredState, "running");
+  await startup;
+  assert.equal(current.desiredState, "running");
+  assert.equal(h.events.includes("unexpected-retire"), false);
+});
+
+test("retirement revokes a grant with no exact worker session before acknowledging local cleanup", async () => {
+  const h = harness();
+  const calls: string[] = [];
+  const daemon = {
+    ...h.daemon,
+    async retireAgent(id: string, generation: number, _sessionId: string | null = null, grantOnly = false) {
+      calls.push(`daemon:${id}:${generation}:${grantOnly}`);
+      return grantOnly
+        ? { outcome: "retired" as const }
+        : { outcome: "revocation_required" as const, revocationKind: "grant_only" as const };
+    },
+  };
+  const coordinator = new SupervisorGrantCoordinator(daemon as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", {
+    ...h.operations,
+    async revokeEntryWithoutWorkerSession(id) { calls.push(`revoke:${id}`); },
+  }, async () => "room_1");
+  await coordinator.retireEntry("supervised_launch_1234567", 7);
+  assert.deepEqual(calls, [
+    "daemon:supervised_launch_1234567:7:false",
+    "revoke:supervised_launch_1234567",
+    "daemon:supervised_launch_1234567:7:true",
+  ]);
+});
+
+test("exact retirement remains idempotent when restart reconciliation later observes no session", async () => {
+  await withRegistry(async () => {
+    const entryId = "supervised_retire_restart_1234567";
+    const agentKey = `owner/${entryId}`;
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "grant_retire_restart"),
+      token: "secret_retire_restart",
+      entryId,
+    }, { storage: keychain });
+    let exactRetired = false;
+    const daemonCalls: string[] = [];
+    const daemon = {
+      async retireAgent(_id: string, _generation: number, sessionId: string | null = null, grantOnly = false) {
+        daemonCalls.push(sessionId ?? (grantOnly ? "grant" : "prepare"));
+        if (!exactRetired) {
+          if (sessionId === "session_retire_restart") {
+            exactRetired = true;
+            return { outcome: "retired" as const };
+          }
+          return {
+            outcome: "revocation_required" as const,
+            revocationKind: "worker_session" as const,
+            agentSessionId: "session_retire_restart",
+          };
+        }
+        return grantOnly
+          ? { outcome: "retired" as const }
+          : { outcome: "revocation_required" as const, revocationKind: "grant_only" as const };
+      },
+    };
+    const requests: string[] = [];
+    const coordinator = new SupervisorGrantCoordinator(
+      daemon as never,
+      (async <T>(requestPath: string) => {
+        requests.push(requestPath);
+        return (requestPath.endsWith("/end")
+          ? { session_id: "session_retire_restart", ended_at: "2026-08-15T00:00:00.000Z" }
+          : {}) as T;
+      }) as never,
+      () => "host_1",
+      storageOperations(),
+      async () => "room_1",
+    );
+    await coordinator.retireEntry(entryId, 7);
+    await coordinator.retireEntry(entryId, 7);
+    assert.deepEqual(daemonCalls, ["prepare", "session_retire_restart", "prepare", "grant"]);
+    assert.deepEqual(requests, [
+      "/supervisor-host-grants/grant_retire_restart/worker-sessions/session_retire_restart/end",
+      "/supervisor-host-grants/grant_retire_restart",
+    ]);
+  });
 });
 
 test("Reconnect repairs only the exact credential binding and does not restart the provider", async () => {
@@ -625,6 +779,8 @@ test("daemon successor rotates then persists the replacement before exact-genera
     resolveIdentity: async () => key, provision: async () => { throw new Error("must not reprovision"); },
     readEntryAgentKey: async () => key, readGrant: async () => replacementHarness.grants.get(key)!,
     replaceGrant: async (input) => { replacementHarness.events.push(`replace:${input.lastInstalledDaemonGeneration ?? "none"}`); replacementHarness.grants.set(key, { metadata: input.metadata, token: input.token, entryId: input.entryId!, lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null }); },
+    revokeEntry: async () => { throw new Error("no stopped entries expected"); },
+    revokeEntryWithoutWorkerSession: async () => { throw new Error("no stopped entries expected"); },
   }, async () => "room_1");
   await c.reconcileDesiredRunning();
   assert.deepEqual(replacementHarness.events.filter((event) => event.startsWith("replace") || event.startsWith("install")), ["replace:none", "install:7", "replace:7"]);
@@ -670,6 +826,8 @@ test("canonical room reuse avoids alias-triggered reprovision while independent 
     resolveIdentity: async ({ entryId }) => `owner/${entryId}`,
     provision: async () => { throw new Error("must reuse"); }, readEntryAgentKey: async (id) => `owner/${id}`,
     readGrant: async (key) => grants.get(key) ?? null, replaceGrant: async () => {},
+    revokeEntry: async () => { throw new Error("no stopped entries expected"); },
+    revokeEntryWithoutWorkerSession: async () => { throw new Error("no stopped entries expected"); },
   }, async () => "room_canonical");
   await independent.reconcileDesiredRunning();
   assert.deepEqual(installs.sort(), ["supervised_launch_1234567", "supervised_second_1234567"]);

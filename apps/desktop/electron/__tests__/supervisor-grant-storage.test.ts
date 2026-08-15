@@ -362,6 +362,40 @@ test("an acknowledged already-revoked response records a durable idempotency rec
   });
 });
 
+test("retirement falls back to owner cascade when the saved worker grant is stale", async () => {
+  await withRegistry(async (path) => {
+    const agentKey = "owner/agent-stale-retirement";
+    const entryId = "entry-stale-retirement";
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: metadata(agentKey, "stale-retirement"),
+      token: "lashg_stale_retirement",
+      entryId,
+    }, { storage: keychain });
+    const calls: string[] = [];
+    await revokeDesktopSupervisorGrantForEntry(entryId, "session-stale-retirement", {
+      storage: keychain,
+      apiFetch: (async <T>(requestPath: string) => {
+        calls.push(requestPath);
+        if (requestPath.endsWith("/end")) {
+          throw new DesktopApiError(409, { error: "Supervisor grant fence is stale." });
+        }
+        return {} as T;
+      }) as never,
+    });
+    assert.deepEqual(calls, [
+      "/supervisor-host-grants/grant_stale-retirement/worker-sessions/session-stale-retirement/end",
+      "/supervisor-host-grants/grant_stale-retirement",
+    ]);
+    assert.equal(await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }), null);
+    const registry = JSON.parse(await readFile(path, "utf8")) as {
+      purgeRevocationReceipts: Record<string, { agentSessionId: string; sessionEndedAt: string; acknowledgedAt: string }>;
+    };
+    assert.equal(registry.purgeRevocationReceipts[entryId]?.agentSessionId, "session-stale-retirement");
+    assert.ok(Number.isFinite(Date.parse(registry.purgeRevocationReceipts[entryId]!.sessionEndedAt)));
+  });
+});
+
 test("a restart retry consumes the durable revoke receipt without repeating DELETE", async () => {
   await withRegistry(async (path) => {
     const agentKey = "owner/agent-restart-retry";
@@ -389,6 +423,13 @@ test("a restart retry consumes the durable revoke receipt without repeating DELE
     await revokeDesktopSupervisorGrantForEntry(entryId, "session-restart-retry", {
       storage: keychain,
       apiFetch: (async () => { requests += 1; throw new Error("DELETE must not repeat after a durable acknowledgement"); }) as never,
+    });
+    // After daemon retirement removes the exact local session, both startup
+    // reconciliation and a later explicit purge request grant-only cleanup.
+    // The stronger exact receipt must satisfy that retry without network I/O.
+    await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
+      storage: keychain,
+      apiFetch: (async () => { requests += 1; throw new Error("retire-to-purge must consume the exact receipt"); }) as never,
     });
     assert.equal(requests, 2);
   });
