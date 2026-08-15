@@ -895,6 +895,29 @@ export async function readDesktopSupervisorGrantAgentKeysForEntries(
   return result;
 }
 
+/**
+ * Return durable proof that this exact entry's remote host authority was
+ * revoked. Missing registry state is deliberately not proof: only the
+ * persisted DELETE acknowledgement, with no replacement authority beside it,
+ * can close a daemon-inbox retirement after a renderer missed its event.
+ */
+export async function readDesktopSupervisorGrantRevocationAttestationForEntry(
+  entryId: string,
+): Promise<"exact" | "none" | null> {
+  const normalizedEntryId = entryId.trim();
+  if (!normalizedEntryId) return null;
+  const registry = await readRegistry();
+  if (!registry) return null;
+  const receipt = registry.purgeRevocationReceipts[normalizedEntryId];
+  if (!receipt) return null;
+  const hasReplacementAuthority = Boolean(
+    registry.entryAgentKeys[normalizedEntryId]
+    || registry.grants[receipt.agentKey]
+    || Object.values(registry.grants).some((grant) => grant.entryId?.trim() === normalizedEntryId),
+  );
+  return hasReplacementAuthority ? null : receipt.workerSessionAttestation;
+}
+
 /** Owner-authenticated purge fence: exact worker end, then grant revoke, then one durable receipt. */
 export async function revokeDesktopSupervisorGrantForEntry(
   entryId: string,

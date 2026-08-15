@@ -15,6 +15,7 @@ import {
   getDesktopSupervisorGrantStorageStatus,
   provisionDesktopSupervisorGrant,
   readDesktopSupervisorGrantForAgent,
+  readDesktopSupervisorGrantRevocationAttestationForEntry,
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntry,
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
@@ -193,12 +194,37 @@ test("never-minted purge revokes only the parent grant and persists an idempoten
     assert.equal(registry.purgeRevocationReceipts[entryId]?.workerSessionAttestation, "none");
     assert.equal(registry.purgeRevocationReceipts[entryId]?.agentSessionId, null);
     assert.equal(registry.purgeRevocationReceipts[entryId]?.sessionEndedAt, null);
+    assert.equal(await readDesktopSupervisorGrantRevocationAttestationForEntry(entryId), "none");
 
     await revokeDesktopSupervisorGrantForEntryWithoutWorkerSession(entryId, {
       storage: keychain,
       apiFetch: (async () => { throw new Error("DELETE must not repeat after the durable receipt"); }) as never,
     });
     assert.deepEqual(calls, ["/supervisor-host-grants/grant_never-minted"]);
+
+    await provisionDesktopSupervisorGrant({
+      hostId: "desktop_host", installationId: "legacy-replacement", allowedRoomIds: ["room-replacement"],
+      allowedAgentKeys: [agentKey],
+    }, {
+      storage: keychain,
+      apiFetch: (async <T>(_requestPath: string, init?: { body?: string }) => {
+        const body = JSON.parse(init?.body ?? "{}") as Record<string, unknown>;
+        return {
+          grant_id: "grant_legacy_replacement", host_id: body.host_id, installation_id: body.installation_id,
+          allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+          current_generation: 2, expires_at: new Date(Date.now() + 60_000).toISOString(),
+          supervisor_grant: "lashg_legacy_replacement",
+        } as T;
+      }) as never,
+    });
+    assert.equal(await readDesktopSupervisorGrantRevocationAttestationForEntry(entryId), null,
+      "a same-agent legacy grant without entryId is replacement authority beside the stale receipt");
+  });
+});
+
+test("missing grant recovery state never impersonates a completed grant-only retirement", async () => {
+  await withRegistry(async () => {
+    assert.equal(await readDesktopSupervisorGrantRevocationAttestationForEntry("entry-missing"), null);
   });
 });
 
