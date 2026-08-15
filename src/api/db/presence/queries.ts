@@ -19,32 +19,66 @@ export async function getMergedRoomAgentPresenceRecords(
     statusLimit?: number;
     deliveryLimit?: number;
     excludeSupervisorManaged?: boolean;
+    excludeEndedSessions?: boolean;
   }
 ): Promise<RoomAgentPresence[]> {
-  const statusScope = options?.excludeSupervisorManaged
-    ? and(
-      eq(room_agent_presence.room_id, roomId),
-      sql`NOT EXISTS (
+  const statusScope = and(
+    eq(room_agent_presence.room_id, roomId),
+    options?.excludeEndedSessions
+      ? sql`(
+        ${room_agent_presence.agent_session_id} IS NULL
+        OR EXISTS (
+          SELECT 1 FROM ${room_agent_sessions}
+          WHERE ${room_agent_sessions.room_id} = ${room_agent_presence.room_id}
+            AND ${room_agent_sessions.session_id} = ${room_agent_presence.agent_session_id}
+            AND ${room_agent_sessions.ended_at} IS NULL
+        )
+      )`
+      : undefined,
+    options?.excludeSupervisorManaged
+      ? sql`NOT EXISTS (
         SELECT 1 FROM ${room_agent_sessions}
         WHERE ${room_agent_sessions.room_id} = ${room_agent_presence.room_id}
           AND ${room_agent_sessions.session_id} = ${room_agent_presence.agent_session_id}
           AND ${room_agent_sessions.session_kind} = 'worker'
           AND ${room_agent_sessions.supervisor_grant_id} IS NOT NULL
       )`
-    )
-    : eq(room_agent_presence.room_id, roomId);
-  const deliveryScope = options?.excludeSupervisorManaged
-    ? and(
-      eq(room_agent_delivery_sessions.room_id, roomId),
-      sql`NOT EXISTS (
+      : undefined,
+  );
+  const deliveryScope = and(
+    eq(room_agent_delivery_sessions.room_id, roomId),
+    options?.excludeEndedSessions
+      ? sql`(
+        ${room_agent_delivery_sessions.agent_session_id} IS NULL
+        OR EXISTS (
+          SELECT 1 FROM ${room_agent_sessions}
+          WHERE ${room_agent_sessions.room_id} = ${room_agent_delivery_sessions.room_id}
+            AND ${room_agent_sessions.session_id} = ${room_agent_delivery_sessions.agent_session_id}
+            AND ${room_agent_sessions.ended_at} IS NULL
+        )
+      )`
+      : undefined,
+    options?.excludeSupervisorManaged
+      ? sql`NOT EXISTS (
         SELECT 1 FROM ${room_agent_sessions}
         WHERE ${room_agent_sessions.room_id} = ${room_agent_delivery_sessions.room_id}
           AND ${room_agent_sessions.session_id} = ${room_agent_delivery_sessions.agent_session_id}
           AND ${room_agent_sessions.session_kind} = 'worker'
           AND ${room_agent_sessions.supervisor_grant_id} IS NOT NULL
       )`
-    )
-    : eq(room_agent_delivery_sessions.room_id, roomId);
+      : undefined,
+  );
+  const livenessScope = and(
+    eq(room_agent_liveness_observations.room_id, roomId),
+    options?.excludeEndedSessions
+      ? sql`EXISTS (
+        SELECT 1 FROM ${room_agent_sessions}
+        WHERE ${room_agent_sessions.room_id} = ${room_agent_liveness_observations.room_id}
+          AND ${room_agent_sessions.session_id} = ${room_agent_liveness_observations.agent_session_id}
+          AND ${room_agent_sessions.ended_at} IS NULL
+      )`
+      : undefined,
+  );
   const statusQuery = db
     .select()
     .from(room_agent_presence)
@@ -65,7 +99,7 @@ export async function getMergedRoomAgentPresenceRecords(
   const livenessQuery = db
     .select()
     .from(room_agent_liveness_observations)
-    .where(eq(room_agent_liveness_observations.room_id, roomId))
+    .where(livenessScope)
     .orderBy(desc(room_agent_liveness_observations.last_observed_at))
     .limit(Math.max(options?.deliveryLimit ?? options?.statusLimit ?? 50, 200));
 
@@ -98,6 +132,7 @@ export async function getRoomAgentPresence(
       statusLimit: limit,
       deliveryLimit: limit,
       excludeSupervisorManaged: options?.excludeSupervisorManaged,
+      excludeEndedSessions: true,
     }),
     getRoomLiveAgentSuppressionActorLabels(roomId),
   ]);
@@ -111,6 +146,11 @@ export async function getRoomAgentPresence(
   });
 }
 
-export async function getRoomAgentPresenceSnapshot(roomId: string): Promise<RoomAgentPresence[]> {
-  return getMergedRoomAgentPresenceRecords(roomId);
+export async function getRoomAgentPresenceSnapshot(
+  roomId: string,
+  options?: { includeEndedSessions?: boolean },
+): Promise<RoomAgentPresence[]> {
+  return getMergedRoomAgentPresenceRecords(roomId, {
+    excludeEndedSessions: !options?.includeEndedSessions,
+  });
 }
