@@ -38,6 +38,21 @@
   </main>
 
   <main
+    v-else-if="showSignedOutGate"
+    class="desktop-onboarding-shell desktop-signed-out-shell"
+    data-testid="desktop-signed-out-gate"
+  >
+    <DesktopSignedOutView
+      :auth-status="authStatus"
+      :busy="authBusy || loading"
+      :feedback="authFeedback"
+      @start-auth="startSignedOutAuthFlow"
+      @open-verification="openVerification"
+      @poll-auth="pollAuthFlow"
+    />
+  </main>
+
+  <main
     v-else
     class="desktop-shell"
     :data-sidebar-mode="isSettingsSurface ? 'hidden' : sidebarMode"
@@ -377,6 +392,7 @@ import DesktopNewRoomModal from "./components/desktop/content/DesktopNewRoomModa
 import DesktopDeviceAuthDialog from "./components/desktop/content/DesktopDeviceAuthDialog.vue";
 import DesktopAppAgent from "./components/desktop/app-agent/DesktopAppAgent.vue";
 import AuthOnboardingView from "./components/desktop/content/AuthOnboardingView.vue";
+import DesktopSignedOutView from "./components/desktop/content/DesktopSignedOutView.vue";
 import { isAuthSnapshotPending } from "./components/desktop/content/auth-onboarding";
 import SettingsView from "./components/desktop/content/SettingsView.vue";
 import FirstRunOnboardingView from "./components/desktop/setup/FirstRunOnboardingView.vue";
@@ -782,7 +798,7 @@ function setSidebarWidth(value: number): void {
 }
 
 async function refreshSidebarRoomMetadata(): Promise<void> {
-  if (showFirstRunGate.value || sidebarMetadataRefreshInFlight) return;
+  if (showFirstRunGate.value || !authStatus.value?.authenticated || sidebarMetadataRefreshInFlight) return;
   sidebarMetadataRefreshInFlight = true;
   try {
     await refreshAccountRooms().catch(() => undefined);
@@ -793,7 +809,7 @@ async function refreshSidebarRoomMetadata(): Promise<void> {
 }
 
 async function refreshActiveRepoStatus(): Promise<void> {
-  if (showFirstRunGate.value || repoStatusRefreshInFlight) return;
+  if (showFirstRunGate.value || !authStatus.value?.authenticated || repoStatusRefreshInFlight) return;
   const rootPath = activeProjectRootPath();
   if (!rootPath) return;
   repoStatusRefreshInFlight = true;
@@ -892,6 +908,7 @@ function handleRepoStatusChanged(nextStatus: RepoStatus): void {
 }
 
 function refreshForegroundData(): void {
+  if (!authStatus.value?.authenticated || authSessionLocked.value) return;
   // The main-process Git watcher retains invalidations while hidden and drains
   // them on BrowserWindow focus/show. Avoid racing it with a second full status
   // reconstruction from the renderer.
@@ -915,6 +932,10 @@ function openRentalRequestInbox(): void {
 }
 
 async function refreshRentalRequestCount(): Promise<void> {
+  if (!authStatus.value?.authenticated || authSessionLocked.value) {
+    rentalRequestCount.value = 0;
+    return;
+  }
   if (!desktopIpc.rental?.getProviderDashboard) return;
   try {
     const dashboard = await loadRentalProviderDashboard();
@@ -1297,6 +1318,7 @@ const authSnapshotPending = computed(() =>
 const {
   authBusy,
   authFeedback,
+  authSessionLocked,
   clearAuthPollTimer,
   openVerification,
   pollAuthFlow,
@@ -1311,8 +1333,34 @@ const {
     firstRunStage.value = "room";
   },
   onAuthorized: () => refresh(),
-  onSignedOut: () => refresh(),
+  onSigningOut: clearDesktopSessionState,
+  onSignedOut: async () => undefined,
 });
+
+const showSignedOutGate = computed(() => (
+  authSessionLocked.value || !authStatus.value?.authenticated
+));
+
+function startSignedOutAuthFlow(): Promise<void> {
+  return startAuthFlow(null);
+}
+
+function clearDesktopSessionState(): void {
+  clearLiveMetadataRefreshTimer();
+  clearLiveMetadataRefreshInterval();
+  clearSelectedSnapshotCache();
+  rootRoomSnapshot.value = null;
+  selectedSnapshot.value = null;
+  workers.value = [];
+  accountRooms.value = [];
+  settingsAccountRooms.value = [];
+  sidebarLatestMessages.value = {};
+  rentalRequestCount.value = 0;
+  repoStatus.value = null;
+  authDialogOpen.value = false;
+  void syncSelectedRoomStream(null).catch(() => undefined);
+  void restartRepoStatusWatch(null);
+}
 
 async function openAccountAuthFlow(): Promise<void> {
   authDialogOpen.value = true;

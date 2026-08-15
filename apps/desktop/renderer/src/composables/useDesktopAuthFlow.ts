@@ -8,6 +8,7 @@ interface DesktopAuthFlowOptions {
   isFirstRunGate: () => boolean;
   onFirstRunAuthorized: () => Promise<void>;
   onAuthorized: () => Promise<void>;
+  onSigningOut?: () => void;
   onSignedOut: () => Promise<void>;
 }
 
@@ -15,6 +16,10 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
   const authStatus = options.authStatus ?? ref<DesktopAuthStatus | null>(null);
   const authBusy = ref(false);
   const authFeedback = ref<string | null>(null);
+  // This lock is independent of status refreshes. Once the user signs out, an
+  // older in-flight refresh must never be able to remount the room shell with a
+  // stale authenticated snapshot.
+  const authSessionLocked = ref(false);
   let authPollTimer: number | null = null;
 
   function clearAuthPollTimer(): void {
@@ -34,11 +39,15 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     }, waitMs);
   }
 
-  async function startAuthFlow(): Promise<void> {
+  async function startAuthFlow(roomIdentifierOverride?: string | null): Promise<void> {
+    if (!authStatus.value?.authenticated) authSessionLocked.value = true;
     authBusy.value = true;
     authFeedback.value = null;
     try {
-      const result = await desktopIpc.auth.startDeviceFlow(options.getRoomIdentifier());
+      const roomIdentifier = roomIdentifierOverride === undefined
+        ? options.getRoomIdentifier()
+        : roomIdentifierOverride;
+      const result = await desktopIpc.auth.startDeviceFlow(roomIdentifier);
       authStatus.value = result.authStatus;
       authFeedback.value = "Your code is ready. Copy it, then open GitHub to finish connecting.";
       scheduleAuthPoll();
@@ -74,10 +83,18 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
       if (result.status === "authorized") {
         authFeedback.value = "Connected. Confirm the room and you are ready.";
         if (options.isFirstRunGate()) {
-          await options.onFirstRunAuthorized();
+          try {
+            await options.onFirstRunAuthorized();
+          } finally {
+            authSessionLocked.value = false;
+          }
           return;
         }
-        await options.onAuthorized();
+        try {
+          await options.onAuthorized();
+        } finally {
+          authSessionLocked.value = false;
+        }
         return;
       }
 
@@ -101,10 +118,13 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
 
   async function signOut(): Promise<void> {
     clearAuthPollTimer();
+    authSessionLocked.value = true;
     authBusy.value = true;
     authFeedback.value = null;
+    authStatus.value = signedOutStatus(authStatus.value);
+    options.onSigningOut?.();
     try {
-      authStatus.value = await desktopIpc.auth.signOut();
+      authStatus.value = signedOutStatus(await desktopIpc.auth.signOut());
       authFeedback.value = "Signed out. Connect GitHub again whenever you are ready.";
       await options.onSignedOut();
     } catch (error) {
@@ -117,6 +137,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
   return {
     authBusy,
     authFeedback,
+    authSessionLocked,
     authStatus,
     clearAuthPollTimer,
     openVerification,
@@ -124,5 +145,16 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     scheduleAuthPoll,
     signOut,
     startAuthFlow,
+  };
+}
+
+export function signedOutStatus(status: DesktopAuthStatus | null): DesktopAuthStatus {
+  return {
+    authenticated: false,
+    account: null,
+    pendingDeviceAuth: null,
+    apiUrl: status?.apiUrl || null,
+    tokenStored: false,
+    error: null,
   };
 }

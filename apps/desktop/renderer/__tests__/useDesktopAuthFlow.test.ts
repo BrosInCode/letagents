@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { ref } from "vue";
 
 import type {
   DesktopAuthStartResult,
@@ -11,7 +12,7 @@ test("startAuthFlow surfaces an unscoped device code before explicit browser nav
   const receivedRoomIdentifiers: Array<string | null | undefined> = [];
   const openedUrls: string[] = [];
   const state = useDesktopAuthFlow({
-    getRoomIdentifier: () => null,
+    getRoomIdentifier: () => "github.com/BrosInCode/private-room",
     isFirstRunGate: () => false,
     onFirstRunAuthorized: async () => undefined,
     onAuthorized: async () => undefined,
@@ -38,7 +39,8 @@ test("startAuthFlow surfaces an unscoped device code before explicit browser nav
       },
     },
     async () => {
-      await state.startAuthFlow();
+      await state.startAuthFlow(null);
+      assert.equal(state.authSessionLocked.value, true);
       assert.equal(state.authStatus.value?.pendingDeviceAuth?.userCode, "ABCD-1234");
       assert.deepEqual(openedUrls, []);
       await state.openVerification("https://github.com/login/device");
@@ -48,6 +50,69 @@ test("startAuthFlow surfaces an unscoped device code before explicit browser nav
 
   assert.deepEqual(receivedRoomIdentifiers, [null]);
   assert.deepEqual(openedUrls, ["https://github.com/login/device"]);
+});
+
+test("signOut locks the shell and clears renderer auth before IPC completes", async () => {
+  let finishSignOut: ((status: DesktopAuthStatus) => void) | null = null;
+  let signingOutCount = 0;
+  let signedOutCount = 0;
+  const signOutPending = new Promise<DesktopAuthStatus>((resolve) => {
+    finishSignOut = resolve;
+  });
+  const authStatus = ref<DesktopAuthStatus | null>({
+    authenticated: true,
+    account: {
+      id: "account_1",
+      provider: "github",
+      providerUserId: "user_1",
+      login: "emmy",
+      displayName: "Emmy",
+      avatarUrl: null,
+    },
+    pendingDeviceAuth: null,
+    apiUrl: "https://letagents.chat",
+    tokenStored: true,
+    error: null,
+  });
+  const state = useDesktopAuthFlow({
+    authStatus,
+    getRoomIdentifier: () => null,
+    isFirstRunGate: () => false,
+    onFirstRunAuthorized: async () => undefined,
+    onAuthorized: async () => undefined,
+    onSigningOut: () => {
+      signingOutCount += 1;
+    },
+    onSignedOut: async () => {
+      signedOutCount += 1;
+    },
+  });
+
+  await withDesktopBridge(
+    {
+      letagentsDesktop: {
+        auth: {
+          signOut: () => signOutPending,
+        },
+      },
+    },
+    async () => {
+      const operation = state.signOut();
+      assert.equal(state.authSessionLocked.value, true);
+      assert.equal(state.authStatus.value?.authenticated, false);
+      assert.equal(state.authStatus.value?.account, null);
+      assert.equal(state.authStatus.value?.tokenStored, false);
+      assert.equal(signingOutCount, 1);
+      assert.equal(signedOutCount, 0);
+
+      finishSignOut?.(authStatusFixture());
+      await operation;
+    },
+  );
+
+  assert.equal(state.authSessionLocked.value, true);
+  assert.equal(state.authStatus.value?.authenticated, false);
+  assert.equal(signedOutCount, 1);
 });
 
 async function withDesktopBridge<T>(
