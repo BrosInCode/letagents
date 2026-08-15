@@ -115,6 +115,51 @@ test("signOut locks the shell and clears renderer auth before IPC completes", as
   assert.equal(signedOutCount, 1);
 });
 
+test("authorized polling keeps the shell locked when the authoritative refresh fails", async () => {
+  const authStatus = ref<DesktopAuthStatus | null>(authStatusFixture());
+  const state = useDesktopAuthFlow({
+    authStatus,
+    getRoomIdentifier: () => null,
+    isFirstRunGate: () => false,
+    onFirstRunAuthorized: async () => undefined,
+    onAuthorized: async () => {
+      throw new Error("Authoritative refresh failed");
+    },
+    onSignedOut: async () => undefined,
+  });
+
+  await withDesktopBridge(
+    {
+      setTimeout: globalThis.setTimeout,
+      clearTimeout: globalThis.clearTimeout,
+      letagentsDesktop: {
+        auth: {
+          startDeviceFlow: async (): Promise<DesktopAuthStartResult> => ({
+            pendingDeviceAuth: pendingDeviceAuthFixture(),
+            authStatus: authStatusFixture(),
+          }),
+          pollDeviceFlow: async () => ({
+            status: "authorized" as const,
+            intervalSeconds: null,
+            expiresInSeconds: null,
+            authStatus: authenticatedStatusFixture(),
+            error: null,
+          }),
+        },
+      },
+    },
+    async () => {
+      await state.startAuthFlow(null);
+      await state.pollAuthFlow();
+      state.clearAuthPollTimer();
+    },
+  );
+
+  assert.equal(state.authStatus.value?.authenticated, true);
+  assert.equal(state.authSessionLocked.value, true);
+  assert.equal(state.authFeedback.value, "Authoritative refresh failed");
+});
+
 async function withDesktopBridge<T>(
   value: object,
   callback: () => Promise<T>,
@@ -154,6 +199,24 @@ function authStatusFixture(): DesktopAuthStatus {
     pendingDeviceAuth: pendingDeviceAuthFixture(),
     apiUrl: "https://letagents.chat",
     tokenStored: false,
+    error: null,
+  };
+}
+
+function authenticatedStatusFixture(): DesktopAuthStatus {
+  return {
+    authenticated: true,
+    account: {
+      id: "account_1",
+      provider: "github",
+      providerUserId: "user_1",
+      login: "emmy",
+      displayName: "Emmy",
+      avatarUrl: null,
+    },
+    pendingDeviceAuth: null,
+    apiUrl: "https://letagents.chat",
+    tokenStored: true,
     error: null,
   };
 }

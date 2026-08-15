@@ -66,6 +66,7 @@ interface DesktopAppDataOptions {
   resolveSelectedRoomIdentifier: (baseRootSnapshot: DesktopRoomSnapshot | null) => string | null;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   scheduleLiveMetadataRefresh: (delayMs?: number) => void;
+  sessionGeneration: Ref<number>;
   selectedMcpTargetIds: Ref<DesktopMcpInstallTargetId[]>;
   selectedRootRoomIdentifier: Ref<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
@@ -124,6 +125,17 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
   const degradedStreamRooms = new Map<string, number>();
   const pendingVerifiedRecoveries = new Map<string, number>();
   const pendingDeliveryRepairs = new Map<string, PendingDeliveryRepairState>();
+
+  function sessionIsCurrent(generation: number): boolean {
+    return generation === options.sessionGeneration.value;
+  }
+
+  function invalidateSession(): void {
+    options.sessionGeneration.value += 1;
+    selectedSnapshotRequestId += 1;
+    clearSelectedSnapshotCache();
+    clearPendingDeliveryRepairs();
+  }
 
   function resetBufferedStreamEvents(): void {
     bufferedStreamEvents = [];
@@ -262,6 +274,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       return;
     }
 
+    const sessionGeneration = options.sessionGeneration.value;
     options.loading.value = true;
     let rootBarrierToken: number | null = null;
     try {
@@ -270,10 +283,12 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
       const preloadedRepoStatus = requestedRootRoomIdentifier
         ? null
         : await desktopIpc.repos.getStatus(requestedRootPath);
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const barrierRoomIdentifier = requestedRootRoomIdentifier || preloadedRepoStatus?.roomIdentifier || null;
       if (barrierRoomIdentifier) {
         rootBarrierToken = await beginRoomSnapshotBarrier(barrierRoomIdentifier);
       }
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const [
         nextAppInfo,
         loadedRootRoomContext,
@@ -297,12 +312,14 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         // feeds the sidebar and the full list feeds Settings.
         desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => []),
       ]), "root room refresh");
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const nextAccountRooms = (nextSettingsAccountRooms || []).filter((room) => !room.archived);
       const nextRootRoomSnapshot = await recoverRootRoomSnapshot(
         requestedRootRoomIdentifier,
         loadedRootRoomContext.snapshot,
         nextAccountRooms || nextSettingsAccountRooms || [],
       );
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const nextRootRoomKey = normalizeRoomIdentifier(nextRootRoomSnapshot.roomIdentifier);
       await repairManagedAgentDeliveryFromSnapshot(
         nextRootRoomSnapshot.roomIdentifier || "",
@@ -310,6 +327,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
         nextRootRoomSnapshot,
         nextRootRoomKey ? pendingDeliveryRepairs.get(nextRootRoomKey)?.token ?? null : null,
       );
+      if (!sessionIsCurrent(sessionGeneration)) return;
       const recoveredAlias = recoveredRootRoomAlias(requestedRootRoomIdentifier, nextRootRoomSnapshot);
       options.appInfo.value = nextAppInfo;
       options.repoStatus.value = loadedRootRoomContext.repoStatus;
@@ -405,8 +423,10 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     // A single `include_archived=true` fetch covers both consumers: the sidebar
     // uses the non-archived subset while Settings needs the full list. This
     // replaces the previous pair of `/account/rooms` requests per refresh tick.
+    const sessionGeneration = options.sessionGeneration.value;
     const allAccountRooms =
       (await desktopIpc.room.listAccountRooms?.({ includeArchived: true, limit: 100 }).catch(() => [])) || [];
+    if (!sessionIsCurrent(sessionGeneration)) return;
     options.settingsAccountRooms.value = allAccountRooms;
     options.accountRooms.value = allAccountRooms.filter((room) => !room.archived);
   }
@@ -952,6 +972,7 @@ export function useDesktopAppData(options: DesktopAppDataOptions) {
     handleRefreshRoom,
     handleRoomRenamed,
     handleRoomStreamEvent,
+    invalidateSession,
     refresh,
     refreshAccountRooms,
     refreshSelectedSnapshot,

@@ -41,12 +41,12 @@
             :class="{ 'is-copied': copied }"
             type="button"
             data-testid="signed-out-device-code"
-            aria-label="Copy GitHub device code"
+            :aria-label="copied ? 'GitHub device code copied' : 'Copy GitHub device code'"
             @click="copyCode"
           >
             <small>One-time code</small>
             <code>{{ pendingAuth.userCode }}</code>
-            <span><Check v-if="copied" aria-hidden="true" /><Copy v-else aria-hidden="true" />{{ copied ? "Copied" : "Copy code" }}</span>
+            <span aria-live="polite"><Check v-if="copied" aria-hidden="true" /><Copy v-else aria-hidden="true" />{{ copied ? "Copied" : "Copy code" }}</span>
           </button>
 
           <div class="signed-out-actions">
