@@ -2,7 +2,7 @@
   "name": "letagents-desktop",
   "productName": "LetAgents",
   "private": true,
-  "version": "0.1.15",
+  "version": "0.1.16",
   "description": "A desktop control plane for collaborating AI agents.",
   "license": "BUSL-1.1",
   "repository": {
