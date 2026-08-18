@@ -16,9 +16,13 @@ function status(overrides: Partial<DesktopUpdateStatus> = {}): DesktopUpdateStat
     availableVersion: null,
     releaseName: null,
     releaseNotes: null,
+    updateSize: null,
     downloadProgress: null,
     lastCheckedAt: null,
     error: null,
+    failureStage: null,
+    downloadAttempt: null,
+    downloadAttemptLimit: null,
     unsupportedReason: null,
     canCheck: true,
     canInstall: false,
@@ -36,6 +40,61 @@ test("update presentation explains that downloads do not interrupt work", () => 
   assert.equal(presentation.title, "Downloading LetAgents 0.2.0");
   assert.match(presentation.detail, /keep working/i);
   assert.match(presentation.detail, /25 MB of 100 MB · 2\.0 MB\/s/);
+});
+
+test("update presentation distinguishes an optimized transfer from the signed archive size", () => {
+  const presentation = desktopUpdatePresentation(status({
+    phase: "downloading",
+    availableVersion: "0.2.0",
+    updateSize: 200 * 1024 * 1024,
+    downloadProgress: { percent: 50, transferred: 20 * 1024 * 1024, total: 40 * 1024 * 1024, bytesPerSecond: 2 * 1024 * 1024 },
+  }));
+  assert.match(presentation.detail, /20 MB of 40 MB optimized download/);
+  assert.match(presentation.detail, /200 MB update/);
+
+  const sidebar = desktopUpdateSidebarPresentation(status({
+    phase: "downloading",
+    availableVersion: "0.2.0",
+    updateSize: 200 * 1024 * 1024,
+    downloadProgress: { percent: 50, transferred: 20 * 1024 * 1024, total: 40 * 1024 * 1024, bytesPerSecond: 2 * 1024 * 1024 },
+  }));
+  assert.match(sidebar.detail, /optimized download/);
+  assert.match(sidebar.detail, /200 MB update/);
+});
+
+test("update presentation distinguishes automatic reconnects and exhausted downloads", () => {
+  const reconnecting = desktopUpdatePresentation(status({
+    phase: "downloading",
+    availableVersion: "0.2.0",
+    error: "net::ERR_CONNECTION_CLOSED",
+    downloadAttempt: 2,
+    downloadAttemptLimit: 3,
+  }));
+  assert.equal(reconnecting.title, "Reconnecting the update download");
+  assert.match(reconnecting.detail, /attempt 2 of 3/i);
+  assert.deepEqual(desktopUpdateSidebarPresentation(status({
+    phase: "downloading",
+    availableVersion: "0.2.0",
+    updateSize: 200 * 1024 * 1024,
+    error: "net::ERR_CONNECTION_CLOSED",
+    downloadAttempt: 2,
+    downloadAttemptLimit: 3,
+  })), {
+    active: true,
+    title: "Reconnecting update download",
+    detail: "Attempt 2 of 3 · 200 MB update",
+    percent: null,
+    state: "downloading",
+  });
+
+  const failed = desktopUpdatePresentation(status({
+    phase: "error",
+    availableVersion: "0.2.0",
+    error: "net::ERR_CONNECTION_CLOSED",
+    failureStage: "download",
+  }));
+  assert.equal(failed.title, "Update download interrupted");
+  assert.doesNotMatch(failed.title, /check/i);
 });
 
 test("sidebar turns the settings row into a compact live transfer instrument", () => {
@@ -106,6 +165,7 @@ test("update progress does not churn an atomic live region or claim account navi
     updatesPane,
     /<h2 role="status" aria-live="polite" aria-atomic="true">\{\{ presentation\.title \}\}<\/h2>/,
   );
+  assert.match(updatesPane, /failureStage === "download"[\s\S]{0,100}"Retry download"/);
   assert.match(sidebar, /v-if="updatePresentation\.active"[\s\S]{0,320}data-testid="sidebar-update-status"/);
   assert.doesNotMatch(sidebar, /:aria-current="!updatePresentation\.active/);
 });

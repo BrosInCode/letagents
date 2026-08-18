@@ -1,14 +1,15 @@
 import electron from "electron";
 import electronUpdaterModule, { type ProgressInfo, type UpdateInfo } from "electron-updater";
+import { join } from "node:path";
 
 import type { DesktopUpdateStatus } from "../ipc-types.js";
 import {
   DesktopUpdaterController,
   desktopUpdateFeedBaseUrl,
-  runDesktopUpdateCheck,
 } from "./desktop-updater.js";
 import { supervisorDaemonClient } from "./supervisor-daemon.js";
 import { supervisorGrantCoordinator } from "./supervisor-grant-coordinator.js";
+import { DesktopUpdateDiagnosticLog } from "./update-diagnostics.js";
 import { emitToMainWindow, focusMainWindow } from "./window.js";
 
 const electronRuntime = electron as Partial<typeof import("electron")>;
@@ -18,6 +19,7 @@ const updateIntervalMs = 6 * 60 * 60 * 1000;
 let initialized = false;
 let scheduledUpdateCheck: NodeJS.Timeout | null = null;
 let notifiedReleaseName: string | null = null;
+let updateDiagnostics: DesktopUpdateDiagnosticLog | null = null;
 
 function desktopAutoUpdater() {
   return electronUpdaterModule.autoUpdater;
@@ -88,7 +90,18 @@ export const desktopUpdater = new DesktopUpdaterController({
   currentVersion: app?.getVersion?.() || process.env.npm_package_version || "0.0.0",
   supported: updatesSupported(),
   unsupportedReason: unsupportedReason(),
-  checkForUpdates: () => runDesktopUpdateCheck(() => desktopAutoUpdater().checkForUpdates()),
+  checkForUpdates: async () => {
+    const result = await desktopAutoUpdater().checkForUpdates();
+    if (!result) return null;
+    return {
+      isUpdateAvailable: result.isUpdateAvailable,
+      version: result.updateInfo.version,
+      releaseName: result.updateInfo.releaseName || `LetAgents ${result.updateInfo.version}`,
+      releaseNotes: releaseNotes(result.updateInfo),
+      total: updateSize(result.updateInfo),
+    };
+  },
+  downloadUpdate: () => desktopAutoUpdater().downloadUpdate(),
   prepareForInstall: () => supervisorDaemonClient.prepareForApplicationUpdate(),
   recoverAfterInstallFailure: async () => {
     await supervisorDaemonClient.resumeAfterApplicationUpdateFailure();
@@ -96,6 +109,7 @@ export const desktopUpdater = new DesktopUpdaterController({
   },
   quitAndInstall: () => desktopAutoUpdater().quitAndInstall(false, true),
   publish: publishStatus,
+  diagnostic: (event) => updateDiagnostics?.append(event),
 });
 
 export function initializeDesktopUpdates(): void {
@@ -104,7 +118,7 @@ export function initializeDesktopUpdates(): void {
   if (!updatesSupported()) return;
 
   const electronUpdater = desktopAutoUpdater();
-  electronUpdater.autoDownload = true;
+  electronUpdater.autoDownload = false;
   electronUpdater.autoInstallOnAppQuit = false;
   electronUpdater.autoRunAppAfterInstall = true;
   electronUpdater.allowDowngrade = false;
@@ -116,20 +130,25 @@ export function initializeDesktopUpdates(): void {
     error: (...values: unknown[]) => console.error("[desktop-updater]", ...values),
   };
 
+  let feedUrl: string;
   try {
-    electronUpdater.setFeedURL({ provider: "generic", url: updateBaseUrl() });
+    feedUrl = updateBaseUrl();
+    if (app?.getPath) {
+      updateDiagnostics = new DesktopUpdateDiagnosticLog(
+        join(app.getPath("userData"), "logs", "desktop-updater.jsonl"),
+        {
+          currentVersion: app.getVersion(),
+          arch: process.arch,
+          feedUrl,
+        },
+      );
+    }
+    electronUpdater.setFeedURL({ provider: "generic", url: feedUrl });
   } catch (error) {
     void desktopUpdater.fail(error);
     return;
   }
 
-  electronUpdater.on("checking-for-update", () => desktopUpdater.markChecking());
-  electronUpdater.on("update-available", (info) => desktopUpdater.markAvailable({
-    version: info.version,
-    releaseName: info.releaseName || `LetAgents ${info.version}`,
-    releaseNotes: releaseNotes(info),
-    total: updateSize(info),
-  }));
   electronUpdater.on("download-progress", (progress: ProgressInfo) => {
     desktopUpdater.markDownloadProgress({
       percent: progress.percent,
@@ -138,7 +157,6 @@ export function initializeDesktopUpdates(): void {
       bytesPerSecond: progress.bytesPerSecond,
     });
   });
-  electronUpdater.on("update-not-available", () => desktopUpdater.markUpToDate());
   electronUpdater.on("error", (error) => {
     // MacUpdater performs native Squirrel staging after quitAndInstall returns.
     // A late error must restore daemon supervision after the completed handoff.
@@ -159,6 +177,8 @@ export function initializeDesktopUpdates(): void {
 export function stopDesktopUpdates(): void {
   if (scheduledUpdateCheck) clearInterval(scheduledUpdateCheck);
   scheduledUpdateCheck = null;
+  updateDiagnostics?.close();
+  updateDiagnostics = null;
 }
 
 export function assertDesktopUpdateMutationAllowed(): void {
