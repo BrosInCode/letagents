@@ -23,18 +23,37 @@ export function formatUpdateBytes(bytes: number): string {
   return `${value.toFixed(digits)} ${units[unitIndex]}`;
 }
 
+function transferSizeDetail(status: DesktopUpdateStatus): string | null {
+  const progress = status.downloadProgress;
+  if (!progress?.total) return status.updateSize ? `${formatUpdateBytes(status.updateSize)} update` : null;
+  const transferred = formatUpdateBytes(progress.transferred);
+  const transferTotal = formatUpdateBytes(progress.total);
+  if (status.updateSize && status.updateSize !== progress.total) {
+    return `${transferred} of ${transferTotal} optimized download · ${formatUpdateBytes(status.updateSize)} update`;
+  }
+  return `${transferred} of ${transferTotal}`;
+}
+
 export function desktopUpdateSidebarPresentation(
   status: DesktopUpdateStatus | null,
 ): DesktopUpdateSidebarPresentation {
   const version = status?.availableVersion || null;
   if (status?.phase === "downloading") {
+    if (status.error && status.downloadAttempt && status.downloadAttemptLimit) {
+      return {
+        active: true,
+        title: "Reconnecting update download",
+        detail: `Attempt ${status.downloadAttempt} of ${status.downloadAttemptLimit}${status.updateSize ? ` · ${formatUpdateBytes(status.updateSize)} update` : ""}`,
+        percent: null,
+        state: "downloading",
+      };
+    }
     const progress = status.downloadProgress;
     const percent = progress ? Math.max(0, Math.min(100, progress.percent)) : null;
-    const transferred = progress ? formatUpdateBytes(progress.transferred) : null;
-    const total = progress?.total ? formatUpdateBytes(progress.total) : null;
     const rate = progress?.bytesPerSecond ? formatUpdateBytes(progress.bytesPerSecond) : null;
-    const detail = transferred && total
-      ? `${transferred} of ${total}${rate ? ` · ${rate}/s` : ""}`
+    const transfer = transferSizeDetail(status);
+    const detail = transfer
+      ? `${transfer}${rate ? ` · ${rate}/s` : ""}`
       : "Preparing the signed download";
     return {
       active: true,
@@ -104,13 +123,21 @@ export function desktopUpdatePresentation(status: DesktopUpdateStatus | null): D
         tone: "neutral",
       };
     case "downloading":
+      if (status.error && status.downloadAttempt && status.downloadAttemptLimit) {
+        return {
+          title: "Reconnecting the update download",
+          detail: `The connection was interrupted. Automatic attempt ${status.downloadAttempt} of ${status.downloadAttemptLimit} is underway. You can keep working.`,
+          tone: "warning",
+        };
+      }
       if (status.downloadProgress?.total) {
         const progress = status.downloadProgress;
+        const transfer = transferSizeDetail(status);
         return {
           title: status.availableVersion
             ? `Downloading LetAgents ${status.availableVersion}`
             : "Downloading the update",
-          detail: `${formatUpdateBytes(progress.transferred)} of ${formatUpdateBytes(progress.total)}${progress.bytesPerSecond ? ` · ${formatUpdateBytes(progress.bytesPerSecond)}/s` : ""}. You can keep working.`,
+          detail: `${transfer}${progress.bytesPerSecond ? ` · ${formatUpdateBytes(progress.bytesPerSecond)}/s` : ""}. You can keep working.`,
           tone: "neutral",
         };
       }
@@ -140,6 +167,13 @@ export function desktopUpdatePresentation(status: DesktopUpdateStatus | null): D
         tone: "warning",
       };
     case "error":
+      if (status.failureStage === "download") {
+        return {
+          title: "Update download interrupted",
+          detail: `The update was found, but its download did not finish after automatic retries. ${status.error || "Try the download again."}`,
+          tone: "error",
+        };
+      }
       return {
         title: "Update check failed",
         detail: status.error || "LetAgents could not reach the update feed.",
