@@ -45,7 +45,11 @@
           data-testid="check-desktop-update"
           @click="$emit('check')"
         >
-          {{ updateStatus?.phase === "checking" ? "Checking..." : "Check now" }}
+          {{ updateStatus?.phase === "checking"
+            ? "Checking..."
+            : updateStatus?.failureStage === "download"
+              ? "Retry download"
+              : "Check now" }}
         </button>
       </div>
     </article>
