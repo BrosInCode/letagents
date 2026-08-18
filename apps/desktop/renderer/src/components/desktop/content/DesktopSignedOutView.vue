@@ -7,19 +7,38 @@
 
     <div class="signed-out-layout">
       <div class="signed-out-intro">
-        <p class="signed-out-kicker">Signed-out mode</p>
-        <h1>Your rooms stay out of sight until you sign in.</h1>
-        <p class="signed-out-summary">
-          Connect GitHub to restore your rooms, agents, and shared work on this device.
-        </p>
-
-        <div class="signed-out-boundary" aria-label="What sign-in restores">
-          <span><ShieldCheck aria-hidden="true" /></span>
-          <div>
-            <strong>One clear privacy boundary</strong>
-            <p>The room list, messages, tasks, and composer remain unmounted while you are signed out.</p>
-          </div>
+        <div class="signed-out-network" aria-hidden="true">
+          <svg viewBox="0 0 720 540" preserveAspectRatio="xMidYMid slice">
+            <g class="network-connections">
+              <path d="M84 126 194 84 284 160 401 92 526 146 636 96" />
+              <path d="M84 126 148 246 284 160 344 286 526 146 592 268 636 96" />
+              <path d="M148 246 76 366 226 424 344 286 456 412 592 268 654 408" />
+              <path d="M76 366 186 324 226 424 376 472 456 412 654 408" />
+              <path d="M194 84 186 324M401 92 456 412M284 160 592 268M344 286 654 408" />
+            </g>
+            <g class="network-nodes network-nodes-a">
+              <circle cx="84" cy="126" r="5" /><circle cx="284" cy="160" r="7" />
+              <circle cx="526" cy="146" r="5" /><circle cx="76" cy="366" r="4" />
+              <circle cx="344" cy="286" r="8" /><circle cx="654" cy="408" r="5" />
+            </g>
+            <g class="network-nodes network-nodes-b">
+              <circle cx="194" cy="84" r="4" /><circle cx="401" cy="92" r="5" />
+              <circle cx="636" cy="96" r="4" /><circle cx="148" cy="246" r="5" />
+              <circle cx="592" cy="268" r="7" /><circle cx="186" cy="324" r="4" />
+              <circle cx="226" cy="424" r="6" /><circle cx="376" cy="472" r="4" />
+              <circle cx="456" cy="412" r="6" />
+            </g>
+          </svg>
         </div>
+
+        <h1 :aria-label="collaborationStatement">
+          <span class="signed-out-wordmark" aria-hidden="true">LetAgents</span>
+          <span class="signed-out-phrase-window" aria-hidden="true">
+            <Transition name="signed-out-phrase" mode="out-in">
+              <span :key="activePhrase" class="signed-out-phrase">{{ activePhrase }}</span>
+            </Transition>
+          </span>
+        </h1>
       </div>
 
       <article class="signed-out-auth-card" :data-state="pendingAuth ? 'code' : 'connect'">
@@ -109,7 +128,6 @@
         <p v-if="effectiveFeedback" class="signed-out-feedback" role="status" data-testid="signed-out-auth-feedback">
           {{ effectiveFeedback }}
         </p>
-        <p class="signed-out-footnote">No password or personal access token is entered in LetAgents.</p>
       </article>
     </div>
   </section>
@@ -122,7 +140,6 @@ import {
   Copy,
   LoaderCircle,
   RefreshCw,
-  ShieldCheck,
 } from "@lucide/vue";
 import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import type { DesktopAuthStatus } from "../../../../../electron/ipc-types";
@@ -144,8 +161,19 @@ defineEmits<{
 const pendingAuth = computed(() => props.authStatus?.pendingDeviceAuth || null);
 const effectiveFeedback = computed(() => props.feedback || props.authStatus?.error || null);
 const now = ref(Date.now());
+const phrases = [
+  "work with you.",
+  "think with you.",
+  "build with you.",
+  "collaborate with you.",
+  "ship with you.",
+] as const;
+const phraseIndex = ref(0);
+const activePhrase = computed(() => phrases[phraseIndex.value]);
+const collaborationStatement = "LetAgents work with you, think with you, build with you, collaborate with you, and ship with you.";
 const { copied, copy } = useCopyIndicator();
 let clock: number | null = null;
+let phraseClock: number | null = null;
 
 const expiryLabel = computed(() => {
   const expiresAt = pendingAuth.value?.expiresAt;
@@ -164,20 +192,24 @@ onMounted(() => {
   clock = window.setInterval(() => {
     now.value = Date.now();
   }, 15_000);
+  phraseClock = window.setInterval(() => {
+    phraseIndex.value = (phraseIndex.value + 1) % phrases.length;
+  }, 3_200);
 });
 
 onBeforeUnmount(() => {
   if (clock !== null) window.clearInterval(clock);
+  if (phraseClock !== null) window.clearInterval(phraseClock);
 });
 </script>
 
 <style scoped>
 .signed-out-view {
-  width: min(1120px, 100%);
+  width: min(1180px, 100%);
   min-height: calc(100vh - 56px);
   display: grid;
   grid-template-rows: auto 1fr;
-  gap: clamp(42px, 8vh, 84px);
+  gap: clamp(30px, 5vh, 56px);
 }
 
 .signed-out-brand {
@@ -194,38 +226,35 @@ onBeforeUnmount(() => {
   width: 27px;
   height: 27px;
   color: var(--text);
-  --letagents-logo-accent: var(--setup-accent);
+  --letagents-logo-accent: var(--text);
 }
 
 .signed-out-layout {
-  align-self: start;
+  align-self: center;
   display: grid;
-  grid-template-columns: minmax(0, 1.08fr) minmax(360px, 0.78fr);
+  grid-template-columns: minmax(0, 1.2fr) minmax(330px, 0.72fr);
   align-items: center;
-  gap: clamp(48px, 8vw, 112px);
+  gap: clamp(56px, 9vw, 128px);
 }
 
 .signed-out-intro {
-  display: grid;
-  gap: 20px;
-  max-width: 620px;
+  position: relative;
+  display: flex;
+  min-height: clamp(390px, 54vh, 560px);
+  align-items: center;
+  isolation: isolate;
 }
 
-.signed-out-kicker,
-.signed-out-summary,
-.signed-out-boundary p,
 .signed-out-card-heading p,
 .signed-out-card-heading h2,
 .signed-out-card-heading span,
 .signed-out-waiting p,
-.signed-out-feedback,
-.signed-out-footnote {
+.signed-out-feedback {
   margin: 0;
 }
 
-.signed-out-kicker,
 .signed-out-card-heading p {
-  color: var(--setup-accent);
+  color: var(--text);
   font-size: 0.68rem;
   font-weight: 760;
   letter-spacing: 0.14em;
@@ -233,59 +262,102 @@ onBeforeUnmount(() => {
 }
 
 .signed-out-intro h1 {
-  max-width: 660px;
+  position: relative;
+  z-index: 2;
+  display: grid;
+  gap: 0.08em;
+  width: 100%;
   margin: 0;
   color: var(--text);
-  font-size: clamp(2.55rem, 5.3vw, 4.65rem);
-  font-weight: 670;
-  letter-spacing: -0.062em;
-  line-height: 0.98;
+  font-size: clamp(3.2rem, 6.1vw, 5.8rem);
+  font-weight: 690;
+  letter-spacing: -0.068em;
+  line-height: 0.93;
 }
 
-.signed-out-summary {
-  max-width: 520px;
-  color: var(--text-secondary);
-  font-size: 1rem;
-  line-height: 1.65;
+.signed-out-wordmark {
+  display: block;
 }
 
-.signed-out-boundary {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 13px;
-  align-items: start;
-  max-width: 510px;
-  padding-top: 7px;
+.signed-out-phrase-window {
+  position: relative;
+  display: block;
+  min-height: 1.04em;
+  color: var(--text);
 }
 
-.signed-out-boundary > span {
-  display: grid;
-  place-items: center;
-  width: 34px;
-  height: 34px;
-  border: 1px solid color-mix(in srgb, var(--setup-accent) 30%, var(--border));
-  border-radius: 50%;
-  color: var(--setup-accent);
-  background: var(--setup-accent-soft);
+.signed-out-phrase {
+  position: absolute;
+  inset: 0 auto auto 0;
+  display: block;
+  white-space: nowrap;
 }
 
-.signed-out-boundary svg { width: 16px; height: 16px; }
-.signed-out-boundary div { display: grid; gap: 4px; }
-.signed-out-boundary strong { color: var(--text); font-size: 0.82rem; }
-.signed-out-boundary p { color: var(--text-tertiary); font-size: 0.76rem; line-height: 1.55; }
+.signed-out-phrase-enter-active {
+  transition: opacity 420ms cubic-bezier(0.23, 1, 0.32, 1), transform 420ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.signed-out-phrase-leave-active {
+  transition: opacity 180ms cubic-bezier(0.23, 1, 0.32, 1), transform 180ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.signed-out-phrase-enter-from {
+  opacity: 0;
+  transform: translateY(0.28em);
+}
+
+.signed-out-phrase-leave-to {
+  opacity: 0;
+  transform: translateY(-0.18em);
+}
+
+.signed-out-network {
+  position: absolute;
+  z-index: 1;
+  inset: -7% -10% -7% -14%;
+  overflow: hidden;
+  color: var(--text);
+  opacity: 0.32;
+  pointer-events: none;
+}
+
+.signed-out-network svg {
+  width: 100%;
+  height: 100%;
+  animation: signed-out-network-drift 18s cubic-bezier(0.77, 0, 0.175, 1) infinite alternate;
+}
+
+.network-connections {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-linecap: round;
+  opacity: 0.28;
+  animation: signed-out-network-breathe 5.8s cubic-bezier(0.77, 0, 0.175, 1) infinite;
+}
+
+.network-nodes {
+  fill: currentColor;
+  transform-box: fill-box;
+  transform-origin: center;
+}
+
+.network-nodes-a {
+  animation: signed-out-nodes-a 6.4s cubic-bezier(0.77, 0, 0.175, 1) infinite alternate;
+}
+
+.network-nodes-b {
+  opacity: 0.52;
+  animation: signed-out-nodes-b 7.2s cubic-bezier(0.77, 0, 0.175, 1) infinite alternate;
+}
 
 .signed-out-auth-card {
   position: relative;
   display: grid;
   gap: 19px;
-  padding: clamp(24px, 3vw, 32px);
-  overflow: hidden;
-  border: 1px solid var(--border);
-  border-radius: 22px;
-  background:
-    radial-gradient(circle at 100% 0%, var(--setup-accent-soft), transparent 38%),
-    var(--setup-surface);
-  box-shadow: 0 24px 70px color-mix(in srgb, #000 13%, transparent), inset 0 1px 0 color-mix(in srgb, white 45%, transparent);
+  width: min(100%, 390px);
+  justify-self: end;
+  padding: clamp(10px, 2vw, 20px) 0;
 }
 
 .signed-out-github-mark {
@@ -293,7 +365,6 @@ onBeforeUnmount(() => {
   place-items: center;
   width: 43px;
   height: 43px;
-  border: 1px solid var(--border-strong);
   border-radius: 13px;
   color: var(--text);
   background: var(--setup-surface-muted);
@@ -323,7 +394,7 @@ onBeforeUnmount(() => {
   border-radius: 11px;
   font-size: 0.8rem;
   font-weight: 680;
-  transition: transform 100ms ease-out, border-color 160ms ease-out, background-color 160ms ease-out;
+  transition: transform 140ms cubic-bezier(0.23, 1, 0.32, 1), border-color 160ms ease, background-color 160ms ease;
 }
 
 .signed-out-primary {
@@ -335,9 +406,8 @@ onBeforeUnmount(() => {
 .signed-out-secondary { color: var(--text); background: var(--setup-surface-muted); }
 .signed-out-connect { width: 100%; }
 .signed-out-primary svg, .signed-out-secondary svg { width: 16px; height: 16px; }
-.signed-out-primary:hover:not(:disabled), .signed-out-secondary:hover:not(:disabled) { transform: translateY(-1px); }
 .signed-out-primary:active:not(:disabled), .signed-out-secondary:active:not(:disabled) { transform: scale(0.985); }
-.signed-out-primary:focus-visible, .signed-out-secondary:focus-visible, .signed-out-code:focus-visible { outline: 2px solid var(--setup-accent); outline-offset: 3px; }
+.signed-out-primary:focus-visible, .signed-out-secondary:focus-visible, .signed-out-code:focus-visible { outline: 2px solid var(--text); outline-offset: 3px; }
 .signed-out-primary:disabled, .signed-out-secondary:disabled { opacity: 0.5; cursor: default; }
 
 .signed-out-actions { display: grid; grid-template-columns: 1.15fr 0.85fr; gap: 9px; }
@@ -348,17 +418,17 @@ onBeforeUnmount(() => {
   gap: 7px;
   width: 100%;
   padding: 18px;
-  border: 1px solid color-mix(in srgb, var(--setup-accent) 28%, var(--border));
+  border: 1px solid color-mix(in srgb, var(--text) 28%, var(--border));
   border-radius: 15px;
   color: var(--text);
-  background: color-mix(in srgb, var(--setup-accent) 6%, var(--setup-surface-muted));
+  background: color-mix(in srgb, var(--text) 6%, var(--setup-surface-muted));
 }
 
 .signed-out-code small { color: var(--text-tertiary); font-size: 0.64rem; font-weight: 720; text-transform: uppercase; letter-spacing: 0.12em; }
 .signed-out-code code { font-family: var(--font-mono); font-size: clamp(1.65rem, 4vw, 2.08rem); font-weight: 760; letter-spacing: 0.13em; }
 .signed-out-code span { display: inline-flex; align-items: center; gap: 5px; color: var(--text-secondary); font-size: 0.69rem; font-weight: 650; }
 .signed-out-code span svg { width: 13px; height: 13px; }
-.signed-out-code.is-copied span { color: var(--green); }
+.signed-out-code.is-copied span { color: var(--text); }
 
 .signed-out-waiting {
   display: grid;
@@ -372,7 +442,7 @@ onBeforeUnmount(() => {
 }
 
 .signed-out-waiting > span { display: inline-flex; gap: 3px; }
-.signed-out-waiting i { width: 4px; height: 4px; border-radius: 50%; background: var(--setup-accent); animation: signed-out-pulse 1.15s ease-in-out infinite; }
+.signed-out-waiting i { width: 4px; height: 4px; border-radius: 50%; background: var(--text); animation: signed-out-pulse 1.15s ease-in-out infinite; }
 .signed-out-waiting i:nth-child(2) { animation-delay: 130ms; }
 .signed-out-waiting i:nth-child(3) { animation-delay: 260ms; }
 .signed-out-waiting p { display: grid; gap: 2px; }
@@ -385,29 +455,53 @@ onBeforeUnmount(() => {
 .signed-out-steps span { display: grid; place-items: center; width: 26px; height: 26px; border: 1px solid var(--border); border-radius: 50%; color: var(--text-tertiary); background: var(--setup-surface-muted); font-size: 0.66rem; font-weight: 700; }
 
 .signed-out-feedback { padding: 10px 12px; border-radius: 9px; color: var(--text-secondary); background: var(--setup-surface-muted); font-size: 0.72rem; line-height: 1.45; }
-.signed-out-footnote { color: var(--text-tertiary); font-size: 0.65rem; line-height: 1.5; text-align: center; }
 .signed-out-spinner { animation: signed-out-spin 0.85s linear infinite; }
 
 @keyframes signed-out-spin { to { transform: rotate(360deg); } }
 @keyframes signed-out-pulse { 0%, 70%, 100% { opacity: 0.28; transform: translateY(0); } 35% { opacity: 1; transform: translateY(-2px); } }
+@keyframes signed-out-network-drift { from { transform: translate3d(-1.2%, 0.8%, 0) scale(1); } to { transform: translate3d(1.4%, -1%, 0) scale(1.025); } }
+@keyframes signed-out-network-breathe { 0%, 100% { opacity: 0.2; } 50% { opacity: 0.42; } }
+@keyframes signed-out-nodes-a { from { opacity: 0.58; transform: translate3d(-3px, 2px, 0); } to { opacity: 0.95; transform: translate3d(4px, -3px, 0); } }
+@keyframes signed-out-nodes-b { from { opacity: 0.34; transform: translate3d(4px, -2px, 0); } to { opacity: 0.72; transform: translate3d(-3px, 3px, 0); } }
 
 @media (max-width: 820px) {
   .signed-out-view { gap: 30px; }
   .signed-out-layout { grid-template-columns: 1fr; gap: 34px; }
-  .signed-out-intro { max-width: 560px; }
-  .signed-out-intro h1 { font-size: clamp(2.4rem, 10vw, 3.65rem); }
-  .signed-out-auth-card { width: min(100%, 500px); }
+  .signed-out-intro { min-height: 310px; }
+  .signed-out-intro h1 { font-size: clamp(3rem, 11vw, 4.8rem); }
+  .signed-out-auth-card { width: min(100%, 500px); justify-self: start; padding-bottom: 32px; }
 }
 
 @media (max-width: 520px) {
-  .signed-out-boundary { display: none; }
   .signed-out-actions { grid-template-columns: 1fr; }
+  .signed-out-intro { min-height: 250px; }
+  .signed-out-intro h1 { font-size: clamp(2.4rem, 12vw, 3.6rem); }
+  .signed-out-network { inset: -10% -30% -10% -24%; }
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .signed-out-primary:hover:not(:disabled),
+  .signed-out-secondary:hover:not(:disabled) { transform: translateY(-1px); }
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .signed-out-phrase-enter-active,
+  .signed-out-phrase-leave-active {
+    transition: opacity 150ms cubic-bezier(0.23, 1, 0.32, 1);
+  }
+
+  .signed-out-phrase-enter-from,
+  .signed-out-phrase-leave-to {
+    transform: none;
+  }
+
   .signed-out-primary,
   .signed-out-secondary { transition: none; }
   .signed-out-spinner,
-  .signed-out-waiting i { animation: none; }
+  .signed-out-waiting i,
+  .signed-out-network svg,
+  .network-connections,
+  .network-nodes-a,
+  .network-nodes-b { animation: none; }
 }
 </style>
