@@ -1,4 +1,5 @@
-import { randomUUID } from "node:crypto";
+import { execFile } from "node:child_process";
+import { createHash, randomUUID } from "node:crypto";
 import { chmodSync, existsSync } from "node:fs";
 import { lstat, mkdir, realpath, stat } from "node:fs/promises";
 import { createRequire } from "node:module";
@@ -47,6 +48,11 @@ interface ProjectBindingRow {
 
 export interface ProjectBindingsStoreOptions {
   storePath?: string;
+  resolveFilesystemNamespace?: (rootPath: string) => Promise<string | null>;
+}
+
+interface FilesystemVerification {
+  keys: string[];
 }
 
 function getElectronMain(): { app?: { getPath: (name: "userData") => string } } {
@@ -109,6 +115,44 @@ function parseStringArray(value: string): string[] | null {
   }
 }
 
+function runSystemCommand(command: string, args: string[]): Promise<string | null> {
+  return new Promise((resolve) => {
+    execFile(command, args, {
+      encoding: "utf8",
+      maxBuffer: 1024 * 1024,
+      timeout: 5_000,
+      windowsHide: true,
+    }, (error, stdout) => resolve(error ? null : stdout.trim()));
+  });
+}
+
+export function parseMacosVolumeUuid(diskInfoPlist: string): string | null {
+  const readUuid = (key: "VolumeUUID" | "DiskUUID") =>
+    new RegExp(`<key>${key}</key>\\s*<string>([A-F\\d-]+)</string>`, "i").exec(diskInfoPlist)?.[1];
+  return readUuid("VolumeUUID") || readUuid("DiskUUID") || null;
+}
+
+async function defaultFilesystemNamespace(rootPath: string): Promise<string | null> {
+  if (process.platform !== "darwin") return null;
+  const diskUsage = await runSystemCommand("/bin/df", ["-P", rootPath]);
+  const device = diskUsage?.split(/\r?\n/).slice(1).find(Boolean)?.trim().split(/\s+/)[0];
+  if (!device) return null;
+  const diskInfo = await runSystemCommand("/usr/sbin/diskutil", ["info", "-plist", device]);
+  const volumeUuid = diskInfo && parseMacosVolumeUuid(diskInfo);
+  return volumeUuid ? `darwin:${volumeUuid.toLowerCase()}` : null;
+}
+
+function namespaceDigest(namespace: string): string {
+  return createHash("sha256").update(namespace).digest("hex");
+}
+
+function filesystemObjectKey(key: string, durable: boolean): string | null {
+  const match = durable
+    ? /^(fs-(?:root|git)):v2:[a-f\d]{64}:(\d+):(\d+)$/i.exec(key)
+    : /^(fs-(?:root|git)):\d+:(\d+):(\d+)$/.exec(key);
+  return match ? `${match[1]}:${match[2]}:${match[3]}` : null;
+}
+
 function mapRow(row: unknown): DesktopProjectBinding | null {
   if (!row || typeof row !== "object") return null;
   const value = row as Partial<ProjectBindingRow>;
@@ -151,6 +195,23 @@ function readBindings(options: ProjectBindingsStoreOptions = {}): DesktopProject
   }
 }
 
+function readBindingById(
+  bindingId: string,
+  options: ProjectBindingsStoreOptions,
+): DesktopProjectBinding | null {
+  const database = openStore(options);
+  try {
+    return mapRow(database.prepare(`
+      SELECT id, identity_key, verification_keys_json, aliases_json,
+             root_path, source, created_at, updated_at
+      FROM project_bindings
+      WHERE id = ?
+    `).get(bindingId));
+  } finally {
+    database.close();
+  }
+}
+
 async function canonicalDirectory(rootPath: string): Promise<string> {
   const canonical = await realpath(rootPath.trim());
   if (!(await stat(canonical)).isDirectory()) {
@@ -168,17 +229,114 @@ async function canonicalDirectory(rootPath: string): Promise<string> {
 async function filesystemVerificationKeys(
   rootPath: string,
   context: DesktopProjectBindingContext,
-): Promise<string[]> {
+  options: ProjectBindingsStoreOptions,
+  namespaceCache: Map<string, Promise<string | null>> = new Map(),
+): Promise<FilesystemVerification> {
   const rootStats = await stat(rootPath, { bigint: true });
+  const resolveNamespace = async (path: string, device: bigint): Promise<string | null> => {
+    if (options.resolveFilesystemNamespace) return options.resolveFilesystemNamespace(path);
+    const cacheKey = device.toString();
+    let namespace = namespaceCache.get(cacheKey);
+    if (!namespace) {
+      namespace = defaultFilesystemNamespace(path);
+      namespaceCache.set(cacheKey, namespace);
+    }
+    return namespace;
+  };
+  const rootNamespace = await resolveNamespace(rootPath, rootStats.dev);
+  const rootNamespaceKey = rootNamespace ? namespaceDigest(rootNamespace) : null;
   const keys = new Set(projectBindingVerificationKeys(context));
-  keys.add(`fs-root:${rootStats.dev}:${rootStats.ino}:${rootStats.birthtimeNs}`);
+  keys.add(rootNamespaceKey
+    ? `fs-root:v2:${rootNamespaceKey}:${rootStats.ino}:${rootStats.birthtimeNs}`
+    : `fs-root:${rootStats.dev}:${rootStats.ino}:${rootStats.birthtimeNs}`);
   try {
-    const gitStats = await stat(join(rootPath, ".git"), { bigint: true });
-    keys.add(`fs-git:${gitStats.dev}:${gitStats.ino}:${gitStats.birthtimeNs}`);
+    const gitPath = join(rootPath, ".git");
+    const gitStats = await stat(gitPath, { bigint: true });
+    const gitNamespace = await resolveNamespace(gitPath, gitStats.dev);
+    const gitNamespaceKey = gitNamespace ? namespaceDigest(gitNamespace) : null;
+    keys.add(gitNamespaceKey
+      ? `fs-git:v2:${gitNamespaceKey}:${gitStats.ino}:${gitStats.birthtimeNs}`
+      : `fs-git:${gitStats.dev}:${gitStats.ino}:${gitStats.birthtimeNs}`);
   } catch {
     // Plain folders have no Git identity axis.
   }
-  return [...keys].sort();
+  return { keys: [...keys].sort() };
+}
+
+function compareVerificationKeys(
+  storedKeys: readonly string[],
+  current: FilesystemVerification,
+): { matches: boolean; shouldUpgrade: boolean } {
+  const currentKeys = new Set(current.keys);
+  const durableFilesystemObjects = new Set(
+    current.keys.map((key) => filesystemObjectKey(key, true)).filter(Boolean),
+  );
+  let shouldUpgrade = false;
+  for (const storedKey of storedKeys) {
+    if (currentKeys.has(storedKey)) continue;
+    // Old releases only recorded the ephemeral mount device number. Recover
+    // that proof once from the durable object fields, then persist v2 below.
+    const legacyObject = filesystemObjectKey(storedKey, false);
+    if (!legacyObject || !durableFilesystemObjects.has(legacyObject)) {
+      return { matches: false, shouldUpgrade: false };
+    }
+    shouldUpgrade = true;
+  }
+  return { matches: true, shouldUpgrade };
+}
+
+function replaceVerificationKeysIfCurrent(
+  binding: DesktopProjectBinding,
+  verificationKeys: string[],
+  options: ProjectBindingsStoreOptions,
+): boolean {
+  const database = openStore(options);
+  try {
+    const result = database.prepare(`
+      UPDATE project_bindings
+      SET verification_keys_json = ?
+      WHERE id = ? AND root_path = ? AND updated_at = ? AND verification_keys_json = ?
+    `).run(
+      JSON.stringify(verificationKeys),
+      binding.id,
+      binding.rootPath,
+      binding.updatedAt,
+      JSON.stringify(binding.verificationKeys),
+    ) as { changes?: number | bigint };
+    return Number(result.changes || 0) === 1;
+  } finally {
+    database.close();
+  }
+}
+
+async function validateProjectBinding(
+  binding: DesktopProjectBinding,
+  options: ProjectBindingsStoreOptions,
+  namespaceCache: Map<string, Promise<string | null>>,
+  rereadOnConflict: boolean,
+): Promise<DesktopProjectBinding | null> {
+  try {
+    const rootPath = await canonicalDirectory(binding.rootPath);
+    const derived = await deriveFilesystemContext(rootPath);
+    const current = await filesystemVerificationKeys(rootPath, derived.context, options, namespaceCache);
+    const comparison = compareVerificationKeys(binding.verificationKeys, current);
+    if (!comparison.matches) return null;
+    if (!comparison.shouldUpgrade) return binding;
+    try {
+      if (replaceVerificationKeysIfCurrent(binding, current.keys, options)) {
+        return { ...binding, verificationKeys: current.keys };
+      }
+    } catch {
+      // Re-read below so a failed upgrade can never return superseded state.
+    }
+    if (!rereadOnConflict) return null;
+    const latest = readBindingById(binding.id, options);
+    return latest
+      ? validateProjectBinding(latest, options, namespaceCache, false)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 async function deriveFilesystemContext(rootPath: string): Promise<{
@@ -196,17 +354,11 @@ export async function listProjectBindings(
   options: ProjectBindingsStoreOptions = {},
 ): Promise<DesktopProjectBinding[]> {
   const bindings = readBindings(options);
-  const available = await Promise.all(bindings.map(async (binding) => {
-    try {
-      const rootPath = await canonicalDirectory(binding.rootPath);
-      const derived = await deriveFilesystemContext(rootPath);
-      const currentKeys = new Set(await filesystemVerificationKeys(rootPath, derived.context));
-      return binding.verificationKeys.every((key) => currentKeys.has(key));
-    } catch {
-      return false;
-    }
-  }));
-  return bindings.filter((_binding, index) => available[index]);
+  const namespaceCache = new Map<string, Promise<string | null>>();
+  const available = await Promise.all(bindings.map((binding) =>
+    validateProjectBinding(binding, options, namespaceCache, true)
+  ));
+  return available.filter((binding): binding is DesktopProjectBinding => Boolean(binding));
 }
 
 export async function bindProjectRoot(input: {
@@ -225,7 +377,7 @@ export async function bindProjectRoot(input: {
   if (hostedContext && !projectBindingContextsOverlap(input.context, filesystem.context)) {
     throw new Error("The selected folder does not prove this project room's identity.");
   }
-  const verificationKeys = await filesystemVerificationKeys(rootPath, filesystem.context);
+  const verificationKeys = (await filesystemVerificationKeys(rootPath, filesystem.context, options)).keys;
   const now = new Date().toISOString();
   const database = openStore(options);
   try {

@@ -3,6 +3,7 @@ import { execFile, execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import test from "node:test";
 
@@ -11,6 +12,7 @@ import {
   bindProjectRoot,
   listProjectBindings,
   migrateLegacyProjectBindings,
+  parseMacosVolumeUuid,
 } from "../main/project-bindings-store.js";
 import {
   canonicalProjectRoomIdentifier,
@@ -21,6 +23,18 @@ import {
 import { resolveRoomIdentifierFromPath } from "../repo-status.js";
 
 const execFileAsync = promisify(execFile);
+
+test("macOS filesystem identity prefers the volume UUID over the earlier disk UUID", () => {
+  const plist = `
+    <key>DiskUUID</key><string>AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA</string>
+    <key>VolumeUUID</key><string>BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB</string>
+  `;
+  assert.equal(parseMacosVolumeUuid(plist), "BBBBBBBB-BBBB-BBBB-BBBB-BBBBBBBBBBBB");
+  assert.equal(
+    parseMacosVolumeUuid("<key>DiskUUID</key><string>AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA</string>"),
+    "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA",
+  );
+});
 
 function githubGitRoom(): DesktopGitRoomInfo {
   return {
@@ -56,6 +70,11 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
   execFileSync("git", ["remote", "add", "origin", "git@github.com:BrosInCode/LetAgents.git"], {
     cwd: rootPath,
   });
+  const storeOptions = {
+    storePath,
+    resolveFilesystemNamespace: async (path: string) =>
+      path.endsWith(".git") ? "test-git-volume" : "test-root-volume",
+  };
   try {
     const binding = await bindProjectRoot({
       context: {
@@ -64,7 +83,7 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
       },
       rootPath,
       source: "git_remote",
-    }, { storePath });
+    }, storeOptions);
 
     assert.equal(
       findProjectBinding([binding], {
@@ -80,10 +99,190 @@ test("hosted root, branch, and focus rooms resolve one project binding", async (
       })?.rootPath,
       realpathSync(rootPath),
     );
-    assert.equal((await listProjectBindings({ storePath })).length, 1);
+    assert.equal((await listProjectBindings(storeOptions)).length, 1);
+    assert.ok(binding.verificationKeys.some((key) => key.startsWith("fs-root:v2:")));
+    assert.ok(binding.verificationKeys.some((key) => key.startsWith("fs-git:v2:")));
+    const rootNamespace = binding.verificationKeys.find((key) => key.startsWith("fs-root:v2:"))?.split(":")[2];
+    const gitNamespace = binding.verificationKeys.find((key) => key.startsWith("fs-git:v2:"))?.split(":")[2];
+    assert.notEqual(rootNamespace, gitNamespace);
     assert.equal(readFileSync(storePath).subarray(0, 16).toString(), "SQLite format 3\0");
     assert.equal(statSync(storePath).mode & 0o777, 0o600);
   } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("legacy project bindings survive filesystem device renumbering", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-remount-"));
+  const storePath = join(temporary, "bindings.sqlite");
+  const rootPath = join(temporary, "checkout");
+  mkdirSync(rootPath);
+  execFileSync("git", ["init", "-b", "main"], { cwd: rootPath, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", "git@github.com:BrosInCode/LetAgents.git"], {
+    cwd: rootPath,
+  });
+  const volumeA = async () => "test-volume-a";
+  try {
+    const binding = await bindProjectRoot({
+      context: {
+        roomIdentifier: "github.com/BrosInCode/LetAgents",
+        gitRoom: githubGitRoom(),
+      },
+      rootPath,
+      source: "git_remote",
+    }, { storePath, resolveFilesystemNamespace: volumeA });
+    const legacyKeys = binding.verificationKeys.map((key) =>
+      key.replace(/^(fs-(?:root|git)):v2:[a-f\d]{64}:(\d+):(\d+)$/, "$1:999999:$2:$3")
+    );
+    const database = new DatabaseSync(storePath);
+    try {
+      database.prepare(`
+        UPDATE project_bindings
+        SET verification_keys_json = ?
+        WHERE id = ?
+      `).run(JSON.stringify(legacyKeys), binding.id);
+    } finally {
+      database.close();
+    }
+
+    const restored = await listProjectBindings({ storePath, resolveFilesystemNamespace: volumeA });
+    assert.equal(restored.length, 1);
+    assert.equal(restored[0]?.id, binding.id);
+    assert.equal(restored[0]?.rootPath, realpathSync(rootPath));
+    assert.ok(restored[0]?.verificationKeys.some((key) => /^fs-root:v2:[a-f\d]{64}:/.test(key)));
+    assert.ok(restored[0]?.verificationKeys.every((key) => !/^fs-(?:root|git):999999:/.test(key)));
+
+    assert.deepEqual(await listProjectBindings({
+      storePath,
+      resolveFilesystemNamespace: async () => "test-volume-b",
+    }), []);
+
+    const replacedObjectKeys = restored[0]!.verificationKeys.map((key) => {
+      const filesystemKey = /^(fs-(?:root|git)):v2:([a-f\d]{64}):(\d+):(\d+)$/.exec(key);
+      return filesystemKey
+        ? `${filesystemKey[1]}:v2:${filesystemKey[2]}:${BigInt(filesystemKey[3]) + 1n}:${filesystemKey[4]}`
+        : key;
+    });
+    const replacementDatabase = new DatabaseSync(storePath);
+    try {
+      replacementDatabase.prepare(`
+        UPDATE project_bindings
+        SET verification_keys_json = ?
+        WHERE id = ?
+      `).run(JSON.stringify(replacedObjectKeys), binding.id);
+    } finally {
+      replacementDatabase.close();
+    }
+    assert.deepEqual(await listProjectBindings({
+      storePath,
+      resolveFilesystemNamespace: volumeA,
+    }), []);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("bindings fail closed when a stable filesystem namespace is unavailable", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-no-volume-id-"));
+  const storePath = join(temporary, "bindings.sqlite");
+  const rootPath = join(temporary, "project");
+  mkdirSync(rootPath);
+  try {
+    const resolved = await resolveRoomIdentifierFromPath(rootPath);
+    const binding = await bindProjectRoot({
+      context: { roomIdentifier: resolved.roomIdentifier },
+      rootPath,
+      source: "local_folder",
+    }, { storePath, resolveFilesystemNamespace: async () => null });
+
+    assert.ok(binding.verificationKeys.some((key) => /^fs-root:\d+:\d+:\d+$/.test(key)));
+    const restored = await listProjectBindings({
+      storePath,
+      resolveFilesystemNamespace: async () => null,
+    });
+    assert.equal(restored.length, 1);
+    assert.ok(restored[0]?.verificationKeys.every((key) => !key.includes(":v2:")));
+
+    const changedDeviceKeys = binding.verificationKeys.map((key) =>
+      key.replace(/^(fs-root):\d+:/, "$1:999999:")
+    );
+    const database = new DatabaseSync(storePath);
+    try {
+      database.prepare(`
+        UPDATE project_bindings
+        SET verification_keys_json = ?
+        WHERE id = ?
+      `).run(JSON.stringify(changedDeviceKeys), binding.id);
+    } finally {
+      database.close();
+    }
+    assert.deepEqual(await listProjectBindings({
+      storePath,
+      resolveFilesystemNamespace: async () => null,
+    }), []);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});
+
+test("a reconnect wins over an in-flight legacy proof upgrade", async () => {
+  const temporary = mkdtempSync(join(tmpdir(), "letagents-binding-upgrade-race-"));
+  const storePath = join(temporary, "bindings.sqlite");
+  const rootA = join(temporary, "project-a");
+  const rootB = join(temporary, "project-b");
+  mkdirSync(rootA);
+  mkdirSync(rootB);
+  let pauseRootA = false;
+  let releaseRootA!: () => void;
+  let observedRootA!: () => void;
+  const rootAReleased = new Promise<void>((resolve) => { releaseRootA = resolve; });
+  const rootAObserved = new Promise<void>((resolve) => { observedRootA = resolve; });
+  const resolveFilesystemNamespace = async (path: string): Promise<string> => {
+    if (path === realpathSync(rootA) && pauseRootA) {
+      pauseRootA = false;
+      observedRootA();
+      await rootAReleased;
+    }
+    return path === realpathSync(rootA) ? "volume-a" : "volume-b";
+  };
+  try {
+    const resolvedA = await resolveRoomIdentifierFromPath(rootA);
+    const binding = await bindProjectRoot({
+      context: { roomIdentifier: resolvedA.roomIdentifier },
+      rootPath: rootA,
+      source: "local_folder",
+    }, { storePath, resolveFilesystemNamespace });
+    const legacyKeys = binding.verificationKeys.map((key) =>
+      key.replace(/^(fs-root):v2:[a-f\d]{64}:(\d+):(\d+)$/, "$1:999999:$2:$3")
+    );
+    const database = new DatabaseSync(storePath);
+    try {
+      database.prepare(`
+        UPDATE project_bindings
+        SET verification_keys_json = ?
+        WHERE id = ?
+      `).run(JSON.stringify(legacyKeys), binding.id);
+    } finally {
+      database.close();
+    }
+
+    pauseRootA = true;
+    const staleRead = listProjectBindings({ storePath, resolveFilesystemNamespace });
+    await rootAObserved;
+    await bindProjectRoot({
+      context: { roomIdentifier: resolvedA.roomIdentifier },
+      rootPath: rootB,
+      source: "local_folder",
+    }, { storePath, resolveFilesystemNamespace });
+    releaseRootA();
+
+    assert.deepEqual((await staleRead).map((row) => row.rootPath), [realpathSync(rootB)]);
+    assert.deepEqual(
+      (await listProjectBindings({ storePath, resolveFilesystemNamespace })).map((row) => row.rootPath),
+      [realpathSync(rootB)],
+    );
+  } finally {
+    releaseRootA();
     rmSync(temporary, { recursive: true, force: true });
   }
 });
