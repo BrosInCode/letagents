@@ -273,7 +273,7 @@ export function resolveAgentInspectorSelection(
       return { ...target, kind: "unavailable", unavailableReason: "missing" };
     }
     if (resource.state === "error") {
-      return { ...target, kind: "unavailable", unavailableReason: "load_error", unavailableDetail: resource.error };
+      return { ...target, kind: "unavailable", unavailableReason: "load_error" };
     }
     return { ...target, kind: "resolving" };
   }
@@ -313,7 +313,7 @@ export function resolveAgentInspectorSelection(
     return { ...target, kind: "external" };
   }
   if (resource.state === "error") {
-    return { ...target, kind: "unavailable", unavailableReason: "load_error", unavailableDetail: resource.error };
+    return { ...target, kind: "unavailable", unavailableReason: "load_error" };
   }
   return { ...target, kind: "resolving" };
 }

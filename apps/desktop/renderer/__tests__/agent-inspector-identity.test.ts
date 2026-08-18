@@ -350,6 +350,7 @@ test("loading, refreshing, and failures never classify an unresolved participant
   const failed = resolveAgentInspectorSelection(resource("error", [entry()]), request, "room_a");
   assert.equal(failed.kind, "unavailable");
   assert.equal(failed.kind === "unavailable" ? failed.unavailableReason : null, "load_error");
+  assert.equal("unavailableDetail" in failed, false, "transport errors must not cross into agent presentation state");
 });
 
 test("a refresh failure retains and resolves an exact last-known supervised identity", () => {

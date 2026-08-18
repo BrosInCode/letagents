@@ -63,7 +63,6 @@ export type AgentInspectorSelection =
       kind: "unavailable";
       supervisorEntryId?: never;
       unavailableReason: "missing" | "ambiguous" | "load_error";
-      unavailableDetail?: string;
     });
 
 export interface GitHubEventPresentation {

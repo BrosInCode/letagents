@@ -226,6 +226,7 @@ let vite: ViteDevServer;
 let AgentInspectorSettings: object;
 let AgentInspectorLifecycleActions: object;
 let AgentInspectorHost: object;
+let AgentInspectorStatusSurface: object;
 let AgentInspectorSurface: object;
 let AgentInspectorOverview: object;
 let AgentInspectorNow: object;
@@ -243,6 +244,7 @@ before(async () => {
   AgentInspectorLifecycleActions = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue")).default;
   AgentInspectorSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue")).default;
   AgentInspectorHost = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorHost.vue")).default;
+  AgentInspectorStatusSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue")).default;
   AgentInspectorOverview = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorOverview.vue")).default;
   AgentInspectorNow = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorNow.vue")).default;
   AgentInspectorReadinessRail = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorReadinessRail.vue")).default;
@@ -252,6 +254,7 @@ before(async () => {
     attachClientRender(AgentInspectorLifecycleActions, "components/desktop/content/agent-inspector/AgentInspectorLifecycleActions.vue"),
     attachClientRender(AgentInspectorSurface, "components/desktop/content/agent-inspector/AgentInspectorSurface.vue"),
     attachClientRender(AgentInspectorHost, "components/desktop/content/agent-inspector/AgentInspectorHost.vue"),
+    attachClientRender(AgentInspectorStatusSurface, "components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue"),
     attachClientRender(AgentInspectorOverview, "components/desktop/content/agent-inspector/AgentInspectorOverview.vue"),
     attachClientRender(AgentInspectorNow, "components/desktop/content/agent-inspector/AgentInspectorNow.vue"),
     attachClientRender(AgentInspectorReadinessRail, "components/desktop/content/agent-inspector/AgentInspectorReadinessRail.vue"),
@@ -596,6 +599,64 @@ test("wide Host closes on a primary pointer press outside and stays open for ins
   mounted.app.unmount();
   assert.equal(opener.focusCount, 0);
   assert.equal(testDocument.activeElement, outside);
+  testDocument.documentElement.getBoundingClientRect = originalBounds;
+});
+
+test("retrying unavailable agent details keeps keyboard focus inside the Inspector", async () => {
+  const originalBounds = testDocument.documentElement.getBoundingClientRect;
+  testDocument.documentElement.getBoundingClientRect = () => ({ width: 1280 });
+  testDocument.activeElement = null;
+  const Harness = Vue.defineComponent({
+    setup() {
+      const selection = Vue.ref({
+        kind: "unavailable" as const,
+        unavailableReason: "load_error" as const,
+        displayName: "GardenPoint",
+        sender: "GardenPoint",
+      });
+      return () => Vue.h(AgentInspectorHost, {
+        open: true,
+        projection: null,
+        selection: selection.value,
+        actionState: null,
+        workResource: { status: "idle", detail: null, error: null, sourceMessageId: null },
+        selectedWorkSourceMessageId: null,
+        workArtifacts: [],
+        settingsResource: { status: "idle", configuration: null, draft: null, error: null },
+        roomMoveResource: noMove,
+        roomMoveAvailable: false,
+        providers: [],
+        destinations: [],
+        settingsConflict: false,
+        liveFeed: { events: [], ended: false, droppedEvents: 0 },
+        roomIdentifier: "room_a",
+        requestVersion: 1,
+        managedSessions: [],
+        reasoningSessions: [],
+        onRetry: () => {
+          selection.value = {
+            kind: "resolving",
+            displayName: "GardenPoint",
+            sender: "GardenPoint",
+          } as typeof selection.value;
+        },
+      });
+    },
+  });
+  const mounted = mount(Harness, {});
+  await nextTick();
+
+  const retry = buttonByText(mounted.root, "Try again");
+  retry.focus();
+  assert.equal(testDocument.activeElement, retry);
+  (retry.props.onClick as () => void)();
+  await nextTick();
+  await nextTick();
+
+  assert.equal(descendants(mounted.root).includes(retry), false);
+  const close = nodeByProp(mounted.root, "aria-label", "Close agent inspector");
+  assert.equal(testDocument.activeElement, close);
+  mounted.app.unmount();
   testDocument.documentElement.getBoundingClientRect = originalBounds;
 });
 
