@@ -288,6 +288,7 @@
       :managed-sessions="roomManagedAgentSessions"
       :reasoning-sessions="reasoningSessions"
       @close="closeAgentDetail"
+      @retry="retryAgentInspectorState"
       @live-selected="openAgentInspectorLive"
       @live-dismissed="stopAgentInspectorLive"
       @action="runAgentInspectorAction"
@@ -1651,6 +1652,13 @@ function refreshManagedAgentSessions(): Promise<void> {
     }
   });
   return managedAgentSessionsRefreshInFlight;
+}
+
+function retryAgentInspectorState(): void {
+  if (!selectedAgentDetailRequest.value) return;
+  supervisorEntriesState.value = supervisorEntriesHaveLoaded.value ? "refreshing" : "loading";
+  supervisorEntriesError.value = null;
+  void refreshManagedAgentSessions();
 }
 
 async function performManagedAgentSessionsRefresh(): Promise<void> {

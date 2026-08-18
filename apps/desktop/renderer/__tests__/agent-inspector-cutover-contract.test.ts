@@ -12,6 +12,7 @@ const activity = source("../src/components/desktop/content/RoomActivityTabView.v
 const chatMessage = source("../src/components/desktop/content/DesktopChatMessage.vue");
 const host = source("../src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
 const participantSurface = source("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue");
+const participantProjection = source("../src/domain/agent-inspector-participant.ts");
 const identity = source("../src/domain/agent-inspector-identity.ts");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
 
@@ -46,7 +47,7 @@ test("Chat carries the clicked canonical message into exact supervised identity 
 
 test("the shared Inspector keeps external and exact local-managed participants distinct", () => {
   assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
-  assert.match(host, /selection\.kind === "external"/);
+  assert.match(participantProjection, /selection\.kind === "external"/);
   assert.match(participantSurface, /projection\.kind === 'local_managed'/);
   assert.match(participantSurface, /participant-inspector-stop-turn/);
   assert.match(participantSurface, /participant-inspector-retry/);

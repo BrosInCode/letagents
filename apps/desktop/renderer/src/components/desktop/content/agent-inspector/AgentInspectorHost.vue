@@ -12,6 +12,7 @@
         @close="emit('close')"
         @action="forwardAction($event, 'wide')"
         @status="participantAnnouncement = $event"
+        @retry="retryStatus"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
@@ -39,6 +40,7 @@
         @close="emit('close')"
         @action="forwardAction($event, 'compact')"
         @status="participantAnnouncement = $event"
+        @retry="retryStatus"
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
@@ -70,6 +72,7 @@ import type {
 } from "../../../../../../electron/ipc-types";
 import {
   projectAgentInspectorParticipant,
+  projectAgentInspectorStatus,
   type AgentInspectorParticipantSessionUpdate,
 } from "../../../../domain/agent-inspector-participant";
 import { agentInspectorRequestResetKey } from "../../../../domain/agent-inspector-identity";
@@ -121,6 +124,7 @@ const emit = defineEmits<{
   purge: [];
   "session-updated": [update: AgentInspectorParticipantSessionUpdate];
   "open-reasoning": [sessionId: string];
+  retry: [];
 }>();
 
 const compact = ref(false);
@@ -154,27 +158,7 @@ const surfaceComponentType = computed<Component>(() => props.projection
     ? AgentInspectorParticipantSurface
     : AgentInspectorStatusSurface);
 watch(compact, (value) => emit("presentation-change", value), { immediate: true });
-const statusPresentation = computed(() => {
-  const title = props.selection.displayName || props.selection.sender || "Agent";
-  if (props.selection.kind === "resolving") {
-    return { title, eyebrow: "Agent", heading: "Loading agent state", detail: "Checking the desktop supervisor for this agent’s durable identity." };
-  }
-  if (props.selection.kind === "unavailable" && props.selection.unavailableReason === "load_error") {
-    return { title, eyebrow: "Agent", heading: "Agent state unavailable", detail: props.selection.unavailableDetail || "The desktop supervisor could not be reached." };
-  }
-  if (props.selection.kind === "unavailable" && props.selection.unavailableReason === "ambiguous") {
-    return {
-      title,
-      eyebrow: "Agent",
-      heading: "Agent identity unavailable",
-      detail: "Conflicting exact supervised identities were found. Controls are withheld until the identity is unambiguous.",
-    };
-  }
-  if (props.selection.kind === "external") {
-    return { title, eyebrow: "Room participant", heading: "Externally managed agent", detail: "This participant is visible in the room, but it is not controlled by this desktop supervisor." };
-  }
-  return { title, eyebrow: "Agent", heading: "Saved agent unavailable", detail: "The durable agent record is no longer available in this room." };
-});
+const statusPresentation = computed(() => projectAgentInspectorStatus(props.selection));
 const liveAnnouncement = computed(() => {
   if (props.actionState?.message) return props.actionState.message;
   if (participantAnnouncement.value) return participantAnnouncement.value;
@@ -235,6 +219,14 @@ function syncCompact(): void {
 
 function forwardAction(intent: AgentInspectorActionIntent, presentation: "wide" | "compact"): void {
   emit("action", { ...intent, presentation });
+}
+
+function retryStatus(): void {
+  const inspectorOwnedFocus = surfaceComponent.value?.containsFocus() ?? false;
+  emit("retry");
+  if (inspectorOwnedFocus) {
+    void nextTick(() => surfaceComponent.value?.focusInitial());
+  }
 }
 
 function setShellContentInert(inert: boolean): void {

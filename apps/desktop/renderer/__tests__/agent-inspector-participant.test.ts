@@ -7,6 +7,7 @@ import {
   agentInspectorManagedSessionIdentity,
   isCurrentAgentInspectorParticipantSessionUpdate,
   projectAgentInspectorParticipant,
+  projectAgentInspectorStatus,
 } from "../src/domain/agent-inspector-participant";
 import { agentInspectorRequestResetKey } from "../src/domain/agent-inspector-identity";
 
@@ -100,6 +101,31 @@ test("resolving and unavailable supervisor identity never produce a participant 
   assert.equal(projectAgentInspectorParticipant({ ...selection(), kind: "resolving" }, [session()], "room_a"), null);
   assert.equal(projectAgentInspectorParticipant({ ...selection(), kind: "unavailable", unavailableReason: "ambiguous" }, [session()], "room_a"), null);
   assert.equal(projectAgentInspectorParticipant({ ...selection(), kind: "unavailable", unavailableReason: "load_error" }, [session()], "room_a"), null);
+});
+
+test("agent status copy distinguishes a background-service failure from agent availability", () => {
+  assert.deepEqual(projectAgentInspectorStatus({
+    ...selection(),
+    kind: "unavailable",
+    unavailableReason: "load_error",
+  }), {
+    title: "GardenSignal",
+    eyebrow: "Agent",
+    heading: "Couldn’t load agent details",
+    detail: "LetAgents couldn’t reach its background agent service. The agent’s room history is still available, and you can try again.",
+    canRetry: true,
+  });
+  assert.deepEqual(projectAgentInspectorStatus({
+    ...selection(),
+    kind: "unavailable",
+    unavailableReason: "missing",
+  }), {
+    title: "GardenSignal",
+    eyebrow: "Agent",
+    heading: "Agent no longer available",
+    detail: "This agent is no longer managed by this desktop. Its room messages remain available in history.",
+    canRetry: false,
+  });
 });
 
 test("participant session updates are fenced by room, request, selection, and exact session", () => {
