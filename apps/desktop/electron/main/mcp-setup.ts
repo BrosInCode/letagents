@@ -1,10 +1,12 @@
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { randomUUID } from "node:crypto";
+import { mkdir, open, readFile, rename, stat, unlink } from "node:fs/promises";
 import { createRequire } from "node:module";
 import { homedir } from "node:os";
-import { dirname, join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import type {
   DesktopMcpInstallConfigPath,
+  DesktopMcpInstallFailure,
   DesktopMcpInstallManyResult,
   DesktopMcpInstallResult,
   DesktopMcpInstallState,
@@ -40,6 +42,8 @@ function getElectronMain(): {
 }
 
 function desktopUserDataPath(): string {
+  const overridePath = process.env.LETAGENTS_DESKTOP_USER_DATA_DIR?.trim();
+  if (overridePath) return overridePath;
   return getElectronMain().app?.getPath("userData") || homedir();
 }
 
@@ -82,14 +86,14 @@ function getSetupStorePath(): string {
 }
 
 function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
-  const home = homedir();
+  const home = process.env.LETAGENTS_DESKTOP_MCP_CONFIG_HOME?.trim() || homedir();
   const claudeSettingsPath = join(home, ".claude", "settings.json");
   const claudeJsonPath = join(home, ".claude.json");
   return [
     {
       id: "claude-code",
       name: "Claude Code",
-      description: "We'll add the MCP bridge for room access.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
       configPath: claudeSettingsPath,
       configLocations: [
         {
@@ -111,7 +115,7 @@ function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
     {
       id: "antigravity",
       name: "Antigravity",
-      description: "We'll add the MCP bridge for room access.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
       configPath: join(home, ".gemini", "settings.json"),
       configLocations: [
         {
@@ -127,7 +131,7 @@ function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
     {
       id: "cursor",
       name: "Cursor",
-      description: "We'll add the MCP bridge for room access.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
       configPath: join(home, ".cursor", "mcp.json"),
       configLocations: [
         {
@@ -142,7 +146,7 @@ function getMcpInstallTargetDefinitions(): McpInstallTargetDefinition[] {
     {
       id: "codex",
       name: "Codex",
-      description: "We'll add the MCP bridge for room access. Install and sign in to Codex separately.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms. Install and sign in to Codex separately.",
       configPath: join(home, ".codex", "config.toml"),
       configLocations: [
         {
@@ -222,12 +226,50 @@ async function buildExpectedLetAgentsMcpServerConfig(): Promise<LetAgentsMcpServ
 async function writeStoredMcpSetup(
   nextSetup: StoredMcpInstallSetup,
 ): Promise<void> {
-  await mkdir(dirname(getSetupStorePath()), { recursive: true });
-  await writeFile(
+  await atomicWriteTextFile(
     getSetupStorePath(),
     `${JSON.stringify(nextSetup, null, 2)}\n`,
-    "utf8",
   );
+}
+
+/**
+ * Replace a config without ever exposing a partially-written destination.
+ * The temporary file lives beside the destination so the final rename is
+ * atomic on the filesystems used by the desktop app.
+ */
+export async function atomicWriteTextFile(
+  destinationPath: string,
+  contents: string,
+): Promise<void> {
+  const parentDirectory = dirname(destinationPath);
+  await mkdir(parentDirectory, { recursive: true });
+
+  let mode = 0o600;
+  try {
+    mode = (await stat(destinationPath)).mode & 0o777;
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+
+  const temporaryPath = join(
+    parentDirectory,
+    `.${basename(destinationPath)}.${process.pid}.${randomUUID()}.tmp`,
+  );
+  let handle: Awaited<ReturnType<typeof open>> | null = null;
+  try {
+    handle = await open(temporaryPath, "wx", mode);
+    await handle.writeFile(contents, "utf8");
+    await handle.sync();
+    await handle.close();
+    handle = null;
+    await rename(temporaryPath, destinationPath);
+  } catch (error) {
+    if (handle) {
+      await handle.close().catch(() => undefined);
+    }
+    await unlink(temporaryPath).catch(() => undefined);
+    throw error;
+  }
 }
 
 async function readMcpJsonConfig(
@@ -354,8 +396,7 @@ async function writeMcpJsonConfig(
   configPath: string,
   config: McpServerJsonConfig,
 ): Promise<void> {
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(configPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+  await atomicWriteTextFile(configPath, `${JSON.stringify(config, null, 2)}\n`);
 }
 
 async function writeCodexTomlMcpConfig(
@@ -371,11 +412,9 @@ async function writeCodexTomlMcpConfig(
     }
   }
 
-  await mkdir(dirname(configPath), { recursive: true });
-  await writeFile(
+  await atomicWriteTextFile(
     configPath,
     buildCodexTomlLetAgentsMcpConfig(currentConfig, expected),
-    "utf8",
   );
 }
 
@@ -464,11 +503,23 @@ async function writeLetAgentsMcpServerForLocation(
 async function writeLetAgentsMcpServerForTarget(
   targetDefinition: McpInstallTargetDefinition,
   expected: LetAgentsMcpServerConfig,
-): Promise<void> {
+): Promise<DesktopMcpInstallFailure[]> {
+  const failures: DesktopMcpInstallFailure[] = [];
   for (const location of targetDefinition.configLocations) {
-    if (!(await shouldWriteMcpLocation(location))) continue;
-    await writeLetAgentsMcpServerForLocation(location, expected);
+    try {
+      if (!(await shouldWriteMcpLocation(location))) continue;
+      await writeLetAgentsMcpServerForLocation(location, expected);
+    } catch (error) {
+      failures.push({
+        targetId: targetDefinition.id,
+        targetName: targetDefinition.name,
+        configPath: location.path,
+        configLabel: location.label,
+        message: error instanceof Error ? error.message : "The config could not be written.",
+      });
+    }
   }
+  return failures;
 }
 
 async function refreshLetAgentsMcpServerAuthForLocation(
@@ -484,14 +535,12 @@ async function refreshLetAgentsMcpServerAuthForLocation(
     }
     const currentServer = getCodexTomlLetAgentsMcpServerFromRaw(currentConfig);
     if (!currentServer) return;
-    await mkdir(dirname(location.path), { recursive: true });
-    await writeFile(
+    await atomicWriteTextFile(
       location.path,
       buildCodexTomlLetAgentsMcpConfig(
         currentConfig,
         withRefreshedRuntimeAndAuth(currentServer, expected),
       ),
-      "utf8",
     );
     return;
   }
@@ -548,24 +597,49 @@ export async function installLetAgentsMcpServers(
   const storedSetup = await readStoredMcpSetup();
   const expected = await buildExpectedLetAgentsMcpServerConfig();
 
-  for (const targetDefinition of targetDefinitions) {
-    await writeLetAgentsMcpServerForTarget(targetDefinition, expected);
-  }
+  const failures = (await Promise.all(
+    targetDefinitions.map((targetDefinition) =>
+      writeLetAgentsMcpServerForTarget(targetDefinition, expected)
+    ),
+  )).flat();
+
+  // Always reread the files after every attempted write. This is the source of
+  // truth for success, including partial installs where another target failed.
+  let installState = await buildMcpInstallState();
+  const verifiedTargetIds = new Set(
+    installState.targets
+      .filter((target) =>
+        uniqueTargetIds.includes(target.id) && target.status === "installed"
+      )
+      .map((target) => target.id),
+  );
 
   const now = new Date().toISOString();
   const installs = { ...storedSetup.installs };
-  for (const targetId of uniqueTargetIds) {
+  for (const targetId of verifiedTargetIds) {
     installs[targetId] = { lastInstalledAt: now };
   }
 
-  await writeStoredMcpSetup({
-    completed: storedSetup.completed,
-    completedAt: storedSetup.completedAt,
-    selectedTargetId: uniqueTargetIds[0] || storedSetup.selectedTargetId,
-    installs,
-  });
+  try {
+    await writeStoredMcpSetup({
+      completed: storedSetup.completed,
+      completedAt: storedSetup.completedAt,
+      selectedTargetId:
+        uniqueTargetIds.find((targetId) => verifiedTargetIds.has(targetId))
+        || storedSetup.selectedTargetId,
+      installs,
+    });
+    installState = await buildMcpInstallState();
+  } catch (error) {
+    failures.push({
+      targetId: null,
+      targetName: "LetAgents",
+      configPath: getSetupStorePath(),
+      configLabel: "Setup state",
+      message: error instanceof Error ? error.message : "Setup progress could not be saved.",
+    });
+  }
 
-  const installState = await buildMcpInstallState();
   const targets = installState.targets.filter((candidate) =>
     uniqueTargetIds.includes(candidate.id),
   );
@@ -575,13 +649,22 @@ export async function installLetAgentsMcpServers(
   );
   const firstIssue = unverifiedTargets.find((target) => target.configIssue)
     ?.configIssue;
+  const failedTargetIds = new Set(unverifiedTargets.map((target) => target.id));
+  const blockingFailures = failures.filter((failure) =>
+    failure.targetId === null || failedTargetIds.has(failure.targetId)
+  );
+  const firstWriteFailure = blockingFailures[0];
+  const successfulTargets = targets.filter((target) => target.status === "installed");
+  const successfulNames = successfulTargets.map((target) => target.name).join(", ");
+  const failedNames = unverifiedTargets.map((target) => target.name).join(", ");
 
   return {
-    success: unverifiedTargets.length === 0,
+    success: unverifiedTargets.length === 0 && blockingFailures.length === 0,
     targets,
     installState,
-    message: unverifiedTargets.length
-      ? `LetAgents could not verify ${unverifiedTargets.map((target) => target.name).join(", ")}. ${firstIssue || "Repair the highlighted config and restart the app."}`
+    failures,
+    message: unverifiedTargets.length || blockingFailures.length
+      ? `${successfulNames ? `${successfulNames} installed. ` : ""}Couldn't install ${failedNames || "LetAgents setup"}. ${firstWriteFailure?.configLabel ? `${firstWriteFailure.configLabel}: ` : ""}${firstWriteFailure?.message || firstIssue || "Check the highlighted config and try again."}`
       : `LetAgents was added to ${targetNames}. Restart or reconnect those apps so the updated MCP settings are used.`,
   };
 }
@@ -599,12 +682,12 @@ export async function installLetAgentsMcpServer(
   }
 
   return {
-    success: target.status === "installed",
+    success: result.success && target.status === "installed",
     target,
     installState,
-    message: target.status === "installed"
+    message: result.success && target.status === "installed"
       ? `LetAgents was added to ${target.name}. ${target.restartHint}`
-      : `LetAgents could not verify ${target.name}. ${target.configIssue || "Repair the highlighted config and restart the app."}`,
+      : result.message,
   };
 }
 

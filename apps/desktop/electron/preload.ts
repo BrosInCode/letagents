@@ -230,6 +230,7 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:auth:start-device-flow", roomIdentifier ?? null),
     pollDeviceFlow: (requestId?: string | null) =>
       ipcRenderer.invoke("desktop:auth:poll-device-flow", requestId ?? null),
+    cancelDeviceFlow: () => ipcRenderer.invoke("desktop:auth:cancel-device-flow"),
     openVerification: (url: string) => ipcRenderer.invoke("desktop:auth:open-verification", url),
     signOut: () => ipcRenderer.invoke("desktop:auth:sign-out"),
   },
