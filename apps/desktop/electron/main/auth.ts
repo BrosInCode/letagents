@@ -535,6 +535,11 @@ export async function startDeviceAuthFlow(
   };
 }
 
+export async function cancelDeviceAuthFlow(): Promise<DesktopAuthStatus> {
+  const storedAuth = await updateStoredAuth({ pendingDeviceAuth: null });
+  return buildAuthStatus({ storedAuth });
+}
+
 export async function pollDeviceAuthFlow(
   requestId?: string | null,
 ): Promise<DesktopAuthPollResult> {

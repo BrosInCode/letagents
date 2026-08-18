@@ -8,7 +8,7 @@ export const fallbackMcpInstallState: DesktopMcpInstallState = {
     {
       id: "claude-code",
       name: "Claude Code",
-      description: "We'll add the MCP bridge for room access.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
       configPath: "~/.claude/settings.json",
       configPaths: [
         {
@@ -34,7 +34,7 @@ export const fallbackMcpInstallState: DesktopMcpInstallState = {
     {
       id: "antigravity",
       name: "Antigravity",
-      description: "We'll add the MCP bridge for room access.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
       configPath: "~/.gemini/settings.json",
       configPaths: [
         {
@@ -53,7 +53,7 @@ export const fallbackMcpInstallState: DesktopMcpInstallState = {
     {
       id: "cursor",
       name: "Cursor",
-      description: "We'll add the MCP bridge for room access.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms.",
       configPath: "~/.cursor/mcp.json",
       configPaths: [
         {
@@ -72,7 +72,7 @@ export const fallbackMcpInstallState: DesktopMcpInstallState = {
     {
       id: "codex",
       name: "Codex",
-      description: "We'll add the MCP bridge for room access. Install and sign in to Codex separately.",
+      description: "Add the LetAgents MCP so agents here can communicate in shared rooms. Install and sign in to Codex separately.",
       configPath: "~/.codex/config.toml",
       configPaths: [
         {
@@ -95,5 +95,5 @@ export function defaultMcpTargetSelection(state: DesktopMcpInstallState): Deskto
   const installedTargets = state.targets.filter((target) => target.status === "installed").map((target) => target.id);
   if (installedTargets.length) return installedTargets;
   if (state.selectedTargetId) return [state.selectedTargetId];
-  return state.targets[0] ? [state.targets[0].id] : [];
+  return [];
 }

@@ -1,165 +1,190 @@
 <template>
   <section class="first-run-wizard surface-page" :data-stage="stage" data-testid="first-run-wizard">
-    <article v-if="stage === 'welcome'" class="first-run-welcome" data-testid="first-run-welcome">
-      <div class="first-run-welcome-brand">
-        <span class="first-run-welcome-mark" aria-hidden="true">
-          <LetAgentsLogoMark />
-        </span>
-        <h1>LetAgents</h1>
-      </div>
-      <button
-        class="primary-button"
-        type="button"
-        :disabled="busy"
-        data-testid="first-run-start-setup"
-        @click="$emit('start-setup')"
-      >
-        Set up LetAgents
-      </button>
-      <p v-if="feedback" class="mcp-feedback" data-testid="first-run-feedback">{{ feedback }}</p>
-    </article>
+    <Transition name="first-run-shell">
+      <article v-if="stage === 'welcome'" key="welcome" class="first-run-welcome" data-testid="first-run-welcome">
+        <div class="first-run-welcome-brand">
+          <span class="first-run-welcome-mark" aria-hidden="true">
+            <LetAgentsLogoMark />
+          </span>
+          <h1>LetAgents</h1>
+        </div>
+        <button
+          class="primary-button"
+          type="button"
+          :disabled="busy"
+          data-testid="first-run-start-setup"
+          @click="$emit('start-setup')"
+        >
+          Set up LetAgents
+        </button>
+        <Transition name="first-run-feedback">
+          <p v-if="feedback" class="mcp-feedback" data-testid="first-run-feedback">{{ feedback }}</p>
+        </Transition>
+      </article>
 
-    <article
-      v-else
-      class="mcp-wizard-card first-run-card"
-      :data-mcp-step="stage === 'mcp' ? mcpWizardStep : null"
-      data-testid="first-run-card"
-    >
-      <div class="first-run-hero-row" data-testid="first-run-hero">
-        <header class="mcp-wizard-header first-run-header" data-testid="first-run-header">
-          <p class="hero-kicker">LetAgents setup</p>
-          <SetupWizardProgress :current-step="stage" :steps="progressSteps" />
-          <h1>{{ headline }}</h1>
-          <p>{{ copy }}</p>
-        </header>
-      </div>
-
-      <div v-if="stage === 'mcp'" class="first-run-stage" data-testid="first-run-stage-mcp">
-        <McpHarnessChoiceStep
-          v-if="mcpWizardStep === 'choose'"
-          :targets="mcpState.targets"
-          :selected-target-ids="selectedMcpTargetIds"
-          @select-target="$emit('select-target', $event)"
-          @select-all="$emit('select-all-targets')"
-          @clear-selection="$emit('clear-target-selection')"
-        />
-
-        <McpInstallConfirmStep
-          v-else-if="mcpWizardStep === 'install'"
-          :targets="selectedMcpTargets"
-        />
-
-        <McpInstallDoneStep v-else :targets="selectedMcpTargets" />
-      </div>
-
-      <FirstRunGithubStep
-        v-else-if="stage === 'github'"
-        :auth-status="authStatus"
-        :busy="authBusy"
-        @start-auth="$emit('start-auth')"
-        @open-verification="$emit('open-verification', $event)"
-        @poll-auth="$emit('poll-auth')"
-        @sign-out="$emit('sign-out')"
-      />
-
-      <FirstRunRoomStep
+      <article
         v-else
-        :selected-room-name="selectedRoomName"
-        :selected-room-identifier="selectedRoomIdentifier"
-        :selected-room-access-status="selectedRoomAccessStatus"
-        :room-needs-github-access="roomNeedsGithubAccess"
-        :github-connected="!!authStatus?.authenticated"
-        :busy="busy"
-        @pick-repo="$emit('pick-repo')"
-        @join-room-code="$emit('join-room-code', $event)"
-      />
+        key="wizard"
+        class="mcp-wizard-card first-run-card"
+        :data-motion-direction="motionDirection"
+        :data-mcp-step="stage === 'mcp' ? mcpWizardStep : null"
+        data-testid="first-run-card"
+      >
+        <div class="first-run-hero-row" data-testid="first-run-hero">
+          <header class="mcp-wizard-header first-run-header" data-testid="first-run-header">
+            <p class="hero-kicker">LetAgents setup</p>
+            <SetupWizardProgress :current-step="stage" :steps="progressSteps" />
+            <div class="first-run-heading-viewport">
+              <Transition :name="stageTransitionName" mode="out-in">
+                <div :key="navigationKey" class="first-run-heading-motion">
+                  <h1>{{ headline }}</h1>
+                  <p>{{ copy }}</p>
+                </div>
+              </Transition>
+            </div>
+          </header>
+        </div>
 
-      <div class="mcp-wizard-actions" data-testid="first-run-actions">
-        <button
-          v-if="showBack"
-          class="ghost-button"
-          type="button"
-          :disabled="busy"
-          data-testid="first-run-back"
-          @click="$emit('back')"
-        >
-          Back
-        </button>
+        <div class="first-run-stage-viewport">
+          <Transition :name="stageTransitionName" mode="out-in">
+            <div :key="navigationKey" class="first-run-stage-motion">
+              <div v-if="stage === 'mcp'" class="first-run-stage" data-testid="first-run-stage-mcp">
+                <McpHarnessChoiceStep
+                  v-if="mcpWizardStep === 'choose'"
+                  :targets="mcpState.targets"
+                  :selected-target-ids="selectedMcpTargetIds"
+                  @select-target="$emit('select-target', $event)"
+                  @select-all="$emit('select-all-targets')"
+                  @clear-selection="$emit('clear-target-selection')"
+                />
 
-        <button
-          v-if="stage === 'mcp' && mcpWizardStep === 'choose'"
-          class="primary-button"
-          type="button"
-          :disabled="!selectedMcpTargetIds.length || busy"
-          data-testid="first-run-mcp-continue"
-          @click="$emit('continue-mcp')"
-        >
-          Continue
-        </button>
+                <McpInstallConfirmStep
+                  v-else
+                  :targets="selectedMcpTargets"
+                  :show-result="mcpWizardStep === 'done' || Boolean(feedback)"
+                />
+              </div>
 
-        <button
-          v-else-if="stage === 'mcp' && mcpWizardStep === 'install'"
-          class="primary-button"
-          type="button"
-          :disabled="!selectedMcpTargetIds.length || busy || !canInstall"
-          data-testid="first-run-mcp-install"
-          @click="$emit('install-targets')"
-        >
-          {{ installButtonLabel }}
-        </button>
+              <FirstRunGithubStep
+                v-else-if="stage === 'github'"
+                :auth-status="authStatus"
+                :busy="authBusy"
+                @cancel-auth="$emit('cancel-auth')"
+                @open-verification="$emit('open-verification', $event)"
+                @poll-auth="$emit('poll-auth')"
+                @sign-out="$emit('sign-out')"
+              />
 
-        <button
-          v-else-if="stage === 'mcp'"
-          class="primary-button"
-          type="button"
-          :disabled="busy"
-          data-testid="first-run-to-github"
-          @click="$emit('continue-to-github')"
-        >
-          Continue
-        </button>
+              <FirstRunRoomStep
+                v-else
+                :selected-room-name="selectedRoomName"
+                :selected-room-identifier="selectedRoomIdentifier"
+                :selected-room-access-status="selectedRoomAccessStatus"
+                :room-needs-github-access="roomNeedsGithubAccess"
+                :created-invite-code="createdInviteCode"
+                :busy="busy"
+                :feedback="feedback"
+                @pick-repo="$emit('pick-repo')"
+                @create-room="$emit('create-room')"
+                @join-room-code="$emit('join-room-code', $event)"
+              />
+            </div>
+          </Transition>
+        </div>
 
-        <button
-          v-if="stage === 'github' && !authStatus?.authenticated"
-          class="ghost-button"
-          type="button"
-          :disabled="busy"
-          data-testid="first-run-skip-github"
-          @click="$emit('continue-to-room')"
-        >
-          Skip for now
-        </button>
+        <div class="first-run-actions-viewport">
+          <Transition name="first-run-action" mode="out-in">
+            <div :key="actionKey" class="mcp-wizard-actions" data-testid="first-run-actions">
+              <button
+                v-if="showBack && !(stage === 'github' && authStatus?.pendingDeviceAuth)"
+                class="ghost-button"
+                type="button"
+                :disabled="busy"
+                data-testid="first-run-back"
+                @click="$emit('back')"
+              >
+                Back
+              </button>
 
-        <button
-          v-else-if="stage === 'github'"
-          class="primary-button"
-          type="button"
-          :disabled="busy"
-          data-testid="first-run-to-room"
-          @click="$emit('continue-to-room')"
-        >
-          Continue
-        </button>
+              <button
+                v-if="stage === 'mcp' && mcpWizardStep === 'choose'"
+                class="primary-button"
+                type="button"
+                :disabled="!selectedMcpTargetIds.length || busy"
+                data-testid="first-run-mcp-continue"
+                @click="$emit('continue-mcp')"
+              >
+                Continue
+              </button>
 
-        <button
-          v-else-if="stage === 'room'"
-          class="primary-button"
-          type="button"
-          :disabled="busy || !roomSelected"
-          data-testid="first-run-open-room"
-          @click="roomNeedsGithubAccess ? $emit('connect-room-auth') : $emit('finish')"
-        >
-          {{ roomActionLabel }}
-        </button>
-      </div>
+              <button
+                v-else-if="stage === 'mcp' && mcpWizardStep === 'install'"
+                class="primary-button"
+                type="button"
+                :disabled="!selectedMcpTargetIds.length || busy || !canInstall"
+                data-testid="first-run-mcp-install"
+                @click="$emit('install-targets')"
+              >
+                {{ installButtonLabel }}
+              </button>
 
-      <p v-if="showFeedback" class="mcp-feedback" data-testid="first-run-feedback">{{ feedback }}</p>
-    </article>
+              <button
+                v-else-if="stage === 'mcp'"
+                class="primary-button"
+                type="button"
+                :disabled="busy"
+                data-testid="first-run-to-github"
+                @click="$emit('continue-to-github')"
+              >
+                Continue
+              </button>
+
+              <button
+                v-if="stage === 'github' && !authStatus?.authenticated && !authStatus?.pendingDeviceAuth"
+                class="primary-button"
+                type="button"
+                :disabled="authBusy"
+                data-testid="first-run-auth-start"
+                @click="$emit('start-auth')"
+              >
+                {{ authBusy ? "Opening GitHub..." : "Sign in with GitHub" }}
+              </button>
+
+              <button
+                v-if="stage === 'github' && authStatus?.authenticated"
+                class="primary-button"
+                type="button"
+                :disabled="busy"
+                data-testid="first-run-to-room"
+                @click="$emit('continue-to-room')"
+              >
+                Continue
+              </button>
+
+              <button
+                v-else-if="stage === 'room'"
+                class="primary-button"
+                type="button"
+                :disabled="busy"
+                data-testid="first-run-open-room"
+                @click="roomNeedsGithubAccess ? $emit('connect-room-auth') : $emit('finish')"
+              >
+                {{ roomActionLabel }}
+              </button>
+            </div>
+          </Transition>
+        </div>
+
+        <Transition name="first-run-feedback">
+          <p v-if="showFeedback" class="mcp-feedback" data-testid="first-run-feedback">{{ feedback }}</p>
+        </Transition>
+      </article>
+    </Transition>
   </section>
 </template>
 
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, ref, watch } from "vue";
 import type {
   DesktopAuthStatus,
   DesktopMcpInstallState,
@@ -171,7 +196,6 @@ import FirstRunRoomStep from "./FirstRunRoomStep.vue";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 import McpHarnessChoiceStep from "./McpHarnessChoiceStep.vue";
 import McpInstallConfirmStep from "./McpInstallConfirmStep.vue";
-import McpInstallDoneStep from "./McpInstallDoneStep.vue";
 import SetupWizardProgress from "./SetupWizardProgress.vue";
 import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./types";
 
@@ -186,6 +210,7 @@ const props = defineProps<{
   canInstall: boolean;
   feedback: string | null;
   roomSelected: boolean;
+  createdInviteCode: string | null;
   selectedRoomName: string | null;
   selectedRoomIdentifier: string | null;
   selectedRoomAccessStatus: DesktopRoomAccess["status"] | null;
@@ -201,12 +226,14 @@ defineEmits<{
   "install-targets": [];
   "continue-to-github": [];
   "start-auth": [];
+  "cancel-auth": [];
   "open-verification": [url: string];
   "poll-auth": [];
   "sign-out": [];
   "continue-to-room": [];
   "connect-room-auth": [];
   "pick-repo": [];
+  "create-room": [];
   "join-room-code": [roomCode: string];
   back: [];
   finish: [];
@@ -216,58 +243,87 @@ const selectedMcpTargets = computed(() => {
   return props.mcpState.targets.filter((target) => props.selectedMcpTargetIds.includes(target.id));
 });
 
-const selectedMcpTargetCount = computed(() => selectedMcpTargets.value.length);
-
-const selectedTargetLabel = computed(() => {
-  if (selectedMcpTargetCount.value === 1) return selectedMcpTargets.value[0].name;
-  if (selectedMcpTargetCount.value === props.mcpState.targets.length) return "all your apps";
-  return `${selectedMcpTargetCount.value} apps`;
-});
-
 const installButtonLabel = computed(() => {
   if (props.busy) return "Installing...";
-  return selectedMcpTargetCount.value > 1
-    ? `Install in ${selectedMcpTargetCount.value} apps`
-    : "Install LetAgents bridge";
+  if (props.feedback && selectedMcpTargets.value.some((target) => target.status !== "installed")) {
+    return "Retry";
+  }
+  return "Install MCP";
 });
 
 const roomActionLabel = computed(() => {
-  if (!props.roomSelected) return "Choose a room";
+  if (!props.roomSelected) return "Continue";
   if (props.roomNeedsGithubAccess) return "Connect GitHub";
   return "Open room";
 });
 
+const navigationKey = computed(() => {
+  if (props.stage !== "mcp") return props.stage;
+  if (props.mcpWizardStep !== "choose") return "mcp-install";
+  return `mcp-${props.mcpWizardStep}`;
+});
+
+const motionDirection = ref<"forward" | "back">("forward");
+
+watch(
+  navigationKey,
+  (next, previous) => {
+    motionDirection.value = navigationRank(next) >= navigationRank(previous) ? "forward" : "back";
+  },
+  { flush: "sync" },
+);
+
+const stageTransitionName = computed(() => `first-run-${motionDirection.value}`);
+
+const actionKey = computed(() => {
+  if (props.stage === "github") {
+    if (props.authStatus?.authenticated) return "github-connected";
+    if (props.authStatus?.pendingDeviceAuth) return "github-pending";
+    return "github-start";
+  }
+  if (props.stage === "room") {
+    return props.roomSelected ? "room-selected" : "room-empty";
+  }
+  return navigationKey.value;
+});
+
 const headline = computed(() => {
-  if (props.stage === "github") return "Access for private repos.";
-  if (props.stage === "room") return "Choose a room.";
-  if (props.mcpWizardStep === "install") return `Add LetAgents to ${selectedTargetLabel.value}.`;
-  if (props.mcpWizardStep === "done") return "Restart once, then agents can join.";
+  if (props.stage === "github") return "Repositories are rooms.";
+  if (props.stage === "room") return "Open your first room.";
+  if (props.mcpWizardStep === "install") return "Connect your agents.";
+  if (props.mcpWizardStep === "done") return "MCP installed.";
   return "Where do your agents live?";
 });
 
 const copy = computed(() => {
   if (props.stage === "github") {
-    return "Connect GitHub now, or skip and use public rooms and invite codes.";
+    return props.authStatus?.authenticated
+      ? "GitHub connected. Continue to open your first room."
+      : "Sign in with GitHub to open your repositories as rooms.";
   }
   if (props.stage === "room") {
-    return "Start with a repository room, or join a room someone shared.";
+    return "Start now, or continue and choose one from the sidebar later.";
   }
   if (props.mcpWizardStep === "install") {
-    return "LetAgents will add a small global MCP connection to this app. Room and repo choice stay inside LetAgents.";
+    return "We'll add the LetAgents MCP to these apps so their agents can talk in shared rooms.";
   }
   if (props.mcpWizardStep === "done") {
-    return `${selectedTargetLabel.value} ${selectedMcpTargetCount.value === 1 ? "has" : "have"} the LetAgents bridge. Restart or reconnect before continuing.`;
+    return "Restart your agent apps, then continue.";
   }
-  return "Pick where your agents run. Provider CLIs stay user-managed; LetAgents adds the MCP bridge for rooms to every selected app.";
+  return "We'll install the LetAgents MCP in the apps you select.";
 });
 
 const showFeedback = computed(() => {
-  return Boolean(props.feedback && !(props.stage === "mcp" && props.mcpWizardStep === "done"));
+  return Boolean(
+    props.feedback
+    && props.stage !== "room"
+    && !(props.stage === "mcp" && props.mcpWizardStep === "done"),
+  );
 });
 
 const progressSteps = computed<Array<{ id: FirstRunWizardStage; step: string; label: string; complete: boolean }>>(() => [
-  { id: "mcp", step: "1", label: "Agent app", complete: props.stage !== "mcp" },
-  { id: "github", step: "2", label: "Access", complete: props.stage === "room" },
+  { id: "mcp", step: "1", label: "MCP", complete: props.stage !== "mcp" },
+  { id: "github", step: "2", label: "GitHub", complete: props.stage === "room" },
   { id: "room", step: "3", label: "Room", complete: false },
 ]);
 
@@ -275,4 +331,16 @@ const showBack = computed(() => {
   if (props.stage === "welcome") return false;
   return props.stage !== "mcp" || props.mcpWizardStep !== "choose";
 });
+
+function navigationRank(key: string): number {
+  const ranks: Record<string, number> = {
+    welcome: 0,
+    "mcp-choose": 1,
+    "mcp-install": 2,
+    "mcp-done": 3,
+    github: 4,
+    room: 5,
+  };
+  return ranks[key] ?? 0;
+}
 </script>

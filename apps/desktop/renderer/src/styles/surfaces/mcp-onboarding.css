@@ -40,7 +40,6 @@
 .mcp-choice-card small,
 .mcp-install-step p,
 .mcp-done-step p,
-.mcp-selected-app small,
 .mcp-feedback {
   margin: 0;
   color: var(--text-secondary);
@@ -53,7 +52,7 @@
   gap: 10px;
 }
 
-.mcp-progress span {
+.mcp-progress > span {
   position: relative;
   display: inline-grid;
   grid-auto-flow: column;
@@ -74,92 +73,116 @@
     color var(--duration-fast) var(--ease-out);
 }
 
-.mcp-progress span strong,
-.mcp-progress span small {
+.mcp-progress > span > strong,
+.mcp-progress > span > small {
   display: inline;
 }
 
-.mcp-progress span small {
+.mcp-progress > span > small {
   font: inherit;
 }
 
-.mcp-progress span[data-active="true"] {
+.mcp-progress > span[data-active="true"] {
   border-color: var(--border-accent);
   background: rgba(255, 255, 255, 0.07);
   color: var(--text);
 }
 
-.mcp-progress span[data-complete="true"] {
+.mcp-progress > span[data-complete="true"] {
   border-color: rgba(34, 197, 94, 0.22);
   color: var(--green);
 }
 
 .mcp-choice-step {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 18px;
-}
-
-.mcp-choice-tools {
-  grid-column: 1 / -1;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 10px;
-  justify-content: flex-end;
-}
-
-.mcp-choice-card,
-.mcp-selected-app {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: 14px;
-  align-items: center;
-  border: 1px solid var(--border);
-  border-radius: var(--radius-xl);
-  background: rgba(20, 20, 20, 0.68);
+  grid-template-columns: repeat(4, minmax(112px, 168px));
+  justify-content: center;
+  gap: clamp(12px, 2vw, 24px);
 }
 
 .mcp-choice-card {
-  min-height: 164px;
-  padding: 22px;
+  position: relative;
+  display: grid;
+  justify-items: center;
+  align-content: center;
+  gap: 14px;
+  min-height: 176px;
+  padding: 18px 12px;
+  border: 1px solid transparent;
+  border-radius: 22px;
+  background: transparent;
   color: inherit;
-  text-align: left;
+  text-align: center;
   cursor: pointer;
-  transform: translateY(0);
   transition:
-    transform var(--duration-fast) var(--ease-out),
-    border-color var(--duration-fast) var(--ease-out),
-    background var(--duration-fast) var(--ease-out);
+    transform 140ms cubic-bezier(0.23, 1, 0.32, 1),
+    border-color 160ms ease,
+    background-color 160ms ease;
 }
 
-.mcp-choice-card:hover {
-  transform: translateY(-2px);
-  border-color: var(--border-accent);
-  background: rgba(255, 255, 255, 0.045);
+.mcp-choice-card:active {
+  transform: scale(0.98);
+}
+
+.mcp-choice-card:focus-visible {
+  outline: 2px solid var(--text);
+  outline-offset: 3px;
 }
 
 .mcp-choice-card[data-selected="true"] {
-  border-color: var(--border-accent);
-  background:
-    radial-gradient(circle at 0% 0%, rgba(255, 255, 255, 0.12), transparent 42%),
-    rgba(255, 255, 255, 0.075);
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.06);
+  border-color: var(--border-strong);
+  background-color: color-mix(in srgb, var(--text) 7%, transparent);
+}
+
+.mcp-choice-icon {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.mcp-choice-icon .mcp-target-mark {
+  width: 88px;
+  height: 88px;
+  border-radius: 24px;
+  transition:
+    background-color 160ms ease,
+    box-shadow 160ms ease;
+}
+
+.mcp-choice-icon .mcp-harness-icon {
+  width: 62px;
+  height: 62px;
+  transition: transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
+}
+
+.mcp-choice-name {
+  color: var(--text);
+  font-size: 0.95rem;
+  font-weight: 720;
+  line-height: 1.2;
 }
 
 .mcp-choice-check {
-  display: inline-grid;
+  position: absolute;
+  top: -7px;
+  right: -7px;
+  display: grid;
   place-items: center;
-  width: 30px;
-  height: 30px;
+  width: 26px;
+  height: 26px;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.07);
-  color: var(--text);
-  font-weight: 900;
+  background: var(--text);
+  color: var(--bg);
+  opacity: 0;
+  transform: scale(0.9);
+  transition:
+    opacity 120ms ease,
+    transform 160ms cubic-bezier(0.23, 1, 0.32, 1);
 }
 
 .mcp-choice-check svg {
-  width: 17px;
-  height: 17px;
+  width: 15px;
+  height: 15px;
 }
 
 .mcp-target-status {
@@ -185,8 +208,55 @@
 }
 
 .mcp-choice-card[data-selected="true"] .mcp-choice-check {
-  background: #f5f5f5;
-  color: #09090b;
+  opacity: 1;
+  transform: scale(1);
+}
+
+.mcp-choice-card[data-selected="true"] .mcp-choice-icon .mcp-target-mark {
+  background-color: color-mix(in srgb, var(--text) 11%, transparent);
+  box-shadow:
+    inset 0 0 0 1px var(--border-strong),
+    0 16px 30px rgba(0, 0, 0, 0.22);
+}
+
+@media (hover: hover) and (pointer: fine) {
+  .mcp-choice-card:hover {
+    transform: translateY(-2px);
+    background-color: rgba(255, 255, 255, 0.04);
+  }
+
+  .mcp-choice-card:hover .mcp-harness-icon {
+    transform: scale(1.04);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .mcp-choice-card,
+  .mcp-choice-check,
+  .mcp-choice-icon .mcp-harness-icon {
+    transform: none;
+  }
+
+  .mcp-choice-card {
+    transition-property: border-color, background-color;
+  }
+
+  .mcp-choice-check {
+    transition-property: opacity;
+  }
+
+  .mcp-choice-icon .mcp-harness-icon {
+    transition: none;
+  }
+
+  .mcp-confirm-target-result,
+  .mcp-confirm-target-result[data-status="installed"] path {
+    animation: none;
+  }
+
+  .mcp-confirm-target-result[data-status="installed"] path {
+    stroke-dashoffset: 0;
+  }
 }
 
 .mcp-target-mark {
@@ -203,19 +273,6 @@
   box-shadow:
     inset 0 0 0 1px rgba(255, 255, 255, 0.04),
     0 12px 26px rgba(0, 0, 0, 0.18);
-}
-
-.mcp-target-stack {
-  display: flex;
-  align-items: center;
-}
-
-.mcp-target-stack .mcp-target-mark + .mcp-target-mark {
-  margin-left: -18px;
-}
-
-.mcp-target-stack .mcp-target-mark:nth-child(n + 4) {
-  display: none;
 }
 
 .mcp-harness-icon {
@@ -261,67 +318,6 @@
   color: var(--warning, #d99a2b);
 }
 
-.mcp-config-paths {
-  display: grid;
-  gap: 8px;
-  margin: 8px 0 0;
-  padding: 0;
-  list-style: none;
-}
-
-.mcp-config-paths li {
-  display: grid;
-  gap: 3px;
-  padding: 8px 10px;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  background: rgba(255, 255, 255, 0.035);
-  color: var(--text-tertiary);
-}
-
-.mcp-config-paths li[data-status="needs_attention"] {
-  border-color: color-mix(in srgb, var(--warning, #d99a2b) 55%, transparent);
-}
-
-.mcp-config-path-heading {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
-  align-items: center;
-  justify-content: space-between;
-}
-
-.mcp-config-path-heading span {
-  color: var(--text-secondary);
-  font-weight: 800;
-}
-
-.mcp-config-path-heading em {
-  padding: 2px 7px;
-  border: 1px solid var(--border);
-  border-radius: 999px;
-  color: var(--text-tertiary);
-  font-size: 0.68rem;
-  font-style: normal;
-  font-weight: 850;
-  text-transform: uppercase;
-}
-
-.mcp-config-path-heading em[data-status="installed"] {
-  color: var(--accent);
-  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
-}
-
-.mcp-config-path-heading em[data-status="needs_attention"] {
-  color: var(--warning, #d99a2b);
-  border-color: color-mix(in srgb, var(--warning, #d99a2b) 50%, transparent);
-}
-
-.mcp-config-paths code {
-  white-space: normal;
-  word-break: break-word;
-}
-
 .mcp-install-step,
 .mcp-done-step {
   display: grid;
@@ -330,17 +326,102 @@
   min-height: 310px;
 }
 
-.mcp-selected-app {
-  padding: 24px;
-  background:
-    radial-gradient(circle at 10% 0%, rgba(255, 255, 255, 0.08), transparent 34%),
-    rgba(255, 255, 255, 0.035);
+.mcp-install-step {
+  justify-items: center;
 }
 
-.mcp-selected-app strong,
-.mcp-done-step strong {
-  display: block;
-  font-size: 1.35rem;
+.mcp-confirm-targets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 124px));
+  justify-content: center;
+  gap: clamp(18px, 3vw, 34px);
+  width: min(680px, 100%);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.mcp-confirm-targets li {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  font-weight: 720;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.mcp-confirm-targets .mcp-target-mark {
+  width: 78px;
+  height: 78px;
+  border-radius: 20px;
+}
+
+.mcp-confirm-targets .mcp-harness-icon {
+  width: 54px;
+  height: 54px;
+}
+
+.mcp-confirm-target-icon {
+  position: relative;
+  display: inline-grid;
+}
+
+.mcp-confirm-target-result {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--bg-card);
+  border-radius: 999px;
+  font-size: 0.8rem;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.mcp-confirm-target-result[data-status="installed"] {
+  background: var(--green);
+  color: #07130d;
+  animation: mcp-confirm-result-in 220ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.mcp-confirm-target-result[data-status="failed"] {
+  background: var(--amber);
+  color: #1d1303;
+  animation: mcp-confirm-result-in 180ms cubic-bezier(0.23, 1, 0.32, 1) both;
+}
+
+.mcp-confirm-target-result svg {
+  width: 14px;
+  height: 14px;
+}
+
+.mcp-confirm-target-result[data-status="installed"] path {
+  stroke-dasharray: 28;
+  stroke-dashoffset: 28;
+  animation: mcp-confirm-check-draw 220ms cubic-bezier(0.23, 1, 0.32, 1) 60ms forwards;
+}
+
+@keyframes mcp-confirm-result-in {
+  from {
+    opacity: 0;
+    transform: scale(0.9);
+  }
+
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+@keyframes mcp-confirm-check-draw {
+  to {
+    stroke-dashoffset: 0;
+  }
 }
 
 .mcp-done-step {
@@ -348,20 +429,61 @@
   text-align: center;
 }
 
-.mcp-done-mark {
-  display: inline-grid;
-  place-items: center;
-  width: 82px;
-  height: 82px;
-  border-radius: 999px;
-  background: #f5f5f5;
-  color: #09090b;
-  font-weight: 900;
+.mcp-done-targets {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(96px, 124px));
+  justify-content: center;
+  gap: clamp(18px, 3vw, 34px);
+  width: min(680px, 100%);
+  margin: 0;
+  padding: 0;
+  list-style: none;
 }
 
-.mcp-done-mark svg {
-  width: 34px;
-  height: 34px;
+.mcp-done-targets li {
+  display: grid;
+  justify-items: center;
+  gap: 12px;
+  color: var(--text-secondary);
+  font-size: 0.88rem;
+  font-weight: 720;
+  line-height: 1.2;
+  text-align: center;
+}
+
+.mcp-done-target-icon {
+  position: relative;
+  display: inline-grid;
+}
+
+.mcp-done-targets .mcp-target-mark {
+  width: 78px;
+  height: 78px;
+  border-radius: 20px;
+}
+
+.mcp-done-targets .mcp-harness-icon {
+  width: 54px;
+  height: 54px;
+}
+
+.mcp-done-target-check {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  display: inline-grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  border: 2px solid var(--bg-card);
+  border-radius: 999px;
+  background: var(--green);
+  color: #07130d;
+}
+
+.mcp-done-target-check svg {
+  width: 14px;
+  height: 14px;
 }
 
 .mcp-wizard-actions {

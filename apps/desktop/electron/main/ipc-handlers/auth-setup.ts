@@ -13,6 +13,7 @@ import type {
   DesktopSupervisorGrantMetadata,
 } from "../../ipc-types.js";
 import {
+  cancelDeviceAuthFlow,
   getDesktopAuthStatus,
   pollDeviceAuthFlow,
   setAuthAuthorizedHandler,
@@ -66,6 +67,10 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
     "desktop:auth:poll-device-flow",
     async (_event, requestId?: string | null): Promise<DesktopAuthPollResult> =>
       pollDeviceAuthFlow(requestId),
+  );
+  targetIpcMain.handle(
+    "desktop:auth:cancel-device-flow",
+    async (): Promise<DesktopAuthStatus> => cancelDeviceAuthFlow(),
   );
   targetIpcMain.handle(
     "desktop:auth:open-verification",

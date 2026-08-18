@@ -1,4 +1,5 @@
 import { app, protocol } from "electron";
+import { join } from "node:path";
 
 import {
   retireLegacyCodexBackedOpenModelSessions,
@@ -12,7 +13,7 @@ import {
   prepareDesktopNotificationLaunch,
   prepareDesktopNotifications,
 } from "./main/notifications.js";
-import { attachmentProtocolScheme } from "./main/paths.js";
+import { attachmentProtocolScheme, workspaceRoot } from "./main/paths.js";
 import { stopDesktopRoomStream } from "./main/room-stream.js";
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
 import { createWindow, hasOpenWindows } from "./main/window.js";
@@ -72,6 +73,9 @@ app.once("ready", async (_event, launchInfo) => {
   protocol.handle(attachmentProtocolScheme, handleAttachmentProtocolRequest);
   seedDesktopSmokeState();
   app.setName("LetAgents");
+  if (process.platform === "darwin" && !app.isPackaged) {
+    app.dock?.setIcon(join(workspaceRoot, "brand", "letagents-app-icon.png"));
+  }
   configureApplicationMenu();
   createWindow();
   void backgroundStartup;
