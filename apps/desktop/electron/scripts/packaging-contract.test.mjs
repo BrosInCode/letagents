@@ -29,6 +29,8 @@ test("packaging preserves APNs plist behavior and rebrands every Electron helper
 test("packaging rejects a non-square application icon before generating the iconset", async () => {
   const packager = await source(join(scriptsDirectory, "package-artifact.mjs"));
 
+  assert.match(packager, /"brand", "letagents-app-icon\.png"/);
+  assert.doesNotMatch(packager, /"docs", "logo\.png"/);
   assert.match(packager, /sips", \["-g", "pixelWidth", "-g", "pixelHeight"/);
   assert.match(packager, /assertSquareImageDimensions\(parseSipsDimensions\(sourceMetadata\), source\)/);
 });

@@ -52,6 +52,39 @@ test("startAuthFlow surfaces an unscoped device code before explicit browser nav
   assert.deepEqual(openedUrls, ["https://github.com/login/device"]);
 });
 
+test("first-run authorization enters room setup without leaking a success banner", async () => {
+  let firstRunAuthorizedCount = 0;
+  const state = useDesktopAuthFlow({
+    getRoomIdentifier: () => null,
+    isFirstRunGate: () => true,
+    onFirstRunAuthorized: async () => {
+      firstRunAuthorizedCount += 1;
+    },
+    onAuthorized: async () => undefined,
+    onSignedOut: async () => undefined,
+  });
+
+  await withDesktopBridge(
+    {
+      letagentsDesktop: {
+        auth: {
+          pollDeviceFlow: async () => ({
+            status: "authorized" as const,
+            intervalSeconds: null,
+            expiresInSeconds: null,
+            authStatus: authenticatedStatusFixture(),
+            error: null,
+          }),
+        },
+      },
+    },
+    () => state.pollAuthFlow(),
+  );
+
+  assert.equal(firstRunAuthorizedCount, 1);
+  assert.equal(state.authFeedback.value, null);
+});
+
 test("signOut locks the shell and clears renderer auth before IPC completes", async () => {
   let finishSignOut: ((status: DesktopAuthStatus) => void) | null = null;
   let signingOutCount = 0;
@@ -113,6 +146,43 @@ test("signOut locks the shell and clears renderer auth before IPC completes", as
   assert.equal(state.authSessionLocked.value, true);
   assert.equal(state.authStatus.value?.authenticated, false);
   assert.equal(signedOutCount, 1);
+});
+
+test("cancelAuthFlow stops polling and clears the pending device request", async () => {
+  const clearedTimers: number[] = [];
+  const authStatus = ref<DesktopAuthStatus | null>(authStatusFixture());
+  const state = useDesktopAuthFlow({
+    authStatus,
+    getRoomIdentifier: () => null,
+    isFirstRunGate: () => true,
+    onFirstRunAuthorized: async () => undefined,
+    onAuthorized: async () => undefined,
+    onSignedOut: async () => undefined,
+  });
+
+  await withDesktopBridge(
+    {
+      setTimeout: () => 41,
+      clearTimeout: (timer: number) => clearedTimers.push(timer),
+      letagentsDesktop: {
+        auth: {
+          cancelDeviceFlow: async (): Promise<DesktopAuthStatus> => ({
+            ...authStatusFixture(),
+            pendingDeviceAuth: null,
+          }),
+        },
+      },
+    },
+    async () => {
+      state.scheduleAuthPoll();
+      await state.cancelAuthFlow();
+    },
+  );
+
+  assert.deepEqual(clearedTimers, [41]);
+  assert.equal(state.authStatus.value?.pendingDeviceAuth, null);
+  assert.equal(state.authBusy.value, false);
+  assert.equal(state.authFeedback.value, null);
 });
 
 test("authorized polling keeps the shell locked when the authoritative refresh fails", async () => {

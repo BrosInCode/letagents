@@ -13,6 +13,7 @@
       :can-install="setupApiAvailable"
       :feedback="firstRunFeedback"
       :room-selected="firstRunRoomSelected"
+      :created-invite-code="firstRunInviteCode"
       :selected-room-name="firstRunRoomSelected ? (rootRoomSnapshot?.room?.displayName || repoName) : null"
       :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
       :selected-room-access-status="firstRunRoomSelected ? (rootRoomSnapshot?.access.status || null) : null"
@@ -27,10 +28,12 @@
       @start-auth="startAuthFlow"
       @open-verification="openVerification"
       @poll-auth="pollAuthFlow"
+      @cancel-auth="cancelAuthFlow"
       @sign-out="signOut"
       @continue-to-room="continueToRoomConfirmation"
       @connect-room-auth="startFirstRunRoomAuth"
       @pick-repo="pickRepoRoom"
+      @create-room="createFirstRunInviteRoom"
       @join-room-code="joinRoomCode"
       @back="goBackFirstRun"
       @finish="finishFirstRunOnboarding"
@@ -1336,6 +1339,7 @@ const {
   authBusy,
   authFeedback,
   authSessionLocked,
+  cancelAuthFlow,
   clearAuthPollTimer,
   openVerification,
   pollAuthFlow,
@@ -1738,7 +1742,9 @@ const {
   completeMcpOnboarding,
   continueMcpOnboarding,
   continueToRoomConfirmation,
+  createFirstRunInviteRoom,
   finishFirstRunOnboarding,
+  firstRunInviteCode,
   firstRunRoomSelected,
   firstRunFeedback,
   goBackFirstRun,
