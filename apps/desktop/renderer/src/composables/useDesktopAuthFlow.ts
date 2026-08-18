@@ -119,7 +119,6 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     options.onSigningOut?.();
     try {
       authStatus.value = signedOutStatus(await desktopIpc.auth.signOut());
-      authFeedback.value = "Signed out. Connect GitHub again whenever you are ready.";
       await options.onSignedOut();
     } catch (error) {
       authFeedback.value = error instanceof Error ? error.message : "Could not sign out.";
