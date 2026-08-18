@@ -9,8 +9,11 @@ import type {
   DesktopAgentProviderSetupInput,
   DesktopAgentProviderSetupResult,
   DesktopMcpInstallManyResult,
+  DesktopMcpInstallResult,
   DesktopMcpInstallState,
+  DesktopMcpInstallTarget,
   DesktopMcpInstallTargetId,
+  DesktopInviteRoomCreation,
   DesktopRepoRoomSelection,
   DesktopRoomAccess,
   DesktopRoomSnapshot,
@@ -38,7 +41,9 @@ interface SetupStateInput {
   firstRunStage?: FirstRunWizardStage;
   mcpWizardStep?: DesktopMcpWizardStep;
   initialBootstrapTimeoutMs?: number;
+  mcpInstallRevealDelayMs?: number;
   roomBridge?: {
+    createInviteRoom?: () => Promise<DesktopInviteRoomCreation>;
     getSnapshot?: (roomIdentifier: string | null) => Promise<DesktopRoomSnapshot>;
   };
   authBridge?: {
@@ -46,6 +51,9 @@ interface SetupStateInput {
   };
   setupBridge?: {
     getMcpInstallState?: () => Promise<DesktopMcpInstallState>;
+    installMcpServer?: (
+      targetId: DesktopMcpInstallTargetId,
+    ) => Promise<DesktopMcpInstallResult>;
     installMcpServers?: (
       targetIds: DesktopMcpInstallTargetId[],
     ) => Promise<DesktopMcpInstallManyResult>;
@@ -96,7 +104,7 @@ test("pickRepoRoom reports success and opens the selected repo room", async () =
     rootPath: "/Users/emmy/Projects/letagents",
     meta: "codex/desktop-codex-room-agents",
   });
-  assert.equal(state.authFeedback.value, "Room selected: letagents. Open it when you are ready.");
+  assert.equal(state.authFeedback.value, null);
 });
 
 test("pickRepoRoom reports false when the picker is canceled", async () => {
@@ -257,6 +265,20 @@ test("startFirstRunSetup advances welcome to MCP choose step", () => {
   assert.equal(state.setupLoadError.value, null);
 });
 
+test("back from completed MCP returns directly to app selection", () => {
+  const state = makeSetupState({
+    mcpWizardStep: "done",
+    selectedMcpTargetIds: ["codex"],
+  });
+
+  state.mcpInstallFeedback.value = "installed";
+  state.onboarding.goBackMcpOnboarding();
+
+  assert.equal(state.mcpWizardStep.value, "choose");
+  assert.deepEqual(state.selectedMcpTargetIds.value, ["codex"]);
+  assert.equal(state.mcpInstallFeedback.value, null);
+});
+
 test("installSelectedMcpTargets does not pass repo cwd to global MCP install", async () => {
   const installCalls: Array<[DesktopMcpInstallTargetId[]]> = [];
   const installState = mcpInstallStateFixture({ completed: false });
@@ -271,6 +293,7 @@ test("installSelectedMcpTargets does not pass repo cwd to global MCP install", a
           success: true,
           targets: installState.targets,
           installState,
+          failures: [],
           message: "installed",
         };
       },
@@ -280,6 +303,138 @@ test("installSelectedMcpTargets does not pass repo cwd to global MCP install", a
   await withDesktopBridge(state.windowBridge, () => state.onboarding.installSelectedMcpTargets());
 
   assert.deepEqual(installCalls, [[["codex"]]]);
+});
+
+test("installSelectedMcpTargets reveals verified apps in their real install order", async () => {
+  const claudePending = mcpInstallTargetFixture("claude-code", "Claude Code", "not_installed");
+  const cursorPending = mcpInstallTargetFixture("cursor", "Cursor", "not_installed");
+  const claudeInstalled = mcpInstallTargetFixture("claude-code", "Claude Code", "installed");
+  const cursorInstalled = mcpInstallTargetFixture("cursor", "Cursor", "installed");
+  const initialState = mcpInstallStateFixture({
+    selectedTargetId: null,
+    targets: [claudePending, cursorPending],
+  });
+  const claudeState = mcpInstallStateFixture({
+    selectedTargetId: "claude-code",
+    targets: [claudeInstalled, cursorPending],
+  });
+  const completedState = mcpInstallStateFixture({
+    selectedTargetId: "claude-code",
+    targets: [claudeInstalled, cursorInstalled],
+  });
+  const installCalls: DesktopMcpInstallTargetId[] = [];
+  let batchInstallCount = 0;
+  const state = makeSetupState({
+    mcpInstallState: initialState,
+    mcpWizardStep: "install",
+    selectedMcpTargetIds: ["claude-code", "cursor"],
+    mcpInstallRevealDelayMs: 0,
+    setupBridge: {
+      installMcpServer: async (targetId) => {
+        installCalls.push(targetId);
+        const installState = targetId === "claude-code" ? claudeState : completedState;
+        const target = installState.targets.find((candidate) => candidate.id === targetId);
+        assert.ok(target);
+        return {
+          success: true,
+          target,
+          installState,
+          message: `${target.name} installed.`,
+        };
+      },
+      installMcpServers: async () => {
+        batchInstallCount += 1;
+        throw new Error("The batch installer should not run.");
+      },
+      getMcpInstallState: async () => completedState,
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.installSelectedMcpTargets());
+
+  assert.deepEqual(installCalls, ["claude-code", "cursor"]);
+  assert.equal(batchInstallCount, 0);
+  assert.equal(state.mcpWizardStep.value, "done");
+  assert.deepEqual(state.mcpInstallState.value, completedState);
+  assert.deepEqual(state.selectedMcpTargetIds.value, ["claude-code", "cursor"]);
+});
+
+test("installSelectedMcpTargets keeps verified checks visible when a later app fails", async () => {
+  const claudePending = mcpInstallTargetFixture("claude-code", "Claude Code", "not_installed");
+  const cursorPending = mcpInstallTargetFixture("cursor", "Cursor", "not_installed");
+  const claudeInstalled = mcpInstallTargetFixture("claude-code", "Claude Code", "installed");
+  const cursorFailed = mcpInstallTargetFixture("cursor", "Cursor", "needs_attention");
+  const initialState = mcpInstallStateFixture({
+    selectedTargetId: null,
+    targets: [claudePending, cursorPending],
+  });
+  const claudeState = mcpInstallStateFixture({
+    selectedTargetId: "claude-code",
+    targets: [claudeInstalled, cursorPending],
+  });
+  const partialState = mcpInstallStateFixture({
+    selectedTargetId: "claude-code",
+    targets: [claudeInstalled, cursorFailed],
+  });
+  const state = makeSetupState({
+    mcpInstallState: initialState,
+    mcpWizardStep: "install",
+    selectedMcpTargetIds: ["claude-code", "cursor"],
+    mcpInstallRevealDelayMs: 0,
+    setupBridge: {
+      installMcpServer: async (targetId) => {
+        const installState = targetId === "claude-code" ? claudeState : partialState;
+        const target = installState.targets.find((candidate) => candidate.id === targetId);
+        assert.ok(target);
+        return {
+          success: target.status === "installed",
+          target,
+          installState,
+          message: target.status === "installed" ? "Claude Code installed." : "Cursor config is read-only.",
+        };
+      },
+      getMcpInstallState: async () => partialState,
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.installSelectedMcpTargets());
+
+  assert.equal(state.mcpWizardStep.value, "install");
+  assert.equal(state.mcpInstallState.value?.targets[0]?.status, "installed");
+  assert.equal(state.mcpInstallState.value?.targets[1]?.status, "needs_attention");
+  assert.match(state.mcpInstallFeedback.value || "", /Claude Code installed/);
+  assert.match(state.mcpInstallFeedback.value || "", /Couldn't install Cursor/);
+});
+
+test("installSelectedMcpTargets trusts the final config reread after an IPC response fails", async () => {
+  const pending = mcpInstallTargetFixture("codex", "Codex", "not_installed");
+  const installed = mcpInstallTargetFixture("codex", "Codex", "installed");
+  const initialState = mcpInstallStateFixture({
+    selectedTargetId: null,
+    targets: [pending],
+  });
+  const installedState = mcpInstallStateFixture({
+    selectedTargetId: "codex",
+    targets: [installed],
+  });
+  const state = makeSetupState({
+    mcpInstallState: initialState,
+    mcpWizardStep: "install",
+    selectedMcpTargetIds: ["codex"],
+    mcpInstallRevealDelayMs: 0,
+    setupBridge: {
+      installMcpServer: async () => {
+        throw new Error("The reply was interrupted.");
+      },
+      getMcpInstallState: async () => installedState,
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.installSelectedMcpTargets());
+
+  assert.equal(state.mcpWizardStep.value, "done");
+  assert.equal(state.mcpInstallState.value?.targets[0]?.status, "installed");
+  assert.equal(state.mcpInstallFeedback.value, "MCP installed. Restart your agent apps to load it.");
 });
 
 test("installSelectedMcpTargets installs the bridge without managing the external Codex CLI", async () => {
@@ -296,6 +451,7 @@ test("installSelectedMcpTargets installs the bridge without managing the externa
           success: true,
           targets: installState.targets,
           installState,
+          failures: [],
           message: "MCP bridge installed.",
         };
       },
@@ -345,6 +501,7 @@ test("installSelectedMcpTargets remains independent when the Codex CLI is alread
           success: true,
           targets: installState.targets,
           installState,
+          failures: [],
           message: "MCP bridge installed.",
         };
       },
@@ -411,6 +568,7 @@ test("installSelectedMcpTargets stays on install step when MCP validation still 
         success: true,
         targets: [failedTarget],
         installState: failedState,
+        failures: [],
         message: "LetAgents could not verify Codex.",
       }),
     },
@@ -421,6 +579,46 @@ test("installSelectedMcpTargets stays on install step when MCP validation still 
   assert.equal(state.mcpWizardStep.value, "install");
   assert.equal(state.mcpInstallFeedback.value, "LetAgents could not verify Codex.");
   assert.deepEqual(state.mcpInstallState.value, failedState);
+});
+
+test("installSelectedMcpTargets rereads config state after an unexpected IPC failure", async () => {
+  const installedState = mcpInstallStateFixture({ completed: false });
+  const initialTarget = {
+    ...installedState.targets[0],
+    status: "not_installed" as const,
+    lastInstalledAt: null,
+    configPaths: installedState.targets[0].configPaths.map((configPath) => ({
+      ...configPath,
+      status: "not_installed" as const,
+      hasLetAgents: false,
+    })),
+  };
+  const initialState = mcpInstallStateFixture({
+    completed: false,
+    targets: [initialTarget],
+  });
+  let refreshCount = 0;
+  const state = makeSetupState({
+    mcpInstallState: initialState,
+    mcpWizardStep: "install",
+    selectedMcpTargetIds: ["codex"],
+    setupBridge: {
+      installMcpServers: async () => {
+        throw new Error("The installer stopped unexpectedly.");
+      },
+      getMcpInstallState: async () => {
+        refreshCount += 1;
+        return installedState;
+      },
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.installSelectedMcpTargets());
+
+  assert.equal(refreshCount, 1);
+  assert.equal(state.mcpWizardStep.value, "install");
+  assert.equal(state.mcpInstallFeedback.value, "The installer stopped unexpectedly.");
+  assert.deepEqual(state.mcpInstallState.value, installedState);
 });
 
 test("finishFirstRunOnboarding completes room-code setup without reinstalling with stale cwd", async () => {
@@ -438,6 +636,7 @@ test("finishFirstRunOnboarding completes room-code setup without reinstalling wi
           success: true,
           targets: [],
           installState: mcpInstallStateFixture({ completed: false }),
+          failures: [],
           message: "installed",
         };
       },
@@ -456,10 +655,14 @@ test("finishFirstRunOnboarding completes room-code setup without reinstalling wi
   assert.equal(state.activeEntry.value.roomIdentifier, "ABCD-1234");
 });
 
-test("finishFirstRunOnboarding requires an explicit room choice", async () => {
+test("finishFirstRunOnboarding can continue without choosing a room", async () => {
   let completed = false;
+  let refreshCount = 0;
   const state = makeSetupState({
     pinnedRoomIdentifier: "github.com/BrosInCode/letagents",
+    refresh: async () => {
+      refreshCount += 1;
+    },
     setupBridge: {
       completeMcpOnboarding: async () => {
         completed = true;
@@ -470,8 +673,59 @@ test("finishFirstRunOnboarding requires an explicit room choice", async () => {
 
   await withDesktopBridge(state.windowBridge, () => state.onboarding.finishFirstRunOnboarding());
 
-  assert.equal(completed, false);
-  assert.equal(state.authFeedback.value, "Choose a repo room or join with a room code first.");
+  assert.equal(completed, true);
+  assert.equal(refreshCount, 1);
+  assert.equal(state.activeEntry.value.roomIdentifier, "github.com/BrosInCode/letagents");
+  assert.equal(state.authFeedback.value, null);
+});
+
+test("createFirstRunInviteRoom creates and selects a shareable room", async () => {
+  const opened: Array<{
+    snapshot: DesktopRoomSnapshot;
+    options: { displayName?: string | null; kind?: string | null; rootPath?: string | null; meta?: string | null } | undefined;
+  }> = [];
+  const snapshot = snapshotFixture("room_123", "Room ABCD-1234");
+  const state = makeSetupState({
+    roomBridge: {
+      createInviteRoom: async () => ({
+        roomIdentifier: "room_123",
+        code: "ABCD-1234",
+        snapshot,
+      }),
+    },
+    openRoomSnapshot: (nextSnapshot, options) => opened.push({ snapshot: nextSnapshot, options }),
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.createFirstRunInviteRoom());
+
+  assert.equal(state.onboarding.firstRunRoomSelected.value, true);
+  assert.equal(state.onboarding.firstRunInviteCode.value, "ABCD-1234");
+  assert.equal(state.repoStatus.value, null);
+  assert.deepEqual(opened, [{
+    snapshot,
+    options: {
+      displayName: "Room ABCD-1234",
+      kind: "room",
+      rootPath: null,
+      meta: "ABCD-1234",
+    },
+  }]);
+});
+
+test("room choice survives going back to GitHub and returning", async () => {
+  const state = makeSetupState({
+    firstRunStage: "room",
+    roomBridge: {
+      getSnapshot: async () => snapshotFixture("ABCD-1234", "Shared room"),
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCD-1234"));
+  state.onboarding.goBackFirstRun();
+  state.onboarding.continueToRoomConfirmation();
+
+  assert.equal(state.firstRunStage.value, "room");
+  assert.equal(state.onboarding.firstRunRoomSelected.value, true);
 });
 
 test("joinRoomCode does not select inaccessible room snapshots", async () => {
@@ -588,6 +842,7 @@ function makeSetupState(input: SetupStateInput = {}) {
   const firstRunStage = ref<FirstRunWizardStage>(input.firstRunStage ?? "welcome");
   const mcpWizardStep = ref<DesktopMcpWizardStep>(input.mcpWizardStep ?? "choose");
   const mcpInstallFeedback = ref<string | null>(null);
+  const selectedMcpTargetIds = ref(input.selectedMcpTargetIds ?? []);
   const setupLoadError = ref<string | null>(null);
   const pinnedRoom = computed<RoomEntry>(() => ({
     id: `room:main:${roomIdentifier}`,
@@ -618,9 +873,10 @@ function makeSetupState(input: SetupStateInput = {}) {
     pinnedRoom,
     refresh: input.refresh ?? (async () => undefined),
     repoStatus,
-    selectedMcpTargetIds: ref(input.selectedMcpTargetIds ?? []),
+    selectedMcpTargetIds,
     setupLoadError,
     initialBootstrapTimeoutMs: input.initialBootstrapTimeoutMs,
+    mcpInstallRevealDelayMs: input.mcpInstallRevealDelayMs ?? 0,
   });
 
   return {
@@ -634,6 +890,7 @@ function makeSetupState(input: SetupStateInput = {}) {
     mcpWizardStep,
     onboarding,
     repoStatus,
+    selectedMcpTargetIds,
     setupLoadError,
     windowBridge: {
       letagentsDesktop: {
@@ -703,7 +960,7 @@ function mcpInstallStateFixture(
       {
         id: "codex",
         name: "Codex",
-        description: "We'll add the MCP bridge for room access. Install and sign in to Codex separately.",
+        description: "Add the LetAgents MCP so agents here can communicate in shared rooms. Install and sign in to Codex separately.",
         configPath: "~/.codex/config.toml",
         configPaths: [
           {
@@ -721,6 +978,31 @@ function mcpInstallStateFixture(
       },
     ],
     ...overrides,
+  };
+}
+
+function mcpInstallTargetFixture(
+  id: DesktopMcpInstallTargetId,
+  name: string,
+  status: DesktopMcpInstallTarget["status"],
+): DesktopMcpInstallTarget {
+  const configPath = `~/.${id}/mcp-config`;
+  return {
+    id,
+    name,
+    description: `Install LetAgents in ${name}.`,
+    configPath,
+    configPaths: [{
+      path: configPath,
+      label: `${name} config`,
+      status,
+      hasLetAgents: status !== "not_installed",
+      issue: status === "needs_attention" ? "Needs attention." : null,
+    }],
+    configIssue: status === "needs_attention" ? `${name} config: Needs attention.` : null,
+    status,
+    lastInstalledAt: status === "installed" ? "2026-08-17T00:00:00.000Z" : null,
+    restartHint: `Restart ${name}.`,
   };
 }
 

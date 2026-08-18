@@ -56,6 +56,7 @@ const props = defineProps<{
   selectedTargets: DesktopMcpInstallTarget[];
   busy: boolean;
   canInstall: boolean;
+  retry?: boolean;
 }>();
 
 defineEmits<{
@@ -67,7 +68,7 @@ defineEmits<{
 
 const installButtonLabel = computed(() => {
   if (props.busy) return "Installing...";
-  if (props.selectedTargets.length <= 1) return "Install LetAgents bridge";
-  return `Install in ${props.selectedTargets.length} apps`;
+  if (props.retry) return "Retry";
+  return "Install MCP";
 });
 </script>

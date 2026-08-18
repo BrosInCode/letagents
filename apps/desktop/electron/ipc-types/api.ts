@@ -292,6 +292,7 @@ export interface DesktopApi {
     getStatus: () => Promise<DesktopAuthStatus>;
     startDeviceFlow: (roomIdentifier?: string | null) => Promise<DesktopAuthStartResult>;
     pollDeviceFlow: (requestId?: string | null) => Promise<DesktopAuthPollResult>;
+    cancelDeviceFlow: () => Promise<DesktopAuthStatus>;
     openVerification: (url: string) => Promise<void>;
     signOut: () => Promise<DesktopAuthStatus>;
   };

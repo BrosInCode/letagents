@@ -61,7 +61,7 @@ async function rebrandHelper({ qualifier = "", bundleIdSuffix = "" }) {
 }
 
 async function createApplicationIcon() {
-  const source = join(root, "..", "..", "docs", "logo.png");
+  const source = join(root, "..", "..", "brand", "letagents-app-icon.png");
   const iconset = join(release, "LetAgents.iconset");
   const { stdout: sourceMetadata } = await execFileAsync("sips", ["-g", "pixelWidth", "-g", "pixelHeight", source]);
   assertSquareImageDimensions(parseSipsDimensions(sourceMetadata), source);

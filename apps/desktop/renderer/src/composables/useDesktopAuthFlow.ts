@@ -71,6 +71,23 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     }
   }
 
+  async function cancelAuthFlow(): Promise<void> {
+    clearAuthPollTimer();
+    authBusy.value = true;
+    authFeedback.value = null;
+    const previousStatus = authStatus.value;
+    authStatus.value = signedOutStatus(previousStatus);
+    try {
+      authStatus.value = await desktopIpc.auth.cancelDeviceFlow();
+    } catch (error) {
+      authStatus.value = previousStatus;
+      authFeedback.value = error instanceof Error ? error.message : "Could not cancel GitHub sign-in.";
+      scheduleAuthPoll();
+    } finally {
+      authBusy.value = false;
+    }
+  }
+
   async function pollAuthFlow(optionsOverride: { automatic?: boolean } = {}): Promise<void> {
     if (!optionsOverride.automatic) {
       authBusy.value = true;
@@ -85,6 +102,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
         if (options.isFirstRunGate()) {
           await options.onFirstRunAuthorized();
           authSessionLocked.value = false;
+          authFeedback.value = null;
           return;
         }
         await options.onAuthorized();
@@ -132,6 +150,7 @@ export function useDesktopAuthFlow(options: DesktopAuthFlowOptions) {
     authFeedback,
     authSessionLocked,
     authStatus,
+    cancelAuthFlow,
     clearAuthPollTimer,
     openVerification,
     pollAuthFlow,
