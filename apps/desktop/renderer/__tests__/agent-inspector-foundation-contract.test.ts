@@ -14,6 +14,7 @@ const actions = source("../src/components/desktop/content/agent-inspector/AgentI
 const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue");
 const statusSurface = source("../src/components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue");
 const participantSurface = source("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue");
+const participantProjection = source("../src/domain/agent-inspector-participant.ts");
 const composer = source("../src/components/desktop/content/room-chat/RoomComposer.vue");
 const chat = source("../src/components/desktop/content/RoomChatView.vue");
 const styles = source("../src/components/desktop/content/agent-inspector/agent-inspector.css");
@@ -32,15 +33,25 @@ test("the Inspector has one exclusive surface for durable, external, loading, er
   assert.match(host, /AgentInspectorParticipantSurface/);
   assert.match(host, /projectAgentInspectorParticipant\(\s*props\.selection,\s*props\.managedSessions,\s*props\.roomIdentifier\s*\)/);
   assert.match(host, /surfaceComponentType/);
-  assert.match(host, /selection\.kind === "resolving"/);
-  assert.match(host, /unavailableReason === "load_error"/);
-  assert.match(host, /selection\.kind === "external"/);
+  assert.match(participantProjection, /selection\.kind === "resolving"/);
+  assert.match(participantProjection, /unavailableReason === "load_error"/);
+  assert.match(participantProjection, /selection\.kind === "external"/);
   assert.match(participantSurface, /Room participant/);
   assert.doesNotMatch(participantSurface, /useManagedAgentSessionsContext/);
   assert.match(participantSurface, /desktopIpc\.workers\.stopManagedAgent/);
   assert.doesNotMatch(participantSurface, /aria-live/);
   assert.doesNotMatch(activity, /v-if="selectedTruthfulAgent" class="desktop-activity-detail"/);
   assert.doesNotMatch(activity, /selectedLegacyTruthfulAgent|selectedTruthfulAgent/);
+});
+
+test("unavailable agent details stay product-safe and can retry the background service", () => {
+  assert.doesNotMatch(host, /unavailableDetail|resource\.error/);
+  assert.match(host, /projectAgentInspectorStatus\(props\.selection\)/);
+  assert.match(host, /@retry="retryStatus"/);
+  assert.match(statusSurface, /v-if="canRetry"/);
+  assert.match(statusSurface, /@click="emit\('retry'\)"/);
+  assert.match(shell, /@retry="retryAgentInspectorState"/);
+  assert.match(shell, /function retryAgentInspectorState\(\)[\s\S]{0,300}supervisorEntriesError\.value = null;[\s\S]{0,120}refreshManagedAgentSessions\(\)/);
 });
 
 test("Activity opens the exact shared projection only after an explicit click", () => {
