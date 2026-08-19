@@ -167,6 +167,29 @@ test("a pre-provider provisioning failure is retryable and never described as re
   assert.match(progress.failureDetail ?? "", /prepare the private project area/i);
 });
 
+test("an unusable source repository surfaces the daemon's actionable message, not the generic fallback", () => {
+  // When the source folder is not a Git repository (e.g. a stale binding that
+  // points at a plain directory), the daemon reports an actionable message
+  // verbatim (no "convergence scheduler failure:" wrapper) so the user knows to
+  // pick a valid repository. That message must reach the launch card instead of
+  // being flattened to the generic "prepare the private project area" copy.
+  const progress = supervisedLaunchProgress(entry({
+    observedState: "failed",
+    condition: "coordination_blocked",
+    lastError: "not a git repository: /Users/emmy/Documents — choose a folder with a git remote, or start the agent in a room with no repo.",
+    workspacePath: null,
+    workAttemptId: null,
+    providerPid: null,
+    providerContinuationId: null,
+    executionGenerationId: null,
+  }));
+
+  assert.equal(progress.failed, true);
+  assert.equal(progress.recoverableBlocked, false);
+  assert.match(progress.failureDetail ?? "", /not a git repository: \/Users\/emmy\/Documents/i);
+  assert.doesNotMatch(progress.failureDetail ?? "", /prepare the private project area/i);
+});
+
 test("a missing provider executable explains the setup-to-supervisor mismatch", () => {
   const progress = supervisedLaunchProgress(entry({
     provider: "codex",

@@ -56,7 +56,7 @@ import {
   assertSupervisedRentalPermissionProfileAvailable,
   supervisedPermissionProfilesForProvider,
 } from "./supervised-permission-profiles.js";
-import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
+import { createGitCommand, repositoryStorageKey, resolveSourceRepositoryIdentity, UnusableSourceRepositoryError, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedDeliveryInterruptReservation, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
@@ -5919,8 +5919,12 @@ export class SupervisorDaemon {
         work_attempt_id: attempt.work_attempt_id,
       }));
     }
-    const remote = String(await this.gitCommand(["-C", sourcePath, "remote", "get-url", "origin"])).trim();
-    const revision = String(await this.gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])).trim();
+    // Validate the selected folder is a usable git repository before we try to
+    // provision a private worktree from it. A non-repo path (e.g. the home
+    // directory) otherwise fails deep in git with an opaque "Command failed"
+    // surfaced to the user as a generic "couldn't prepare the private project
+    // area"; resolveSourceRepositoryIdentity throws an actionable message.
+    const { remoteUrl: remote, revision } = await resolveSourceRepositoryIdentity(sourcePath, this.gitCommand);
     const repo = repositoryStorageKey(remote);
     const workAttemptId = randomUUID();
     const provisioned = await this.provisioner.provision({
@@ -7883,7 +7887,13 @@ export class SupervisorDaemon {
       const observedState = !entry.work_attempt_id && !entry.provider_ref
         ? "failed"
         : entry.observed_state;
-      await this.transitionOnce(entryId, observedState, condition, `convergence scheduler failure: ${message}`, actor, undefined, "coordination_escalation");
+      // An unusable source repository is a launch-input problem, not a
+      // scheduler fault — surface its actionable message verbatim (no wrapper)
+      // so the desktop can tell the user to pick a valid repository folder.
+      const lastError = error instanceof UnusableSourceRepositoryError
+        ? error.message
+        : `convergence scheduler failure: ${message}`;
+      await this.transitionOnce(entryId, observedState, condition, lastError, actor, undefined, "coordination_escalation");
     }));
     // A transient mint failure must converge again without waiting for another
     // Electron RPC — but only a bounded number of times: each retry re-runs up

@@ -1002,7 +1002,7 @@ test("managedAgentRepoStatusForRoom requires verified repo identity for branch r
   );
 });
 
-test("managedAgentRootPathForRoom requires repo selection instead of falling back to HOME", () => {
+test("managedAgentRootPathForRoom never falls back to HOME", () => {
   // Regression (task_60): a repo-backed focus room whose durable root was lost
   // (an account/app-agent reopen wiped it) must resolve to null so Add Agent
   // requires an explicit repo — never HOME. HOME is not a Git repo and the daemon
@@ -1013,7 +1013,6 @@ test("managedAgentRootPathForRoom requires repo selection instead of falling bac
       repoStatus: null,
       gitRoomMatchesActiveRepo: false,
       durableProjectRootPath: null,
-      homePath: "/Users/emmy",
     }),
     null,
   );
@@ -1025,20 +1024,21 @@ test("managedAgentRootPathForRoom requires repo selection instead of falling bac
       repoStatus: null,
       gitRoomMatchesActiveRepo: false,
       durableProjectRootPath: "/Users/emmy/Projects/letagents",
-      homePath: "/Users/emmy",
     }),
     "/Users/emmy/Projects/letagents",
   );
-  // Only a room with no project context at all resolves to HOME.
+  // A room with no project context at all is genuinely repo-less: it resolves to
+  // null so the daemon provisions a private, empty scratch workspace — the agent
+  // is NEVER pointed at HOME (which is not a Git repo and would leak the whole
+  // home directory into the agent's reach).
   assert.equal(
     managedAgentRootPathForRoom({
       room: { gitRoom: null },
       repoStatus: null,
       gitRoomMatchesActiveRepo: false,
       durableProjectRootPath: null,
-      homePath: "/Users/emmy",
     }),
-    "/Users/emmy",
+    null,
   );
 });
 

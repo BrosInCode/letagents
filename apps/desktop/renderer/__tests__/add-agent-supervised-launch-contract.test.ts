@@ -275,7 +275,11 @@ test("supervised start rechecks secure storage before creating a launch", () => 
 
 test("an in-flight Start remains fenced across modal close and provider reset", () => {
   assert.match(controllerSource, /let startOperationInFlight = false/);
-  assert.match(controllerSource, /if \(!selectedProviderId\.value \|\| !props\.repoRootPath \|\| startOperationInFlight\) return/);
+  // A repo-less room (no git binding, no resolved repo path) is allowed to
+  // launch — the daemon provisions a private scratch workspace — but a
+  // repo-backed room with an unresolved path is still fenced.
+  assert.match(controllerSource, /const roomOnlyLaunch = props\.roomGitRoom == null && !props\.repoRootPath\?\.trim\(\)/);
+  assert.match(controllerSource, /if \(!selectedProviderId\.value \|\| \(!props\.repoRootPath\?\.trim\(\) && !roomOnlyLaunch\) \|\| startOperationInFlight\) return/);
   assert.match(controllerSource, /onResetStartingAgent: \(\) => \{ startingAgent\.value = startOperationInFlight; \}/);
   assert.match(controllerSource, /finally \{[\s\S]*?startOperationInFlight = false;[\s\S]*?startingAgent\.value = false;/);
 });

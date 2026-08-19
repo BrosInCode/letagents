@@ -155,6 +155,11 @@ export function useAddAgentSetup() {
           roomIdentifier: bindings.roomIdentifier(),
           roomGitRoom: bindings.roomGitRoom(),
           repoRootPath: bindings.repoRootPath(),
+          // A room with no git binding and no repo path is genuinely repo-less:
+          // the agent runs in a private scratch workspace, so preflight must not
+          // demand a repo. This never relaxes a repo-backed room (gitRoom set) or
+          // a durable-project room (repoRootPath set).
+          roomOnly: bindings.roomGitRoom() == null && !bindings.repoRootPath()?.trim(),
           launchMode,
           permissionProfileId: bindings.selectedPermissionProfile.value?.id ?? null,
           cursorMcpPolicy: providerId === "cursor" ? bindings.selectedCursorMcpPolicy.value : null,

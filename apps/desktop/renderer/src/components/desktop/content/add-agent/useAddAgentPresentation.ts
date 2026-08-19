@@ -185,7 +185,12 @@ export function useAddAgentPresentation(
         ? `${mismatch.currentBranch} - expected ${mismatch.expectedBranch}`
         : `Expected ${mismatch.expectedBranch}`;
     }
-    return props.repoRootPath || "Required before local agents can start";
+    if (props.repoRootPath) return props.repoRootPath;
+    // A repo-less room (no git binding, no resolved repo path) launches the
+    // agent in a private, empty scratch folder the daemon provisions — it does
+    // NOT need a repo. Only a repo-backed room still prompts for one.
+    if (props.roomGitRoom == null) return "Private scratch workspace";
+    return "Required before local agents can start";
   });
   const showSecureStorage = computed(() => launchMode.value === "supervised");
   const secureStorageLabel = computed(() => {
