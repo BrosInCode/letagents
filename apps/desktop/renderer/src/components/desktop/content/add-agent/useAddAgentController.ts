@@ -58,7 +58,8 @@ export interface SupervisedLaunchCreateSnapshot {
   providerId: DesktopAgentProviderId;
   providerName: string;
   roomIdentifier: string;
-  repoRootPath: string;
+  /** Null launches an isolated, non-Git room-only agent (private scratch workspace). */
+  repoRootPath: string | null;
   charter: string;
   permissionProfileId: DesktopManagedAgentPermissionProfileId | null;
   launchPolicy: unknown;
@@ -420,7 +421,12 @@ async function retrySupervisedLaunch(): Promise<void> {
 async function startManagedAgent(
   options: { retryingPreDurableLaunch?: boolean } = {},
 ): Promise<void> {
-  if (!selectedProviderId.value || !props.repoRootPath || startOperationInFlight) return;
+  // A room with no git binding and no resolved repo path is a genuine repo-less
+  // room: launching is allowed and the daemon provisions a private scratch
+  // workspace. A repo-backed room whose path has not resolved yet (gitRoom
+  // present, repoRootPath null) must still be blocked until a repo is chosen.
+  const roomOnlyLaunch = props.roomGitRoom == null && !props.repoRootPath?.trim();
+  if (!selectedProviderId.value || (!props.repoRootPath?.trim() && !roomOnlyLaunch) || startOperationInFlight) return;
   if (
     !hasDesktopManagedRuntime(selectedProvider.value)
     && !hasSupervisedRuntime(selectedProvider.value)
@@ -521,12 +527,23 @@ async function startManagedAgent(
       void managedSessionsContext.refresh();
       return;
     }
+    // The legacy desktop-managed path always requires a resolved repo. Repo-less
+    // rooms are a supervised-only capability, so never fall through to it with a
+    // null path (the runtime gate above already permits a repo-less supervised
+    // launch; a repo-less legacy launch is not supported).
+    if (!requestRepoRootPath) {
+      setSetupMessage(
+        "Repo-less agents need the supervised runtime. This provider's basic launch requires a local repository.",
+        "warning",
+      );
+      return;
+    }
     const startMessage = await managedLaunch.start({
       providerId: selectedProviderId.value,
       roomIdentifier: props.roomIdentifier,
       roomGitRoom: props.roomGitRoom,
       roomDisplayName: props.roomDisplayName,
-      repoRootPath: props.repoRootPath,
+      repoRootPath: requestRepoRootPath,
       deliveryMode: deliveryMode.value,
       permissionProfileId: selectedPermissionProfile.value?.id ?? null,
       cursorMcpPolicy: selectedProviderId.value === "cursor" ? selectedCursorMcpPolicy.value : null,

@@ -27,6 +27,76 @@ export function createGitCommand(stableCwd: string): GitCommand {
   };
 }
 
+/**
+ * A supervised launch names a source repository (the selected local project
+ * folder) that LetAgents copies into a private per-agent worktree. When that
+ * folder is not a usable git repository — the home directory, a plain folder,
+ * a repo with no `origin` remote, or one with no commits yet — we must fail
+ * with an actionable message instead of leaking a raw `git` error.
+ */
+export class UnusableSourceRepositoryError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "UnusableSourceRepositoryError";
+  }
+}
+
+/**
+ * Validate the source repository and return the identity the provisioner needs
+ * (`origin` remote URL + HEAD commit). Throws {@link UnusableSourceRepositoryError}
+ * — never a raw git failure — when the path cannot back a private project area.
+ */
+export async function resolveSourceRepositoryIdentity(
+  sourcePath: string,
+  gitCommand: GitCommand,
+): Promise<{ remoteUrl: string; revision: string }> {
+  let insideWorkTree = "";
+  try {
+    insideWorkTree = String(
+      (await gitCommand(["-C", sourcePath, "rev-parse", "--is-inside-work-tree"])) ?? "",
+    ).trim();
+  } catch {
+    // A missing directory or non-repo makes `git` exit non-zero; treat both as
+    // "not a usable repo" and report the path rather than the git stderr.
+    insideWorkTree = "";
+  }
+  if (insideWorkTree !== "true") {
+    throw new UnusableSourceRepositoryError(
+      `The selected project folder is not a git repository: ${sourcePath}. Choose a folder that contains a git repository (with a .git directory) for this agent — a plain folder or your home directory can't be used.`,
+    );
+  }
+
+  let remoteUrl = "";
+  try {
+    remoteUrl = String(
+      (await gitCommand(["-C", sourcePath, "remote", "get-url", "origin"])) ?? "",
+    ).trim();
+  } catch {
+    remoteUrl = "";
+  }
+  if (!remoteUrl) {
+    throw new UnusableSourceRepositoryError(
+      `The git repository at ${sourcePath} has no "origin" remote, so LetAgents can't identify it for a private project area. Add an origin remote or choose a repository that has one.`,
+    );
+  }
+
+  let revision = "";
+  try {
+    revision = String(
+      (await gitCommand(["-C", sourcePath, "rev-parse", "--verify", "HEAD^{commit}"])) ?? "",
+    ).trim();
+  } catch {
+    revision = "";
+  }
+  if (!revision) {
+    throw new UnusableSourceRepositoryError(
+      `The git repository at ${sourcePath} has no commits yet. Make an initial commit before starting an agent there.`,
+    );
+  }
+
+  return { remoteUrl, revision };
+}
+
 type RepositoryMarker = { version: 1; repo: string; remote_url: string };
 export type WorkspaceMarker = {
   version: 1;

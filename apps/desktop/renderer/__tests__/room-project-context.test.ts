@@ -131,7 +131,6 @@ test("Add Agent consumes the durable project root when live Git status is absent
     repoStatus: null,
     gitRoomMatchesActiveRepo: false,
     durableProjectRootPath: "/project/main",
-    homePath: "/Users/emmy",
   }), "/project/main");
 });
 
@@ -151,7 +150,6 @@ test("Add Agent uses a matching branch worktree ahead of the source project root
     },
     gitRoomMatchesActiveRepo: true,
     durableProjectRootPath: "/project/main",
-    homePath: "/Users/emmy",
   }), "/project/feature-launch");
 });
 

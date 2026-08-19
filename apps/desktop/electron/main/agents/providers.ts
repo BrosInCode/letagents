@@ -226,7 +226,7 @@ async function codexPreflight(
     };
   }
 
-  if (!input.repoRootPath?.trim()) {
+  if (!input.repoRootPath?.trim() && !input.roomOnly) {
     return {
       providerId: provider.id,
       status: "repo_required",
@@ -304,7 +304,7 @@ async function claudeCodePreflight(
     };
   }
 
-  if (!input.repoRootPath?.trim()) {
+  if (!input.repoRootPath?.trim() && !input.roomOnly) {
     return {
       providerId: provider.id,
       status: "repo_required",
@@ -390,7 +390,7 @@ async function openModelPreflight(
     };
   }
 
-  if (!input.repoRootPath?.trim()) {
+  if (!input.repoRootPath?.trim() && !input.roomOnly) {
     return {
       providerId: provider.id,
       status: "repo_required",
@@ -489,25 +489,28 @@ export async function runDesktopAgentProviderPreflight(
         mcpStatus: null,
       };
     }
+    // A repo-less room supplies its own private scratch workspace, so treat
+    // roomOnly the same as a resolved repo path for the smoke-mode gate.
+    const smokeHasWorkspace = Boolean(input.repoRootPath?.trim()) || Boolean(input.roomOnly);
     return withManagedRuntimeValidation({
       providerId: provider.id,
       status: (
         provider.capabilities.includes("desktop_managed_runtime")
         || provider.capabilities.includes("supervised_runtime")
       )
-        ? input.repoRootPath?.trim()
+        ? smokeHasWorkspace
           ? "ready"
           : "repo_required"
         : "ready",
       canStart: (
         provider.capabilities.includes("desktop_managed_runtime")
         || provider.capabilities.includes("supervised_runtime")
-      ) && Boolean(input.repoRootPath?.trim()),
+      ) && smokeHasWorkspace,
       message: (
         provider.capabilities.includes("desktop_managed_runtime")
         || provider.capabilities.includes("supervised_runtime")
       )
-        ? input.repoRootPath?.trim()
+        ? smokeHasWorkspace
           ? `${provider.name} is ready to start.`
           : `Choose a local repository before starting ${provider.name}.`
         : `${provider.name} is connected to LetAgents.`,
@@ -515,14 +518,14 @@ export async function runDesktopAgentProviderPreflight(
         provider.capabilities.includes("desktop_managed_runtime")
         || provider.capabilities.includes("supervised_runtime")
       )
-        ? input.repoRootPath?.trim()
+        ? smokeHasWorkspace
           ? "The desktop can launch and supervise this local provider."
           : "A supervised agent needs a local repo or worktree for code actions."
         : "Open this agent app, then ask it to join this room through LetAgents.",
       nextAction: (
         provider.capabilities.includes("desktop_managed_runtime")
         || provider.capabilities.includes("supervised_runtime")
-      ) && !input.repoRootPath?.trim()
+      ) && !smokeHasWorkspace
         ? "choose_repo"
         : null,
       version: provider.id === "codex" ? "codex smoke" : null,

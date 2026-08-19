@@ -498,7 +498,6 @@ const props = defineProps<{
   gitRoomMatchesActiveRepo: boolean;
   durableProjectRootPath?: string | null;
   projectRoom?: boolean;
-  homePath?: string | null;
   workers: WorkerSnapshot[];
   openAddAgentRequested?: boolean;
   notificationRevealMessageId?: string | null;
@@ -853,7 +852,6 @@ const managedAgentRepoRootPath = computed(() =>
     repoStatus: managedAgentRepoStatus.value,
     gitRoomMatchesActiveRepo: props.gitRoomMatchesActiveRepo,
     durableProjectRootPath: props.durableProjectRootPath,
-    homePath: props.homePath,
   })
 );
 const roomPresence = computed(() =>
