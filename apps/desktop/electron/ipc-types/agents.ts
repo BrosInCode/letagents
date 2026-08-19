@@ -61,6 +61,9 @@ export interface DesktopAgentProviderPreflightInput {
   roomIdentifier?: string | null;
   roomGitRoom?: DesktopGitRoomInfo | null;
   repoRootPath?: string | null;
+  /** The room is genuinely repo-less: skip the "choose a repo" gate and let the
+   * agent start in a private, daemon-provisioned scratch workspace. */
+  roomOnly?: boolean | null;
   launchMode?: "legacy" | "supervised" | null;
   permissionProfileId?: DesktopManagedAgentPermissionProfileId | null;
   cursorMcpPolicy?: DesktopCursorMcpPolicy | null;

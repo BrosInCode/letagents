@@ -179,7 +179,6 @@
           :git-room-matches-active-repo="selectedGitRoomMatchesActiveRepo"
           :durable-project-root-path="selectedRoomProjectRootPath"
           :project-room="selectedRoomIsProject"
-          :home-path="appInfo?.homePath || null"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
           :notification-reveal-message-id="notificationRevealMessageId"

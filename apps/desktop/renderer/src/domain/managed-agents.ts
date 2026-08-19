@@ -83,7 +83,6 @@ export function managedAgentRootPathForRoom(input: {
   repoStatus: Pick<RepoStatus, "rootPath" | "mainRootPath" | "worktrees" | "defaultBranch"> | null | undefined;
   gitRoomMatchesActiveRepo: boolean;
   durableProjectRootPath?: string | null;
-  homePath?: string | null;
 }): string | null {
   const durableProjectRoot = input.durableProjectRootPath?.trim() || null;
   const hasProjectContext = Boolean(input.room.gitRoom || durableProjectRoot);
@@ -102,7 +101,11 @@ export function managedAgentRootPathForRoom(input: {
   // repo selection rather than silently launching against HOME.
   if (hasProjectContext) return null;
 
-  return input.homePath?.trim() || null;
+  // A room with no project context at all (no git room, no durable project) is
+  // genuinely repo-less. The agent must NOT be pointed at HOME: returning null
+  // declares "no source repo" so the daemon provisions a private, empty scratch
+  // workspace for it instead (see ensureWorkAttempt's ephemeral branch).
+  return null;
 }
 
 export function branchScopedGitRoomExpectedBranch(
