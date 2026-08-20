@@ -76,7 +76,7 @@
               />
 
               <FirstRunRoomStep
-                v-else
+                v-else-if="stage === 'room'"
                 :selected-room-name="selectedRoomName"
                 :selected-room-identifier="selectedRoomIdentifier"
                 :selected-room-access-status="selectedRoomAccessStatus"
@@ -87,6 +87,14 @@
                 @pick-repo="$emit('pick-repo')"
                 @create-room="$emit('create-room')"
                 @join-room-code="$emit('join-room-code', $event)"
+              />
+
+              <FirstRunAgentStep
+                v-else
+                :targets="firstAgentTargets"
+                :selected-target-id="selectedFirstAgentTargetId"
+                :room-name="selectedRoomName"
+                @select="$emit('select-first-agent', $event)"
               />
             </div>
           </Transition>
@@ -167,10 +175,31 @@
                 type="button"
                 :disabled="busy"
                 data-testid="first-run-open-room"
-                @click="roomNeedsGithubAccess ? $emit('connect-room-auth') : $emit('finish')"
+                @click="handleRoomContinue"
               >
                 {{ roomActionLabel }}
               </button>
+
+              <template v-else-if="stage === 'agent'">
+                <button
+                  class="ghost-button"
+                  type="button"
+                  :disabled="busy"
+                  data-testid="first-run-skip-agent"
+                  @click="$emit('finish')"
+                >
+                  Do this later
+                </button>
+                <button
+                  class="primary-button"
+                  type="button"
+                  :disabled="busy || !selectedFirstAgentTargetId"
+                  data-testid="first-run-add-agent"
+                  @click="selectedFirstAgentTargetId && $emit('finish-with-agent', selectedFirstAgentTargetId)"
+                >
+                  {{ firstAgentActionLabel }}
+                </button>
+              </template>
             </div>
           </Transition>
         </div>
@@ -191,6 +220,7 @@ import type {
   DesktopMcpInstallTargetId,
   DesktopRoomAccess,
 } from "../../../../../electron/ipc-types";
+import FirstRunAgentStep from "./FirstRunAgentStep.vue";
 import FirstRunGithubStep from "./FirstRunGithubStep.vue";
 import FirstRunRoomStep from "./FirstRunRoomStep.vue";
 import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
@@ -215,9 +245,10 @@ const props = defineProps<{
   selectedRoomIdentifier: string | null;
   selectedRoomAccessStatus: DesktopRoomAccess["status"] | null;
   roomNeedsGithubAccess: boolean;
+  selectedFirstAgentTargetId: DesktopMcpInstallTargetId | null;
 }>();
 
-defineEmits<{
+const emit = defineEmits<{
   "select-target": [targetId: DesktopMcpInstallTargetId];
   "select-all-targets": [];
   "clear-target-selection": [];
@@ -231,16 +262,23 @@ defineEmits<{
   "poll-auth": [];
   "sign-out": [];
   "continue-to-room": [];
+  "continue-to-agent": [];
   "connect-room-auth": [];
   "pick-repo": [];
   "create-room": [];
   "join-room-code": [roomCode: string];
+  "select-first-agent": [targetId: DesktopMcpInstallTargetId];
+  "finish-with-agent": [targetId: DesktopMcpInstallTargetId];
   back: [];
   finish: [];
 }>();
 
 const selectedMcpTargets = computed(() => {
   return props.mcpState.targets.filter((target) => props.selectedMcpTargetIds.includes(target.id));
+});
+
+const firstAgentTargets = computed(() => {
+  return selectedMcpTargets.value.filter((target) => target.status === "installed");
 });
 
 const installButtonLabel = computed(() => {
@@ -254,7 +292,12 @@ const installButtonLabel = computed(() => {
 const roomActionLabel = computed(() => {
   if (!props.roomSelected) return "Continue";
   if (props.roomNeedsGithubAccess) return "Connect GitHub";
-  return "Open room";
+  return "Continue";
+});
+
+const firstAgentActionLabel = computed(() => {
+  const target = firstAgentTargets.value.find((candidate) => candidate.id === props.selectedFirstAgentTargetId);
+  return target ? `Add ${target.name}` : "Add agent";
 });
 
 const navigationKey = computed(() => {
@@ -284,15 +327,17 @@ const actionKey = computed(() => {
   if (props.stage === "room") {
     return props.roomSelected ? "room-selected" : "room-empty";
   }
+  if (props.stage === "agent") return `agent-${props.selectedFirstAgentTargetId || "empty"}`;
   return navigationKey.value;
 });
 
 const headline = computed(() => {
   if (props.stage === "github") return "Repositories are rooms.";
   if (props.stage === "room") return "Open your first room.";
+  if (props.stage === "agent") return "Add your first agent.";
   if (props.mcpWizardStep === "install") return "Connect your agents.";
   if (props.mcpWizardStep === "done") return "MCP installed.";
-  return "Where do your agents live?";
+  return "Bring your agents into rooms.";
 });
 
 const copy = computed(() => {
@@ -304,13 +349,16 @@ const copy = computed(() => {
   if (props.stage === "room") {
     return "Start now, or continue and choose one from the sidebar later.";
   }
+  if (props.stage === "agent") {
+    return "Room messages don't start agents by themselves. Choose who should join.";
+  }
   if (props.mcpWizardStep === "install") {
-    return "We'll add the LetAgents MCP to these apps so their agents can talk in shared rooms.";
+    return "We'll add the LetAgents MCP — the connection these apps use to enter rooms.";
   }
   if (props.mcpWizardStep === "done") {
     return "Restart your agent apps, then continue.";
   }
-  return "We'll install the LetAgents MCP in the apps you select.";
+  return "Choose where your agents run. LetAgents will connect those apps to shared rooms.";
 });
 
 const showFeedback = computed(() => {
@@ -322,9 +370,10 @@ const showFeedback = computed(() => {
 });
 
 const progressSteps = computed<Array<{ id: FirstRunWizardStage; step: string; label: string; complete: boolean }>>(() => [
-  { id: "mcp", step: "1", label: "MCP", complete: props.stage !== "mcp" },
-  { id: "github", step: "2", label: "GitHub", complete: props.stage === "room" },
-  { id: "room", step: "3", label: "Room", complete: false },
+  { id: "mcp", step: "1", label: "Apps", complete: props.stage !== "mcp" },
+  { id: "github", step: "2", label: "GitHub", complete: props.stage === "room" || props.stage === "agent" },
+  { id: "room", step: "3", label: "Room", complete: props.stage === "agent" },
+  { id: "agent", step: "4", label: "Agent", complete: false },
 ]);
 
 const showBack = computed(() => {
@@ -340,7 +389,20 @@ function navigationRank(key: string): number {
     "mcp-done": 3,
     github: 4,
     room: 5,
+    agent: 6,
   };
   return ranks[key] ?? 0;
+}
+
+function handleRoomContinue(): void {
+  if (props.roomNeedsGithubAccess) {
+    emit("connect-room-auth");
+    return;
+  }
+  if (props.roomSelected) {
+    emit("continue-to-agent");
+    return;
+  }
+  emit("finish");
 }
 </script>

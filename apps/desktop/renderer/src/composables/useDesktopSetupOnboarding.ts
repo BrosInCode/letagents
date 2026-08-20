@@ -36,6 +36,7 @@ interface DesktopSetupOnboardingOptions {
   mcpWizardStep: Ref<DesktopMcpWizardStep>;
   openRoomSnapshot: (snapshot: DesktopRoomSnapshot, options?: OpenRoomOptions) => void;
   pinnedRoom: ComputedRef<RoomEntry>;
+  requestFirstAgent?: (providerId: DesktopMcpInstallTargetId) => void;
   refresh: () => Promise<void>;
   repoStatus: Ref<RepoStatus | null>;
   selectedMcpTargetIds: Ref<DesktopMcpInstallTargetId[]>;
@@ -47,6 +48,7 @@ interface DesktopSetupOnboardingOptions {
 export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions) {
   const firstRunRoomSelected = ref(false);
   const firstRunInviteCode = ref<string | null>(null);
+  const firstRunAgentTargetId = ref<DesktopMcpInstallTargetId | null>(null);
   const initialBootstrapPending = ref(true);
 
   const showFirstRunGate = computed(() => {
@@ -144,6 +146,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpWizardStep.value = "choose";
     firstRunRoomSelected.value = false;
     firstRunInviteCode.value = null;
+    firstRunAgentTargetId.value = null;
   }
 
   function goBackMcpOnboarding(): void {
@@ -271,6 +274,11 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.mcpInstallFeedback.value = null;
     options.authFeedback.value = null;
     options.setupLoadError.value = null;
+
+    if (options.firstRunStage.value === "agent") {
+      options.firstRunStage.value = "room";
+      return;
+    }
 
     if (options.firstRunStage.value === "room") {
       options.firstRunStage.value = "github";
@@ -405,7 +413,33 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     options.firstRunStage.value = "room";
   }
 
-  async function finishFirstRunOnboarding(): Promise<void> {
+  function continueToFirstAgent(): void {
+    if (!firstRunRoomSelected.value) return;
+    const availableTargets = visibleMcpInstallState.value.targets.filter((target) =>
+      options.selectedMcpTargetIds.value.includes(target.id) && target.status === "installed"
+    );
+    const selectedStillAvailable = availableTargets.some(
+      (target) => target.id === firstRunAgentTargetId.value,
+    );
+    if (!selectedStillAvailable) {
+      firstRunAgentTargetId.value = availableTargets[0]?.id || null;
+    }
+    options.authFeedback.value = null;
+    options.firstRunStage.value = "agent";
+  }
+
+  function selectFirstAgentTarget(targetId: DesktopMcpInstallTargetId): void {
+    const available = visibleMcpInstallState.value.targets.some((target) =>
+      target.id === targetId
+      && target.status === "installed"
+      && options.selectedMcpTargetIds.value.includes(target.id)
+    );
+    if (available) firstRunAgentTargetId.value = targetId;
+  }
+
+  async function finishFirstRunOnboarding(
+    preferredProviderId: DesktopMcpInstallTargetId | null = null,
+  ): Promise<boolean> {
     const roomIdentifier = firstRunRoomSelected.value
       ? options.pinnedRoom.value.roomIdentifier
       : null;
@@ -426,15 +460,20 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
           firstRunRoomSelected.value = snapshot.access.status === "auth_required";
           options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
           options.authFeedback.value = roomAccessFeedback(snapshot);
-          return;
+          return false;
         }
         options.openRoomSnapshot(snapshot, firstRunRoomOpenOptions(snapshot, options));
       }
       options.mcpInstallState.value = await desktopIpc.setup.completeMcpOnboarding();
       await options.refresh();
       options.activeEntry.value = options.pinnedRoom.value;
+      if (roomIdentifier && preferredProviderId) {
+        options.requestFirstAgent?.(preferredProviderId);
+      }
+      return true;
     } catch (error) {
       options.authFeedback.value = error instanceof Error ? error.message : "Could not close setup.";
+      return false;
     } finally {
       options.mcpInstallBusy.value = false;
     }
@@ -443,10 +482,12 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
   return {
     clearMcpTargetSelection,
     completeMcpOnboarding,
+    continueToFirstAgent,
     continueMcpOnboarding,
     continueToRoomConfirmation,
     createFirstRunInviteRoom,
     finishFirstRunOnboarding,
+    firstRunAgentTargetId,
     firstRunInviteCode,
     firstRunRoomSelected,
     firstRunFeedback,
@@ -457,6 +498,7 @@ export function useDesktopSetupOnboarding(options: DesktopSetupOnboardingOptions
     loadFirstRunSetup,
     pickRepoRoom,
     selectAllMcpTargets,
+    selectFirstAgentTarget,
     selectMcpTarget,
     setupApiAvailable,
     showFirstRunGate,

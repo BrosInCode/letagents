@@ -18,6 +18,7 @@
       :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
       :selected-room-access-status="firstRunRoomSelected ? (rootRoomSnapshot?.access.status || null) : null"
       :room-needs-github-access="firstRunRoomSelected && rootRoomSnapshot?.access.status === 'auth_required' && !authStatus?.authenticated"
+      :selected-first-agent-target-id="firstRunAgentTargetId"
       @select-target="selectMcpTarget"
       @select-all-targets="selectAllMcpTargets"
       @clear-target-selection="clearMcpTargetSelection"
@@ -31,12 +32,15 @@
       @cancel-auth="cancelAuthFlow"
       @sign-out="signOut"
       @continue-to-room="continueToRoomConfirmation"
+      @continue-to-agent="continueToFirstAgent"
       @connect-room-auth="startFirstRunRoomAuth"
       @pick-repo="pickRepoRoom"
       @create-room="createFirstRunInviteRoom"
       @join-room-code="joinRoomCode"
+      @select-first-agent="selectFirstAgentTarget"
       @back="goBackFirstRun"
       @finish="finishFirstRunOnboarding"
+      @finish-with-agent="finishFirstRunOnboarding"
     />
   </main>
 
@@ -181,6 +185,7 @@
           :project-room="selectedRoomIsProject"
           :workers="workers"
           :open-add-agent-requested="openAddAgentAfterRepoPick"
+          :preferred-add-agent-provider-id="preferredAddAgentProviderId"
           :notification-reveal-message-id="notificationRevealMessageId"
           :notification-reveal-nonce="notificationRevealNonce"
           :initial-chat-scroll-top="chatScrollTopForRoom(selectedRoomInfo.identifier)"
@@ -198,7 +203,7 @@
           @connect-project="connectActiveRoomProject"
           @choose-worktree="openWorktreeForAgent"
           @open-repo-root="openWorkspaceGitRoom"
-          @add-agent-open-request-consumed="openAddAgentAfterRepoPick = false"
+          @add-agent-open-request-consumed="handleAddAgentOpenRequestConsumed"
         />
       </KeepAlive>
 
@@ -515,6 +520,7 @@ const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const rentalRequestCount = ref(0);
 const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
+const preferredAddAgentProviderId = ref<DesktopMcpInstallTargetId | null>(null);
 const notificationRevealMessageId = ref<string | null>(null);
 const notificationRevealNonce = ref(0);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
@@ -1739,10 +1745,12 @@ function handleSidebarFocusRoomConclusionAfterLeave(): void {
 const {
   clearMcpTargetSelection,
   completeMcpOnboarding,
+  continueToFirstAgent,
   continueMcpOnboarding,
   continueToRoomConfirmation,
   createFirstRunInviteRoom,
   finishFirstRunOnboarding,
+  firstRunAgentTargetId,
   firstRunInviteCode,
   firstRunRoomSelected,
   firstRunFeedback,
@@ -1753,6 +1761,7 @@ const {
   loadFirstRunSetup,
   pickRepoRoom,
   selectAllMcpTargets,
+  selectFirstAgentTarget,
   selectMcpTarget,
   setupApiAvailable,
   showFirstRunGate,
@@ -1771,11 +1780,20 @@ const {
   mcpWizardStep,
   openRoomSnapshot: (snapshot, options) => openRoomSnapshot(snapshot, options),
   pinnedRoom,
+  requestFirstAgent: (providerId) => {
+    preferredAddAgentProviderId.value = providerId;
+    openAddAgentAfterRepoPick.value = true;
+  },
   refresh: () => refresh(),
   repoStatus,
   selectedMcpTargetIds,
   setupLoadError,
 });
+
+function handleAddAgentOpenRequestConsumed(): void {
+  openAddAgentAfterRepoPick.value = false;
+  preferredAddAgentProviderId.value = null;
+}
 
 async function startFirstRunRoomAuth(): Promise<void> {
   firstRunStage.value = "github";

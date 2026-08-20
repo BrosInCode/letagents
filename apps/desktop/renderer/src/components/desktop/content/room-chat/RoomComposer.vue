@@ -64,6 +64,19 @@
       @open-event-preview="openEventPreview"
       @dismiss-event-preview="emit('dismiss-event-preview', $event)"
     />
+    <div
+      v-if="roomIdentifier && !hasListeningAgent"
+      class="desktop-composer-agent-empty"
+      data-testid="desktop-composer-agent-empty"
+      role="status"
+    >
+      <Bot aria-hidden="true" />
+      <p>
+        <strong>No agent is listening yet.</strong>
+        <span>Add one to start work in this room.</span>
+      </p>
+      <button type="button" @click="$emit('open-add-agent')">Add agent</button>
+    </div>
     <div class="desktop-composer-input-row">
       <button
         class="desktop-composer-add-agent"
@@ -161,7 +174,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowUp, LoaderCircle, Plus } from "@lucide/vue";
+import { ArrowUp, Bot, LoaderCircle, Plus } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
@@ -226,6 +239,9 @@ const canSend = computed(() =>
 );
 const primaryPermissionApproval = computed(() => props.permissionApprovals[0] ?? null);
 const permissionOverflowCount = computed(() => Math.max(0, props.permissionApprovals.length - 1));
+const hasListeningAgent = computed(() => props.participants.some((participant) =>
+  participant.kind === "agent" && participant.activityState !== "offline"
+));
 const composerInputLabel = computed(() => {
   if (props.roomLoading) return "Room messages are loading";
   return props.roomIdentifier ? "Message room" : "Choose a room before writing";

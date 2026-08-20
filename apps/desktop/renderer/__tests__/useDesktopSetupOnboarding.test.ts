@@ -37,6 +37,7 @@ interface SetupStateInput {
   repoStatus?: RepoStatus | null;
   openRoomSnapshot?: OpenRoomSnapshot;
   refresh?: () => Promise<void>;
+  requestFirstAgent?: (providerId: DesktopMcpInstallTargetId) => void;
   selectedMcpTargetIds?: DesktopMcpInstallTargetId[];
   firstRunStage?: FirstRunWizardStage;
   mcpWizardStep?: DesktopMcpWizardStep;
@@ -728,6 +729,50 @@ test("room choice survives going back to GitHub and returning", async () => {
   assert.equal(state.onboarding.firstRunRoomSelected.value, true);
 });
 
+test("selected room continues to a first-agent choice using an installed app", async () => {
+  const state = makeSetupState({
+    firstRunStage: "room",
+    mcpInstallState: mcpInstallStateFixture({ completed: false }),
+    selectedMcpTargetIds: ["codex"],
+    roomBridge: {
+      getSnapshot: async () => snapshotFixture("ABCD-1234", "Shared room"),
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCD-1234"));
+  state.onboarding.continueToFirstAgent();
+
+  assert.equal(state.firstRunStage.value, "agent");
+  assert.equal(state.onboarding.firstRunAgentTargetId.value, "codex");
+
+  state.onboarding.goBackFirstRun();
+  assert.equal(state.firstRunStage.value, "room");
+});
+
+test("finishing with a first agent requests it only after room verification", async () => {
+  const requestedProviders: DesktopMcpInstallTargetId[] = [];
+  const state = makeSetupState({
+    pinnedRoomIdentifier: "ABCD-1234",
+    selectedMcpTargetIds: ["codex"],
+    requestFirstAgent: (providerId) => requestedProviders.push(providerId),
+    roomBridge: {
+      getSnapshot: async () => snapshotFixture("ABCD-1234", "Shared room"),
+    },
+    setupBridge: {
+      completeMcpOnboarding: async () => mcpInstallStateFixture({ completed: true }),
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCD-1234"));
+  const completed = await withDesktopBridge(
+    state.windowBridge,
+    () => state.onboarding.finishFirstRunOnboarding("codex"),
+  );
+
+  assert.equal(completed, true);
+  assert.deepEqual(requestedProviders, ["codex"]);
+});
+
 test("joinRoomCode does not select inaccessible room snapshots", async () => {
   let openCount = 0;
   const state = makeSetupState({
@@ -871,6 +916,7 @@ function makeSetupState(input: SetupStateInput = {}) {
     mcpWizardStep,
     openRoomSnapshot: input.openRoomSnapshot ?? (() => undefined),
     pinnedRoom,
+    requestFirstAgent: input.requestFirstAgent,
     refresh: input.refresh ?? (async () => undefined),
     repoStatus,
     selectedMcpTargetIds,
