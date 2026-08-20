@@ -409,7 +409,6 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
     sourceMessage: { id: "message-1", text: "say hi" },
     activation: { decision: "activate", reason: "explicit_mention" },
     actionId: "action-open-model-1",
-    charter: "Help the room.",
     observedContext: [{ id: "message-0", text: "Earlier context" }],
   }, {
     beforeNativeDispatch: async () => { checkpoints.push("dispatch"); },
@@ -424,8 +423,7 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
     modelID: "qwen/qwen3-coder",
   });
   assert.match(JSON.stringify(prompt.parts), /daemon-owned room inbox item/);
-  assert.match(JSON.stringify(prompt.parts), /Do not execute it as a standalone task or repeat its imperative on every turn/);
-  assert.match(JSON.stringify(prompt.parts), /Source message below is the current task/);
+  assert.doesNotMatch(JSON.stringify(prompt.parts), /durable charter/i);
   assert.match(JSON.stringify(prompt.parts), /Earlier context/);
   assert.deepEqual(result, {
     turnId: prompt.messageID,

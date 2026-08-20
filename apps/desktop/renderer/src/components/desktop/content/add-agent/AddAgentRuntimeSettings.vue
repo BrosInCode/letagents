@@ -12,7 +12,7 @@
     </div>
     <p>{{ lifecycleDescription }}</p>
     <label v-if="launchMode === 'supervised'" class="desktop-add-agent-model-custom-input">
-      <small>Charter</small>
+      <small>Initial message</small>
       <textarea
         :value="charter"
         rows="3"
@@ -26,7 +26,7 @@
         v-if="!charter.trim()"
         id="desktop-add-agent-supervised-charter-error"
         class="desktop-add-agent-field-error"
-      >Add a charter so the supervised agent knows how to work in this room.</small>
+      >Add the first message the agent should handle after it joins. It is sent once.</small>
     </label>
   </section>
 

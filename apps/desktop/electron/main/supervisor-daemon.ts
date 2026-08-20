@@ -615,7 +615,7 @@ export class SupervisorDaemonClient {
   }
 
   async create(input: DesktopSupervisorCreateInput): Promise<DesktopSupervisorManifestEntry> {
-    if (!input.charter.trim()) throw new Error("A supervised agent charter is required.");
+    if (!input.charter.trim()) throw new Error("A supervised agent initial message is required.");
     const creationRequestId = input.creationRequestId?.trim() || randomUUID();
     if (!/^[A-Za-z0-9][A-Za-z0-9_-]{7,127}$/.test(creationRequestId)) {
       throw new Error("A valid supervised agent creation request id is required.");
@@ -1146,12 +1146,13 @@ export class SupervisorDaemonClient {
   }
 
   /** Establish a daemon-inbox entry's one-time durable room boundary. */
-  async bootstrapRoomIngress(entryId: string, daemonGeneration: number): Promise<"bootstrapped" | "existing" | "stale"> {
+  async bootstrapRoomIngress(entryId: string, daemonGeneration: number, initialMessage?: string): Promise<"bootstrapped" | "existing" | "stale"> {
     const status = await this.ensureRunning();
     if (status.generation !== daemonGeneration) return "stale";
     const result = await this.request<{ status?: unknown }>("supervisor.bootstrap_room_ingress", {
       entry_id: entryId,
       daemon_generation: daemonGeneration,
+      ...(initialMessage?.trim() ? { initial_message: initialMessage.trim() } : {}),
     }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, BOOTSTRAP_INGRESS_REQUEST_TIMEOUT_MS);
     return result.status === "bootstrapped" || result.status === "existing" ? result.status : "stale";
   }

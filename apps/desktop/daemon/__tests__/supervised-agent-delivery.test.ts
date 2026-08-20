@@ -851,15 +851,15 @@ test("a publish response without a nonempty matching canonical room identity nev
   }
 });
 
-test("each new bounded turn resolves the latest durable charter without restarting the provider", async () => {
+test("bounded room turns never resolve or inject the legacy charter", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-charter-refresh-"));
   const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-  let charter = "first durable charter";
-  const seen: Array<string | undefined> = [];
+  let resolverCalls = 0;
+  const seen: Array<{ source: unknown; hasCharter: boolean }> = [];
   const delivery = new SupervisedAgentDelivery(
     store,
     provider(async (_handle, request) => {
-      seen.push(request.charter);
+      seen.push({ source: request.sourceMessage, hasCharter: Object.hasOwn(request, "charter") });
       return { turnId: `turn:${request.inboxItemId}`, outcome: "no_reply", text: null };
     }),
     { poll: async () => ({}), publish: async () => { throw new Error("no-reply turn must not publish"); } },
@@ -868,15 +868,16 @@ test("each new bounded turn resolves the latest durable charter without restarti
     undefined,
     undefined,
     undefined,
-    async () => ({ charter }),
+    async () => { resolverCalls += 1; return { charter: "must never be injected" }; },
   );
   try {
     await ingest(store, "1");
     await delivery.pump(agent);
-    charter = "second durable charter";
     await ingest(store, "2");
     await delivery.pump(agent);
-    assert.deepEqual(seen, ["first durable charter", "second durable charter"]);
+    assert.equal(resolverCalls, 0);
+    assert.deepEqual(seen.map((turn) => turn.hasCharter), [false, false]);
+    assert.deepEqual(seen.map((turn) => (turn.source as { id?: string }).id), ["1", "2"]);
   } finally {
     await store.close();
     await rm(root, { recursive: true, force: true });

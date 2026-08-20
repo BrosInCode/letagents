@@ -73,6 +73,7 @@ function entry(id = "supervised_launch_1234567"): DesktopSupervisorManifestEntry
 
 function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) {
   const events: string[] = [];
+  const bootstrapMessages: Array<string | undefined> = [];
   const grants = new Map<string, { metadata: ReturnType<typeof metadata>; token: string; entryId: string; lastInstalledDaemonGeneration: number | null }>();
   const daemon = {
     async ensureRunning() { events.push("ensure"); return { generation: 7 }; },
@@ -83,8 +84,9 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
       assert.equal(input.supervisorGrant.includes("secret"), true);
       return "installed" as const;
     },
-    async bootstrapRoomIngress(entryId: string, daemonGeneration: number) {
+    async bootstrapRoomIngress(entryId: string, daemonGeneration: number, initialMessage?: string) {
       events.push(`bootstrap:${entryId}:${daemonGeneration}`);
+      bootstrapMessages.push(initialMessage);
       return "bootstrapped" as const;
     },
     async retireAgent(id: string, generation: number, sessionId: string | null = null, grantOnly = false) {
@@ -113,7 +115,7 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
     ...overrides,
   };
   const request = (async () => { throw new Error("unexpected request"); }) as never;
-  return { events, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
+  return { events, bootstrapMessages, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
 }
 
 test("fresh Codex launch provisions before paused claim, installs before activation can occur", async () => {
@@ -125,6 +127,7 @@ test("fresh Codex launch provisions before paused claim, installs before activat
   assert.deepEqual(h.events, [
     "ensure", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
   ]);
+  assert.deepEqual(h.bootstrapMessages, ["help"], "fresh creation queues the saved text as its one-time initial message");
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
 });
 

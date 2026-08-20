@@ -469,7 +469,8 @@ test("mounted room-move recovery survives an inspector remount without an in-mem
 test("mounted busy and refreshing settings prevent draft edits and overlapping saves", () => {
   const busy = mount(AgentInspectorSettings, settingsProps({ busy: true }));
   for (const control of descendants(busy.root).filter((node) => node.type === "textarea" || node.type === "select")) {
-    assert.equal(control.props.disabled, true);
+    if (Object.hasOwn(control.props, "readonly")) assert.notEqual(control.props.readonly, false);
+    else assert.equal(control.props.disabled, true);
   }
   assert.equal(buttonByText(busy.root, "Saving…").props.disabled, true);
   busy.app.unmount();
@@ -661,9 +662,9 @@ test("retrying unavailable agent details keeps keyboard focus inside the Inspect
 });
 
 test("compact Host gives the overflow menu first Escape ownership before closing the Inspector", async () => {
-  const unsavedCharter = "Keep this unsaved inspector draft.";
+  const unsavedModel = "gpt-next-unsaved";
   let closeCount = 0;
-  let currentCharter = readyResource.draft!.charter;
+  let currentModel = readyResource.draft!.model;
   testDocument.activeElement = null;
 
   const projection = {
@@ -718,7 +719,7 @@ test("compact Host gives the overflow menu first Escape ownership before closing
             ...settingsResource.value,
             draft: { ...settingsResource.value.draft!, ...patch },
           };
-          currentCharter = settingsResource.value.draft!.charter;
+          currentModel = settingsResource.value.draft!.model;
         },
         onClose: () => {
           closeCount += 1;
@@ -735,11 +736,11 @@ test("compact Host gives the overflow menu first Escape ownership before closing
 
   (buttonByText(testBody, "Settings").props.onClick as () => void)();
   await nextTick();
-  const charter = descendants(testBody).find((node) => node.type === "textarea");
-  assert.ok(charter, "expected the mounted Settings charter field");
-  (charter.props.onInput as (event: object) => void)({ target: { value: unsavedCharter } });
+  const model = descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Provider default");
+  assert.ok(model, "expected the mounted Settings model field");
+  (model.props.onInput as (event: object) => void)({ target: { value: unsavedModel } });
   await nextTick();
-  assert.equal(currentCharter, unsavedCharter);
+  assert.equal(currentModel, unsavedModel);
 
   const trigger = nodeByProp(testBody, "aria-label", "More agent actions");
   (trigger.props.onClick as () => void)();
@@ -767,8 +768,8 @@ test("compact Host gives the overflow menu first Escape ownership before closing
   assert.equal(trigger.focusCount, 1);
   assert.equal(testDocument.activeElement, trigger);
   assert.ok(nodeByProp(testBody, "role", "dialog"), "Inspector remains open after menu dismissal");
-  assert.equal(currentCharter, unsavedCharter, "menu dismissal must preserve the Settings draft");
-  assert.equal(descendants(testBody).find((node) => node.type === "textarea")?.props.value, unsavedCharter);
+  assert.equal(currentModel, unsavedModel, "menu dismissal must preserve the Settings draft");
+  assert.equal(descendants(testBody).find((node) => node.type === "input" && node.props.placeholder === "Provider default")?.props.value, unsavedModel);
 
   let secondPrevented = false;
   const secondEscape = {

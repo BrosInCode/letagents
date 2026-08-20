@@ -48,6 +48,10 @@ const configurationSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/useAddAgentConfiguration.ts",
   import.meta.url,
 )), "utf8");
+const runtimeSettingsSource = readFileSync(fileURLToPath(new URL(
+  "../src/components/desktop/content/add-agent/AddAgentRuntimeSettings.vue",
+  import.meta.url,
+)), "utf8");
 const presentationSource = readFileSync(fileURLToPath(new URL(
   "../src/components/desktop/content/add-agent/useAddAgentPresentation.ts",
   import.meta.url,
@@ -234,10 +238,17 @@ test("bounded supervised defaults never tell providers to own polling and Claude
   assert.match(presentationSource, /return "Managed at launch"/);
   assert.match(
     configurationSource,
-    /Work from the room board, coordinate through the room, and help move assigned work forward/,
+    /Join the room, check the board, and help move the available work forward/,
   );
   assert.match(presentationSource, /showEffortSelector = computed\(\(\) =>\s*selectedProviderId\.value === "codex"\s*\)/);
   assert.doesNotMatch(presentationSource, /showEffortSelector[\s\S]{0,160}claude-code/);
+});
+
+test("supervised creation presents the startup text as a one-time initial message", () => {
+  assert.match(runtimeSettingsSource, /<small>Initial message<\/small>/);
+  assert.match(runtimeSettingsSource, /It is sent once/);
+  assert.doesNotMatch(runtimeSettingsSource, /<small>Charter<\/small>/);
+  assert.match(actionBarSource, /Add an initial message before starting/);
 });
 
 test("supervised Cursor exposes the provider permission profiles instead of forcing read-only", () => {
