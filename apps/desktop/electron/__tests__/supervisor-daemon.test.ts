@@ -383,6 +383,8 @@ async function startWireDaemon(
         result = { status: "installed" };
       } else if (request.method === "supervisor.install_open_model_credential") {
         result = { status: "installed" };
+      } else if (request.method === "supervisor.bootstrap_room_ingress") {
+        result = { status: "bootstrapped" };
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -976,6 +978,10 @@ test("host grant install carries renewal ownership and expiry metadata to the ex
       supervisor_grant: "secret-parent", grant_generation: 4,
       host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2026-07-22T12:00:00.000Z",
       api_url: configuredApiUrl, daemon_generation: 39, credential_only: false,
+    });
+    assert.equal(await client.bootstrapRoomIngress("entry-1", 39, "join the room and say hi"), "bootstrapped");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.bootstrap_room_ingress")?.params, {
+      entry_id: "entry-1", daemon_generation: 39, initial_message: "join the room and say hi",
     });
   } finally {
     await closeServer(wire.server, env.socketPath);

@@ -242,6 +242,15 @@ export class SupervisedAgentInboxStore {
   }
 
   /**
+   * Enqueue the desktop-authored message that starts a newly created agent.
+   * Its caller supplies a deterministic source id, so retries and daemon
+   * recovery can re-admit the same launch without running the message twice.
+   */
+  async enqueueInitialMessage(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
+    return this.enqueueSyntheticMessage(input);
+  }
+
+  /**
    * Enqueue a human correction as a synthetic FIFO turn that runs on the SAME
    * provider session as the interrupted turn (stop-then-resend). It mirrors
    * `ingestPoll`'s inbox INSERT but deliberately never touches the ingress
@@ -251,6 +260,10 @@ export class SupervisedAgentInboxStore {
    * retried control action re-enqueues idempotently rather than duplicating.
    */
   async enqueueCorrection(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
+    return this.enqueueSyntheticMessage(input);
+  }
+
+  private async enqueueSyntheticMessage(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id"); this.require(input.source_message_id, "source_message_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
       const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, input.source_message_id) as Row | undefined;

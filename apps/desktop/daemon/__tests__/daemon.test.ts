@@ -5378,6 +5378,77 @@ test("cursor admission repairs pre-upgrade running and stopped daemon-inbox entr
   }
 });
 
+test("fresh desktop bootstrap queues its initial message exactly once while legacy bootstrap queues none", async () => {
+  const env = await fixture();
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+  };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { throw new Error("stopped bootstrap must not spawn"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("stopped bootstrap must not resume"); }, poke: async () => {},
+    stop: async () => { throw new Error("stopped bootstrap must not stop"); },
+    onExit: async () => () => {}, onStream: async () => () => {},
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false, 15_000, undefined, {}, {
+    latest: async () => ({ messages: [{ id: "44" }] }),
+    poll: async () => ({ messages: [] }), publish: async () => {},
+  }, {
+    createWorkerSession: async () => ({
+      sessionId: "initial-message-session", bearer: "initial-message-bearer",
+      bearerId: "initial-message-bearer-id", expiresAt: null,
+    }),
+  });
+  try {
+    await daemon.start();
+    const internals = daemon as unknown as { supervisedInbox: SupervisedAgentInboxStore };
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    for (const id of ["fresh_initial_message", "legacy_without_initial_message"]) {
+      assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: {
+        ...entry, id, provider: "codex", delivery_mode: "daemon_inbox",
+        desired_state: "stopped", observed_state: "stopped",
+      } })).ok, true);
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: id, room_id: entry.room_id, agent_key: `owner/${id}`, grant_id: `grant-${id}`,
+        supervisor_grant: `grant-secret-${id}`, grant_generation: 1, api_url: "https://letagents.example",
+        host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2099-01-01T00:00:00.000Z",
+        daemon_generation: generation,
+      })).ok, true);
+    }
+
+    const first = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+      entry_id: "fresh_initial_message", daemon_generation: generation,
+      initial_message: "join the room and say hi",
+    });
+    assert.equal(first.ok, true, first.error);
+    const queued = await internals.supervisedInbox.head("fresh_initial_message");
+    assert.equal(queued?.source_message_id, "desktop-initial-message:fresh_initial_message");
+    assert.equal((queued?.source_message as { text?: string }).text, "join the room and say hi");
+    assert.equal((queued?.source_message as { source?: string }).source, "desktop_initial_message");
+
+    const retried = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+      entry_id: "fresh_initial_message", daemon_generation: generation,
+      initial_message: "a retry must not replace or duplicate the first message",
+    });
+    assert.equal(retried.ok, true, retried.error);
+    const afterRetry = await internals.supervisedInbox.receipts("fresh_initial_message");
+    assert.equal(afterRetry.length, 1);
+    assert.equal(afterRetry[0]?.inbox_item_id, queued?.inbox_item_id);
+    assert.equal((afterRetry[0]?.source_message as { text?: string }).text, "join the room and say hi");
+
+    const legacy = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+      entry_id: "legacy_without_initial_message", daemon_generation: generation,
+    });
+    assert.equal(legacy.ok, true, legacy.error);
+    assert.equal(await internals.supervisedInbox.head("legacy_without_initial_message"), null);
+  } finally {
+    await daemon.stop().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
 test("bootstrap and launch reuse one fresh host worker mint before creating one provider generation", async () => {
   const env = await fixture();
   const paths = {

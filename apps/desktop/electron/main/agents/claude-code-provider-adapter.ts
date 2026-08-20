@@ -7,7 +7,6 @@ import { createInterface } from "node:readline";
 import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import {
-  boundedRoomTurnCharterInstructionLines,
   synthesizeTerminalPayload,
   type ProviderActivityEvent,
   type ProviderAdapter,
@@ -264,7 +263,6 @@ function userStreamJsonLine(text: string, uuid?: string): string {
 export function boundedClaudeRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
     "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    ...boundedRoomTurnCharterInstructionLines(request.charter),
     "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
     "You may use the discovered LetAgents product tools for room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
     "Answer the activating message in your final response; do not send that same reply with a message tool.",

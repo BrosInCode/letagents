@@ -427,17 +427,7 @@ export class SupervisorDaemon {
         undefined,
         undefined,
         (input) => this.commitPreparedRoomMove(input),
-        async (authority) => {
-          if (!await this.isExactSupervisedDeliveryAuthority(authority)) {
-            throw new Error("The supervised delivery authority changed before resolving its turn configuration.");
-          }
-          const configuration = await this.store.getAgentConfiguration(authority.agentId);
-          if (!configuration) throw new Error("The exact agent no longer exists.");
-          if (!await this.isExactSupervisedDeliveryAuthority(authority)) {
-            throw new Error("The supervised delivery authority changed while resolving its turn configuration.");
-          }
-          return { charter: configuration.charter };
-        },
+        undefined,
         (input) => this.restoreMissingProviderContinuation(input),
         (input) => this.checkpointDynamicProviderState(input),
         (input) => this.checkpointPreparedCursorTurn(input),
@@ -7115,11 +7105,40 @@ export class SupervisorDaemon {
    * read, so a successor resumes this exact boundary instead of reading a
    * newer tail and skipping the intervening message.
    */
-  private async bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number }, operation: BootstrapOperation): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
+  private async bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }, operation: BootstrapOperation): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
     return this.serializeEntryTick(input.entry_id, async () => {
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
       const entry = await this.store.getEntry(input.entry_id);
       if (!entry || !this.requiresHostGrant(entry)) return { status: "stale", last_observed_message_id: null };
+      const initialMessage = input.initial_message?.trim() || null;
+      if (input.initial_message !== undefined && !initialMessage) {
+        throw new Error("A non-empty initial agent message is required.");
+      }
+      if (initialMessage) {
+        const sourceMessageId = `desktop-initial-message:${entry.id}`;
+        const activation = {
+          for_current_agent: {
+            decision: "activate",
+            reason: "initial_message",
+            addressed: true,
+          },
+        };
+        await this.supervisedInbox.enqueueInitialMessage({
+          agent_id: entry.id,
+          room_id: entry.room_id,
+          source_message_id: sourceMessageId,
+          source_message: {
+            id: sourceMessageId,
+            room_id: entry.room_id,
+            sender: "Desktop user",
+            text: initialMessage,
+            timestamp: entry.created_at,
+            source: "desktop_initial_message",
+            thread_root_id: sourceMessageId,
+          },
+          activation,
+        });
+      }
       const existing = await this.supervisedInbox.cursor(entry.id);
       if (existing) {
         await this.requestAdmittedRunningConvergence(entry.id, input.daemon_generation);

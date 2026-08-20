@@ -113,7 +113,6 @@ export type ProviderRoomTurnRequest = {
   sourceMessage: unknown;
   activation: Record<string, unknown>;
   actionId: string;
-  charter?: string;
   observedContext?: unknown[];
 };
 export type ProviderRoomTurnResult =
