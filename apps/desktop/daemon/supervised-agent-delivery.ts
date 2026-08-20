@@ -41,6 +41,7 @@ export type SupervisedAuthorityRevalidator = (
   authority: SupervisedDeliveryAuthority,
   scope: SupervisedAuthorityScope,
 ) => Promise<boolean> | boolean;
+/** @deprecated Retained as a constructor compatibility slot; bounded turns never read startup text. */
 export type SupervisedTurnConfigurationResolver = (
   authority: SupervisedDeliveryAuthority,
 ) => Promise<{ charter?: string }>;
@@ -174,7 +175,7 @@ export class SupervisedAgentDelivery {
     private readonly sleep: (ms: number) => Promise<void> = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
     private readonly waitForPollDelay: SupervisedPollWait = abortablePollDelay,
     private readonly commitPreparedRoomMove?: SupervisedRoomMoveCommitter,
-    private readonly resolveTurnConfiguration?: SupervisedTurnConfigurationResolver,
+    private readonly _legacyTurnConfigurationResolver?: SupervisedTurnConfigurationResolver,
     private readonly restoreMissingContinuation?: SupervisedContinuationRestorer,
     private readonly checkpointProviderState?: SupervisedProviderStateCheckpointer,
     private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
@@ -1168,10 +1169,6 @@ export class SupervisedAgentDelivery {
         ? []
         : (await this.inbox.observedContext(agent.agentId, agent.roomId, 30)).map((message) => message.source_message);
       if (!await hasProviderAuthority()) return;
-      const turnConfiguration = recovering
-        ? { charter: agent.charter }
-        : await this.resolveTurnConfiguration?.(agent) ?? { charter: agent.charter };
-      if (!await hasProviderAuthority()) return;
       // Handoff may abandon observation only after the provider has committed
       // an exact, recoverable native turn boundary. Before then, the provider
       // promise owns preflight/helper cleanup and must settle before drain can
@@ -1299,7 +1296,6 @@ export class SupervisedAgentDelivery {
         sourceMessage: item.source_message,
         activation: item.activation,
         actionId: item.action_id,
-        charter: turnConfiguration.charter,
         observedContext,
       }, { beforeNativeDispatch: async () => {
         if (!await this.hasExecutionAuthority(agent, turnController)) throw new AuthorityLostError();

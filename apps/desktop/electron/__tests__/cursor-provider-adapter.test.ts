@@ -595,12 +595,10 @@ async function spawnDaemonLane(
 function roomTurnRequest(over: Partial<{
   inboxItemId: string;
   actionId: string;
-  charter: string;
 }> = {}) {
   return {
     inboxItemId: over.inboxItemId ?? "inbox_cursor_1",
     actionId: over.actionId ?? "action_cursor_1",
-    charter: over.charter ?? "Review and implement carefully.",
     sourceMessage: { id: "msg_8", text: "Please fix it" },
     activation: { decision: "activate" },
     observedContext: [{ id: "msg_7", text: "Earlier context" }],

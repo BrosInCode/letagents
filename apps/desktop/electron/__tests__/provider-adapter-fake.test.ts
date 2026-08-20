@@ -10,15 +10,6 @@ import type {
   ProviderSpawnRequest,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
-import { boundedRoomTurnCharterInstructionLines } from "../main/agents/provider-adapter.js";
-
-test("bounded room turns treat the charter as standing guidance and the source as the current task", () => {
-  const prompt = boundedRoomTurnCharterInstructionLines("say hi").join("\n");
-  assert.match(prompt, /Your durable charter: say hi/);
-  assert.match(prompt, /Do not execute it as a standalone task or repeat its imperative on every turn/);
-  assert.match(prompt, /Source message below is the current task/);
-});
-
 // In-memory fake child implementing the ProviderAdapter launcher boundary
 // (v10 §4.8). It has no real process — it exists to prove the durability
 // lifecycle contract (spawn → kill → restart/resume → terminal ordering)

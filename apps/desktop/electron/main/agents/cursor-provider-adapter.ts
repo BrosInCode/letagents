@@ -11,7 +11,6 @@ import {
   makeCodexStopToken,
 } from "./codex-start-prompt.js";
 import {
-  boundedRoomTurnCharterInstructionLines,
   synthesizeTerminalPayload,
   type ProviderActivityEvent,
   type ProviderAdapter,
@@ -251,7 +250,6 @@ export function boundedCursorRoomTurnPrompt(
 ): string {
   return [
     "You are handling one daemon-owned room inbox item in an exact bounded turn.",
-    ...boundedRoomTurnCharterInstructionLines(request.charter),
     ...cursorPermissionProfileInstructionLines(permissionProfileId as CursorSupervisedProfileOptions["permissionProfileId"]),
     "The daemon owns observation, credentials, retries, and publication. Do not register a session, authenticate, poll, or manage runtime lifecycle.",
     "You may use the discovered LetAgents product tools for bounded room context, tasks, artifacts, status, deliberate side messages, or moving to another room. Those actions are daemon-mediated.",
