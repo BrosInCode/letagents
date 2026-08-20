@@ -17,7 +17,7 @@
         <label class="agent-inspector-field"><span>Provider</span><input :value="resource.configuration.provider" readonly aria-readonly="true" /><small>Provider is fixed when this agent is created.</small></label>
         <label class="agent-inspector-field"><span>Model</span><input :value="resource.draft.model || ''" :disabled="busy || !settingsEditable || !canEditModel" placeholder="Provider default" @input="patch({ model: ($event.target as HTMLInputElement).value.trim() || null })" /><small v-if="!canEditModel">{{ provider ? 'This provider does not expose a managed model control.' : 'Provider capabilities are unavailable.' }}</small></label>
         <label v-if="canEditEffort" class="agent-inspector-field"><span>Reasoning effort</span><select :value="resource.draft.reasoningEffort || ''" :disabled="busy || !settingsEditable" @change="patch({ reasoningEffort: (($event.target as HTMLSelectElement).value || null) as any })"><option v-for="option in inspectorEffortOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
-        <label class="agent-inspector-field"><span>Charter</span><textarea :value="resource.draft.charter" rows="4" :disabled="busy || !settingsEditable" @input="patch({ charter: ($event.target as HTMLTextAreaElement).value })"></textarea></label>
+        <label class="agent-inspector-field"><span>Initial message</span><textarea :value="resource.draft.charter" rows="4" readonly aria-readonly="true"></textarea><small>For newly created agents, this is queued once at creation. It is never injected into later room messages.</small></label>
         <fieldset v-if="resource.configuration.supervisedPermissionProfiles.length" class="agent-inspector-permissions" :disabled="busy || !settingsEditable" :aria-describedby="'agent-inspector-permission-detail'">
           <legend>Permissions</legend>
           <p id="agent-inspector-permission-detail" class="agent-inspector-settings-note">Choose the access level for future provider starts. LetAgents applies the matching native policy when you save.</p>
@@ -102,7 +102,7 @@ const canEditModel = computed(() => Boolean(provider.value?.capabilities.include
 const canEditEffort = computed(() => agentInspectorProviderSupportsEffort(provider.value?.id));
 const runtimeLag = computed(() => configurationHasRuntimeLag(props.resource.configuration));
 const settingsEditable = computed(() => props.resource.status === "ready");
-const validDraft = computed(() => Boolean(props.resource.draft?.charter.trim()));
+const validDraft = computed(() => Boolean(props.resource.draft));
 const movePresentation = computed(() => props.move.move ? roomMovePresentation(props.move.move) : null);
 const moveTerminal = computed(() => Boolean(movePresentation.value?.terminal));
 function patch(value: Partial<AgentInspectorConfigurationDraft>) { emit("patch", value); }

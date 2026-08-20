@@ -72,7 +72,7 @@ export interface DaemonControlOperations {
   installOpenModelCredential(input: {
     entry_id: string; api_key: string | null; base_url: string; model: string; daemon_generation: number;
   }): unknown;
-  bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number }): unknown;
+  bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }): unknown;
   borrowWorkerCredential(input: WorkerSessionCoordinates & { daemon_generation: number; provider_turn_id: string; api_url: string }): unknown;
   checkpointWorkerCursor(input: Omit<WorkerSessionCoordinates, "room_id"> & { room_cursor: string }): unknown;
   readAttempt(id: string): unknown;
@@ -525,6 +525,7 @@ export function createDaemonControlRequestHandler(
       return operations.bootstrapRoomIngress({
         entry_id: String(params.entry_id ?? ""),
         daemon_generation: Number(params.daemon_generation ?? NaN),
+        ...(typeof params.initial_message === "string" ? { initial_message: params.initial_message } : {}),
       });
     }
     if (request.method === "supervisor.borrow_worker_credential") {

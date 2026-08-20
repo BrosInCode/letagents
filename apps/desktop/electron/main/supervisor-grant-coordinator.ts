@@ -200,6 +200,9 @@ export class SupervisorGrantCoordinator {
         prepared.agentKey,
         prepared.grant,
         (await this.daemon.ensureRunning()).generation,
+        false,
+        false,
+        prepared.entry.charter,
       );
       return { entry: prepared.entry, agentKey: prepared.agentKey };
     });
@@ -261,6 +264,9 @@ export class SupervisorGrantCoordinator {
           lastInstalledDaemonGeneration: null,
         },
         (await this.daemon.ensureRunning()).generation,
+        false,
+        false,
+        entry.charter,
       );
       return { entry, agentKey };
     });
@@ -759,6 +765,7 @@ export class SupervisorGrantCoordinator {
     daemonGeneration: number,
     credentialOnly = false,
     recoveryOnly = false,
+    initialMessage?: string,
   ): Promise<void> {
     if (credentialOnly && recoveryOnly) {
       throw new Error("Grant installation cannot be both reconnect-only and recovery-only.");
@@ -800,7 +807,7 @@ export class SupervisorGrantCoordinator {
     // forward. Bootstrap admits the cursor before any running convergence and
     // never converges a stopped provider.
     if (entry.deliveryMode === "daemon_inbox" && !recoveryOnly) {
-      const bootstrapped = await this.daemon.bootstrapRoomIngress(entry.id, daemonGeneration);
+      const bootstrapped = await this.daemon.bootstrapRoomIngress(entry.id, daemonGeneration, initialMessage);
       if (bootstrapped === "stale") throw new Error("Background agent management changed generation before room delivery could be initialized.");
     }
     // Only a confirmed exact-generation socket install advances the durable

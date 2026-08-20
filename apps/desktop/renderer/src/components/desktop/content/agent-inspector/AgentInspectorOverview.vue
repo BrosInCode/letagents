@@ -22,9 +22,9 @@
 
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-charter-title">
       <div class="agent-inspector-section-heading">
-        <p id="agent-inspector-charter-title">Charter</p>
+        <p id="agent-inspector-charter-title">Initial message</p>
       </div>
-      <p class="agent-inspector-charter">{{ projection.charter || "No charter has been set for this agent." }}</p>
+      <p class="agent-inspector-charter">{{ projection.charter || "No initial message was recorded for this agent." }}</p>
     </section>
 
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-context-title">

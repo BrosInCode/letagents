@@ -73,18 +73,20 @@ function entry(id = "supervised_launch_1234567"): DesktopSupervisorManifestEntry
 
 function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) {
   const events: string[] = [];
+  const bootstrapMessages: Array<string | undefined> = [];
   const grants = new Map<string, { metadata: ReturnType<typeof metadata>; token: string; entryId: string; lastInstalledDaemonGeneration: number | null }>();
   const daemon = {
     async ensureRunning() { events.push("ensure"); return { generation: 7 }; },
-    async create(input: { roomIdentifier: string }) { events.push(`create:${input.roomIdentifier}`); return { ...entry(), roomId: input.roomIdentifier, desiredState: "paused" as const }; },
+    async create(input: { roomIdentifier: string; charter?: string }) { events.push(`create:${input.roomIdentifier}`); return { ...entry(), roomId: input.roomIdentifier, charter: input.charter ?? entry().charter, desiredState: "paused" as const }; },
     async list() { events.push("list"); return [entry()]; },
     async installHostGrant(input: { supervisorGrant: string; daemonGeneration: number }) {
       events.push(`install:${input.daemonGeneration}`);
       assert.equal(input.supervisorGrant.includes("secret"), true);
       return "installed" as const;
     },
-    async bootstrapRoomIngress(entryId: string, daemonGeneration: number) {
+    async bootstrapRoomIngress(entryId: string, daemonGeneration: number, initialMessage?: string) {
       events.push(`bootstrap:${entryId}:${daemonGeneration}`);
+      bootstrapMessages.push(initialMessage);
       return "bootstrapped" as const;
     },
     async retireAgent(id: string, generation: number, sessionId: string | null = null, grantOnly = false) {
@@ -113,7 +115,7 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
     ...overrides,
   };
   const request = (async () => { throw new Error("unexpected request"); }) as never;
-  return { events, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
+  return { events, bootstrapMessages, grants, daemon, operations, coordinator: new SupervisorGrantCoordinator(daemon as never, request, () => "host_1", operations, async () => "room_1") };
 }
 
 test("fresh Codex launch provisions before paused claim, installs before activation can occur", async () => {
@@ -125,7 +127,38 @@ test("fresh Codex launch provisions before paused claim, installs before activat
   assert.deepEqual(h.events, [
     "ensure", "identity:supervised_launch_1234567", "provision:supervised_launch_1234567:false", "create:room_1", "ensure", "install:7", "bootstrap:supervised_launch_1234567:7", "replace:7",
   ]);
+  assert.deepEqual(h.bootstrapMessages, ["help"], "fresh creation queues the saved text as its one-time initial message");
   assert.equal(JSON.stringify(result).includes("secret_provisioned"), false, "no bearer is in the public coordinator result");
+});
+
+test("fresh rental launch queues its accepted task once while recovery paths omit startup text", async () => {
+  const h = harness();
+  await h.coordinator.createRentalPausedAndInstall({
+    creationRequestId: "rental_12345678",
+    roomIdentifier: "room_1",
+    displayName: "Rental agent",
+    providerId: "cursor",
+    charter: "complete the accepted rental task",
+    model: null,
+    permissionProfileId: "sandboxed_write",
+    repoRootPath: "/tmp/repo",
+    agentKey: "renter/rental-agent",
+    preparedGrant: {
+      metadata: metadata("renter/rental-agent"),
+      token: "secret_rental",
+    },
+  });
+  assert.deepEqual(h.bootstrapMessages, ["complete the accepted rental task"], "the freshly created rental entry supplies its stored initial message");
+
+  h.bootstrapMessages.length = 0;
+  h.grants.set("owner/supervised_launch_1234567", {
+    metadata: metadata("owner/supervised_launch_1234567"),
+    token: "secret_recovery",
+    entryId: "supervised_launch_1234567",
+    lastInstalledDaemonGeneration: 7,
+  });
+  await h.coordinator.reconcileDesiredRunning();
+  assert.deepEqual(h.bootstrapMessages, [undefined], "an existing agent bootstrap never replays its stored legacy charter");
 });
 
 test("fresh Open Model launch installs the desktop-held endpoint credential before convergence", async () => {
