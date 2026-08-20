@@ -709,15 +709,26 @@ test("production publication requires a nonempty canonical id in the requested r
     for (const body of [{ id: "", room_id: "room_1" }, { id: "msg_1", room_id: "room_2" }]) {
       globalThis.fetch = (async () => ({ ok: true, json: async () => body })) as typeof fetch;
       await assert.rejects(
-        () => productionSupervisedDeliveryHttp.publish({ roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "reply", clientMessageId: "client_1" }),
+        () => productionSupervisedDeliveryHttp.publish({ roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "reply", clientMessageId: "client_1", replyTo: null, threadRootId: null }),
         /omitted its canonical message identity/,
       );
     }
-    globalThis.fetch = (async () => ({ ok: true, json: async () => ({ id: "msg_1", room_id: "room_1" }) })) as typeof fetch;
+    const publishedBodies: Array<Record<string, unknown>> = [];
+    globalThis.fetch = (async (_url, init) => {
+      publishedBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return { ok: true, json: async () => ({ id: "msg_1", room_id: "room_1" }) };
+    }) as typeof fetch;
     assert.deepEqual(
-      await productionSupervisedDeliveryHttp.publish({ roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "reply", clientMessageId: "client_1" }),
+      await productionSupervisedDeliveryHttp.publish({ roomId: "room_1", apiUrl: "https://letagents.test", bearer: "token", text: "reply", clientMessageId: "client_1", replyTo: "msg_45", threadRootId: "msg_44" }),
       { messageId: "msg_1", roomId: "room_1" },
     );
+    assert.deepEqual(publishedBodies, [{
+      sender: "supervised-daemon",
+      text: "reply",
+      client_message_id: "client_1",
+      reply_to: "msg_45",
+      thread_root_id: "msg_44",
+    }]);
   } finally {
     globalThis.fetch = previousFetch;
   }

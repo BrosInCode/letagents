@@ -346,6 +346,20 @@ export interface ProviderRoomTurnRequest {
   observedContext?: unknown[];
 }
 
+/**
+ * A charter is durable role/constraint context, not a one-shot instruction to
+ * re-run for every room event. Keep this wording shared across providers so a
+ * terse charter such as "say hi" cannot outrank the activating room message
+ * for one model while another model happens to interpret it as background.
+ */
+export function boundedRoomTurnCharterInstructionLines(charter?: string): string[] {
+  return [
+    `Your durable charter: ${charter?.trim() || "Help thoughtfully within the room."}`,
+    "Treat the durable charter as standing role, priorities, and constraints. Do not execute it as a standalone task or repeat its imperative on every turn.",
+    "The activating Source message below is the current task to answer or act on, unless doing so would conflict with the charter's standing constraints.",
+  ];
+}
+
 export type ProviderRoomTurnResult =
   | { turnId: string; outcome: "reply"; text: string; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }
   | { turnId: string; outcome: "no_reply"; text: null; evidence?: "transcript" | "stream"; publicationContract?: "structured_room_turn_v1" | "legacy_cursor_aggregate_v0" }

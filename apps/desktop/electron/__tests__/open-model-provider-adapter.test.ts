@@ -424,6 +424,8 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
     modelID: "qwen/qwen3-coder",
   });
   assert.match(JSON.stringify(prompt.parts), /daemon-owned room inbox item/);
+  assert.match(JSON.stringify(prompt.parts), /Do not execute it as a standalone task or repeat its imperative on every turn/);
+  assert.match(JSON.stringify(prompt.parts), /Source message below is the current task/);
   assert.match(JSON.stringify(prompt.parts), /Earlier context/);
   assert.deepEqual(result, {
     turnId: prompt.messageID,

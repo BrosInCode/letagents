@@ -813,6 +813,8 @@ test("daemon-owned Claude runs one exact bounded room turn and checkpoints befor
   const prompt = frame.message.content[0]!.text;
   assert.match(prompt, /daemon owns observation, credentials, retries, and publication/i);
   assert.match(prompt, /Do not register a session, authenticate, poll/);
+  assert.match(prompt, /Do not execute it as a standalone task or repeat its imperative on every turn/);
+  assert.match(prompt, /Source message below is the current task/);
   assert.match(prompt, /Inbox item: inbox-claude-1/);
   assert.match(prompt, /Source message: .*Please fix it/);
 

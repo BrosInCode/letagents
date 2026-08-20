@@ -10,7 +10,10 @@ import test from "node:test";
 import { ProviderActionFailure, type ProviderActionPort } from "../provider-action-port.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
-import { SupervisedAgentDelivery } from "../supervised-agent-delivery.js";
+import {
+  SupervisedAgentDelivery,
+  supervisedReplyTargetForSourceMessage,
+} from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_PROTOCOL_VERSION } from "../types.js";
 
@@ -775,20 +778,49 @@ async function ingest(store: SupervisedAgentInboxStore, id = "1") {
   await store.ingestPoll({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: id, messages: [{ source_message_id: id, source_message: { id }, activation: {} }] });
 }
 
+test("supervised reply targets inherit true threads but not top-level quote replies", () => {
+  assert.deepEqual(
+    supervisedReplyTargetForSourceMessage({
+      id: "msg_45",
+      reply_to: { id: "msg_44" },
+      thread_root_id: "msg_44",
+      thread: { root_message_id: "msg_44", is_thread_reply: true },
+    }),
+    { replyTo: "msg_45", threadRootId: "msg_44" },
+  );
+  assert.deepEqual(
+    supervisedReplyTargetForSourceMessage({
+      id: "msg_49",
+      reply_to: { id: "msg_48" },
+      thread_root_id: "msg_49",
+      thread: { root_message_id: "msg_49", is_thread_reply: false },
+    }),
+    { replyTo: null, threadRootId: null },
+  );
+});
+
 test("worker-authenticated activation ingress deduplicates replay and publishes one bounded reply", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    const polls: unknown[] = []; const published: string[] = [];
+    const polls: unknown[] = [];
+    const published: Array<{ clientMessageId: string; replyTo: string | null; threadRootId: string | null }> = [];
     const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => ({ turnId: `turn:${request.inboxItemId}`, outcome: "reply", text: "hello" })), {
-      poll: async (input) => { polls.push(input); return { messages: [{ id: "1", activation: { for_current_agent: { decision: "activate", reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
-      publish: async (input) => { published.push(input.clientMessageId); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; },
+      poll: async (input) => { polls.push(input); return { messages: [{ id: "1", thread_root_id: "root", thread: { root_message_id: "root", is_thread_reply: true }, activation: { for_current_agent: { decision: "activate", reason: "server" } }, text: "hi" }, { id: "2", text: "ignored" }] }; },
+      publish: async (input) => {
+        published.push({ clientMessageId: input.clientMessageId, replyTo: input.replyTo, threadRootId: input.threadRootId });
+        return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+      },
     }, currentAuthority, 0);
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
     await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 5));
     assert.equal(polls.length, 2);
     assert.equal((await store.receipts("stone")).length, 1);
-    assert.deepEqual(published, ["supervised-room:stone:room:1:reply:v1"]);
+    assert.deepEqual(published, [{
+      clientMessageId: "supervised-room:stone:room:1:reply:v1",
+      replyTo: "1",
+      threadRootId: "root",
+    }]);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
