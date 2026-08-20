@@ -65,7 +65,16 @@ export interface SupervisedDeliveryHttp {
   latest?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ messages?: Array<Record<string, unknown>> }>;
   /** Idempotent remote membership join used by the durable room-move journal. */
   joinRoom?(input: { roomId: string; apiUrl: string; bearer: string; signal: AbortSignal }): Promise<{ roomId: string }>;
-  publish(input: { roomId: string; apiUrl: string; bearer: string; text: string; clientMessageId: string; signal: AbortSignal }): Promise<{ messageId: string; roomId: string }>;
+  publish(input: {
+    roomId: string;
+    apiUrl: string;
+    bearer: string;
+    text: string;
+    clientMessageId: string;
+    replyTo: string | null;
+    threadRootId: string | null;
+    signal: AbortSignal;
+  }): Promise<{ messageId: string; roomId: string }>;
 }
 
 export type SupervisedPollWait = (delayMs: number, signal: AbortSignal) => Promise<void>;
@@ -1604,7 +1613,17 @@ export class SupervisedAgentDelivery {
     const relayAbort = () => controller.abort();
     parent.signal.addEventListener("abort", relayAbort, { once: true });
     try {
-      const publication = await this.track(controller, this.http.publish({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, text, clientMessageId: item.reply_client_message_id, signal: controller.signal }));
+      const replyTarget = supervisedReplyTargetForSourceMessage(item.source_message);
+      const publication = await this.track(controller, this.http.publish({
+        roomId: agent.roomId,
+        apiUrl: agent.apiUrl,
+        bearer: agent.bearer,
+        text,
+        clientMessageId: item.reply_client_message_id,
+        replyTo: replyTarget.replyTo,
+        threadRootId: replyTarget.threadRootId,
+        signal: controller.signal,
+      }));
       if (!publication.messageId?.trim() || !publication.roomId?.trim() || publication.roomId !== agent.roomId) throw new Error("Room publication did not return a nonempty canonical message id in the matching room.");
       this.publishedIds.set(item.inbox_item_id, publication.messageId);
       const current = await this.hasLaneAuthority(agent, parent);
@@ -1761,6 +1780,38 @@ export class SupervisedAgentDelivery {
       this.inFlight.delete(operation);
     });
   }
+}
+
+export type SupervisedReplyTarget = {
+  replyTo: string | null;
+  threadRootId: string | null;
+};
+
+/**
+ * Supervised replies inherit only real thread membership. Current room rows
+ * identify top-level quote replies with thread_root_id equal to their own id;
+ * carrying quote-only reply_to metadata forward would incorrectly pull the
+ * provider response into a thread.
+ */
+export function supervisedReplyTargetForSourceMessage(sourceMessage: unknown): SupervisedReplyTarget {
+  if (!sourceMessage || typeof sourceMessage !== "object" || Array.isArray(sourceMessage)) {
+    return { replyTo: null, threadRootId: null };
+  }
+  const source = sourceMessage as Record<string, unknown>;
+  const sourceId = stringOrNull(source.id);
+  const thread = source.thread && typeof source.thread === "object" && !Array.isArray(source.thread)
+    ? source.thread as Record<string, unknown>
+    : null;
+  const threadRootId = stringOrNull(source.thread_root_id)
+    ?? stringOrNull(source.threadRootId)
+    ?? stringOrNull(thread?.root_message_id);
+  const isThreadReply = threadRootId !== null
+    && sourceId !== null
+    && threadRootId !== sourceId
+    && (thread?.is_thread_reply !== false);
+  return isThreadReply
+    ? { replyTo: sourceId, threadRootId }
+    : { replyTo: null, threadRootId: null };
 }
 
 class AuthorityLostError extends Error {

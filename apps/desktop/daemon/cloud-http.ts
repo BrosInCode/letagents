@@ -107,7 +107,14 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
     const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages`, {
       method: "POST",
       headers: { authorization: `Bearer ${input.bearer}`, "content-type": "application/json" },
-      body: JSON.stringify({ sender: "supervised-daemon", text: input.text, client_message_id: input.clientMessageId }),
+      body: JSON.stringify({
+        sender: "supervised-daemon",
+        text: input.text,
+        client_message_id: input.clientMessageId,
+        ...(input.replyTo && input.threadRootId
+          ? { reply_to: input.replyTo, thread_root_id: input.threadRootId }
+          : {}),
+      }),
       signal: boundedCloudSignal(input.signal),
     });
     if (!response.ok) throw new Error(`Supervised room publication failed with HTTP ${response.status}.`);
