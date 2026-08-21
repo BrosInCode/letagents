@@ -18,7 +18,10 @@
       :selected-room-identifier="firstRunRoomSelected ? (rootRoomSnapshot?.roomIdentifier || null) : null"
       :selected-room-access-status="firstRunRoomSelected ? (rootRoomSnapshot?.access.status || null) : null"
       :room-needs-github-access="firstRunRoomSelected && rootRoomSnapshot?.access.status === 'auth_required' && !authStatus?.authenticated"
-      :selected-first-agent-target-id="firstRunAgentTargetId"
+      :first-agent-options="firstRunAgentOptions"
+      :selected-first-agent-provider-id="firstRunAgentProviderId"
+      :first-agent-loading="firstRunAgentLoading"
+      :first-agent-error="firstRunAgentError"
       @select-target="selectMcpTarget"
       @select-all-targets="selectAllMcpTargets"
       @clear-target-selection="clearMcpTargetSelection"
@@ -37,7 +40,8 @@
       @pick-repo="pickRepoRoom"
       @create-room="createFirstRunInviteRoom"
       @join-room-code="joinRoomCode"
-      @select-first-agent="selectFirstAgentTarget"
+      @select-first-agent="selectFirstAgentProvider"
+      @retry-first-agent="retryFirstRunAgentProviders"
       @back="goBackFirstRun"
       @finish="finishFirstRunOnboarding"
       @finish-with-agent="finishFirstRunOnboarding"
@@ -368,6 +372,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import type {
+  DesktopAgentProviderId,
   DesktopAccountRoomEntry,
   DesktopAppAgentActionMetadata,
   DesktopAppAgentRunInput,
@@ -520,7 +525,7 @@ const settingsAccountRooms = ref<DesktopAccountRoomEntry[]>([]);
 const rentalRequestCount = ref(0);
 const rentMarketplaceRole = ref<"renter" | "provider">("renter");
 const openAddAgentAfterRepoPick = ref(false);
-const preferredAddAgentProviderId = ref<DesktopMcpInstallTargetId | null>(null);
+const preferredAddAgentProviderId = ref<DesktopAgentProviderId | null>(null);
 const notificationRevealMessageId = ref<string | null>(null);
 const notificationRevealNonce = ref(0);
 const chatStorageSettings = ref<DesktopChatStorageSettings | null>(null);
@@ -1750,7 +1755,10 @@ const {
   continueToRoomConfirmation,
   createFirstRunInviteRoom,
   finishFirstRunOnboarding,
-  firstRunAgentTargetId,
+  firstRunAgentError,
+  firstRunAgentLoading,
+  firstRunAgentOptions,
+  firstRunAgentProviderId,
   firstRunInviteCode,
   firstRunRoomSelected,
   firstRunFeedback,
@@ -1760,8 +1768,9 @@ const {
   joinRoomCode,
   loadFirstRunSetup,
   pickRepoRoom,
+  retryFirstRunAgentProviders,
   selectAllMcpTargets,
-  selectFirstAgentTarget,
+  selectFirstAgentProvider,
   selectMcpTarget,
   setupApiAvailable,
   showFirstRunGate,

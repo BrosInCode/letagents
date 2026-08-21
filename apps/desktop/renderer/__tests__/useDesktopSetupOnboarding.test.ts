@@ -3,6 +3,7 @@ import test from "node:test";
 import { computed, ref } from "vue";
 
 import type {
+  DesktopAgentProvider,
   DesktopAuthStatus,
   DesktopAgentProviderId,
   DesktopAgentProviderPreflight,
@@ -37,7 +38,7 @@ interface SetupStateInput {
   repoStatus?: RepoStatus | null;
   openRoomSnapshot?: OpenRoomSnapshot;
   refresh?: () => Promise<void>;
-  requestFirstAgent?: (providerId: DesktopMcpInstallTargetId) => void;
+  requestFirstAgent?: (providerId: DesktopAgentProviderId) => void;
   selectedMcpTargetIds?: DesktopMcpInstallTargetId[];
   firstRunStage?: FirstRunWizardStage;
   mcpWizardStep?: DesktopMcpWizardStep;
@@ -61,6 +62,7 @@ interface SetupStateInput {
     completeMcpOnboarding?: () => Promise<DesktopMcpInstallState>;
   };
   workersBridge?: {
+    listAgentProviders?: () => Promise<DesktopAgentProvider[]>;
     runAgentProviderPreflight?: (
       providerId: DesktopAgentProviderId,
       input?: object,
@@ -729,28 +731,83 @@ test("room choice survives going back to GitHub and returning", async () => {
   assert.equal(state.onboarding.firstRunRoomSelected.value, true);
 });
 
-test("selected room continues to a first-agent choice using an installed app", async () => {
+test("first-agent choices use managed CLI providers instead of selected MCP apps", async () => {
   const state = makeSetupState({
     firstRunStage: "room",
     mcpInstallState: mcpInstallStateFixture({ completed: false }),
-    selectedMcpTargetIds: ["codex"],
+    selectedMcpTargetIds: ["antigravity"],
     roomBridge: {
       getSnapshot: async () => snapshotFixture("ABCD-1234", "Shared room"),
+    },
+    workersBridge: {
+      listAgentProviders: async () => [
+        agentProviderFixture("antigravity", ["external_mcp"]),
+        agentProviderFixture("codex", ["external_mcp", "desktop_managed_runtime", "supervised_runtime"]),
+      ],
+      runAgentProviderPreflight: async (providerId) => ({
+        providerId,
+        status: "ready",
+        canStart: true,
+        message: "Codex is ready to start.",
+        detail: null,
+        nextAction: null,
+        version: "0.1.0",
+        mcpStatus: "installed",
+      }),
     },
   });
 
   await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCD-1234"));
-  state.onboarding.continueToFirstAgent();
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.continueToFirstAgent());
 
   assert.equal(state.firstRunStage.value, "agent");
-  assert.equal(state.onboarding.firstRunAgentTargetId.value, "codex");
+  assert.equal(state.onboarding.firstRunAgentProviderId.value, "codex");
+  assert.deepEqual(
+    state.onboarding.firstRunAgentOptions.value.map((option) => option.provider.id),
+    ["codex"],
+    "Antigravity is an MCP host, not a managed room-agent provider",
+  );
 
   state.onboarding.goBackFirstRun();
   assert.equal(state.firstRunStage.value, "room");
 });
 
+test("first-agent choice defaults to a detected CLI over a missing runtime", async () => {
+  const state = makeSetupState({
+    firstRunStage: "room",
+    roomBridge: {
+      getSnapshot: async () => snapshotFixture("ABCD-1234", "Shared room"),
+    },
+    workersBridge: {
+      listAgentProviders: async () => [
+        agentProviderFixture("claude-code", ["external_mcp", "supervised_runtime"]),
+        agentProviderFixture("codex", ["external_mcp", "desktop_managed_runtime", "supervised_runtime"]),
+      ],
+      runAgentProviderPreflight: async (providerId) => ({
+        providerId,
+        status: providerId === "claude-code" ? "missing_runtime" : "auth_required",
+        canStart: false,
+        message: providerId === "claude-code" ? "Claude Code is not installed." : "Codex needs sign-in.",
+        detail: null,
+        nextAction: providerId === "claude-code" ? "install_external_runtime" : "authenticate",
+        version: providerId === "codex" ? "0.1.0" : null,
+        mcpStatus: "installed",
+      }),
+    },
+  });
+
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.joinRoomCode("ABCD-1234"));
+  await withDesktopBridge(state.windowBridge, () => state.onboarding.continueToFirstAgent());
+
+  assert.equal(state.onboarding.firstRunAgentProviderId.value, "codex");
+  assert.equal(
+    state.onboarding.firstRunAgentOptions.value.find((option) => option.provider.id === "codex")?.preflight?.status,
+    "auth_required",
+  );
+});
+
 test("finishing with a first agent requests it only after room verification", async () => {
-  const requestedProviders: DesktopMcpInstallTargetId[] = [];
+  const requestedProviders: DesktopAgentProviderId[] = [];
   const state = makeSetupState({
     pinnedRoomIdentifier: "ABCD-1234",
     selectedMcpTargetIds: ["codex"],
@@ -1024,6 +1081,30 @@ function mcpInstallStateFixture(
       },
     ],
     ...overrides,
+  };
+}
+
+function agentProviderFixture(
+  id: DesktopAgentProviderId,
+  capabilities: DesktopAgentProvider["capabilities"],
+): DesktopAgentProvider {
+  const names: Record<string, string> = {
+    "claude-code": "Claude Code",
+    antigravity: "Antigravity",
+    cursor: "Cursor",
+    codex: "Codex",
+    "open-model": "Open Model",
+  };
+  return {
+    id,
+    name: names[id] || String(id),
+    description: "Managed agent provider",
+    capabilities,
+    supervisedDeliveryMode: capabilities.includes("supervised_runtime") ? "daemon_inbox" : null,
+    runtimeCommand: id === "codex" ? "codex" : null,
+    mcpTargetId: id === "open-model" ? null : id as DesktopMcpInstallTargetId,
+    permissionProfiles: [],
+    defaultPermissionProfileId: null,
   };
 }
 

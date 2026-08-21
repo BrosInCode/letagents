@@ -91,10 +91,13 @@
 
               <FirstRunAgentStep
                 v-else
-                :targets="firstAgentTargets"
-                :selected-target-id="selectedFirstAgentTargetId"
+                :options="firstAgentOptions"
+                :selected-provider-id="selectedFirstAgentProviderId"
                 :room-name="selectedRoomName"
+                :loading="firstAgentLoading"
+                :error="firstAgentError"
                 @select="$emit('select-first-agent', $event)"
+                @retry="$emit('retry-first-agent')"
               />
             </div>
           </Transition>
@@ -193,9 +196,9 @@
                 <button
                   class="primary-button"
                   type="button"
-                  :disabled="busy || !selectedFirstAgentTargetId"
+                  :disabled="busy || firstAgentLoading || !selectedFirstAgentProviderId"
                   data-testid="first-run-add-agent"
-                  @click="selectedFirstAgentTargetId && $emit('finish-with-agent', selectedFirstAgentTargetId)"
+                  @click="selectedFirstAgentProviderId && $emit('finish-with-agent', selectedFirstAgentProviderId)"
                 >
                   {{ firstAgentActionLabel }}
                 </button>
@@ -215,6 +218,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from "vue";
 import type {
+  DesktopAgentProviderId,
   DesktopAuthStatus,
   DesktopMcpInstallState,
   DesktopMcpInstallTargetId,
@@ -227,7 +231,11 @@ import LetAgentsLogoMark from "../brand/LetAgentsLogoMark.vue";
 import McpHarnessChoiceStep from "./McpHarnessChoiceStep.vue";
 import McpInstallConfirmStep from "./McpInstallConfirmStep.vue";
 import SetupWizardProgress from "./SetupWizardProgress.vue";
-import type { DesktopMcpWizardStep, FirstRunWizardStage } from "./types";
+import type {
+  DesktopMcpWizardStep,
+  FirstRunAgentOption,
+  FirstRunWizardStage,
+} from "./types";
 
 const props = defineProps<{
   stage: FirstRunWizardStage;
@@ -245,7 +253,10 @@ const props = defineProps<{
   selectedRoomIdentifier: string | null;
   selectedRoomAccessStatus: DesktopRoomAccess["status"] | null;
   roomNeedsGithubAccess: boolean;
-  selectedFirstAgentTargetId: DesktopMcpInstallTargetId | null;
+  firstAgentOptions: FirstRunAgentOption[];
+  selectedFirstAgentProviderId: DesktopAgentProviderId | null;
+  firstAgentLoading: boolean;
+  firstAgentError: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -267,18 +278,15 @@ const emit = defineEmits<{
   "pick-repo": [];
   "create-room": [];
   "join-room-code": [roomCode: string];
-  "select-first-agent": [targetId: DesktopMcpInstallTargetId];
-  "finish-with-agent": [targetId: DesktopMcpInstallTargetId];
+  "select-first-agent": [providerId: DesktopAgentProviderId];
+  "retry-first-agent": [];
+  "finish-with-agent": [providerId: DesktopAgentProviderId];
   back: [];
   finish: [];
 }>();
 
 const selectedMcpTargets = computed(() => {
   return props.mcpState.targets.filter((target) => props.selectedMcpTargetIds.includes(target.id));
-});
-
-const firstAgentTargets = computed(() => {
-  return selectedMcpTargets.value.filter((target) => target.status === "installed");
 });
 
 const installButtonLabel = computed(() => {
@@ -296,8 +304,13 @@ const roomActionLabel = computed(() => {
 });
 
 const firstAgentActionLabel = computed(() => {
-  const target = firstAgentTargets.value.find((candidate) => candidate.id === props.selectedFirstAgentTargetId);
-  return target ? `Add ${target.name}` : "Add agent";
+  const option = props.firstAgentOptions.find(
+    (candidate) => candidate.provider.id === props.selectedFirstAgentProviderId,
+  );
+  if (!option) return "Add agent";
+  return option.preflight?.canStart
+    ? `Add ${option.provider.name}`
+    : `Set up ${option.provider.name}`;
 });
 
 const navigationKey = computed(() => {
@@ -327,7 +340,7 @@ const actionKey = computed(() => {
   if (props.stage === "room") {
     return props.roomSelected ? "room-selected" : "room-empty";
   }
-  if (props.stage === "agent") return `agent-${props.selectedFirstAgentTargetId || "empty"}`;
+  if (props.stage === "agent") return `agent-${props.selectedFirstAgentProviderId || "empty"}`;
   return navigationKey.value;
 });
 
@@ -350,7 +363,7 @@ const copy = computed(() => {
     return "Start now, or continue and choose one from the sidebar later.";
   }
   if (props.stage === "agent") {
-    return "Room messages don't start agents by themselves. Choose who should join.";
+    return "Room messages don't start agents by themselves. Choose a provider this desktop can start.";
   }
   if (props.mcpWizardStep === "install") {
     return "We'll add the LetAgents MCP — the connection these apps use to enter rooms.";

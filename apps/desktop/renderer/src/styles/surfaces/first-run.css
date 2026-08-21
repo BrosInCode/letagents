@@ -1680,11 +1680,59 @@
   width: 100%;
 }
 
+.first-run-agent-checking {
+  display: grid;
+  justify-items: center;
+  gap: 8px;
+  min-height: 126px;
+  align-content: center;
+  color: var(--setup-muted);
+  text-align: center;
+}
+
+.first-run-agent-checking > svg {
+  width: 24px;
+  height: 24px;
+  color: var(--setup-muted-strong);
+}
+
+.first-run-agent-checking > svg:first-child:is(.lucide-loader-circle) {
+  animation: first-run-agent-check-spin 800ms linear infinite;
+}
+
+.first-run-agent-checking strong {
+  color: var(--setup-text);
+  font-size: 0.88rem;
+}
+
+.first-run-agent-checking span {
+  max-width: 380px;
+  font-size: 0.76rem;
+  line-height: 1.4;
+}
+
+.first-run-agent-checking button {
+  min-height: 32px;
+  padding: 0 12px;
+  border: 1px solid var(--setup-border-strong);
+  border-radius: 10px;
+  background: var(--setup-surface);
+  color: var(--setup-text);
+  font: inherit;
+  font-size: 0.78rem;
+  font-weight: 700;
+  cursor: pointer;
+}
+
+@keyframes first-run-agent-check-spin {
+  to { transform: rotate(1turn); }
+}
+
 .first-run-agent-option {
   display: grid;
   justify-items: center;
   gap: 9px;
-  min-height: 116px;
+  min-height: 132px;
   padding: 10px;
   border: 1px solid transparent;
   border-radius: 16px;
@@ -1713,7 +1761,14 @@
   height: 50px;
 }
 
-.first-run-agent-option-icon > svg {
+.first-run-agent-option-icon > .first-run-agent-option-fallback {
+  width: 30px;
+  height: 30px;
+  color: var(--setup-muted-strong);
+  stroke-width: 1.6;
+}
+
+.first-run-agent-option-icon > .first-run-agent-option-check {
   position: absolute;
   right: -5px;
   bottom: -5px;
@@ -1736,12 +1791,28 @@
   font-weight: 740;
 }
 
+.first-run-agent-option small {
+  color: var(--setup-muted);
+  font-size: 0.7rem;
+  font-weight: 620;
+  line-height: 1.2;
+}
+
+.first-run-agent-option small[data-state="ready"] {
+  color: var(--setup-muted-strong);
+}
+
+.first-run-agent-option small[data-state="error"],
+.first-run-agent-option small[data-state="missing"] {
+  color: var(--setup-muted);
+}
+
 .first-run-agent-option[data-selected="true"] {
   border-color: color-mix(in srgb, var(--setup-text) 28%, var(--setup-border));
   background: color-mix(in srgb, var(--setup-text) 5%, transparent);
 }
 
-.first-run-agent-option[data-selected="true"] .first-run-agent-option-icon > svg {
+.first-run-agent-option[data-selected="true"] .first-run-agent-option-check {
   opacity: 1;
   transform: scale(1) rotate(0deg);
 }
@@ -1750,6 +1821,16 @@
   .first-run-agent-option:hover {
     background: color-mix(in srgb, var(--setup-text) 4%, transparent);
   }
+
+  .first-run-agent-checking button:hover {
+    border-color: color-mix(in srgb, var(--setup-text) 28%, var(--setup-border));
+    background: color-mix(in srgb, var(--setup-text) 5%, var(--setup-surface));
+  }
+}
+
+.first-run-agent-checking button:focus-visible {
+  outline: 2px solid var(--setup-text);
+  outline-offset: 2px;
 }
 
 .first-run-agent-option:active {
@@ -2140,6 +2221,9 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
+  .first-run-agent-checking > svg:first-child:is(.lucide-loader-circle) {
+    animation: none;
+  }
   .first-run-agent-route-line i {
     display: none;
   }
@@ -2214,7 +2298,7 @@
   .first-run-card .mcp-choice-card::before,
   .first-run-card .mcp-choice-card[data-selected="true"] .mcp-target-mark,
   .first-run-card .mcp-choice-check,
-  .first-run-agent-option-icon > svg,
+  .first-run-agent-option-check,
   .first-run-room-path-icon svg {
     transform: none;
     transition-property: opacity, border-color, background-color, color;
