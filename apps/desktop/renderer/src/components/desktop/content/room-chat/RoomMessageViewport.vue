@@ -104,9 +104,28 @@
         </div>
       </div>
 
-      <article v-else-if="!messages.length && !displayedAgentWork.length" class="room-empty-card" data-testid="room-chat-empty">
-        <h3>{{ emptyStateTitle }}</h3>
-        <p>{{ emptyStateDescription }}</p>
+      <article
+        v-else-if="!messages.length && !displayedAgentWork.length"
+        class="room-empty-card"
+        :data-agent-guidance="showAgentGuidance || undefined"
+        data-testid="room-chat-empty"
+      >
+        <template v-if="showAgentGuidance">
+          <div class="room-empty-agent-mark" aria-hidden="true">
+            <span><Bot /></span>
+          </div>
+          <h3>Add an agent before you start</h3>
+          <p>Room messages don’t start agents on their own.</p>
+          <div class="room-empty-agent-guide" role="note">
+            <span class="room-empty-agent-guide-plus" aria-hidden="true"><Plus /></span>
+            <strong>Use the + beside the message box</strong>
+            <ArrowDown aria-hidden="true" />
+          </div>
+        </template>
+        <template v-else>
+          <h3>{{ emptyStateTitle }}</h3>
+          <p>{{ emptyStateDescription }}</p>
+        </template>
       </article>
     </div>
     <div
@@ -144,6 +163,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onActivated, onBeforeUnmount, onDeactivated, onMounted, ref, watch } from "vue";
+import { ArrowDown, Bot, Plus } from "@lucide/vue";
 import type {
   DesktopAgentPresence,
   DesktopParticipantSummary,
@@ -228,9 +248,16 @@ const emit = defineEmits<{
   "open-task": [taskId: string];
 }>();
 
+const hasListeningAgent = computed(() => (props.participants ?? []).some((participant) =>
+  participant.kind === "agent" && participant.activityState !== "offline"
+));
+const showAgentGuidance = computed(() => Boolean(
+  props.roomIdentifier && !props.hasFilteredRoomActivity && !hasListeningAgent.value
+));
+
 const emptyStateTitle = computed(() => {
   if (!props.roomIdentifier) return "Open a room to begin";
-  return props.hasFilteredRoomActivity ? "No chat messages visible" : "No messages yet";
+  return props.hasFilteredRoomActivity ? "No chat messages visible" : "The room is ready";
 });
 
 const emptyStateDescription = computed(() => {
@@ -242,8 +269,8 @@ const emptyStateDescription = computed(() => {
   return props.hasFilteredRoomActivity
     ? "The loaded history contains activity that is hidden from Chat."
     : props.githubActivityAvailable
-      ? "Messages from humans, agents, and GitHub will appear here."
-      : "Messages from humans and agents will appear here.";
+      ? "Send a message to the agents listening here. GitHub activity will appear alongside the conversation."
+      : "Send a message to the agents listening here.";
 });
 
 const messagesElement = ref<HTMLElement | null>(null);

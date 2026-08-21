@@ -64,24 +64,12 @@
       @open-event-preview="openEventPreview"
       @dismiss-event-preview="emit('dismiss-event-preview', $event)"
     />
-    <div
-      v-if="roomIdentifier && !hasListeningAgent"
-      class="desktop-composer-agent-empty"
-      data-testid="desktop-composer-agent-empty"
-      role="status"
-    >
-      <Bot aria-hidden="true" />
-      <p>
-        <strong>No agent is listening yet.</strong>
-        <span>Add one to start work in this room.</span>
-      </p>
-      <button type="button" @click="$emit('open-add-agent')">Add agent</button>
-    </div>
     <div class="desktop-composer-input-row">
       <button
         class="desktop-composer-add-agent"
         type="button"
         :disabled="roomLoading || !roomIdentifier"
+        :data-needs-agent="Boolean(roomIdentifier && !hasListeningAgent)"
         :title="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
         :aria-label="roomIdentifier ? 'Add agent to room' : 'Choose a room before adding an agent'"
         data-testid="desktop-composer-add-agent"
@@ -174,7 +162,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowUp, Bot, LoaderCircle, Plus } from "@lucide/vue";
+import { ArrowUp, LoaderCircle, Plus } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
