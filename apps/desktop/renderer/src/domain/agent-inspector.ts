@@ -23,25 +23,9 @@ export type AgentInspectorOverallState =
   | "recovering"
   | "reconnecting"
   | "responding"
-  | "listening"
+  | "online"
   | "starting"
   | "disconnected";
-
-export type AgentInspectorReadinessTone =
-  | "ready"
-  | "active"
-  | "waiting"
-  | "warning"
-  | "blocked"
-  | "offline";
-
-export interface AgentInspectorReadinessFact {
-  key: "provider" | "observation" | "inbox" | "turn";
-  label: string;
-  value: string;
-  detail: string | null;
-  tone: AgentInspectorReadinessTone;
-}
 
 export interface AgentInspectorTaskProjection {
   id: string;
@@ -276,7 +260,6 @@ export interface AgentInspectorProjection {
   overallState: AgentInspectorOverallState;
   overallLabel: string;
   overallDetail: string;
-  readiness: AgentInspectorReadinessFact[];
   deliveryProgress: AgentInspectorDeliveryProgressProjection | null;
   now: AgentInspectorNowProjection | null;
   assignedWork: AgentInspectorTaskProjection[];
@@ -293,6 +276,31 @@ export interface AgentInspectorProjection {
   mentionInsertText: string | null;
   resourceFreshness: "fresh" | "stale";
   entry: DesktopSupervisorManifestEntry;
+}
+
+export type AgentInspectorActivityGroupState =
+  | Exclude<AgentInspectorOverallState, "retired">
+  | "status_unavailable";
+
+export function agentInspectorActivityGroupState(
+  projection: Pick<AgentInspectorProjection, "overallState" | "resourceFreshness">,
+): AgentInspectorActivityGroupState | null {
+  if (projection.overallState === "retired") return null;
+  return projection.resourceFreshness === "stale"
+    ? "status_unavailable"
+    : projection.overallState;
+}
+
+export function agentInspectorLiveAnnouncement(
+  projection: Pick<AgentInspectorProjection, "displayName" | "overallLabel" | "overallState" | "resourceFreshness">,
+): string {
+  if (projection.resourceFreshness === "stale") {
+    return `${projection.displayName}: Status unavailable.`;
+  }
+  if (projection.overallState === "responding") {
+    return `${projection.displayName}: ${projection.overallLabel}. Responding.`;
+  }
+  return `${projection.displayName}: ${projection.overallLabel}.`;
 }
 
 export interface AgentInspectorProjectionOptions {
@@ -409,13 +417,14 @@ export function agentInspectorOverallState(entry: DesktopSupervisorManifestEntry
     || room?.turn.state === "failed"
   ) return "needs_attention";
   if (room?.connection.state === "reconnecting" || room?.ingress.state === "backoff") return "reconnecting";
-  if (room && ACTIVE_TURN_STATES.has(room.turn.state)) return "responding";
-  if (
+  const hasOnlineDeliveryAuthority = Boolean(
     room?.connection.state === "connected"
     && room.ingress.state === "observing"
     && hasLiveProvider(entry)
     && hasValidCredential(entry)
-  ) return "listening";
+  );
+  if (hasOnlineDeliveryAuthority && room && ACTIVE_TURN_STATES.has(room.turn.state)) return "responding";
+  if (hasOnlineDeliveryAuthority) return "online";
   if (
     entry.observedState === "starting"
     || entry.observedState === "recovering"
@@ -432,72 +441,14 @@ function overallPresentation(state: AgentInspectorOverallState): { label: string
     case "restoring_conversation": return { label: "Restoring conversation", detail: "Recovering the agent’s private Codex conversation without restarting its provider." };
     case "recovering": return { label: "Recovering agent", detail: "The provider is running while LetAgents restores its room access." };
     case "reconnecting": return { label: "Reconnecting", detail: "Restoring the room observation path." };
-    case "responding": return { label: "Responding", detail: "A bounded room turn is in progress." };
-    case "listening": return { label: "Listening", detail: "Connected and ready for a routed room message." };
+    // Connectivity and work are separate truths. A responding agent remains
+    // online; its active turn is rendered in Now/Work instead of replacing the
+    // connection state in the identity header.
+    case "responding": return { label: "Online", detail: "" };
+    case "online": return { label: "Online", detail: "" };
     case "starting": return { label: "Starting", detail: "Preparing the provider and room observation path." };
     case "disconnected": return { label: "Disconnected", detail: "The provider is not currently reachable." };
   }
-}
-
-function readiness(entry: DesktopSupervisorManifestEntry): AgentInspectorReadinessFact[] {
-  const room = entry.roomAgentState;
-  const providerLive = hasLiveProvider(entry);
-  const providerPresent = providerRuntimePresent(entry);
-  const providerStopped = providerRuntimeStopped(entry);
-  const providerTone: AgentInspectorReadinessTone = providerLive || providerPresent
-    ? "ready"
-    : providerStopped
-      ? "offline"
-    : entry.observedState === "starting" || entry.observedState === "recovering"
-      ? "waiting"
-      : entry.observedState === "failed" ? "blocked" : "offline";
-  const ingress = room?.ingress.state ?? "stopped";
-  const ingressTone: AgentInspectorReadinessTone = ingress === "observing"
-    ? "ready"
-    : ingress === "backoff" ? "warning" : ingress === "blocked" ? "blocked" : ingress === "starting" ? "waiting" : "offline";
-  const inbox = room?.inbox;
-  const inboxTone: AgentInspectorReadinessTone = inbox?.state === "blocked" || inbox?.state === "waiting_for_desktop_credentials"
-    ? "blocked"
-    : inbox?.state === "queued" || inbox?.state === "restoring_conversation" ? "waiting" : inbox ? "ready" : "offline";
-  const turn = room?.turn;
-  const turnTone: AgentInspectorReadinessTone = turn?.state === "failed"
-    ? "blocked"
-    : turn && ACTIVE_TURN_STATES.has(turn.state) ? "active" : "ready";
-  return [
-    {
-      key: "provider",
-      label: "Provider",
-      value: providerLive
-        ? "Connected"
-        : providerPresent ? "Connected"
-        : providerStopped ? "Stopped" : titleCase(entry.observedState),
-      detail: lifecycleDetail(entry) ?? entry.workplaceLiveness.detail,
-      tone: providerTone,
-    },
-    {
-      key: "observation",
-      label: "Room observation",
-      value: titleCase(ingress),
-      detail: room?.ingress.detail ?? null,
-      tone: ingressTone,
-    },
-    {
-      key: "inbox",
-      label: "Inbox",
-      value: inbox
-        ? `${inbox.state === "restoring_conversation" ? "Restoring the blocked message" : titleCase(inbox.state)}${inbox.pendingCount ? ` · ${inbox.pendingCount}` : ""}`
-        : "Unavailable",
-      detail: inbox?.detail ?? null,
-      tone: inboxTone,
-    },
-    {
-      key: "turn",
-      label: "Current turn",
-      value: titleCase(turn?.state ?? "idle"),
-      detail: turn?.detail ?? null,
-      tone: turnTone,
-    },
-  ];
 }
 
 function turnStartedAt(entry: DesktopSupervisorManifestEntry): number | null {
@@ -1017,7 +968,6 @@ export function projectAgentInspector(
     overallState,
     overallLabel: presentation.label,
     overallDetail: presentation.detail,
-    readiness: readiness(entry),
     deliveryProgress: deliveryProgress(
       entry,
       options.deliveryRetryingKeys ?? new Set(),

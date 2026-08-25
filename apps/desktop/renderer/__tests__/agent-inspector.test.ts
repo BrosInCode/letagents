@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  agentInspectorActivityGroupState,
+  agentInspectorLiveAnnouncement,
   agentInspectorRetryableTurnControlInput,
   agentInspectorTurnControlActionId,
   agentInspectorTurnControlActionIdIfCurrent,
@@ -142,15 +144,41 @@ function task(id: string, status: string, overrides: Partial<DesktopTaskSummary>
   };
 }
 
-test("truthful state requires all listening authorities and preserves reconnecting", () => {
-  assert.equal(agentInspectorOverallState(entry()), "listening");
+test("truthful online state requires the exact delivery connection and preserves reconnecting", () => {
+  assert.equal(agentInspectorOverallState(entry()), "online");
+  assert.equal(agentInspectorOverallState(entry({
+    nativeLiveness: { state: "stale", observedAt: "2026-07-29T09:59:00.000Z", detail: null },
+  })), "online", "native heartbeat freshness does not own the Online state");
+  assert.equal(agentInspectorOverallState(entry({
+    nativeLiveness: { state: "active", observedAt: "2026-07-29T10:00:00.000Z", detail: null },
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: null, detail: null },
+      ingress: { state: "stopped", observedAt: null, detail: null },
+    },
+  })), "disconnected", "a native heartbeat cannot manufacture Online without message delivery");
+  assert.equal(agentInspectorOverallState(entry({
+    providerPid: null,
+    roomAgentState: {
+      ...entry().roomAgentState!,
+      connection: { state: "disconnected", observedAt: null, detail: "No live delivery owner." },
+      ingress: { state: "stopped", observedAt: null, detail: "Room observation stopped." },
+      turn: {
+        state: "retrying",
+        inboxItemId: "inbox_result_recovery",
+        sourceMessageId: "message_result_recovery",
+        providerTurnId: "turn_result_recovery",
+        detail: "Recovering a durable result.",
+      },
+    },
+  })), "disconnected", "durable result recovery without a live receiver cannot manufacture Online");
   assert.equal(agentInspectorOverallState(entry({ providerPid: null })), "disconnected");
   assert.equal(agentInspectorOverallState(entry({
     provider: "cursor",
     providerPid: null,
     providerContinuationId: "cursor-session-1",
     observedState: "idle",
-  })), "listening", "Cursor's idle lane is identified by its continuation, not a nonexistent child pid");
+  })), "online", "Cursor's online lane is identified by its continuation, not a nonexistent child pid");
   assert.equal(agentInspectorOverallState(entry({
     providerPid: null,
     roomAgentState: {
@@ -203,7 +231,7 @@ test("a stopped provider with retained historical coordinates offers recovery in
     roomId: "focus_1",
     deliveryRetryAvailable: true,
   });
-  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Stopped");
+  assert.equal(projection?.overallState, "needs_attention");
   assert.match(projection?.now?.summary ?? "", /Recover the agent/);
   assert.equal(projection?.actions.find((action) => action.kind === "reconnect")?.available, false);
   assert.equal(projection?.actions.find((action) => action.kind === "recover")?.available, true);
@@ -241,7 +269,7 @@ test("a reconnecting room keeps provider connectivity separate from delivery aut
     roomId: "focus_1",
     deliveryRetryAvailable: true,
   });
-  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Connected");
+  assert.notEqual(projection?.overallLabel, "Online");
   assert.equal(projection?.actions.find((action) => action.kind === "retry_delivery")?.available, false);
 });
 
@@ -258,7 +286,7 @@ test("overall state follows the complete product precedence table", () => {
     ["ingress blocked", withRoom({ ingress: { state: "blocked", observedAt: null, detail: null } }), "needs_attention"],
     ["reconnecting", withRoom({ connection: { state: "reconnecting", observedAt: null, detail: null } }), "reconnecting"],
     ["active turn", withRoom({ turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null } }), "responding"],
-    ["listening", entry(), "listening"],
+    ["online", entry(), "online"],
     ["starting", entry({ providerPid: null, observedState: "starting" }), "starting"],
     ["disconnected", entry({ providerPid: null, observedState: "working" }), "disconnected"],
     ["missing axes", entry({ roomAgentState: null }), "disconnected"],
@@ -267,6 +295,14 @@ test("overall state follows the complete product precedence table", () => {
   for (const [label, candidate, expected] of cases) {
     assert.equal(agentInspectorOverallState(candidate), expected, label);
   }
+  const online = projectAgentInspector(entry(), { roomId: "focus_1" });
+  assert.equal(online?.overallLabel, "Online");
+  assert.equal(online?.overallDetail, "");
+  const responding = projectAgentInspector(withRoom({
+    turn: { state: "responding", inboxItemId: "inbox_1", sourceMessageId: "message_1", providerTurnId: "turn_1", detail: null },
+  }), { roomId: "focus_1" });
+  assert.equal(responding?.overallLabel, "Online", "active work does not replace connection status");
+  assert.equal(responding?.overallDetail, "");
 });
 
 test("durable entries remain inspectable before room state exists", () => {
@@ -276,8 +312,40 @@ test("durable entries remain inspectable before room state exists", () => {
   }), { roomId: "focus_1" });
   assert.ok(projection);
   assert.equal(projection.overallState, "starting");
-  assert.equal(projection.readiness.find((fact) => fact.key === "inbox")?.value, "Unavailable");
-  assert.equal(projection.readiness.find((fact) => fact.key === "inbox")?.tone, "offline");
+  assert.equal(projection.overallLabel, "Starting");
+});
+
+test("Activity groups stale supervisor facts as unavailable", () => {
+  assert.equal(agentInspectorActivityGroupState({
+    overallState: "online",
+    resourceFreshness: "stale",
+  }), "status_unavailable");
+  assert.equal(agentInspectorActivityGroupState({
+    overallState: "recovering",
+    resourceFreshness: "fresh",
+  }), "recovering");
+  assert.equal(agentInspectorActivityGroupState({
+    overallState: "retired",
+    resourceFreshness: "fresh",
+  }), null);
+});
+
+test("Inspector live announcements distinguish responding from idle Online", () => {
+  const online = {
+    displayName: "GardenSignal",
+    overallLabel: "Online",
+    overallState: "online" as const,
+    resourceFreshness: "fresh" as const,
+  };
+  assert.equal(agentInspectorLiveAnnouncement(online), "GardenSignal: Online.");
+  assert.equal(agentInspectorLiveAnnouncement({
+    ...online,
+    overallState: "responding",
+  }), "GardenSignal: Online. Responding.");
+  assert.equal(agentInspectorLiveAnnouncement({
+    ...online,
+    resourceFreshness: "stale",
+  }), "GardenSignal: Status unavailable.");
 });
 
 test("Now uses only sanitized activity observed after the exact turn_started event", () => {
@@ -431,7 +499,6 @@ test("runtime recovery shows the live replacement and durable room-access phase"
 
   assert.equal(projection?.overallState, "recovering");
   assert.equal(projection?.overallLabel, "Recovering agent");
-  assert.equal(projection?.readiness.find((fact) => fact.key === "provider")?.value, "Connected");
   assert.deepEqual(projection?.deliveryProgress, {
     kind: "runtime_recovery",
     phase: "recovering",

@@ -55,10 +55,11 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch, type Component } from "vue";
-import type {
-  AgentInspectorActionIntent,
-  AgentInspectorActionState,
-  AgentInspectorProjection,
+import {
+  agentInspectorLiveAnnouncement,
+  type AgentInspectorActionIntent,
+  type AgentInspectorActionState,
+  type AgentInspectorProjection,
 } from "../../../../domain/agent-inspector";
 import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
@@ -162,7 +163,7 @@ const statusPresentation = computed(() => projectAgentInspectorStatus(props.sele
 const liveAnnouncement = computed(() => {
   if (props.actionState?.message) return props.actionState.message;
   if (participantAnnouncement.value) return participantAnnouncement.value;
-  if (props.projection) return `${props.projection.displayName}: ${props.projection.overallLabel}.`;
+  if (props.projection) return agentInspectorLiveAnnouncement(props.projection);
   if (participantProjection.value?.kind === "local_managed") {
     return `${participantProjection.value.title}: ${participantProjection.value.heading}.`;
   }

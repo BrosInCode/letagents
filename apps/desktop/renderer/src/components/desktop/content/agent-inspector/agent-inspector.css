@@ -78,8 +78,8 @@
 
 .agent-inspector-state-label { display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: var(--text-secondary, #a1a1aa); font-size: 0.66rem; font-weight: 720; }
 .agent-inspector-state-label > span { width: 6px; height: 6px; border-radius: 50%; background: #94949f; }
-.agent-inspector-state-label[data-state="listening"] > span { background: #4ade80; }
-.agent-inspector-state-label[data-state="responding"] > span { background: #60a5fa; }
+.agent-inspector-state-label[data-state="online"] > span,
+.agent-inspector-state-label[data-state="responding"] > span { background: #4ade80; }
 .agent-inspector-state-label[data-state="reconnecting"] > span,
 .agent-inspector-state-label[data-state="starting"] > span,
 .agent-inspector-state-label[data-state="restoring_conversation"] > span { background: #fbbf24; }
@@ -219,7 +219,6 @@
 .agent-inspector-overview { display: grid; gap: 12px; }
 .agent-inspector-now,
 .agent-inspector-delivery-progress,
-.agent-inspector-readiness,
 .agent-inspector-continuation-recovery,
 .agent-inspector-overview-section { border: 1px solid rgba(255, 255, 255, 0.075); border-radius: 16px; background: rgba(255, 255, 255, 0.026); }
 .agent-inspector-continuation-recovery { padding: 14px; border-color: rgba(251, 191, 36, 0.22); background: rgba(251, 191, 36, 0.055); }
@@ -344,7 +343,6 @@
 .agent-inspector-turn-control-actions button:active { transform: scale(.97); }
 .agent-inspector-turn-control-actions button:focus-visible { outline: 2px solid #93c5fd; outline-offset: 2px; }
 
-.agent-inspector-readiness,
 .agent-inspector-overview-section {
   padding: 14px 0;
   border-width: 1px 0 0;
@@ -353,47 +351,6 @@
 }
 .agent-inspector-section-heading { justify-content: space-between; gap: 12px; }
 .agent-inspector-section-heading > span { color: var(--text-secondary, #a1a1aa); font-size: 0.67rem; }
-.agent-inspector-readiness-rail {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  margin: 10px 0 0;
-  padding: 0;
-  list-style: none;
-}
-.agent-inspector-readiness-rail li {
-  position: relative;
-  display: grid;
-  grid-template-columns: 20px minmax(0, 1fr);
-  gap: 7px;
-  min-height: 58px;
-  padding: 9px 10px 9px 0;
-}
-.agent-inspector-readiness-rail li:nth-child(even) {
-  padding-right: 0;
-  padding-left: 12px;
-  border-left: 1px solid rgba(255, 255, 255, 0.075);
-}
-.agent-inspector-rail-marker { position: relative; z-index: 1; display: grid; place-items: center; width: 15px; height: 15px; border-radius: 50%; background: #202023; color: #94949f; }
-.agent-inspector-rail-marker svg { width: 12px; height: 12px; stroke: currentColor; stroke-linecap: round; stroke-linejoin: round; stroke-width: 1.35; }
-li[data-tone="ready"] .agent-inspector-rail-marker { color: #4ade80; }
-li[data-tone="active"] .agent-inspector-rail-marker { color: #60a5fa; }
-li[data-tone="waiting"] .agent-inspector-rail-marker,
-li[data-tone="warning"] .agent-inspector-rail-marker { color: #fbbf24; }
-li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
-.agent-inspector-readiness-rail li > div { min-width: 0; padding-bottom: 0; }
-.agent-inspector-readiness-rail span:not(.agent-inspector-rail-marker) { display: block; color: var(--text-secondary, #a1a1aa); font-size: 0.68rem; font-weight: 620; }
-.agent-inspector-readiness-rail strong { display: block; margin-top: 2px; font-size: 0.82rem; font-weight: 670; }
-.agent-inspector-readiness-rail small {
-  display: -webkit-box;
-  margin-top: 3px;
-  overflow: hidden;
-  color: var(--text-secondary, #a1a1aa);
-  font-size: 0.68rem;
-  line-height: 1.35;
-  -webkit-box-orient: vertical;
-  -webkit-line-clamp: 2;
-}
-
 .agent-inspector-charter { margin: 12px 0 0; color: var(--text-secondary, #a1a1aa); font-size: 0.79rem; line-height: 1.55; }
 .agent-inspector-settings { display: grid; gap: 12px; }
 .agent-inspector-settings-note, .agent-inspector-danger > p { margin: 10px 0 0; color: var(--text-secondary, #a1a1aa); font-size: .73rem; line-height: 1.45; }
@@ -501,13 +458,6 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
 }
 
 @media (max-width: 520px) {
-  .agent-inspector-readiness-rail { grid-template-columns: 1fr; }
-  .agent-inspector-readiness-rail li { min-height: 0; padding: 9px 0; }
-  .agent-inspector-readiness-rail li:nth-child(even) {
-    padding-left: 0;
-    border-left: 0;
-  }
-  .agent-inspector-readiness-rail li + li { border-top: 1px solid rgba(255, 255, 255, 0.065); }
   .agent-inspector-settings-actions > button { flex: 1 1 100%; }
   .agent-inspector-field input,
   .agent-inspector-field select,
@@ -523,7 +473,6 @@ li[data-tone="blocked"] .agent-inspector-rail-marker { color: #fb7185; }
   .agent-inspector-surface { border-color: rgba(255, 255, 255, 0.42); background: #101011; }
   .agent-inspector-now,
   .agent-inspector-delivery-progress,
-  .agent-inspector-readiness,
   .agent-inspector-continuation-recovery,
   .agent-inspector-overview-section { border-color: rgba(255, 255, 255, 0.28); }
 }

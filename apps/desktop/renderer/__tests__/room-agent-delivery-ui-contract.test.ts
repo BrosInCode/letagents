@@ -42,7 +42,7 @@ describe("durable room delivery UI contracts", () => {
         task: { state: "none", taskId: null, title: null },
       },
     });
-    assert.equal(roomAgentDeliveryGroup(state("connected", "empty", "idle")), "listening");
+    assert.equal(roomAgentDeliveryGroup(state("connected", "empty", "idle")), "online");
     assert.equal(roomAgentDeliveryGroup(state("connected", "queued", "responding")), "responding");
     assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "idle")), "attention");
     assert.equal(roomAgentDeliveryGroup(state("connected", "blocked", "responding")), "attention");
@@ -53,6 +53,7 @@ describe("durable room delivery UI contracts", () => {
     assert.equal(roomAgentDeliverySummary(state("connected", "waiting_for_desktop_credentials", "idle").roomAgentState!), "Waiting for desktop credential handoff");
     assert.equal(roomAgentDeliverySummary(state("reconnecting", "queued", "idle").roomAgentState!), "Reconnecting");
     assert.equal(roomAgentDeliverySummary(state("connected", "blocked", "responding").roomAgentState!), "Delivery needs attention");
+    assert.equal(roomAgentDeliverySummary(state("connected", "empty", "idle").roomAgentState!), "Online");
   });
 
   it("keeps reconnect exact-runtime-only and routes all controls through the Inspector", async () => {
@@ -149,11 +150,24 @@ describe("durable room delivery UI contracts", () => {
     assert.match(activity, /!hasLiveActivity/);
     assert.match(activity, /legacyReachableAgents/);
     assert.match(activity, /legacyWorkingAgents/);
-    for (const group of ["listening", "responding", "reconnecting", "needs_attention", "starting", "paused", "disconnected"]) {
+    for (const group of ["online", "responding", "recovering", "reconnecting", "needs_attention", "starting", "paused", "disconnected", "status_unavailable"]) {
       assert.match(activity, new RegExp(`key: "${group}"`));
     }
+    assert.match(activity, /agentInspectorActivityGroupState\(agent\)/);
+    assert.match(activity, /group\.key === "status_unavailable" \? "Status unavailable" : agent\.overallLabel/);
+    assert.match(activity, /agent\.resourceFreshness === 'stale'/);
     assert.match(activity, /selectInspectorAgent\(agent\)/);
     assert.match(activity, /selectParticipantAgent\(agent\)/);
+  });
+
+  it("presents Online activity with the same connected visual treatment", async () => {
+    const [rosterStyles, sharedSurfaceStyles] = await Promise.all([
+      source("src/styles/room-activity/groups-roster.css"),
+      source("src/styles/surfaces/shared-surfaces.css"),
+    ]);
+    assert.match(rosterStyles, /\.desktop-activity-avatar\[data-state="online"\]/);
+    assert.match(sharedSurfaceStyles, /\.state-pill\[data-state="online"\]/);
+    assert.match(sharedSurfaceStyles, /\.state-pill\[data-state="responding"\]/);
   });
 
   it("routes loaded main and thread links directly, then requests bounded history for an unloaded target", () => {

@@ -6,7 +6,7 @@ import type {
   DesktopSupervisorManifestEntry,
 } from "../../../electron/ipc-types";
 
-export type RoomAgentDeliveryGroup = "listening" | "responding" | "restoring" | "attention" | "disconnected";
+export type RoomAgentDeliveryGroup = "online" | "responding" | "restoring" | "attention" | "disconnected";
 
 type RoomAgentActivityEntry = Pick<
   DesktopSupervisorManifestEntry,
@@ -115,7 +115,7 @@ export function roomAgentDeliveryGroup(
   if (ingressState !== "observing") return "disconnected";
   if (state.inbox.state === "blocked" || state.turn.state === "failed") return "attention";
   if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "responding";
-  return "listening";
+  return "online";
 }
 
 export function roomAgentDeliverySummary(
@@ -136,7 +136,7 @@ export function roomAgentDeliverySummary(
   if (ingressState !== "observing") return "Starting room observation";
   if (state.inbox.state === "blocked" || state.turn.state === "failed") return "Delivery needs attention";
   if (["dispatching", "responding", "publishing", "retrying"].includes(state.turn.state)) return "Responding to a room message";
-  return "Connected · Listening";
+  return "Online";
 }
 
 /**
