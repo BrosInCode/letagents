@@ -369,13 +369,15 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
         }>;
         checkpoint(id: string, input: { provider_continuation_id: string | null }): Promise<void>;
       };
-      checkpointDynamicProviderState(input: {
-        agent: typeof ingressAgent;
-        inboxItemId: string;
-        providerTurnId: string;
-        providerContinuationId: string;
-        providerConnection: typeof providerConnection;
-      }): Promise<void>;
+      providerCheckpoints: {
+        checkpointDynamicState(input: {
+          agent: typeof ingressAgent;
+          inboxItemId: string;
+          providerTurnId: string;
+          providerContinuationId: string;
+          providerConnection: typeof providerConnection;
+        }): Promise<void>;
+      };
       handleProviderTerminal(
         entryId: string,
         handle: typeof liveHandle,
@@ -431,7 +433,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
       durableCheckpoints.push(realContinuation);
     };
 
-    await internals.checkpointDynamicProviderState({
+    await internals.providerCheckpoints.checkpointDynamicState({
       agent: ingressAgent,
       inboxItemId: inboxItem.inbox_item_id,
       providerTurnId,
@@ -446,7 +448,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     assert.equal(ingressAgent.providerContinuationId, realContinuation, "ingress authority converges to the committed manifest");
     assert.equal(liveHandle.providerContinuationId, realContinuation);
 
-    await internals.checkpointDynamicProviderState({
+    await internals.providerCheckpoints.checkpointDynamicState({
       agent: ingressAgent,
       inboxItemId: inboxItem.inbox_item_id,
       providerTurnId,
@@ -470,7 +472,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     );
     assert.equal(internals.liveHandles.has(ingressAgent.agentId), false, "terminal notification retires the live handle");
     await assert.rejects(
-      internals.checkpointDynamicProviderState({
+      internals.providerCheckpoints.checkpointDynamicState({
         agent: ingressAgent,
         inboxItemId: inboxItem.inbox_item_id,
         providerTurnId,
