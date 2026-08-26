@@ -487,8 +487,9 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
     await daemon.start();
     const internals = daemon as unknown as {
       pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void;
-      agentStreams: Map<string, unknown>;
-      agentStreamWaiters: Map<string, Set<() => void>>;
+      watchAgentStream: (input: { entryId: string; afterSequence: number; waitMs: number }) => Promise<{
+        events: DaemonAgentStreamEvent[];
+      }>;
     };
     const status = (await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number };
     // A fully stopped durable identity carrying a live-feed transcript.
@@ -496,14 +497,10 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
       ...entry, id: "purge_streams", desired_state: "stopped", observed_state: "stopped",
     } })).ok, true);
     internals.pushAgentStreamEvent("purge_streams", mk("hello"));
-    assert.equal(internals.agentStreams.has("purge_streams"), true);
+    assert.equal((await internals.watchAgentStream({ entryId: "purge_streams", afterSequence: 0, waitMs: 0 })).events.length, 1);
 
-    // A drained watcher blocks, registering a waiter for this entry.
-    const pending = daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "purge_streams", after_sequence: 1, wait_ms: 5_000 });
-    for (let i = 0; i < 100 && (internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) === 0; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal((internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) > 0, true, "the drained watcher registers a waiter before purge");
+    // A drained watcher blocks before purge wakes it.
+    const pending = internals.watchAgentStream({ entryId: "purge_streams", afterSequence: 1, waitMs: 5_000 });
 
     // A successful purge settles the waiter and drops the entry's ephemeral state.
     const purge = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
@@ -515,8 +512,10 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
     })).result as { outcome: string };
     assert.equal(replay.outcome, "purged", "a completed purge tombstone remains replayable after the identity row is gone");
     await pending; // the blocked watcher returns rather than hanging to its own timeout
-    assert.equal(internals.agentStreams.has("purge_streams"), false);
-    assert.equal(internals.agentStreamWaiters.has("purge_streams"), false);
+    assert.deepEqual(
+      (await internals.watchAgentStream({ entryId: "purge_streams", afterSequence: 0, waitMs: 0 })).events,
+      [],
+    );
   } finally {
     await daemon.stop();
     await env.cleanup();
