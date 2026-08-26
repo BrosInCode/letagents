@@ -125,6 +125,8 @@
 }
 
 .state-pill[data-state="connected"],
+.state-pill[data-state="online"],
+.state-pill[data-state="responding"],
 .state-pill[data-state="active"],
 .state-pill[data-state="installed"] {
   background: var(--green-dim);

@@ -35,7 +35,7 @@
             class="desktop-activity-group"
             :data-room-agent-state="group.key"
           >
-            <header><div><h3>{{ group.label }}</h3><p>{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
+            <header><div><h3>{{ group.label }}</h3><p v-if="group.description">{{ group.description }}</p></div><strong>{{ group.agents.length }}</strong></header>
             <button
               v-for="agent in group.agents"
               :key="agent.entryId"
@@ -46,8 +46,16 @@
               @click="selectInspectorAgent(agent)"
             >
               <span class="desktop-activity-avatar" :data-state="group.key">{{ initials(agent.displayName) }}</span>
-              <span><strong>{{ agent.displayName }}</strong><small>{{ agent.overallDetail }}</small></span>
-              <span class="desktop-activity-row-meta"><span class="state-pill" :data-state="group.key">{{ agent.overallLabel }}</span></span>
+              <span>
+                <strong>{{ agent.displayName }}</strong>
+                <small v-if="agent.resourceFreshness === 'stale'">Waiting for fresh supervisor state.</small>
+                <small v-else-if="agent.overallDetail">{{ agent.overallDetail }}</small>
+              </span>
+              <span class="desktop-activity-row-meta">
+                <span class="state-pill" :data-state="group.key">
+                  {{ group.key === "status_unavailable" ? "Status unavailable" : agent.overallLabel }}
+                </span>
+              </span>
             </button>
           </section>
 
@@ -306,7 +314,11 @@ import type {
   DesktopTaskSummary,
   WorkerSnapshot,
 } from "../../../../../electron/ipc-types";
-import type { AgentInspectorProjection } from "../../../domain/agent-inspector";
+import {
+  agentInspectorActivityGroupState,
+  type AgentInspectorActivityGroupState,
+  type AgentInspectorProjection,
+} from "../../../domain/agent-inspector";
 import { activityParticipantToAgentTarget, ownerAttribution } from "./room-activity/agentTarget";
 import {
   participantAgentInspectorRequest,
@@ -433,17 +445,28 @@ const hasLiveActivity = computed(() => Boolean(
     || legacyWorkingAgents.value.length,
 ));
 const inspectorTruthfulGroups = computed(() => {
-  const groups = [
-    { key: "listening", label: "Listening", description: "Connected and ready for a routed room message.", agents: [] as AgentInspectorProjection[] },
+  const groups: Array<{
+    key: AgentInspectorActivityGroupState;
+    label: string;
+    description: string | null;
+    agents: AgentInspectorProjection[];
+  }> = [
+    { key: "online", label: "Online", description: null, agents: [] as AgentInspectorProjection[] },
     { key: "responding", label: "Responding", description: "A bounded room turn is in progress.", agents: [] as AgentInspectorProjection[] },
     { key: "restoring_conversation", label: "Restoring conversation", description: "Recovering a missing private conversation without restarting the provider.", agents: [] as AgentInspectorProjection[] },
+    { key: "recovering", label: "Recovering agent", description: "Restoring room access for the running provider.", agents: [] as AgentInspectorProjection[] },
     { key: "reconnecting", label: "Reconnecting", description: "Restoring the room observation path.", agents: [] as AgentInspectorProjection[] },
     { key: "needs_attention", label: "Needs attention", description: "A runtime or delivery step needs your input.", agents: [] as AgentInspectorProjection[] },
     { key: "starting", label: "Starting", description: "Preparing the provider and room observation path.", agents: [] as AgentInspectorProjection[] },
     { key: "paused", label: "Paused", description: "Room work is held until the agent resumes.", agents: [] as AgentInspectorProjection[] },
     { key: "disconnected", label: "Disconnected", description: "The provider is not currently reachable.", agents: [] as AgentInspectorProjection[] },
+    { key: "status_unavailable", label: "Status unavailable", description: "Waiting for fresh supervisor state.", agents: [] as AgentInspectorProjection[] },
   ];
-  for (const agent of inspectorTruthfulAgents.value) groups.find((group) => group.key === agent.overallState)!.agents.push(agent);
+  for (const agent of inspectorTruthfulAgents.value) {
+    const groupState = agentInspectorActivityGroupState(agent);
+    const group = groups.find((candidate) => candidate.key === groupState);
+    if (group) group.agents.push(agent);
+  }
   return groups;
 });
 const selectedInspectorAgent = computed(() => inspectorTruthfulAgents.value.find((agent) => agent.entryId === selectedTruthfulId.value) || null);
