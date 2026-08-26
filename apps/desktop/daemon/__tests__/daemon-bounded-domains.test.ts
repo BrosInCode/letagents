@@ -6,7 +6,17 @@ import { fileURLToPath } from "node:url";
 const mainSource = read("../main.ts");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
+const daemonReadModelSource = read("../daemon-read-model.ts");
+const deliveryCutoverExecutionSource = read("../delivery-cutover-execution-coordinator.ts");
+const desiredStateSource = read("../desired-state-coordinator.ts");
+const manifestTransitionSource = read("../manifest-transition-coordinator.ts");
+const nativeActivityPublicationSource = read("../native-activity-publication-coordinator.ts");
+const providerCheckpointSource = read("../provider-checkpoint-coordinator.ts");
+const providerSchedulerFailureSource = read("../provider-scheduler-failure-coordinator.ts");
+const providerTerminalSource = read("../provider-terminal-coordinator.ts");
 const roomAgentProjectionSource = read("../room-agent-state-projection.ts");
+const runtimeRecoverySource = read("../runtime-recovery-coordinator.ts");
+const supervisedDeliveryLifecycleSource = read("../supervised-delivery-lifecycle-coordinator.ts");
 
 const expectedControlMethods = [
   "attempt.read",
@@ -81,21 +91,29 @@ test("daemon policy and projection domains remain extracted", () => {
     "control-request-router",
     "daemon-authority",
     "daemon-error-policy",
+    "daemon-read-model",
     "daemon-state-watch",
     "delivery-cutover-coordinator",
+    "delivery-cutover-execution-coordinator",
+    "desired-state-coordinator",
     "entry-concurrency-gate",
     "legacy-lane-coordinator",
     "lifecycle-administration-coordinator",
     "manifest-administration-coordinator",
+    "manifest-transition-coordinator",
+    "native-activity-publication-coordinator",
     "process-identity",
+    "provider-checkpoint-coordinator",
     "provider-execution-coordinator",
     "provider-reconciliation-coordinator",
-    "provider-state-policy",
+    "provider-scheduler-failure-coordinator",
     "provider-stream-coordinator",
     "provider-stream-policy",
-    "room-agent-state-projection",
+    "provider-terminal-coordinator",
     "room-delivery-control",
     "room-move-coordinator",
+    "runtime-recovery-coordinator",
+    "supervised-delivery-lifecycle-coordinator",
     "turn-control-coordinator",
     "worker-authority-coordinator",
     "worker-runtime-custody",
@@ -103,8 +121,31 @@ test("daemon policy and projection domains remain extracted", () => {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
   }
   assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
+  assert.match(daemonReadModelSource, /from "\.\/room-agent-state-projection\.js"/);
+  assert.match(deliveryCutoverExecutionSource, /controlExactTurn/);
+  assert.equal(matches(mainSource, /\.controlExactTurn\s*\(/g).length, 0);
+  assert.match(desiredStateSource, /compareAndSet/);
+  assert.equal(matches(mainSource, /private async setDesiredState\s*\(/g).length, 0);
+  assert.match(providerCheckpointSource, /checkpointCursorPreparedTurn/);
+  assert.match(providerCheckpointSource, /from "\.\/provider-state-policy\.js"/);
+  assert.equal(matches(mainSource, /\.checkpointCursorPreparedTurn\s*\(/g).length, 0);
+  assert.match(runtimeRecoverySource, /commitTurnControlState/);
+  assert.equal(matches(mainSource, /\.commitTurnControlState\s*\(/g).length, 0);
+  assert.match(supervisedDeliveryLifecycleSource, /exactActiveBoundedContext/);
+  assert.equal(matches(mainSource, /preparedRoomMove\s*\(/g).length, 0);
+  assert.match(providerSchedulerFailureSource, /transientProviderStartFailure/);
+  assert.equal(matches(mainSource, /transientProviderStartFailure/g).length, 0);
+  assert.match(nativeActivityPublicationSource, /publishWorkerNativeActivity/);
+  assert.equal(matches(mainSource, /publishWorkerNativeActivity/g).length, 0);
+  assert.match(manifestTransitionSource, /function sanitizeTerminal/);
+  assert.equal(matches(mainSource, /function sanitizeTerminal/g).length, 0);
+  assert.match(providerTerminalSource, /advanceReconciliationState/);
+  assert.equal(matches(mainSource, /advanceReconciliationState/g).length, 0);
+  assert.match(daemonReadModelSource, /projectRoomAgentManifestEntry/);
+  assert.equal(matches(mainSource, /projectRoomAgentManifestEntry/g).length, 0);
   assert.equal(matches(mainSource, /^export function providerStreamLifecycle/mg).length, 0);
   assert.equal(matches(mainSource, /^function projectDeliveryReceipts/mg).length, 0);
+  assert.ok(mainSource.split("\n").length < 1_500, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {
