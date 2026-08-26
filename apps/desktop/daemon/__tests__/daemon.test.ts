@@ -21,6 +21,7 @@ import { assertMacOS } from "../platform.js";
 import { DaemonAlreadyRunningError, DaemonFenceLostError, DaemonSingleton } from "../singleton.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { WorkerRuntimeCustody, type CachedWorkerAuthorization, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import { loadSupervisedToolRuntimeAt, type DaemonToolAgentSession } from "../supervised-tool-runtime.js";
 import { productionSupervisorGrantHttp } from "../cloud-http.js";
 
@@ -487,8 +488,9 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
     await daemon.start();
     const internals = daemon as unknown as {
       pushAgentStreamEvent: (entryId: string, event: DaemonActivityEvent) => void;
-      agentStreams: Map<string, unknown>;
-      agentStreamWaiters: Map<string, Set<() => void>>;
+      watchAgentStream: (input: { entryId: string; afterSequence: number; waitMs: number }) => Promise<{
+        events: DaemonAgentStreamEvent[];
+      }>;
     };
     const status = (await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number };
     // A fully stopped durable identity carrying a live-feed transcript.
@@ -496,14 +498,10 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
       ...entry, id: "purge_streams", desired_state: "stopped", observed_state: "stopped",
     } })).ok, true);
     internals.pushAgentStreamEvent("purge_streams", mk("hello"));
-    assert.equal(internals.agentStreams.has("purge_streams"), true);
+    assert.equal((await internals.watchAgentStream({ entryId: "purge_streams", afterSequence: 0, waitMs: 0 })).events.length, 1);
 
-    // A drained watcher blocks, registering a waiter for this entry.
-    const pending = daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", { entry_id: "purge_streams", after_sequence: 1, wait_ms: 5_000 });
-    for (let i = 0; i < 100 && (internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) === 0; i += 1) {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    assert.equal((internals.agentStreamWaiters.get("purge_streams")?.size ?? 0) > 0, true, "the drained watcher registers a waiter before purge");
+    // A drained watcher blocks before purge wakes it.
+    const pending = internals.watchAgentStream({ entryId: "purge_streams", afterSequence: 1, waitMs: 5_000 });
 
     // A successful purge settles the waiter and drops the entry's ephemeral state.
     const purge = (await daemonRequest(paths.socketPath, "supervisor.purge_agent", {
@@ -515,8 +513,10 @@ test("purgeAgent drops the ephemeral live feed and settles its outstanding waite
     })).result as { outcome: string };
     assert.equal(replay.outcome, "purged", "a completed purge tombstone remains replayable after the identity row is gone");
     await pending; // the blocked watcher returns rather than hanging to its own timeout
-    assert.equal(internals.agentStreams.has("purge_streams"), false);
-    assert.equal(internals.agentStreamWaiters.has("purge_streams"), false);
+    assert.deepEqual(
+      (await internals.watchAgentStream({ entryId: "purge_streams", afterSequence: 0, waitMs: 0 })).events,
+      [],
+    );
   } finally {
     await daemon.stop();
     await env.cleanup();
@@ -1319,7 +1319,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
   };
   type StreamInternals = {
     liveHandles: Map<string, typeof handle>;
-    liveBindingIdentities: Map<string, { executionGenerationId: undefined }>;
+    workerRuntimeCustody: WorkerRuntimeCustody;
     handleProviderStream: (entryId: string, providerHandle: typeof handle, event: StreamEvent) => Promise<void>;
     publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean>;
   };
@@ -1356,7 +1356,11 @@ test("daemon keeps empty wait results idle across the real stream handler and re
   const install = (daemon: SupervisorDaemon, published: Array<"working" | "idle">): StreamInternals => {
     const internals = daemon as unknown as StreamInternals;
     internals.liveHandles.set("quiet_poll", handle);
-    internals.liveBindingIdentities.set("quiet_poll", { executionGenerationId: undefined });
+    internals.workerRuntimeCustody.installLiveBinding("quiet_poll", {
+      agentSessionId: "session-poll",
+      executionGenerationId: "generation-poll",
+      updatedAt: new Date().toISOString(),
+    });
     internals.publishNativeActivity = async (_entryId, _method, status) => { published.push(status); return true; };
     return internals;
   };
@@ -1366,7 +1370,20 @@ test("daemon keeps empty wait results idle across the real stream handler and re
   try {
     await first.start();
     await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: { ...entry, id: "quiet_poll", room_id: "focus_37", provider: "claude-code", desired_state: "paused" },
+      entry: {
+        ...entry,
+        id: "quiet_poll",
+        room_id: "focus_37",
+        provider: "claude-code",
+        desired_state: "paused",
+        work_attempt_id: handle.workAttemptId,
+        provider_ref: {
+          work_attempt_id: handle.workAttemptId,
+          provider_continuation_id: handle.providerContinuationId,
+          provider_connection: null,
+          execution_generation_id: "generation-poll",
+        },
+      },
     });
     const published: Array<"working" | "idle"> = [];
     const firstInternals = install(first, published);
@@ -2631,8 +2648,7 @@ test("host grant renewal retries transient failures, rotates the bearer in place
     await daemon.start();
     const internals = daemon as unknown as {
       workerBindings: WorkerBindingStore;
-      hostGrants: Map<string, { supervisorGrant: string; expiresAt: string }>;
-      cachedWorkerAuthorizations: Map<string, unknown>;
+      workerRuntimeCustody: WorkerRuntimeCustody;
       publishNativeActivity: () => Promise<boolean>;
       requestConvergence: (entryId: string) => void;
     };
@@ -2653,17 +2669,17 @@ test("host grant renewal retries transient failures, rotates the bearer in place
       const binding = await internals.workerBindings.get("host_grant_renewal_retry");
       return renewalCalls >= 2 && mintCalls >= 3 && binding?.credential_ref === "renewed-worker-bearer-id";
     }, "parent renewal and transient child-session retry");
-    const beforeStale = internals.hostGrants.get("host_grant_renewal_retry")!;
-    const cachedBeforeStale = internals.cachedWorkerAuthorizations.get("host_grant_renewal_retry");
+    const beforeStale = internals.workerRuntimeCustody.hostGrant("host_grant_renewal_retry")!;
+    const cachedBeforeStale = internals.workerRuntimeCustody.workerAuthorization("host_grant_renewal_retry");
     assert.ok(cachedBeforeStale, "the latest successful bearer remains in process memory");
     assert.equal(beforeStale.supervisorGrant, "renewed-parent-secret");
     const renewedExpiry = beforeStale.expiresAt;
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", staleInstall)).ok, true);
     await new Promise((resolve) => setTimeout(resolve, 30));
-    const afterStale = internals.hostGrants.get("host_grant_renewal_retry")!;
+    const afterStale = internals.workerRuntimeCustody.hostGrant("host_grant_renewal_retry")!;
     assert.equal(afterStale.supervisorGrant, "renewed-parent-secret");
     assert.equal(afterStale.expiresAt, renewedExpiry);
-    assert.equal(internals.cachedWorkerAuthorizations.get("host_grant_renewal_retry"), cachedBeforeStale,
+    assert.equal(internals.workerRuntimeCustody.workerAuthorization("host_grant_renewal_retry"), cachedBeforeStale,
       "a stale install retaining the newer effective grant must retain its cached bearer");
     const mintsBeforeReconnect = mintCalls;
     let reconnectConvergenceCalls = 0;
@@ -2675,7 +2691,7 @@ test("host grant renewal retries transient failures, rotates the bearer in place
     assert.equal(credentialOnlyReplay.ok, true, credentialOnlyReplay.error);
     assert.equal((credentialOnlyReplay.result as { status?: string }).status, "installed");
     await eventually(async () => mintCalls === mintsBeforeReconnect + 1, "credential-only exact-provider rebind");
-    const afterCredentialOnlyReplay = internals.hostGrants.get("host_grant_renewal_retry")!;
+    const afterCredentialOnlyReplay = internals.workerRuntimeCustody.hostGrant("host_grant_renewal_retry")!;
     assert.equal(afterCredentialOnlyReplay.supervisorGrant, "renewed-parent-secret");
     assert.equal(afterCredentialOnlyReplay.expiresAt, renewedExpiry);
     assert.equal(mintParentGrants.at(-1), "renewed-parent-secret", "the rebind mints with daemon's newer grant, never stale safeStorage input");
@@ -2737,7 +2753,7 @@ test("expired and definitively rejected host grants become auth-blocked without 
       await daemon.start();
       const internals = daemon as unknown as {
         liveHandles: Map<string, typeof handle>;
-        hostGrants: Map<string, unknown>;
+        workerRuntimeCustody: WorkerRuntimeCustody;
         publishNativeActivity: () => Promise<boolean>;
       };
       internals.publishNativeActivity = async () => true;
@@ -2759,7 +2775,7 @@ test("expired and definitively rejected host grants become auth-blocked without 
         return current?.condition === "auth_blocked" && current.observed_state === "recovering";
       }, `${id} auth block`);
       assert.equal(internals.liveHandles.get(id), handle, "authority loss preserves the exact provider handle");
-      assert.equal(internals.hostGrants.has(id), false, "rejected plaintext parent authority is removed from memory");
+      assert.equal(internals.workerRuntimeCustody.hostGrant(id), undefined, "rejected plaintext parent authority is removed from memory");
       assert.equal(stops, 0);
       assert.equal(rejection === "expired" ? renewals === 0 : renewals >= 1, true);
     } finally {
@@ -4466,13 +4482,9 @@ test("version handoff releases authority without waiting for wedged callbacks an
     await first.start();
     const never = new Promise<void>(() => {});
     const internals = first as unknown as {
-      convergenceRequests: Map<string, Promise<void>>;
-      providerCallbacks: Set<Promise<void>>;
-      scheduledConvergence: Map<string, Promise<{ dispose: () => Promise<void> }>>;
+      providerStreams: { callbacks: Set<Promise<void>> };
     };
-    internals.convergenceRequests.set("wedged", never);
-    internals.providerCallbacks.add(never);
-    internals.scheduledConvergence.set("wedged", new Promise(() => {}));
+    internals.providerStreams.callbacks.add(never);
 
     const handoff = first.waitForHandoff();
     const prepared = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
@@ -4506,7 +4518,9 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
   let second: SupervisorDaemon | null = null;
   try {
     await first.start();
-    (first as unknown as { liveDisposers: Map<string, Array<() => void>> }).liveDisposers
+    (first as unknown as {
+      providerStreams: { liveDisposers: Map<string, Array<() => void>> };
+    }).providerStreams.liveDisposers
       .set("throws", [() => { throw new Error("injected observer disposal failure"); }]);
     const handoff = first.waitForHandoff();
     assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
@@ -4676,7 +4690,7 @@ test("credential-only reconnect rejects a missing exact provider without retaini
   });
   try {
     await daemon.start();
-    const internals = daemon as unknown as { hostGrants: Map<string, unknown>; requestConvergence: (entryId: string) => void };
+    const internals = daemon as unknown as { workerRuntimeCustody: WorkerRuntimeCustody; requestConvergence: (entryId: string) => void };
     internals.requestConvergence = () => { calls.converge += 1; };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "credential_only_missing_provider", provider: "codex", delivery_mode: "daemon_inbox",
@@ -4692,7 +4706,7 @@ test("credential-only reconnect rejects a missing exact provider without retaini
     });
     assert.equal(result.ok, true, result.error);
     assert.deepEqual(result.result, { status: "provider_unavailable" });
-    assert.equal(internals.hostGrants.has("credential_only_missing_provider"), false, "a rejected reconnect cannot become usable later");
+    assert.equal(internals.workerRuntimeCustody.hostGrant("credential_only_missing_provider"), undefined, "a rejected reconnect cannot become usable later");
     assert.deepEqual(calls, { spawn: 0, resume: 0, stop: 0, converge: 0 });
   } finally {
     await daemon.stop().catch(() => undefined);
@@ -4724,7 +4738,7 @@ test("recovery-only authority install retains the grant without touching the dea
   try {
     await daemon.start();
     const internals = daemon as unknown as {
-      hostGrants: Map<string, unknown>;
+      workerRuntimeCustody: WorkerRuntimeCustody;
       requestConvergence: (entryId: string) => void;
     };
     internals.requestConvergence = () => { calls.converge += 1; };
@@ -4742,7 +4756,7 @@ test("recovery-only authority install retains the grant without touching the dea
     });
     assert.equal(result.ok, true, result.error);
     assert.deepEqual(result.result, { status: "installed" });
-    assert.equal(internals.hostGrants.has("recovery_authority_dead_provider"), true);
+    assert.ok(internals.workerRuntimeCustody.hostGrant("recovery_authority_dead_provider"));
     assert.deepEqual(calls, { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0 });
   } finally {
     await daemon.stop().catch(() => undefined);
@@ -5991,7 +6005,7 @@ test("a host-grant install queued before handoff cannot retain plaintext or repo
     const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
     const internals = daemon as unknown as {
       serializeEntryTick: <T>(entryId: string, operation: () => Promise<T>) => Promise<T>;
-      hostGrants: Map<string, unknown>;
+      workerRuntimeCustody: WorkerRuntimeCustody;
     };
     const heldTick = internals.serializeEntryTick("queued_host_grant", async () => { tickEntered(); await tickGate; });
     await tickStarted;
@@ -6010,7 +6024,7 @@ test("a host-grant install queued before handoff cannot retain plaintext or repo
     assert.equal(rejected.ok, true);
     assert.deepEqual(rejected.result, { status: "stale" });
     assert.equal(mintCalls, 0, "a retired daemon cannot mint a worker session");
-    assert.equal(internals.hostGrants.size, 0, "a retired daemon retains no plaintext grant");
+    assert.equal(internals.workerRuntimeCustody.hostGrant("queued_host_grant"), undefined, "a retired daemon retains no plaintext grant");
     await within(handoff, "queued host-grant handoff", 1_000);
   } finally {
     releaseTick?.();
@@ -6108,7 +6122,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
     const terminalLoadReached = new Promise<void>((resolve) => { reachedTerminalLoad = resolve; });
     const replacementInternals = second as unknown as {
       liveHandles: Map<string, typeof staleHandle>;
-      liveBindingIdentities: Map<string, { agentSessionId: string; executionGenerationId: string; updatedAt: string }>;
+      workerRuntimeCustody: WorkerRuntimeCustody;
       store: ManifestStore;
       durability: {
         getAttempt: (id: string) => Promise<{ execution_generations: Array<{ execution_generation_id: string; terminal: unknown; actor: string; generation: number }> }>;
@@ -6122,7 +6136,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       executionGenerationId: predecessorBinding.execution_generation_id,
       updatedAt: predecessorBinding.updated_at,
     };
-    replacementInternals.liveBindingIdentities.set("binding_race", predecessorIdentity);
+    replacementInternals.workerRuntimeCustody.installLiveBinding("binding_race", predecessorIdentity);
     const fakeExecutions = [
       { execution_generation_id: "execution_old", terminal: null as unknown, actor: "old-worker", generation: 1 },
       { execution_generation_id: "execution_successor", terminal: null as unknown, actor: "successor-worker", generation: 2 },
@@ -6152,7 +6166,7 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       agent_session_token: "new-secret", api_url: "https://letagents.chat",
     });
     replacementInternals.liveHandles.set("binding_race", successorHandle);
-    replacementInternals.liveBindingIdentities.set("binding_race", {
+    replacementInternals.workerRuntimeCustody.installLiveBinding("binding_race", {
       agentSessionId: successorBinding.agent_session_id,
       executionGenerationId: successorBinding.execution_generation_id,
       updatedAt: successorBinding.updated_at,
@@ -7040,10 +7054,7 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof handle>;
       workerBindings: WorkerBindingStore;
-      cachedWorkerAuthorizations: Map<string, {
-        agentSessionId: string; bearer: string; bearerId: string; agentKey: string;
-        roomId: string; agentSession: DaemonToolAgentSession;
-      }>;
+      workerRuntimeCustody: WorkerRuntimeCustody;
       completeBoundedEffectOnce: (
         input: Record<string, unknown>,
         admittedBeforeHandoff?: boolean,
@@ -7058,14 +7069,16 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       agent_session_token: "cursor-cap-bearer", credential_ref: "cursor-cap-bearer-id",
       api_url: "https://letagents.example",
     });
-    internals.cachedWorkerAuthorizations.set(id, {
-      agentSessionId: "cursor-cap-worker", bearer: "cursor-cap-bearer", bearerId: "cursor-cap-bearer-id",
-      agentKey: "emmymay/cedarridge", roomId: entry.room_id,
+    internals.workerRuntimeCustody.installWorkerAuthorization({
+      entryId: id, agentSessionId: "cursor-cap-worker", bearer: "cursor-cap-bearer", bearerId: "cursor-cap-bearer-id",
+      agentKey: "emmymay/cedarridge", roomId: entry.room_id, workAttemptId: attempt.work_attempt_id,
+      grantId: "grant-cursor-cap", grantGeneration: 1, daemonGeneration: 1,
+      apiUrl: "https://letagents.example", expiresAt: "2099-01-01T00:00:00.000Z", mintedAtMs: Date.now(),
       agentSession: exactAgentSession({
         entryId: id, sessionId: "cursor-cap-worker", roomId: entry.room_id, runtime: "cursor",
         displayName: "CedarRidge", agentKey: "emmymay/cedarridge",
       }),
-    });
+    } satisfies CachedWorkerAuthorization);
     const [item] = await internals.supervisedInbox.ingestPoll({
       agent_id: id, room_id: entry.room_id, last_observed_message_id: "1",
       messages: [{ source_message_id: "1", source_message: { text: "current" }, activation: {} }],
@@ -7343,14 +7356,17 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
       agent_session_id: "provider-neutral-worker", agent_session_token: "provider-neutral-bearer",
       credential_ref: "provider-neutral-bearer-id", api_url: "https://letagents.example",
     });
-    internals.cachedWorkerAuthorizations.set(providerNeutralId, {
-      agentSessionId: "provider-neutral-worker", bearer: "provider-neutral-bearer",
+    internals.workerRuntimeCustody.installWorkerAuthorization({
+      entryId: providerNeutralId, agentSessionId: "provider-neutral-worker", bearer: "provider-neutral-bearer",
       bearerId: "provider-neutral-bearer-id", agentKey: "emmymay/pinefield", roomId: "provider-neutral-room",
+      workAttemptId: providerNeutralAttempt.work_attempt_id, grantId: "grant-provider-neutral",
+      grantGeneration: 1, daemonGeneration: 1, apiUrl: "https://letagents.example",
+      expiresAt: "2099-01-01T00:00:00.000Z", mintedAtMs: Date.now(),
       agentSession: exactAgentSession({
         entryId: providerNeutralId, sessionId: "provider-neutral-worker", roomId: "provider-neutral-room", runtime: "codex",
         displayName: "PineField", agentKey: "emmymay/pinefield",
       }),
-    });
+    } satisfies CachedWorkerAuthorization);
     const [providerNeutralItem] = await internals.supervisedInbox.ingestPoll({
       agent_id: providerNeutralId, room_id: "provider-neutral-room", last_observed_message_id: "1",
       messages: [{ source_message_id: "1", source_message: { text: "provider neutral" }, activation: {} }],
@@ -8583,7 +8599,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
         && reattached.condition === "coordination_blocked"
         && reattached.worker_binding === null
         && streamListeners.size === 1
-        && (second as unknown as { pendingResumeBindings: Map<string, unknown> }).pendingResumeBindings.has("supervised_handoff");
+        && (second as unknown as { workerRuntimeCustody: WorkerRuntimeCustody }).workerRuntimeCustody.hasPendingResumeBinding("supervised_handoff");
     }, "daemon restart reconstructs the staged successor before its first wait", 8_000);
     assert.equal(resumeCount, 1, "staging reconstruction attaches the single live successor without another resume");
     assert.equal((await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id, stoppedGenerationId, "restart-window reconstruction preserves predecessor authority until proof");
@@ -8768,7 +8784,7 @@ test("generation handoff reattaches the same provider and publishes its supervis
         && fresh.worker_binding === null;
     }, "fresh spawn with a terminal predecessor credential fails closed awaiting formal bind");
     assert.equal(resumeCount, 3, "fresh-spawn negative does not masquerade as native resume");
-    assert.equal((third as unknown as { pendingResumeBindings: Map<string, unknown> }).pendingResumeBindings.has("supervised_handoff"), false, "fresh spawn cannot enter compatibility rollover");
+    assert.equal((third as unknown as { workerRuntimeCustody: WorkerRuntimeCustody }).workerRuntimeCustody.hasPendingResumeBinding("supervised_handoff"), false, "fresh spawn cannot enter compatibility rollover");
     assert.equal((await new WorkerBindingStore(paths.workerBindingsPath).get("supervised_handoff"))?.execution_generation_id, exactGenerationBeforeFreshStart, "fresh spawn preserves terminal predecessor authority without rolling it");
   } finally {
     await third?.stop().catch(() => undefined);
@@ -9164,11 +9180,7 @@ test("alias room move journals its canonical destination before local membership
   type Internals = {
     store: ManifestStore;
     workerBindings: WorkerBindingStore;
-    hostGrants: Map<string, {
-      entryId: string; roomId: string; agentKey: string; grantId: string; supervisorGrant: string;
-      grantGeneration: number; apiUrl: string; daemonGeneration: number;
-      hostId: string; installationId: string; expiresAt: string;
-    }>;
+    workerRuntimeCustody: WorkerRuntimeCustody;
     updateManifestEntry: (entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry) => Promise<DaemonManifestEntry>;
     reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
   };
@@ -9262,12 +9274,12 @@ test("alias room move journals its canonical destination before local membership
     resumed = exactAck.result as DaemonRoomMoveRecord;
     assert.equal(resumed.source_credentials_revoked, true);
     await bind(daemon, canonicalDestination);
-    internals.hostGrants.set(moving.id, {
+    internals.workerRuntimeCustody.installHostGrant({
       entryId: moving.id, roomId: canonicalDestination, agentKey: "owner/alias_move",
       grantId: "grant_destination", supervisorGrant: "secret_destination_grant", grantGeneration: 2,
       apiUrl: "https://letagents.test", daemonGeneration: resumed.daemon_generation,
       hostId: "host_1", installationId: "install_1", expiresAt: "2099-01-01T00:00:00.000Z",
-    });
+    } satisfies InstalledHostGrant);
     resumed = await internals.reconcileRoomMove(resumed);
     assert.equal(resumed.phase, "active");
     assert.equal(resumed.remote_room_id, canonicalDestination);

@@ -1332,11 +1332,12 @@ setTimeout(() => process.exit(73), 5000).unref();
       withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "connector-stubborn-native" }))),
       // A forced process-group reap deliberately kills the wrapper too. The
       // exact fail-closed observation depends on whether its already-buffered
-      // init/result reaches the parent before that SIGKILL: either the bounded
-      // turn starts and then loses terminal evidence, or startup never becomes
-      // observable. Both paths must reject and the PID assertions below prove
-      // the intended authority-before-group-reap ordering independently.
-      /(?:ended before the bounded room turn produced a terminal result|exited before reporting its stream-json init)/,
+      // init/result reaches the parent before that SIGKILL: the connector can
+      // close before init, the bounded turn can lose terminal evidence, or
+      // startup can remain unobservable. Every path must reject, and the PID
+      // assertions below prove the intended authority-before-group-reap ordering
+      // independently.
+      /(?:live MCP connector ended before the turn became terminal|ended before the bounded room turn produced a terminal result|exited before reporting its stream-json init)/,
     );
     assert.equal(await waitForPath(stubbornPidPath), true, "the combined teardown fixture launched its stubborn native member");
     stubbornPid = Number(readFileSync(stubbornPidPath, "utf8"));
