@@ -5,11 +5,7 @@ import { isDeepStrictEqual } from "node:util";
 import { AuditLog } from "./audit-log.js";
 import { AgentStreamRegistry } from "./agent-stream-registry.js";
 import { BoundedEffectCoordinator } from "./bounded-effect-coordinator.js";
-import {
-  CONTINUATION_REPAIR_EXHAUSTED_ERROR,
-  continuationRepairExhaustionNeedsPersistence,
-  continuationRepairMissingContinuation,
-} from "./continuation-repair-policy.js";
+import { ContinuationRepairCoordinator } from "./continuation-repair-coordinator.js";
 import {
   hostGrantApiOrigin,
   lastRoomMessageId,
@@ -28,7 +24,6 @@ import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-
 import { DaemonAuthority } from "./daemon-authority.js";
 import { DeliveryCutoverCoordinator, DeliveryCutoverObservationDetached } from "./delivery-cutover-coordinator.js";
 import {
-  authoritativeRoomJoinRejection,
   exhaustedTransientWorkerMint,
   providerRuntimeGoneFailure,
   retryableWorkerMintFailure,
@@ -53,6 +48,7 @@ import {
   projectRoomAgentManifestEntry,
 } from "./room-agent-state-projection.js";
 import { RoomDeliveryControl } from "./room-delivery-control.js";
+import { RoomMoveCoordinator } from "./room-move-coordinator.js";
 import {
   isAgentInspectorLiveDisplayEvent,
   isCorrelatedNonemptyWaitResult,
@@ -93,7 +89,7 @@ import {
   type MintedWorkerAuthorization,
   type PendingResumeBinding,
 } from "./worker-runtime-custody.js";
-import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type ProviderContinuationRepair, type SupervisedEffectRecord } from "./supervised-agent-inbox-store.js";
+import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedDeliveryInterruptReservation, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import { supervisedToolRuntime, type DaemonToolAgentSession, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 
@@ -184,6 +180,8 @@ export class SupervisorDaemon {
   private readonly workerBindings: WorkerBindingStore;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
+  private readonly continuationRepairs: ContinuationRepairCoordinator;
+  private readonly roomMoves: RoomMoveCoordinator;
   private readonly supervisedDelivery: SupervisedAgentDelivery | null;
   private readonly roomDeliveryControl: RoomDeliveryControl;
   private readonly boundedEffects: BoundedEffectCoordinator;
@@ -339,6 +337,63 @@ export class SupervisorDaemon {
       undefined,
       () => this.notifyStateChanged(),
     );
+    this.continuationRepairs = new ContinuationRepairCoordinator({
+      authority: {
+        isHandoffScheduled: () => this.handoffScheduled,
+        currentGeneration: () => this.singleton.currentGeneration,
+        assertCurrent: () => this.singleton.assertCurrent(),
+      },
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      inbox: {
+        latest: (entryId) => this.supervisedInbox.latestContinuationRepair(entryId),
+        exhaust: (inboxItemId, repairId, error) => this.supervisedInbox.exhaustCommittedContinuationRepair(inboxItemId, repairId, error),
+        begin: (input) => this.supervisedInbox.beginContinuationRepair(input),
+        checkpointReplacement: (repairId, continuation) => this.supervisedInbox.checkpointContinuationReplacement(repairId, continuation),
+        commit: (repairId, continuation, reset) => this.supervisedInbox.commitContinuationRepair(repairId, continuation, reset),
+        fail: (repairId, error) => this.supervisedInbox.failContinuationRepair(repairId, error),
+      },
+      manifest: {
+        getEntry: async (entryId) => await this.store.getEntry(entryId) ?? null,
+        updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      },
+      bindings: {
+        get: (entryId) => this.workerBindings.get(entryId),
+        credentialFor: (binding) => this.workerBindings.credentialFor(binding),
+      },
+      durability: {
+        getAttempt: (workAttemptId) => this.durability.getAttempt(workAttemptId),
+        checkpoint: (workAttemptId, checkpoint) => this.durability.checkpoint(workAttemptId, checkpoint),
+      },
+      runtime: {
+        getHandle: (entryId) => this.liveHandles.get(entryId),
+        ...(providerPort?.repairContinuation
+          ? { repair: (handle, request, options) => providerPort.repairContinuation!(handle, request, options) }
+          : {}),
+        promote: (entryId, handle, executionGenerationId) => this.installProviderHandle(entryId, handle, executionGenerationId),
+      },
+      notifyStateChanged: () => this.notifyStateChanged(),
+    });
+    this.roomMoves = new RoomMoveCoordinator({
+      store: this.store,
+      inbox: this.supervisedInbox,
+      bindings: this.workerBindings,
+      runtimeCustody: this.workerRuntimeCustody,
+      deliveryHttp: this.supervisedDeliveryHttp,
+      authority: {
+        currentGeneration: () => this.singleton.currentGeneration,
+        isHandoffScheduled: () => this.handoffScheduled,
+        assertCurrent: () => this.singleton.assertCurrent(),
+        ownsDaemonGeneration: (expected) => this.ownsDaemonGeneration(expected),
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+      },
+      entryConcurrency: this.entryConcurrency,
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      currentHandle: (entryId) => this.liveHandles.get(entryId),
+      pauseIngress: (entryId) => this.supervisedDelivery?.pauseIngress(entryId),
+      restartDelivery: (entryId) => this.startSupervisedDelivery(entryId),
+      scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
+    });
     this.supervisedDelivery = providerPort
       ? new SupervisedAgentDelivery(
         this.supervisedInbox,
@@ -348,7 +403,7 @@ export class SupervisorDaemon {
         undefined,
         undefined,
         undefined,
-        (input) => this.commitPreparedRoomMove(input),
+        (input) => this.roomMoves.commitPreparedRoomMove(input),
         undefined,
         (input) => this.restoreMissingProviderContinuation(input),
         (input) => this.checkpointDynamicProviderState(input),
@@ -391,14 +446,14 @@ export class SupervisorDaemon {
       policy: { structuredRoomTurnCompletion },
     });
     const controlOperations = {
-      acknowledgeInspectorRoomMoveSourceRevocation: this.acknowledgeInspectorRoomMoveSourceRevocation.bind(this),
+      acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
       activateLegacyLane: this.activateLegacyLane.bind(this),
       appendActivity: this.appendActivity.bind(this),
       bindWorkerSession: this.bindWorkerSession.bind(this),
       bootstrapRoomIngress: (input) => this.beginBootstrap(this.bootstrapRoomIngress.bind(this), input),
       borrowWorkerCredential: this.borrowWorkerCredential.bind(this),
       checkpointWorkerCursor: this.checkpointWorkerCursor.bind(this),
-      commitInspectorRoomMove: this.commitInspectorRoomMove.bind(this),
+      commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
       compareAndSetDesiredState: this.compareAndSetDesiredState.bind(this),
       completeBoundedEffect: this.completeBoundedEffect.bind(this),
       executeBoundedTool: this.executeBoundedTool.bind(this),
@@ -406,15 +461,15 @@ export class SupervisorDaemon {
       entryWithDerivedLiveness: this.entryWithDerivedLiveness.bind(this),
       getAgentConfiguration: this.getAgentConfiguration.bind(this),
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
-      getCurrentInspectorRoomMove: this.getCurrentInspectorRoomMove.bind(this),
-      getInspectorRoomMove: this.getInspectorRoomMove.bind(this),
+      getCurrentInspectorRoomMove: (input) => this.roomMoves.getCurrentInspector(input),
+      getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
       installHostGrant: this.installHostGrant.bind(this),
       installOpenModelCredential: this.installOpenModelCredential.bind(this),
       installWorkerCredential: this.installWorkerCredential.bind(this),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
       prepareBoundedEffect: this.prepareBoundedEffect.bind(this),
       prepareHandoff: this.prepareHandoff.bind(this),
-      prepareInspectorRoomMove: this.prepareInspectorRoomMove.bind(this),
+      prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
       purgeAgent: this.purgeAgent.bind(this),
       putManifestEntry: this.putManifestEntry.bind(this),
       readAttempt: this.readAttempt.bind(this),
@@ -425,7 +480,7 @@ export class SupervisorDaemon {
       restoreAgentConversation: this.restoreAgentConversation.bind(this),
       retireAgent: this.retireAgent.bind(this),
       retryRoomDelivery: this.retryRoomDelivery.bind(this),
-      rollbackInspectorRoomMove: this.rollbackInspectorRoomMove.bind(this),
+      rollbackInspectorRoomMove: (input) => this.roomMoves.rollbackInspector(input),
       setDesiredState: this.setDesiredState.bind(this),
       setDisplayName: this.setDisplayName.bind(this),
       skipRoomDelivery: this.skipRoomDelivery.bind(this),
@@ -460,7 +515,7 @@ export class SupervisorDaemon {
     await this.quarantineDuplicateSupervisedLaneOwners();
     await this.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
-    await this.reconcilePreparedRoomMoves();
+    await this.roomMoves.reconcilePrepared();
     await this.recoverPreparedPurges();
     await this.recoverEphemeralWorkspaces();
     await this.socket.start();
@@ -738,196 +793,7 @@ export class SupervisorDaemon {
     item: import("./supervised-agent-inbox-store.js").SupervisedInboxItem;
     manual: boolean;
   }): Promise<"restored" | "replaced" | "authority_changed" | "failed"> {
-    const { agent, item } = input;
-    const repairContinuation = this.providerPort?.repairContinuation?.bind(this.providerPort);
-    if (!repairContinuation) return "failed";
-    return this.serializeEntryTick(agent.agentId, async () => {
-      if (this.handoffScheduled || agent.daemonGeneration !== this.singleton.currentGeneration) return "authority_changed";
-      await this.singleton.assertCurrent();
-
-      const previousRepair = await this.supervisedInbox.latestContinuationRepair(agent.agentId);
-      const entry = await this.store.getEntry(agent.agentId);
-      const handle = this.liveHandles.get(agent.agentId);
-      const binding = await this.workerBindings.get(agent.agentId);
-      const connection = handle?.providerConnection;
-      const processIdentity = connection?.processIdentity?.trim() || null;
-      const expectedPid = connection?.pid ?? handle?.pid ?? null;
-      if (!entry || !handle || !binding || !entry.work_attempt_id || !entry.provider_ref
-        || item.agent_id !== entry.id || item.room_id !== entry.room_id
-        || item.state !== "blocked" || item.failure_code !== "provider_continuation_missing"
-        || item.attempt_count !== 0 || item.provider_turn_id || item.outcome
-        || binding.entry_id !== entry.id || binding.room_id !== entry.room_id
-        || binding.work_attempt_id !== entry.work_attempt_id
-        || binding.execution_generation_id !== entry.provider_ref.execution_generation_id
-        || binding.agent_session_id !== agent.agentSessionId
-        || handle.workAttemptId !== entry.work_attempt_id
-        || expectedPid === null || expectedPid <= 0 || !processIdentity) {
-        return "authority_changed";
-      }
-      const credential = await this.workerBindings.credentialFor(binding);
-      if (!credential || credential !== agent.bearer) return "authority_changed";
-
-      const durableContinuation = entry.provider_ref.provider_continuation_id;
-      const currentContinuation = agent.providerContinuationId;
-      if (!currentContinuation) return "failed";
-      const previousCommittedForCurrentContinuation = Boolean(
-        previousRepair
-        && previousRepair.inbox_item_id === item.inbox_item_id
-        && previousRepair.phase === "committed"
-        && previousRepair.replacement_continuation === currentContinuation,
-      );
-      const previousRepairOnlyRematerialized = previousCommittedForCurrentContinuation
-        && previousRepair!.missing_continuation === previousRepair!.replacement_continuation;
-      if (previousCommittedForCurrentContinuation && !previousRepairOnlyRematerialized && !input.manual) {
-        if (!continuationRepairExhaustionNeedsPersistence(item.last_error)) return "failed";
-        await this.supervisedInbox.exhaustCommittedContinuationRepair(
-          item.inbox_item_id,
-          previousRepair!.repair_id,
-          CONTINUATION_REPAIR_EXHAUSTED_ERROR,
-        );
-        this.notifyStateChanged();
-        return "failed";
-      }
-      const forceReplacement = previousCommittedForCurrentContinuation
-        && (previousRepairOnlyRematerialized || input.manual);
-      const missingContinuation = continuationRepairMissingContinuation(
-        previousRepair,
-        item.inbox_item_id,
-        currentContinuation,
-      );
-      if (!missingContinuation) return "failed";
-      const replacementAlreadyDurable = previousRepair?.replacement_continuation ?? null;
-      const canReconcileFailedReplacement = previousRepair?.inbox_item_id === item.inbox_item_id
-        && previousRepair.phase === "failed"
-        && replacementAlreadyDurable !== null
-        && durableContinuation === replacementAlreadyDurable
-        && handle.providerContinuationId === replacementAlreadyDurable;
-      if (!input.manual
-        && previousRepair?.inbox_item_id === item.inbox_item_id
-        && previousRepair.phase === "failed"
-        && !canReconcileFailedReplacement) {
-        return "failed";
-      }
-      const continuationIsRepairTarget = durableContinuation === missingContinuation
-        || (replacementAlreadyDurable !== null && durableContinuation === replacementAlreadyDurable);
-      if (!continuationIsRepairTarget
-        || !sameProviderActionConnectionIdentity(entry.provider_ref.provider_connection, connection)) {
-        return "authority_changed";
-      }
-
-      const repair = await this.supervisedInbox.beginContinuationRepair({
-        agent_id: entry.id,
-        room_id: entry.room_id,
-        inbox_item_id: item.inbox_item_id,
-        daemon_generation: this.singleton.currentGeneration,
-        execution_generation_id: entry.provider_ref.execution_generation_id,
-        work_attempt_id: entry.work_attempt_id,
-        expected_pid: expectedPid,
-        expected_process_identity: processIdentity,
-        missing_continuation: missingContinuation,
-      });
-
-      // A predecessor may have completed every authority-changing commit and
-      // crashed before releasing the inbox row. Reconcile that fact without
-      // creating or probing another thread.
-      if (repair.replacement_continuation
-        && durableContinuation === repair.replacement_continuation
-        && handle.providerContinuationId === repair.replacement_continuation) {
-        await this.supervisedInbox.commitContinuationRepair(
-          repair.repair_id,
-          repair.replacement_continuation,
-          true,
-        );
-        return "restored";
-      }
-
-      if (durableContinuation !== repair.missing_continuation
-        || handle.providerContinuationId !== repair.missing_continuation) {
-        return "authority_changed";
-      }
-
-      try {
-        const result = await repairContinuation(handle, {
-          workAttemptId: entry.work_attempt_id,
-          expectedProviderContinuationId: repair.missing_continuation,
-          checkpointedReplacementProviderContinuationId: repair.replacement_continuation,
-          forceReplacement,
-          cwd: entry.workspace_path ?? "",
-          launchPolicy: entry.provider_launch_policy,
-          model: entry.model,
-          reasoningEffort: entry.reasoning_effort ?? null,
-        }, {
-          checkpointReplacement: async (replacementContinuation) => {
-            await this.singleton.assertCurrent();
-            const checkpointed = await this.supervisedInbox.checkpointContinuationReplacement(
-              repair.repair_id,
-              replacementContinuation,
-            );
-            const current = await this.store.getEntry(entry.id);
-            const currentHandle = this.liveHandles.get(entry.id);
-            if (!current || currentHandle !== handle
-              || current.work_attempt_id !== repair.work_attempt_id
-              || current.provider_ref?.execution_generation_id !== repair.execution_generation_id
-              || current.provider_ref.provider_continuation_id !== repair.missing_continuation
-              || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, handle.providerConnection)) {
-              throw new Error("Provider authority changed before the replacement conversation could be committed.");
-            }
-            const attempt = await this.durability.getAttempt(repair.work_attempt_id);
-            if (attempt.checkpoints.at(-1)?.provider_continuation_id !== replacementContinuation) {
-              await this.durability.checkpoint(repair.work_attempt_id, {
-                room_cursor: null,
-                provider_continuation_id: replacementContinuation,
-              });
-            }
-            await this.updateManifestEntry(entry.id, (candidate) => {
-              if (candidate.work_attempt_id !== repair.work_attempt_id
-                || candidate.provider_ref?.execution_generation_id !== repair.execution_generation_id
-                || candidate.provider_ref.provider_continuation_id !== repair.missing_continuation
-                || !sameProviderActionConnectionIdentity(candidate.provider_ref.provider_connection, handle.providerConnection)) {
-                throw new Error("Provider authority changed during replacement conversation persistence.");
-              }
-              return {
-                ...candidate,
-                provider_ref: {
-                  ...candidate.provider_ref,
-                  provider_continuation_id: checkpointed.replacement_continuation!,
-                },
-              };
-            });
-          },
-        });
-
-        if (result.handle.workAttemptId !== repair.work_attempt_id
-          || result.handle.pid !== repair.expected_pid
-          || !sameProviderActionConnectionIdentity(result.handle.providerConnection, connection)
-          || result.previousProviderContinuationId !== repair.missing_continuation) {
-          throw new Error("Continuation repair returned a different provider process or work attempt.");
-        }
-        const continuityReset = result.outcome === "replaced";
-        if (continuityReset) {
-          const committedEntry = await this.store.getEntry(entry.id);
-          if (committedEntry?.provider_ref?.provider_continuation_id !== result.replacementProviderContinuationId) {
-            throw new Error("Replacement conversation was not durable before handle promotion.");
-          }
-          await this.installProviderHandle(entry.id, result.handle, repair.execution_generation_id);
-        }
-        await this.supervisedInbox.commitContinuationRepair(
-          repair.repair_id,
-          result.replacementProviderContinuationId,
-          continuityReset,
-        );
-        this.notifyStateChanged();
-        return continuityReset ? "replaced" : "restored";
-      } catch (error) {
-        const detail = redactCredentialText(error instanceof Error ? error.message : "Conversation restoration failed.").value;
-        await this.supervisedInbox.failContinuationRepair(
-          repair.repair_id,
-          `Couldn't restore this agent's provider conversation. ${detail}`,
-        ).catch(() => undefined);
-        this.notifyStateChanged();
-        return "failed";
-      }
-    });
+    return this.continuationRepairs.restore(input);
   }
 
   /** Inspector reads are exact-entry scoped; a room mismatch never falls back to history. */
@@ -1016,261 +882,9 @@ export class SupervisorDaemon {
     return this.boundedEffects.completeOnce(input, admittedDaemonExecution);
   }
 
-  private async commitPreparedRoomMove(input: { agent: SupervisedIngressAgent; inboxItemId: string }): Promise<void> {
-    const item = await this.supervisedInbox.get(input.inboxItemId);
-    if (!item?.provider_turn_id || !["acknowledged", "acknowledged_no_reply"].includes(item.state)) return;
-    try {
-      for (const move of await this.store.pendingRoomMoves(input.agent.agentId)) await this.reconcileRoomMove(move);
-    } catch {
-      // The reply is already terminal and ingress is fenced. A transient join
-      // or local-store failure must retry the durable move, not fail or rerun
-      // the completed provider turn.
-      this.scheduleRecoveryConvergence(input.agent.agentId, 1_000);
-    }
-  }
-
-  private async reconcilePreparedRoomMoves(agentId?: string): Promise<void> {
-    // Repair an exact predecessor split first. Earlier builds could commit a
-    // terminal move and crash before terminalizing its prepared join effect;
-    // terminal moves are absent from pendingRoomMoves(), so effect-first
-    // enumeration is the only complete startup worklist.
-    for (const effect of await this.supervisedInbox.preparedRoomMoves(agentId)) {
-      await this.reconcilePreparedRoomMove(effect).catch(() => {
-        this.scheduleRecoveryConvergence(effect.agent_id, 1_000);
-      });
-    }
-    for (const move of await this.store.pendingRoomMoves(agentId)) {
-      await this.reconcileRoomMove(move).catch(() => {
-        this.scheduleRecoveryConvergence(move.agent_id, 1_000);
-      });
-    }
-  }
-
-  private async reconcilePreparedRoomMove(effect: SupervisedEffectRecord): Promise<void> {
-    const move = await this.store.getRoomMove(`room_move:${effect.effect_id}`);
-    if (!move) return;
-    if (move.phase === "active" || move.phase === "failed") {
-      await this.store.advanceRoomMove({
-        operationId: move.operation_id,
-        agentId: move.agent_id,
-        expectedDaemonGeneration: move.daemon_generation,
-        expectedExecutionGenerationId: move.execution_generation_id,
-        from: [move.phase],
-        to: move.phase,
-        error: move.error,
-      }, (commit) => this.fenceDaemonCommit(commit));
-      return;
-    }
-    await this.reconcileRoomMove(move);
-  }
-
-  /**
-   * Shared room-move transaction runner for Inspector and mediated join_room.
-   * Every durable edge is re-authorized against the exact provider generation;
-   * a successor may adopt only the journal generation, never its runtime fence.
-   */
-  private async reconcileRoomMove(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
-    // Lifecycle/recovery announces exclusion synchronously, before draining
-    // delivery. Avoid queueing a room-move continuation behind that drain: a
-    // delivery callback may itself be waiting to reconcile this exact move.
-    try {
-      return await this.entryConcurrency.runRoomMove(initial.agent_id, initial, async () => {
-      if (this.handoffScheduled) return initial;
-      let move = await this.store.getRoomMove(initial.operation_id);
-      if (!move || ["active", "failed"].includes(move.phase)) return move ?? initial;
-      if (move.daemon_generation !== this.singleton.currentGeneration) {
-        await this.singleton.assertCurrent();
-        move = await this.store.advanceRoomMove({ operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation, expectedExecutionGenerationId: move.execution_generation_id, from: [move.phase], to: move.phase, adoptDaemonGeneration: this.singleton.currentGeneration }, (commit) => this.fenceDaemonCommit(commit));
-      }
-      if (move.phase === "rollback_required") return this.compensateRoomMoveRollback(move);
-      let entry = await this.store.getEntry(move.agent_id);
-      const membershipCommitted = ["membership_committed", "rotating_credentials", "bootstrapping_destination_tail"].includes(move.phase);
-      // joining_destination is already beyond the last provably pre-effect
-      // edge: the remote join may have committed before a lost response or a
-      // daemon crash. Any authority mismatch from this phase onward requires
-      // compensation, even while local membership still names the source.
-      const externalJoinMayHaveCommitted = move.phase === "joining_destination" || membershipCommitted;
-      const runtimeExact = Boolean(entry && entry.desired_state === "running"
-        && move.work_attempt_id && move.execution_generation_id
-        && entry.work_attempt_id === move.work_attempt_id
-        && entry.provider_ref?.execution_generation_id === move.execution_generation_id);
-      if (!entry || !runtimeExact || (membershipCommitted ? entry.room_id !== (move.remote_room_id ?? move.destination_room_id) : ![move.source_room_id, move.destination_room_id, move.remote_room_id].includes(entry.room_id))) {
-        const phase = externalJoinMayHaveCommitted ? "rollback_required" : "failed";
-        move = await this.store.advanceRoomMove({ operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation, expectedExecutionGenerationId: move.execution_generation_id, from: [move.phase], to: phase, error: "The exact provider generation or room membership changed during the move." }, (commit) => this.fenceDaemonCommit(commit));
-        if (phase === "rollback_required") this.scheduleRecoveryConvergence(move.agent_id, 1_000);
-        return move;
-      }
-      const advance = async (from: DaemonRoomMoveRecord["phase"], to: DaemonRoomMoveRecord["phase"], extra: Partial<Pick<DaemonRoomMoveRecord, "remote_room_id" | "destination_cursor" | "source_credentials_revoked" | "error">> = {}) => {
-        move = await this.store.advanceRoomMove({ operationId: move!.operation_id, agentId: move!.agent_id, expectedDaemonGeneration: move!.daemon_generation, expectedExecutionGenerationId: move!.execution_generation_id, from: [from], to, remoteRoomId: extra.remote_room_id, destinationCursor: extra.destination_cursor, sourceCredentialsRevoked: extra.source_credentials_revoked, error: extra.error }, (commit) => this.fenceDaemonCommit(commit));
-      };
-      const runtimeIsExact = async (roomIds: readonly string[]): Promise<boolean> => {
-        if (!await this.ownsDaemonGeneration(move!.daemon_generation)) return false;
-        const current = await this.store.getEntry(move!.agent_id);
-        return Boolean(current && roomIds.includes(current.room_id) && current.work_attempt_id === move!.work_attempt_id
-          && current.provider_ref?.execution_generation_id === move!.execution_generation_id);
-      };
-      const failFence = async (terminal: "failed" | "rollback_required", detail: string): Promise<DaemonRoomMoveRecord> => {
-        await advance(move!.phase, terminal, { error: detail });
-        if (terminal === "rollback_required") this.scheduleRecoveryConvergence(move!.agent_id, 1_000);
-        return move!;
-      };
-
-      if (move.phase === "prepared") await advance("prepared", "waiting_for_current_turn");
-      if (move.phase === "waiting_for_current_turn") {
-        if (move.activating_inbox_item_id) {
-          const item = await this.supervisedInbox.get(move.activating_inbox_item_id);
-          const providerTurnBinding = item
-            ? await this.supervisedInbox.providerTurnBinding(item.inbox_item_id)
-            : null;
-          const effect = move.effect_id && move.provider_turn_id && providerTurnBinding
-            ? await this.supervisedInbox.preparedRoomMove(
-              move.agent_id,
-              providerTurnBinding.origin_execution_generation_id,
-              move.provider_turn_id,
-            )
-            : null;
-          const exactActivatingAuthority = Boolean(item
-            && item.agent_id === move.agent_id && item.room_id === move.source_room_id
-            && item.provider_turn_id === move.provider_turn_id
-            && providerTurnBinding && providerTurnBinding.provider_turn_id === item.provider_turn_id
-            && effect && effect.effect_id === move.effect_id && effect.room_id === move.source_room_id
-            && effect.execution_generation_id === providerTurnBinding.origin_execution_generation_id);
-          if (!exactActivatingAuthority) {
-            return failFence("failed", "The activating provider-turn authority changed before destination membership was joined.");
-          }
-          if (["cancelled_by_room_move", "cancelled_by_user"].includes(item!.state)) {
-            return failFence("failed", "The activating provider turn was cancelled before destination membership was joined.");
-          }
-          if (!["acknowledged", "acknowledged_no_reply"].includes(item!.state)) return move;
-        } else {
-          const receipts = await this.supervisedInbox.receipts(move.agent_id);
-          if (receipts.some((receipt) => ["dispatching", "awaiting_result", "result_recovery", "publishing", "retryable"].includes(receipt.state)
-            || (receipt.state === "pending" && receipt.provider_turn_id !== null))) return move;
-        }
-        if (!await runtimeIsExact([move.source_room_id])) return failFence("failed", "Runtime authority changed before destination membership was joined.");
-        await advance("waiting_for_current_turn", "joining_destination");
-      }
-      if (move.phase === "joining_destination") {
-        this.supervisedDelivery?.pauseIngress(move.agent_id);
-        const binding = await this.workerBindings.get(move.agent_id);
-        const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-        if (!binding || !credential || binding.room_id !== move.source_room_id
-          || binding.work_attempt_id !== move.work_attempt_id || binding.execution_generation_id !== move.execution_generation_id
-          || (move.agent_session_id !== null && binding.agent_session_id !== move.agent_session_id)) return move;
-        let remoteRoomId: string;
-        try {
-          if (!this.supervisedDeliveryHttp.joinRoom) throw new Error("Durable room join transport is unavailable.");
-          await this.assertRoomMoveExternalAuthority();
-          remoteRoomId = (await this.supervisedDeliveryHttp.joinRoom({ roomId: move.destination_room_id, apiUrl: binding.api_url, bearer: credential, signal: AbortSignal.timeout(10_000) })).roomId.trim();
-          await this.assertRoomMoveExternalAuthority();
-          if (!remoteRoomId || remoteRoomId === move.source_room_id || remoteRoomId.length > 1_024 || /[\u0000-\u001f\u007f]/.test(remoteRoomId)) throw new Error("Destination join response omitted a valid distinct canonical room identity.");
-        } catch (error) {
-          if (this.handoffScheduled && error instanceof DaemonFenceLostError) throw error;
-          if (!authoritativeRoomJoinRejection(error)) {
-            await advance("joining_destination", "joining_destination", { error: `Destination join outcome was ambiguous and will retry: ${schedulerErrorDetail(error)}` });
-            this.scheduleRecoveryConvergence(move.agent_id, 1_000);
-            return move;
-          }
-          await advance("joining_destination", "failed", { error: `Destination join was authoritatively rejected before local membership changed: ${schedulerErrorDetail(error)}` });
-          void this.startSupervisedDelivery(move.agent_id).catch(() => undefined);
-          return move;
-        }
-        // The join target can be an alias while the server returns a
-        // different canonical room id. Journal that canonical identity before
-        // changing the manifest. A crash after local membership then replays
-        // from joining_destination with enough durable evidence to recognize
-        // the canonical room instead of falsely terminalizing the move.
-        await advance("joining_destination", "joining_destination", { remote_room_id: remoteRoomId });
-        entry = await this.store.getEntry(move.agent_id);
-        if (!entry || entry.work_attempt_id !== move.work_attempt_id || entry.provider_ref?.execution_generation_id !== move.execution_generation_id) {
-          try {
-            await this.assertRoomMoveExternalAuthority();
-            await this.supervisedDeliveryHttp.joinRoom({ roomId: move.source_room_id, apiUrl: binding.api_url, bearer: credential, signal: AbortSignal.timeout(10_000) });
-            await this.assertRoomMoveExternalAuthority();
-            await advance("joining_destination", "failed", { error: "Runtime authority changed after remote join; remote membership was rolled back to the source room." });
-          } catch (error) {
-            await advance("joining_destination", "rollback_required", { error: `Runtime authority changed after remote join and remote rollback failed: ${schedulerErrorDetail(error)}` });
-            this.scheduleRecoveryConvergence(move.agent_id, 1_000);
-          }
-          return move;
-        }
-        if (entry.room_id === move.source_room_id) {
-          const fencedMove = move;
-          await this.updateManifestEntry(fencedMove.agent_id, (current) => current.work_attempt_id === fencedMove.work_attempt_id && current.provider_ref?.execution_generation_id === fencedMove.execution_generation_id && current.room_id === fencedMove.source_room_id ? {
-            ...current, room_id: remoteRoomId, condition: "coordination_blocked",
-            last_error: "Room membership moved; waiting for destination credential rotation.",
-            workplace_liveness: { state: "unknown", observed_at: new Date().toISOString(), detail: "Destination membership committed; destination ingress is not active yet." },
-            last_worker_binding: null,
-          } : current);
-        }
-        entry = await this.store.getEntry(move.agent_id);
-        if (!entry || entry.room_id !== remoteRoomId || entry.work_attempt_id !== move.work_attempt_id || entry.provider_ref?.execution_generation_id !== move.execution_generation_id) {
-          try {
-            await this.assertRoomMoveExternalAuthority();
-            await this.supervisedDeliveryHttp.joinRoom({ roomId: move.source_room_id, apiUrl: binding.api_url, bearer: credential, signal: AbortSignal.timeout(10_000) });
-            await this.assertRoomMoveExternalAuthority();
-            await advance("joining_destination", "failed", { error: "Local membership commit lost its fence; remote membership was rolled back to the source room." });
-          } catch (error) {
-            await advance("joining_destination", "rollback_required", { error: `Local membership commit and remote rollback both failed: ${schedulerErrorDetail(error)}` });
-            this.scheduleRecoveryConvergence(move.agent_id, 1_000);
-          }
-          return move;
-        }
-        await advance("joining_destination", "membership_committed", { remote_room_id: remoteRoomId });
-      }
-      if (move.phase === "membership_committed") {
-        const binding = await this.workerBindings.get(move.agent_id);
-        const destination = move.remote_room_id ?? move.destination_room_id;
-        if (!binding || ![move.source_room_id, destination].includes(binding.room_id) || binding.work_attempt_id !== move.work_attempt_id || binding.execution_generation_id !== move.execution_generation_id) return failFence("rollback_required", "Credential binding changed after membership commit.");
-        const activating = move.activating_inbox_item_id ? await this.supervisedInbox.get(move.activating_inbox_item_id) : null;
-        await this.supervisedInbox.commitRoomMoveQueue({ operation_id: move.operation_id, agent_id: move.agent_id, old_room_id: move.source_room_id, after_fifo_sequence: activating?.fifo_sequence ?? 0 }, (commit) => this.fenceDaemonCommit(commit));
-        if (!await runtimeIsExact([destination])) return failFence("rollback_required", "Runtime authority changed after membership commit.");
-        await advance("membership_committed", "rotating_credentials");
-      }
-      if (move.phase === "rotating_credentials") {
-        const destination = move.remote_room_id ?? move.destination_room_id;
-        if (!await runtimeIsExact([destination])) return failFence("rollback_required", "Runtime authority changed during credential rotation.");
-        // Process memory is not durable revocation evidence. Electron owns the
-        // parent grant and must first acknowledge revocation of the exact
-        // journalled source session, then install a destination-scoped grant
-        // into this same daemon generation.
-        if (!move.source_credentials_revoked || !move.agent_session_id) return move;
-        const binding = await this.workerBindings.get(move.agent_id);
-        const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-        const grant = this.workerRuntimeCustody.hostGrant(move.agent_id) ?? null;
-        if (!binding || !credential || binding.room_id !== destination
-          || binding.work_attempt_id !== move.work_attempt_id || binding.execution_generation_id !== move.execution_generation_id
-          || !grant || grant.entryId !== move.agent_id || grant.roomId !== destination
-          || grant.daemonGeneration !== move.daemon_generation) return move;
-        await advance("rotating_credentials", "bootstrapping_destination_tail");
-      }
-      if (move.phase === "bootstrapping_destination_tail") {
-        const current = await this.store.getEntry(move.agent_id);
-        const binding = await this.workerBindings.get(move.agent_id);
-        const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-        const destination = move.remote_room_id ?? move.destination_room_id;
-        if (!current || current.room_id !== destination || current.work_attempt_id !== move.work_attempt_id
-          || current.provider_ref?.execution_generation_id !== move.execution_generation_id) return failFence("rollback_required", "Runtime authority changed before destination ingress activation.");
-        if (!binding || !credential || binding.room_id !== destination || binding.work_attempt_id !== move.work_attempt_id
-          || binding.execution_generation_id !== move.execution_generation_id || !this.supervisedDeliveryHttp.latest) return move;
-        await this.assertRoomMoveExternalAuthority();
-        const tail = await this.supervisedDeliveryHttp.latest({ roomId: destination, apiUrl: binding.api_url, bearer: credential, signal: AbortSignal.timeout(10_000) });
-        await this.assertRoomMoveExternalAuthority();
-        if (!await runtimeIsExact([destination])) return failFence("rollback_required", "Runtime authority changed while destination tail was observed.");
-        const exactBinding = await this.workerBindings.get(move.agent_id);
-        if (!exactBinding || exactBinding.room_id !== destination || exactBinding.work_attempt_id !== move.work_attempt_id || exactBinding.execution_generation_id !== move.execution_generation_id || exactBinding.agent_session_id !== binding.agent_session_id) return move;
-        const cursor = lastRoomMessageId(tail.messages ?? []);
-        await this.supervisedInbox.commitRoomMoveCursor({ agent_id: move.agent_id, source_room_id: move.source_room_id, destination_room_id: destination, last_observed_message_id: cursor }, (commit) => this.fenceDaemonCommit(commit));
-        if (!await runtimeIsExact([destination])) return failFence("rollback_required", "Runtime authority changed before destination ingress activation committed.");
-        await advance("bootstrapping_destination_tail", "active", { destination_cursor: cursor });
-        void this.startSupervisedDelivery(move.agent_id).catch(() => undefined);
-      }
-      return move;
-      });
-    } catch (error) {
-      if (this.handoffScheduled && error instanceof DaemonFenceLostError) return initial;
-      throw error;
-    }
+  /** Compatibility seam for focused daemon integration tests; production callers use roomMoves directly. */
+  private reconcileRoomMove(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
+    return this.roomMoves.reconcile(initial);
   }
 
   private async waitForActiveRoomMoveReconciliation(entryId: string): Promise<void> {
@@ -1289,217 +903,6 @@ export class SupervisorDaemon {
    */
   private async fenceAndDrainRoomMoveReconciliations(): Promise<void> {
     await this.entryConcurrency.fenceAndDrainRoomMoves();
-  }
-
-  private async assertRoomMoveExternalAuthority(): Promise<void> {
-    if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale room-move effect.");
-    await this.singleton.assertCurrent();
-    if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale room-move effect.");
-  }
-
-  /**
-   * Retryable compensation for every post-join failure. Each edge is
-   * idempotent, so a daemon crash may replay from rollback_required without
-   * inventing external success or leaving the operation as a permanent lock.
-   */
-  private async compensateRoomMoveRollback(initial: DaemonRoomMoveRecord): Promise<DaemonRoomMoveRecord> {
-    let move = initial;
-    const destination = move.remote_room_id ?? move.destination_room_id;
-    const retry = async (detail: string): Promise<DaemonRoomMoveRecord> => {
-      move = await this.store.advanceRoomMove({
-        operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
-        expectedExecutionGenerationId: move.execution_generation_id, from: ["rollback_required"], to: "rollback_required", error: detail,
-      }, (commit) => this.fenceDaemonCommit(commit));
-      this.scheduleRecoveryConvergence(move.agent_id, 1_000);
-      return move;
-    };
-    this.supervisedDelivery?.pauseIngress(move.agent_id);
-    const entry = await this.store.getEntry(move.agent_id);
-    if (!entry) return move;
-    if (![move.source_room_id, destination, move.destination_room_id].includes(entry.room_id)) {
-      const detail = `Room-move rollback was superseded by operator membership ${entry.room_id}; no local membership was overwritten.`;
-      move = await this.store.advanceRoomMove({
-        operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
-        expectedExecutionGenerationId: move.execution_generation_id, from: ["rollback_required"], to: "failed", error: detail,
-      }, (commit) => this.fenceDaemonCommit(commit));
-      return move;
-    }
-
-    const binding = await this.workerBindings.get(move.agent_id);
-    const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-    if (!binding || !credential || ![move.source_room_id, destination, move.destination_room_id].includes(binding.room_id)) {
-      return retry("Room-move rollback is waiting for a current source-or-destination credential.");
-    }
-    if (!this.supervisedDeliveryHttp.joinRoom) return retry("Room-move rollback transport is unavailable.");
-    try {
-      await this.assertRoomMoveExternalAuthority();
-      const joined = await this.supervisedDeliveryHttp.joinRoom({
-        roomId: move.source_room_id, apiUrl: binding.api_url, bearer: credential, signal: AbortSignal.timeout(10_000),
-      });
-      await this.assertRoomMoveExternalAuthority();
-      if (joined.roomId.trim() !== move.source_room_id) throw new Error("Source rejoin returned a different canonical room identity.");
-    } catch (error) {
-      if (this.handoffScheduled && error instanceof DaemonFenceLostError) throw error;
-      return retry(`Source-room rollback join failed and will retry: ${schedulerErrorDetail(error)}`);
-    }
-
-    await this.updateManifestEntry(move.agent_id, (current) => {
-      if (![move.source_room_id, destination, move.destination_room_id].includes(current.room_id)) return current;
-      return {
-        ...current,
-        room_id: move.source_room_id,
-        condition: "coordination_blocked",
-        last_error: "Room move rolled back; waiting for source-room credential and ingress convergence.",
-        workplace_liveness: {
-          state: "unknown", observed_at: new Date().toISOString(),
-          detail: "Source membership restored after room-move compensation.",
-        },
-        last_worker_binding: binding.room_id === move.source_room_id ? current.last_worker_binding : null,
-      };
-    });
-    const restored = await this.store.getEntry(move.agent_id);
-    if (!restored || restored.room_id !== move.source_room_id) {
-      return retry("Source-room external membership was restored, but local membership is awaiting an operator-safe retry.");
-    }
-
-    const activating = move.activating_inbox_item_id ? await this.supervisedInbox.get(move.activating_inbox_item_id) : null;
-    await this.supervisedInbox.rollbackRoomMoveIngress({
-      operation_id: move.operation_id,
-      agent_id: move.agent_id,
-      source_room_id: move.source_room_id,
-      destination_room_id: destination,
-      source_cursor_present: move.source_cursor_present,
-      source_cursor: move.source_cursor,
-      after_fifo_sequence: activating?.fifo_sequence ?? 0,
-    }, (commit) => this.fenceDaemonCommit(commit));
-    if (binding.room_id !== move.source_room_id) {
-      await this.workerBindings.unbind(move.agent_id, binding.agent_session_id, binding.execution_generation_id);
-      this.workerRuntimeCustody.deleteLiveBinding(move.agent_id);
-      this.workerRuntimeCustody.deleteWorkerAuthorization(move.agent_id);
-    }
-    const grant = this.workerRuntimeCustody.hostGrant(move.agent_id);
-    if (grant && grant.roomId !== move.source_room_id) this.revokeHostGrantIfCurrent(move.agent_id, grant);
-
-    const detail = "Room move failed after destination join and was durably restored to the source room.";
-    move = await this.store.advanceRoomMove({
-      operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
-      expectedExecutionGenerationId: move.execution_generation_id, from: ["rollback_required"], to: "failed", error: detail,
-    }, (commit) => this.fenceDaemonCommit(commit));
-    void this.startSupervisedDelivery(move.agent_id).catch(() => undefined);
-    return move;
-  }
-
-  private async prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
-    if (!input.entryId.trim() || !input.destinationRoomId.trim() || input.destinationRoomId.length > 1_024 || /[\u0000-\u001f\u007f]/.test(input.destinationRoomId) || !input.requestId.trim() || input.requestId.length > 256
-      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) throw new Error("Room-move preparation is stale or invalid.");
-    return this.serializeEntryTick(input.entryId, async () => {
-      await this.singleton.assertCurrent();
-      const entry = await this.store.getEntry(input.entryId);
-      const binding = await this.workerBindings.get(input.entryId);
-      const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-      const handle = this.liveHandles.get(input.entryId);
-      if (!entry || input.destinationRoomId.trim() === entry.room_id || !entry.work_attempt_id || !entry.provider_ref || !binding || !credential || !handle
-        || binding.room_id !== entry.room_id || binding.work_attempt_id !== entry.work_attempt_id
-        || binding.execution_generation_id !== entry.provider_ref.execution_generation_id
-        || handle.workAttemptId !== entry.work_attempt_id || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id) {
-        throw new Error("Room move requires the exact current live provider and source-room credential binding.");
-      }
-      const operationId = `inspector-room-move:${input.entryId}:${input.requestId}`;
-      const prepared = await this.store.prepareRoomMove({
-        operation_id: operationId, request_id: `inspector:${input.requestId}`, agent_id: entry.id,
-        source_room_id: entry.room_id, destination_room_id: input.destinationRoomId.trim(), daemon_generation: input.daemonGeneration,
-        work_attempt_id: entry.work_attempt_id, execution_generation_id: entry.provider_ref.execution_generation_id,
-        agent_session_id: binding.agent_session_id, activating_inbox_item_id: null, provider_turn_id: null, effect_id: null, phase: "prepared",
-      }, (commit) => this.fenceDaemonCommit(commit));
-      return prepared.move;
-    });
-  }
-
-  private async commitInspectorRoomMove(input: { operationId: string; entryId: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
-    if (!input.operationId.trim() || !input.entryId.trim() || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) throw new Error("Room-move commit is stale or invalid.");
-    const move = await this.store.getRoomMove(input.operationId);
-    if (!move || move.agent_id !== input.entryId) throw new Error("Unknown room-move operation for this agent.");
-    return this.reconcileRoomMove(move);
-  }
-
-  private async acknowledgeInspectorRoomMoveSourceRevocation(input: { operationId: string; entryId: string; sourceAgentSessionId: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
-    if (!input.operationId.trim() || !input.entryId.trim() || !input.sourceAgentSessionId.trim()
-      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) {
-      throw new Error("Room-move credential acknowledgement is stale or invalid.");
-    }
-    return this.serializeEntryTick(input.entryId, async () => {
-      await this.singleton.assertCurrent();
-      const move = await this.store.getRoomMove(input.operationId);
-      if (!move || move.agent_id !== input.entryId) throw new Error("Unknown room-move operation for this agent.");
-      if (move.agent_session_id !== input.sourceAgentSessionId) throw new Error("Room-move credential acknowledgement does not match the exact source session.");
-      if (move.source_credentials_revoked) return move;
-      if (move.phase !== "rotating_credentials") throw new Error("Room-move source credentials can only be acknowledged during credential rotation.");
-      return this.store.advanceRoomMove({
-        operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
-        expectedExecutionGenerationId: move.execution_generation_id, from: ["rotating_credentials"], to: "rotating_credentials",
-        sourceCredentialsRevoked: true,
-      }, (commit) => this.fenceDaemonCommit(commit));
-    });
-  }
-
-  private async rollbackInspectorRoomMove(input: { operationId: string; entryId: string; detail: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
-    if (!input.operationId.trim() || !input.entryId.trim() || !input.detail.trim()
-      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) {
-      throw new Error("Room-move rollback is stale or invalid.");
-    }
-    return this.serializeEntryTick(input.entryId, async () => {
-      await this.singleton.assertCurrent();
-      let move = await this.store.getRoomMove(input.operationId);
-      if (!move || move.agent_id !== input.entryId) throw new Error("Unknown room-move operation for this agent.");
-      if (["active", "failed"].includes(move.phase)) return move;
-      if (move.phase !== "rollback_required") {
-        if (!["joining_destination", "membership_committed", "rotating_credentials", "bootstrapping_destination_tail"].includes(move.phase)) {
-          throw new Error("Room move cannot be rolled back before destination membership commits.");
-        }
-        move = await this.store.advanceRoomMove({
-          operationId: move.operation_id, agentId: move.agent_id, expectedDaemonGeneration: move.daemon_generation,
-          expectedExecutionGenerationId: move.execution_generation_id, from: [move.phase], to: "rollback_required",
-          error: `Destination credential preparation failed: ${schedulerErrorDetail(new Error(input.detail))}`,
-        }, (commit) => this.fenceDaemonCommit(commit));
-      }
-      // Journal rollback_required before restoring local source membership, so
-      // a crash can never make the source manifest look like a fresh move.
-      const destination = move.remote_room_id ?? move.destination_room_id;
-      await this.updateManifestEntry(move.agent_id, (current) => {
-        if (![move.source_room_id, destination, move.destination_room_id].includes(current.room_id)) return current;
-        return {
-          ...current, room_id: move.source_room_id, condition: "coordination_blocked",
-          last_error: "Room move rollback is waiting for source-room owner authority.",
-          workplace_liveness: {
-            state: "unknown", observed_at: new Date().toISOString(),
-            detail: "Destination credential preparation failed; source authority is being restored.",
-          },
-          last_worker_binding: current.room_id === move.source_room_id ? current.last_worker_binding : null,
-        };
-      });
-      return move;
-    });
-  }
-
-  private async getInspectorRoomMove(input: { operationId: string; entryId: string; daemonGeneration: number }): Promise<DaemonRoomMoveRecord> {
-    if (!input.operationId.trim() || !input.entryId.trim() || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration !== this.singleton.currentGeneration) throw new Error("Room-move status is stale or invalid.");
-    const move = await this.store.getRoomMove(input.operationId);
-    if (!move || move.agent_id !== input.entryId) throw new Error("Unknown room-move operation for this agent.");
-    return move;
-  }
-
-  private async getCurrentInspectorRoomMove(input: {
-    entryId: string;
-    daemonGeneration: number;
-  }): Promise<DaemonRoomMoveRecord | null> {
-    if (!input.entryId.trim() || !Number.isSafeInteger(input.daemonGeneration)
-      || input.daemonGeneration !== this.singleton.currentGeneration) {
-      throw new Error("Current room-move discovery is stale or invalid.");
-    }
-    const moves = await this.store.pendingRoomMoves(input.entryId);
-    if (moves.length > 1) throw new Error("More than one nonterminal room move exists for this agent.");
-    const move = moves[0] ?? null;
-    return move?.daemon_generation === input.daemonGeneration ? move : null;
   }
 
   /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
@@ -1532,7 +935,7 @@ export class SupervisorDaemon {
     if (pendingMove) {
       let move: DaemonRoomMoveRecord;
       try {
-        move = await this.reconcileRoomMove(pendingMove);
+        move = await this.roomMoves.reconcile(pendingMove);
       } catch (error) {
         this.scheduleRecoveryConvergence(pendingMove.agent_id, 1_000);
         throw error;
