@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
-import { isDeepStrictEqual } from "node:util";
 
 import { AuditLog } from "./audit-log.js";
 import { AgentStreamRegistry } from "./agent-stream-registry.js";
@@ -36,6 +35,7 @@ import { WorkDurabilityStore } from "./durability-store.js";
 import { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import { EphemeralWorkspaceProvisioner, isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
+import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
@@ -69,7 +69,6 @@ import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import {
   deriveProviderConfigurationSnapshot,
   providerSupportsConcurrentSupervisedAgents,
-  type ProviderReasoningEffort,
 } from "./provider-configuration.js";
 import {
   assertSupervisedPermissionProfileAvailable,
@@ -172,6 +171,7 @@ export class SupervisorDaemon {
   private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
   private readonly legacyLanes: LegacyLaneCoordinator;
+  private readonly manifestAdministration: ManifestAdministrationCoordinator;
   private readonly audit: AuditLog;
   private readonly durability: WorkDurabilityStore;
   private readonly provisioner: WorkspaceProvisioner;
@@ -296,6 +296,31 @@ export class SupervisorDaemon {
         assertCurrent: () => this.singleton.assertCurrent(),
       },
       isSupervisedLaneOwner: (entry) => this.isSupervisedLaneOwner(entry),
+    });
+    this.manifestAdministration = new ManifestAdministrationCoordinator({
+      store: this.store,
+      authority: {
+        serialize: (operation) => this.serializeManifestMutation(operation),
+        assertCurrent: () => this.singleton.assertCurrent(),
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        currentManifestGeneration: () => this.manifestGeneration,
+        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+      },
+      policies: {
+        projectCreateReplayParameters: projectDaemonCreateRequestReplayParameters,
+        providerSupportsConcurrentAgents: providerSupportsConcurrentSupervisedAgents,
+        deriveProviderConfiguration: deriveProviderConfigurationSnapshot,
+        permissionProfilesForProvider: supervisedPermissionProfilesForProvider,
+        sanitizeActivity: sanitizeDaemonActivityEvent,
+        safeErrorDetail: schedulerErrorDetail,
+      },
+      lanes: {
+        liveOwners: (owners) => this.legacyLanes.liveOwners(owners),
+      },
+      convergence: {
+        request: (entryId) => this.requestConvergence(entryId),
+      },
     });
     this.audit = new AuditLog(paths.auditPath);
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
@@ -1775,16 +1800,8 @@ export class SupervisorDaemon {
     return result;
   }
 
-
-  private validateEntry(entry: DaemonManifestEntry): void {
-    for (const field of ["id", "room_id", "display_name", "provider", "charter", "created_by", "created_at"] as const) {
-      if (typeof entry[field] !== "string" || !entry[field].trim()) throw new Error(`Manifest entry ${field} is required.`);
-    }
-    if (!["running", "paused", "stopped"].includes(entry.desired_state)) throw new Error("Invalid desired state.");
-  }
-
   private isSupervisedLaneOwner(entry: DaemonManifestEntry): boolean {
-    return !(entry.desired_state === "stopped" && entry.observed_state === "stopped");
+    return this.manifestAdministration.isSupervisedLaneOwner(entry);
   }
 
   /**
@@ -1797,97 +1814,20 @@ export class SupervisorDaemon {
     entries: readonly DaemonManifestEntry[],
     entry: DaemonManifestEntry,
   ): DaemonManifestEntry | undefined {
-    if (providerSupportsConcurrentSupervisedAgents(entry.provider)) return undefined;
-    return entries.find((candidate) =>
-      candidate.id !== entry.id
-      && candidate.room_id === entry.room_id
-      && candidate.provider === entry.provider
-      && this.isSupervisedLaneOwner(candidate));
+    return this.manifestAdministration.competingSupervisedLaneOwner(entries, entry);
   }
 
   private async quarantineDuplicateSupervisedLaneOwners(): Promise<void> {
-    await this.serializeManifestMutation(async () => {
-      const manifest = await this.store.load();
-      const ownersByLane = new Map<string, DaemonManifestEntry[]>();
-      for (const entry of manifest.entries) {
-        if (providerSupportsConcurrentSupervisedAgents(entry.provider)) continue;
-        if (!this.isSupervisedLaneOwner(entry)) continue;
-        const key = `${entry.room_id}\u0000${entry.provider}`;
-        const owners = ownersByLane.get(key) ?? [];
-        owners.push(entry);
-        ownersByLane.set(key, owners);
-      }
-      const duplicateIds = new Set(
-        [...ownersByLane.values()]
-          .filter((owners) => owners.length > 1)
-          .flatMap((owners) => owners.map((entry) => entry.id)),
-      );
-      if (!duplicateIds.size) return;
-      const entries = manifest.entries.map((entry) => duplicateIds.has(entry.id)
-        ? {
-            ...entry,
-            desired_state: "stopped" as const,
-            last_error: "LetAgents found multiple supervised agents for this provider lane after restart and stopped them to prevent duplicate work.",
-          }
-        : entry);
-      const next = await this.writeManifest(this.manifestGeneration, entries, manifest.legacy_lane_owners);
-      this.manifestGeneration = next.generation;
-    });
+    await this.manifestAdministration.quarantineDuplicateSupervisedLaneOwners();
   }
 
   /** Inspector configuration is a durable optimistic-concurrency resource. */
   private async getAgentConfiguration(entryId: string, daemonGeneration: number) {
-    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Agent configuration is fenced by a stale daemon generation.");
-    const configuration = await this.store.getAgentConfiguration(entryId);
-    if (!configuration) throw new Error("The exact agent no longer exists.");
-    return {
-      entry_id: entryId, daemon_generation: daemonGeneration, ...configuration,
-      supervised_permission_profiles: supervisedPermissionProfilesForProvider(configuration.provider),
-    };
+    return this.manifestAdministration.getAgentConfiguration(entryId, daemonGeneration);
   }
 
   private async updateAgentConfiguration(input: { entryId: string; daemonGeneration: number; expectedRevision: number; configuration: Record<string, unknown> }) {
-    if (!input.entryId || input.daemonGeneration !== this.singleton.currentGeneration || !Number.isSafeInteger(input.expectedRevision) || input.expectedRevision < 1) {
-      return { outcome: "invalid", error: "Configuration requires an exact agent, current daemon generation, and positive expected revision." };
-    }
-    const effort = input.configuration.reasoning_effort;
-    const model = input.configuration.model;
-    const charter = input.configuration.charter;
-    const profile = input.configuration.permission_profile_id;
-    if (!Object.hasOwn(input.configuration, "model") || !Object.hasOwn(input.configuration, "reasoning_effort")
-      || !Object.hasOwn(input.configuration, "charter") || !Object.hasOwn(input.configuration, "permission_profile_id")
-      || Object.hasOwn(input.configuration, "provider_launch_policy")
-      || (effort !== null && !["low", "medium", "high", "xhigh", "max"].includes(String(effort)))
-      || (model !== null && (typeof model !== "string" || !model.trim() || model.length > 256))
-      || typeof charter !== "string" || !charter.trim()
-      || charter.length > 32_768
-      || (profile !== null && (typeof profile !== "string" || !profile.trim() || profile.length > 128))) {
-      return { outcome: "invalid", error: "The selected provider does not accept this model, effort, charter, or permission profile. Native launch policy is managed by the desktop supervisor." };
-    }
-    const currentConfiguration = await this.store.getAgentConfiguration(input.entryId);
-    if (!currentConfiguration) return { outcome: "invalid", error: "The exact agent no longer exists." };
-    try {
-      const normalized = deriveProviderConfigurationSnapshot({
-        provider: currentConfiguration.provider,
-        model: model === null ? null : (model as string).trim(),
-        reasoningEffort: effort as ProviderReasoningEffort,
-        permissionProfileId: profile === null ? null : (profile as string).trim(),
-        configurationRevision: input.expectedRevision + 1,
-      }, currentConfiguration.provider_launch_policy);
-      return this.serializeManifestMutation(async () => {
-        await this.singleton.assertCurrent();
-        const result = await this.store.updateAgentConfiguration(this.manifestGeneration, {
-          agentId: input.entryId, expectedRevision: input.expectedRevision, model: normalized.model,
-          reasoningEffort: normalized.reasoningEffort, charter: charter.trim(),
-          permissionProfileId: normalized.permissionProfileId, providerLaunchPolicy: normalized.launchPolicy,
-        }, (commit) => this.fenceDaemonCommit(commit));
-        this.manifestGeneration = result.generation;
-        if (result.outcome === "invalid") return { outcome: "invalid", error: "The exact agent no longer exists." };
-        return { outcome: result.outcome, configuration: await this.getAgentConfiguration(input.entryId, input.daemonGeneration) };
-      });
-    } catch (error) {
-      return { outcome: "invalid", error: schedulerErrorDetail(error) };
-    }
+    return this.manifestAdministration.updateAgentConfiguration(input);
   }
 
   /**
@@ -2405,55 +2345,7 @@ export class SupervisorDaemon {
   }
 
   private async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
-    this.validateEntry(entry);
-    const updated = await this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const purgeTombstone = await this.store.getPurge(`purge:${entry.id}`);
-      if (purgeTombstone?.phase === "complete") {
-        throw new Error(`Supervised entry '${entry.id}' was permanently purged. Start a genuinely new agent with a new creation request id.`);
-      }
-      const manifest = await this.store.load();
-      const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
-      const existing = manifest.entries.find((candidate) => candidate.id === entry.id);
-      if (existing) {
-        if (!isDeepStrictEqual(
-          projectDaemonCreateRequestReplayParameters(existing),
-          projectDaemonCreateRequestReplayParameters(entry),
-        )) {
-          throw new Error(`Supervised creation request '${entry.id}' is already bound to different agent parameters.`);
-        }
-        // A retry after a lost response must observe the durable entry as it is
-        // now. It must never rewind running lifecycle state back to the paused
-        // creation claim supplied by the retried request.
-        return existing;
-      }
-      if (entry.desired_state !== "stopped") {
-        const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
-        if (supervisedOwner) {
-          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
-        }
-        // A paused supervised entry may atomically become the pending transfer
-        // claim while one legacy engine is still running. It cannot activate
-        // until that exact legacy reservation has been released.
-        const legacyOwner = legacyOwners.find((candidate) =>
-          candidate.room_id === entry.room_id && candidate.provider === entry.provider);
-        if (legacyOwner && entry.desired_state === "running") {
-          throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
-        }
-      }
-      const nextEntry: DaemonManifestEntry = {
-        ...entry,
-        workplace_liveness: entry.workplace_liveness ?? { state: "unknown", observed_at: null, detail: null },
-        native_liveness: entry.native_liveness ?? { state: "unknown", observed_at: null, detail: null },
-        activity: (entry.activity ?? []).slice(-200),
-      };
-      const entries = [...manifest.entries, nextEntry];
-      const next = await this.writeManifest(this.manifestGeneration, entries, legacyOwners);
-      this.manifestGeneration = next.generation;
-      return nextEntry;
-    });
-    this.requestConvergence(updated.id);
-    return updated;
+    return this.manifestAdministration.putManifestEntry(entry);
   }
 
   private beginLifecycleExclusion(entryId: string): () => void {
@@ -2532,25 +2424,7 @@ export class SupervisorDaemon {
    * delivery cursors, credentials, or lifecycle authority.
    */
   private async setDisplayName(id: string, displayName: string): Promise<DaemonManifestEntry> {
-    const normalized = displayName.trim();
-    if (!id || !normalized || normalized.length > 120) {
-      throw new Error("Agent naming requires an exact identity and display name.");
-    }
-    return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const manifest = await this.store.load();
-      const entry = manifest.entries.find((candidate) => candidate.id === id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      if (entry.display_name === normalized) return entry;
-      const updated = { ...entry, display_name: normalized };
-      const next = await this.writeManifest(
-        this.manifestGeneration,
-        manifest.entries.map((candidate) => candidate.id === id ? updated : candidate),
-        this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []),
-      );
-      this.manifestGeneration = next.generation;
-      return updated;
-    });
+    return this.manifestAdministration.setDisplayName(id, displayName);
   }
 
   private async compareAndSetDesiredState(
@@ -3500,51 +3374,11 @@ export class SupervisorDaemon {
   }
 
   private async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
-    if (!event || typeof event !== "object" || !event.observed_at) throw new Error("A bounded activity event is required.");
-    const sanitizedEvent = sanitizeDaemonActivityEvent(event);
-    return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const entry = await this.store.getEntry(id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      const lastSequence = entry.activity?.at(-1)?.sequence ?? -1;
-      if (sanitizedEvent.sequence <= lastSequence) throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
-      const updated: DaemonManifestEntry = {
-        ...entry,
-        observed_state: sanitizedEvent.status === "working" || sanitizedEvent.status === "reviewing" ? "working" : sanitizedEvent.status === "blocked" ? entry.observed_state : "idle",
-        native_liveness: { state: sanitizedEvent.status === "idle" ? "idle" : "active", observed_at: sanitizedEvent.observed_at, detail: sanitizedEvent.summary },
-        activity: [...(entry.activity ?? []), sanitizedEvent].slice(-200),
-      };
-      const next = await this.store.appendActivity(
-        this.manifestGeneration,
-        id,
-        sanitizedEvent,
-        updated.observed_state,
-        updated.native_liveness!,
-        200,
-        (commit) => this.fenceDaemonCommit(commit),
-      );
-      this.manifestGeneration = next.generation;
-      return next.entry;
-    });
+    return this.manifestAdministration.appendActivity(id, event);
   }
 
   private async updateWorkplaceLiveness(id: string, state: "reachable" | "stale" | "unknown", detail: string | null, observedAt: string): Promise<DaemonManifestEntry> {
-    if (!id) throw new Error("Manifest entry id is required.");
-    if (!["reachable", "stale", "unknown"].includes(state)) throw new Error("Invalid workplace liveness state.");
-    return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const entry = await this.store.getEntry(id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-      const updated: DaemonManifestEntry = { ...entry, workplace_liveness: { state, observed_at: observedAt, detail } };
-      const next = await this.store.updateWorkplaceLiveness(
-        this.manifestGeneration,
-        id,
-        updated.workplace_liveness!,
-        (commit) => this.fenceDaemonCommit(commit),
-      );
-      this.manifestGeneration = next.generation;
-      return next.entry;
-    });
+    return this.manifestAdministration.updateWorkplaceLiveness(id, state, detail, observedAt);
   }
 
   private async entriesWithDerivedLiveness(entries: DaemonManifestEntry[]): Promise<DaemonManifestEntryView[]> {
