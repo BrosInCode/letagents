@@ -1358,7 +1358,7 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     internals.liveHandles.set("quiet_poll", handle);
     internals.workerRuntimeCustody.installLiveBinding("quiet_poll", {
       agentSessionId: "session-poll",
-      executionGenerationId: undefined as unknown as string,
+      executionGenerationId: "generation-poll",
       updatedAt: new Date().toISOString(),
     });
     internals.publishNativeActivity = async (_entryId, _method, status) => { published.push(status); return true; };
@@ -1370,7 +1370,20 @@ test("daemon keeps empty wait results idle across the real stream handler and re
   try {
     await first.start();
     await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: { ...entry, id: "quiet_poll", room_id: "focus_37", provider: "claude-code", desired_state: "paused" },
+      entry: {
+        ...entry,
+        id: "quiet_poll",
+        room_id: "focus_37",
+        provider: "claude-code",
+        desired_state: "paused",
+        work_attempt_id: handle.workAttemptId,
+        provider_ref: {
+          work_attempt_id: handle.workAttemptId,
+          provider_continuation_id: handle.providerContinuationId,
+          provider_connection: null,
+          execution_generation_id: "generation-poll",
+        },
+      },
     });
     const published: Array<"working" | "idle"> = [];
     const firstInternals = install(first, published);
@@ -7060,12 +7073,14 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     });
     internals.workerRuntimeCustody.installWorkerAuthorization({
       entryId: id, agentSessionId: "cursor-cap-worker", bearer: "cursor-cap-bearer", bearerId: "cursor-cap-bearer-id",
-      agentKey: "emmymay/cedarridge", roomId: entry.room_id,
+      agentKey: "emmymay/cedarridge", roomId: entry.room_id, workAttemptId: attempt.work_attempt_id,
+      grantId: "grant-cursor-cap", grantGeneration: 1, daemonGeneration: 1,
+      apiUrl: "https://letagents.example", expiresAt: "2099-01-01T00:00:00.000Z", mintedAtMs: Date.now(),
       agentSession: exactAgentSession({
         entryId: id, sessionId: "cursor-cap-worker", roomId: entry.room_id, runtime: "cursor",
         displayName: "CedarRidge", agentKey: "emmymay/cedarridge",
       }),
-    } as unknown as CachedWorkerAuthorization);
+    } satisfies CachedWorkerAuthorization);
     const [item] = await internals.supervisedInbox.ingestPoll({
       agent_id: id, room_id: entry.room_id, last_observed_message_id: "1",
       messages: [{ source_message_id: "1", source_message: { text: "current" }, activation: {} }],
@@ -7346,11 +7361,14 @@ test("Cursor bounded effects and credential borrowing reject a prior provider-tu
     internals.workerRuntimeCustody.installWorkerAuthorization({
       entryId: providerNeutralId, agentSessionId: "provider-neutral-worker", bearer: "provider-neutral-bearer",
       bearerId: "provider-neutral-bearer-id", agentKey: "emmymay/pinefield", roomId: "provider-neutral-room",
+      workAttemptId: providerNeutralAttempt.work_attempt_id, grantId: "grant-provider-neutral",
+      grantGeneration: 1, daemonGeneration: 1, apiUrl: "https://letagents.example",
+      expiresAt: "2099-01-01T00:00:00.000Z", mintedAtMs: Date.now(),
       agentSession: exactAgentSession({
         entryId: providerNeutralId, sessionId: "provider-neutral-worker", roomId: "provider-neutral-room", runtime: "codex",
         displayName: "PineField", agentKey: "emmymay/pinefield",
       }),
-    } as unknown as CachedWorkerAuthorization);
+    } satisfies CachedWorkerAuthorization);
     const [providerNeutralItem] = await internals.supervisedInbox.ingestPoll({
       agent_id: providerNeutralId, room_id: "provider-neutral-room", last_observed_message_id: "1",
       messages: [{ source_message_id: "1", source_message: { text: "provider neutral" }, activation: {} }],

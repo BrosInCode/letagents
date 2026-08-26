@@ -76,6 +76,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "agent-stream-registry",
     "bounded-effect-coordinator",
     "cloud-http",
+    "continuation-repair-coordinator",
     "continuation-repair-policy",
     "control-request-router",
     "daemon-authority",
@@ -89,6 +90,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "provider-stream-policy",
     "room-agent-state-projection",
     "room-delivery-control",
+    "room-move-coordinator",
     "worker-runtime-custody",
   ]) {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
