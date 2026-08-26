@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const mainSource = read("../main.ts");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
+const roomAgentProjectionSource = read("../room-agent-state-projection.ts");
 
 const expectedControlMethods = [
   "attempt.read",
@@ -72,15 +73,20 @@ test("cloud requests are isolated from the daemon authority owner", () => {
 
 test("daemon policy and projection domains remain extracted", () => {
   for (const moduleName of [
+    "agent-stream-registry",
     "cloud-http",
+    "continuation-repair-policy",
     "control-request-router",
-    "manifest-view-projection",
+    "daemon-error-policy",
+    "daemon-state-watch",
     "process-identity",
     "provider-state-policy",
     "provider-stream-policy",
+    "room-agent-state-projection",
   ]) {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
   }
+  assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
   assert.equal(matches(mainSource, /^export function providerStreamLifecycle/mg).length, 0);
   assert.equal(matches(mainSource, /^function projectDeliveryReceipts/mg).length, 0);
 });
