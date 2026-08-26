@@ -226,7 +226,7 @@ export class WorkerAuthorityCoordinator {
     }
   }
 
-  revokeHostGrantIfCurrent(entryId: string, grant: InstalledHostGrant): void {
+  private revokeHostGrantIfCurrent(entryId: string, grant: InstalledHostGrant): void {
     this.options.custody.destroyHostGrantIfCurrent(entryId, grant);
   }
 
@@ -234,7 +234,7 @@ export class WorkerAuthorityCoordinator {
     return this.options.serializeEntry(input.entry_id, () => this.bindWorkerSessionLocked(input));
   }
 
-  async bindWorkerSessionLocked(
+  private async bindWorkerSessionLocked(
     input: BindWorkerSessionInput,
     mayPublish: () => boolean = () => true,
   ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
@@ -869,7 +869,7 @@ export class WorkerAuthorityCoordinator {
     });
   }
 
-  async requestAdmittedRunningConvergence(entryId: string, daemonGeneration: number): Promise<void> {
+  private async requestAdmittedRunningConvergence(entryId: string, daemonGeneration: number): Promise<void> {
     if (!await this.ownsDaemonGeneration(daemonGeneration)) return;
     const entry = await this.options.store.getEntry(entryId);
     if (!entry || !this.requiresHostGrant(entry) || entry.desired_state !== "running") return;
@@ -881,7 +881,7 @@ export class WorkerAuthorityCoordinator {
     return this.options.serializeEntry(input.entry_id, () => this.verifyWorkerSessionLocked(input));
   }
 
-  async verifyWorkerSessionLocked(input: VerifyWorkerSessionInput): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
+  private async verifyWorkerSessionLocked(input: VerifyWorkerSessionInput): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
     const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
     if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
@@ -956,7 +956,7 @@ export class WorkerAuthorityCoordinator {
     });
   }
 
-  async isExactCredentialRoute(input: {
+  private async isExactCredentialRoute(input: {
     entry_id: string;
     room_id: string;
     work_attempt_id: string;
