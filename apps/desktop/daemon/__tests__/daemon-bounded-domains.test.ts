@@ -74,18 +74,22 @@ test("cloud requests are isolated from the daemon authority owner", () => {
 test("daemon policy and projection domains remain extracted", () => {
   for (const moduleName of [
     "agent-stream-registry",
+    "bounded-effect-coordinator",
     "cloud-http",
     "continuation-repair-policy",
     "control-request-router",
     "daemon-authority",
     "daemon-error-policy",
     "daemon-state-watch",
+    "delivery-cutover-coordinator",
     "entry-concurrency-gate",
     "legacy-lane-coordinator",
     "process-identity",
     "provider-state-policy",
     "provider-stream-policy",
     "room-agent-state-projection",
+    "room-delivery-control",
+    "worker-runtime-custody",
   ]) {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
   }
