@@ -16,7 +16,8 @@ import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { DaemonAuthority } from "./daemon-authority.js";
-import { DeliveryCutoverCoordinator, DeliveryCutoverObservationDetached } from "./delivery-cutover-coordinator.js";
+import { DeliveryCutoverCoordinator } from "./delivery-cutover-coordinator.js";
+import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-execution-coordinator.js";
 import {
   exhaustedTransientWorkerMint,
   providerRuntimeGoneFailure,
@@ -24,6 +25,7 @@ import {
   transientProviderStartFailure,
 } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
+import { DesiredStateCoordinator } from "./desired-state-coordinator.js";
 import { WorkDurabilityStore } from "./durability-store.js";
 import { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import { EphemeralWorkspaceProvisioner } from "./ephemeral-workspace-provisioner.js";
@@ -34,14 +36,14 @@ import { ManifestStore } from "./manifest-store.js";
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { assertMacOS } from "./platform.js";
-import { sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
+import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
+import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
 import { ProviderExecutionCoordinator } from "./provider-execution-coordinator.js";
 import {
   ProviderReconciliationCoordinator,
   type DaemonReconcileInput,
 } from "./provider-reconciliation-coordinator.js";
 import { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
-import { isAllowedCursorProviderStateTransition, isIdleCursorConnection, isLiveCursorConnection } from "./provider-state-policy.js";
 import {
   bindingMatchesRoomAgentGeneration,
   hasExactRoomAgentDeliveryOwner,
@@ -49,10 +51,11 @@ import {
 } from "./room-agent-state-projection.js";
 import { RoomDeliveryControl } from "./room-delivery-control.js";
 import { RoomMoveCoordinator } from "./room-move-coordinator.js";
+import { RuntimeRecoveryCoordinator } from "./runtime-recovery-coordinator.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
-import { advanceReconciliationState, rememberCompletedControlAction } from "./reconciler-state.js";
+import { advanceReconciliationState } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
-import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
+import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
 import {
   deriveProviderConfigurationSnapshot,
   providerSupportsConcurrentSupervisedAgents,
@@ -68,7 +71,7 @@ import {
   type LiveBindingIdentity,
 } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
-import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
 
@@ -110,6 +113,7 @@ export class SupervisorDaemon {
   private readonly legacyLanes: LegacyLaneCoordinator;
   private readonly manifestAdministration: ManifestAdministrationCoordinator;
   private readonly lifecycleAdministration: LifecycleAdministrationCoordinator;
+  private readonly desiredStates: DesiredStateCoordinator;
   private readonly audit: AuditLog;
   private readonly durability: WorkDurabilityStore;
   private readonly provisioner: WorkspaceProvisioner;
@@ -124,13 +128,16 @@ export class SupervisorDaemon {
   private readonly supervisedDelivery: SupervisedAgentDelivery | null;
   private readonly turnControls: TurnControlCoordinator;
   private readonly roomDeliveryControl: RoomDeliveryControl;
+  private readonly runtimeRecovery: RuntimeRecoveryCoordinator;
   private readonly boundedEffects: BoundedEffectCoordinator;
   private readonly socket: DaemonControlSocket;
   private readonly stateWatch: DaemonStateWatch;
   private readonly entryConcurrency: EntryConcurrencyGate;
   private readonly deliveryCutovers: DeliveryCutoverCoordinator;
+  private readonly deliveryCutoverExecution: DeliveryCutoverExecutionCoordinator;
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly providerStreams: ProviderStreamCoordinator;
+  private readonly providerCheckpoints: ProviderCheckpointCoordinator;
   private readonly providerExecution: ProviderExecutionCoordinator | null;
   private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
   /**
@@ -186,7 +193,7 @@ export class SupervisorDaemon {
     });
     this.deliveryCutovers = new DeliveryCutoverCoordinator({
       isHandoffScheduled: () => this.handoffScheduled,
-      drive: (entryId, signal) => this.driveDeliveryCutover(entryId, signal),
+      drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath);
     this.legacyLanes = new LegacyLaneCoordinator({
@@ -271,9 +278,9 @@ export class SupervisorDaemon {
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
         serializeManifestMutation: (operation) => this.serializeManifestMutation(operation),
       },
-      beginLifecycle: (entryId) => this.beginLifecycleExclusion(entryId),
+      beginLifecycle: (entryId) => this.entryConcurrency.beginLifecycle(entryId),
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
-      setDesiredStateExclusive: (entryId, desiredState) => this.setDesiredStateExclusive(entryId, desiredState),
+      setDesiredStateExclusive: (entryId, desiredState) => this.desiredStates.setExclusive(entryId, desiredState),
       updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
       entryWithDerivedLiveness: (entry) => this.entryWithDerivedLiveness(entry),
       stopDelivery: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
@@ -403,7 +410,7 @@ export class SupervisorDaemon {
         observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
           this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
         completeTurnControlForRuntimeRecovery: (entry) =>
-          this.completeTurnControlForRuntimeRecovery(entry),
+          this.runtimeRecovery.completeTurnControl(entry),
         delivery: {
           stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
           start: (entryId, mode) => this.startSupervisedDelivery(entryId, mode ?? "refresh"),
@@ -528,22 +535,104 @@ export class SupervisorDaemon {
       restartDelivery: (entryId) => this.startSupervisedDelivery(entryId),
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
     });
+    this.providerCheckpoints = new ProviderCheckpointCoordinator({
+      store: this.store,
+      bindings: this.workerBindings,
+      inbox: this.supervisedInbox,
+      durability: this.durability,
+      liveHandles: this.liveHandles,
+      authority: {
+        isHandoffScheduled: () => this.handoffScheduled,
+        assertCurrent: () => this.singleton.assertCurrent(),
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        currentManifestGeneration: () => this.manifestGeneration,
+        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+        fenceAdmittedTransitionCommit: (commit) => this.fenceAdmittedTransitionCommit(commit),
+      },
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      serializeManifest: (operation) => this.serializeManifestMutation(operation),
+      scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
+      nowMs: () => this.nowMs(),
+    });
     this.supervisedDelivery = providerPort
       ? new SupervisedAgentDelivery(
         this.supervisedInbox,
         providerPort,
         supervisedDeliveryHttp,
-        (authority, scope) => this.isExactSupervisedDeliveryAuthority(authority, scope),
+        (authority, scope) => this.providerCheckpoints.isExactAuthority(authority, scope),
         undefined,
         undefined,
         undefined,
         (input) => this.roomMoves.commitPreparedRoomMove(input),
         undefined,
         (input) => this.restoreMissingProviderContinuation(input),
-        (input) => this.checkpointDynamicProviderState(input),
-        (input) => this.checkpointPreparedCursorTurn(input),
+        (input) => this.providerCheckpoints.checkpointDynamicState(input),
+        (input) => this.providerCheckpoints.checkpointPreparedTurn(input),
       )
       : null;
+    this.deliveryCutoverExecution = new DeliveryCutoverExecutionCoordinator({
+      isHandoffScheduled: () => this.handoffScheduled,
+      ...(providerPort ? { provider: providerPort } : {}),
+      getEntry: (entryId) => this.store.getEntry(entryId),
+      getAttempt: (workAttemptId) => this.durability.getAttempt(workAttemptId),
+      updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      getLiveHandle: (entryId) => this.liveHandles.get(entryId),
+      startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
+      observation: {
+        assert: (signal) => this.deliveryCutovers.assertObservation(signal),
+        observe: (signal, operation) => this.deliveryCutovers.observe(signal, operation),
+        scheduleRetry: (entryId, delayMs) => this.deliveryCutovers.scheduleRetry(entryId, delayMs),
+      },
+    });
+    this.desiredStates = new DesiredStateCoordinator({
+      store: this.store,
+      entryConcurrency: this.entryConcurrency,
+      legacyLanes: this.legacyLanes,
+      manifestAdministration: this.manifestAdministration,
+      delivery: this.supervisedDelivery,
+      authority: {
+        currentManifestGeneration: () => this.manifestGeneration,
+        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+        assertCurrent: () => this.singleton.assertCurrent(),
+        serializeManifest: (operation) => this.serializeManifestMutation(operation),
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+      },
+      waitForActiveRoomMove: (entryId) => this.waitForActiveRoomMoveReconciliation(entryId),
+      clearRecovery: (entryId) => this.clearRecoveryConvergence(entryId),
+      restartDeliveryOrConverge: (entryId) => this.restartSupervisedDeliveryOrConverge(entryId),
+      requestConvergence: (entryId) => this.requestConvergence(entryId),
+    });
+    this.runtimeRecovery = new RuntimeRecoveryCoordinator({
+      store: this.store,
+      durability: this.durability,
+      inbox: this.supervisedInbox,
+      bindings: this.workerBindings,
+      workerAuthority: this.workerAuthority,
+      runtimeCustody: this.workerRuntimeCustody,
+      delivery: this.supervisedDelivery,
+      supervisorGrantHttp: this.supervisorGrantHttp,
+      ...(providerPort ? { provider: providerPort } : {}),
+      liveHandles: this.liveHandles,
+      authority: {
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        currentManifestGeneration: () => this.manifestGeneration,
+        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+        isHandoffScheduled: () => this.handoffScheduled,
+        assertCurrent: () => this.singleton.assertCurrent(),
+        serializeManifest: (operation) => this.serializeManifestMutation(operation),
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+      },
+      beginLifecycle: (entryId) => this.entryConcurrency.beginLifecycle(entryId),
+      bumpControlEpoch: (entryId) => this.bumpEntryControlEpoch(entryId),
+      clearRecovery: (entryId) => this.clearRecoveryConvergence(entryId),
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      updateEntry: (entryId, update, roomMoveCancellation) =>
+        this.updateManifestEntry(entryId, update, roomMoveCancellation),
+      requestConvergence: (entryId) => this.requestConvergence(entryId),
+      entryWithDerivedLiveness: (entry) => this.entryWithDerivedLiveness(entry),
+      nowMs: () => this.nowMs(),
+    });
     this.turnControls = new TurnControlCoordinator({
       authority: {
         currentGeneration: () => this.singleton.currentGeneration,
@@ -579,7 +668,7 @@ export class SupervisorDaemon {
       getHandle: (entryId) => this.liveHandles.get(entryId) ?? null,
       getBinding: (entryId) => this.workerBindings.get(entryId),
       credentialFor: (binding) => this.workerBindings.credentialFor(binding),
-      isExactAuthority: (agent) => this.isExactSupervisedDeliveryAuthority(agent),
+      isExactAuthority: (agent) => this.providerCheckpoints.isExactAuthority(agent),
     });
     this.boundedEffects = new BoundedEffectCoordinator({
       context: { exactActive: (input) => this.exactActiveBoundedContext(input) },
@@ -614,7 +703,7 @@ export class SupervisorDaemon {
       borrowWorkerCredential: this.workerAuthority.borrowWorkerCredential.bind(this.workerAuthority),
       checkpointWorkerCursor: this.workerAuthority.checkpointWorkerCursor.bind(this.workerAuthority),
       commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
-      compareAndSetDesiredState: this.compareAndSetDesiredState.bind(this),
+      compareAndSetDesiredState: this.desiredStates.compareAndSet.bind(this.desiredStates),
       completeBoundedEffect: this.completeBoundedEffect.bind(this),
       executeBoundedTool: this.executeBoundedTool.bind(this),
       controlTurn: (input) => this.turnControls.control(input),
@@ -633,7 +722,7 @@ export class SupervisorDaemon {
       purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
       putManifestEntry: this.putManifestEntry.bind(this),
       readAttempt: this.readAttempt.bind(this),
-      recoverAgentRuntime: this.recoverAgentRuntime.bind(this),
+      recoverAgentRuntime: this.runtimeRecovery.recoverAgentRuntime.bind(this.runtimeRecovery),
       releaseLegacyLane: this.releaseLegacyLane.bind(this),
       reserveLegacyLane: this.reserveLegacyLane.bind(this),
       resolveTurnControl: (input) => this.turnControls.resolve(input),
@@ -641,7 +730,7 @@ export class SupervisorDaemon {
       retireAgent: this.lifecycleAdministration.retireAgent.bind(this.lifecycleAdministration),
       retryRoomDelivery: this.retryRoomDelivery.bind(this),
       rollbackInspectorRoomMove: (input) => this.roomMoves.rollbackInspector(input),
-      setDesiredState: this.setDesiredState.bind(this),
+      setDesiredState: this.desiredStates.set.bind(this.desiredStates),
       setDisplayName: this.setDisplayName.bind(this),
       skipRoomDelivery: this.skipRoomDelivery.bind(this),
       status: this.status.bind(this),
@@ -671,7 +760,7 @@ export class SupervisorDaemon {
     this.manifestGeneration = (await this.store.load()).generation;
     await this.supervisedInbox.normalizeInterruptedEffects();
     await this.quarantineDuplicateSupervisedLaneOwners();
-    await this.recoverTurnControls();
+    await this.runtimeRecovery.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
     await this.roomMoves.reconcilePrepared();
     await this.lifecycleAdministration.recoverPreparedPurges();
@@ -685,142 +774,6 @@ export class SupervisorDaemon {
     }
   }
 
-  private async recoverTurnControls(): Promise<void> {
-    await this.serializeManifestMutation(async () => {
-      const manifest = await this.store.load();
-      const recoveredAt = new Date().toISOString();
-      let changed = false;
-      const entries: DaemonManifestEntry[] = [];
-      for (const entry of manifest.entries) {
-        const control = entry.turn_control;
-        if (!control || control.status === "completed") { entries.push(entry); continue; }
-
-        let correctionText = control.correction_text?.trim() || null;
-        let correctionStrategy = control.correction_strategy ?? null;
-        let exactLegacyCorrectionApplied = false;
-        // The predecessor implementation could enqueue the correction before
-        // it checkpointed the journal payload. That exact, action-derived row
-        // is trustworthy recovery evidence; arbitrary room text is not.
-        if (entry.delivery_mode === "daemon_inbox" && control.has_correction) {
-          const legacyCorrection = await this.supervisedInbox.getBySourceMessage(
-            entry.id,
-            entry.room_id,
-            `correction:${control.action_id}`,
-          ).catch(() => null);
-          const source = legacyCorrection?.source_message;
-          const sourceRecord = source && typeof source === "object" && !Array.isArray(source)
-            ? source as Record<string, unknown>
-            : null;
-          const sender = sourceRecord?.sender && typeof sourceRecord.sender === "object" && !Array.isArray(sourceRecord.sender)
-            ? sourceRecord.sender as Record<string, unknown>
-            : null;
-          const recoveredText = typeof sourceRecord?.text === "string" ? sourceRecord.text.trim() : "";
-          const exactLegacyCorrection = Boolean(
-            recoveredText
-            && sender?.kind === "supervisor_correction"
-            && legacyCorrection?.activation?.decision === "activate"
-            && legacyCorrection.activation.reason === "human_correction"
-            && legacyCorrection.activation.addressed === true
-            && (!correctionText || correctionText === recoveredText)
-            && (!correctionStrategy || correctionStrategy === "native" || correctionStrategy === "stop_then_resend"),
-          );
-          if (exactLegacyCorrection) {
-            correctionText = recoveredText;
-            correctionStrategy = "stop_then_resend";
-            // In the predecessor implementation this deterministic row was
-            // inserted only after native Stop and A settlement. Its existence
-            // is exact durable completion evidence, not work to Stop again.
-            // Preserve the row in every state (including active/blocked/final)
-            // and tombstone the old journal without touching FIFO authority.
-            exactLegacyCorrectionApplied = true;
-          }
-        }
-        // Only a pre-dispatch/retryable legacy daemon action can be migrated
-        // from native correction to the bounded Stop + FIFO correction model.
-        // A dispatching/uncertain action may already have produced the native
-        // effect and must retain its original semantics for operator review.
-        if (entry.delivery_mode === "daemon_inbox"
-          && control.has_correction
-          && correctionText
-          && ["prepared", "retryable"].includes(control.status)
-          && (correctionStrategy === null || correctionStrategy === "native")) {
-          correctionStrategy = "stop_then_resend";
-        } else if ((entry.delivery_mode ?? "mcp_polling") !== "daemon_inbox"
-          && control.has_correction
-          && correctionText
-          && correctionStrategy === null
-          && ["prepared", "retryable"].includes(control.status)) {
-          correctionStrategy = "native";
-        }
-
-        const missingCorrectionIntent = control.has_correction && (!correctionText || !correctionStrategy);
-        const retireWithoutClaimingEffect = !exactLegacyCorrectionApplied && (control.status === "prepared"
-          ? !control.has_correction || missingCorrectionIntent
-          : control.status === "retryable" && missingCorrectionIntent);
-        const nextStatus = exactLegacyCorrectionApplied || retireWithoutClaimingEffect
-          ? "completed" as const
-          : control.status === "prepared"
-            ? "retryable" as const
-            : control.status === "dispatching"
-              ? "uncertain" as const
-              : control.status;
-        const nextError = exactLegacyCorrectionApplied
-          ? "Recovered the predecessor supervisor's exact durable correction row; no provider control or FIFO mutation was replayed."
-          : retireWithoutClaimingEffect
-          ? control.has_correction
-            ? "Supervisor restarted before a native effect was proven. The legacy correction payload was not durable, so no effect was claimed; reissue the correction."
-            : "Supervisor restarted before native dispatch. The unapplied Stop was retired and the supervised lane was recovered."
-          : control.status === "dispatching"
-            ? "Supervisor restarted after native dispatch began; verify the provider outcome before resolving the action."
-            : control.status === "prepared"
-              ? correctionStrategy === "stop_then_resend"
-                ? "Supervisor restarted before native dispatch; the accepted correction will retry through the daemon's bounded FIFO."
-                : "Supervisor restarted before native dispatch; the exact action is safe to retry."
-              : missingCorrectionIntent && control.status === "uncertain"
-                ? "The native effect is uncertain and the legacy correction payload is unavailable. Resolve the effect; if it was not applied, reissue the correction."
-                : control.error;
-        const controlChanged = nextStatus !== control.status
-          || correctionText !== (control.correction_text?.trim() || null)
-          || correctionStrategy !== (control.correction_strategy ?? null)
-          || nextError !== control.error
-          || control.operator_resolution != null;
-        if (!controlChanged) { entries.push(entry); continue; }
-        changed = true;
-        entries.push({
-          ...entry,
-          reconciliation: exactLegacyCorrectionApplied || retireWithoutClaimingEffect
-            ? rememberCompletedControlAction(
-              advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs()),
-              control.action_id,
-            )
-            : entry.reconciliation,
-          turn_control: {
-            ...control,
-            correction_text: correctionText,
-            correction_strategy: correctionStrategy,
-            operator_resolution: null,
-            status: nextStatus,
-            interrupted: exactLegacyCorrectionApplied ? true : retireWithoutClaimingEffect ? false : control.interrupted,
-            resumed: exactLegacyCorrectionApplied ? true : retireWithoutClaimingEffect ? false : control.resumed,
-            state: exactLegacyCorrectionApplied
-              ? entry.observed_state === "working" ? "working" as const : "idle" as const
-              : retireWithoutClaimingEffect
-              ? entry.observed_state === "working" ? "working" as const : "idle" as const
-              : control.state,
-            stages: exactLegacyCorrectionApplied
-              ? ["delivered", "applied", "resumed"]
-              : retireWithoutClaimingEffect ? [] : control.stages,
-            error: nextError,
-            updated_at: recoveredAt,
-          },
-        });
-      }
-      if (!changed) return;
-      const next = await this.writeManifest(this.manifestGeneration, entries, manifest.legacy_lane_owners);
-      this.manifestGeneration = next.generation;
-    });
-  }
-
   async stop(): Promise<void> {
     // Stop is final for this daemon instance. Fence late delivery/cutover
     // continuations before awaiting any drain so they cannot retain a socket
@@ -830,7 +783,7 @@ export class SupervisorDaemon {
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
     this.workerRuntimeCustody.destroyAllCredentials();
-    await this.fenceAndDrainDeliveryCutovers();
+    await this.deliveryCutovers.fenceAndDrain();
     await this.supervisedDelivery?.fenceAndDrain();
     await this.fenceAndDrainRoomMoveReconciliations();
     await this.boundedEffects.drainJournalReservations();
@@ -866,7 +819,7 @@ export class SupervisorDaemon {
     this.workerRuntimeCustody.destroyAllCredentials();
     this.wakeRoomMoveReconciliationWaiters();
     const failures: unknown[] = [];
-    try { await this.fenceAndDrainDeliveryCutovers(); } catch (error) { failures.push(error); }
+    try { await this.deliveryCutovers.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.supervisedDelivery?.fenceAndDrain(); } catch (error) { failures.push(error); }
     try { await this.fenceAndDrainRoomMoveReconciliations(); } catch (error) { failures.push(error); }
     const captureSync = (operation: () => void): void => {
@@ -1140,7 +1093,7 @@ export class SupervisorDaemon {
       daemonGeneration: this.singleton.currentGeneration,
       deliveryMode: entry.delivery_mode ?? "mcp_polling",
     };
-    if (!await this.isExactSupervisedDeliveryAuthority({
+    if (!await this.providerCheckpoints.isExactAuthority({
       agentId: agent.agentId, roomId: agent.roomId, provider: agent.provider,
       apiUrl: agent.apiUrl, agentSessionId: agent.agentSessionId, bearer: agent.bearer,
       handle: agent.handle, workAttemptId: agent.workAttemptId,
@@ -1182,670 +1135,6 @@ export class SupervisorDaemon {
   /** Coalesce one durable legacy-polling -> daemon-inbox handoff per agent. */
   private startDeliveryCutover(entryId: string): Promise<void> {
     return this.deliveryCutovers.start(entryId);
-  }
-
-  /**
-   * Fence the exact legacy polling turn before enabling daemon ingress.  The
-   * manifest is the effect journal: once a target is recorded no later run may
-   * inspect "latest" as a replacement target, and once native dispatch is
-   * recorded an active/unknown result is deliberately left gated.
-   */
-  private async driveDeliveryCutover(entryId: string, detachSignal: AbortSignal): Promise<void> {
-    if (this.handoffScheduled || !this.providerPort?.controlExactTurn) return;
-    let entry = await this.store.getEntry(entryId);
-    this.assertDeliveryCutoverObservation(detachSignal);
-    if (!entry) return;
-
-    // Terminal durability is the convergence boundary for every old cutover,
-    // including predecessor states whose provider_ref was already detached or
-    // replaced. A terminal current/no-runtime cutover can adopt daemon ingress;
-    // a stale cutover beside a successor is only cleared, never allowed to flip
-    // that successor's delivery mode.
-    if (entry.delivery_cutover) {
-      const saved = entry.delivery_cutover;
-      const attempt = await this.durability.getAttempt(saved.work_attempt_id).catch(() => null);
-      const terminal = attempt?.execution_generations.some((candidate) =>
-        candidate.execution_generation_id === saved.execution_generation_id && candidate.terminal) ?? false;
-      if (terminal) {
-        entry = await this.updateManifestEntry(entryId, (current) => {
-          const cutover = current.delivery_cutover;
-          if (!cutover
-            || cutover.work_attempt_id !== saved.work_attempt_id
-            || cutover.execution_generation_id !== saved.execution_generation_id
-            || cutover.provider_continuation_id !== saved.provider_continuation_id
-            || cutover.provider_turn_id !== saved.provider_turn_id) return current;
-          const sameRuntime = current.provider_ref?.execution_generation_id === saved.execution_generation_id
-            && current.provider_ref.provider_continuation_id === saved.provider_continuation_id;
-          const noRuntime = current.provider_ref == null;
-          return {
-            ...current,
-            ...(sameRuntime || noRuntime ? { delivery_mode: "daemon_inbox" as const } : {}),
-            delivery_cutover: null,
-          };
-        });
-        this.assertDeliveryCutoverObservation(detachSignal);
-        if (entry.delivery_mode === "daemon_inbox") {
-          const timer = setTimeout(() => void this.startSupervisedDelivery(entryId).catch(() => undefined), 0);
-          timer.unref();
-          return;
-        }
-      }
-    }
-
-    const handle = this.liveHandles.get(entryId);
-    if (!handle
-      || entry.provider !== "codex"
-      || (entry.delivery_mode ?? "mcp_polling") !== "mcp_polling"
-      || entry.desired_state !== "running"
-      || entry.condition !== "none"
-      || !entry.work_attempt_id
-      || !entry.provider_ref
-      || handle.workAttemptId !== entry.work_attempt_id
-      || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id
-      || !sameProviderActionConnectionSnapshot(handle.providerConnection, entry.provider_ref.provider_connection)) return;
-
-    const identity = {
-      work_attempt_id: entry.work_attempt_id,
-      execution_generation_id: entry.provider_ref.execution_generation_id,
-      provider_continuation_id: entry.provider_ref.provider_continuation_id,
-    };
-    if (!entry.delivery_cutover) {
-      this.assertDeliveryCutoverObservation(detachSignal);
-      entry = await this.updateManifestEntry(entryId, (current) => {
-        this.assertDeliveryCutoverObservation(detachSignal);
-        if (current.turn_control && current.turn_control.status !== "completed") {
-          throw new Error(`Delivery cutover is blocked by unresolved turn-control action '${current.turn_control.action_id}'.`);
-        }
-        if (current.provider !== "codex" || (current.delivery_mode ?? "mcp_polling") !== "mcp_polling"
-          || current.work_attempt_id !== identity.work_attempt_id
-          || current.provider_ref?.execution_generation_id !== identity.execution_generation_id
-          || current.provider_ref.provider_continuation_id !== identity.provider_continuation_id
-          || this.liveHandles.get(entryId) !== handle
-          || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, handle.providerConnection)) return current;
-        const cutover: DaemonDeliveryCutover = { ...identity, provider_turn_id: null, phase: "prepared", error: null, updated_at: new Date().toISOString() };
-        return { ...current, delivery_cutover: cutover };
-      });
-      this.assertDeliveryCutoverObservation(detachSignal);
-    }
-    const cutover = entry.delivery_cutover;
-    if (!cutover
-      || cutover.work_attempt_id !== identity.work_attempt_id
-      || cutover.execution_generation_id !== identity.execution_generation_id
-      || cutover.provider_continuation_id !== identity.provider_continuation_id) return;
-
-    if (cutover.phase === "dispatching" || cutover.phase === "uncertain") {
-      if (!cutover.provider_turn_id || !this.providerPort.inspectTurn) {
-        await this.markDeliveryCutoverUncertain(entryId, identity, "native interrupt dispatch is ambiguous without an exact turn id", handle, detachSignal);
-        return;
-      }
-      const state = await this.observeDeliveryCutover(detachSignal, this.providerPort.inspectTurn(handle, cutover.provider_turn_id)).catch(() => "unknown" as const);
-      this.assertDeliveryCutoverObservation(detachSignal);
-      if (state === "terminal") {
-        await this.completeDeliveryCutover(entryId, identity, handle, detachSignal);
-        return;
-      }
-      if (state === "unknown") {
-        await this.markDeliveryCutoverUncertain(entryId, identity, `native interrupt dispatch is ambiguous; exact turn remains ${state}`, handle, detachSignal);
-        this.scheduleDeliveryCutoverRetry(entryId, 1_000);
-        return;
-      }
-      // Exact A is still active. Re-driving the interrupt is safe because the
-      // persisted target is immutable; no latest-turn discovery occurs.
-    }
-
-    let dispatchMarked = cutover.phase === "dispatching" || cutover.phase === "uncertain";
-    try {
-      const result = await this.observeDeliveryCutover(detachSignal, this.providerPort.controlExactTurn(handle, {
-        targetTurnId: cutover.provider_turn_id,
-        checkpointTargetTurn: async (turnId) => {
-          this.assertDeliveryCutoverObservation(detachSignal);
-          await this.updateManifestEntry(entryId, (current) => {
-            this.assertDeliveryCutoverObservation(detachSignal);
-            const currentCutover = current.delivery_cutover;
-            if (!currentCutover
-              || (current.delivery_mode ?? "mcp_polling") !== "mcp_polling"
-              || !["prepared", "retryable", "dispatching", "uncertain"].includes(currentCutover.phase)
-              || current.desired_state !== "running"
-              || current.condition !== "none"
-              || current.provider_ref?.execution_generation_id !== identity.execution_generation_id
-              || current.provider_ref.provider_continuation_id !== identity.provider_continuation_id
-              || this.liveHandles.get(entryId) !== handle
-              || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, handle.providerConnection)
-              || currentCutover.work_attempt_id !== identity.work_attempt_id
-              || currentCutover.execution_generation_id !== identity.execution_generation_id
-              || currentCutover.provider_continuation_id !== identity.provider_continuation_id
-              || (currentCutover.provider_turn_id && currentCutover.provider_turn_id !== turnId)) {
-              throw new Error("Legacy delivery cutover changed before exact turn checkpoint.");
-            }
-            return { ...current, delivery_cutover: { ...currentCutover, provider_turn_id: turnId, updated_at: new Date().toISOString() } };
-          });
-          this.assertDeliveryCutoverObservation(detachSignal);
-        },
-        markDispatched: async () => {
-          this.assertDeliveryCutoverObservation(detachSignal);
-          await this.updateManifestEntry(entryId, (current) => {
-            this.assertDeliveryCutoverObservation(detachSignal);
-            const currentCutover = current.delivery_cutover;
-            if (!currentCutover
-              || (current.delivery_mode ?? "mcp_polling") !== "mcp_polling"
-              || !["prepared", "retryable", "dispatching", "uncertain"].includes(currentCutover.phase)
-              || current.desired_state !== "running"
-              || current.condition !== "none"
-              || current.provider_ref?.execution_generation_id !== identity.execution_generation_id
-              || current.provider_ref.provider_continuation_id !== identity.provider_continuation_id
-              || this.liveHandles.get(entryId) !== handle
-              || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, handle.providerConnection)
-              || !currentCutover.provider_turn_id
-              || currentCutover.work_attempt_id !== identity.work_attempt_id
-              || currentCutover.execution_generation_id !== identity.execution_generation_id
-              || currentCutover.provider_continuation_id !== identity.provider_continuation_id) {
-              throw new Error("Legacy delivery cutover changed before native interrupt dispatch.");
-            }
-            return { ...current, delivery_cutover: { ...currentCutover, phase: "dispatching", updated_at: new Date().toISOString() } };
-          });
-          dispatchMarked = true;
-          this.assertDeliveryCutoverObservation(detachSignal);
-        },
-        detachSignal,
-      }));
-      this.assertDeliveryCutoverObservation(detachSignal);
-      // A no-active/terminal inspection is a completion fact. An adapter's
-      // interrupt acknowledgement is not: independently re-inspect exactly
-      // the persisted target before allowing daemon ingress.
-      if (result.outcome === "no_active" || result.outcome === "terminal") {
-        await this.completeDeliveryCutover(entryId, identity, handle, detachSignal);
-      } else if (result.outcome === "interrupt_dispatched") {
-        const targetTurnId = cutover.provider_turn_id ?? result.targetTurnId;
-        if (!targetTurnId || !this.providerPort.inspectTurn) {
-          await this.markDeliveryCutoverUncertain(entryId, identity, "native interrupt was acknowledged without exact terminal inspection", handle, detachSignal);
-          return;
-        }
-        const state = await this.observeDeliveryCutover(detachSignal, this.providerPort.inspectTurn(handle, targetTurnId)).catch(() => "unknown" as const);
-        this.assertDeliveryCutoverObservation(detachSignal);
-        if (state === "terminal") await this.completeDeliveryCutover(entryId, identity, handle, detachSignal);
-        else {
-          await this.markDeliveryCutoverUncertain(entryId, identity, `native interrupt was acknowledged but exact turn remains ${state}`, handle, detachSignal);
-          this.scheduleDeliveryCutoverRetry(entryId, 1_000);
-        }
-      }
-    } catch (error) {
-      if (error instanceof DeliveryCutoverObservationDetached) return;
-      const outcome = error && typeof error === "object" && "turnControlOutcome" in error
-        ? (error as { turnControlOutcome?: unknown }).turnControlOutcome
-        : null;
-      const ambiguous = dispatchMarked || outcome === "uncertain";
-      if (ambiguous) {
-        await this.markDeliveryCutoverUncertain(entryId, identity, error instanceof Error ? error.message : "exact legacy turn control failed", handle, detachSignal);
-        this.scheduleDeliveryCutoverRetry(entryId, 1_000);
-      } else {
-        await this.markDeliveryCutoverRetryable(entryId, identity, error instanceof Error ? error.message : "exact legacy turn preparation failed", handle, detachSignal);
-        this.scheduleDeliveryCutoverRetry(entryId, 250);
-      }
-    }
-  }
-
-  private async completeDeliveryCutover(entryId: string, identity: Omit<DaemonDeliveryCutover, "provider_turn_id" | "phase" | "updated_at">, handle: ProviderActionHandle, detachSignal: AbortSignal): Promise<void> {
-    this.assertDeliveryCutoverObservation(detachSignal);
-    const completed = await this.updateManifestEntry(entryId, (current) => {
-      this.assertDeliveryCutoverObservation(detachSignal);
-      const cutover = current.delivery_cutover;
-      if ((current.delivery_mode ?? "mcp_polling") !== "mcp_polling"
-        || !cutover
-        || current.desired_state !== "running"
-        || current.condition !== "none"
-        || current.provider_ref?.execution_generation_id !== identity.execution_generation_id
-        || current.provider_ref.provider_continuation_id !== identity.provider_continuation_id
-        || this.liveHandles.get(entryId) !== handle
-        || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, handle.providerConnection)
-        || cutover.work_attempt_id !== identity.work_attempt_id
-        || cutover.execution_generation_id !== identity.execution_generation_id
-        || cutover.provider_continuation_id !== identity.provider_continuation_id) return current;
-      const now = new Date().toISOString();
-      return {
-        ...current,
-        delivery_mode: "daemon_inbox",
-        delivery_cutover: null,
-        // A terminal legacy turn is the successful boundary of the handoff,
-        // not a dead worker. The retained app-server/thread is immediately a
-        // healthy idle daemon-inbox session until its next bounded delivery.
-        ...(current.observed_state === "working" || current.observed_state === "starting"
-          ? { observed_state: "idle" as const, native_liveness: { state: "idle" as const, observed_at: now, detail: "legacy polling turn fenced; daemon inbox ready" } }
-          : {}),
-      };
-    });
-    this.assertDeliveryCutoverObservation(detachSignal);
-    if (completed.delivery_mode === "daemon_inbox") {
-      // This coordinator is still coalesced until its finally runs. Defer the
-      // first inbox start one tick so it cannot mistake the cutover operation
-      // for an already-running successor.
-      const timer = setTimeout(() => void this.startSupervisedDelivery(entryId).catch(() => undefined), 0);
-      timer.unref();
-    }
-  }
-
-  private async markDeliveryCutoverRetryable(
-    entryId: string,
-    identity: Omit<DaemonDeliveryCutover, "provider_turn_id" | "phase" | "updated_at">,
-    detail: string,
-    handle: ProviderActionHandle,
-    detachSignal: AbortSignal,
-  ): Promise<void> {
-    this.assertDeliveryCutoverObservation(detachSignal);
-    await this.updateManifestEntry(entryId, (current) => {
-      this.assertDeliveryCutoverObservation(detachSignal);
-      const cutover = current.delivery_cutover;
-      if ((current.delivery_mode ?? "mcp_polling") !== "mcp_polling"
-        || !cutover
-        || cutover.phase === "dispatching"
-        || cutover.phase === "uncertain"
-        || current.desired_state !== "running"
-        || current.condition !== "none"
-        || current.provider_ref?.execution_generation_id !== identity.execution_generation_id
-        || current.provider_ref.provider_continuation_id !== identity.provider_continuation_id
-        || this.liveHandles.get(entryId) !== handle
-        || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, handle.providerConnection)
-        || cutover.work_attempt_id !== identity.work_attempt_id
-        || cutover.execution_generation_id !== identity.execution_generation_id
-        || cutover.provider_continuation_id !== identity.provider_continuation_id) return current;
-      return {
-        ...current,
-        delivery_cutover: {
-          ...cutover,
-          phase: "retryable",
-          error: redactCredentialText(detail).value,
-          updated_at: new Date().toISOString(),
-        },
-      };
-    });
-    this.assertDeliveryCutoverObservation(detachSignal);
-  }
-
-  private async markDeliveryCutoverUncertain(entryId: string, identity: Omit<DaemonDeliveryCutover, "provider_turn_id" | "phase" | "updated_at">, detail: string, handle: ProviderActionHandle, detachSignal: AbortSignal): Promise<void> {
-    this.assertDeliveryCutoverObservation(detachSignal);
-    await this.updateManifestEntry(entryId, (current) => {
-      this.assertDeliveryCutoverObservation(detachSignal);
-      const cutover = current.delivery_cutover;
-      if ((current.delivery_mode ?? "mcp_polling") !== "mcp_polling"
-        || !cutover
-        || current.desired_state !== "running"
-        || current.condition !== "none"
-        || current.provider_ref?.execution_generation_id !== identity.execution_generation_id
-        || current.provider_ref.provider_continuation_id !== identity.provider_continuation_id
-        || this.liveHandles.get(entryId) !== handle
-        || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, handle.providerConnection)
-        || cutover.work_attempt_id !== identity.work_attempt_id
-        || cutover.execution_generation_id !== identity.execution_generation_id
-        || cutover.provider_continuation_id !== identity.provider_continuation_id) return current;
-      const safeDetail = redactCredentialText(detail).value;
-      const observedAt = new Date().toISOString();
-      const activity: DaemonActivityEvent = {
-        observed_at: observedAt,
-        sequence: (current.activity?.at(-1)?.sequence ?? 0) + 1,
-        provider: current.provider,
-        kind: "delivery_cutover",
-        method: "legacy_polling_interrupt",
-        summary: "Daemon inbox cutover needs attention; legacy ingress remains fenced.",
-        status: "blocked",
-        payload: { phase: "uncertain", provider_turn_id: cutover.provider_turn_id, detail: safeDetail },
-        payload_truncated: false,
-        payload_redacted: false,
-        durable_payload_ref: null,
-      };
-      return {
-        ...current,
-        delivery_cutover: { ...cutover, phase: "uncertain", error: safeDetail, updated_at: observedAt },
-        activity: [...(current.activity ?? []), activity].slice(-200),
-      };
-    });
-    this.assertDeliveryCutoverObservation(detachSignal);
-  }
-
-  private scheduleDeliveryCutoverRetry(entryId: string, delayMs: number): void {
-    this.deliveryCutovers.scheduleRetry(entryId, delayMs);
-  }
-
-  /** Retirement detaches local observation only; it never signals the provider. */
-  private async fenceAndDrainDeliveryCutovers(): Promise<void> {
-    await this.deliveryCutovers.fenceAndDrain();
-  }
-
-  private assertDeliveryCutoverObservation(detachSignal: AbortSignal): void {
-    this.deliveryCutovers.assertObservation(detachSignal);
-  }
-
-  private observeDeliveryCutover<T>(detachSignal: AbortSignal, operation: Promise<T>): Promise<T> {
-    return this.deliveryCutovers.observe(detachSignal, operation);
-  }
-
-  /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
-  private async checkpointPreparedCursorTurn(input: {
-    agent: SupervisedIngressAgent;
-    inboxItemId: string;
-    providerTurnId: string;
-    providerContinuationId: string;
-    providerConnection: ProviderActionConnectionRef;
-  }): Promise<void> {
-    const { agent, inboxItemId, providerTurnId, providerContinuationId, providerConnection } = input;
-    if (agent.provider !== "cursor"
-      || providerConnection.kind !== "cursor_cli"
-      || providerContinuationId !== agent.providerContinuationId
-      || providerConnection.pid === null
-      || !providerConnection.processIdentity?.trim()
-      || !agent.handle) {
-      throw new Error("Only an exact paused Cursor wrapper may cross the prepared-turn boundary.");
-    }
-    const expectedConnection = agent.providerConnection;
-    if (!isIdleCursorConnection(expectedConnection)) {
-      throw new DaemonFenceLostError("Cursor prepared turn did not begin from the exact idle runtime state.");
-    }
-    await this.serializeEntryTick(agent.agentId, () => this.serializeManifestMutation(async () => {
-      if (this.handoffScheduled) throw new DaemonFenceLostError("Cursor prepared turn changed during daemon handoff.");
-      await this.singleton.assertCurrent();
-      const current = await this.store.getEntry(agent.agentId);
-      const live = this.liveHandles.get(agent.agentId);
-      const binding = await this.workerBindings.get(agent.agentId);
-      const currentCredential = binding ? await this.workerBindings.credentialFor(binding) : null;
-      if (!current
-        || live !== agent.handle
-        || current.room_id !== agent.roomId
-        || current.desired_state !== "running"
-        || current.provider !== "cursor"
-        || current.delivery_mode !== "daemon_inbox"
-        || current.work_attempt_id !== agent.workAttemptId
-        || current.provider_ref?.work_attempt_id !== agent.workAttemptId
-        || current.provider_ref.execution_generation_id !== agent.executionGenerationId
-        || current.provider_ref.provider_continuation_id !== agent.providerContinuationId
-        || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, expectedConnection)
-        || !binding
-        || binding.room_id !== agent.roomId
-        || binding.api_url !== agent.apiUrl
-        || binding.work_attempt_id !== agent.workAttemptId
-        || binding.execution_generation_id !== agent.executionGenerationId
-        || binding.agent_session_id !== agent.agentSessionId
-        || currentCredential !== agent.bearer
-        || live.workAttemptId !== agent.workAttemptId
-        || live.providerContinuationId !== providerContinuationId
-        || !sameProviderActionConnectionSnapshot(live.providerConnection, providerConnection)) {
-        throw new DaemonFenceLostError("Cursor prepared turn no longer belongs to the exact supervised lane.");
-      }
-      try {
-        const checkpoint = await this.store.checkpointCursorPreparedTurn(this.manifestGeneration, {
-          agentId: agent.agentId,
-          roomId: agent.roomId,
-          inboxItemId,
-          providerTurnId,
-          providerContinuationId,
-          workAttemptId: agent.workAttemptId,
-          executionGenerationId: agent.executionGenerationId,
-          agentSessionId: agent.agentSessionId,
-          credentialRef: binding.credential_ref,
-          apiUrl: agent.apiUrl,
-          expectedProviderContinuationId: agent.providerContinuationId!,
-          expectedProviderConnection: expectedConnection,
-          providerConnection,
-          observedAt: new Date(this.nowMs()).toISOString(),
-        }, (commit) => this.fenceDaemonCommit(commit));
-        this.manifestGeneration = checkpoint.generation;
-        agent.providerConnection = providerConnection;
-      } catch (error) {
-        // A commit fence may report failure after SQLite committed. The paired
-        // manifest+inbox read proves whether the atomic boundary won.
-        const [persisted, inbox, recoveredBinding] = await Promise.all([
-          this.store.getEntry(agent.agentId).catch(() => undefined),
-          this.supervisedInbox.get(inboxItemId).catch(() => null),
-          this.workerBindings.get(agent.agentId).catch(() => null),
-        ]);
-        const recoveredCredential = recoveredBinding
-          ? await this.workerBindings.credentialFor(recoveredBinding).catch(() => null)
-          : null;
-        const recoveredLive = this.liveHandles.get(agent.agentId);
-        if (persisted?.room_id === agent.roomId
-          && persisted.desired_state === "running"
-          && persisted.provider === "cursor"
-          && persisted.delivery_mode === "daemon_inbox"
-          && persisted.work_attempt_id === agent.workAttemptId
-          && persisted.provider_ref?.work_attempt_id === agent.workAttemptId
-          && persisted.provider_ref.execution_generation_id === agent.executionGenerationId
-          && persisted.provider_ref.provider_continuation_id === providerContinuationId
-          && sameProviderActionConnectionSnapshot(persisted.provider_ref.provider_connection, providerConnection)
-          && inbox?.agent_id === agent.agentId
-          && inbox.room_id === agent.roomId
-          && inbox?.provider_turn_id === providerTurnId
-          && ["dispatching", "awaiting_result", "result_recovery"].includes(inbox.state)
-          && recoveredBinding?.entry_id === agent.agentId
-          && recoveredBinding.room_id === agent.roomId
-          && recoveredBinding.api_url === agent.apiUrl
-          && recoveredBinding.work_attempt_id === agent.workAttemptId
-          && recoveredBinding.execution_generation_id === agent.executionGenerationId
-          && recoveredBinding.agent_session_id === agent.agentSessionId
-          && recoveredCredential === agent.bearer
-          && recoveredLive === agent.handle
-          && recoveredLive.workAttemptId === agent.workAttemptId
-          && recoveredLive.providerContinuationId === providerContinuationId
-          && sameProviderActionConnectionSnapshot(recoveredLive.providerConnection, providerConnection)) {
-          const manifest = await this.store.load();
-          this.manifestGeneration = manifest.generation;
-          agent.providerConnection = providerConnection;
-          return;
-        }
-        throw error;
-      }
-    }));
-  }
-
-  /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
-  private async checkpointDynamicProviderState(input: {
-    agent: SupervisedIngressAgent;
-    inboxItemId: string;
-    providerTurnId: string;
-    providerContinuationId: string;
-    providerConnection: ProviderActionConnectionRef;
-  }): Promise<void> {
-    const { agent, inboxItemId, providerTurnId, providerContinuationId, providerConnection } = input;
-    if (agent.provider !== "cursor" || providerConnection.kind !== "cursor_cli"
-      || !providerContinuationId.trim() || !agent.handle) {
-      throw new Error("Only an exact live Cursor lane may checkpoint dynamic provider state.");
-    }
-    const completingAdmittedCursorState = isLiveCursorConnection(agent.providerConnection)
-      && isAllowedCursorProviderStateTransition(
-        agent.providerContinuationId,
-        agent.providerConnection,
-        providerContinuationId,
-        providerConnection,
-      );
-    await this.serializeEntryTick(agent.agentId, () => this.serializeManifestMutation(async () => {
-      if (this.handoffScheduled && !completingAdmittedCursorState) {
-        throw new DaemonFenceLostError("Cursor provider state changed during daemon handoff.");
-      }
-      await this.singleton.assertCurrent();
-      const current = await this.store.getEntry(agent.agentId);
-      const live = this.liveHandles.get(agent.agentId);
-      const binding = await this.workerBindings.get(agent.agentId);
-      const currentCredential = binding ? await this.workerBindings.credentialFor(binding) : null;
-      const currentProviderStateMatchesAgent = Boolean(current?.provider_ref
-        && current.provider_ref.provider_continuation_id === agent.providerContinuationId
-        && sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection ?? null, agent.providerConnection));
-      const currentProviderStateMatchesCandidate = Boolean(current?.provider_ref
-        && current.provider_ref.provider_continuation_id === providerContinuationId
-        && sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection ?? null, providerConnection));
-      const inbox = await this.supervisedInbox.get(inboxItemId);
-      if (!current || live !== agent.handle
-        || current.room_id !== agent.roomId
-        || current.desired_state !== "running"
-        || current.provider !== "cursor"
-        || current.delivery_mode !== "daemon_inbox"
-        || current.work_attempt_id !== agent.workAttemptId
-        || current.provider_ref?.work_attempt_id !== agent.workAttemptId
-        || current.provider_ref.execution_generation_id !== agent.executionGenerationId
-        || (!currentProviderStateMatchesAgent && !currentProviderStateMatchesCandidate)
-        || !inbox
-        || inbox.agent_id !== agent.agentId
-        || inbox.room_id !== agent.roomId
-        || inbox.provider_turn_id !== providerTurnId
-        || !["dispatching", "awaiting_result", "result_recovery"].includes(inbox.state)
-        || !binding
-        || binding.entry_id !== agent.agentId
-        || binding.room_id !== agent.roomId
-        || binding.api_url !== agent.apiUrl
-        || binding.work_attempt_id !== agent.workAttemptId
-        || binding.execution_generation_id !== agent.executionGenerationId
-        || binding.agent_session_id !== agent.agentSessionId
-        || currentCredential !== agent.bearer
-        || live.workAttemptId !== agent.workAttemptId
-        || live.providerContinuationId !== providerContinuationId
-        || !sameProviderActionConnectionSnapshot(live.providerConnection, providerConnection)
-        || !isAllowedCursorProviderStateTransition(
-          agent.providerContinuationId,
-          agent.providerConnection,
-          providerContinuationId,
-          providerConnection,
-        )) {
-        throw new DaemonFenceLostError("Cursor provider state no longer belongs to the exact supervised lane.");
-      }
-      try {
-        if (current.provider_ref.provider_continuation_id !== providerContinuationId
-          || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, providerConnection)) {
-          const checkpoint = await this.store.checkpointCursorProviderState(this.manifestGeneration, {
-            agentId: agent.agentId,
-            roomId: agent.roomId,
-            inboxItemId,
-            providerTurnId,
-            workAttemptId: agent.workAttemptId,
-            executionGenerationId: agent.executionGenerationId,
-            agentSessionId: agent.agentSessionId,
-            credentialRef: binding.credential_ref,
-            apiUrl: agent.apiUrl,
-            expectedProviderContinuationId: agent.providerContinuationId!,
-            expectedProviderConnection: agent.providerConnection,
-            providerContinuationId,
-            providerConnection,
-            observedAt: new Date().toISOString(),
-          }, (commit) => completingAdmittedCursorState
-            ? this.fenceAdmittedTransitionCommit(commit)
-            : this.fenceDaemonCommit(commit));
-          this.manifestGeneration = checkpoint.generation;
-        }
-        // Manifest and live handle now agree. Advance the in-memory ingress
-        // authority before the separate attempt checkpoint so a failure in the
-        // latter cannot split manifest=new from agent/handle=old.
-        agent.providerContinuationId = providerContinuationId;
-        agent.providerConnection = providerConnection;
-        const attempt = await this.durability.getAttempt(agent.workAttemptId);
-        if (attempt.checkpoints.at(-1)?.provider_continuation_id !== providerContinuationId) {
-          try {
-            await this.durability.checkpoint(agent.workAttemptId, {
-              room_cursor: null,
-              provider_continuation_id: providerContinuationId,
-            });
-          } catch {
-            // The manifest is the authoritative live runtime reference. A
-            // secondary attempt-history checkpoint must not make the adapter
-            // reap an already-authorized turn; convergence retries it.
-            this.scheduleRecoveryConvergence(agent.agentId, 1_000);
-          }
-        }
-      } catch (error) {
-        // An SQLite/filesystem boundary can report failure after committing.
-        // Re-read the manifest and converge in-memory authority when the exact
-        // new handle/ref is already durable; the next retry then only needs to
-        // finish the idempotent attempt checkpoint.
-        const [persisted, recoveredInbox, recoveredBinding] = await Promise.all([
-          this.store.getEntry(agent.agentId).catch(() => undefined),
-          this.supervisedInbox.get(inboxItemId).catch(() => null),
-          this.workerBindings.get(agent.agentId).catch(() => null),
-        ]);
-        const recoveredCredential = recoveredBinding
-          ? await this.workerBindings.credentialFor(recoveredBinding).catch(() => null)
-          : null;
-        const recoveredLive = this.liveHandles.get(agent.agentId);
-        if (persisted?.room_id === agent.roomId
-          && persisted.desired_state === "running"
-          && persisted.provider === "cursor"
-          && persisted.delivery_mode === "daemon_inbox"
-          && persisted.work_attempt_id === agent.workAttemptId
-          && persisted.provider_ref?.work_attempt_id === agent.workAttemptId
-          && persisted.provider_ref.execution_generation_id === agent.executionGenerationId
-          && persisted.provider_ref.provider_continuation_id === providerContinuationId
-          && sameProviderActionConnectionSnapshot(persisted.provider_ref.provider_connection, providerConnection)
-          && recoveredInbox?.agent_id === agent.agentId
-          && recoveredInbox.room_id === agent.roomId
-          && recoveredInbox.provider_turn_id === providerTurnId
-          && ["dispatching", "awaiting_result", "result_recovery"].includes(recoveredInbox.state)
-          && recoveredBinding?.entry_id === agent.agentId
-          && recoveredBinding.room_id === agent.roomId
-          && recoveredBinding.api_url === agent.apiUrl
-          && recoveredBinding.work_attempt_id === agent.workAttemptId
-          && recoveredBinding.execution_generation_id === agent.executionGenerationId
-          && recoveredBinding.agent_session_id === agent.agentSessionId
-          && recoveredCredential === agent.bearer
-          && recoveredLive === agent.handle
-          && recoveredLive.workAttemptId === agent.workAttemptId
-          && recoveredLive.providerContinuationId === providerContinuationId
-          && sameProviderActionConnectionSnapshot(recoveredLive.providerConnection, providerConnection)
-          && isAllowedCursorProviderStateTransition(
-            agent.providerContinuationId,
-            agent.providerConnection,
-            providerContinuationId,
-            providerConnection,
-          )) {
-          const manifest = await this.store.load();
-          this.manifestGeneration = manifest.generation;
-          agent.providerContinuationId = providerContinuationId;
-          agent.providerConnection = providerConnection;
-          return;
-        }
-        throw error;
-      }
-    }));
-  }
-
-  /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
-  private async isExactSupervisedDeliveryAuthority(
-    authority: SupervisedDeliveryAuthority,
-    scope: SupervisedAuthorityScope = "settled_provider_state",
-  ): Promise<boolean> {
-    if (this.handoffScheduled) return false;
-    try { await this.singleton.assertCurrent(); } catch { return false; }
-    if (authority.daemonGeneration !== this.singleton.currentGeneration) return false;
-    const entry = await this.store.getEntry(authority.agentId);
-    const handle = this.liveHandles.get(authority.agentId);
-    if (!entry
-      || entry.id !== authority.agentId
-      || entry.room_id !== authority.roomId
-      || entry.desired_state !== "running"
-      || entry.delivery_mode !== "daemon_inbox"
-      || entry.provider !== authority.provider
-      || entry.work_attempt_id !== authority.workAttemptId
-      || entry.provider_ref?.work_attempt_id !== authority.workAttemptId
-      || entry.provider_ref?.execution_generation_id !== authority.executionGenerationId
-      ) return false;
-    const binding = await this.workerBindings.get(authority.agentId);
-    if (!binding
-      || binding.entry_id !== authority.agentId
-      || binding.room_id !== authority.roomId
-      || binding.api_url !== authority.apiUrl
-      || binding.work_attempt_id !== authority.workAttemptId
-      || binding.execution_generation_id !== authority.executionGenerationId
-      || binding.agent_session_id !== authority.agentSessionId) return false;
-    if ((await this.workerBindings.credentialFor(binding)) !== authority.bearer) return false;
-    // Ingress authority deliberately survives loss of provider execution. A
-    // bounded turn requires the exact live handle in addition to this route.
-    if (!authority.handle) return true;
-    if (!handle
-      || handle !== authority.handle
-      || handle.workAttemptId !== authority.workAttemptId) return false;
-    if (scope === "lane_lease") return true;
-    if (handle.pid !== (authority.providerConnection?.pid ?? null)) return false;
-    return entry.provider_ref?.provider_continuation_id === authority.providerContinuationId
-      && sameProviderActionConnectionSnapshot(
-        entry.provider_ref?.provider_connection ?? null,
-        authority.providerConnection,
-      )
-      && handle.providerContinuationId === authority.providerContinuationId
-      && sameProviderActionConnectionSnapshot(
-        handle.providerConnection ?? null,
-        authority.providerConnection,
-      );
   }
 
   private status() {
@@ -1948,293 +1237,8 @@ export class SupervisorDaemon {
     return this.manifestAdministration.updateAgentConfiguration(input);
   }
 
-  /**
-   * Explicitly replace a provider runtime that is durably proven absent.
-   *
-   * Reconnect is intentionally credential-only and may never create a second
-   * writer. Recovery crosses that boundary only after the saved execution is
-   * terminal (or an attach returns exact terminal evidence), ends the prior
-   * worker session, and retires every stale runtime/binding coordinate. The
-   * durable agent, room, work attempt, workspace, configuration, inbox, and
-   * cursor remain untouched; ordinary convergence then creates one successor
-   * provider generation.
-   */
-  private async completeTurnControlForRuntimeRecovery(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
-    const control = entry.turn_control;
-    if (!control || control.status === "completed") return entry;
-    if (!entry.work_attempt_id || control.work_attempt_id !== entry.work_attempt_id) {
-      throw new Error("Provider recovery found a turn-control barrier owned by a different work attempt.");
-    }
-    const attempt = await this.durability.getAttempt(control.work_attempt_id);
-    const controlledExecution = attempt.execution_generations.find((candidate) =>
-      candidate.execution_generation_id === control.execution_generation_id);
-    if (!controlledExecution?.terminal) {
-      throw new Error("Provider recovery cannot retire turn control before its exact execution generation is durably terminal.");
-    }
-    const observedAt = new Date(this.nowMs()).toISOString();
-    const checkpoint = await this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const committed = await this.store.commitTurnControlState(this.manifestGeneration, {
-        agentId: entry.id,
-        roomId: entry.room_id,
-        actionId: control.action_id,
-        workAttemptId: control.work_attempt_id,
-        executionGenerationId: control.execution_generation_id,
-        mode: "runtime_recovered",
-        // Terminal provider evidence retires the control barrier. FIFO state
-        // is changed only when the journal persisted A's exact inbox identity;
-        // an unlinked historical head may actually be successor B.
-        settleOriginal: Boolean(control.inbox_item_id),
-        activateCorrection: control.correction_strategy === "stop_then_resend",
-        observedAt,
-      }, (current, outcome) => ({
-        ...current,
-        reconciliation: rememberCompletedControlAction(
-          advanceReconciliationState(current.reconciliation, current.observed_state, this.nowMs()),
-          control.action_id,
-        ),
-        turn_control: {
-          ...current.turn_control!,
-          inbox_item_id: outcome.inboxItemId,
-          provider_turn_id: outcome.providerTurnId,
-          operator_resolution: null,
-          status: "completed",
-          interrupted: outcome.original === "cancelled",
-          resumed: control.correction_strategy === "stop_then_resend",
-          state: "idle",
-          stages: outcome.inboxItemId
-            ? control.correction_strategy === "stop_then_resend"
-              ? ["delivered", "applied", "resumed"]
-              : ["delivered", "applied"]
-            : control.correction_strategy === "stop_then_resend"
-              ? ["delivered", "resumed"]
-              : [],
-          error: control.has_correction && control.correction_strategy !== "stop_then_resend"
-            ? "The previous provider was terminally recovered. Its legacy correction payload was not durably recoverable and must be reissued."
-            : outcome.inboxItemId
-              ? "The previous provider was terminally recovered; its exact linked turn-control barrier was settled before replacement."
-              : "The previous provider was terminally recovered. The unlinked legacy control barrier was retired without guessing or mutating the current FIFO head.",
-          updated_at: observedAt,
-        },
-      }), (commit) => this.fenceDaemonCommit(commit));
-      this.manifestGeneration = committed.generation;
-      return committed;
-    });
-    return checkpoint.entry;
-  }
-
-  private async recoverAgentRuntime(entryId: string, daemonGeneration: number) {
-    const release = this.beginLifecycleExclusion(entryId);
-    try {
-      return await this.recoverAgentRuntimeExclusive(entryId, daemonGeneration);
-    } finally {
-      release();
-    }
-  }
-
-  private async recoverAgentRuntimeExclusive(entryId: string, daemonGeneration: number) {
-    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) {
-      throw new Error("Agent runtime recovery is fenced by a stale daemon generation.");
-    }
-    this.bumpEntryControlEpoch(entryId);
-    this.clearRecoveryConvergence(entryId);
-    const updated = await this.serializeEntryTick(entryId, async () => {
-      await this.singleton.assertCurrent();
-      if (daemonGeneration !== this.singleton.currentGeneration || this.handoffScheduled) {
-        throw new Error("Agent runtime recovery lost daemon authority.");
-      }
-      let entry = await this.store.getEntry(entryId);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
-      if (entry.desired_state === "stopped") {
-        throw new Error("A stopped agent must be resumed before its runtime can be recovered.");
-      }
-      if (this.liveHandles.has(entryId)) {
-        throw new Error("The provider runtime is still connected. Reconnect its credentials instead.");
-      }
-      // Runtime replacement is destructive: terminal evidence, the worker
-      // session, and its credential binding are retired below. Prove first—
-      // while lifecycle exclusion and the per-entry lane prevent any new room
-      // move edge—that destination membership has not entered an ambiguous or
-      // post-join phase. The final manifest mutation still performs the exact
-      // atomic pre-membership cancellation; this early phase fence prevents us
-      // from destroying the authority needed to compensate a later phase.
-      const pendingRoomMoves = await this.store.pendingRoomMoves(entryId);
-      if (pendingRoomMoves.length > 1) {
-        throw new Error("Runtime recovery found more than one nonterminal room move for this agent.");
-      }
-      if (pendingRoomMoves.some((move) => !["prepared", "waiting_for_current_turn"].includes(move.phase))) {
-        throw new Error("Agent runtime recovery is blocked while a room move may have changed destination membership.");
-      }
-
-      const ref = entry.provider_ref ?? null;
-      if (ref) {
-        if (!entry.work_attempt_id || ref.work_attempt_id !== entry.work_attempt_id) {
-          throw new Error("The saved provider runtime no longer matches this agent’s durable work attempt.");
-        }
-        const attempt = await this.durability.getAttempt(ref.work_attempt_id);
-        const execution = attempt.execution_generations.find((candidate) =>
-          candidate.execution_generation_id === ref.execution_generation_id);
-        if (!execution) {
-          throw new Error("The saved provider runtime has no matching durable execution generation.");
-        }
-        if (!execution.terminal) {
-          if (!this.providerPort) throw new Error("Provider recovery is unavailable.");
-          const attachment = await this.providerPort.attach(this.providerRef(entry));
-          if (!attachment) {
-            throw new Error("LetAgents cannot prove that the previous provider process stopped. Recovery was not started.");
-          }
-          if (!this.isAttachTerminal(attachment)) {
-            throw new Error("The provider runtime is still reachable. Reconnect its credentials instead.");
-          }
-          if (attachment.terminal.providerContinuationId
-            && attachment.terminal.providerContinuationId !== ref.provider_continuation_id) {
-            throw new Error("Provider recovery returned terminal evidence for a different continuation.");
-          }
-          await this.durability.recordTerminal(ref.work_attempt_id, ref.execution_generation_id, {
-            ...this.terminalPayload(attachment.terminal, execution.actor),
-            actor: execution.actor,
-            generation: execution.generation,
-          });
-          await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, ref.execution_generation_id);
-        }
-      }
-
-      await this.supervisedDelivery?.stop(entryId).catch(() => undefined);
-      // Exact terminal evidence for the old provider is the generation-cutover
-      // boundary. Settle its journal/FIFO effects before removing provider_ref;
-      // otherwise an old unresolved action would freeze every future generation.
-      entry = await this.completeTurnControlForRuntimeRecovery(await this.store.getEntry(entryId) ?? entry);
-      const binding = await this.workerBindings.get(entryId);
-      const retainedSessionId = binding?.agent_session_id
-        ?? entry.last_worker_binding?.agent_session_id
-        ?? null;
-      if (retainedSessionId) {
-        const grant = this.workerAuthority.currentHostGrant(entry);
-        if (!grant || !this.supervisorGrantHttp.endWorkerSession) {
-          throw new Error("Desktop credentials are required before this provider can be safely recovered.");
-        }
-        await this.supervisorGrantHttp.endWorkerSession({
-          apiUrl: grant.apiUrl,
-          grantId: grant.grantId,
-          supervisorGrant: grant.supervisorGrant,
-          grantGeneration: grant.grantGeneration,
-          sessionId: retainedSessionId,
-        });
-      }
-      if (binding) {
-        await this.workerBindings.unbind(
-          entryId,
-          binding.agent_session_id,
-          binding.execution_generation_id,
-        );
-      }
-      this.workerRuntimeCustody.deleteLiveBinding(entryId);
-      this.workerRuntimeCustody.deletePendingResumeBinding(entryId);
-      this.workerRuntimeCustody.deleteWorkerAuthorization(entryId);
-
-      entry = await this.updateManifestEntry(entryId, (current) => ({
-        ...current,
-        desired_state: "running",
-        observed_state: "starting",
-        condition: "none",
-        last_error: null,
-        run_id: null,
-        deployment_id: null,
-        provider_ref: null,
-        last_worker_binding: null,
-        workplace_liveness: {
-          state: "unknown",
-          observed_at: new Date(this.nowMs()).toISOString(),
-          detail: "Preparing a replacement provider and exact worker binding.",
-        },
-        native_liveness: {
-          state: "unknown",
-          observed_at: new Date(this.nowMs()).toISOString(),
-          detail: "The previous provider process stopped; a replacement is starting.",
-        },
-      }), {
-        agentId: entryId,
-        detail: "Room move cancelled because its activating provider runtime ended before destination membership was joined.",
-      });
-      return entry;
-    });
-    this.requestConvergence(entryId);
-    return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(updated) };
-  }
-
   private async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
     return this.manifestAdministration.putManifestEntry(entry);
-  }
-
-  private beginLifecycleExclusion(entryId: string): () => void {
-    return this.entryConcurrency.beginLifecycle(entryId);
-  }
-
-  private async setDesiredState(id: string, desiredState: DesiredState): Promise<DaemonManifestEntry> {
-    const release = this.beginLifecycleExclusion(id);
-    try {
-      return await this.setDesiredStateExclusive(id, desiredState);
-    } finally {
-      release();
-    }
-  }
-
-  private async setDesiredStateExclusive(id: string, desiredState: DesiredState): Promise<DaemonManifestEntry> {
-    if (!id) throw new Error("Manifest entry id is required.");
-    if (!["running", "paused", "stopped"].includes(desiredState)) throw new Error("Invalid desired state.");
-    this.bumpEntryControlEpoch(id);
-    const deliveryStopped = desiredState !== "running" && Boolean(this.supervisedDelivery);
-    if (deliveryStopped) {
-      try {
-        // Wait only for a room-move transition that was already active when
-        // lifecycle exclusion began. Provider launch/capability work remains
-        // fenceable and cannot make Stop/Pause wait on the broad entry lane.
-        await this.waitForActiveRoomMoveReconciliation(id);
-        this.clearRecoveryConvergence(id);
-        await this.supervisedDelivery!.stop(id);
-      } catch (error) {
-        await this.restartSupervisedDeliveryOrConverge(id);
-        throw error;
-      }
-    }
-    let updated: DaemonManifestEntry;
-    try {
-      updated = await this.serializeManifestMutation(async () => {
-        await this.singleton.assertCurrent();
-        const manifest = await this.store.load();
-        const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
-        const entry = manifest.entries.find((candidate) => candidate.id === id);
-        if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-        if (desiredState !== "stopped") {
-          const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
-          if (supervisedOwner) {
-            throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
-          }
-          const legacyOwner = legacyOwners.find((candidate) =>
-            candidate.room_id === entry.room_id && candidate.provider === entry.provider);
-          if (legacyOwner && desiredState === "running") {
-            throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
-          }
-        }
-        const updated = { ...entry, desired_state: desiredState };
-        const next = await this.writeManifest(
-          this.manifestGeneration,
-          manifest.entries.map((candidate) => candidate.id === id ? updated : candidate),
-          legacyOwners,
-          desiredState === "running" ? undefined : {
-            agentId: id,
-            detail: `Room move cancelled because the agent lifecycle changed to ${desiredState} before destination membership was joined.`,
-          },
-        );
-        this.manifestGeneration = next.generation;
-        return updated;
-      });
-    } catch (error) {
-      if (deliveryStopped) await this.restartSupervisedDeliveryOrConverge(id);
-      throw error;
-    }
-    this.requestConvergence(id);
-    return updated;
   }
 
   /**
@@ -2243,92 +1247,6 @@ export class SupervisorDaemon {
    */
   private async setDisplayName(id: string, displayName: string): Promise<DaemonManifestEntry> {
     return this.manifestAdministration.setDisplayName(id, displayName);
-  }
-
-  private async compareAndSetDesiredState(
-    id: string,
-    expectedDesiredState: DesiredState,
-    desiredState: DesiredState,
-  ): Promise<{ applied: boolean; entry: DaemonManifestEntry }> {
-    const release = this.beginLifecycleExclusion(id);
-    try {
-      return await this.compareAndSetDesiredStateExclusive(id, expectedDesiredState, desiredState);
-    } finally {
-      release();
-    }
-  }
-
-  private async compareAndSetDesiredStateExclusive(
-    id: string,
-    expectedDesiredState: DesiredState,
-    desiredState: DesiredState,
-  ): Promise<{ applied: boolean; entry: DaemonManifestEntry }> {
-    if (!id) throw new Error("Manifest entry id is required.");
-    if (!["running", "paused", "stopped"].includes(expectedDesiredState)) throw new Error("Invalid expected desired state.");
-    if (!["running", "paused", "stopped"].includes(desiredState)) throw new Error("Invalid desired state.");
-    const preflight = await this.store.getEntry(id);
-    if (!preflight) throw new Error(`Unknown daemon manifest entry: ${id}`);
-    if (preflight.desired_state !== expectedDesiredState) {
-      return { applied: false, entry: preflight };
-    }
-    this.bumpEntryControlEpoch(id);
-    const deliveryStopped = desiredState !== "running" && Boolean(this.supervisedDelivery);
-    if (deliveryStopped) {
-      try {
-        await this.waitForActiveRoomMoveReconciliation(id);
-        this.clearRecoveryConvergence(id);
-        await this.supervisedDelivery!.stop(id);
-      } catch (error) {
-        await this.restartSupervisedDeliveryOrConverge(id);
-        throw error;
-      }
-    }
-    let result: { applied: boolean; entry: DaemonManifestEntry };
-    try {
-      result = await this.serializeManifestMutation(async () => {
-        await this.singleton.assertCurrent();
-        const manifest = await this.store.load();
-        const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
-        const entry = manifest.entries.find((candidate) => candidate.id === id);
-        if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
-        if (entry.desired_state !== expectedDesiredState) return { applied: false, entry };
-        if (desiredState !== "stopped") {
-          const supervisedOwner = this.competingSupervisedLaneOwner(manifest.entries, entry);
-          if (supervisedOwner) {
-            throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
-          }
-          const legacyOwner = legacyOwners.find((candidate) =>
-            candidate.room_id === entry.room_id && candidate.provider === entry.provider);
-          if (legacyOwner && desiredState === "running") {
-            throw new Error(`Provider lane '${entry.room_id}/${entry.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
-          }
-        }
-        const updated = { ...entry, desired_state: desiredState };
-        const next = await this.writeManifest(
-          this.manifestGeneration,
-          manifest.entries.map((candidate) => candidate.id === id ? updated : candidate),
-          legacyOwners,
-          desiredState === "running" ? undefined : {
-            agentId: id,
-            detail: `Room move cancelled because the agent lifecycle changed to ${desiredState} before destination membership was joined.`,
-          },
-        );
-        this.manifestGeneration = next.generation;
-        return { applied: true, entry: updated };
-      });
-    } catch (error) {
-      if (deliveryStopped) await this.restartSupervisedDeliveryOrConverge(id);
-      throw error;
-    }
-    if (result.applied) {
-      this.requestConvergence(id);
-    } else {
-      if (deliveryStopped) await this.restartSupervisedDeliveryOrConverge(id);
-      // The speculative epoch bump may have fenced an in-flight launch even
-      // though the CAS lost. Reconcile the unchanged durable state again.
-      this.requestConvergence(id);
-    }
-    return result;
   }
 
   private admitNewTurnControl(entryId: string): void {
@@ -2478,12 +1396,6 @@ export class SupervisorDaemon {
     return this.boundedEffects.reserveJournal(operation);
   }
 
-  private providerRef(entry: DaemonManifestEntry): ProviderActionRef {
-    const coordinator = this.providerExecution;
-    if (!coordinator) throw new Error("Provider action port is unavailable");
-    return coordinator.providerRef(entry);
-  }
-
   private attachLiveProvider(
     entry: DaemonManifestEntry,
     mayStartDelivery: () => boolean = () => true,
@@ -2492,13 +1404,6 @@ export class SupervisorDaemon {
     const coordinator = this.providerExecution;
     if (!coordinator) throw new Error("Provider action port is unavailable");
     return coordinator.attachLiveProvider(entry, mayStartDelivery);
-  }
-
-  private isAttachTerminal(
-    attachment: ProviderActionHandle | ProviderActionAttachTerminal,
-  ): attachment is ProviderActionAttachTerminal {
-    return this.providerExecution?.isAttachTerminal(attachment)
-      ?? ("state" in attachment && attachment.state === "terminal");
   }
 
   private installProviderHandle(

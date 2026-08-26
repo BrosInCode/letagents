@@ -6,7 +6,11 @@ import { fileURLToPath } from "node:url";
 const mainSource = read("../main.ts");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
+const deliveryCutoverExecutionSource = read("../delivery-cutover-execution-coordinator.ts");
+const desiredStateSource = read("../desired-state-coordinator.ts");
+const providerCheckpointSource = read("../provider-checkpoint-coordinator.ts");
 const roomAgentProjectionSource = read("../room-agent-state-projection.ts");
+const runtimeRecoverySource = read("../runtime-recovery-coordinator.ts");
 
 const expectedControlMethods = [
   "attempt.read",
@@ -83,19 +87,22 @@ test("daemon policy and projection domains remain extracted", () => {
     "daemon-error-policy",
     "daemon-state-watch",
     "delivery-cutover-coordinator",
+    "delivery-cutover-execution-coordinator",
+    "desired-state-coordinator",
     "entry-concurrency-gate",
     "legacy-lane-coordinator",
     "lifecycle-administration-coordinator",
     "manifest-administration-coordinator",
     "process-identity",
+    "provider-checkpoint-coordinator",
     "provider-execution-coordinator",
     "provider-reconciliation-coordinator",
-    "provider-state-policy",
     "provider-stream-coordinator",
     "provider-stream-policy",
     "room-agent-state-projection",
     "room-delivery-control",
     "room-move-coordinator",
+    "runtime-recovery-coordinator",
     "turn-control-coordinator",
     "worker-authority-coordinator",
     "worker-runtime-custody",
@@ -103,6 +110,15 @@ test("daemon policy and projection domains remain extracted", () => {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
   }
   assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
+  assert.match(deliveryCutoverExecutionSource, /controlExactTurn/);
+  assert.equal(matches(mainSource, /\.controlExactTurn\s*\(/g).length, 0);
+  assert.match(desiredStateSource, /compareAndSet/);
+  assert.equal(matches(mainSource, /private async setDesiredState\s*\(/g).length, 0);
+  assert.match(providerCheckpointSource, /checkpointCursorPreparedTurn/);
+  assert.match(providerCheckpointSource, /from "\.\/provider-state-policy\.js"/);
+  assert.equal(matches(mainSource, /\.checkpointCursorPreparedTurn\s*\(/g).length, 0);
+  assert.match(runtimeRecoverySource, /commitTurnControlState/);
+  assert.equal(matches(mainSource, /\.commitTurnControlState\s*\(/g).length, 0);
   assert.equal(matches(mainSource, /^export function providerStreamLifecycle/mg).length, 0);
   assert.equal(matches(mainSource, /^function projectDeliveryReceipts/mg).length, 0);
 });
