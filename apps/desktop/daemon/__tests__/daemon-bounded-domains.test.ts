@@ -85,6 +85,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "delivery-cutover-coordinator",
     "entry-concurrency-gate",
     "legacy-lane-coordinator",
+    "lifecycle-administration-coordinator",
     "manifest-administration-coordinator",
     "process-identity",
     "provider-state-policy",
