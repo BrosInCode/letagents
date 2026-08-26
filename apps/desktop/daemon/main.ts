@@ -33,7 +33,8 @@ import {
 import { DaemonStateWatch } from "./daemon-state-watch.js";
 import { WorkDurabilityStore } from "./durability-store.js";
 import { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
-import { EphemeralWorkspaceProvisioner, isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
+import { EphemeralWorkspaceProvisioner } from "./ephemeral-workspace-provisioner.js";
+import { LifecycleAdministrationCoordinator } from "./lifecycle-administration-coordinator.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
@@ -172,6 +173,7 @@ export class SupervisorDaemon {
   private readonly store: ManifestStore;
   private readonly legacyLanes: LegacyLaneCoordinator;
   private readonly manifestAdministration: ManifestAdministrationCoordinator;
+  private readonly lifecycleAdministration: LifecycleAdministrationCoordinator;
   private readonly audit: AuditLog;
   private readonly durability: WorkDurabilityStore;
   private readonly provisioner: WorkspaceProvisioner;
@@ -354,6 +356,31 @@ export class SupervisorDaemon {
     this.agentStreamRegistry = new AgentStreamRegistry({
       isHandoffScheduled: () => this.handoffScheduled,
     });
+    this.lifecycleAdministration = new LifecycleAdministrationCoordinator({
+      store: this.store,
+      bindings: this.workerBindings,
+      durability: this.durability,
+      authority: {
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        currentManifestGeneration: () => this.manifestGeneration,
+        acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+        assertCurrent: () => this.singleton.assertCurrent(),
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+        serializeManifestMutation: (operation) => this.serializeManifestMutation(operation),
+      },
+      beginLifecycle: (entryId) => this.beginLifecycleExclusion(entryId),
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      setDesiredStateExclusive: (entryId, desiredState) => this.setDesiredStateExclusive(entryId, desiredState),
+      updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      entryWithDerivedLiveness: (entry) => this.entryWithDerivedLiveness(entry),
+      stopDelivery: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
+      hasLiveHandle: (entryId) => this.liveHandles.has(entryId),
+      ...(providerPort ? { provider: providerPort } : {}),
+      runtimeCustody: this.workerRuntimeCustody,
+      deleteAgentStream: (entryId) => this.agentStreamRegistry.delete(entryId),
+      ephemeralProvisioner: this.ephemeralProvisioner,
+      nowMs: () => this.nowMs(),
+    });
     // Inbox state belongs to the canonical daemon database. The worker-binding
     // path is a legacy JSON import source and must never become a second SQLite
     // authority for delivery receipts.
@@ -495,7 +522,7 @@ export class SupervisorDaemon {
       prepareBoundedEffect: this.prepareBoundedEffect.bind(this),
       prepareHandoff: this.prepareHandoff.bind(this),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
-      purgeAgent: this.purgeAgent.bind(this),
+      purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
       putManifestEntry: this.putManifestEntry.bind(this),
       readAttempt: this.readAttempt.bind(this),
       recoverAgentRuntime: this.recoverAgentRuntime.bind(this),
@@ -503,7 +530,7 @@ export class SupervisorDaemon {
       reserveLegacyLane: this.reserveLegacyLane.bind(this),
       resolveTurnControl: this.resolveTurnControl.bind(this),
       restoreAgentConversation: this.restoreAgentConversation.bind(this),
-      retireAgent: this.retireAgent.bind(this),
+      retireAgent: this.lifecycleAdministration.retireAgent.bind(this.lifecycleAdministration),
       retryRoomDelivery: this.retryRoomDelivery.bind(this),
       rollbackInspectorRoomMove: (input) => this.roomMoves.rollbackInspector(input),
       setDesiredState: this.setDesiredState.bind(this),
@@ -541,8 +568,8 @@ export class SupervisorDaemon {
     await this.recoverTurnControls();
     await this.recoverOrphanedLegacyReservations();
     await this.roomMoves.reconcilePrepared();
-    await this.recoverPreparedPurges();
-    await this.recoverEphemeralWorkspaces();
+    await this.lifecycleAdministration.recoverPreparedPurges();
+    await this.lifecycleAdministration.recoverEphemeralWorkspaces();
     await this.socket.start();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
@@ -2042,306 +2069,6 @@ export class SupervisorDaemon {
     });
     this.requestConvergence(entryId);
     return { outcome: "recovering", entry: await this.entryWithDerivedLiveness(updated) };
-  }
-
-  /** Retire preserves identity/history/worktree, but revokes live room authority. */
-  private async retireAgent(
-    entryId: string,
-    daemonGeneration: number,
-    revokedAgentSessionId: string | null = null,
-    grantRevokedWithoutWorkerSession = false,
-  ) {
-    if (!entryId || daemonGeneration !== this.singleton.currentGeneration
-      || !(revokedAgentSessionId === null || Boolean(revokedAgentSessionId.trim()))
-      || (revokedAgentSessionId !== null && grantRevokedWithoutWorkerSession)) {
-      throw new Error("Retire is fenced by stale or invalid lifecycle coordinates.");
-    }
-    const release = this.beginLifecycleExclusion(entryId);
-    try {
-      const stoppedEntry = await this.setDesiredStateExclusive(entryId, "stopped");
-      if (!this.requiresHostGrant(stoppedEntry)) {
-        return { outcome: "retired" as const, entry: await this.entryWithDerivedLiveness(stoppedEntry) };
-      }
-      // The entry tick is also the mint/bind lane. Waiting for it here makes
-      // an in-flight worker-session mint settle before we choose the exact
-      // revocation coordinate, and prevents a late mint from recreating local
-      // authority after retirement cleanup.
-      return await this.serializeEntryTick(entryId, async () => {
-        let entry = await this.store.getEntry(entryId);
-        if (!entry || entry.desired_state !== "stopped") {
-          return { outcome: "invalid" as const, error: "Agent lifecycle changed before retirement cleanup." };
-        }
-
-        const [session, binding, mint] = await Promise.all([
-          this.workerBindings.supervisedWorkerSession(entryId),
-          this.workerBindings.get(entryId),
-          this.workerBindings.supervisedWorkerMintState(entryId),
-        ]);
-        const sessionIds = new Set<string>();
-        if (session?.agent_session_id) sessionIds.add(session.agent_session_id);
-        if (binding?.agent_session_id) sessionIds.add(binding.agent_session_id);
-        if (mint?.phase === "exact" && mint.agent_session_id) sessionIds.add(mint.agent_session_id);
-        if (sessionIds.size > 1) {
-          return { outcome: "invalid" as const, error: "Retirement found conflicting worker-session identities; no authority was removed." };
-        }
-        const exactSessionId = sessionIds.size === 1 ? [...sessionIds][0]! : null;
-
-        if (exactSessionId && revokedAgentSessionId !== exactSessionId) {
-          if (revokedAgentSessionId) {
-            return { outcome: "invalid" as const, error: "Retirement acknowledgement belongs to a different worker session." };
-          }
-          return {
-            outcome: "revocation_required" as const,
-            revocation_kind: "worker_session" as const,
-            agent_session_id: exactSessionId,
-          };
-        }
-        // Even a never-minted agent retains a live parent grant in Electron's
-        // encrypted registry. Retirement revokes that latent mint authority,
-        // not only grants whose worker-session POST outcome is uncertain.
-        if (!exactSessionId && !grantRevokedWithoutWorkerSession) {
-          return { outcome: "revocation_required" as const, revocation_kind: "grant_only" as const };
-        }
-        if (!exactSessionId && revokedAgentSessionId) {
-          return { outcome: "invalid" as const, error: "Retirement no longer has the acknowledged worker session." };
-        }
-
-        const current = await this.store.getEntry(entryId);
-        if (!current || current.desired_state !== "stopped"
-          || daemonGeneration !== this.singleton.currentGeneration) {
-          return { outcome: "invalid" as const, error: "Agent lifecycle changed before retirement cleanup." };
-        }
-        await this.supervisedDelivery?.stop(entryId).catch(() => undefined);
-        await this.workerBindings.retireSupervisedWorkerAuthority(entryId, exactSessionId);
-        this.workerRuntimeCustody.deleteLiveBinding(entryId);
-        this.workerRuntimeCustody.deletePendingResumeBinding(entryId);
-        this.workerRuntimeCustody.deleteWorkerAuthorization(entryId);
-        this.workerRuntimeCustody.deleteHostGrant(entryId);
-        entry = await this.updateManifestEntry(entryId, (latest) => ({
-          ...latest,
-          last_worker_binding: null,
-          workplace_liveness: {
-            state: "stale",
-            observed_at: new Date(this.nowMs()).toISOString(),
-            detail: "Retired agent has no active room worker session.",
-          },
-        }));
-        return { outcome: "retired" as const, entry: await this.entryWithDerivedLiveness(entry) };
-      });
-    } finally {
-      release();
-    }
-  }
-
-  /** Purge is intentionally stricter than retire and never removes a worktree. */
-  private async purgeAgent(
-    entryId: string,
-    daemonGeneration: number,
-    revokedAgentSessionId: string | null = null,
-    grantRevokedWithoutWorkerSession = false,
-  ) {
-    if (!entryId || daemonGeneration !== this.singleton.currentGeneration) throw new Error("Purge is fenced by a stale daemon generation.");
-    return this.serializeEntryTick(entryId, async () => {
-      const preflight = await this.store.getEntry(entryId);
-      if (preflight && (preflight.desired_state !== "stopped"
-        || !["absent", "stopped", "failed"].includes(preflight.observed_state))) {
-        return { outcome: "invalid" as const, error: "Purge requires a fully stopped durable lifecycle." };
-      }
-      const cursorConnection = preflight?.provider_ref?.provider_connection?.kind === "cursor_cli"
-        ? preflight.provider_ref.provider_connection
-        : null;
-      if (preflight && !this.liveHandles.has(entryId) && cursorConnection && cursorConnection.pid !== null) {
-        if (!this.providerPort?.stopRef) {
-          return { outcome: "invalid" as const, error: "Purge cannot prove the unattached Cursor wrapper is stopped." };
-        }
-        try {
-          const ref = this.providerRef(preflight);
-          const terminal = await this.providerPort.stopRef(ref, {
-            actionId: `purge:${entryId}:cursor-wrapper-fence:${preflight.provider_ref!.execution_generation_id}`,
-          });
-          const attempt = await this.durability.getAttempt(ref.workAttemptId);
-          const execution = attempt.execution_generations.find((candidate) =>
-            candidate.execution_generation_id === preflight.provider_ref!.execution_generation_id);
-          if (!execution) throw new Error("Cursor purge fence has no matching durable execution generation.");
-          if (!execution.terminal) {
-            await this.durability.recordTerminal(ref.workAttemptId, execution.execution_generation_id, {
-              ...this.terminalPayload(terminal, execution.actor),
-              actor: execution.actor,
-              generation: execution.generation,
-            });
-          }
-          await this.durability.releaseTerminalExecutionFence(ref.workAttemptId, execution.execution_generation_id);
-        } catch (error) {
-          return {
-            outcome: "invalid" as const,
-            error: `Purge could not fence the unattached Cursor wrapper: ${schedulerErrorDetail(error)}`,
-          };
-        }
-      }
-      return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const operationId = `purge:${entryId}`;
-      let purge = await this.store.getPurge(operationId);
-      const entry = await this.store.getEntry(entryId);
-      if (!entry) {
-        return purge?.phase === "complete" || !purge
-          ? {
-            outcome: "purged" as const,
-            ...(purge?.attached_work_attempt_id
-              ? { purged_work_attempt_id: purge.attached_work_attempt_id }
-              : {}),
-          }
-          : { outcome: "invalid" as const, error: "Purge identity is absent but its journal is incomplete." };
-      }
-      if (this.liveHandles.has(entryId)) return { outcome: "invalid" as const, error: "Purge requires no live provider or bounded delivery turn." };
-      if (!purge) {
-        try {
-          const externalRevokeRequired = this.requiresHostGrant(entry);
-          const evidence = externalRevokeRequired
-            ? await this.store.durablePurgeWorkerSessionAttestation(entryId)
-            : { workerSessionAttestation: "not_required" as const, agentSessionId: null };
-          purge = (await this.store.preparePurge(this.manifestGeneration, {
-            operationId, requestId: operationId, agentId: entryId, daemonGeneration,
-            // Electron is the durable grant custodian, so every daemon-inbox
-            // identity requires an owner-authenticated revoke acknowledgement.
-            externalRevokeRequired,
-            workerSessionAttestation: evidence.workerSessionAttestation,
-            agentSessionId: evidence.agentSessionId,
-          })).purge;
-        } catch (error) {
-          return { outcome: "invalid" as const, error: schedulerErrorDetail(error) };
-        }
-      }
-      if (purge.daemon_generation !== daemonGeneration) {
-        purge = await this.store.adoptPurgeDaemonGeneration({ operationId, agentId: entryId, expectedDaemonGeneration: purge.daemon_generation, daemonGeneration });
-      }
-      if (purge.phase === "reprepare_credentials") {
-        const evidence = await this.store.durablePurgeWorkerSessionAttestation(entryId);
-        if (evidence.workerSessionAttestation === "unknown") {
-          return {
-            outcome: "invalid" as const,
-            error: "Purge credential recovery needs an exact retained worker session or durable proof that no worker session was minted.",
-          };
-        }
-        purge = await this.store.repreparePurgeCredentials({
-          operationId,
-          agentId: entryId,
-          expectedDaemonGeneration: daemonGeneration,
-          workerSessionAttestation: evidence.workerSessionAttestation,
-          agentSessionId: evidence.agentSessionId,
-        });
-      }
-      if (revokedAgentSessionId && purge.phase === "revoking_credentials") {
-        purge = await this.store.markPurgeCredentialsRevoked({
-          operationId,
-          agentId: entryId,
-          expectedDaemonGeneration: daemonGeneration,
-          agentSessionId: revokedAgentSessionId,
-        });
-      }
-      if (grantRevokedWithoutWorkerSession && purge.phase === "revoking_credentials") {
-        purge = await this.store.markPurgeGrantRevokedWithoutWorkerSession({
-          operationId,
-          agentId: entryId,
-          expectedDaemonGeneration: daemonGeneration,
-        });
-      }
-      if (purge.phase === "revoking_credentials") {
-        if (purge.worker_session_attestation === "exact" && purge.agent_session_id) {
-          return {
-            outcome: "revocation_required" as const,
-            operation_id: operationId,
-            revocation_kind: "worker_session" as const,
-            agent_session_id: purge.agent_session_id,
-          };
-        }
-        if (purge.worker_session_attestation === "none" && purge.agent_session_id === null) {
-          return {
-            outcome: "revocation_required" as const,
-            operation_id: operationId,
-            revocation_kind: "grant_only" as const,
-          };
-        }
-        return { outcome: "invalid" as const, error: "Purge revocation evidence is internally inconsistent." };
-      }
-      if (purge.phase === "complete") {
-        return {
-          outcome: "purged" as const,
-          ...(purge.attached_work_attempt_id
-            ? { purged_work_attempt_id: purge.attached_work_attempt_id }
-            : {}),
-        };
-      }
-      if (purge.phase !== "local_commit") return { outcome: "invalid" as const, error: purge.error ?? "Purge journal is not committable." };
-      try {
-        if (purge.attached_work_attempt_id) {
-          await this.removeEphemeralWorkAttempt(purge.attached_work_attempt_id);
-        }
-        const committed = await this.store.commitPurge(this.manifestGeneration, { operationId, agentId: entryId, daemonGeneration }, (commit) => this.fenceDaemonCommit(commit));
-        this.manifestGeneration = committed.generation;
-      } catch (error) {
-        return { outcome: "invalid" as const, error: schedulerErrorDetail(error) };
-      }
-      this.workerRuntimeCustody.deleteLiveBinding(entryId);
-      this.workerRuntimeCustody.deleteWorkerAuthorization(entryId);
-      this.workerRuntimeCustody.deleteHostGrant(entryId);
-      this.workerRuntimeCustody.deleteOpenModelCredential(entryId);
-      // The ephemeral live feed shares the durable identity's lifetime.
-      this.agentStreamRegistry.delete(entryId);
-      return {
-        outcome: "purged" as const,
-        ...(purge.attached_work_attempt_id
-          ? { purged_work_attempt_id: purge.attached_work_attempt_id }
-          : {}),
-      };
-      });
-    });
-  }
-
-  private async recoverPreparedPurges(): Promise<void> {
-    for (const purge of await this.store.pendingPurges()) {
-      if (purge.phase !== "local_commit") continue; // Electron must finish external revocation.
-      await this.purgeAgent(purge.agent_id, this.singleton.currentGeneration, null, false).catch(() => undefined);
-    }
-  }
-
-  private async removeEphemeralWorkAttempt(workAttemptId: string): Promise<boolean> {
-    let attempt = await this.durability.getAttempt(workAttemptId);
-    if (!isEphemeralWorkspaceMarker(attempt.workspace_identity)) return false;
-    if (!attempt.concluded_at && !["gc_pending", "garbage_collected"].includes(attempt.state)) {
-      attempt = await this.durability.concludeAttempt(workAttemptId, {
-        state: "cleanly_concluded",
-        cause: "room_only_agent_purged",
-      });
-    }
-    if (attempt.state !== "garbage_collected") {
-      await this.durability.garbageCollectEphemeralAttempt(workAttemptId);
-    }
-    return true;
-  }
-
-  private async recoverEphemeralWorkspaces(): Promise<void> {
-    const manifest = await this.store.load();
-    const attached = new Set<string>();
-    for (const entry of manifest.entries) {
-      if (entry.work_attempt_id) attached.add(entry.work_attempt_id);
-      if (entry.provider_ref?.work_attempt_id) attached.add(entry.provider_ref.work_attempt_id);
-    }
-    for (const purge of await this.store.pendingPurges()) {
-      if (purge.attached_work_attempt_id) attached.add(purge.attached_work_attempt_id);
-    }
-    for (const attempt of await this.durability.listAttempts()) {
-      if (!isEphemeralWorkspaceMarker(attempt.workspace_identity) || attached.has(attempt.work_attempt_id)) continue;
-      if (attempt.execution_generations.some((generation) => generation.terminal === null)) {
-        console.error(`Refusing to collect orphaned room-only attempt ${attempt.work_attempt_id}: live execution evidence remains.`);
-        continue;
-      }
-      await this.removeEphemeralWorkAttempt(attempt.work_attempt_id).catch((error) => {
-        console.error(`Refusing to collect orphaned room-only attempt ${attempt.work_attempt_id}:`, error);
-      });
-    }
-    const retained = new Set((await this.durability.listAttempts()).map((attempt) => attempt.work_attempt_id));
-    await this.ephemeralProvisioner.garbageCollectOrphans(retained);
   }
 
   private async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
