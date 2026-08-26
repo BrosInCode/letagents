@@ -41,7 +41,7 @@ import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { assertMacOS } from "./platform.js";
-import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal, type ProviderTurnControlResult } from "./provider-action-port.js";
+import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
 import { isAllowedCursorProviderStateTransition, isIdleCursorConnection, isLiveCursorConnection } from "./provider-state-policy.js";
 import {
   bindingMatchesRoomAgentGeneration,
@@ -90,8 +90,9 @@ import {
   type PendingResumeBinding,
 } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
-import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedDeliveryInterruptReservation, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
+import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import { supervisedToolRuntime, type DaemonToolAgentSession, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
+import { TurnControlCoordinator } from "./turn-control-coordinator.js";
 
 export {
   productionSupervisedDeliveryHttp,
@@ -127,10 +128,6 @@ type BootstrapOperation = {
   operation: Promise<unknown>;
 };
 
-const MAX_TURN_CONTROL_CORRECTION_BYTES = 32 * 1024;
-const MAX_TURN_CONTROL_ACTION_ID_BYTES = 256;
-const TURN_CONTROL_ADMISSION_WINDOW_MS = 60_000;
-const MAX_NEW_TURN_CONTROLS_PER_WINDOW = 24;
 const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
 const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
 // Electron calls the bootstrap admission with a dedicated 45s deadline. Keep
@@ -150,15 +147,6 @@ const WORKER_BIND_MAX_ATTEMPTS = 3;
 const WORKER_BIND_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const PROVIDER_START_RETRY_LIMIT = 3;
 const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
-
-type DaemonTurnControlResult = ProviderTurnControlResult & {
-  entryId: string;
-  workAttemptId: string;
-  executionGenerationId: string;
-  actionId: string;
-  duplicate: boolean;
-  stages: Array<"delivered" | "interrupting" | "applied" | "resumed" | "already_applied">;
-};
 
 export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
   /** Durable provider-action identity; reused ticks must keep this value. */
@@ -185,6 +173,7 @@ export class SupervisorDaemon {
   private readonly continuationRepairs: ContinuationRepairCoordinator;
   private readonly roomMoves: RoomMoveCoordinator;
   private readonly supervisedDelivery: SupervisedAgentDelivery | null;
+  private readonly turnControls: TurnControlCoordinator;
   private readonly roomDeliveryControl: RoomDeliveryControl;
   private readonly boundedEffects: BoundedEffectCoordinator;
   private readonly socket: DaemonControlSocket;
@@ -212,16 +201,6 @@ export class SupervisorDaemon {
     entryId: string; executionGenerationId: string; daemonGeneration: number;
   }>();
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
-  private readonly turnControlRequests = new Map<string, {
-    input: {
-      entryId: string; daemonGeneration: number; roomId: string;
-      workAttemptId: string; executionGenerationId: string; providerContinuationId: string;
-      providerTurnId: string; inboxItemId: string; sourceMessageId: string;
-      actionId: string; actionSequence: number; correction: string | null;
-    };
-    operation: Promise<DaemonTurnControlResult>;
-  }>();
-  private readonly turnControlAdmissions = new Map<string, number[]>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly workerRuntimeCustody = new WorkerRuntimeCustody();
   /**
@@ -462,6 +441,32 @@ export class SupervisorDaemon {
         (input) => this.checkpointPreparedCursorTurn(input),
       )
       : null;
+    this.turnControls = new TurnControlCoordinator({
+      authority: {
+        currentGeneration: () => this.singleton.currentGeneration,
+        assertCurrent: () => this.singleton.assertCurrent(),
+        manifestGeneration: () => this.manifestGeneration,
+        setManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+      },
+      store: this.store,
+      durability: this.durability,
+      workerBindings: this.workerBindings,
+      inbox: this.supervisedInbox,
+      delivery: this.supervisedDelivery,
+      providerPort: this.providerPort,
+      entryConcurrency: this.entryConcurrency,
+      currentHandle: (entryId) => this.liveHandles.get(entryId),
+      attachLiveProvider: (entry) => this.attachLiveProvider(entry),
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      serializeManifest: (operation) => this.serializeManifestMutation(operation),
+      updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      entryWithDerivedLiveness: (entry) => this.entryWithDerivedLiveness(entry),
+      wakeDelivery: (entryId) => this.startSupervisedDelivery(entryId, "wake"),
+      scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
+      requestConvergence: (entryId) => this.requestConvergence(entryId),
+      nowMs: () => this.nowMs(),
+    });
     this.roomDeliveryControl = new RoomDeliveryControl({
       delivery: this.supervisedDelivery,
       supportsRunRoomTurn: () => Boolean(this.providerPort?.runRoomTurn),
@@ -509,7 +514,7 @@ export class SupervisorDaemon {
       compareAndSetDesiredState: this.compareAndSetDesiredState.bind(this),
       completeBoundedEffect: this.completeBoundedEffect.bind(this),
       executeBoundedTool: this.executeBoundedTool.bind(this),
-      controlTurn: this.controlTurn.bind(this),
+      controlTurn: (input) => this.turnControls.control(input),
       entryWithDerivedLiveness: this.entryWithDerivedLiveness.bind(this),
       getAgentConfiguration: this.getAgentConfiguration.bind(this),
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
@@ -528,7 +533,7 @@ export class SupervisorDaemon {
       recoverAgentRuntime: this.recoverAgentRuntime.bind(this),
       releaseLegacyLane: this.releaseLegacyLane.bind(this),
       reserveLegacyLane: this.reserveLegacyLane.bind(this),
-      resolveTurnControl: this.resolveTurnControl.bind(this),
+      resolveTurnControl: (input) => this.turnControls.resolve(input),
       restoreAgentConversation: this.restoreAgentConversation.bind(this),
       retireAgent: this.lifecycleAdministration.retireAgent.bind(this.lifecycleAdministration),
       retryRoomDelivery: this.retryRoomDelivery.bind(this),
@@ -2240,844 +2245,8 @@ export class SupervisorDaemon {
     return result;
   }
 
-  private controlTurn(input: {
-    entryId: string;
-    daemonGeneration: number;
-    roomId: string;
-    workAttemptId: string;
-    executionGenerationId: string;
-    providerContinuationId: string;
-    providerTurnId: string;
-    inboxItemId: string;
-    sourceMessageId: string;
-    actionId: string;
-    actionSequence: number;
-    correction: string | null;
-  }): Promise<DaemonTurnControlResult> {
-    for (const [field, value] of Object.entries({
-      id: input.entryId,
-      room_id: input.roomId,
-      work_attempt_id: input.workAttemptId,
-      execution_generation_id: input.executionGenerationId,
-      provider_continuation_id: input.providerContinuationId,
-      provider_turn_id: input.providerTurnId,
-      inbox_item_id: input.inboxItemId,
-      source_message_id: input.sourceMessageId,
-      action_id: input.actionId,
-    })) {
-      if (!value.trim() || value !== value.trim()) throw new Error(`Turn control ${field} is required.`);
-    }
-    if (!Number.isSafeInteger(input.actionSequence) || input.actionSequence < 1) {
-      throw new Error("Turn control action_sequence must be a positive safe integer.");
-    }
-    if (!Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1) {
-      throw new Error("Turn control daemon_generation must be a positive safe integer.");
-    }
-    const correction = input.correction?.trim() || null;
-    if (Buffer.byteLength(input.actionId, "utf8") > MAX_TURN_CONTROL_ACTION_ID_BYTES
-      || !/^[A-Za-z0-9._:-]+$/.test(input.actionId)) {
-      throw new Error("Turn control action_id must be at most 256 UTF-8 bytes and contain only letters, numbers, '.', '_', ':', or '-'.");
-    }
-    if (correction && Buffer.byteLength(correction, "utf8") > MAX_TURN_CONTROL_CORRECTION_BYTES) {
-      throw new Error("Turn control correction exceeds the 32 KiB durable payload limit.");
-    }
-    const normalizedInput = { ...input, correction };
-    const requestKey = JSON.stringify([normalizedInput.entryId, normalizedInput.actionId]);
-    const existing = this.turnControlRequests.get(requestKey);
-    if (existing) {
-      const sameInput = existing.input.entryId === normalizedInput.entryId
-        && existing.input.daemonGeneration === normalizedInput.daemonGeneration
-        && existing.input.roomId === normalizedInput.roomId
-        && existing.input.workAttemptId === normalizedInput.workAttemptId
-        && existing.input.executionGenerationId === normalizedInput.executionGenerationId
-        && existing.input.providerContinuationId === normalizedInput.providerContinuationId
-        && existing.input.providerTurnId === normalizedInput.providerTurnId
-        && existing.input.inboxItemId === normalizedInput.inboxItemId
-        && existing.input.sourceMessageId === normalizedInput.sourceMessageId
-        && existing.input.actionId === normalizedInput.actionId
-        && existing.input.actionSequence === normalizedInput.actionSequence
-        && existing.input.correction === normalizedInput.correction;
-      if (!sameInput) throw new Error("An in-flight turn-control action id was reused with different fenced input.");
-      return existing.operation;
-    }
-    const releaseTurnControl = this.entryConcurrency.beginTurnControl(normalizedInput.entryId);
-    const operation = this.controlTurnOnce(normalizedInput).finally(() => {
-      this.turnControlRequests.delete(requestKey);
-      releaseTurnControl();
-    });
-    this.turnControlRequests.set(requestKey, { input: normalizedInput, operation });
-    return operation;
-  }
-
-  private async resolveTurnControl(input: {
-    entryId: string;
-    workAttemptId: string;
-    executionGenerationId: string;
-    actionId: string;
-    resolution: "not_applied" | "applied";
-  }): Promise<DaemonManifestEntryView> {
-    if (!input.entryId || !input.workAttemptId || !input.executionGenerationId || !input.actionId) {
-      throw new Error("Exact turn-control resolution identity is required.");
-    }
-    if (input.resolution !== "not_applied" && input.resolution !== "applied") {
-      throw new Error("Turn-control resolution must be 'not_applied' or 'applied'.");
-    }
-    const prior = await this.store.getEntry(input.entryId);
-    const priorControl = prior?.turn_control;
-    if (prior
-      && prior.work_attempt_id === input.workAttemptId
-      && priorControl?.action_id === input.actionId
-      && priorControl.work_attempt_id === input.workAttemptId
-      && priorControl.execution_generation_id === input.executionGenerationId
-      && priorControl.status === "completed") {
-      if (priorControl.operator_resolution !== input.resolution) {
-        throw new Error("This turn-control action was already completed with a different operator resolution.");
-      }
-      return this.entryWithDerivedLiveness(prior);
-    }
-    const updatedAt = new Date().toISOString();
-    let committed: Awaited<ReturnType<ManifestStore["commitTurnControlState"]>>;
-    try {
-      committed = await this.serializeEntryTick(input.entryId, () => this.serializeManifestMutation(async () => {
-        await this.singleton.assertCurrent();
-        const current = await this.store.getEntry(input.entryId);
-        const control = current?.turn_control;
-        // Current-runtime resolution needs no attempt-store lookup. Historical
-        // resolution consults durability only when the provider reference was
-        // detached or replaced, so legacy current journals are not rejected by
-        // stricter modern work-attempt identifier validation.
-        const currentRuntimeMatches = current?.provider_ref?.execution_generation_id === input.executionGenerationId;
-        const controlledAttempt = current?.work_attempt_id === input.workAttemptId && !currentRuntimeMatches
-          ? await this.durability.getAttempt(input.workAttemptId)
-          : null;
-        const controlledExecutionTerminal = Boolean(controlledAttempt?.execution_generations.some((candidate) =>
-          candidate.execution_generation_id === input.executionGenerationId && candidate.terminal));
-        if (!current
-          || !control
-          || control.action_id !== input.actionId
-          || control.work_attempt_id !== input.workAttemptId
-          || control.execution_generation_id !== input.executionGenerationId
-          || current.work_attempt_id !== input.workAttemptId
-          || (!currentRuntimeMatches && !controlledExecutionTerminal)) {
-          throw new Error("Turn-control resolution identity is stale or belongs to another execution.");
-        }
-        if (control.status !== "uncertain") {
-          throw new Error("Only an uncertain turn-control outcome requires operator resolution.");
-        }
-        const checkpoint = await this.store.commitTurnControlState(this.manifestGeneration, {
-          agentId: current.id,
-          roomId: current.room_id,
-          actionId: input.actionId,
-          workAttemptId: input.workAttemptId,
-          executionGenerationId: input.executionGenerationId,
-          mode: input.resolution === "applied" ? "operator_applied" : "operator_not_applied",
-          // Every applied native interrupt settles the exact old FIFO row. A
-          // legacy daemon-inbox native-correction journal cannot safely resume
-          // that old provider turn; future corrections never create this shape
-          // because daemon-owned corrections use bounded stop-then-resend.
-          settleOriginal: input.resolution === "applied" && Boolean(control.inbox_item_id),
-          // The operator resolves only whether native Stop happened. The
-          // already-accepted durable correction intent survives either answer.
-          activateCorrection: control.correction_strategy === "stop_then_resend",
-          observedAt: updatedAt,
-        }, (entry, outcome) => {
-          const publicationWon = outcome.original === "publication_won";
-          const interrupted = input.resolution === "applied" && !publicationWon;
-          const resumed = control.correction_strategy === "stop_then_resend"
-            || (input.resolution === "applied" && control.has_correction);
-          const activity = [...(entry.activity ?? []), sanitizeDaemonActivityEvent({
-            observed_at: updatedAt,
-            sequence: ((entry.activity ?? []).at(-1)?.sequence ?? 0) + 1,
-            provider: entry.provider,
-            kind: "turn_lifecycle",
-            method: "supervisor/resolve-turn-control",
-            summary: input.resolution === "not_applied"
-              ? publicationWon
-                ? "Operator verified the native control was not applied; the committed reply stands"
-                : outcome.original === "cancelled"
-                  ? "Operator verified the native control was not applied; the migration-cancelled legacy turn remains retired"
-                  : "Operator verified the native control was not applied; the exact turn was recovered"
-              : publicationWon
-                ? "Operator verified the native control was applied after the reply had already committed"
-                : control.correction_strategy === "stop_then_resend"
-                  ? "Operator verified the stop was applied; the durable correction was queued"
-                  : "Operator verified the ambiguous native effect was applied",
-            status: entry.observed_state === "working" ? "working" : "idle",
-            payload: { action_id: control.action_id, resolution: input.resolution },
-            payload_truncated: false,
-            payload_redacted: false,
-            durable_payload_ref: null,
-          })].slice(-200);
-          return {
-            ...entry,
-            activity,
-            reconciliation: rememberCompletedControlAction(
-              advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs()),
-              control.action_id,
-            ),
-            turn_control: {
-              ...control,
-              inbox_item_id: outcome.inboxItemId,
-              provider_turn_id: outcome.providerTurnId,
-              operator_resolution: input.resolution,
-              status: "completed",
-              interrupted,
-              resumed,
-              state: entry.observed_state === "working" ? "working" : "idle",
-              stages: input.resolution === "applied" ? ["already_applied"] : [],
-              error: input.resolution === "not_applied"
-                ? control.has_correction && (!control.correction_text?.trim() || !control.correction_strategy)
-                  ? "Operator verified that the prior native effect was not applied. The legacy correction payload was not durable and must be reissued."
-                  : outcome.original === "cancelled"
-                    ? "Operator verified that the prior native effect was not applied; the migration-cancelled legacy turn remains cancelled and was not replayed."
-                    : "Operator verified that the prior native effect was not applied; the exact turn was recovered without replaying native Stop."
-                : "Operator verified that the prior native effect was applied.",
-              updated_at: updatedAt,
-            },
-          };
-        }, (commit) => this.fenceDaemonCommit(commit));
-        this.manifestGeneration = checkpoint.generation;
-        return checkpoint;
-      }));
-    } catch (error) {
-      // As with native completion, an exact completed readback wins over a
-      // post-COMMIT transport/filesystem error.
-      const recoveredManifest = await this.store.load().catch(() => null);
-      const recoveredEntry = recoveredManifest?.entries.find((candidate) => candidate.id === input.entryId);
-      const recoveredControl = recoveredEntry?.turn_control;
-      if (!recoveredManifest
-        || recoveredEntry?.work_attempt_id !== input.workAttemptId
-        || recoveredControl?.action_id !== input.actionId
-        || recoveredControl.work_attempt_id !== input.workAttemptId
-        || recoveredControl.execution_generation_id !== input.executionGenerationId
-        || recoveredControl.status !== "completed"
-        || recoveredControl.operator_resolution !== input.resolution) {
-        throw error;
-      }
-      const recoveredInbox = recoveredControl.inbox_item_id
-        ? await this.supervisedInbox.get(recoveredControl.inbox_item_id).catch(() => null)
-        : null;
-      const original = recoveredInbox?.state === "cancelled_by_user"
-        ? "cancelled" as const
-        : recoveredInbox && ["publishing", "acknowledged", "acknowledged_no_reply"].includes(recoveredInbox.state)
-          ? "publication_won" as const
-          : input.resolution === "not_applied" && recoveredInbox
-            ? "resumed" as const
-            : "none" as const;
-      this.manifestGeneration = recoveredManifest.generation;
-      committed = { generation: recoveredManifest.generation, entry: recoveredEntry, original, correctionInboxItemId: null, providerTurnId: recoveredControl.provider_turn_id ?? null };
-    }
-
-    this.supervisedDelivery?.finishActiveDeliveryInterruptByAction(
-      input.entryId,
-      input.actionId,
-      committed.original === "cancelled" ? "cancelled" : "resume",
-    );
-    try {
-      await this.startSupervisedDelivery(input.entryId, "wake");
-    } catch {
-      this.scheduleRecoveryConvergence(input.entryId, 250);
-    }
-    // `startSupervisedDelivery` is deliberately a no-op until handle, binding,
-    // and memory-only credential authority all exist. Resolution is durable, so
-    // ordinary convergence must retry that reconstruction instead of leaving a
-    // recovered exact turn pending forever.
-    this.requestConvergence(input.entryId);
-    return this.entryWithDerivedLiveness(committed.entry);
-  }
-
-  private async controlTurnOnce(input: {
-    entryId: string;
-    daemonGeneration: number;
-    roomId: string;
-    workAttemptId: string;
-    executionGenerationId: string;
-    providerContinuationId: string;
-    providerTurnId: string;
-    inboxItemId: string;
-    sourceMessageId: string;
-    actionId: string;
-    actionSequence: number;
-    correction: string | null;
-  }): Promise<DaemonTurnControlResult> {
-    await this.singleton.assertCurrent();
-    if (input.daemonGeneration !== this.singleton.currentGeneration) {
-      throw new Error("Turn control belongs to a stale supervisor generation.");
-    }
-    const manifest = await this.store.load();
-    const entry = manifest.entries.find((candidate) => candidate.id === input.entryId);
-    if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entryId}`);
-    const ref = entry.provider_ref;
-    if (entry.desired_state !== "running") throw new Error("Turn control requires desired_state=running.");
-    if (entry.condition !== "none" || (entry.observed_state !== "working" && entry.observed_state !== "idle")) {
-      throw new Error("Turn control requires a healthy working or idle supervised entry.");
-    }
-    if (!entry.work_attempt_id || entry.work_attempt_id !== input.workAttemptId || ref?.work_attempt_id !== input.workAttemptId) {
-      throw new Error("Turn control work attempt is stale or belongs to a different entry.");
-    }
-    if (!ref || ref.execution_generation_id !== input.executionGenerationId) {
-      throw new Error("Turn control execution generation is stale or incomplete.");
-    }
-    if (entry.room_id !== input.roomId || ref.provider_continuation_id !== input.providerContinuationId) {
-      throw new Error("Turn control room or provider continuation is stale.");
-    }
-    const reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs());
-    const capabilities = await this.providerPort?.capabilities(input.workAttemptId, entry.provider);
-    const capability = capabilities?.turnControl ?? "unsupported";
-    const correction = input.correction?.trim() || null;
-    // The daemon-inbox lane must observe every bounded provider turn itself.
-    // Even when an adapter supports native correction, interrupt+resume can
-    // create a replacement provider turn outside this FIFO's result observer.
-    // Therefore every daemon-owned correction is one atomic Stop + durable next
-    // row. Legacy/mcp_polling lanes have no daemon pump and retain their native
-    // adapter correction path.
-    const stopThenResend = Boolean(correction) && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox";
-    let nativeCorrection = stopThenResend ? null : correction;
-    let correctionStrategy: "native" | "stop_then_resend" | null = correction
-      ? stopThenResend ? "stop_then_resend" : "native"
-      : null;
-    const existingControl = entry.turn_control;
-    const retryingControl = existingControl?.action_id === input.actionId
-      && existingControl.status === "retryable";
-    if (existingControl?.action_id === input.actionId) {
-      if (existingControl.work_attempt_id !== input.workAttemptId
-        || existingControl.execution_generation_id !== input.executionGenerationId
-        || existingControl.target_room_id !== input.roomId
-        || existingControl.target_source_message_id !== input.sourceMessageId
-        || existingControl.target_provider_continuation_id !== input.providerContinuationId
-        || existingControl.inbox_item_id !== input.inboxItemId
-        || existingControl.provider_turn_id !== input.providerTurnId
-        || existingControl.action_sequence !== input.actionSequence
-        || existingControl.has_correction !== Boolean(correction)
-        || (existingControl.correction_text ?? null) !== correction) {
-        throw new Error("Turn control action id was reused with different fenced input.");
-      }
-      if (existingControl.status === "completed") {
-        return {
-          entryId: input.entryId,
-          workAttemptId: input.workAttemptId,
-          executionGenerationId: input.executionGenerationId,
-          actionId: input.actionId,
-          capability: existingControl.capability,
-          interrupted: existingControl.interrupted === true,
-          resumed: existingControl.resumed === true,
-          state: existingControl.state ?? (entry.observed_state === "working" ? "working" : "idle"),
-          duplicate: true,
-          // Duplicate acknowledgement must report the durable outcome. In
-          // particular, an operator-resolved not-applied action has no applied
-          // stage and must never be relabelled as already applied.
-          stages: [...existingControl.stages],
-        };
-      }
-      if (!retryingControl) {
-        throw new Error("Turn control was durably dispatched but its provider outcome is unresolved; it was not replayed.");
-      }
-      if (correction && !existingControl.correction_strategy) {
-        throw new Error("Turn control retry is missing its durable correction strategy; it was not replayed.");
-      }
-      // A retry executes the accepted journal semantics, never semantics
-      // re-derived from mutable capabilities or a later delivery-mode view.
-      correctionStrategy = existingControl.correction_strategy ?? null;
-      nativeCorrection = correctionStrategy === "stop_then_resend" ? null : correction;
-    }
-    if (existingControl
-      && existingControl.work_attempt_id === input.workAttemptId
-      && existingControl.execution_generation_id === input.executionGenerationId
-      && existingControl.status !== "completed"
-      && existingControl.status !== "retryable") {
-      throw new Error(`Turn control action '${existingControl.action_id}' is unresolved; refusing a second action on the same execution generation.`);
-    }
-    if (existingControl
-      && existingControl.action_id !== input.actionId
-      && existingControl.work_attempt_id === input.workAttemptId
-      && existingControl.execution_generation_id === input.executionGenerationId
-      && existingControl.status === "retryable"
-      && existingControl.inbox_item_id) {
-      throw new Error(`Turn control action '${existingControl.action_id}' is accepted and retryable; refusing to replace its exact FIFO barrier with another action.`);
-    }
-    if (!retryingControl) {
-      if (entry.observed_state === "idle" && correction === null) {
-        throw new Error("There is no active supervised turn to stop.");
-      }
-      this.admitNewTurnControl(entry.id);
-    }
-    if (!this.providerPort?.controlTurn || capability === "unsupported") {
-      throw new Error(`Provider '${entry.provider}' does not support supervised turn control.`);
-    }
-    const binding = await this.workerBindings.get(entry.id);
-    if (!binding
-      || binding.room_id !== entry.room_id
-      || binding.work_attempt_id !== input.workAttemptId
-      || binding.execution_generation_id !== input.executionGenerationId) {
-      throw new Error("Turn control requires the exact active worker binding for this execution generation.");
-    }
-    const attempt = await this.durability.getAttempt(input.workAttemptId);
-    const execution = attempt.execution_generations.find((candidate) =>
-      candidate.execution_generation_id === input.executionGenerationId);
-    if (!execution || execution.terminal) throw new Error("Turn control execution generation is no longer live.");
-    let handle = this.liveHandles.get(entry.id) ?? null;
-    if (!handle) handle = await this.attachLiveProvider(entry);
-    if (!handle
-      || handle.workAttemptId !== input.workAttemptId
-      || handle.providerContinuationId !== ref.provider_continuation_id) {
-      throw new Error("Turn control could not resolve the exact live provider continuation.");
-    }
-    // Capture or reconstruct the exact FIFO owner before provider control. A
-    // retryable linked journal is also a durable successor barrier, so recovery
-    // may finish A but can never start B before this action completes.
-    const deliveryAgent: SupervisedIngressAgent = {
-      agentId: entry.id,
-      roomId: binding.room_id,
-      provider: entry.provider,
-      charter: entry.charter,
-      apiUrl: binding.api_url,
-      agentSessionId: binding.agent_session_id,
-      bearer: "",
-      handle,
-      workAttemptId: binding.work_attempt_id,
-      providerContinuationId: ref.provider_continuation_id ?? null,
-      providerConnection: ref.provider_connection ?? null,
-      executionGenerationId: binding.execution_generation_id,
-      daemonGeneration: this.singleton.currentGeneration,
-      deliveryMode: entry.delivery_mode ?? "mcp_polling",
-    };
-    const interruptedDelivery: { current: SupervisedDeliveryInterruptReservation | null } = { current: null };
-    let foldCompletedRetryWithoutNativeControl = false;
-    if (retryingControl && existingControl?.inbox_item_id && (entry.delivery_mode ?? "mcp_polling") === "daemon_inbox") {
-      // Recovery may safely finish A, but the durable journal prevents B from
-      // being claimed. Give A's exact recovery a bounded chance to materialize
-      // an in-memory invocation. If A already reached publication/terminal,
-      // fold that race into the journal transaction without calling a provider
-      // API that could only target the provider's latest (not exact) turn.
-      await this.startSupervisedDelivery(entry.id, "wake");
-      for (let observation = 0; observation < 500; observation += 1) {
-        const active = this.supervisedDelivery?.activeTurn(deliveryAgent);
-        if (active?.inboxItemId === existingControl.inbox_item_id) break;
-        const linked = await this.supervisedInbox.get(existingControl.inbox_item_id);
-        if (linked && ["publishing", "acknowledged", "acknowledged_no_reply"].includes(linked.state)) {
-          foldCompletedRetryWithoutNativeControl = true;
-          break;
-        }
-        await new Promise((resolve) => setTimeout(resolve, 10));
-      }
-    }
-    const recordedAt = new Date().toISOString();
-    let prepared: Awaited<ReturnType<ManifestStore["prepareTurnControlState"]>>;
-    try {
-      prepared = await this.serializeEntryTick(entry.id, () => this.serializeManifestMutation(async () => {
-        await this.singleton.assertCurrent();
-        const checkpoint = await this.store.prepareTurnControlState(this.manifestGeneration, {
-          agentId: entry.id,
-          roomId: entry.room_id,
-          expectedInboxItemId: input.inboxItemId,
-          expectedSourceMessageId: input.sourceMessageId,
-          expectedProviderTurnId: input.providerTurnId,
-          actionId: input.actionId,
-          actionSequence: input.actionSequence,
-          workAttemptId: input.workAttemptId,
-          executionGenerationId: input.executionGenerationId,
-          providerContinuationId: ref.provider_continuation_id,
-          providerConnection: ref.provider_connection,
-          deliveryMode: entry.delivery_mode ?? "mcp_polling",
-          hasCorrection: Boolean(correction),
-          correctionText: correction,
-          correctionStrategy,
-          capability,
-          recordedAt,
-        }, (commit) => this.fenceDaemonCommit(commit));
-        this.manifestGeneration = checkpoint.generation;
-        return checkpoint;
-      }));
-    } catch (error) {
-      // A filesystem/transport edge may report failure after SQLite COMMIT.
-      // Exact readback prevents us from either accepting twice or treating the
-      // durable admission barrier as absent.
-      const recoveredManifest = await this.store.load().catch(() => null);
-      const recoveredEntry = recoveredManifest?.entries.find((candidate) => candidate.id === entry.id);
-      const recovered = recoveredEntry?.turn_control;
-      if (!recoveredManifest
-        || recoveredEntry?.room_id !== entry.room_id
-        || recoveredEntry.work_attempt_id !== input.workAttemptId
-        || recoveredEntry.provider_ref?.execution_generation_id !== input.executionGenerationId
-        || recoveredEntry.provider_ref.provider_continuation_id !== ref.provider_continuation_id
-        || !sameProviderActionConnectionSnapshot(recoveredEntry.provider_ref.provider_connection, ref.provider_connection)
-        || (recoveredEntry.delivery_mode ?? "mcp_polling") !== (entry.delivery_mode ?? "mcp_polling")
-        || recovered?.action_id !== input.actionId
-        || recovered.target_room_id !== input.roomId
-        || recovered.target_source_message_id !== input.sourceMessageId
-        || recovered.target_provider_continuation_id !== input.providerContinuationId
-        || recovered.inbox_item_id !== input.inboxItemId
-        || recovered.provider_turn_id !== input.providerTurnId
-        || recovered.action_sequence !== input.actionSequence
-        || recovered.work_attempt_id !== input.workAttemptId
-        || recovered.execution_generation_id !== input.executionGenerationId
-        || recovered.status !== "prepared"
-        || recovered.has_correction !== Boolean(correction)
-        || (recovered.correction_text ?? null) !== correction
-        || (recovered.correction_strategy ?? null) !== correctionStrategy) {
-        throw error;
-      }
-      const linked = recovered.inbox_item_id
-        ? await this.supervisedInbox.get(recovered.inbox_item_id).catch(() => null)
-        : null;
-      this.manifestGeneration = recoveredManifest.generation;
-      prepared = {
-        generation: recoveredManifest.generation,
-        entry: recoveredEntry,
-        linkedInboxItemId: recovered.inbox_item_id ?? null,
-        providerTurnId: recovered.provider_turn_id ?? null,
-        linkedState: linked?.state ?? null,
-      };
-    }
-    if ((entry.delivery_mode ?? "mcp_polling") === "daemon_inbox") {
-      if (prepared.linkedInboxItemId) {
-        interruptedDelivery.current = this.supervisedDelivery?.captureActiveDeliveryInterrupt(deliveryAgent, input.actionId) ?? null;
-        if (interruptedDelivery.current?.inboxItemId !== prepared.linkedInboxItemId) {
-          this.supervisedDelivery?.finishActiveDeliveryInterrupt(interruptedDelivery.current, "resume");
-          interruptedDelivery.current = null;
-        }
-        if (!interruptedDelivery.current) {
-          const linked = await this.supervisedInbox.get(prepared.linkedInboxItemId);
-          if (linked && ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linked.state)) {
-            foldCompletedRetryWithoutNativeControl = true;
-          } else {
-            const message = "Turn control is waiting for its exact admitted FIFO invocation; no native latest-turn control was dispatched.";
-            await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
-              && current.turn_control.status === "prepared"
-              ? { ...current, turn_control: { ...current.turn_control, status: "retryable", error: message, updated_at: new Date().toISOString() } }
-              : current);
-            try { await this.startSupervisedDelivery(entry.id, "wake"); } catch { this.scheduleRecoveryConvergence(entry.id, 250); }
-            this.requestConvergence(entry.id);
-            throw new Error(message);
-          }
-        }
-      } else {
-        // The atomic preparation transaction won before any pending head could
-        // be admitted. A plain Stop is therefore an honest no-op; a correction
-        // is inserted at the frozen head without touching provider latest-turn
-        // state.
-        foldCompletedRetryWithoutNativeControl = true;
-      }
-    }
-    let providerResult: ProviderTurnControlResult;
-    let dispatchMarked = false;
-    try {
-      providerResult = foldCompletedRetryWithoutNativeControl
-        ? { capability, interrupted: false, resumed: false, state: entry.observed_state === "working" ? "working" : "idle" }
-        : await this.providerPort.controlTurn(handle, nativeCorrection, {
-        actionId: input.actionId,
-        targetTurnId: prepared.providerTurnId,
-        checkpointTurnStarted: async (turnId) => {
-          if (!turnId.trim() || this.liveHandles.get(entry.id) !== handle) {
-            throw new Error("Turn control lost its exact live provider before target checkpoint.");
-          }
-          const checkpointedAt = new Date().toISOString();
-          const checkpoint = await this.serializeManifestMutation(async () => {
-            await this.singleton.assertCurrent();
-            const result = await this.store.checkpointTurnControlTarget(this.manifestGeneration, {
-              agentId: entry.id,
-              roomId: entry.room_id,
-              actionId: input.actionId,
-              workAttemptId: input.workAttemptId,
-              executionGenerationId: input.executionGenerationId,
-              providerContinuationId: ref.provider_continuation_id,
-              providerConnection: ref.provider_connection,
-              deliveryMode: entry.delivery_mode ?? "mcp_polling",
-              providerTurnId: turnId,
-              observedAt: checkpointedAt,
-            }, (commit) => this.fenceDaemonCommit(commit));
-            this.manifestGeneration = result.generation;
-            return result;
-          });
-          if (this.liveHandles.get(entry.id) !== handle) {
-            throw new Error("Turn control provider changed after exact target checkpoint.");
-          }
-          prepared = { ...prepared, generation: checkpoint.generation, entry: checkpoint.entry, providerTurnId: turnId };
-        },
-        markDispatched: async () => {
-          if (dispatchMarked) return;
-          if ((entry.delivery_mode ?? "mcp_polling") === "daemon_inbox" && !interruptedDelivery.current) {
-            throw new Error("Turn control cannot dispatch without reserving the exact active daemon-inbox invocation.");
-          }
-          await this.updateManifestEntry(entry.id, (current) => {
-            if (current.turn_control?.action_id !== input.actionId
-              || current.desired_state !== "running"
-              || current.condition !== "none"
-              || current.work_attempt_id !== input.workAttemptId
-              || current.provider_ref?.execution_generation_id !== input.executionGenerationId
-              || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id
-              || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, ref.provider_connection)
-              || (current.delivery_mode ?? "mcp_polling") !== (entry.delivery_mode ?? "mcp_polling")
-              || this.liveHandles.get(entry.id) !== handle) {
-              throw new Error("Turn control lost its durable prepared journal before native dispatch.");
-            }
-            const durableInboxItemId = current.turn_control.inbox_item_id ?? null;
-            const capturedInboxItemId = interruptedDelivery.current?.inboxItemId ?? null;
-            if (durableInboxItemId !== null && durableInboxItemId !== capturedInboxItemId) {
-              throw new Error("Turn control retry no longer owns its exact durable FIFO invocation.");
-            }
-            return {
-              ...current,
-              turn_control: {
-                ...current.turn_control,
-                inbox_item_id: interruptedDelivery.current?.inboxItemId ?? current.turn_control.inbox_item_id ?? null,
-                provider_turn_id: interruptedDelivery.current?.providerTurnId ?? current.turn_control.provider_turn_id ?? null,
-                status: "dispatching",
-                updated_at: new Date().toISOString(),
-              },
-            };
-          });
-          dispatchMarked = true;
-        },
-        });
-      if ((providerResult.interrupted || providerResult.resumed) && !dispatchMarked) {
-        throw Object.assign(
-          new Error("Provider reported a turn-control effect without marking native dispatch."),
-          { turnControlOutcome: "uncertain" as const },
-        );
-      }
-    } catch (error) {
-      const message = redactCredentialText(error instanceof Error ? error.message : String(error)).value;
-      const outcome = error && typeof error === "object" && "turnControlOutcome" in error
-        ? (error as { turnControlOutcome?: unknown }).turnControlOutcome
-        : null;
-      const mayResumeDelivery = outcome === "not_applied" || (!dispatchMarked && outcome !== "uncertain");
-      if (!mayResumeDelivery) {
-        this.supervisedDelivery?.resolveActiveDeliveryInterrupt(interruptedDelivery.current, "freeze");
-      }
-      try {
-        await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
-          ? {
-            ...current,
-            turn_control: {
-              ...current.turn_control,
-              inbox_item_id: interruptedDelivery.current?.inboxItemId ?? current.turn_control.inbox_item_id ?? null,
-              provider_turn_id: interruptedDelivery.current?.providerTurnId ?? current.turn_control.provider_turn_id ?? null,
-              // An adapter that explicitly reports "uncertain" (e.g. an abort was
-              // accepted but its turn boundary could not be verified) must be
-              // honored as uncertain even if native dispatch was never marked —
-              // never silently downgraded to a replayable "retryable".
-              status: outcome === "not_applied" ? "retryable" : outcome === "uncertain" ? "uncertain" : dispatchMarked ? "uncertain" : "retryable",
-              error: message,
-              updated_at: new Date().toISOString(),
-            },
-          }
-          : current);
-      } catch (journalError) {
-        // Never let the FIFO advance unless the provider-control journal first
-        // proves this Stop is safe to replay. Otherwise recovery could re-drive
-        // the old action against the row's successor invocation.
-        this.supervisedDelivery?.resolveActiveDeliveryInterrupt(interruptedDelivery.current, "freeze");
-        throw journalError;
-      }
-      if (mayResumeDelivery) {
-        this.supervisedDelivery?.resolveActiveDeliveryInterrupt(interruptedDelivery.current, "resume");
-      }
-      throw error;
-    }
-    const reservation = interruptedDelivery.current;
-    if (nativeCorrection === null && providerResult.interrupted && reservation && this.supervisedDelivery) {
-      try {
-        await this.supervisedDelivery.prepareActiveDeliveryInterrupt(reservation);
-      } catch (error) {
-        this.supervisedDelivery.finishActiveDeliveryInterrupt(reservation, "freeze");
-        const message = redactCredentialText(error instanceof Error ? error.message : String(error)).value;
-        await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
-          ? { ...current, turn_control: {
-            ...current.turn_control,
-            inbox_item_id: reservation.inboxItemId,
-            provider_turn_id: reservation.providerTurnId ?? current.turn_control.provider_turn_id ?? null,
-            status: "uncertain" as const,
-            error: message,
-            updated_at: new Date().toISOString(),
-          } }
-          : current);
-        throw error;
-      }
-    }
-
-    const observedAt = new Date().toISOString();
-    let committed: Awaited<ReturnType<ManifestStore["commitTurnControlState"]>>;
-    try {
-      committed = await this.serializeEntryTick(entry.id, () => this.serializeManifestMutation(async () => {
-        await this.singleton.assertCurrent();
-        const checkpoint = await this.store.commitTurnControlState(this.manifestGeneration, {
-          agentId: entry.id,
-          roomId: entry.room_id,
-          actionId: input.actionId,
-          workAttemptId: input.workAttemptId,
-          executionGenerationId: input.executionGenerationId,
-          mode: "native_applied",
-          settleOriginal: nativeCorrection === null && providerResult.interrupted && Boolean(reservation),
-          activateCorrection: correctionStrategy === "stop_then_resend",
-          observedAt,
-        }, (current, outcome) => {
-          const interrupted = outcome.original === "publication_won" ? false : providerResult.interrupted;
-          const resumed = correctionStrategy === "stop_then_resend" ? true : providerResult.resumed;
-          const stages: DaemonTurnControlResult["stages"] = ["delivered"];
-          if (interrupted) stages.push("interrupting");
-          stages.push("applied");
-          if (resumed) stages.push("resumed");
-          const nextReconciliation = rememberCompletedControlAction(
-            advanceReconciliationState(current.reconciliation, providerResult.state, this.nowMs()),
-            input.actionId,
-          );
-          const activity = [...(current.activity ?? []), sanitizeDaemonActivityEvent({
-            observed_at: observedAt,
-            sequence: ((current.activity ?? []).at(-1)?.sequence ?? 0) + 1,
-            provider: current.provider,
-            kind: "turn_lifecycle",
-            method: correction ? "supervisor/steer" : "supervisor/stop-turn",
-            summary: correctionStrategy === "stop_then_resend"
-              ? "Active turn stopped; human correction queued as the next bounded turn"
-              : correction
-                ? "Human correction applied; same continuation resumed"
-                : interrupted
-                  ? "Active turn interrupted; worker remains available"
-                  : "Turn already finished before the stop; its reply stands",
-            status: providerResult.state === "working" ? "working" : "idle",
-            payload: { action_id: input.actionId, capability, stages },
-            payload_truncated: false,
-            payload_redacted: false,
-            durable_payload_ref: null,
-          })].slice(-200);
-          return {
-            ...current,
-            observed_state: providerResult.state,
-            native_liveness: {
-              state: providerResult.state === "working" ? "active" : "idle",
-              observed_at: observedAt,
-              detail: correctionStrategy === "stop_then_resend"
-                ? "turn interrupted; correction queued on the same supervised lane"
-                : correction
-                  ? "human correction resumed on the same continuation"
-                  : interrupted
-                    ? "turn interrupted; worker available"
-                    : "turn already finished; its reply stands",
-            },
-            activity,
-            reconciliation: nextReconciliation,
-            turn_control: {
-              ...current.turn_control!,
-              inbox_item_id: outcome.inboxItemId,
-              provider_turn_id: outcome.providerTurnId,
-              status: "completed",
-              capability,
-              interrupted,
-              resumed,
-              state: providerResult.state,
-              stages,
-              error: null,
-              updated_at: observedAt,
-            },
-          };
-        }, (commit) => this.fenceDaemonCommit(commit));
-        this.manifestGeneration = checkpoint.generation;
-        return checkpoint;
-      }));
-    } catch (error) {
-      // COMMIT can become durable before the SQLite/filesystem boundary reports
-      // failure. Read back the exact action before freezing it: a completed
-      // journal plus its linked FIFO outcome is authoritative, and post-commit
-      // abort/wake still has to run.
-      const recoveredManifest = await this.store.load().catch(() => null);
-      const recoveredEntry = recoveredManifest?.entries.find((candidate) => candidate.id === entry.id);
-      const recoveredControl = recoveredEntry?.turn_control;
-      const expectedInboxItemId = reservation?.inboxItemId
-        ?? prepared.linkedInboxItemId
-        ?? existingControl?.inbox_item_id
-        ?? null;
-      if (recoveredManifest
-        && recoveredEntry?.room_id === entry.room_id
-        && recoveredEntry.work_attempt_id === input.workAttemptId
-        && recoveredEntry.provider_ref?.execution_generation_id === input.executionGenerationId
-        && recoveredControl?.action_id === input.actionId
-        && recoveredControl.work_attempt_id === input.workAttemptId
-        && recoveredControl.execution_generation_id === input.executionGenerationId
-        && recoveredControl.status === "completed"
-        && (recoveredControl.inbox_item_id ?? null) === expectedInboxItemId
-        && (recoveredControl.provider_turn_id ?? null) === (reservation?.providerTurnId ?? prepared.providerTurnId ?? null)
-        && recoveredControl.has_correction === Boolean(correction)
-        && (recoveredControl.correction_text ?? null) === correction
-        && (recoveredControl.correction_strategy ?? null) === correctionStrategy) {
-        const recoveredInbox = expectedInboxItemId
-          ? await this.supervisedInbox.get(expectedInboxItemId).catch(() => null)
-          : null;
-        const original = recoveredInbox?.state === "cancelled_by_user"
-          ? "cancelled" as const
-          : recoveredInbox && ["publishing", "acknowledged", "acknowledged_no_reply"].includes(recoveredInbox.state)
-            ? "publication_won" as const
-            : "none" as const;
-        this.manifestGeneration = recoveredManifest.generation;
-        committed = { generation: recoveredManifest.generation, entry: recoveredEntry, original, correctionInboxItemId: null, providerTurnId: recoveredControl.provider_turn_id ?? null };
-      } else {
-        const nativeOutcomeMayExist = dispatchMarked && !foldCompletedRetryWithoutNativeControl;
-        this.supervisedDelivery?.finishActiveDeliveryInterrupt(
-          reservation,
-          nativeOutcomeMayExist ? "freeze" : "resume",
-        );
-        const message = redactCredentialText(error instanceof Error ? error.message : String(error)).value;
-        try {
-          await this.updateManifestEntry(entry.id, (current) => current.turn_control?.action_id === input.actionId
-            && current.turn_control.status !== "completed"
-            ? { ...current, turn_control: {
-              ...current.turn_control,
-              inbox_item_id: reservation?.inboxItemId ?? current.turn_control.inbox_item_id ?? null,
-              provider_turn_id: reservation?.providerTurnId ?? current.turn_control.provider_turn_id ?? null,
-              status: nativeOutcomeMayExist ? "uncertain" as const : "retryable" as const,
-              error: message,
-              updated_at: new Date().toISOString(),
-            } }
-            : current);
-        } catch { /* The durable dispatching journal still fails closed on restart. */ }
-        if (!nativeOutcomeMayExist) {
-          try { await this.startSupervisedDelivery(entry.id, "wake"); } catch { this.scheduleRecoveryConvergence(entry.id, 250); }
-          this.requestConvergence(entry.id);
-        }
-        throw error;
-      }
-    }
-
-    const interrupted = committed.entry.turn_control?.interrupted === true;
-    const resumed = committed.entry.turn_control?.resumed === true;
-    const stages = committed.entry.turn_control?.stages ?? ["applied"];
-    this.supervisedDelivery?.finishActiveDeliveryInterrupt(
-      reservation,
-      committed.original === "cancelled" ? "cancelled" : "resume",
-    );
-    if (committed.correctionInboxItemId
-      || (correctionStrategy === "stop_then_resend" && committed.entry.turn_control?.status === "completed")) {
-      try {
-        await this.startSupervisedDelivery(entry.id, "wake");
-      } catch {
-        this.scheduleRecoveryConvergence(entry.id, 250);
-      }
-      this.requestConvergence(entry.id);
-    }
-    return {
-      entryId: input.entryId,
-      workAttemptId: input.workAttemptId,
-      executionGenerationId: input.executionGenerationId,
-      actionId: input.actionId,
-      duplicate: false,
-      stages,
-      ...providerResult,
-      interrupted,
-      resumed,
-    };
-  }
-
-  /** Bound renderer-originated durable control creation without rate-limiting exact recovery retries. */
   private admitNewTurnControl(entryId: string): void {
-    const now = this.nowMs();
-    const cutoff = now - TURN_CONTROL_ADMISSION_WINDOW_MS;
-    const recent = (this.turnControlAdmissions.get(entryId) ?? []).filter((timestamp) => timestamp > cutoff);
-    if (recent.length >= MAX_NEW_TURN_CONTROLS_PER_WINDOW) {
-      this.turnControlAdmissions.set(entryId, recent);
-      throw new Error("Turn control is temporarily rate limited for this supervised agent.");
-    }
-    recent.push(now);
-    this.turnControlAdmissions.set(entryId, recent);
+    this.turnControls.admitNew(entryId);
   }
 
   private async reserveLegacyLane(input: { reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string }): Promise<LegacyLaneOwner> {
