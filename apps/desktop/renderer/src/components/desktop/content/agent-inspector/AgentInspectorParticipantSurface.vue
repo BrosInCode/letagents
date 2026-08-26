@@ -231,7 +231,7 @@ const sessionState = computed(() => {
   if (props.projection.session.status === "running") return "responding";
   if (props.projection.session.status === "starting") return "starting";
   if (props.projection.session.status === "blocked" || props.projection.session.status === "failed") return "needs_attention";
-  return "listening";
+  return "online";
 });
 const busy = computed(() => Boolean(props.busy || activeOperation.value));
 const inspecting = computed(() => props.projection.kind === "local_managed" && activeOperation.value === `inspect:${props.projection.session.id}`);

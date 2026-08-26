@@ -230,7 +230,6 @@ let AgentInspectorStatusSurface: object;
 let AgentInspectorSurface: object;
 let AgentInspectorOverview: object;
 let AgentInspectorNow: object;
-let AgentInspectorReadinessRail: object;
 let ProviderBadge: object;
 
 before(async () => {
@@ -247,7 +246,6 @@ before(async () => {
   AgentInspectorStatusSurface = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue")).default;
   AgentInspectorOverview = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorOverview.vue")).default;
   AgentInspectorNow = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorNow.vue")).default;
-  AgentInspectorReadinessRail = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorReadinessRail.vue")).default;
   ProviderBadge = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/desktop-chat-message/ProviderBadge.vue")).default;
   await Promise.all([
     attachClientRender(AgentInspectorSettings, "components/desktop/content/agent-inspector/AgentInspectorSettings.vue"),
@@ -257,7 +255,6 @@ before(async () => {
     attachClientRender(AgentInspectorStatusSurface, "components/desktop/content/agent-inspector/AgentInspectorStatusSurface.vue"),
     attachClientRender(AgentInspectorOverview, "components/desktop/content/agent-inspector/AgentInspectorOverview.vue"),
     attachClientRender(AgentInspectorNow, "components/desktop/content/agent-inspector/AgentInspectorNow.vue"),
-    attachClientRender(AgentInspectorReadinessRail, "components/desktop/content/agent-inspector/AgentInspectorReadinessRail.vue"),
     attachClientRender(ProviderBadge, "components/desktop/content/desktop-chat-message/ProviderBadge.vue"),
   ]);
 });
@@ -676,10 +673,9 @@ test("compact Host gives the overflow menu first Escape ownership before closing
     provider: "codex",
     model: "gpt-next",
     charter: readyResource.draft!.charter,
-    overallState: "listening",
-    overallLabel: "Listening",
-    overallDetail: "Ready for room work.",
-    readiness: [],
+    overallState: "online",
+    overallLabel: "Online",
+    overallDetail: "",
     now: null,
     assignedWork: [],
     recentOutcome: null,

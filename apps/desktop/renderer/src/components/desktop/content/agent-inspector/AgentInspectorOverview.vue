@@ -18,8 +18,6 @@
       @retry="emit('retry-turn-control')"
       @resolve="emit('resolve-turn-control', $event)"
     />
-    <AgentInspectorReadinessRail :facts="projection.readiness" />
-
     <section class="agent-inspector-overview-section" aria-labelledby="agent-inspector-charter-title">
       <div class="agent-inspector-section-heading">
         <p id="agent-inspector-charter-title">Initial message</p>
@@ -54,7 +52,6 @@ import type { AgentInspectorProjection } from "../../../../domain/agent-inspecto
 import AgentInspectorDeliveryProgress from "./AgentInspectorDeliveryProgress.vue";
 import AgentInspectorNow from "./AgentInspectorNow.vue";
 import AgentInspectorContinuationRecovery from "./AgentInspectorContinuationRecovery.vue";
-import AgentInspectorReadinessRail from "./AgentInspectorReadinessRail.vue";
 import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 
 defineProps<{ projection: AgentInspectorProjection; busy: boolean }>();
