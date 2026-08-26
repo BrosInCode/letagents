@@ -275,3 +275,113 @@ test("active continuation repair marks its receipt and prevents a model turn", (
   });
   assert.equal(projected.delivery_receipts?.[0]?.state, "restoring_conversation");
 });
+
+test("inbox projection preserves cutover, repair, credential, blocked, and queued precedence", () => {
+  const blocked = receipt({
+    state: "blocked",
+    receipt_state: "blocked",
+    last_error: "Delivery is blocked.",
+  });
+  const cutoverEntry: DaemonManifestEntry = {
+    ...entry,
+    delivery_mode: "mcp_polling",
+    delivery_cutover: {
+      work_attempt_id: "attempt_1",
+      execution_generation_id: "generation_1",
+      provider_continuation_id: "continuation_1",
+      provider_turn_id: "turn_uncertain",
+      phase: "uncertain",
+      error: "Cutover is uncertain.",
+      updated_at: "2026-08-26T00:01:45.000Z",
+    },
+  };
+
+  const cutover = projectRoomAgentManifestEntry(facts({
+    entry: cutoverEntry,
+    credentialAvailable: false,
+    receipts: [blocked],
+    continuationRepair: { inbox_item_id: "inbox_1", phase: "probing" },
+    activeTurn: null,
+  }));
+  assert.equal(cutover.room_agent_state?.inbox.state, "blocked", "cutover wins over restoration and credentials");
+  assert.equal(cutover.room_agent_state?.turn.state, "failed");
+
+  const restoring = projectRoomAgentManifestEntry(facts({
+    credentialAvailable: false,
+    receipts: [blocked],
+    continuationRepair: { inbox_item_id: "inbox_1", phase: "probing" },
+    activeTurn: null,
+  }));
+  assert.equal(restoring.room_agent_state?.inbox.state, "restoring_conversation", "restoration wins over credentials and blockage");
+
+  const credentials = projectRoomAgentManifestEntry(facts({
+    credentialAvailable: false,
+    receipts: [blocked],
+    activeTurn: null,
+  }));
+  assert.equal(credentials.room_agent_state?.inbox.state, "waiting_for_desktop_credentials", "missing credentials win over blockage");
+
+  const blockedProjection = projectRoomAgentManifestEntry(facts({
+    receipts: [blocked],
+    activeTurn: null,
+  }));
+  assert.equal(blockedProjection.room_agent_state?.inbox.state, "blocked", "blockage wins over a nonfinal queue");
+
+  const queued = projectRoomAgentManifestEntry(facts({ activeTurn: null }));
+  assert.equal(queued.room_agent_state?.inbox.state, "queued");
+});
+
+test("exact stopped ingress authority clears its observed timestamp", () => {
+  const projected = projectRoomAgentManifestEntry(facts({
+    ingressHealth: {
+      room_id: "room_1",
+      state: "stopped",
+      detail: "Observation was explicitly stopped.",
+      execution_generation_id: "generation_1",
+    },
+  }));
+
+  assert.deepEqual(projected.room_agent_state?.ingress, {
+    state: "stopped",
+    observed_at: null,
+    detail: "Observation was explicitly stopped.",
+  });
+});
+
+test("liveness becomes stale only after, not at, its exact threshold", () => {
+  const threshold = projectRoomAgentManifestEntry(facts({
+    nowMs: Date.parse("2026-08-26T00:02:30.000Z"),
+    workplaceLivenessStaleAfterMs: 60_000,
+    nativeLivenessStaleAfterMs: 90_000,
+  }));
+  assert.equal(threshold.workplace_liveness?.state, "reachable");
+  assert.equal(threshold.native_liveness?.state, "active");
+
+  const beyond = projectRoomAgentManifestEntry(facts({
+    nowMs: Date.parse("2026-08-26T00:02:30.001Z"),
+    workplaceLivenessStaleAfterMs: 60_000,
+    nativeLivenessStaleAfterMs: 90_000,
+  }));
+  assert.equal(beyond.workplace_liveness?.state, "stale");
+  assert.equal(beyond.native_liveness?.state, "stale");
+});
+
+test("committed and failed continuation repairs are ignored", () => {
+  const blocked = receipt({
+    state: "blocked",
+    receipt_state: "blocked",
+    provider_turn_id: "turn_failed",
+    last_error: "Delivery remains blocked.",
+  });
+
+  for (const phase of ["committed", "failed"] as const) {
+    const projected = projectRoomAgentManifestEntry(facts({
+      receipts: [blocked],
+      continuationRepair: { inbox_item_id: "inbox_1", phase },
+      activeTurn: null,
+    }));
+    assert.equal(projected.room_agent_state?.inbox.state, "blocked", `${phase} repair does not override the inbox`);
+    assert.equal(projected.room_agent_state?.turn.state, "failed", `${phase} repair does not override the turn`);
+    assert.equal(projected.delivery_receipts?.[0]?.state, "blocked", `${phase} repair does not relabel the receipt`);
+  }
+});

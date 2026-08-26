@@ -43,3 +43,69 @@ test("state watch close settles outstanding waiters without inventing a state ch
   watch.close();
   assert.deepEqual(await pending, { daemon_generation: 3, sequence: 1, entries: [] });
 });
+
+test("state watch defaults and caps its long-poll timeout", async () => {
+  let scheduled: { callback: () => void; delay: number } | null = null;
+  const setFakeTimeout = ((callback: () => void, delay?: number) => {
+    scheduled = { callback, delay: delay ?? 0 };
+    return { fake: true } as unknown as ReturnType<typeof setTimeout>;
+  }) as typeof setTimeout;
+  const watch = new DaemonStateWatch({
+    currentGeneration: () => 1,
+    isHandoffScheduled: () => false,
+    assertCurrent: async () => undefined,
+    entries: async () => [],
+    setTimeout: setFakeTimeout,
+    clearTimeout: (() => undefined) as typeof clearTimeout,
+  });
+
+  const defaulted = watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: Number.NaN });
+  assert.equal(scheduled === null ? null : scheduled.delay, 25_000);
+  const defaultCallback = scheduled === null ? null : scheduled.callback;
+  assert.ok(defaultCallback);
+  defaultCallback();
+  await defaulted;
+
+  scheduled = null;
+  const capped = watch.watch({ afterDaemonGeneration: 1, afterSequence: 1, waitMs: 90_000 });
+  assert.equal(scheduled === null ? null : scheduled.delay, 30_000);
+  const cappedCallback = scheduled === null ? null : scheduled.callback;
+  assert.ok(cappedCallback);
+  cappedCallback();
+  await capped;
+});
+
+test("handoff suppresses new waits and notification wakes an already-pending wait", async () => {
+  let handoff = true;
+  let timerRegistrations = 0;
+  const entries: DaemonManifestEntryView[] = [];
+  const watch = new DaemonStateWatch({
+    currentGeneration: () => 4,
+    isHandoffScheduled: () => handoff,
+    assertCurrent: async () => undefined,
+    entries: async () => entries,
+    setTimeout: ((callback: () => void) => {
+      timerRegistrations += 1;
+      return setTimeout(callback, 30_000);
+    }) as typeof setTimeout,
+  });
+
+  assert.deepEqual(await watch.watch({ afterDaemonGeneration: 4, afterSequence: 1, waitMs: 1_000 }), {
+    daemon_generation: 4,
+    sequence: 1,
+    entries,
+  });
+  assert.equal(timerRegistrations, 0, "handoff does not register a new long poll");
+
+  handoff = false;
+  const pending = watch.watch({ afterDaemonGeneration: 4, afterSequence: 1, waitMs: 30_000 });
+  await Promise.resolve();
+  assert.equal(timerRegistrations, 1);
+  handoff = true;
+  watch.notify();
+  assert.deepEqual(await pending, {
+    daemon_generation: 4,
+    sequence: 2,
+    entries,
+  });
+});
