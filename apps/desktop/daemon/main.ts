@@ -1,4 +1,3 @@
-import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -25,6 +24,7 @@ import {
 import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
+import { DaemonAuthority } from "./daemon-authority.js";
 import {
   authoritativeRoomJoinRejection,
   exhaustedTransientWorkerMint,
@@ -36,12 +36,13 @@ import {
 } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
 import { WorkDurabilityStore } from "./durability-store.js";
+import { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import { EphemeralWorkspaceProvisioner, isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
+import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { assertMacOS } from "./platform.js";
-import { sameProcessBirthIdentity } from "./process-identity.js";
 import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal, type ProviderTurnControlResult } from "./provider-action-port.js";
 import { isAllowedCursorProviderStateTransition, isIdleCursorConnection, isLiveCursorConnection } from "./provider-state-policy.js";
 import {
@@ -195,9 +196,10 @@ class DeliveryCutoverObservationDetached extends Error {}
 
 
 export class SupervisorDaemon {
-  private manifestGeneration = 0;
   private readonly singleton: DaemonSingleton;
+  private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
+  private readonly legacyLanes: LegacyLaneCoordinator;
   private readonly audit: AuditLog;
   private readonly durability: WorkDurabilityStore;
   private readonly provisioner: WorkspaceProvisioner;
@@ -209,10 +211,9 @@ export class SupervisorDaemon {
   private readonly supervisedDelivery: SupervisedAgentDelivery | null;
   private readonly socket: DaemonControlSocket;
   private readonly stateWatch: DaemonStateWatch;
-  private readonly reconciliationTicks = new Map<string, Promise<void>>();
+  private readonly entryConcurrency: EntryConcurrencyGate;
   private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
   private readonly scheduledConvergenceCancels = new Map<string, () => void>();
-  private manifestMutation: Promise<void> = Promise.resolve();
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly liveDisposers = new Map<string, Array<() => void>>();
   private readonly convergenceRequests = new Map<string, Promise<void>>();
@@ -221,7 +222,6 @@ export class SupervisorDaemon {
    * reconciliation lane is awaiting remote authorization or capabilities.
    * They therefore cannot rely on that same lane for ordering.
    */
-  private readonly entryControlEpochs = new Map<string, number>();
   private readonly providerStreamQueues = new Map<string, Promise<void>>();
   private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
   private readonly providerCallbacks = new Set<Promise<void>>();
@@ -247,16 +247,7 @@ export class SupervisorDaemon {
   }>();
   private readonly deliveryCutoverRequests = new Map<string, Promise<void>>();
   private readonly deliveryCutoverControllers = new Map<string, AbortController>();
-  private readonly turnControlActiveEntries = new Set<string>();
   private readonly turnControlAdmissions = new Map<string, number[]>();
-  private readonly lifecycleActiveEntries = new Set<string>();
-  /** A lifecycle edge waits only for room membership work that already
-   * crossed its in-memory admission check. It must never wait behind unrelated
-   * provider launch/capability work on the broader per-entry lane. */
-  private readonly activeRoomMoveReconciliations = new Map<string, Promise<void>>();
-  /** Wake callers queued on the broad entry lane as soon as lifecycle fencing
-   * starts; their queued callback later observes the same fence and no-ops. */
-  private readonly roomMoveExclusionWaiters = new Map<string, Set<() => void>>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly liveBindingIdentities = new Map<string, LiveBindingIdentity>();
   private readonly pendingResumeBindings = new Map<string, PendingResumeBinding>();
@@ -292,7 +283,6 @@ export class SupervisorDaemon {
   private readonly nowMs: () => number;
   private readonly setRecoveryTimeout: typeof setTimeout;
   private readonly clearRecoveryTimeout: typeof clearTimeout;
-  private manifestCommit: Promise<void> = Promise.resolve();
   private readonly startedAt = new Date().toISOString();
   private readonly agentStreamRegistry: AgentStreamRegistry;
   private handoffScheduled = false;
@@ -301,6 +291,14 @@ export class SupervisorDaemon {
   private readonly handoffCompletion: Promise<void>;
   private resolveHandoffCompletion!: () => void;
   private rejectHandoffCompletion!: (error: unknown) => void;
+
+  private get manifestGeneration(): number {
+    return this.authority.generation;
+  }
+
+  private set manifestGeneration(generation: number) {
+    this.authority.generation = generation;
+  }
 
   constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp, private readonly loadSupervisedToolRuntime: () => Promise<SupervisedToolRuntime> = supervisedToolRuntime) {
     this.handoffCompletion = new Promise<void>((resolve, reject) => {
@@ -311,7 +309,28 @@ export class SupervisorDaemon {
     // Keep the rejection observed while preserving it for waitForHandoff().
     void this.handoffCompletion.catch(() => undefined);
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
+    this.authority = new DaemonAuthority({
+      assertCurrent: () => this.singleton.assertCurrent(),
+      isHandoffScheduled: () => this.handoffScheduled,
+      notifyStateChanged: () => this.notifyStateChanged(),
+    });
+    this.entryConcurrency = new EntryConcurrencyGate({
+      isHandoffScheduled: () => this.handoffScheduled,
+    });
     this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath);
+    this.legacyLanes = new LegacyLaneCoordinator({
+      storage: { load: () => this.store.load() },
+      commit: {
+        currentGeneration: () => this.manifestGeneration,
+        write: (expectedGeneration, entries, owners) => this.writeManifest(expectedGeneration, entries, owners),
+        acceptGeneration: (generation) => { this.manifestGeneration = generation; },
+      },
+      authority: {
+        serialize: (operation) => this.serializeManifestMutation(operation),
+        assertCurrent: () => this.singleton.assertCurrent(),
+      },
+      isSupervisedLaneOwner: (entry) => this.isSupervisedLaneOwner(entry),
+    });
     this.audit = new AuditLog(paths.auditPath);
     const root = paths.workspaceRoot ?? dirname(paths.manifestPath);
     const gitCommand = createGitCommand(root);
@@ -1350,18 +1369,8 @@ export class SupervisorDaemon {
     // Lifecycle/recovery announces exclusion synchronously, before draining
     // delivery. Avoid queueing a room-move continuation behind that drain: a
     // delivery callback may itself be waiting to reconcile this exact move.
-    if (this.handoffScheduled || this.lifecycleActiveEntries.has(initial.agent_id)) return initial;
-    let exclude!: () => void;
-    const excluded = new Promise<DaemonRoomMoveRecord>((resolve) => {
-      exclude = () => resolve(initial);
-    });
-    const waiters = this.roomMoveExclusionWaiters.get(initial.agent_id) ?? new Set<() => void>();
-    waiters.add(exclude);
-    this.roomMoveExclusionWaiters.set(initial.agent_id, waiters);
-    const operation = this.serializeRoomMoveReconciliation(
-      initial.agent_id,
-      async () => initial,
-      async () => {
+    try {
+      return await this.entryConcurrency.runRoomMove(initial.agent_id, initial, async () => {
       if (this.handoffScheduled) return initial;
       let move = await this.store.getRoomMove(initial.operation_id);
       if (!move || ["active", "failed"].includes(move.phase)) return move ?? initial;
@@ -1553,53 +1562,19 @@ export class SupervisorDaemon {
         void this.startSupervisedDelivery(move.agent_id).catch(() => undefined);
       }
       return move;
-      },
-    );
-    try {
-      return await Promise.race([operation, excluded]);
+      });
     } catch (error) {
       if (this.handoffScheduled && error instanceof DaemonFenceLostError) return initial;
       throw error;
-    } finally {
-      waiters.delete(exclude);
-      if (waiters.size === 0 && this.roomMoveExclusionWaiters.get(initial.agent_id) === waiters) {
-        this.roomMoveExclusionWaiters.delete(initial.agent_id);
-      }
     }
-  }
-
-  private serializeRoomMoveReconciliation<T>(
-    entryId: string,
-    excluded: () => Promise<T>,
-    operation: () => Promise<T>,
-  ): Promise<T> {
-    return this.serializeEntryTick(entryId, async () => {
-      if (this.handoffScheduled || this.lifecycleActiveEntries.has(entryId)) return excluded();
-      let settle!: () => void;
-      const active = new Promise<void>((resolve) => { settle = resolve; });
-      if (this.activeRoomMoveReconciliations.has(entryId)) {
-        throw new Error("Room-move reconciliation entered its critical section twice for one agent.");
-      }
-      this.activeRoomMoveReconciliations.set(entryId, active);
-      try {
-        return await operation();
-      } finally {
-        settle();
-        if (this.activeRoomMoveReconciliations.get(entryId) === active) {
-          this.activeRoomMoveReconciliations.delete(entryId);
-        }
-      }
-    });
   }
 
   private async waitForActiveRoomMoveReconciliation(entryId: string): Promise<void> {
-    await this.activeRoomMoveReconciliations.get(entryId);
+    await this.entryConcurrency.waitForActiveRoomMove(entryId);
   }
 
   private wakeRoomMoveReconciliationWaiters(): void {
-    for (const waiters of this.roomMoveExclusionWaiters.values()) {
-      for (const waiter of waiters) waiter();
-    }
+    this.entryConcurrency.wakeRoomMoveWaiters();
   }
 
   /**
@@ -1609,10 +1584,7 @@ export class SupervisorDaemon {
    * without touching a closed store.
    */
   private async fenceAndDrainRoomMoveReconciliations(): Promise<void> {
-    this.wakeRoomMoveReconciliationWaiters();
-    while (this.activeRoomMoveReconciliations.size > 0) {
-      await Promise.all([...this.activeRoomMoveReconciliations.values()]);
-    }
+    await this.entryConcurrency.fenceAndDrainRoomMoves();
   }
 
   private async assertRoomMoveExternalAuthority(): Promise<void> {
@@ -1829,7 +1801,7 @@ export class SupervisorDaemon {
   /** Build a delivery agent only from one current manifest, handle, binding, and memory credential tuple. */
   private async startSupervisedDelivery(entryId: string, mode: "refresh" | "ensure" | "wake" = "refresh"): Promise<void> {
     if (this.handoffScheduled || !this.supervisedDelivery || !this.providerPort?.runRoomTurn) return;
-    if (this.lifecycleActiveEntries.has(entryId)) return;
+    if (this.entryConcurrency.isLifecycleActive(entryId)) return;
     const entry = await this.store.getEntry(entryId);
     // A legacy worker-owned polling loop must be cut over before the daemon
     // can even read its bearer.  This keeps the two ingress systems mutually
@@ -1861,7 +1833,7 @@ export class SupervisorDaemon {
         this.scheduleRecoveryConvergence(pendingMove.agent_id, 1_000);
         throw error;
       }
-      if (this.lifecycleActiveEntries.has(entryId) || move.phase !== "waiting_for_current_turn") return;
+      if (this.entryConcurrency.isLifecycleActive(entryId) || move.phase !== "waiting_for_current_turn") return;
       const isRecoverableActivatingState = (candidate: { state: string; provider_turn_id: string | null }): boolean =>
         ["dispatching", "awaiting_result", "result_recovery", "publishing", "retryable"].includes(candidate.state)
         || (candidate.state === "pending" && candidate.provider_turn_id !== null);
@@ -1937,7 +1909,7 @@ export class SupervisorDaemon {
   }
 
   private async restartSupervisedDeliveryOrConverge(entryId: string): Promise<void> {
-    if (this.lifecycleActiveEntries.has(entryId)) {
+    if (this.entryConcurrency.isLifecycleActive(entryId)) {
       // Lifecycle callers invoke this from their failure/losing-CAS cleanup,
       // before their outer finally releases exclusion. Defer one turn so the
       // exact pending room move and delivery owner can actually reacquire the
@@ -3405,12 +3377,7 @@ export class SupervisorDaemon {
   }
 
   private beginLifecycleExclusion(entryId: string): () => void {
-    if (this.lifecycleActiveEntries.has(entryId) || this.turnControlActiveEntries.has(entryId)) {
-      throw new Error("This supervised entry already has an in-flight lifecycle or turn-control action.");
-    }
-    this.lifecycleActiveEntries.add(entryId);
-    for (const waiter of this.roomMoveExclusionWaiters.get(entryId) ?? []) waiter();
-    return () => { this.lifecycleActiveEntries.delete(entryId); };
+    return this.entryConcurrency.beginLifecycle(entryId);
   }
 
   private async setDesiredState(id: string, desiredState: DesiredState): Promise<DaemonManifestEntry> {
@@ -3652,16 +3619,10 @@ export class SupervisorDaemon {
       if (!sameInput) throw new Error("An in-flight turn-control action id was reused with different fenced input.");
       return existing.operation;
     }
-    if (this.lifecycleActiveEntries.has(normalizedInput.entryId)) {
-      throw new Error("Turn control is unavailable while a lifecycle action is in flight for this supervised entry.");
-    }
-    if (this.turnControlActiveEntries.has(normalizedInput.entryId)) {
-      throw new Error("A turn-control action is already in flight for this exact supervised entry.");
-    }
-    this.turnControlActiveEntries.add(normalizedInput.entryId);
+    const releaseTurnControl = this.entryConcurrency.beginTurnControl(normalizedInput.entryId);
     const operation = this.controlTurnOnce(normalizedInput).finally(() => {
       this.turnControlRequests.delete(requestKey);
-      this.turnControlActiveEntries.delete(normalizedInput.entryId);
+      releaseTurnControl();
     });
     this.turnControlRequests.set(requestKey, { input: normalizedInput, operation });
     return operation;
@@ -4439,129 +4400,23 @@ export class SupervisorDaemon {
   }
 
   private async reserveLegacyLane(input: { reservation_id: string; room_id: string; provider: string; owner_pid: number; owner_process_identity: string }): Promise<LegacyLaneOwner> {
-    for (const [field, value] of Object.entries({ reservation_id: input.reservation_id, room_id: input.room_id, provider: input.provider })) {
-      if (!value.trim()) throw new Error(`Legacy lane ${field} is required.`);
-    }
-    if (!Number.isSafeInteger(input.owner_pid) || input.owner_pid < 1) throw new Error("Legacy lane owner_pid is required.");
-    if (!input.owner_process_identity.trim()) throw new Error("Legacy lane owner_process_identity is required.");
-    return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const manifest = await this.store.load();
-      const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
-      const duplicate = legacyOwners.find((candidate) => candidate.reservation_id === input.reservation_id);
-      if (duplicate) {
-        if (duplicate.room_id !== input.room_id || duplicate.provider !== input.provider) {
-          throw new Error(`Legacy reservation '${input.reservation_id}' is already bound to another lane.`);
-        }
-        if (duplicate.owner_pid !== input.owner_pid || duplicate.owner_process_identity !== input.owner_process_identity) {
-          throw new Error(`Legacy reservation '${input.reservation_id}' belongs to another Electron process.`);
-        }
-        return duplicate;
-      }
-      const supervisedOwner = manifest.entries.find((candidate) =>
-        candidate.room_id === input.room_id && candidate.provider === input.provider && this.isSupervisedLaneOwner(candidate));
-      if (supervisedOwner) {
-        throw new Error(`Provider lane '${input.room_id}/${input.provider}' is already owned by supervised entry '${supervisedOwner.id}'.`);
-      }
-      const legacyOwner = legacyOwners.find((candidate) =>
-        candidate.room_id === input.room_id && candidate.provider === input.provider);
-      if (legacyOwner) {
-        throw new Error(`Provider lane '${input.room_id}/${input.provider}' is already owned by legacy reservation '${legacyOwner.reservation_id}'.`);
-      }
-      const now = new Date().toISOString();
-      const owner: LegacyLaneOwner = {
-        ...input,
-        state: "reserved",
-        session_id: null,
-        created_at: now,
-        updated_at: now,
-      };
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, [...legacyOwners, owner]);
-      this.manifestGeneration = next.generation;
-      return owner;
-    });
+    return this.legacyLanes.reserve(input);
   }
 
   private liveLegacyLaneOwners(owners: readonly LegacyLaneOwner[]): LegacyLaneOwner[] {
-    return owners.filter((owner) => owner.state === "active" || this.isProcessOwnerLive(owner.owner_pid, owner.owner_process_identity));
-  }
-
-  private isProcessOwnerLive(pid: number, expectedIdentity: string): boolean {
-    try {
-      // Read the start-time-only identity to match how Electron records the owner
-      // (defaultGetProcessIdentity). Compare the stable birth prefix, not the whole
-      // string — a live owner whose recorded identity omits the mutable command must
-      // still read live, or its reservation is wrongly pruned before activate.
-      const identity = execFileSync(
-        "/bin/ps",
-        ["-p", String(pid), "-o", "lstart="],
-        { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-      ).trim();
-      return Boolean(identity) && sameProcessBirthIdentity(identity, expectedIdentity);
-    } catch (error) {
-      try {
-        process.kill(pid, 0);
-        // Unknown evidence fails closed: retain the fence until a later
-        // reconciliation can prove absence or birth-identity mismatch.
-        return true;
-      } catch (killError) {
-        return (killError as NodeJS.ErrnoException).code === "EPERM";
-      }
-    }
+    return this.legacyLanes.liveOwners(owners);
   }
 
   private async recoverOrphanedLegacyReservations(): Promise<void> {
-    await this.serializeManifestMutation(async () => {
-      const manifest = await this.store.load();
-      const owners = manifest.legacy_lane_owners ?? [];
-      const live = this.liveLegacyLaneOwners(owners);
-      if (live.length === owners.length) return;
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, live);
-      this.manifestGeneration = next.generation;
-    });
+    await this.legacyLanes.recoverOrphanedReservations();
   }
 
   private async activateLegacyLane(reservationId: string, sessionId: string): Promise<LegacyLaneOwner> {
-    if (!reservationId.trim() || !sessionId.trim()) throw new Error("Legacy reservation and session ids are required.");
-    return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const manifest = await this.store.load();
-      const legacyOwners = this.liveLegacyLaneOwners(manifest.legacy_lane_owners ?? []);
-      const owner = legacyOwners.find((candidate) => candidate.reservation_id === reservationId);
-      if (!owner) throw new Error(`Unknown legacy lane reservation: ${reservationId}`);
-      if (owner.state === "active" && owner.session_id !== sessionId) {
-        throw new Error(`Legacy reservation '${reservationId}' is already active for another session.`);
-      }
-      const updated: LegacyLaneOwner = { ...owner, state: "active", session_id: sessionId, updated_at: new Date().toISOString() };
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, legacyOwners
-        .map((candidate) => candidate.reservation_id === reservationId ? updated : candidate));
-      this.manifestGeneration = next.generation;
-      return updated;
-    });
+    return this.legacyLanes.activate(reservationId, sessionId);
   }
 
   private async releaseLegacyLane(input: { reservation_id: string | null; session_id: string | null; room_id: string | null; provider: string | null }): Promise<{ released: boolean }> {
-    const reservationId = input.reservation_id?.trim() || null;
-    const sessionId = input.session_id?.trim() || null;
-    const roomId = input.room_id?.trim() || null;
-    const provider = input.provider?.trim() || null;
-    if (!reservationId && !sessionId && !(roomId && provider)) {
-      throw new Error("Legacy reservation_id, session_id, or complete room/provider lane is required.");
-    }
-    return this.serializeManifestMutation(async () => {
-      await this.singleton.assertCurrent();
-      const manifest = await this.store.load();
-      const owners = manifest.legacy_lane_owners ?? [];
-      const retained = owners.filter((candidate) => !(
-        (reservationId && candidate.reservation_id === reservationId)
-        || (sessionId && candidate.session_id === sessionId)
-        || (roomId && provider && candidate.room_id === roomId && candidate.provider === provider)
-      ));
-      if (retained.length === owners.length) return { released: false };
-      const next = await this.writeManifest(this.manifestGeneration, manifest.entries, retained);
-      this.manifestGeneration = next.generation;
-      return { released: true };
-    });
+    return this.legacyLanes.release(input);
   }
 
   private async appendActivity(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
@@ -4657,12 +4512,14 @@ export class SupervisorDaemon {
     entry: DaemonManifestEntry,
     projectedBinding?: WorkerSessionBinding | null,
   ): Promise<DaemonManifestEntryView> {
+    const projectionNowMs = this.nowMs();
     const binding = projectedBinding === undefined ? await this.workerBindings.get(entry.id) : projectedBinding;
     const receipts = await this.supervisedInbox.receipts(entry.id);
     const credential = bindingMatchesRoomAgentGeneration(entry, binding)
       ? await this.workerBindings.credentialFor(binding)
       : null;
     const continuationRepair = await this.supervisedInbox.latestContinuationRepair(entry.id);
+    const currentHostGrantAvailable = Boolean(this.currentHostGrant(entry));
     const liveHandle = this.liveHandles.get(entry.id);
     const persistedIngress = await this.supervisedInbox.ingressHealth(entry.id);
     const authorityFacts = {
@@ -4684,12 +4541,12 @@ export class SupervisorDaemon {
       : null;
     return projectRoomAgentManifestEntry({
       ...authorityFacts,
-      currentHostGrantAvailable: Boolean(this.currentHostGrant(entry)),
+      currentHostGrantAvailable,
       ingressHealth: persistedIngress,
       continuationRepair,
       receipts,
       activeTurn,
-      nowMs: this.nowMs(),
+      nowMs: projectionNowMs,
       workplaceLivenessStaleAfterMs: workplaceLivenessStaleAfterMs(),
       nativeLivenessStaleAfterMs: NATIVE_LIVENESS_STALE_AFTER_MS,
     });
@@ -4734,13 +4591,11 @@ export class SupervisorDaemon {
   }
 
   private currentEntryControlEpoch(entryId: string): number {
-    return this.entryControlEpochs.get(entryId) ?? 0;
+    return this.entryConcurrency.currentControlEpoch(entryId);
   }
 
   private bumpEntryControlEpoch(entryId: string): number {
-    const next = this.currentEntryControlEpoch(entryId) + 1;
-    this.entryControlEpochs.set(entryId, next);
-    return next;
+    return this.entryConcurrency.bumpControlEpoch(entryId);
   }
 
   private reserveProviderDispatch(entryId: string, executionGenerationId: string): { token: symbol; release: (error?: unknown) => void } {
@@ -7300,16 +7155,7 @@ export class SupervisorDaemon {
   }
 
   private async serializeEntryTick<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.reconciliationTicks.get(entryId) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => { release = resolve; });
-    const tail = previous.then(() => current);
-    this.reconciliationTicks.set(entryId, tail);
-    await previous;
-    try { return await operation(); } finally {
-      release();
-      if (this.reconciliationTicks.get(entryId) === tail) this.reconciliationTicks.delete(entryId);
-    }
+    return this.entryConcurrency.run(entryId, operation);
   }
 
   /** Provider terminal callback: records an actual exit edge before the next tick. */
@@ -7476,14 +7322,7 @@ export class SupervisorDaemon {
   }
 
   private async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.manifestMutation;
-    let release!: () => void;
-    this.manifestMutation = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try {
-      await this.singleton.assertCurrent();
-      return await operation();
-    } finally { release(); }
+    return this.authority.serializeManifestMutation(operation);
   }
 
   private writeManifest(
@@ -7502,16 +7341,7 @@ export class SupervisorDaemon {
   }
 
   private fenceDaemonCommit(commit: () => Promise<void>): Promise<void> {
-    return this.serializeManifestCommit(async () => {
-      if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.");
-      await this.singleton.assertCurrent();
-      // assertCurrent performs asynchronous filesystem I/O. Handoff may set
-      // the public revocation flag during that await while this process still
-      // owns the on-disk generation, so validate both sides of the boundary.
-      if (this.handoffScheduled) throw new DaemonFenceLostError("Supervisor handoff fenced a stale daemon-owned commit.");
-      await commit();
-      this.notifyStateChanged();
-    });
+    return this.authority.fenceDaemonCommit(commit);
   }
 
   /**
@@ -7521,20 +7351,11 @@ export class SupervisorDaemon {
    * state honest before releasing it to a successor.
    */
   private fenceAdmittedTransitionCommit(commit: () => Promise<void>): Promise<void> {
-    return this.serializeManifestCommit(async () => {
-      await this.singleton.assertCurrent();
-      await commit();
-      await this.singleton.assertCurrent();
-      this.notifyStateChanged();
-    });
+    return this.authority.fenceAdmittedTransitionCommit(commit);
   }
 
   private async serializeManifestCommit<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.manifestCommit;
-    let release!: () => void;
-    this.manifestCommit = new Promise<void>((resolve) => { release = resolve; });
-    await previous;
-    try { return await operation(); } finally { release(); }
+    return this.authority.serializeManifestCommit(operation);
   }
 
   private terminalPayload(terminal: ProviderActionTerminal, actor: string): ExecutionTerminalPayload {
