@@ -6,14 +6,11 @@ import { AgentStreamRegistry } from "./agent-stream-registry.js";
 import { BoundedEffectCoordinator } from "./bounded-effect-coordinator.js";
 import { ContinuationRepairCoordinator } from "./continuation-repair-coordinator.js";
 import {
-  hostGrantApiOrigin,
-  lastRoomMessageId,
   NATIVE_LIVENESS_STALE_AFTER_MS,
   publishWorkerNativeActivity,
   productionSupervisedDeliveryHttp,
   productionSupervisorGrantHttp,
   supervisedProviderLabel,
-  SupervisorGrantRequestError,
   workplaceLivenessStaleAfterMs,
   type SupervisorGrantHttp,
 } from "./cloud-http.js";
@@ -25,10 +22,8 @@ import { DeliveryCutoverCoordinator, DeliveryCutoverObservationDetached } from "
 import {
   exhaustedTransientWorkerMint,
   providerRuntimeGoneFailure,
-  retryableWorkerMintFailure,
   schedulerErrorDetail,
   transientProviderStartFailure,
-  WorkerCredentialMintError,
 } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
 import { WorkDurabilityStore } from "./durability-store.js";
@@ -78,20 +73,14 @@ import {
 } from "./supervised-permission-profiles.js";
 import { createGitCommand, repositoryStorageKey, resolveSourceRepositoryIdentity, UnusableSourceRepositoryError, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
+import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-authority-coordinator.js";
 import {
   WorkerRuntimeCustody,
-  WORKER_BEARER_ROTATION_LEAD_MS,
-  type BoundWorkerAuthorization,
-  type CachedWorkerAuthorization,
-  type InstalledHostGrant,
-  type InstalledOpenModelCredential,
   type LiveBindingIdentity,
-  type MintedWorkerAuthorization,
-  type PendingResumeBinding,
 } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedAuthorityScope, type SupervisedDeliveryAuthority, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
-import { supervisedToolRuntime, type DaemonToolAgentSession, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
+import { supervisedToolRuntime, type SupervisedToolRuntime } from "./supervised-tool-runtime.js";
 import { TurnControlCoordinator } from "./turn-control-coordinator.js";
 
 export {
@@ -121,30 +110,6 @@ type RecoveryClock = {
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
 };
-class InvalidSupervisorGrantRenewalError extends Error {}
-type BootstrapOperation = {
-  controller: AbortController;
-  phase: "observing" | "committing";
-  operation: Promise<unknown>;
-};
-
-const HOST_GRANT_TTL_MS = 24 * 60 * 60 * 1_000;
-const HOST_GRANT_RENEWAL_LEAD_MS = 60 * 60 * 1_000;
-// Electron calls the bootstrap admission with a dedicated 45s deadline. Keep
-// the admission boundary inside that window: after Electron gives up, a late
-// first-tail write would be both surprising and hard to surface to the user.
-// The envelope must hold two sequential cloud round-trips (worker mint with
-// retries, then the first room-tail read); its 2.5s predecessor aborted real
-// launches on mobile networks and orphaned their durable claims as paused.
-const BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS = 40_000;
-// One HTTPS round-trip on a degraded network routinely exceeds 2s; a mint
-// attempt that times out burns a server-side session, so give each attempt a
-// realistic budget instead of retrying a deadline that cannot be met.
-const WORKER_MINT_TIMEOUT_MS = 10_000;
-const WORKER_MINT_MAX_ATTEMPTS = 3;
-const WORKER_MINT_RETRY_DELAY_MS = 100;
-const WORKER_BIND_MAX_ATTEMPTS = 3;
-const WORKER_BIND_RETRY_DELAYS_MS = [1_000, 3_000] as const;
 const PROVIDER_START_RETRY_LIMIT = 3;
 const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
 
@@ -168,6 +133,7 @@ export class SupervisorDaemon {
   private readonly ephemeralProvisioner: EphemeralWorkspaceProvisioner;
   private readonly gitCommand: GitCommand;
   private readonly workerBindings: WorkerBindingStore;
+  private readonly workerAuthority: WorkerAuthorityCoordinator;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
   private readonly continuationRepairs: ContinuationRepairCoordinator;
@@ -203,16 +169,6 @@ export class SupervisorDaemon {
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
   private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly workerRuntimeCustody = new WorkerRuntimeCustody();
-  /**
-   * Post-launch room binding is retried against one exact provider generation.
-   * This state is deliberately process-only: durable manifest copy exposes the
-   * current attempt and failure, while a successor safely starts a fresh
-   * bounded retry series after reattaching the same persisted provider.
-   */
-  private readonly workerBindingRecoveryAttempts = new Map<string, {
-    executionGenerationId: string;
-    attempts: number;
-  }>();
   /**
    * Consecutive transient provider-start failures per entry. A launch that
    * times out is retried automatically a bounded number of times instead of
@@ -368,6 +324,50 @@ export class SupervisorDaemon {
       undefined,
       () => this.notifyStateChanged(),
     );
+    this.workerAuthority = new WorkerAuthorityCoordinator({
+      store: this.store,
+      durability: this.durability,
+      bindings: this.workerBindings,
+      custody: this.workerRuntimeCustody,
+      inbox: this.supervisedInbox,
+      supervisorGrantHttp: this.supervisorGrantHttp,
+      deliveryHttp: this.supervisedDeliveryHttp,
+      authority: {
+        currentGeneration: () => this.singleton.currentGeneration,
+        isHandoffScheduled: () => this.handoffScheduled,
+        assertCurrent: () => this.singleton.assertCurrent(),
+      },
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      serializeCursorCheckpoint: (entryId, operation) => this.serializeCursorCheckpoint(entryId, operation),
+      manifest: {
+        updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      },
+      runtime: {
+        currentHandle: (entryId) => this.liveHandles.get(entryId),
+        attach: (entry, mayPublish) => this.attachLiveProvider(entry, mayPublish),
+      },
+      delivery: {
+        stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
+        start: (entryId) => this.startSupervisedDelivery(entryId),
+      },
+      convergence: {
+        request: (entryId) => this.requestConvergence(entryId),
+        schedule: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
+        clear: (entryId) => this.clearRecoveryConvergence(entryId),
+        heartbeatIntervalMs: this.nativeHeartbeatIntervalMs,
+      },
+      recovery: {
+        resetMintAttempts: (entryId) => this.workerMintRecoveryRetryAttempts.delete(entryId),
+      },
+      activity: {
+        publishNative: (entryId, method, status) => this.publishNativeActivity(entryId, method, status),
+        transition: (entryId, state, condition, detail, source) => this.transition(entryId, state, condition, detail, source),
+      },
+      boundedContext: (input) => this.exactActiveBoundedContext(input),
+      nowMs: recoveryClock.nowMs ?? Date.now,
+      setTimeout: recoveryClock.setTimeout ?? setTimeout,
+      clearTimeout: recoveryClock.clearTimeout ?? clearTimeout,
+    });
     this.continuationRepairs = new ContinuationRepairCoordinator({
       authority: {
         isHandoffScheduled: () => this.handoffScheduled,
@@ -414,7 +414,7 @@ export class SupervisorDaemon {
         currentGeneration: () => this.singleton.currentGeneration,
         isHandoffScheduled: () => this.handoffScheduled,
         assertCurrent: () => this.singleton.assertCurrent(),
-        ownsDaemonGeneration: (expected) => this.ownsDaemonGeneration(expected),
+        ownsDaemonGeneration: (expected) => this.workerAuthority.ownsDaemonGeneration(expected),
         fenceCommit: (commit) => this.fenceDaemonCommit(commit),
       },
       entryConcurrency: this.entryConcurrency,
@@ -506,10 +506,10 @@ export class SupervisorDaemon {
       acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
       activateLegacyLane: this.activateLegacyLane.bind(this),
       appendActivity: this.appendActivity.bind(this),
-      bindWorkerSession: this.bindWorkerSession.bind(this),
-      bootstrapRoomIngress: (input) => this.beginBootstrap(this.bootstrapRoomIngress.bind(this), input),
-      borrowWorkerCredential: this.borrowWorkerCredential.bind(this),
-      checkpointWorkerCursor: this.checkpointWorkerCursor.bind(this),
+      bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),
+      bootstrapRoomIngress: (input) => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input),
+      borrowWorkerCredential: this.workerAuthority.borrowWorkerCredential.bind(this.workerAuthority),
+      checkpointWorkerCursor: this.workerAuthority.checkpointWorkerCursor.bind(this.workerAuthority),
       commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
       compareAndSetDesiredState: this.compareAndSetDesiredState.bind(this),
       completeBoundedEffect: this.completeBoundedEffect.bind(this),
@@ -520,9 +520,9 @@ export class SupervisorDaemon {
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
       getCurrentInspectorRoomMove: (input) => this.roomMoves.getCurrentInspector(input),
       getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
-      installHostGrant: this.installHostGrant.bind(this),
-      installOpenModelCredential: this.installOpenModelCredential.bind(this),
-      installWorkerCredential: this.installWorkerCredential.bind(this),
+      installHostGrant: this.workerAuthority.installHostGrant.bind(this.workerAuthority),
+      installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
+      installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
       prepareBoundedEffect: this.prepareBoundedEffect.bind(this),
       prepareHandoff: this.prepareHandoff.bind(this),
@@ -544,7 +544,7 @@ export class SupervisorDaemon {
       status: this.status.bind(this),
       updateAgentConfiguration: this.updateAgentConfiguration.bind(this),
       updateWorkplaceLiveness: this.updateWorkplaceLiveness.bind(this),
-      verifyWorkerSession: this.verifyWorkerSession.bind(this),
+      verifyWorkerSession: this.workerAuthority.verifyWorkerSession.bind(this.workerAuthority),
       watchAgentStream: this.watchAgentStream.bind(this),
       watchState: this.watchState.bind(this),
     } satisfies DaemonControlOperations;
@@ -2023,7 +2023,7 @@ export class SupervisorDaemon {
         ?? entry.last_worker_binding?.agent_session_id
         ?? null;
       if (retainedSessionId) {
-        const grant = this.currentHostGrant(entry);
+        const grant = this.workerAuthority.currentHostGrant(entry);
         if (!grant || !this.supervisorGrantHttp.endWorkerSession) {
           throw new Error("Desktop credentials are required before this provider can be safely recovered.");
         }
@@ -2329,7 +2329,7 @@ export class SupervisorDaemon {
       ? await this.workerBindings.credentialFor(binding)
       : null;
     const continuationRepair = await this.supervisedInbox.latestContinuationRepair(entry.id);
-    const currentHostGrantAvailable = Boolean(this.currentHostGrant(entry));
+    const currentHostGrantAvailable = Boolean(this.workerAuthority.currentHostGrant(entry));
     const liveHandle = this.liveHandles.get(entry.id);
     const persistedIngress = await this.supervisedInbox.ingressHealth(entry.id);
     const authorityFacts = {
@@ -2583,12 +2583,12 @@ export class SupervisorDaemon {
       // A daemon-inbox provider has no ambient room credential. Do not create
       // it (or even a new work execution) until Electron installs the exact
       // host grant over the local daemon socket.
-      if (this.requiresHostGrant(entry) && !this.currentHostGrant(entry)) return;
+      if (this.workerAuthority.requiresHostGrant(entry) && !this.workerAuthority.currentHostGrant(entry)) return;
       // A running provider from before cursor admission must not attach,
       // resume, or spawn in the grant-install/bootstrap gap. Bootstrap owns
       // the first-tail boundary and queues this convergence only afterwards.
-      if (this.requiresHostGrant(entry) && !await this.supervisedInbox.cursor(entry.id)) return;
-      if (this.requiresHostGrant(entry) && !await this.ensureHostGrantFresh(entry)) return;
+      if (this.workerAuthority.requiresHostGrant(entry) && !await this.supervisedInbox.cursor(entry.id)) return;
+      if (this.workerAuthority.requiresHostGrant(entry) && !await this.workerAuthority.ensureHostGrantFresh(entry)) return;
       entry = await this.launchEntryIfCurrent(entry.id, launchControlEpoch) ?? entry;
       if (entry.desired_state !== "running" || this.currentEntryControlEpoch(entry.id) !== launchControlEpoch || this.handoffScheduled) return;
       if (entry.observed_state === "failed") {
@@ -2634,17 +2634,17 @@ export class SupervisorDaemon {
         entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId) ?? entry;
       }
       if (handle) {
-        if (this.requiresHostGrant(entry) && this.currentHostGrant(entry)) {
+        if (this.workerAuthority.requiresHostGrant(entry) && this.workerAuthority.currentHostGrant(entry)) {
           const binding = await this.workerBindings.get(entry.id);
           const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
           const supervisedSession = binding ? await this.workerBindings.supervisedWorkerSession(entry.id) : null;
-          const expiring = binding ? await this.hostWorkerBearerNeedsRotation(entry, binding) : false;
+          const expiring = binding ? await this.workerAuthority.hostWorkerBearerNeedsRotation(entry, binding) : false;
           if ((!credential || expiring) && entry.provider_ref?.execution_generation_id) {
             const executionGenerationId = entry.provider_ref.execution_generation_id;
             try {
-              const minted = await this.mintHostWorkerSession(entry, executionGenerationId);
+              const minted = await this.workerAuthority.mintHostWorkerSession(entry, executionGenerationId);
               if (minted) {
-                await this.bindMintedHostWorkerSession(entry.id, minted);
+                await this.workerAuthority.bindMintedHostWorkerSession(entry.id, minted);
                 // Binding clears a coordination/auth latch in the durable
                 // manifest. Refresh before the generic handle-state
                 // reconciliation below so its stale copy cannot restore the
@@ -2656,7 +2656,7 @@ export class SupervisorDaemon {
               // the exact provider and let the next heartbeat retry rotation.
               const bearerExpiry = supervisedSession?.expires_at ? Date.parse(supervisedSession.expires_at) : Number.NaN;
               if (!credential) {
-                await this.recordWorkerBindingRecoveryFailure(
+                await this.workerAuthority.recordWorkerBindingRecoveryFailure(
                   entry.id,
                   executionGenerationId,
                   error,
@@ -2664,7 +2664,7 @@ export class SupervisorDaemon {
                 return;
               }
               if (Number.isFinite(bearerExpiry) && bearerExpiry <= this.nowMs()) {
-                await this.blockExpiredWorkerAuthority(entry, `Worker bearer rotation failed after expiry: ${error instanceof Error ? error.message : "unknown error"}`);
+                await this.workerAuthority.blockExpiredWorkerAuthority(entry, `Worker bearer rotation failed after expiry: ${error instanceof Error ? error.message : "unknown error"}`);
                 return;
               }
             }
@@ -2724,10 +2724,10 @@ export class SupervisorDaemon {
         }
         : null;
       const ref = entry.provider_ref ? this.providerRef(entry) : null;
-      const mintedAuthorization = this.requiresHostGrant(entry)
-        ? await this.mintHostWorkerAuthorization(entry)
+      const mintedAuthorization = this.workerAuthority.requiresHostGrant(entry)
+        ? await this.workerAuthority.mintHostWorkerAuthorization(entry)
         : null;
-      if (this.requiresHostGrant(entry) && !mintedAuthorization) return;
+      if (this.workerAuthority.requiresHostGrant(entry) && !mintedAuthorization) return;
       const currentAfterMint = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
       if (!currentAfterMint) return;
       entry = currentAfterMint;
@@ -2747,9 +2747,9 @@ export class SupervisorDaemon {
         return;
       }
       const resumed = Boolean(ref && capabilities.resume);
-      if (this.requiresHostGrant(entry)) {
-        const grant = this.currentHostGrant(entry);
-        if (!grant || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return;
+      if (this.workerAuthority.requiresHostGrant(entry)) {
+        const grant = this.workerAuthority.currentHostGrant(entry);
+        if (!grant || !await this.workerAuthority.ownsDaemonGeneration(grant.daemonGeneration)) return;
       }
       // Every potentially long remote authorization/capability await is now
       // complete. Only then may this daemon create a durable live generation.
@@ -2757,9 +2757,9 @@ export class SupervisorDaemon {
       const currentAfterTransition = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
       if (!currentAfterTransition) return;
       entry = currentAfterTransition;
-      if (this.requiresHostGrant(entry)) {
-        const grant = this.currentHostGrant(entry);
-        if (!grant || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return;
+      if (this.workerAuthority.requiresHostGrant(entry)) {
+        const grant = this.workerAuthority.currentHostGrant(entry);
+        if (!grant || !await this.workerAuthority.ownsDaemonGeneration(grant.daemonGeneration)) return;
       }
       const launchConfiguration = await this.store.getAgentConfiguration(entry.id);
       if (!launchConfiguration) throw new Error("Agent configuration disappeared before provider launch.");
@@ -2808,7 +2808,7 @@ export class SupervisorDaemon {
         return;
       }
       const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
-      let mintedHostSession: Awaited<ReturnType<SupervisorDaemon["mintHostWorkerSession"]>> = null;
+      let mintedHostSession: Awaited<ReturnType<WorkerAuthorityCoordinator["mintHostWorkerSession"]>> = null;
       const spawn: ProviderActionSpawn = {
         workAttemptId: attempt.work_attempt_id,
         roomId: entry.room_id,
@@ -2844,7 +2844,7 @@ export class SupervisorDaemon {
       let unpersistedReturnedProviderFenced = false;
       try {
         if (mintedAuthorization) {
-          mintedHostSession = await this.recordMintedHostWorkerSession(entry, execution.execution_generation_id, mintedAuthorization);
+          mintedHostSession = await this.workerAuthority.recordMintedHostWorkerSession(entry, execution.execution_generation_id, mintedAuthorization);
           if (!mintedHostSession) throw new Error("Waiting for desktop credential handoff.");
           Object.assign(spawn, { supervisorWorkerSession: { agentSessionId: mintedHostSession.agentSessionId, roomCursor: null } });
         }
@@ -2919,7 +2919,7 @@ export class SupervisorDaemon {
               if (control === "handoff" || control === "fenced") return;
               launchControlEpoch = this.currentEntryControlEpoch(entry.id);
               try {
-                await this.bindMintedHostWorkerSession(
+                await this.workerAuthority.bindMintedHostWorkerSession(
                   entry.id,
                   mintedHostSession,
                   () => !this.handoffScheduled && this.currentEntryControlEpoch(entryId) === launchControlEpoch,
@@ -2930,7 +2930,7 @@ export class SupervisorDaemon {
                   entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
                 );
                 if (control === "handoff" || control === "fenced") return;
-                await this.recordWorkerBindingRecoveryFailure(
+                await this.workerAuthority.recordWorkerBindingRecoveryFailure(
                   entry.id,
                   execution.execution_generation_id,
                   error,
@@ -2971,7 +2971,7 @@ export class SupervisorDaemon {
         }
       } catch (error) {
         if (reusesActiveCursorExecution && !providerPersisted) {
-          await this.recordWorkerBindingRecoveryFailure(
+          await this.workerAuthority.recordWorkerBindingRecoveryFailure(
             entry.id,
             execution.execution_generation_id,
             error,
@@ -2984,7 +2984,7 @@ export class SupervisorDaemon {
         // The exact provider remains the recovery target; no stop, restart,
         // migration, or second spawn is permitted here.
         if (providerPersisted) {
-          await this.recordWorkerBindingRecoveryFailure(
+          await this.workerAuthority.recordWorkerBindingRecoveryFailure(
             entry.id,
             execution.execution_generation_id,
             error,
@@ -3408,14 +3408,16 @@ export class SupervisorDaemon {
           && manifestEntry.last_error === "Provider is running; waiting for desktop credential handoff.";
         if (!["working", "idle"].includes(manifestEntry.observed_state) && !retriesCredentialHandoff) return;
         if (!["working", "idle"].includes(current.observedState)) return;
-        const hostGrant = this.requiresHostGrant(manifestEntry) ? this.currentHostGrant(manifestEntry) : null;
-        if (hostGrant && this.hostGrantNeedsRenewal(hostGrant)) {
+        const hostGrant = this.workerAuthority.requiresHostGrant(manifestEntry)
+          ? this.workerAuthority.currentHostGrant(manifestEntry)
+          : null;
+        if (hostGrant && this.workerAuthority.hostGrantNeedsRenewal(hostGrant)) {
           this.requestConvergence(entryId);
           return;
         }
         if (hostGrant) {
           const binding = await this.workerBindings.get(entryId);
-          if (binding && await this.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
+          if (binding && await this.workerAuthority.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
             // The serialized convergence lane rotates the bearer against the
             // existing generation and provider. No Electron reinstall is
             // required while this daemon still owns the in-memory host grant.
@@ -3765,867 +3767,6 @@ export class SupervisorDaemon {
     if (!timer) return;
     this.clearRecoveryTimeout(timer);
     this.recoveryTimers.delete(entryId);
-  }
-
-  private async bindWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; credential_ref?: string; api_url: string }): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
-    return this.serializeEntryTick(input.entry_id, () => this.bindWorkerSessionLocked(input));
-  }
-
-  private async bindWorkerSessionLocked(
-    input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; credential_ref?: string; api_url: string },
-    mayPublish: () => boolean = () => true,
-  ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
-    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
-    if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
-    if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
-    if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker session work attempt does not match the supervised manifest entry.");
-    if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
-      throw new Error("Worker session execution generation does not match the active supervised manifest entry.");
-    }
-    const attempt = await this.durability.getAttempt(input.work_attempt_id);
-    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
-    if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
-    const currentBinding = await this.workerBindings.get(input.entry_id);
-    const currentCredential = currentBinding
-      ? await this.workerBindings.credentialFor(currentBinding)
-      : null;
-    const normalizedApiUrl = new URL(input.api_url).origin;
-    const exactCurrentBinding = Boolean(currentBinding
-      && currentBinding.entry_id === input.entry_id
-      && currentBinding.room_id === input.room_id
-      && currentBinding.work_attempt_id === input.work_attempt_id
-      && currentBinding.execution_generation_id === input.execution_generation_id
-      && currentBinding.agent_session_id === input.agent_session_id
-      && currentCredential === input.agent_session_token
-      && currentBinding.api_url === normalizedApiUrl);
-    const binding = exactCurrentBinding && currentBinding
-      ? currentBinding
-      : await this.workerBindings.bind(input);
-    this.workerRuntimeCustody.installLiveBinding(input.entry_id, {
-      agentSessionId: binding.agent_session_id,
-      executionGenerationId: binding.execution_generation_id,
-      updatedAt: binding.updated_at,
-    });
-    this.workerRuntimeCustody.deletePendingResumeBinding(input.entry_id);
-    // The native-activity publication is part of restoring room access: a
-    // server that rejects the bound observation proves the room is NOT
-    // reachable yet. Verify it before clearing the bounded recovery ledger
-    // and before projecting the entry as working, so a deterministic remote
-    // rejection exhausts its bounded retries instead of resetting the count
-    // (and flickering working/recovering) on every convergence cycle.
-    if (mayPublish() && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
-      await this.publishNativeActivity(input.entry_id, "native_harness.bound", "working");
-    }
-    this.workerBindingRecoveryAttempts.delete(input.entry_id);
-    this.workerMintRecoveryRetryAttempts.delete(input.entry_id);
-    this.clearRecoveryConvergence(input.entry_id);
-    await this.updateManifestEntry(input.entry_id, (current) => {
-      const clearsCoordinationLatch = current.desired_state === "running"
-        && (current.condition === "coordination_blocked" || current.condition === "auth_blocked");
-      const manifestBindingIsCurrent = current.last_worker_binding?.agent_session_id === binding.agent_session_id
-        && current.last_worker_binding?.work_attempt_id === binding.work_attempt_id
-        && current.last_worker_binding?.execution_generation_id === binding.execution_generation_id;
-      if (current.workplace_liveness?.state === "reachable"
-        && !clearsCoordinationLatch
-        && manifestBindingIsCurrent) return current;
-      return {
-        ...current,
-        // A successful exact-generation bind proves that an ambiguous live
-        // provider has its MCP control route. Restore workplace reachability on
-        // fresh and persisted-idempotent binds; clear only the coordination
-        // latch, while quarantine and native terminal failures stay authoritative.
-        workplace_liveness: {
-          state: "reachable" as const,
-          observed_at: new Date().toISOString(),
-          detail: exactCurrentBinding
-            ? "exact supervised worker session binding confirmed"
-            : "supervised worker session bound",
-        },
-        ...(clearsCoordinationLatch
-          ? {
-            observed_state: "working" as const,
-            condition: "none" as const,
-            last_error: null,
-          }
-          : {}),
-        // Durable set-once ready stamp: this bind restores reachability, so the
-        // entry is ready when it is running + unblocked + live.
-        ready_reached_at: resolveReadyReachedAt(current, clearsCoordinationLatch, new Date().toISOString()),
-        last_worker_binding: {
-          agent_session_id: binding.agent_session_id,
-          work_attempt_id: binding.work_attempt_id,
-          execution_generation_id: binding.execution_generation_id,
-          updated_at: binding.updated_at,
-        },
-      };
-    });
-    if (mayPublish()) void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
-    return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
-  }
-
-  private requiresHostGrant(entry: DaemonManifestEntry): boolean {
-    return entry.delivery_mode === "daemon_inbox";
-  }
-
-  private currentHostGrant(entry: DaemonManifestEntry): InstalledHostGrant | null {
-    return this.workerRuntimeCustody.currentHostGrant(
-      { entryId: entry.id, roomId: entry.room_id },
-      this.singleton.currentGeneration,
-      this.handoffScheduled,
-    );
-  }
-
-  private hostGrantNeedsRenewal(grant: InstalledHostGrant): boolean {
-    const expiresAt = Date.parse(grant.expiresAt);
-    return !Number.isFinite(expiresAt) || expiresAt <= this.nowMs() + HOST_GRANT_RENEWAL_LEAD_MS;
-  }
-
-  private async blockHostGrantAuthority(entry: DaemonManifestEntry, grant: InstalledHostGrant, detail: string): Promise<void> {
-    this.revokeHostGrantIfCurrent(entry.id, grant);
-    this.workerRuntimeCustody.deleteWorkerAuthorization(entry.id);
-    await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
-    const binding = await this.workerBindings.get(entry.id);
-    if (binding) await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
-    this.workerRuntimeCustody.deleteLiveBinding(entry.id);
-    await this.updateManifestEntry(entry.id, (current) => ({
-      ...current,
-      observed_state: current.desired_state === "running" ? "recovering" : current.observed_state,
-      condition: "auth_blocked",
-      last_error: redactCredentialText(detail).value,
-      workplace_liveness: {
-        state: "stale",
-        observed_at: new Date(this.nowMs()).toISOString(),
-        detail: "Supervisor host authority is unavailable; room delivery is paused.",
-      },
-    }));
-  }
-
-  private async blockExpiredWorkerAuthority(entry: DaemonManifestEntry, detail: string): Promise<void> {
-    this.workerRuntimeCustody.deleteWorkerAuthorization(entry.id);
-    await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
-    const binding = await this.workerBindings.get(entry.id);
-    if (binding) await this.workerBindings.unbind(entry.id, binding.agent_session_id, binding.execution_generation_id);
-    await this.updateManifestEntry(entry.id, (current) => ({
-      ...current,
-      observed_state: current.desired_state === "running" ? "recovering" : current.observed_state,
-      condition: "auth_blocked",
-      last_error: redactCredentialText(detail).value,
-      workplace_liveness: {
-        state: "stale", observed_at: new Date(this.nowMs()).toISOString(),
-        detail: "The worker bearer expired before rotation succeeded; room delivery is paused.",
-      },
-    }));
-    this.scheduleRecoveryConvergence(entry.id, this.nativeHeartbeatIntervalMs);
-  }
-
-  /** Renew in memory only and rotate the live worker bearer in place. */
-  private async ensureHostGrantFresh(entry: DaemonManifestEntry): Promise<InstalledHostGrant | null> {
-    const grant = this.currentHostGrant(entry);
-    if (!grant) return null;
-    const expiresAt = Date.parse(grant.expiresAt);
-    if (!Number.isFinite(expiresAt) || expiresAt <= this.nowMs()) {
-      await this.blockHostGrantAuthority(entry, grant, "Supervisor host grant expired; waiting for Electron owner recovery.");
-      return null;
-    }
-    if (!this.hostGrantNeedsRenewal(grant)) return grant;
-    try {
-      if (!this.supervisorGrantHttp.renewHostGrant) throw new Error("Supervisor host grant renewal is unavailable.");
-      const renewed = await this.supervisorGrantHttp.renewHostGrant({
-        apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
-        grantGeneration: grant.grantGeneration, hostId: grant.hostId,
-        installationId: grant.installationId, ttlMs: HOST_GRANT_TTL_MS,
-      });
-      const renewedExpiry = Date.parse(renewed.expiresAt);
-      if (renewed.grantId !== grant.grantId || renewed.grantGeneration !== grant.grantGeneration
-        || !renewed.supervisorGrant.trim() || !Number.isFinite(renewedExpiry) || renewedExpiry <= this.nowMs()) {
-        throw new InvalidSupervisorGrantRenewalError("Supervisor host grant renewal returned a stale fence.");
-      }
-      if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
-        || !this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) return null;
-      const replacement: InstalledHostGrant = {
-        ...grant, supervisorGrant: renewed.supervisorGrant, expiresAt: renewed.expiresAt,
-      };
-      if (!this.workerRuntimeCustody.replaceHostGrantIfCurrent(entry.id, grant, replacement)) return null;
-      const current = await this.store.getEntry(entry.id);
-      if (current?.provider_ref?.execution_generation_id && this.liveHandles.get(entry.id)) {
-        try {
-          const minted = await this.mintHostWorkerSession(current, current.provider_ref.execution_generation_id);
-          if (!minted) throw new Error("Renewed host grant could not rotate the live worker bearer.");
-          await this.bindMintedHostWorkerSession(entry.id, minted);
-        } catch (error) {
-          if (error instanceof SupervisorGrantRequestError && [401, 403, 409].includes(error.status)) throw error;
-          // The renewed parent grant is valid and stays memory-only. Preserve
-          // the still-live worker bearer and let its heartbeat retry rotation;
-          // a transient child-session transport failure must not force owner
-          // recovery or disturb the provider.
-        }
-      }
-      return replacement;
-    } catch (error) {
-      const active = this.workerRuntimeCustody.hostGrant(entry.id);
-      const definitiveRejection = error instanceof InvalidSupervisorGrantRenewalError
-        || (error instanceof SupervisorGrantRequestError && [401, 403, 409].includes(error.status));
-      if (definitiveRejection && active && active.grantId === grant.grantId && active.daemonGeneration === grant.daemonGeneration) {
-        await this.blockHostGrantAuthority(
-          entry,
-          active,
-          `Supervisor host grant renewal failed: ${error instanceof Error ? error.message : "unknown error"}`,
-        );
-        return null;
-      }
-      if (active && Date.parse(active.expiresAt) <= this.nowMs()) {
-        await this.blockHostGrantAuthority(
-          entry,
-          active,
-          `Supervisor host grant expired while renewal was pending: ${error instanceof Error ? error.message : "unknown error"}`,
-        );
-        return null;
-      }
-      // Transport and 5xx failures do not revoke a still-valid parent grant
-      // or its worker bearer. Retry in the background and let the actual
-      // parent/bearer deadlines decide when delivery becomes auth_blocked.
-      this.scheduleRecoveryConvergence(entry.id, this.nativeHeartbeatIntervalMs);
-      return this.currentHostGrant(entry);
-    }
-  }
-
-  private async hostWorkerBearerNeedsRotation(entry: DaemonManifestEntry, binding: WorkerSessionBinding): Promise<boolean> {
-    const session = await this.workerBindings.supervisedWorkerSession(entry.id);
-    if (!session
-      || session.room_id !== entry.room_id
-      || session.agent_session_id !== binding.agent_session_id
-      || session.execution_generation_id !== binding.execution_generation_id) return false;
-    // Public metadata is committed before the private vault rebind. If the
-    // latter fails, the mismatch makes the next heartbeat remint instead of
-    // silently retaining the old credential forever.
-    if (session.credential_ref !== binding.credential_ref) return true;
-    if (!session.expires_at) return false;
-    const expiresAt = Date.parse(session.expires_at);
-    return Number.isFinite(expiresAt) && expiresAt <= this.nowMs() + WORKER_BEARER_ROTATION_LEAD_MS;
-  }
-
-  private async ownsDaemonGeneration(expectedGeneration: number): Promise<boolean> {
-    if (this.handoffScheduled) {
-      this.workerRuntimeCustody.destroyAllCredentials();
-      return false;
-    }
-    if (expectedGeneration !== this.singleton.currentGeneration) return false;
-    try {
-      await this.singleton.assertCurrent();
-      if (this.handoffScheduled) {
-        this.workerRuntimeCustody.destroyAllCredentials();
-        return false;
-      }
-      return expectedGeneration === this.singleton.currentGeneration;
-    } catch {
-      // A successor acquired the singleton without this process completing its
-      // normal handoff path. Drop every process-memory credential immediately.
-      this.workerRuntimeCustody.destroyAllCredentials();
-      return false;
-    }
-  }
-
-  private revokeHostGrantIfCurrent(entryId: string, grant: InstalledHostGrant): void {
-    this.workerRuntimeCustody.destroyHostGrantIfCurrent(entryId, grant);
-  }
-
-  private cachedWorkerAuthorization(entry: DaemonManifestEntry, grant: InstalledHostGrant): CachedWorkerAuthorization | null {
-    return this.workerRuntimeCustody.currentWorkerAuthorization({
-      entryId: entry.id,
-      roomId: entry.room_id,
-      workAttemptId: entry.work_attempt_id,
-    }, grant, this.nowMs());
-  }
-
-  private async mintWorkerSessionWithRetry(entry: DaemonManifestEntry, grant: InstalledHostGrant, signal?: AbortSignal): Promise<Awaited<ReturnType<SupervisorGrantHttp["createWorkerSession"]>>> {
-    let lastError: unknown = null;
-    let attempts = 0;
-    let lastRetryable = false;
-    const agentInstanceId = `daemon:${entry.id}`;
-    if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
-    // Commit uncertainty before the first byte of the remote POST can leave
-    // this process. A crash or lost response can now only resolve to unknown,
-    // never to the stale never-minted proof.
-    await this.workerBindings.beginSupervisedWorkerSessionMint({
-      agent_id: entry.id,
-      room_id: entry.room_id,
-      agent_instance_id: agentInstanceId,
-    });
-    for (let attempt = 1; attempt <= WORKER_MINT_MAX_ATTEMPTS; attempt += 1) {
-      if (signal?.aborted) throw new Error("Worker credential mint was cancelled.");
-      attempts = attempt;
-      const controller = new AbortController();
-      const abort = () => controller.abort();
-      signal?.addEventListener("abort", abort, { once: true });
-      let timeoutReject!: (error: Error) => void;
-      const timedOut = new Promise<never>((_resolve, reject) => { timeoutReject = reject; });
-      const timeout = this.setRecoveryTimeout(() => {
-        controller.abort();
-        timeoutReject(new Error(`Worker credential mint timed out after ${WORKER_MINT_TIMEOUT_MS}ms.`));
-      }, WORKER_MINT_TIMEOUT_MS);
-      timeout.unref();
-      try {
-        const request = (async () => {
-          const minted = await this.supervisorGrantHttp.createWorkerSession({
-            apiUrl: grant.apiUrl, grantId: grant.grantId, supervisorGrant: grant.supervisorGrant,
-            grantGeneration: grant.grantGeneration, roomId: grant.roomId, agentKey: grant.agentKey,
-            agentInstanceId, provider: entry.provider,
-            displayName: entry.display_name, signal: controller.signal,
-          });
-          // The server serializes this stable agent-instance tuple and reuses
-          // its live session id. Persist that exact public id before the
-          // returned bearer is cached or coupled to a provider generation.
-          await this.workerBindings.recordExactSupervisedWorkerSessionMint({
-            agent_id: entry.id,
-            room_id: entry.room_id,
-            agent_instance_id: agentInstanceId,
-            agent_session_id: minted.sessionId,
-          });
-          return minted;
-        })();
-        return await Promise.race([request, timedOut]);
-      } catch (error) {
-        lastError = error;
-        const retryable = retryableWorkerMintFailure(error);
-        lastRetryable = retryable && !signal?.aborted;
-        if (!retryable || signal?.aborted || attempt === WORKER_MINT_MAX_ATTEMPTS) break;
-        await new Promise<void>((resolve) => this.setRecoveryTimeout(resolve, WORKER_MINT_RETRY_DELAY_MS));
-      } finally {
-        this.clearRecoveryTimeout(timeout);
-        signal?.removeEventListener("abort", abort);
-      }
-    }
-    throw new WorkerCredentialMintError(attempts, lastRetryable, lastError);
-  }
-
-  /** Remote authorization happens before starting a durable provider generation. */
-  private async mintHostWorkerAuthorization(entry: DaemonManifestEntry, signal?: AbortSignal, forceFresh = false): Promise<{
-    agentSessionId: string; bearer: string; bearerId: string; expiresAt: string | null; apiUrl: string;
-    agentSession?: DaemonToolAgentSession;
-  } | null> {
-    const grant = this.currentHostGrant(entry);
-    if (!grant) return null;
-    if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
-      || !this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-      this.revokeHostGrantIfCurrent(entry.id, grant);
-      return null;
-    }
-    const cached = forceFresh ? null : this.cachedWorkerAuthorization(entry, grant);
-    if (cached) return {
-      agentSessionId: cached.agentSessionId, bearer: cached.bearer, bearerId: cached.bearerId,
-      expiresAt: cached.expiresAt, apiUrl: cached.apiUrl, agentSession: cached.agentSession,
-    };
-    const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal);
-    if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
-      || !this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-      this.revokeHostGrantIfCurrent(entry.id, grant);
-      return null;
-    }
-    const current = await this.store.getEntry(entry.id);
-    if (!current || current.work_attempt_id !== entry.work_attempt_id || this.currentHostGrant(current) !== grant) return null;
-    this.workerRuntimeCustody.installWorkerAuthorization({
-      entryId: entry.id, roomId: entry.room_id, agentKey: grant.agentKey,
-      workAttemptId: entry.work_attempt_id ?? null, grantId: grant.grantId, grantGeneration: grant.grantGeneration,
-      daemonGeneration: grant.daemonGeneration, apiUrl: grant.apiUrl, agentSessionId: minted.sessionId,
-      bearer: minted.bearer, bearerId: minted.bearerId, expiresAt: minted.expiresAt, mintedAtMs: this.nowMs(),
-      agentSession: minted.agentSession,
-    });
-    return {
-      agentSessionId: minted.sessionId, bearer: minted.bearer, bearerId: minted.bearerId,
-      expiresAt: minted.expiresAt, apiUrl: grant.apiUrl, agentSession: minted.agentSession,
-    };
-  }
-
-  /** Bind public session metadata to the exact generation after it exists. */
-  private async recordMintedHostWorkerSession(
-    entry: DaemonManifestEntry,
-    executionGenerationId: string,
-    minted: MintedWorkerAuthorization,
-  ): Promise<BoundWorkerAuthorization | null> {
-    const grant = this.currentHostGrant(entry);
-    if (!grant || !entry.work_attempt_id || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return null;
-    const current = await this.store.getEntry(entry.id);
-    if (!current || !this.currentHostGrant(current)
-      || current.work_attempt_id !== entry.work_attempt_id) return null;
-    const attempt = await this.durability.getAttempt(entry.work_attempt_id);
-    if (!attempt.execution_generations.some((candidate) => candidate.execution_generation_id === executionGenerationId && !candidate.terminal)) return null;
-    await this.workerBindings.recordSupervisedWorkerSession({
-      agent_id: entry.id, room_id: entry.room_id, agent_session_id: minted.agentSessionId,
-      execution_generation_id: executionGenerationId, credential_ref: minted.bearerId, expires_at: minted.expiresAt,
-    });
-    if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
-      || !this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-      this.revokeHostGrantIfCurrent(entry.id, grant);
-      return null;
-    }
-    return { ...minted, executionGenerationId };
-  }
-
-  private async mintHostWorkerSession(
-    entry: DaemonManifestEntry,
-    executionGenerationId: string,
-    forceFresh = false,
-  ): Promise<BoundWorkerAuthorization | null> {
-    const minted = await this.mintHostWorkerAuthorization(entry, undefined, forceFresh);
-    return minted ? this.recordMintedHostWorkerSession(entry, executionGenerationId, minted) : null;
-  }
-
-  /** Provider identity has already been persisted when this binds the raw bearer. */
-  private async bindMintedHostWorkerSession(entryId: string, session: {
-    agentSessionId: string; bearer: string; bearerId: string; apiUrl: string; executionGenerationId: string;
-  }, mayPublish: () => boolean = () => true): Promise<void> {
-    const entry = await this.store.getEntry(entryId);
-    if (!entry || !entry.work_attempt_id || !entry.provider_ref || entry.provider_ref.execution_generation_id !== session.executionGenerationId || !this.currentHostGrant(entry)) return;
-    await this.bindWorkerSessionLocked({
-      entry_id: entry.id, room_id: entry.room_id, work_attempt_id: entry.work_attempt_id,
-      execution_generation_id: session.executionGenerationId, agent_session_id: session.agentSessionId,
-      agent_session_token: session.bearer, credential_ref: session.bearerId, api_url: session.apiUrl,
-    }, mayPublish);
-  }
-
-  /**
-   * A provider that already crossed the durable native boundary must never be
-   * restarted merely because its room credential could not be bound. Retry
-   * only that exact generation, expose the real safe error, and stop after a
-   * bounded number of attempts so the user eventually receives an action.
-   */
-  private async recordWorkerBindingRecoveryFailure(
-    entryId: string,
-    executionGenerationId: string,
-    error: unknown,
-  ): Promise<void> {
-    const entry = await this.store.getEntry(entryId);
-    const handle = this.liveHandles.get(entryId);
-    if (!entry
-      || entry.desired_state !== "running"
-      || entry.provider_ref?.execution_generation_id !== executionGenerationId
-      || !handle
-      || handle.workAttemptId !== entry.work_attempt_id
-      || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id) return;
-
-    const previous = this.workerBindingRecoveryAttempts.get(entryId);
-    const attempts = previous?.executionGenerationId === executionGenerationId
-      ? previous.attempts + 1
-      : 1;
-    this.workerBindingRecoveryAttempts.set(entryId, { executionGenerationId, attempts });
-    const safeError = schedulerErrorDetail(error);
-    const retrying = attempts < WORKER_BIND_MAX_ATTEMPTS;
-    const detail = retrying
-      ? `Restoring room access (attempt ${attempts} of ${WORKER_BIND_MAX_ATTEMPTS}) failed: ${safeError}. Retrying automatically.`
-      : `The provider is running, but room access could not be restored after ${WORKER_BIND_MAX_ATTEMPTS} attempts: ${safeError}. Use Reconnect to try the room handoff again.`;
-    await this.transition(
-      entryId,
-      "recovering",
-      "coordination_blocked",
-      detail,
-      "daemon-convergence",
-    );
-    if (retrying) {
-      this.clearRecoveryConvergence(entryId);
-      this.scheduleRecoveryConvergence(
-        entryId,
-        WORKER_BIND_RETRY_DELAYS_MS[Math.min(attempts - 1, WORKER_BIND_RETRY_DELAYS_MS.length - 1)]!,
-      );
-    }
-  }
-
-  /** Desktop-only local RPC. Provider endpoint authority remains process-memory-only. */
-  private async installOpenModelCredential(input: {
-    entry_id: string;
-    api_key: string | null;
-    base_url: string;
-    model: string;
-    daemon_generation: number;
-  }): Promise<{ status: "installed" | "stale" }> {
-    if (!input.entry_id.trim() || !input.base_url.trim() || !input.model.trim()) {
-      throw new Error("Open Model credential handoff requires an entry, endpoint, and model.");
-    }
-    if (input.api_key !== null && !input.api_key.trim()) {
-      throw new Error("Open Model API key must be non-empty or null.");
-    }
-    let baseUrl: URL;
-    try {
-      baseUrl = new URL(input.base_url);
-    } catch {
-      throw new Error("Open Model credential handoff contains an invalid endpoint.");
-    }
-    if (!["http:", "https:"].includes(baseUrl.protocol)
-      || baseUrl.username
-      || baseUrl.password
-      || baseUrl.hash) {
-      throw new Error("Open Model credential handoff contains an unsafe endpoint.");
-    }
-    if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
-    const entry = await this.store.getEntry(input.entry_id);
-    if (!entry || entry.provider !== "open-model") return { status: "stale" };
-    if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
-    this.workerRuntimeCustody.installOpenModelCredential({
-      entryId: entry.id,
-      apiKey: input.api_key,
-      baseUrl: input.base_url.replace(/\/+$/, ""),
-      model: input.model.trim(),
-      daemonGeneration: input.daemon_generation,
-    });
-    return { status: "installed" };
-  }
-
-  /** Desktop-only local RPC. The host grant itself is never copied to SQLite, activity, or manifests. */
-  private async installHostGrant(input: {
-    entry_id: string; room_id: string; agent_key: string; grant_id: string; supervisor_grant: string;
-    grant_generation: number; api_url: string; daemon_generation: number;
-    host_id: string; installation_id: string; grant_expires_at: string; credential_only?: boolean;
-    recovery_only?: boolean;
-  }): Promise<{ status: "installed" | "stale" | "provider_unavailable"; agent_session_id?: string }> {
-    return this.serializeEntryTick(input.entry_id, async () => {
-      if (input.credential_only && input.recovery_only) {
-        throw new Error("Host grant installation cannot be both reconnect-only and recovery-only.");
-      }
-      for (const field of ["entry_id", "room_id", "agent_key", "grant_id", "supervisor_grant", "api_url", "host_id", "installation_id", "grant_expires_at"] as const) {
-        if (!input[field].trim()) throw new Error(`Host grant ${field} is required.`);
-      }
-      if (!Number.isSafeInteger(input.grant_generation) || input.grant_generation < 1
-        || !await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
-      const inputExpiry = Date.parse(input.grant_expires_at);
-      if (!Number.isFinite(inputExpiry) || inputExpiry <= this.nowMs()) return { status: "stale" };
-      let apiUrl: string;
-      try { apiUrl = hostGrantApiOrigin(input.api_url); } catch { throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP."); }
-      let entry = await this.store.getEntry(input.entry_id);
-      if (!entry || !this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
-      if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
-      const currentGrant = this.currentHostGrant(entry);
-      const currentGrantIsAtLeastInput = Boolean(currentGrant?.grantId === input.grant_id
-        && (currentGrant.grantGeneration > input.grant_generation
-          || (currentGrant.grantGeneration === input.grant_generation
-            && Date.parse(currentGrant.expiresAt) >= inputExpiry)));
-      if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only && !input.recovery_only) {
-        // Electron may still hold the pre-renewal safeStorage value. It may
-        // confirm installation, but must never roll the daemon's newer
-        // memory-only token/expiry backwards in the same generation.
-        // A cursorless daemon-inbox entry is waiting for Electron's separate
-        // admission RPC. Do not queue provider work in the gap between this
-        // grant install and the durable first-tail boundary.
-        if (entry.desired_state === "running"
-          && (!this.requiresHostGrant(entry) || await this.supervisedInbox.cursor(entry.id))) {
-          this.requestConvergence(entry.id);
-        }
-        return { status: "installed" };
-      }
-      // Credential-only reconnect is a rebind request, not a credential
-      // update. Electron can legitimately still have a pre-renewal encrypted
-      // copy, so retain and mint through the daemon's newer memory-only grant.
-      const grant: InstalledHostGrant = currentGrantIsAtLeastInput && currentGrant ? currentGrant : {
-        entryId: entry.id, roomId: entry.room_id, agentKey: input.agent_key, grantId: input.grant_id,
-        supervisorGrant: input.supervisor_grant, grantGeneration: input.grant_generation, apiUrl,
-        daemonGeneration: input.daemon_generation, hostId: input.host_id,
-        installationId: input.installation_id, expiresAt: input.grant_expires_at,
-      };
-      // Compare the *effective* grant after stale-install resolution. A stale
-      // Electron resend deliberately retains the daemon's newer grant and its
-      // cache; an actual grant id/generation replacement cannot reuse it.
-      if (currentGrant && (currentGrant.grantId !== grant.grantId
-        || currentGrant.grantGeneration !== grant.grantGeneration)) {
-        this.workerRuntimeCustody.deleteWorkerAuthorization(entry.id);
-      }
-      // Explicit runtime recovery needs current owner authority so it can end
-      // the retained worker session before replacing a proven-dead provider.
-      // Installing that authority must not attach, mint, start delivery, or
-      // request convergence against the old runtime.
-      if (input.recovery_only) {
-        if (!this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-          this.workerRuntimeCustody.installHostGrant(grant);
-        }
-        return { status: "installed" };
-      }
-      // Recovery must not signal, restart, or migrate a live provider. It only
-      // rotates the worker bearer against the persisted exact generation.
-      let live: ProviderActionHandle | null | undefined = this.liveHandles.get(entry.id);
-      let hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
-        && live.workAttemptId === entry.work_attempt_id
-        && live.providerContinuationId === entry.provider_ref.provider_continuation_id);
-      if (input.credential_only && !hasExactLiveProvider && entry.provider_ref) {
-        live = await this.attachLiveProvider(entry, () => false);
-        entry = await this.store.getEntry(input.entry_id);
-        if (!entry) return { status: "stale" };
-        hasExactLiveProvider = Boolean(entry.provider_ref && entry.work_attempt_id && live
-          && live.workAttemptId === entry.work_attempt_id
-          && live.providerContinuationId === entry.provider_ref.provider_continuation_id);
-      }
-      if (input.credential_only && !hasExactLiveProvider) {
-        // Do not retain a new reconnect grant when there is nothing exact to
-        // bind it to. A later unrelated reconciliation must not turn this
-        // rejected reconnect into a launch.
-        return { status: "provider_unavailable" };
-      }
-      if (!this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-        this.workerRuntimeCustody.installHostGrant(grant);
-      }
-      if (hasExactLiveProvider && entry.provider_ref && entry.work_attempt_id && live) {
-        const attempt = await this.durability.getAttempt(entry.work_attempt_id);
-        if (!await this.ownsDaemonGeneration(input.daemon_generation)
-          || !this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-          this.revokeHostGrantIfCurrent(entry.id, grant);
-          return { status: "stale" };
-        }
-        const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === entry.provider_ref!.execution_generation_id);
-        if (execution && !execution.terminal) {
-          const minted = await this.mintHostWorkerSession(entry, execution.execution_generation_id, input.credential_only === true);
-          if (minted) {
-            await this.bindMintedHostWorkerSession(entry.id, minted);
-            if (!await this.ownsDaemonGeneration(input.daemon_generation)
-              || !this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-              this.revokeHostGrantIfCurrent(entry.id, grant);
-              return { status: "stale" };
-            }
-            if (input.credential_only) await this.startSupervisedDelivery(entry.id);
-            return { status: "installed", agent_session_id: minted.agentSessionId };
-          }
-        }
-      }
-      if (input.credential_only) {
-        // Reconnect is deliberately not recovery. It may rebind an exact live
-        // provider generation, but it must never request convergence, resume,
-        // spawn, stop, signal, or alter desired state when that handle is gone.
-        // A pre-existing newer grant remains valid even though this exact
-        // provider could not be rebound; only discard a newly supplied input.
-        if (grant !== currentGrant) this.revokeHostGrantIfCurrent(entry.id, grant);
-        return { status: "provider_unavailable" };
-      }
-      if (!await this.ownsDaemonGeneration(input.daemon_generation)
-        || !this.workerRuntimeCustody.hostGrantIsCurrent(entry.id, grant)) {
-        this.revokeHostGrantIfCurrent(entry.id, grant);
-        return { status: "stale" };
-      }
-      // For daemon-inbox entries, bootstrapRoomIngress is the only path that
-      // may queue a running convergence after the first cursor exists. A
-      // stopped entry never queues lifecycle work merely because its host
-      // grant was repaired.
-      if (entry.desired_state === "running"
-        && (!this.requiresHostGrant(entry) || await this.supervisedInbox.cursor(entry.id))) {
-        this.requestConvergence(entry.id);
-      }
-      return { status: "installed" };
-    });
-  }
-
-  /**
-   * Establish the first daemon-inbox cursor. Fresh entries call this while
-   * paused, before provider start/reachability. Upgrade recovery may call it
-   * for an already-running or stopped entry that predates cursor admission.
-   * It observes the current tail and durably records that boundary before any
-   * running convergence is queued. Stopped entries remain stopped. The cursor
-   * remains durable even if this generation loses authority after the HTTP
-   * read, so a successor resumes this exact boundary instead of reading a
-   * newer tail and skipping the intervening message.
-   */
-  private async bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }, operation: BootstrapOperation): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
-    return this.serializeEntryTick(input.entry_id, async () => {
-      if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
-      const entry = await this.store.getEntry(input.entry_id);
-      if (!entry || !this.requiresHostGrant(entry)) return { status: "stale", last_observed_message_id: null };
-      const initialMessage = input.initial_message?.trim() || null;
-      if (input.initial_message !== undefined && !initialMessage) {
-        throw new Error("A non-empty initial agent message is required.");
-      }
-      if (initialMessage) {
-        const sourceMessageId = `desktop-initial-message:${entry.id}`;
-        const activation = {
-          for_current_agent: {
-            decision: "activate",
-            reason: "initial_message",
-            addressed: true,
-          },
-        };
-        await this.supervisedInbox.enqueueInitialMessage({
-          agent_id: entry.id,
-          room_id: entry.room_id,
-          source_message_id: sourceMessageId,
-          source_message: {
-            id: sourceMessageId,
-            room_id: entry.room_id,
-            sender: "Desktop user",
-            text: initialMessage,
-            timestamp: entry.created_at,
-            source: "desktop_initial_message",
-            thread_root_id: sourceMessageId,
-          },
-          activation,
-        });
-      }
-      const existing = await this.supervisedInbox.cursor(entry.id);
-      if (existing) {
-        await this.requestAdmittedRunningConvergence(entry.id, input.daemon_generation);
-        return { status: "existing", last_observed_message_id: existing.last_observed_message_id };
-      }
-      const grant = this.currentHostGrant(entry);
-      const latest = this.supervisedDeliveryHttp.latest;
-      if (!grant || !latest) throw new Error("A supervised room tail reader is required before activation.");
-      const timeout = setTimeout(() => {
-        if (operation.phase === "observing") operation.controller.abort();
-      }, BOOTSTRAP_ROOM_INGRESS_TIMEOUT_MS);
-      timeout.unref();
-      let minted: NonNullable<Awaited<ReturnType<typeof this.mintHostWorkerAuthorization>>>;
-      let tail: { messages?: Array<Record<string, unknown>> };
-      try {
-        const authorization = await this.mintHostWorkerAuthorization(entry, operation.controller.signal);
-        if (!authorization) throw new Error("Room ingress bootstrap lost host grant authority before minting a worker credential.");
-        minted = authorization;
-        if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
-        tail = await latest({ roomId: entry.room_id, apiUrl: grant.apiUrl, bearer: minted.bearer, signal: operation.controller.signal });
-        if (operation.controller.signal.aborted) throw new Error("Room ingress bootstrap was cancelled before a room tail was observed.");
-      } finally {
-        clearTimeout(timeout);
-      }
-      // Do not re-check singleton authority before this durable write. Once a
-      // generation observed tail N, every successor must inherit N rather
-      // than advancing the initial boundary beyond a message that raced it.
-      const tailId = lastRoomMessageId(tail.messages ?? []);
-      operation.phase = "committing";
-      const result = await this.supervisedInbox.bootstrapCursor({
-        agent_id: entry.id, room_id: entry.room_id, last_observed_message_id: tailId,
-      });
-      await this.requestAdmittedRunningConvergence(entry.id, input.daemon_generation);
-      if (!result.created) return { status: "existing", last_observed_message_id: result.last_observed_message_id };
-      return { status: "bootstrapped", last_observed_message_id: tailId };
-    });
-  }
-
-  /** Queue provider work only after this generation has durably admitted ingress. */
-  private async requestAdmittedRunningConvergence(entryId: string, daemonGeneration: number): Promise<void> {
-    if (!await this.ownsDaemonGeneration(daemonGeneration)) return;
-    const entry = await this.store.getEntry(entryId);
-    if (!entry || !this.requiresHostGrant(entry) || entry.desired_state !== "running") return;
-    if (!await this.supervisedInbox.cursor(entryId)) return;
-    this.requestConvergence(entryId);
-  }
-
-  private async verifyWorkerSession(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
-    return this.serializeEntryTick(input.entry_id, () => this.verifyWorkerSessionLocked(input));
-  }
-
-  private async verifyWorkerSessionLocked(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; api_url: string }): Promise<{ verified: true; entry_id: string; agent_session_id: string }> {
-    const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
-    if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
-    if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
-    if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker session work attempt does not match the supervised manifest entry.");
-    if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
-      throw new Error("Worker session execution generation does not match the active supervised manifest entry.");
-    }
-    const attempt = await this.durability.getAttempt(input.work_attempt_id);
-    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
-    if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
-    const binding = await this.workerBindings.get(input.entry_id);
-    const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-    const normalizedApiUrl = new URL(input.api_url).origin;
-    if (!binding
-      || binding.entry_id !== input.entry_id
-      || binding.room_id !== input.room_id
-      || binding.work_attempt_id !== input.work_attempt_id
-      || binding.execution_generation_id !== input.execution_generation_id
-      || binding.agent_session_id !== input.agent_session_id
-      || credential !== input.agent_session_token
-      || binding.api_url !== normalizedApiUrl) {
-      throw new Error("Worker session verification does not match the active supervised binding.");
-    }
-    return { verified: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
-  }
-
-  /** Main-process-only handoff path. Tokens live only in WorkerBindingStore memory. */
-  private async installWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; agent_session_token: string; daemon_generation: number }): Promise<{ status: "installed" | "stale" }> {
-    return this.serializeEntryTick(input.entry_id, async () => {
-      if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
-      const installed = await this.workerBindings.installCredential(input);
-      if (installed) void this.startSupervisedDelivery(input.entry_id).catch(() => undefined);
-      return { status: installed ? "installed" : "stale" };
-    });
-  }
-
-  private async borrowWorkerCredential(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number; api_url: string; provider_turn_id: string }): Promise<{ status: "available"; credential: string } | { status: "deferred" | "stale" }> {
-    return this.serializeEntryTick(input.entry_id, async () => {
-      if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
-      const entry = await this.store.getEntry(input.entry_id);
-      if (entry?.provider === "cursor") {
-        try {
-          await this.exactActiveBoundedContext({
-            entryId: input.entry_id,
-            workAttemptId: input.work_attempt_id,
-            executionGenerationId: input.execution_generation_id,
-            daemonGeneration: input.daemon_generation,
-            providerTurnId: input.provider_turn_id,
-          });
-        } catch {
-          return { status: "stale" };
-        }
-      }
-      const credential = await this.workerBindings.credentialFor(input);
-      return credential ? { status: "available", credential } : { status: "deferred" };
-    });
-  }
-
-  /** All four durable identities fence a credential from a retired daemon/turn. */
-  private async isExactCredentialRoute(input: { entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; daemon_generation: number; api_url?: string }): Promise<boolean> {
-    if (!Number.isSafeInteger(input.daemon_generation) || input.daemon_generation !== this.singleton.currentGeneration) return false;
-    const entry = await this.store.getEntry(input.entry_id);
-    if (!entry || entry.room_id !== input.room_id || entry.work_attempt_id !== input.work_attempt_id
-      || entry.provider_ref?.execution_generation_id !== input.execution_generation_id) return false;
-    const attempt = await this.durability.getAttempt(input.work_attempt_id);
-    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
-    if (!execution || execution.terminal) return false;
-    const binding = await this.workerBindings.get(input.entry_id);
-    let normalizedApiUrl: string | null = null;
-    if (input.api_url !== undefined) {
-      try { normalizedApiUrl = new URL(input.api_url).origin; } catch { return false; }
-    }
-    return Boolean(binding && binding.room_id === input.room_id && binding.work_attempt_id === input.work_attempt_id
-      && binding.execution_generation_id === input.execution_generation_id && binding.agent_session_id === input.agent_session_id
-      && (normalizedApiUrl === null || binding.api_url === normalizedApiUrl));
-  }
-
-  private async checkpointWorkerCursor(input: { entry_id: string; work_attempt_id: string; execution_generation_id: string; agent_session_id: string; room_cursor: string }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {
-    return this.serializeEntryTick(input.entry_id, () => this.serializeCursorCheckpoint(input.entry_id, async () => {
-      const entry = (await this.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
-      if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
-      if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker cursor work attempt does not match the supervised manifest entry.");
-      if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
-        throw new Error("Worker cursor execution generation does not match the active supervised manifest entry.");
-      }
-      const attempt = await this.durability.getAttempt(input.work_attempt_id);
-      const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
-      if (!execution || execution.terminal) throw new Error("Worker cursor execution generation is absent or terminal.");
-      const currentBinding = await this.workerBindings.get(input.entry_id);
-      if (!currentBinding
-        || currentBinding.entry_id !== input.entry_id
-        || currentBinding.room_id !== entry.room_id
-        || currentBinding.work_attempt_id !== input.work_attempt_id
-        || currentBinding.agent_session_id !== input.agent_session_id
-        || currentBinding.execution_generation_id !== input.execution_generation_id) {
-        throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
-      }
-      const checkpoint = await this.workerBindings.checkpointCursorMonotonic(
-        input.entry_id,
-        input.agent_session_id,
-        input.execution_generation_id,
-        input.room_cursor,
-      );
-      if (!checkpoint.advanced) {
-        const durableCursor = checkpoint.binding.room_cursor;
-        if (durableCursor && attempt.checkpoints.at(-1)?.room_cursor !== durableCursor) {
-          await this.durability.checkpoint(input.work_attempt_id, {
-            room_cursor: durableCursor,
-            provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
-          });
-        }
-        return {
-          checkpointed: true,
-          entry_id: input.entry_id,
-          room_cursor: checkpoint.binding.room_cursor ?? input.room_cursor,
-        };
-      }
-      await this.durability.checkpoint(input.work_attempt_id, {
-        room_cursor: input.room_cursor,
-        provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
-      });
-      return { checkpointed: true, entry_id: input.entry_id, room_cursor: input.room_cursor };
-    }));
   }
 
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {

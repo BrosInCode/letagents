@@ -94,6 +94,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "room-delivery-control",
     "room-move-coordinator",
     "turn-control-coordinator",
+    "worker-authority-coordinator",
     "worker-runtime-custody",
   ]) {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
