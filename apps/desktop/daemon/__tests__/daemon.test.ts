@@ -4482,13 +4482,9 @@ test("version handoff releases authority without waiting for wedged callbacks an
     await first.start();
     const never = new Promise<void>(() => {});
     const internals = first as unknown as {
-      convergenceRequests: Map<string, Promise<void>>;
-      providerCallbacks: Set<Promise<void>>;
-      scheduledConvergence: Map<string, Promise<{ dispose: () => Promise<void> }>>;
+      providerStreams: { callbacks: Set<Promise<void>> };
     };
-    internals.convergenceRequests.set("wedged", never);
-    internals.providerCallbacks.add(never);
-    internals.scheduledConvergence.set("wedged", new Promise(() => {}));
+    internals.providerStreams.callbacks.add(never);
 
     const handoff = first.waitForHandoff();
     const prepared = await daemonRequest(paths.socketPath, "daemon.prepare_handoff");
@@ -4522,7 +4518,9 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
   let second: SupervisorDaemon | null = null;
   try {
     await first.start();
-    (first as unknown as { liveDisposers: Map<string, Array<() => void>> }).liveDisposers
+    (first as unknown as {
+      providerStreams: { liveDisposers: Map<string, Array<() => void>> };
+    }).providerStreams.liveDisposers
       .set("throws", [() => { throw new Error("injected observer disposal failure"); }]);
     const handoff = first.waitForHandoff();
     assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);

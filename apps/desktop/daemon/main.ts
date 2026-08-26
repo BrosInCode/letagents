@@ -1,4 +1,3 @@
-import { randomUUID } from "node:crypto";
 import { dirname } from "node:path";
 
 import { AuditLog } from "./audit-log.js";
@@ -10,7 +9,6 @@ import {
   publishWorkerNativeActivity,
   productionSupervisedDeliveryHttp,
   productionSupervisorGrantHttp,
-  supervisedProviderLabel,
   workplaceLivenessStaleAfterMs,
   type SupervisorGrantHttp,
 } from "./cloud-http.js";
@@ -30,13 +28,19 @@ import { WorkDurabilityStore } from "./durability-store.js";
 import { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import { EphemeralWorkspaceProvisioner } from "./ephemeral-workspace-provisioner.js";
 import { LifecycleAdministrationCoordinator } from "./lifecycle-administration-coordinator.js";
-import { projectDaemonCreateRequestReplayParameters, serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
+import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
 import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
-import { ManifestConflictError, ManifestStore } from "./manifest-store.js";
+import { ManifestStore } from "./manifest-store.js";
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { assertMacOS } from "./platform.js";
-import { sameProviderActionConnectionIdentity, sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionSpawn, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
+import { sameProviderActionConnectionSnapshot, type ProviderActionAttachTerminal, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderActionRef, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
+import { ProviderExecutionCoordinator } from "./provider-execution-coordinator.js";
+import {
+  ProviderReconciliationCoordinator,
+  type DaemonReconcileInput,
+} from "./provider-reconciliation-coordinator.js";
+import { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
 import { isAllowedCursorProviderStateTransition, isIdleCursorConnection, isLiveCursorConnection } from "./provider-state-policy.js";
 import {
   bindingMatchesRoomAgentGeneration,
@@ -45,33 +49,18 @@ import {
 } from "./room-agent-state-projection.js";
 import { RoomDeliveryControl } from "./room-delivery-control.js";
 import { RoomMoveCoordinator } from "./room-move-coordinator.js";
-import {
-  isAgentInspectorLiveDisplayEvent,
-  isCorrelatedNonemptyWaitResult,
-  isHumanRoomActivityEvent,
-  isSupervisedQuietPollContinuation,
-  isSupervisedWaitProviderEvent,
-  providerStreamLifecycle,
-  resolveReadyReachedAt,
-  supervisedWaitEvidenceFromProviderEvent,
-  type SupervisedWaitEvidence,
-} from "./provider-stream-policy.js";
-import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
-import { ProviderReconciler, type ReconcilerExecutionInput } from "./reconciler-runner.js";
-import { advanceReconciliationState, beginReconciliationAction, completeReconciliationAction, recordReconciliationActionFailure, rememberCompletedControlAction } from "./reconciler-state.js";
+import { resolveReadyReachedAt } from "./provider-stream-policy.js";
+import { advanceReconciliationState, rememberCompletedControlAction } from "./reconciler-state.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { DAEMON_IMPLEMENTATION_VERSION, DAEMON_PROTOCOL_VERSION, type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonDeliveryCutover, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type DesiredState, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
-import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import {
   deriveProviderConfigurationSnapshot,
   providerSupportsConcurrentSupervisedAgents,
 } from "./provider-configuration.js";
 import {
-  assertSupervisedPermissionProfileAvailable,
-  assertSupervisedRentalPermissionProfileAvailable,
   supervisedPermissionProfilesForProvider,
 } from "./supervised-permission-profiles.js";
-import { createGitCommand, repositoryStorageKey, resolveSourceRepositoryIdentity, UnusableSourceRepositoryError, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
+import { createGitCommand, UnusableSourceRepositoryError, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-authority-coordinator.js";
 import {
@@ -103,6 +92,7 @@ export {
   continuationRepairExhaustionNeedsPersistence,
   continuationRepairMissingContinuation,
 } from "./continuation-repair-policy.js";
+export type { DaemonReconcileInput } from "./provider-reconciliation-coordinator.js";
 
 type DaemonPaths = Pick<ReturnType<typeof defaultDaemonPaths>, "lockPath" | "socketPath" | "manifestPath" | "auditPath"> & Partial<Pick<ReturnType<typeof defaultDaemonPaths>, "legacyManifestPath" | "attemptsPath" | "attemptsRoot" | "workspaceRoot" | "workerBindingsPath">>;
 type RecoveryClock = {
@@ -113,13 +103,6 @@ type RecoveryClock = {
 const PROVIDER_START_RETRY_LIMIT = 3;
 const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
 
-export type DaemonReconcileInput = Omit<ReconcilerExecutionInput, "desiredState" | "observedState" | "condition" | "exitsInWindow" | "nextRestartAtMs"> & {
-  /** Durable provider-action identity; reused ticks must keep this value. */
-  reconciliationActionId: string;
-  reconciliationActionSequence: number;
-};
-
-class ReplacementListenerInstallError extends Error {}
 export class SupervisorDaemon {
   private readonly singleton: DaemonSingleton;
   private readonly authority: DaemonAuthority;
@@ -146,28 +129,15 @@ export class SupervisorDaemon {
   private readonly stateWatch: DaemonStateWatch;
   private readonly entryConcurrency: EntryConcurrencyGate;
   private readonly deliveryCutovers: DeliveryCutoverCoordinator;
-  private readonly scheduledConvergence = new Map<string, Promise<{ dispose: () => Promise<void> }>>();
-  private readonly scheduledConvergenceCancels = new Map<string, () => void>();
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
-  private readonly liveDisposers = new Map<string, Array<() => void>>();
-  private readonly convergenceRequests = new Map<string, Promise<void>>();
+  private readonly providerStreams: ProviderStreamCoordinator;
+  private readonly providerExecution: ProviderExecutionCoordinator | null;
+  private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
   /**
    * Control requests must be able to fence a launch while its per-entry
    * reconciliation lane is awaiting remote authorization or capabilities.
    * They therefore cannot rely on that same lane for ordering.
    */
-  private readonly providerStreamQueues = new Map<string, Promise<void>>();
-  private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
-  private readonly providerCallbacks = new Set<Promise<void>>();
-  /** Handoff drains only dispatches that crossed the native-effect boundary. */
-  private readonly providerDispatchReservations = new Set<Promise<void>>();
-  /** Fatal returned-handle cleanup failure permanently blocks authority release. */
-  private fatalProviderDispatchError: unknown = null;
-  private readonly activeProviderDispatches = new Map<symbol, {
-    entryId: string; executionGenerationId: string; daemonGeneration: number;
-  }>();
-  private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
-  private readonly recoveryTimers = new Map<string, ReturnType<typeof setTimeout>>();
   private readonly workerRuntimeCustody = new WorkerRuntimeCustody();
   /**
    * Consecutive transient provider-start failures per entry. A launch that
@@ -180,8 +150,6 @@ export class SupervisorDaemon {
   /** Initial-tail reads are authority-bearing admission operations. */
   private readonly bootstrapOperations = new Set<BootstrapOperation>();
   private readonly nowMs: () => number;
-  private readonly setRecoveryTimeout: typeof setTimeout;
-  private readonly clearRecoveryTimeout: typeof clearTimeout;
   private readonly startedAt = new Date().toISOString();
   private readonly agentStreamRegistry: AgentStreamRegistry;
   private handoffScheduled = false;
@@ -368,6 +336,141 @@ export class SupervisorDaemon {
       setTimeout: recoveryClock.setTimeout ?? setTimeout,
       clearTimeout: recoveryClock.clearTimeout ?? clearTimeout,
     });
+    this.providerStreams = new ProviderStreamCoordinator({
+      liveHandles: this.liveHandles,
+      ...(providerPort ? { provider: providerPort } : {}),
+      manifest: {
+        getEntry: (entryId) => this.store.getEntry(entryId),
+        load: () => this.store.load(),
+        updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+      },
+      bindings: this.workerBindings,
+      durability: this.durability,
+      runtimeCustody: this.workerRuntimeCustody,
+      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      transition: (entryId, state, condition, detail, actor) =>
+        this.transition(entryId, state, condition, detail, actor),
+      appendActivity: (entryId, event) => this.appendActivity(entryId, event),
+      publishNativeActivity: (entryId, method, status, observedAt) =>
+        this.publishNativeActivity(entryId, method, status, observedAt),
+      handleTerminal: (entryId, handle, executionGenerationId, bindingIdentity, terminal) =>
+        this.handleProviderTerminal(entryId, handle, executionGenerationId, bindingIdentity, terminal),
+      streams: {
+        reset: (entryId) => this.resetAgentStream(entryId),
+        push: (entryId, event) => this.pushAgentStreamEvent(entryId, event),
+        end: (entryId) => this.endAgentStream(entryId),
+      },
+      delivery: {
+        start: (entryId) => this.startSupervisedDelivery(entryId),
+        startCutover: (entryId) => this.startDeliveryCutover(entryId),
+      },
+      heartbeat: {
+        intervalMs: this.nativeHeartbeatIntervalMs,
+        requiresHostGrant: (entry) => this.workerAuthority.requiresHostGrant(entry),
+        currentHostGrant: (entry) => this.workerAuthority.currentHostGrant(entry),
+        hostGrantNeedsRenewal: (grant) => this.workerAuthority.hostGrantNeedsRenewal(grant),
+        hostWorkerBearerNeedsRotation: (entry, binding) =>
+          this.workerAuthority.hostWorkerBearerNeedsRotation(entry, binding),
+        requestConvergence: (entryId) => this.requestConvergence(entryId),
+      },
+    });
+    this.providerExecution = providerPort
+      ? new ProviderExecutionCoordinator({
+        provider: providerPort,
+        store: this.store,
+        durability: this.durability,
+        bindings: this.workerBindings,
+        streams: this.providerStreams,
+        authority: {
+          isHandoffScheduled: () => this.handoffScheduled,
+          currentDaemonGeneration: () => this.singleton.currentGeneration,
+          currentManifestGeneration: () => this.manifestGeneration,
+          acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+          assertCurrent: () => this.singleton.assertCurrent(),
+          ownsDaemonGeneration: (generation) => this.workerAuthority.ownsDaemonGeneration(generation),
+          fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+          serializeManifestMutation: (operation) => this.serializeManifestMutation(operation),
+          serializeManifestCommit: (operation) => this.serializeManifestCommit(operation),
+        },
+        concurrency: {
+          currentControlEpoch: (entryId) => this.entryConcurrency.currentControlEpoch(entryId),
+          serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+        },
+        updateManifestEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+        transition: (entryId, state, condition, detail, actor) =>
+          this.transition(entryId, state, condition, detail, actor),
+        terminalPayload: (terminal, actor) => this.terminalPayload(terminal, actor),
+        observeProviderExit: (entryId, terminal, actor, executionGenerationId, handle) =>
+          this.observeProviderExitOnce(entryId, terminal, actor, executionGenerationId, handle),
+        completeTurnControlForRuntimeRecovery: (entry) =>
+          this.completeTurnControlForRuntimeRecovery(entry),
+        delivery: {
+          stop: async (entryId) => { await this.supervisedDelivery?.stop(entryId); },
+          start: (entryId, mode) => this.startSupervisedDelivery(entryId, mode ?? "refresh"),
+        },
+        inbox: {
+          cursor: (entryId) => this.supervisedInbox.cursor(entryId),
+        },
+        host: {
+          requiresGrant: (entry) => this.workerAuthority.requiresHostGrant(entry),
+          currentGrant: (entry) => this.workerAuthority.currentHostGrant(entry),
+          ensureGrantFresh: (entry) => this.workerAuthority.ensureHostGrantFresh(entry),
+          mintAuthorization: (entry) => this.workerAuthority.mintHostWorkerAuthorization(entry),
+          recordMintedSession: (entry, executionGenerationId, authorization) =>
+            this.workerAuthority.recordMintedHostWorkerSession(entry, executionGenerationId, authorization),
+          mintSession: (entry, executionGenerationId) =>
+            this.workerAuthority.mintHostWorkerSession(entry, executionGenerationId),
+          bindMintedSession: (entryId, session, mayPublish) =>
+            this.workerAuthority.bindMintedHostWorkerSession(entryId, session, mayPublish),
+          bearerNeedsRotation: (entry, binding) =>
+            this.workerAuthority.hostWorkerBearerNeedsRotation(entry, binding),
+          blockExpiredAuthority: (entry, detail) =>
+            this.workerAuthority.blockExpiredWorkerAuthority(entry, detail),
+          currentOpenModelCredential: (entryId, daemonGeneration) =>
+            this.workerRuntimeCustody.currentOpenModelCredential(entryId, daemonGeneration),
+          recordBindingRecoveryFailure: (entryId, executionGenerationId, error) =>
+            this.workerAuthority.recordWorkerBindingRecoveryFailure(entryId, executionGenerationId, error),
+          clearSuccessfulRecovery: (entryId) => {
+            this.providerStartRetryAttempts.delete(entryId);
+            this.workerMintRecoveryRetryAttempts.delete(entryId);
+          },
+        },
+        workspace: {
+          ephemeral: this.ephemeralProvisioner,
+          git: this.provisioner,
+          gitCommand: this.gitCommand,
+        },
+        socketPath: paths.socketPath,
+        autoConverge: this.autoConverge,
+        nowMs: () => this.nowMs(),
+        recordSchedulerFailure: (entryId, error, actor) =>
+          this.recordSchedulerFailure(entryId, error, actor),
+        ...(recoveryClock.setTimeout ? { setTimeout: recoveryClock.setTimeout } : {}),
+        ...(recoveryClock.clearTimeout ? { clearTimeout: recoveryClock.clearTimeout } : {}),
+      })
+      : null;
+    this.providerReconciliation = providerPort
+      ? new ProviderReconciliationCoordinator({
+        provider: providerPort,
+        store: this.store,
+        authority: {
+          assertCurrent: () => this.singleton.assertCurrent(),
+          currentManifestGeneration: () => this.manifestGeneration,
+          acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+          fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+          serializeManifest: (operation) => this.serializeManifestMutation(operation),
+        },
+        serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+        transitionOnce: (entryId, state, condition, cause, actor, reconciliation, notice, terminal) =>
+          this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
+        terminalPayload: (terminal, actor) => this.terminalPayload(terminal, actor),
+        observeProviderExit: (entryId, terminal, actor) =>
+          this.observeProviderExit(entryId, terminal, actor),
+        recordSchedulerFailure: (entryId, error, actor) =>
+          this.recordSchedulerFailure(entryId, error, actor),
+        nowMs: () => this.nowMs(),
+      })
+      : null;
     this.continuationRepairs = new ContinuationRepairCoordinator({
       authority: {
         isHandoffScheduled: () => this.handoffScheduled,
@@ -559,8 +662,6 @@ export class SupervisorDaemon {
       async (error) => { if (error instanceof DaemonFenceLostError) await this.stop(); },
     );
     this.nowMs = recoveryClock.nowMs ?? Date.now;
-    this.setRecoveryTimeout = recoveryClock.setTimeout ?? setTimeout;
-    this.clearRecoveryTimeout = recoveryClock.clearTimeout ?? clearTimeout;
   }
 
   async start(): Promise<void> {
@@ -733,13 +834,10 @@ export class SupervisorDaemon {
     await this.supervisedDelivery?.fenceAndDrain();
     await this.fenceAndDrainRoomMoveReconciliations();
     await this.boundedEffects.drainJournalReservations();
-    for (const timer of this.recoveryTimers.values()) this.clearRecoveryTimeout(timer);
-    this.recoveryTimers.clear();
-    await Promise.all([...this.scheduledConvergence.values()].map(async (scheduled) => (await scheduled).dispose()));
-    await Promise.all([...this.convergenceRequests.values()]);
-    for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) dispose();
-    this.liveDisposers.clear();
-    await Promise.all([...this.providerCallbacks]);
+    this.providerExecution?.clearRecoveryTimers();
+    await this.providerReconciliation?.disposeAll();
+    await this.providerExecution?.drainConvergence();
+    await this.providerStreams.disposeAll();
     await this.socket.stop();
     await this.serializeManifestCommit(() => this.singleton.release());
     await this.store.close();
@@ -774,23 +872,14 @@ export class SupervisorDaemon {
     const captureSync = (operation: () => void): void => {
       try { operation(); } catch (error) { failures.push(error); }
     };
-    for (const cancel of this.scheduledConvergenceCancels.values()) captureSync(cancel);
-    this.scheduledConvergenceCancels.clear();
-    for (const timer of this.recoveryTimers.values()) captureSync(() => this.clearRecoveryTimeout(timer));
-    this.recoveryTimers.clear();
-    for (const scheduled of this.scheduledConvergence.values()) {
-      void scheduled.then(({ dispose }) => dispose()).catch(() => undefined);
-    }
-    this.scheduledConvergence.clear();
+    captureSync(() => this.providerReconciliation?.detachAll());
+    captureSync(() => this.providerExecution?.clearRecoveryTimers());
     // Remote grant/capability waits remain freely cancellable, but once a
     // native provider dispatch begins its exact returned identity must be
     // persisted before the shared stores are closed for successor attach.
-    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
-    await Promise.all([...this.providerDispatchReservations]);
-    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
+    await this.providerExecution?.drainDispatches();
     await this.boundedEffects.drainJournalReservations();
-    for (const disposers of this.liveDisposers.values()) for (const dispose of disposers) captureSync(dispose);
-    this.liveDisposers.clear();
+    captureSync(() => this.providerStreams.detachAll());
     // Complete every local cleanup step even if one fails. The process-level
     // entrypoint will report the failure and exit non-zero, but should never
     // leave the singleton lock behind merely because (for example) socket
@@ -806,8 +895,7 @@ export class SupervisorDaemon {
     await cleanup(() => this.supervisedInbox.close());
     // Existing convergence/provider callbacks are generation-fenced below.
     // Do not await them: a wedged native transport must not block an upgrade.
-    this.convergenceRequests.clear();
-    this.providerCallbacks.clear();
+    this.providerExecution?.detachConvergence();
     if (failures.length > 0) {
       throw new AggregateError(failures, "Supervisor handoff cleanup did not complete cleanly.");
     }
@@ -1806,9 +1894,7 @@ export class SupervisorDaemon {
     // dispatch preflight then proves every native return is journaled before
     // the acknowledgement can authorize Electron to replace this daemon.
     this.workerRuntimeCustody.destroyOwnerCredentials();
-    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
-    await Promise.all([...this.providerDispatchReservations]);
-    if (this.fatalProviderDispatchError) throw this.fatalProviderDispatchError;
+    await this.providerExecution?.drainDispatches();
     await this.boundedEffects.drainJournalReservations();
     await this.boundedEffects.drainExternalExecutions();
     this.handoffTeardownScheduled = true;
@@ -2381,1392 +2467,96 @@ export class SupervisorDaemon {
 
   /** Queue convergence without making a control-socket caller wait for launch. */
   private requestConvergence(entryId: string): void {
-    if (this.handoffScheduled || !this.providerPort || !this.autoConverge) return;
-    const previous = this.convergenceRequests.get(entryId) ?? Promise.resolve();
-    const next = previous
-      .catch(() => undefined)
-      // Direct manifest convergence and the legacy reconciliation scheduler
-      // both mutate provider authority for this entry. They must share one
-      // serialization lane; otherwise a pause/resume edge can observe the
-      // durable generation before its provider handle is installed and mint a
-      // second live generation.
-      .then(() => this.serializeEntryTick(entryId, () => this.convergeManifestEntry(entryId)))
-      .catch(async (error) => {
-        await this.recordSchedulerFailure(entryId, error, "daemon-convergence").catch(() => undefined);
-      })
-      .finally(() => {
-        if (this.convergenceRequests.get(entryId) === next) this.convergenceRequests.delete(entryId);
-      });
-    this.convergenceRequests.set(entryId, next);
-  }
-
-  private currentEntryControlEpoch(entryId: string): number {
-    return this.entryConcurrency.currentControlEpoch(entryId);
+    this.providerExecution?.request(entryId);
   }
 
   private bumpEntryControlEpoch(entryId: string): number {
     return this.entryConcurrency.bumpControlEpoch(entryId);
   }
 
-  private reserveProviderDispatch(entryId: string, executionGenerationId: string): { token: symbol; release: (error?: unknown) => void } {
-    const token = Symbol(`provider-dispatch:${entryId}`);
-    let release!: () => void;
-    let reject!: (error: unknown) => void;
-    const reservation = new Promise<void>((resolve, rejectReservation) => { release = resolve; reject = rejectReservation; });
-    // stopForHandoff awaits the original rejected promise. Outside handoff,
-    // keep a rejection observed so an injected persistence+stop failure does
-    // not become a process-level unhandled rejection.
-    void reservation.catch(() => undefined);
-    this.providerDispatchReservations.add(reservation);
-    this.activeProviderDispatches.set(token, {
-      entryId, executionGenerationId, daemonGeneration: this.singleton.currentGeneration,
-    });
-    return {
-      token,
-      release: (error) => {
-        this.activeProviderDispatches.delete(token);
-        this.providerDispatchReservations.delete(reservation);
-        if (error === undefined) release();
-        else {
-          this.fatalProviderDispatchError ??= error;
-          reject(error);
-        }
-      },
-    };
-  }
-
   private reserveBoundedEffectJournal<T>(operation: () => Promise<T>): Promise<T> {
     return this.boundedEffects.reserveJournal(operation);
   }
 
-  /** Re-read durable intent after every delayed launch boundary. */
-  private async launchEntryIfCurrent(entryId: string, expectedEpoch: number): Promise<DaemonManifestEntry | null> {
-    if (this.handoffScheduled || this.currentEntryControlEpoch(entryId) !== expectedEpoch) return null;
-    const current = await this.store.getEntry(entryId);
-    if (this.handoffScheduled || this.currentEntryControlEpoch(entryId) !== expectedEpoch
-      || current?.desired_state !== "running") return null;
-    return current;
-  }
-
-  private async terminalizeUnlaunchedGeneration(
-    attempt: Awaited<ReturnType<WorkDurabilityStore["getAttempt"]>>,
-    executionGenerationId: string,
-    generation: number,
-  ): Promise<void> {
-    const terminal = this.terminalPayload({
-      endedAt: new Date().toISOString(), exitCode: 0, signal: null,
-      terminalCause: "stopped", providerContinuationId: null,
-    }, "daemon-provider");
-    await this.durability.recordTerminal(attempt.work_attempt_id, executionGenerationId, {
-      ...terminal, generation, actor: "daemon-provider",
-    });
-    await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, executionGenerationId);
-  }
-
-  /** Stop and record the real terminal for a returned handle that could not be journaled. */
-  private async fenceUnpersistedReturnedProvider(
-    attempt: Awaited<ReturnType<WorkDurabilityStore["getAttempt"]>>,
-    executionGenerationId: string,
-    generation: number,
-    handle: ProviderActionHandle,
-  ): Promise<void> {
-    const terminal = await this.providerPort!.stop(handle, {
-      actionId: `manifest:unjournaled-dispatch-fence:${executionGenerationId}`,
-    });
-    await this.durability.recordTerminal(attempt.work_attempt_id, executionGenerationId, {
-      ...this.terminalPayload(terminal, "daemon-provider"), generation, actor: "daemon-provider",
-    });
-    await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, executionGenerationId);
-  }
-
-  /** A real handle returned after Pause/Stop won the race; fence that exact process. */
-  private async fenceReturnedProviderAfterControl(
-    entryId: string,
-    handle: ProviderActionHandle,
-    executionGenerationId: string,
-    generation: number,
-  ): Promise<boolean> {
-    // A control request bumps the epoch before it queues its durable manifest
-    // mutation. Drain that queue so the exact desired state, not a stale
-    // pre-control row, decides whether this returned provider must be stopped.
-    await this.serializeManifestMutation(async () => undefined);
-    const current = await this.store.getEntry(entryId);
-    if (!current || current.desired_state === "running") return false;
-    await this.supervisedDelivery?.stop(entryId).catch(() => undefined);
-    await this.transition(entryId, "stopping", current.condition, `desired state changed to ${current.desired_state} during provider dispatch`, "daemon-convergence");
-    const terminal = await this.providerPort!.stop(handle, {
-      actionId: `manifest:${entryId}:${current.desired_state}:dispatch-fence:${generation}`,
-    });
-    if (this.liveHandles.get(entryId) === handle) {
-      this.liveHandles.delete(entryId);
-      this.workerRuntimeCustody.deleteLiveBinding(entryId);
-      for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
-      this.liveDisposers.delete(entryId);
-    }
-    const attempt = current.work_attempt_id ? await this.durability.getAttempt(current.work_attempt_id) : null;
-    const execution = attempt?.execution_generations.find((candidate) => candidate.execution_generation_id === executionGenerationId);
-    if (attempt && execution && !execution.terminal) {
-      await this.durability.recordTerminal(attempt.work_attempt_id, executionGenerationId, {
-        ...this.terminalPayload(terminal, execution.actor), generation: execution.generation,
-      });
-      if (current.desired_state === "stopped") {
-        await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, executionGenerationId);
-      }
-    }
-    await this.observeProviderExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle);
-    return true;
-  }
-
-  private async revalidateReturnedProviderControl(
-    entryId: string,
-    handle: ProviderActionHandle,
-    executionGenerationId: string,
-    generation: number,
-    expectedEpoch: number,
-  ): Promise<"current" | "fenced" | "handoff"> {
-    if (this.handoffScheduled) return "handoff";
-    if (this.currentEntryControlEpoch(entryId) === expectedEpoch) return "current";
-    return await this.fenceReturnedProviderAfterControl(entryId, handle, executionGenerationId, generation)
-      ? "fenced"
-      : this.handoffScheduled ? "handoff" : "current";
-  }
-
-  private async convergeManifestEntry(entryId: string): Promise<void> {
-    if (this.handoffScheduled || !this.providerPort) return;
-    let entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
-    if (!entry) return;
-    let launchControlEpoch = this.currentEntryControlEpoch(entryId);
-    if (!this.providerPort) throw new Error(`No daemon provider port is available for ${entry.provider}.`);
-
-    const historicalControl = entry.turn_control;
-    if (historicalControl && historicalControl.status !== "completed"
-      && entry.work_attempt_id === historicalControl.work_attempt_id) {
-      const attempt = await this.durability.getAttempt(historicalControl.work_attempt_id);
-      const controlledExecution = attempt.execution_generations.find((candidate) =>
-        candidate.execution_generation_id === historicalControl.execution_generation_id);
-      if (controlledExecution?.terminal) {
-        // Upgrade recovery is independent of the current provider_ref. A
-        // predecessor may already have detached it or installed a successor;
-        // the exact terminal execution is sufficient to retire the barrier,
-        // while only an exact inbox_item_id permits FIFO mutation.
-        entry = await this.completeTurnControlForRuntimeRecovery(entry);
-      }
-    }
-
-    if (entry.desired_state === "running") {
-      if (entry.condition === "quarantined") return;
-      // A restart may load a manifest written by an older Desktop build. Fence
-      // rental authority before attach, worker-bearer minting, or room delivery;
-      // the later launch assertion alone cannot protect a still-live provider.
-      if (entry.id.startsWith("supervised_rental_")) {
-        const rentalConfiguration = await this.store.getAgentConfiguration(entry.id);
-        try {
-          if (!rentalConfiguration) {
-            throw new Error("Rental agent configuration is unavailable.");
-          }
-          assertSupervisedRentalPermissionProfileAvailable(
-            rentalConfiguration.provider,
-            rentalConfiguration.permission_profile_id,
-          );
-        } catch (error) {
-          await this.supervisedDelivery?.stop(entry.id).catch(() => undefined);
-          await this.transition(
-            entry.id,
-            "failed",
-            "quarantined",
-            error instanceof Error ? error.message : "Unsafe rental permission profile.",
-            "daemon-convergence",
-          );
-          return;
-        }
-      }
-      // A daemon-inbox provider has no ambient room credential. Do not create
-      // it (or even a new work execution) until Electron installs the exact
-      // host grant over the local daemon socket.
-      if (this.workerAuthority.requiresHostGrant(entry) && !this.workerAuthority.currentHostGrant(entry)) return;
-      // A running provider from before cursor admission must not attach,
-      // resume, or spawn in the grant-install/bootstrap gap. Bootstrap owns
-      // the first-tail boundary and queues this convergence only afterwards.
-      if (this.workerAuthority.requiresHostGrant(entry) && !await this.supervisedInbox.cursor(entry.id)) return;
-      if (this.workerAuthority.requiresHostGrant(entry) && !await this.workerAuthority.ensureHostGrantFresh(entry)) return;
-      entry = await this.launchEntryIfCurrent(entry.id, launchControlEpoch) ?? entry;
-      if (entry.desired_state !== "running" || this.currentEntryControlEpoch(entry.id) !== launchControlEpoch || this.handoffScheduled) return;
-      if (entry.observed_state === "failed") {
-        const now = this.nowMs();
-        const exitsInWindow = (entry.reconciliation?.exit_timestamps_ms ?? [])
-          .filter((at) => at >= now - CRASH_LOOP_WINDOW_MS).length;
-        if (exitsInWindow >= CRASH_LOOP_EXIT_LIMIT) {
-          await this.transition(
-            entry.id,
-            "failed",
-            "quarantined",
-            "crash-loop threshold reached before provider restart",
-            "daemon-convergence",
-          );
-          return;
-        }
-        const restartAt = entry.reconciliation?.next_restart_at_ms;
-        if (typeof restartAt === "number" && restartAt > now) {
-          this.scheduleRecoveryConvergence(entry.id, restartAt - now);
-          return;
-        }
-      }
-      entry = await this.ensureWorkAttempt(entry);
-      const currentAfterAttempt = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-      if (!currentAfterAttempt) return;
-      entry = currentAfterAttempt;
-      let handle = this.liveHandles.get(entry.id) ?? null;
-      if (!handle && entry.provider_ref) {
-        try {
-          handle = await this.attachLiveProvider(entry);
-        } catch (error) {
-          if ((error as { providerAttachOutcome?: unknown })?.providerAttachOutcome !== "in_progress") throw error;
-          await this.transition(
-            entry.id,
-            "recovering",
-            "none",
-            "exact Cursor turn wrapper is still finishing; retrying without launching a successor",
-            "daemon-convergence",
-          );
-          this.scheduleRecoveryConvergence(entry.id, 250);
-          return;
-        }
-        entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId) ?? entry;
-      }
-      if (handle) {
-        if (this.workerAuthority.requiresHostGrant(entry) && this.workerAuthority.currentHostGrant(entry)) {
-          const binding = await this.workerBindings.get(entry.id);
-          const credential = binding ? await this.workerBindings.credentialFor(binding) : null;
-          const supervisedSession = binding ? await this.workerBindings.supervisedWorkerSession(entry.id) : null;
-          const expiring = binding ? await this.workerAuthority.hostWorkerBearerNeedsRotation(entry, binding) : false;
-          if ((!credential || expiring) && entry.provider_ref?.execution_generation_id) {
-            const executionGenerationId = entry.provider_ref.execution_generation_id;
-            try {
-              const minted = await this.workerAuthority.mintHostWorkerSession(entry, executionGenerationId);
-              if (minted) {
-                await this.workerAuthority.bindMintedHostWorkerSession(entry.id, minted);
-                // Binding clears a coordination/auth latch in the durable
-                // manifest. Refresh before the generic handle-state
-                // reconciliation below so its stale copy cannot restore the
-                // just-cleared condition.
-                entry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId) ?? entry;
-              }
-            } catch (error) {
-              // A still-live bearer remains usable until its deadline. Keep
-              // the exact provider and let the next heartbeat retry rotation.
-              const bearerExpiry = supervisedSession?.expires_at ? Date.parse(supervisedSession.expires_at) : Number.NaN;
-              if (!credential) {
-                await this.workerAuthority.recordWorkerBindingRecoveryFailure(
-                  entry.id,
-                  executionGenerationId,
-                  error,
-                );
-                return;
-              }
-              if (Number.isFinite(bearerExpiry) && bearerExpiry <= this.nowMs()) {
-                await this.workerAuthority.blockExpiredWorkerAuthority(entry, `Worker bearer rotation failed after expiry: ${error instanceof Error ? error.message : "unknown error"}`);
-                return;
-              }
-            }
-          }
-        }
-        if (entry.observed_state !== handle.observedState) {
-          await this.transition(entry.id, handle.observedState, entry.condition, "reattached durable provider handle", "daemon-convergence");
-        }
-        if (["failed", "stopped"].includes(handle.observedState)
-          || (handle.observedState === "idle" && entry.delivery_mode !== "daemon_inbox")) {
-          await this.fenceTerminalProviderHandleOnce(
-            handle,
-            `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
-          );
-        }
-        if (entry.desired_state === "running" && entry.delivery_mode === "daemon_inbox") {
-          // A healthy provider handle does not imply its room-ingress loop is
-          // alive. Lifecycle rollback, transient binding reads, and daemon
-          // recovery all converge this independently owned component here.
-          await this.startSupervisedDelivery(entry.id, "ensure");
-        }
-        return;
-      }
-
-      const attempt = await this.durability.getAttempt(entry.work_attempt_id!);
-      const activeExecution = attempt.execution_generations.find((candidate) => candidate.terminal === null);
-      // Cursor's daemon-inbox lane is intentionally process-less while idle.
-      // Its adapter returns null only after any recorded per-turn child is
-      // proved absent/fenced, so the durable session must reach resume() even
-      // though the execution generation itself remains nonterminal.
-      const resumableCursorLane = entry.provider === "cursor"
-        && entry.delivery_mode === "daemon_inbox"
-        && entry.provider_ref?.provider_connection?.kind === "cursor_cli";
-      if (activeExecution && !resumableCursorLane) {
-        await this.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          "durable execution generation remains live without an attachable provider handle",
-          "daemon-convergence",
-        );
-        return;
-      }
-      if (!activeExecution && entry.turn_control && entry.turn_control.status !== "completed") {
-        // Automatic restart crosses the same proven-terminal generation
-        // boundary as explicit recovery. Retire the old action/FIFO authority
-        // before a successor generation can exist.
-        entry = await this.completeTurnControlForRuntimeRecovery(entry);
-      }
-      const priorBinding = entry.provider_ref ? await this.workerBindings.get(entry.id) : null;
-      const resumeWorker = priorBinding
-        && priorBinding.room_id === entry.room_id
-        && priorBinding.work_attempt_id === attempt.work_attempt_id
-        ? {
-          agentSessionId: priorBinding.agent_session_id,
-          roomCursor: priorBinding.room_cursor ?? null,
-        }
-        : null;
-      const ref = entry.provider_ref ? this.providerRef(entry) : null;
-      const mintedAuthorization = this.workerAuthority.requiresHostGrant(entry)
-        ? await this.workerAuthority.mintHostWorkerAuthorization(entry)
-        : null;
-      if (this.workerAuthority.requiresHostGrant(entry) && !mintedAuthorization) return;
-      const currentAfterMint = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-      if (!currentAfterMint) return;
-      entry = currentAfterMint;
-      const capabilities = await this.providerPort.capabilities(attempt.work_attempt_id, entry.provider);
-      const currentAfterCapabilities = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-      if (!currentAfterCapabilities) return;
-      entry = currentAfterCapabilities;
-      const deliveryMode = entry.delivery_mode ?? "mcp_polling";
-      if (capabilities.deliveryModes && !capabilities.deliveryModes.includes(deliveryMode)) {
-        await this.transition(
-          entry.id,
-          "failed",
-          "coordination_blocked",
-          `${supervisedProviderLabel(entry.provider)} does not support ${deliveryMode} room delivery.`,
-          "daemon-convergence",
-        );
-        return;
-      }
-      const resumed = Boolean(ref && capabilities.resume);
-      if (this.workerAuthority.requiresHostGrant(entry)) {
-        const grant = this.workerAuthority.currentHostGrant(entry);
-        if (!grant || !await this.workerAuthority.ownsDaemonGeneration(grant.daemonGeneration)) return;
-      }
-      // Every potentially long remote authorization/capability await is now
-      // complete. Only then may this daemon create a durable live generation.
-      await this.transition(entry.id, entry.provider_ref ? "recovering" : "starting", "none", entry.provider_ref ? "recovering durable provider continuation" : "starting daemon-owned provider", "daemon-convergence");
-      const currentAfterTransition = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
-      if (!currentAfterTransition) return;
-      entry = currentAfterTransition;
-      if (this.workerAuthority.requiresHostGrant(entry)) {
-        const grant = this.workerAuthority.currentHostGrant(entry);
-        if (!grant || !await this.workerAuthority.ownsDaemonGeneration(grant.daemonGeneration)) return;
-      }
-      const launchConfiguration = await this.store.getAgentConfiguration(entry.id);
-      if (!launchConfiguration) throw new Error("Agent configuration disappeared before provider launch.");
-      // Stored rows can predate the supervised Inspector contract. Re-check
-      // admission at the last possible boundary so a stale generic default
-      // cannot reach the native provider launch path.
-      const permissionProfileId = entry.id.startsWith("supervised_rental_")
-        ? assertSupervisedRentalPermissionProfileAvailable(
-            launchConfiguration.provider,
-            launchConfiguration.permission_profile_id,
-          )
-        : assertSupervisedPermissionProfileAvailable(
-            launchConfiguration.provider,
-            launchConfiguration.permission_profile_id,
-          );
-      const launchSnapshot = deriveProviderConfigurationSnapshot({
-        provider: launchConfiguration.provider,
-        model: launchConfiguration.model,
-        reasoningEffort: launchConfiguration.reasoning_effort ?? null,
-        permissionProfileId,
-        configurationRevision: launchConfiguration.config_revision,
-      }, launchConfiguration.provider_launch_policy);
-      const openModelCredential = entry.provider === "open-model"
-        ? this.workerRuntimeCustody.currentOpenModelCredential(entry.id, this.singleton.currentGeneration)
-        : null;
-      if (entry.provider === "open-model"
-        && (!openModelCredential
-          || openModelCredential.daemonGeneration !== this.singleton.currentGeneration)) {
-        throw new Error("Waiting for desktop Open Model credential handoff.");
-      }
-      const reusesActiveCursorExecution = Boolean(resumableCursorLane && activeExecution);
-      const generationNumber = reusesActiveCursorExecution
-        ? activeExecution!.generation
-        : attempt.execution_generations.reduce((max, candidate) => Math.max(max, candidate.generation), 0) + 1;
-      const execution = reusesActiveCursorExecution
-        ? activeExecution!
-        : await this.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", generationNumber);
-      if (reusesActiveCursorExecution && priorBinding
-        && priorBinding.execution_generation_id !== execution.execution_generation_id) {
-        throw new Error("Process-less Cursor recovery found a worker binding for a different execution generation.");
-      }
-      if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
-        if (!reusesActiveCursorExecution) {
-          await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
-        }
-        return;
-      }
-      const devMcpServerEntryPath = devMcpServerEntryFromEnv() ?? undefined;
-      let mintedHostSession: Awaited<ReturnType<WorkerAuthorityCoordinator["mintHostWorkerSession"]>> = null;
-      const spawn: ProviderActionSpawn = {
-        workAttemptId: attempt.work_attempt_id,
-        roomId: entry.room_id,
-        cwd: attempt.workspace_path,
-        launchPolicy: launchSnapshot.launchPolicy,
-        provider: launchSnapshot.provider,
-        model: launchSnapshot.model,
-        reasoningEffort: launchSnapshot.reasoningEffort,
-        permissionProfileId: launchSnapshot.permissionProfileId,
-        configurationRevision: launchSnapshot.configurationRevision,
-        deliveryMode: entry.delivery_mode ?? "mcp_polling",
-        agentDisplayName: entry.display_name,
-        actionId: `manifest:${entry.id}:generation:${generationNumber}`,
-        supervisorEntryId: entry.id,
-        supervisorSocketPath: this.socket.path,
-        supervisorExecutionGenerationId: execution.execution_generation_id,
-        ...(resumeWorker ? { supervisorWorkerSession: resumeWorker } : {}),
-        ...(devMcpServerEntryPath && (entry.provider === "codex"
-          || entry.provider === "open-model"
-          || entry.provider === "cursor")
-          ? { devMcpServerEntryPath }
-          : {}),
-        ...(openModelCredential ? {
-          providerCredential: {
-            apiKey: openModelCredential.apiKey,
-            baseUrl: openModelCredential.baseUrl,
-            model: launchSnapshot.model?.trim() || openModelCredential.model,
-          },
-        } : {}),
-      };
-      let providerPersisted = false;
-      let providerDispatched = false;
-      let unpersistedReturnedProviderFenced = false;
-      try {
-        if (mintedAuthorization) {
-          mintedHostSession = await this.workerAuthority.recordMintedHostWorkerSession(entry, execution.execution_generation_id, mintedAuthorization);
-          if (!mintedHostSession) throw new Error("Waiting for desktop credential handoff.");
-          Object.assign(spawn, { supervisorWorkerSession: { agentSessionId: mintedHostSession.agentSessionId, roomCursor: null } });
-        }
-        if (!await this.launchEntryIfCurrent(entry.id, launchControlEpoch)) {
-          if (!reusesActiveCursorExecution) {
-            await this.terminalizeUnlaunchedGeneration(attempt, execution.execution_generation_id, generationNumber);
-          }
-          return;
-        }
-        const dispatchReservation = this.reserveProviderDispatch(entry.id, execution.execution_generation_id);
-        let fatalReservationError: unknown;
-        try {
-          try {
-            handle = resumed
-              ? await this.providerPort.resume(ref!, { ...spawn, resumeFrom: ref })
-              : await this.providerPort.spawn(spawn);
-            providerDispatched = true;
-            // This check is synchronous with the native return: an adapter
-            // that cannot attest the exact snapshot is still an unjournaled
-            // provider and is fenced by the cleanup path below. It never
-            // becomes an attachable continuation under ambiguous authority.
-            if (handle.appliedConfigurationRevision !== launchSnapshot.configurationRevision) {
-              throw new Error("Provider launch did not attest the complete configuration snapshot.");
-            }
-            await this.persistDispatchedProvider(
-              dispatchReservation.token, entry.id, handle, execution.execution_generation_id,
-            );
-            // The native continuation is now durable. Configuration apply is
-            // subsequent bookkeeping and must never make handoff treat this
-            // exact returned provider as unjournaled.
-            providerPersisted = true;
-            const applied = await this.store.markRuntimeConfigurationApplied(this.manifestGeneration, {
-              agentId: entry.id,
-              executionGenerationId: execution.execution_generation_id,
-              appliedRevision: launchSnapshot.configurationRevision,
-            }, (commit) => this.fenceDaemonCommit(commit));
-            this.manifestGeneration = applied.generation;
-            await this.durability.checkpoint(attempt.work_attempt_id, { room_cursor: null, provider_continuation_id: handle.providerContinuationId });
-            if (this.handoffScheduled) {
-              // The successor attaches this exact durable continuation. Do not
-              // signal it or register callbacks owned by the retiring daemon.
-              return;
-            }
-            let control = await this.revalidateReturnedProviderControl(
-              entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
-            );
-            if (control === "handoff" || control === "fenced") return;
-            launchControlEpoch = this.currentEntryControlEpoch(entry.id);
-            // installProviderHandle has its own async listener-registration
-            // boundaries. The synchronous guard prevents it from starting room
-            // delivery if Pause/Stop/handoff wins during those awaits.
-            if (this.handoffScheduled) return;
-            await this.installProviderHandle(
-              entry.id,
-              handle,
-              execution.execution_generation_id,
-              () => !mintedHostSession
-                && !this.handoffScheduled
-                && this.currentEntryControlEpoch(entryId) === launchControlEpoch,
-            );
-            if (this.handoffScheduled) return;
-            control = await this.revalidateReturnedProviderControl(
-              entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
-            );
-            if (control === "handoff" || control === "fenced") return;
-            launchControlEpoch = this.currentEntryControlEpoch(entry.id);
-
-            if (mintedHostSession) {
-              control = await this.revalidateReturnedProviderControl(
-                entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
-              );
-              if (control === "handoff" || control === "fenced") return;
-              launchControlEpoch = this.currentEntryControlEpoch(entry.id);
-              try {
-                await this.workerAuthority.bindMintedHostWorkerSession(
-                  entry.id,
-                  mintedHostSession,
-                  () => !this.handoffScheduled && this.currentEntryControlEpoch(entryId) === launchControlEpoch,
-                );
-              } catch (error) {
-                if (this.handoffScheduled) return;
-                control = await this.revalidateReturnedProviderControl(
-                  entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
-                );
-                if (control === "handoff" || control === "fenced") return;
-                await this.workerAuthority.recordWorkerBindingRecoveryFailure(
-                  entry.id,
-                  execution.execution_generation_id,
-                  error,
-                );
-                return;
-              }
-              if (this.handoffScheduled) return;
-              control = await this.revalidateReturnedProviderControl(
-                entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
-              );
-              if (control === "handoff" || control === "fenced") return;
-              launchControlEpoch = this.currentEntryControlEpoch(entry.id);
-            }
-
-            // Last guard before terminal/bootstrap state and delivery logic
-            // continue outside this native dispatch reservation.
-            control = await this.revalidateReturnedProviderControl(
-              entry.id, handle, execution.execution_generation_id, generationNumber, launchControlEpoch,
-            );
-            if (control === "handoff" || control === "fenced") return;
-            launchControlEpoch = this.currentEntryControlEpoch(entry.id);
-          } catch (error) {
-            if (providerDispatched && !providerPersisted && handle) {
-              try {
-                await this.fenceUnpersistedReturnedProvider(
-                  attempt, execution.execution_generation_id, generationNumber, handle,
-                );
-                unpersistedReturnedProviderFenced = true;
-              } catch (cleanupError) {
-                fatalReservationError = cleanupError;
-                throw new AggregateError([error, cleanupError], "Returned provider could not be journaled or exactly fenced.");
-              }
-            }
-            throw error;
-          }
-        } finally {
-          dispatchReservation.release(fatalReservationError);
-        }
-      } catch (error) {
-        if (reusesActiveCursorExecution && !providerPersisted) {
-          await this.workerAuthority.recordWorkerBindingRecoveryFailure(
-            entry.id,
-            execution.execution_generation_id,
-            error,
-          );
-          return;
-        }
-        if (providerPersisted && this.handoffScheduled) return;
-        // Once the provider reference is durable, do not convert a local
-        // post-spawn bookkeeping/credential issue into a terminal execution.
-        // The exact provider remains the recovery target; no stop, restart,
-        // migration, or second spawn is permitted here.
-        if (providerPersisted) {
-          await this.workerAuthority.recordWorkerBindingRecoveryFailure(
-            entry.id,
-            execution.execution_generation_id,
-            error,
-          );
-          return;
-        }
-        // A native handle that actually returned is never an "unlaunched"
-        // generation. Persistence normally cannot fail here because the
-        // active reservation falls back through the retirement gate, but an
-        // unexpected fault must still avoid fabricating terminal evidence.
-        if (providerDispatched || unpersistedReturnedProviderFenced) throw error;
-        const terminal = this.terminalPayload({
-          endedAt: new Date().toISOString(), exitCode: null, signal: null,
-          terminalCause: "protocol_error", providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
-        }, "daemon-provider");
-        try {
-          await this.durability.recordTerminal(attempt.work_attempt_id, execution.execution_generation_id, { ...terminal, generation: generationNumber, actor: "daemon-provider" });
-          await this.durability.releaseTerminalExecutionFence(attempt.work_attempt_id, execution.execution_generation_id);
-        } catch (cleanupError) {
-          const launchMessage = error instanceof Error ? error.message : "unknown provider launch failure";
-          const cleanupMessage = cleanupError instanceof Error ? cleanupError.message : "unknown failed-launch cleanup failure";
-          throw new Error(`Provider launch failed (${launchMessage}) and durable cleanup failed (${cleanupMessage}).`, { cause: error });
-        }
-        throw error;
-      }
-      if (["failed", "stopped"].includes(handle.observedState)
-        || (handle.observedState === "idle" && entry.delivery_mode !== "daemon_inbox")) {
-        // A provider can finish the bootstrap turn before spawn/resume
-        // returns and before the daemon has installed its stream listener.
-        // The handle state is still authoritative: a persistent polling
-        // worker that already failed or completed has no live delivery
-        // loop. Fence it after installing the exit listener so the normal
-        // terminal callback can persist the edge and mint a bounded resume
-        // generation instead of parking forever on a terminal live handle.
-        await this.fenceTerminalProviderHandleOnce(
-          handle,
-          `manifest:${entry.id}:returned-terminal:${generationNumber}`,
-        );
-        return;
-      }
-      if (priorBinding && !resumed) {
-        await this.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          "fresh provider generation cannot inherit a terminal worker credential; awaiting exact bind",
-          "daemon-convergence",
-        );
-        return;
-      }
-      if (resumed && priorBinding && !reusesActiveCursorExecution) {
-        try {
-          await this.stageWorkerBindingAfterResume(entry, priorBinding, execution.execution_generation_id, handle);
-        } catch (error) {
-          await this.transition(
-            entry.id,
-            "recovering",
-            "coordination_blocked",
-            `resumed provider worker binding could not be staged: ${error instanceof Error ? error.message : "unknown binding recovery failure"}`,
-            "daemon-convergence",
-          );
-          return;
-        }
-        await this.transition(
-          entry.id,
-          "recovering",
-          "coordination_blocked",
-          "resumed provider awaits exact worker wait evidence",
-          "daemon-convergence",
-        );
-        return;
-      }
-      this.providerStartRetryAttempts.delete(entry.id);
-      this.workerMintRecoveryRetryAttempts.delete(entry.id);
-      await this.transition(entry.id, handle.observedState, "none", resumed ? "provider resumed under daemon authority" : "provider launched under daemon authority", "daemon-convergence");
-      return;
-    }
-
-    let handle = this.liveHandles.get(entry.id) ?? null;
-    const exactCursorRef = entry.provider_ref?.provider_connection?.kind === "cursor_cli"
-      ? entry.provider_ref
-      : null;
-    if (!handle && exactCursorRef && this.providerPort.stopRef) {
-      await this.transition(entry.id, "stopping", entry.condition, `desired state changed to ${entry.desired_state}`, "daemon-convergence");
-      const terminal = await this.providerPort.stopRef(this.providerRef(entry), {
-        actionId: `manifest:${entry.id}:${entry.desired_state}:${this.nowMs()}`,
-      });
-      const attempt = await this.durability.getAttempt(exactCursorRef.work_attempt_id);
-      const execution = attempt.execution_generations.find((candidate) =>
-        candidate.execution_generation_id === exactCursorRef.execution_generation_id);
-      if (!execution) throw new Error("Cursor exact-reference stop has no matching durable execution generation.");
-      if (!execution.terminal) {
-        await this.durability.recordTerminal(exactCursorRef.work_attempt_id, exactCursorRef.execution_generation_id, {
-          ...this.terminalPayload(terminal, execution.actor),
-          actor: execution.actor,
-          generation: execution.generation,
-        });
-        if (entry.desired_state === "stopped") {
-          await this.durability.releaseTerminalExecutionFence(exactCursorRef.work_attempt_id, exactCursorRef.execution_generation_id);
-        }
-      }
-      await this.observeProviderExitOnce(entry.id, terminal, "daemon-provider", exactCursorRef.execution_generation_id);
-      return;
-    }
-    if (!handle && entry.provider_ref) {
-      handle = await this.attachLiveProvider(entry);
-    }
-    if (handle) {
-      await this.transition(entry.id, "stopping", entry.condition, `desired state changed to ${entry.desired_state}`, "daemon-convergence");
-      await this.providerPort.stop(handle, { actionId: `manifest:${entry.id}:${entry.desired_state}:${this.nowMs()}` });
-      return;
-    }
-    await this.transition(entry.id, entry.desired_state === "paused" ? "paused" : "stopped", "none", "desired state converged without a live provider", "daemon-convergence");
-  }
-
   private providerRef(entry: DaemonManifestEntry): ProviderActionRef {
-    const ref = entry.provider_ref;
-    if (!ref) throw new Error("Manifest entry has no durable provider ref.");
-    return {
-      workAttemptId: ref.work_attempt_id,
-      providerContinuationId: ref.provider_continuation_id,
-      provider: entry.provider,
-      providerConnection: ref.provider_connection,
-    };
+    const coordinator = this.providerExecution;
+    if (!coordinator) throw new Error("Provider action port is unavailable");
+    return coordinator.providerRef(entry);
   }
 
-  /**
-   * Attach only when the manifest's exact execution generation is still live.
-   * A provider transport (for example a long-lived app-server) can remain
-   * reachable after an intentional worker stop, but that transport is not
-   * authority to resurrect the terminal generation. A later desired=running
-   * transition must instead mint a successor generation and use resume/spawn.
-   */
-  private async attachLiveProvider(
+  private attachLiveProvider(
     entry: DaemonManifestEntry,
     mayStartDelivery: () => boolean = () => true,
   ): Promise<ProviderActionHandle | null> {
-    const ref = entry.provider_ref;
-    if (!ref) return null;
-    const attempt = await this.durability.getAttempt(ref.work_attempt_id);
-    const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === ref.execution_generation_id);
-    if (!execution) throw new Error("Manifest provider reference has no matching durable execution generation.");
-    if (execution.terminal) return null;
-    const attachment = await this.providerPort!.attach(this.providerRef(entry));
-    if (!attachment) return null;
-    if (this.isAttachTerminal(attachment)) {
-      const terminal = attachment.terminal;
-      if (terminal.providerContinuationId && terminal.providerContinuationId !== ref.provider_continuation_id) {
-        throw new Error("Provider attach terminal evidence belongs to a different durable continuation.");
-      }
-      await this.durability.recordTerminal(ref.work_attempt_id, execution.execution_generation_id, {
-        ...this.terminalPayload(terminal, execution.actor),
-        actor: execution.actor,
-        generation: execution.generation,
-      });
-      // A no-handle attach result used to strand this generation forever. The
-      // explicit terminal evidence proves the writer absent (or fenced), so it
-      // is now safe to release workspace authority before bounded resume.
-      await this.durability.releaseTerminalExecutionFence(ref.work_attempt_id, execution.execution_generation_id);
-      // Keep the private credential on its durably terminal generation. It is
-      // no longer projected or allowed to publish, but a later exact native
-      // resume needs it for verify-before-rollover compatibility with workers
-      // that cannot bind again after their saved provider session resumes.
-      return null;
-    }
-    const handle = attachment;
-    let authoritativeEntry = entry;
-    if (handle.providerConnection && ref.provider_connection
-      && !sameProviderActionConnectionIdentity(ref.provider_connection, handle.providerConnection)) {
-      throw new Error("Attached provider returned connection evidence that conflicts with the durable manifest.");
-    }
-    if (handle.providerConnection && !ref.provider_connection) {
-      authoritativeEntry = await this.updateManifestEntry(entry.id, (current) => {
-        if (current.work_attempt_id !== ref.work_attempt_id
-          || current.provider_ref?.execution_generation_id !== ref.execution_generation_id
-          || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id) {
-          throw new Error("Provider authority changed before recovered connection evidence could be persisted.");
-        }
-        return {
-          ...current,
-          provider_ref: {
-            ...current.provider_ref,
-            provider_connection: handle.providerConnection ?? null,
-          },
-        };
-      });
-    }
-    await this.durability.recoverExecutionFence(ref.work_attempt_id);
-    await this.installProviderHandle(
-      authoritativeEntry.id,
-      handle,
-      ref.execution_generation_id,
-      mayStartDelivery,
-    );
-    const binding = await this.workerBindings.get(authoritativeEntry.id);
-    if (binding && binding.execution_generation_id !== ref.execution_generation_id) {
-      try {
-        await this.stageWorkerBindingAfterResume(
-          authoritativeEntry,
-          binding,
-          ref.execution_generation_id,
-          handle,
-        );
-        await this.transition(
-          authoritativeEntry.id,
-          "recovering",
-          "coordination_blocked",
-          "reattached resumed provider awaits exact worker wait evidence",
-          "daemon-convergence",
-        );
-      } catch (error) {
-        await this.transition(
-          authoritativeEntry.id,
-          "recovering",
-          "coordination_blocked",
-          `reattached provider worker binding could not be staged: ${error instanceof Error ? error.message : "unknown binding recovery failure"}`,
-          "daemon-convergence",
-        );
-      }
-    }
-    return handle;
+    if (!entry.provider_ref) return Promise.resolve(null);
+    const coordinator = this.providerExecution;
+    if (!coordinator) throw new Error("Provider action port is unavailable");
+    return coordinator.attachLiveProvider(entry, mayStartDelivery);
   }
 
   private isAttachTerminal(
     attachment: ProviderActionHandle | ProviderActionAttachTerminal,
   ): attachment is ProviderActionAttachTerminal {
-    return "state" in attachment && attachment.state === "terminal";
+    return this.providerExecution?.isAttachTerminal(attachment)
+      ?? ("state" in attachment && attachment.state === "terminal");
   }
 
-  private async ensureWorkAttempt(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
-    if (entry.work_attempt_id) {
-      await this.durability.getAttempt(entry.work_attempt_id);
-      return entry;
-    }
-    const sourcePath = entry.source_repo_path?.trim() || entry.workspace_path?.trim();
-    if (!sourcePath) {
-      const workAttemptId = randomUUID();
-      const provisioned = await this.ephemeralProvisioner.provision({
-        workAttemptId,
-        taskId: entry.id,
-      });
-      const attempt = await this.durability.createAttempt({
-        taskId: entry.id,
-        leaseId: entry.id,
-        leaseEpoch: 0,
-        workspacePath: provisioned.path,
-        workAttemptId,
-      });
-      return this.updateManifestEntry(entry.id, (current) => ({
-        ...current,
-        source_repo_path: null,
-        workspace_path: attempt.workspace_path,
-        work_attempt_id: attempt.work_attempt_id,
-      }));
-    }
-    // Validate the selected folder is a usable git repository before we try to
-    // provision a private worktree from it. A non-repo path (e.g. the home
-    // directory) otherwise fails deep in git with an opaque "Command failed"
-    // surfaced to the user as a generic "couldn't prepare the private project
-    // area"; resolveSourceRepositoryIdentity throws an actionable message.
-    const { remoteUrl: remote, revision } = await resolveSourceRepositoryIdentity(sourcePath, this.gitCommand);
-    const repo = repositoryStorageKey(remote);
-    const workAttemptId = randomUUID();
-    const provisioned = await this.provisioner.provision({
-      repo,
-      workAttemptId,
-      taskId: entry.id,
-      remoteUrl: remote,
-      revision,
-      sourceRepoPath: sourcePath,
-    });
-    const attempt = await this.durability.createAttempt({ taskId: entry.id, leaseId: entry.id, leaseEpoch: 0, workspacePath: provisioned.path, workAttemptId });
-    return this.updateManifestEntry(entry.id, (current) => ({ ...current, source_repo_path: sourcePath, workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id }));
-  }
-
-  private async persistProviderHandle(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): Promise<void> {
-    if (!handle.providerContinuationId) throw new Error("Provider launch did not return a durable continuation id.");
-    await this.updateManifestEntry(entryId, (current) => ({
-      ...current,
-      run_id: executionGenerationId,
-      deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
-      provider_ref: {
-        work_attempt_id: handle.workAttemptId,
-        provider_continuation_id: handle.providerContinuationId!,
-        provider_connection: handle.providerConnection ?? null,
-        execution_generation_id: executionGenerationId,
-      },
-    }));
-  }
-
-  /**
-   * Select normal or retirement persistence while the exact native dispatch
-   * reservation is live. If handoff wins the normal commit fence, retry only
-   * through the narrow retirement gate before releasing the reservation.
-   */
-  private async persistDispatchedProvider(
-    token: symbol,
-    entryId: string,
-    handle: ProviderActionHandle,
-    executionGenerationId: string,
-  ): Promise<void> {
-    if (this.handoffScheduled) {
-      await this.persistReturnedProviderForHandoff(token, entryId, handle, executionGenerationId);
-      return;
-    }
-    try {
-      await this.persistProviderHandle(entryId, handle, executionGenerationId);
-    } catch (error) {
-      if (!this.handoffScheduled || !(error instanceof DaemonFenceLostError)) throw error;
-      await this.persistReturnedProviderForHandoff(token, entryId, handle, executionGenerationId);
-    }
-  }
-
-  /**
-   * The sole mutation admitted after prepare_handoff: finish journaling a
-   * native dispatch that began while this exact daemon generation owned the
-   * singleton. The reservation is deleted before authority/store release.
-   */
-  private async persistReturnedProviderForHandoff(
-    token: symbol,
-    entryId: string,
-    handle: ProviderActionHandle,
-    executionGenerationId: string,
-  ): Promise<void> {
-    if (!handle.providerContinuationId) throw new Error("Provider launch did not return a durable continuation id.");
-    const reservation = this.activeProviderDispatches.get(token);
-    if (!this.handoffScheduled || !reservation
-      || reservation.entryId !== entryId
-      || reservation.executionGenerationId !== executionGenerationId
-      || reservation.daemonGeneration !== this.singleton.currentGeneration) {
-      throw new DaemonFenceLostError("Retiring provider dispatch reservation is no longer exact.");
-    }
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      await this.singleton.assertCurrent();
-      const activeBeforeRead = this.activeProviderDispatches.get(token);
-      if (!this.handoffScheduled || activeBeforeRead !== reservation
-        || activeBeforeRead.daemonGeneration !== this.singleton.currentGeneration) {
-        throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
-      }
-      const snapshot = await this.store.load();
-      const current = snapshot.entries.find((candidate) => candidate.id === entryId);
-      if (!current || current.work_attempt_id !== handle.workAttemptId) {
-        throw new DaemonFenceLostError("Retiring provider dispatch no longer matches the durable work attempt.");
-      }
-      if (current.provider_ref?.execution_generation_id === executionGenerationId
-        && current.provider_ref.provider_continuation_id === handle.providerContinuationId) {
-        this.manifestGeneration = snapshot.generation;
-        return;
-      }
-      const updated: DaemonManifestEntry = {
-        ...current,
-        run_id: executionGenerationId,
-        deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
-        provider_ref: {
-          work_attempt_id: handle.workAttemptId,
-          provider_continuation_id: handle.providerContinuationId,
-          provider_connection: handle.providerConnection ?? null,
-          execution_generation_id: executionGenerationId,
-        },
-      };
-      try {
-        const next = await this.store.replaceEntry(snapshot.generation, updated, (commit) => this.serializeManifestCommit(async () => {
-          const active = this.activeProviderDispatches.get(token);
-          if (!this.handoffScheduled || active !== reservation
-            || active.daemonGeneration !== this.singleton.currentGeneration) {
-            throw new DaemonFenceLostError("Retiring provider dispatch persistence gate closed.");
-          }
-          await this.singleton.assertCurrent();
-          await commit();
-        }));
-        this.manifestGeneration = next.generation;
-        return;
-      } catch (error) {
-        if (!(error instanceof ManifestConflictError)) throw error;
-      }
-    }
-    throw new DaemonFenceLostError("Retiring provider dispatch persistence could not converge on the latest manifest generation.");
-  }
-
-  private async installProviderHandle(
+  private installProviderHandle(
     entryId: string,
     handle: ProviderActionHandle,
     executionGenerationId: string,
     mayStartDelivery: () => boolean = () => true,
   ): Promise<void> {
-    for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
-    // A fresh provider generation owns a fresh ephemeral display transcript.
-    // Keep only the monotonic sequence; never replay the predecessor's tail.
-    this.resetAgentStream(entryId);
-    this.liveHandles.set(entryId, handle);
-    const binding = await this.workerBindings.get(entryId);
-    const currentBinding = this.workerRuntimeCustody.liveBinding(entryId);
-    if (binding?.execution_generation_id === executionGenerationId) {
-      if (!currentBinding || binding.updated_at >= currentBinding.updatedAt) {
-        this.workerRuntimeCustody.installLiveBinding(entryId, {
-          agentSessionId: binding.agent_session_id,
-          executionGenerationId: binding.execution_generation_id,
-          updatedAt: binding.updated_at,
-        });
-      }
-    } else if (currentBinding?.executionGenerationId !== executionGenerationId) {
-      this.workerRuntimeCustody.deleteLiveBinding(entryId);
-    }
-    const disposeExit = await this.providerPort!.onExit(handle, (terminal) => {
-      const bindingIdentity = this.workerRuntimeCustody.liveBinding(entryId);
-      this.trackProviderCallback(this.handleProviderTerminal(entryId, handle, executionGenerationId, bindingIdentity, terminal));
-    });
-    const disposeStream = this.providerPort!.onStream
-      ? await this.providerPort!.onStream!(handle, (event) => { this.trackProviderCallback(this.enqueueProviderStream(entryId, handle, event)); })
-      : () => {};
-    const heartbeat = setInterval(() => {
-      const current = this.liveHandles.get(entryId);
-      if (!current) return;
-      this.trackProviderCallback((async () => {
-        const manifestEntry = (await this.store.load()).entries.find((candidate) => candidate.id === entryId);
-        if (!manifestEntry || this.liveHandles.get(entryId) !== current) return;
-        if (this.workerRuntimeCustody.liveBinding(entryId)?.executionGenerationId !== manifestEntry.provider_ref?.execution_generation_id) return;
-        const retriesCredentialHandoff = manifestEntry.desired_state === "running"
-          && manifestEntry.observed_state === "recovering"
-          && manifestEntry.condition === "coordination_blocked"
-          && manifestEntry.last_error === "Provider is running; waiting for desktop credential handoff.";
-        if (!["working", "idle"].includes(manifestEntry.observed_state) && !retriesCredentialHandoff) return;
-        if (!["working", "idle"].includes(current.observedState)) return;
-        const hostGrant = this.workerAuthority.requiresHostGrant(manifestEntry)
-          ? this.workerAuthority.currentHostGrant(manifestEntry)
-          : null;
-        if (hostGrant && this.workerAuthority.hostGrantNeedsRenewal(hostGrant)) {
-          this.requestConvergence(entryId);
-          return;
-        }
-        if (hostGrant) {
-          const binding = await this.workerBindings.get(entryId);
-          if (binding && await this.workerAuthority.hostWorkerBearerNeedsRotation(manifestEntry, binding)) {
-            // The serialized convergence lane rotates the bearer against the
-            // existing generation and provider. No Electron reinstall is
-            // required while this daemon still owns the in-memory host grant.
-            this.requestConvergence(entryId);
-            return;
-          }
-        }
-        const status = current.observedState === "idle" ? "idle" : "working";
-        await this.publishNativeActivity(entryId, "native_harness.heartbeat", status);
-      })().catch(() => undefined));
-    }, this.nativeHeartbeatIntervalMs);
-    heartbeat.unref();
-    this.liveDisposers.set(entryId, [disposeExit, disposeStream, () => clearInterval(heartbeat), () => this.endAgentStream(entryId)]);
-    if (mayStartDelivery()) void this.startSupervisedDelivery(entryId).catch(() => undefined);
+    return this.providerStreams.install(
+      entryId,
+      handle,
+      executionGenerationId,
+      mayStartDelivery,
+    );
   }
 
-  private async stageWorkerBindingAfterResume(
+  private stageWorkerBindingAfterResume(
     entry: DaemonManifestEntry,
     priorBinding: WorkerSessionBinding,
     successorExecutionGenerationId: string,
     handle: ProviderActionHandle,
   ): Promise<void> {
-    const ref = entry.provider_ref;
-    if (!ref
-      || priorBinding.entry_id !== entry.id
-      || priorBinding.room_id !== entry.room_id
-      || priorBinding.work_attempt_id !== ref.work_attempt_id
-      || handle.workAttemptId !== ref.work_attempt_id
-      || handle.providerContinuationId !== ref.provider_continuation_id) {
-      throw new Error("Resumed provider does not match the durable worker continuation identity.");
-    }
-    const attempt = await this.durability.getAttempt(ref.work_attempt_id);
-    const predecessor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === priorBinding.execution_generation_id,
-    );
-    const successor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === successorExecutionGenerationId,
-    );
-    if (!predecessor?.terminal) {
-      throw new Error("Worker binding predecessor execution is not durably terminal.");
-    }
-    if (predecessor.terminal.provider_continuation_id !== ref.provider_continuation_id) {
-      throw new Error("Worker binding predecessor belongs to a different provider continuation.");
-    }
-    if (!successor || successor.terminal
-      || attempt.execution_generations.filter((candidate) => candidate.terminal === null).length !== 1) {
-      throw new Error("Worker binding successor is not the single live execution generation.");
-    }
-    this.workerRuntimeCustody.installPendingResumeBinding(entry.id, {
-      roomId: entry.room_id,
-      workAttemptId: ref.work_attempt_id,
-      predecessorExecutionGenerationId: priorBinding.execution_generation_id,
+    return this.providerStreams.stageWorkerBindingAfterResume(
+      entry,
+      priorBinding,
       successorExecutionGenerationId,
-      agentSessionId: priorBinding.agent_session_id,
-      providerContinuationId: ref.provider_continuation_id,
-    });
+      handle,
+    );
   }
 
-  /**
-   * Published MCP runtimes before bind-on-wait cannot present their credential
-   * again after a native session resume. The first exact wait event proves the
-   * saved worker-session identity. While the credential still belongs to its
-   * terminal predecessor, verify it with the API; only an accepted response is
-   * allowed to atomically advance the private binding and public projection.
-   */
-  private async restoreWorkerBindingFromWait(
+  private handleProviderStream(
     entryId: string,
-    evidence: SupervisedWaitEvidence,
-  ): Promise<boolean> {
-    const pending = this.workerRuntimeCustody.pendingResumeBinding(entryId);
-    if (!pending || evidence.agentSessionId !== pending.agentSessionId) return false;
-    const entry = await this.store.getEntry(entryId);
-    const handle = this.liveHandles.get(entryId);
-    if (!entry || !handle
-      || entry.room_id !== pending.roomId
-      || entry.work_attempt_id !== pending.workAttemptId
-      || entry.provider_ref?.execution_generation_id !== pending.successorExecutionGenerationId
-      || entry.provider_ref.provider_continuation_id !== pending.providerContinuationId
-      || handle.workAttemptId !== pending.workAttemptId
-      || handle.providerContinuationId !== pending.providerContinuationId) {
-      throw new Error("Resumed wait evidence does not match the staged provider continuation.");
-    }
-    const attempt = await this.durability.getAttempt(pending.workAttemptId);
-    const predecessor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === pending.predecessorExecutionGenerationId,
-    );
-    const successor = attempt.execution_generations.find(
-      (candidate) => candidate.execution_generation_id === pending.successorExecutionGenerationId,
-    );
-    if (!predecessor?.terminal) throw new Error("Worker binding predecessor execution is not durably terminal.");
-    if (predecessor.terminal.provider_continuation_id !== pending.providerContinuationId) {
-      throw new Error("Worker binding predecessor belongs to a different provider continuation.");
-    }
-    if (!successor || successor.terminal
-      || attempt.execution_generations.filter((candidate) => candidate.terminal === null).length !== 1) {
-      throw new Error("Worker binding successor is not the single live execution generation.");
-    }
-    const method = "native_harness.resumed_binding";
-    const result = await this.workerBindings.verifyAndAdvanceExecutionGeneration({
-      entryId,
-      roomId: pending.roomId,
-      workAttemptId: pending.workAttemptId,
-      fromExecutionGenerationId: pending.predecessorExecutionGenerationId,
-      toExecutionGenerationId: pending.successorExecutionGenerationId,
-      agentSessionId: pending.agentSessionId,
-    }, async ({ binding, sequence, observed_at }) => {
-      const credential = await this.workerBindings.credentialFor(binding);
-      if (!credential) throw new Error("Worker credential is unavailable until desktop credential delivery.");
-      return { accepted: await publishWorkerNativeActivity({
-        apiUrl: binding.api_url,
-        roomId: binding.room_id,
-        agentSessionId: binding.agent_session_id,
-        bearer: credential,
-        observedAt: observed_at,
-        sequence,
-        method,
-        status: "working",
-        operation: "resumed credential verification",
-      }) };
-    });
-    if (!result.accepted) throw new Error("Native activity endpoint rejected the retained worker credential.");
-    const verified = result.binding;
-    this.workerRuntimeCustody.installLiveBinding(entry.id, {
-      agentSessionId: verified.agent_session_id,
-      executionGenerationId: verified.execution_generation_id,
-      updatedAt: verified.updated_at,
-    });
-    await this.updateManifestEntry(entry.id, (current) => {
-      if (current.work_attempt_id !== pending.workAttemptId
-        || current.provider_ref?.execution_generation_id !== pending.successorExecutionGenerationId
-        || current.provider_ref.provider_continuation_id !== pending.providerContinuationId) {
-        throw new Error("Manifest moved while restoring the resumed worker binding.");
-      }
-      return {
-        ...current,
-        observed_state: "working" as const,
-        condition: "none" as const,
-        last_error: null,
-        workplace_liveness: {
-          state: "reachable" as const,
-          observed_at: verified.updated_at,
-          detail: "exact persisted worker session restored after native resume",
-        },
-        last_worker_binding: {
-          agent_session_id: verified.agent_session_id,
-          work_attempt_id: verified.work_attempt_id,
-          execution_generation_id: verified.execution_generation_id,
-          updated_at: verified.updated_at,
-        },
-      };
-    });
-    this.workerRuntimeCustody.deletePendingResumeBinding(entryId);
-    return true;
+    handle: ProviderActionHandle,
+    event: ProviderActionStreamEvent,
+  ): Promise<void> {
+    return this.providerStreams.handle(entryId, handle, event);
   }
 
-  private async handleProviderStream(entryId: string, handle: ProviderActionHandle, event: ProviderActionStreamEvent): Promise<void> {
-    if (this.liveHandles.get(entryId) !== handle) return;
-    const observedLifecycle = providerStreamLifecycle(event);
-    const entry = await this.store.getEntry(entryId);
-    if (!entry) return;
-    // A daemon-inbox worker deliberately completes one bounded native turn at
-    // a time. During the one-way legacy Codex cutover, the old polling turn
-    // has the same reusable-thread meaning: it is the handoff boundary, never
-    // evidence that the app-server deployment died.
-    const daemonInbox = entry.delivery_mode === "daemon_inbox";
-    const legacyCodexCutover = entry.provider === "codex"
-      && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
-      && entry.desired_state === "running";
-    const effectiveLifecycle = (daemonInbox || legacyCodexCutover) && observedLifecycle === "terminal"
-      ? "idle"
-      : observedLifecycle;
-    const addressedWaitResult = observedLifecycle === "idle"
-      && isCorrelatedNonemptyWaitResult(event, entry.activity ?? []);
-    // A terminal native failure is sticky for the installed execution. Late
-    // deltas and heartbeats from that same handle are evidence, not recovery.
-    const lifecycle = entry.observed_state === "failed"
-      ? "failed"
-      : addressedWaitResult ? "working" : effectiveLifecycle;
-    // Provider-local stream counters may restart when a replacement daemon
-    // attaches. Persist a daemon-global monotonic sequence for the manifest.
-    const sequence = Math.max((entry.activity?.at(-1)?.sequence ?? 0) + 1, event.sequence);
-    const quietlyPolling = isSupervisedWaitProviderEvent(event)
-      || isSupervisedQuietPollContinuation(event, entry.activity ?? []);
-    const status: DaemonActivityEvent["status"] = lifecycle === "failed"
-      ? "blocked"
-      : lifecycle === "terminal" || quietlyPolling ? "idle" : lifecycle;
-    const sanitizedEvent = sanitizeDaemonActivityEvent({
-      observed_at: event.observedAt,
-      sequence,
-      provider: event.provider,
-      kind: event.kind,
-      method: event.method,
-      summary: (event.summary?.trim() || `${event.provider} · ${event.method}`).slice(0, 500),
-      status,
-      payload: event.payload,
-      payload_truncated: event.payloadTruncated,
-      payload_redacted: event.payloadRedacted,
-      durable_payload_ref: event.durablePayloadRef,
-    });
-    // Cursor launches one native child per bounded turn. Its verified init is
-    // the exact display-generation boundary: clear any prior turn before
-    // assistant/tool projections for this child arrive.
-    if (event.provider === "cursor" && event.method === "system/init") {
-      this.resetAgentStream(entryId);
-    }
-    // Transcript probes and account telemetry remain in provider diagnostics;
-    // they are transport facts, not human-readable agent activity.
-    if (isHumanRoomActivityEvent(event)) {
-      // Ephemeral live feed first (in-memory, non-blocking): the focused
-      // inspector sees reasoning/text/tool events token-by-token without the
-      // durable journal's coalescing or 200-event cap.
-      if (isAgentInspectorLiveDisplayEvent(event)) {
-        this.pushAgentStreamEvent(entryId, sanitizedEvent);
-      }
-      await this.appendActivity(entryId, sanitizedEvent);
-    }
-    const waitEvidence = supervisedWaitEvidenceFromProviderEvent(event);
-    if (waitEvidence) {
-      const pending = this.workerRuntimeCustody.pendingResumeBinding(entryId);
-      if (pending && waitEvidence.agentSessionId === pending.agentSessionId) {
-        try {
-          await this.serializeEntryTick(entryId, () => this.restoreWorkerBindingFromWait(entryId, waitEvidence));
-        } catch (error) {
-          await this.serializeEntryTick(entryId, () => this.transition(
-            entryId,
-            "recovering",
-            "coordination_blocked",
-            `resumed provider credential verification failed: ${error instanceof Error ? error.message : "unknown credential verification failure"}`,
-            "daemon-provider-stream",
-          ));
-          return;
-        }
-      }
-      if (!this.workerRuntimeCustody.hasPendingResumeBinding(entryId)) {
-        await this.checkpointObservedWaitCursor(entry, waitEvidence.roomCursor, waitEvidence.agentSessionId);
-      }
-    }
-    if (lifecycle === "failed" && entry.observed_state !== "failed") {
-      await this.transition(entryId, "failed", entry.condition, `provider stream terminal failure: ${sanitizedEvent.method}`, "daemon-provider-stream");
-    }
-    const liveBinding = this.workerRuntimeCustody.liveBinding(entryId);
-    if (liveBinding?.executionGenerationId === entry.provider_ref?.execution_generation_id) {
-      await this.publishNativeActivity(entryId, sanitizedEvent.method, lifecycle === "working" && !quietlyPolling ? "working" : "idle", event.observedAt).catch(() => undefined);
-    }
-    if (legacyCodexCutover && observedLifecycle === "terminal") {
-      // The exact control adapter will checkpoint this now-terminal legacy
-      // turn and atomically hand ingress to daemon_inbox without replacing
-      // the PID, thread, continuation, work attempt, or generation.
-      void this.startDeliveryCutover(entryId).catch(() => undefined);
-    }
-    if ((lifecycle === "failed" || lifecycle === "terminal")
-      && this.liveHandles.get(entryId) === handle
-      && !["stopping", "stopped"].includes(handle.observedState)) {
-      try {
-        // A persistent polling turn ending (successfully or with a native
-        // terminal error) means delivery ended. Fence that native process so
-        // the terminal callback can mint a bounded resume generation.
-        await this.fenceTerminalProviderHandleOnce(
-          handle,
-          `manifest:${entryId}:terminal-turn:${event.sequence}`,
-        );
-      } catch (error) {
-        await this.transition(
-          entryId,
-          "failed",
-          "coordination_blocked",
-          `failed to fence terminal provider turn: ${error instanceof Error ? error.message : "unknown error"}`,
-          "daemon-provider-stream",
-        );
-      }
-    }
+  private serializeCursorCheckpoint<T>(
+    entryId: string,
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    return this.providerStreams.serializeCursorCheckpoint(entryId, operation);
   }
 
-  private async checkpointObservedWaitCursor(entry: DaemonManifestEntry, roomCursor: string, agentSessionId: string): Promise<void> {
-    await this.serializeCursorCheckpoint(entry.id, async () => {
-      const executionGenerationId = entry.provider_ref?.execution_generation_id;
-      if (!entry.work_attempt_id || !executionGenerationId) return;
-      const currentEntry = (await this.store.load()).entries.find((candidate) => candidate.id === entry.id);
-      if (!currentEntry
-        || currentEntry.room_id !== entry.room_id
-        || currentEntry.work_attempt_id !== entry.work_attempt_id
-        || currentEntry.provider_ref?.execution_generation_id !== executionGenerationId) return;
-      const binding = await this.workerBindings.get(entry.id);
-      if (!binding
-        || binding.entry_id !== entry.id
-        || binding.room_id !== entry.room_id
-        || binding.work_attempt_id !== entry.work_attempt_id
-        || binding.agent_session_id !== agentSessionId
-        || binding.execution_generation_id !== executionGenerationId) return;
-      const checkpoint = await this.workerBindings.checkpointCursorMonotonic(
-        entry.id,
-        binding.agent_session_id,
-        executionGenerationId,
-        roomCursor,
-      );
-      const durableAttempt = await this.durability.getAttempt(entry.work_attempt_id);
-      const durableCursor = checkpoint.binding.room_cursor;
-      if (!durableCursor || (!checkpoint.advanced && durableAttempt.checkpoints.at(-1)?.room_cursor === durableCursor)) return;
-      await this.durability.checkpoint(entry.work_attempt_id, {
-        room_cursor: durableCursor,
-        provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
-      });
-    });
-  }
-
-  private enqueueProviderStream(entryId: string, handle: ProviderActionHandle, event: ProviderActionStreamEvent): Promise<void> {
-    const previous = this.providerStreamQueues.get(entryId) ?? Promise.resolve();
-    const next = previous.catch(() => undefined).then(() => this.handleProviderStream(entryId, handle, event)).finally(() => {
-      if (this.providerStreamQueues.get(entryId) === next) this.providerStreamQueues.delete(entryId);
-    });
-    this.providerStreamQueues.set(entryId, next);
-    return next;
-  }
-
-  private serializeCursorCheckpoint<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.cursorCheckpointQueues.get(entryId) ?? Promise.resolve();
-    const result = previous.catch(() => undefined).then(operation);
-    const tail = result.then(() => undefined, () => undefined).finally(() => {
-      if (this.cursorCheckpointQueues.get(entryId) === tail) this.cursorCheckpointQueues.delete(entryId);
-    });
-    this.cursorCheckpointQueues.set(entryId, tail);
-    return result;
-  }
-
-  private fenceTerminalProviderHandleOnce(handle: ProviderActionHandle, actionId: string): Promise<void> {
-    const existing = this.terminalFenceRequests.get(handle);
-    if (existing) return existing;
-    const operation = this.providerPort!
-      .stop(handle, { actionId })
-      .then(() => undefined);
-    this.terminalFenceRequests.set(handle, operation);
-    return operation;
+  private fenceTerminalProviderHandleOnce(
+    handle: ProviderActionHandle,
+    actionId: string,
+  ): Promise<void> {
+    return this.providerStreams.fenceTerminalOnce(handle, actionId);
   }
 
   private scheduleRecoveryConvergence(entryId: string, delayMs: number): void {
-    if (this.recoveryTimers.has(entryId)) return;
-    const timer = this.setRecoveryTimeout(() => {
-      this.recoveryTimers.delete(entryId);
-      this.requestConvergence(entryId);
-    }, Math.max(1, delayMs));
-    timer.unref?.();
-    this.recoveryTimers.set(entryId, timer);
+    this.providerExecution?.scheduleRecovery(entryId, delayMs);
   }
 
   private clearRecoveryConvergence(entryId: string): void {
-    const timer = this.recoveryTimers.get(entryId);
-    if (!timer) return;
-    this.clearRecoveryTimeout(timer);
-    this.recoveryTimers.delete(entryId);
+    this.providerExecution?.clearRecovery(entryId);
   }
 
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
@@ -3837,10 +2627,7 @@ export class SupervisorDaemon {
   private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, executionGenerationId: string, _terminalBinding: LiveBindingIdentity | undefined, terminal: ProviderActionTerminal): Promise<void> {
     if (this.liveHandles.get(entryId) !== handle) return;
     this.workerRuntimeCustody.deletePendingResumeBinding(entryId);
-    this.liveHandles.delete(entryId);
-    this.workerRuntimeCustody.deleteLiveBinding(entryId);
-    for (const dispose of this.liveDisposers.get(entryId) ?? []) dispose();
-    this.liveDisposers.delete(entryId);
+    this.providerStreams.remove(entryId, handle);
     // Provider execution and room observation are separate authorities. Keep
     // polling only while the durable lifecycle still wants a provider. A
     // retired agent must not recreate delivery after its stop raced terminal
@@ -3875,11 +2662,6 @@ export class SupervisorDaemon {
       await this.observeProviderExitOnce(entryId, terminal, "daemon-provider", executionGenerationId, handle);
       this.requestConvergence(entryId);
     });
-  }
-
-  private trackProviderCallback(operation: Promise<void>): void {
-    this.providerCallbacks.add(operation);
-    void operation.finally(() => this.providerCallbacks.delete(operation));
   }
 
   private async updateManifestEntry(
@@ -3966,94 +2748,9 @@ export class SupervisorDaemon {
    * the real control-socket port; tests may inject a fake port directly.
    */
   async reconcile(entryId: string, input: DaemonReconcileInput, watchdogThresholdMs: number, actor = "reconciler") {
-    return this.serializeEntryTick(entryId, () => this.serializeManifestMutation(() => this.reconcileOnce(entryId, input, watchdogThresholdMs, actor)));
-  }
-
-  private async reconcileOnce(entryId: string, input: DaemonReconcileInput, watchdogThresholdMs: number, actor: string) {
-    if (!this.providerPort) throw new Error("Provider action port is unavailable");
-    await this.singleton.assertCurrent();
-    const entry = await this.store.getEntry(entryId);
-    if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
-
-    let reconciliation = advanceReconciliationState(entry.reconciliation, entry.observed_state, input.nowMs);
-    if (JSON.stringify(reconciliation) !== JSON.stringify(entry.reconciliation)) {
-      const persisted = { ...entry, reconciliation };
-      const next = await this.store.replaceEntriesBatch(
-        this.manifestGeneration,
-        [persisted],
-        (commit) => this.fenceDaemonCommit(commit),
-      );
-      this.manifestGeneration = next.generation;
-    }
-
-    let redispatchPending = false;
-    let redispatchKind: "poke" | "restart_fresh" | "restart_with_resume" | "stop" | undefined;
-    let redispatchActionId = input.reconciliationActionId;
-    let redispatchActionSequence = input.reconciliationActionSequence;
-    if (reconciliation.pending_action) {
-      const pending = reconciliation.pending_action;
-      const attachment = await this.providerPort.attachAction(pending.id, input.workAttemptId);
-      if (attachment.state === "attached") {
-        reconciliation = completeReconciliationAction(reconciliation, pending.id);
-        await this.transitionOnce(entryId, attachment.handle.observedState, entry.condition, "reconciled pending provider action", actor, reconciliation);
-      }
-      if (attachment.state === "absent") { redispatchPending = true; redispatchActionId = pending.id; redispatchActionSequence = pending.sequence; redispatchKind = pending.kind; }
-      if (attachment.state === "ambiguous") {
-        await this.transitionOnce(entryId, "recovering", "coordination_blocked", `pending provider action ambiguous: ${attachment.reason}`, actor, reconciliation);
-        return { decision: { action: "hold_coordination" as const, observedState: "recovering" as const, condition: "coordination_blocked" as const, reason: `pending provider action ambiguous: ${attachment.reason}` }, disposition: "held" as const };
-      }
-      if (attachment.state === "attached") return {
-        decision: { action: "hold_coordination" as const, observedState: attachment.handle.observedState, condition: entry.condition, reason: "pending provider action attached; await next convergence tick" },
-        disposition: "held" as const,
-      };
-    }
-
-    if (redispatchPending && entry.desired_state === "stopped" && redispatchKind !== "stop") {
-      reconciliation = completeReconciliationAction(reconciliation, redispatchActionId);
-      redispatchPending = false;
-      redispatchKind = undefined;
-      redispatchActionId = input.reconciliationActionId;
-      redispatchActionSequence = input.reconciliationActionSequence;
-      await this.transitionOnce(entryId, entry.observed_state, entry.condition, "cancelled pending provider action because desired state is stopped", actor, reconciliation);
-    }
-    if (redispatchPending && entry.condition === "quarantined") {
-      reconciliation = completeReconciliationAction(reconciliation, redispatchActionId);
-      await this.transitionOnce(entryId, entry.observed_state, "quarantined", "cancelled pending provider action because entry is quarantined", actor, reconciliation);
-      return { decision: { action: "quarantine" as const, observedState: entry.observed_state, condition: "quarantined" as const, reason: "quarantined entry cannot redispatch pending provider action" }, disposition: "held" as const };
-    }
-    if (redispatchPending && ["restart_fresh", "restart_with_resume"].includes(redispatchKind ?? "") && input.activeLease) {
-      await this.transitionOnce(entryId, "recovering", "coordination_blocked", "pending provider action awaits fenced lease rebind", actor, reconciliation);
-      return { decision: { action: "hold_coordination" as const, observedState: "recovering" as const, condition: "coordination_blocked" as const, reason: "pending provider action awaits fenced lease rebind" }, disposition: "held" as const };
-    }
-
-    const result = await new ProviderReconciler(this.providerPort).reconcile({
-      ...input,
-      actionId: redispatchActionId,
-      forcedAction: redispatchKind,
-      desiredState: entry.desired_state,
-      observedState: entry.observed_state,
-      condition: entry.condition,
-      exitsInWindow: reconciliation.exit_timestamps_ms.length,
-      nextRestartAtMs: reconciliation.next_restart_at_ms,
-    }, watchdogThresholdMs, {
-      beforeAction: async (kind) => {
-        if (redispatchPending) return;
-        reconciliation = beginReconciliationAction(reconciliation, { id: redispatchActionId, sequence: redispatchActionSequence, kind, recorded_at_ms: input.nowMs });
-        await this.transitionOnce(entryId, entry.observed_state, entry.condition, `persisted ${kind} action intent`, actor, reconciliation);
-      },
-    });
-    const finalReconciliation = result.disposition === "failed"
-      ? recordReconciliationActionFailure(reconciliation, redispatchActionId, input.nowMs)
-      : result.disposition === "executed"
-        ? completeReconciliationAction(reconciliation, redispatchActionId)
-        : reconciliation;
-    const target = result.disposition === "failed"
-      ? { observedState: "failed" as const, condition: "none" as const }
-      : { observedState: result.decision.observedState, condition: result.decision.condition };
-    if (target.observedState !== entry.observed_state || target.condition !== entry.condition || JSON.stringify(finalReconciliation) !== JSON.stringify(reconciliation)) {
-      await this.transitionOnce(entryId, target.observedState, target.condition, result.decision.reason, actor, finalReconciliation);
-    }
-    return result;
+    const coordinator = this.providerReconciliation;
+    if (!coordinator) throw new Error("Provider action port is unavailable");
+    return coordinator.reconcile(entryId, input, watchdogThresholdMs, actor);
   }
 
   private async serializeEntryTick<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
@@ -4104,123 +2801,24 @@ export class SupervisorDaemon {
   }
 
   /** Starts periodic convergence and joins provider onExit to the same durable path. */
-  async scheduleConvergence(entryId: string, handle: ProviderActionHandle, input: () => DaemonReconcileInput, watchdogThresholdMs: number, intervalMs: number, actor = "reconciler"): Promise<() => Promise<void>> {
-    const providerPort = this.providerPort;
-    if (!providerPort) throw new Error("Provider action port is unavailable");
-    const existing = this.scheduledConvergence.get(entryId);
-    if (existing) return (await existing).dispose;
-    let resolveReservation!: (control: { dispose: () => Promise<void> }) => void;
-    const reservation = new Promise<{ dispose: () => Promise<void> }>((resolve) => { resolveReservation = resolve; });
-    this.scheduledConvergence.set(entryId, reservation);
-    let timer: ReturnType<typeof setInterval> | null = null;
-    let unsubscribe = () => {};
-    try {
-      let stopped = false;
-      let currentHandle = handle;
-      let currentHandleGeneration = 0;
-      let listenerInstalledGeneration = 0;
-      let listenerInstallTail: Promise<void> = Promise.resolve();
-      const activeCallbacks = new Set<Promise<void>>();
-      const cancel = () => {
-        if (stopped) return;
-        stopped = true;
-        if (timer) clearInterval(timer);
-        unsubscribe();
-        if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
-        if (this.scheduledConvergenceCancels.get(entryId) === cancel) this.scheduledConvergenceCancels.delete(entryId);
-      };
-      this.scheduledConvergenceCancels.set(entryId, cancel);
-      const trackCallback = (operation: Promise<void>) => {
-        activeCallbacks.add(operation);
-        void operation.then(() => activeCallbacks.delete(operation), () => activeCallbacks.delete(operation));
-      };
-      const recordError = async (error: unknown) => this.recordSchedulerFailure(entryId, error, actor);
-      const sameHandle = (left: ProviderActionHandle, right: ProviderActionHandle) => left.workAttemptId === right.workAttemptId && left.pid === right.pid && left.providerContinuationId === right.providerContinuationId;
-      const recordStaleExit = async (staleHandle: ProviderActionHandle, terminal: ProviderActionTerminal) => {
-        const payload = this.terminalPayload(terminal, actor);
-        await this.serializeEntryTick(entryId, () => this.serializeManifestMutation(async () => {
-          const manifest = await this.store.load();
-          const entry = manifest.entries.find((candidate) => candidate.id === entryId);
-          if (!entry) return;
-          await this.transitionOnce(entryId, entry.observed_state, entry.condition, `stale terminal from superseded provider handle pid=${staleHandle.pid ?? "unknown"}`, actor, { ...advanceReconciliationState(entry.reconciliation, entry.observed_state, this.nowMs()), last_terminal: payload }, "coordination_escalation", payload);
-        }));
-      };
-      const installExitListener = async (nextHandle: ProviderActionHandle, generation: number) => {
-        let nextUnsubscribe: () => void;
-        try { nextUnsubscribe = await providerPort.onExit(nextHandle, (terminal) => {
-          const operation = (async () => {
-            try {
-              if (generation !== currentHandleGeneration || !sameHandle(nextHandle, currentHandle)) {
-                await recordStaleExit(nextHandle, terminal);
-                return;
-              }
-              await this.observeProviderExit(entryId, terminal, actor);
-              await tick();
-            } catch (error) {
-              try { await recordError(error); } catch { /* A fenced daemon cannot persist after losing authority. */ }
-            }
-          })();
-          trackCallback(operation);
-        }); } catch (error) {
-          if (generation > 1) throw new ReplacementListenerInstallError(error instanceof Error ? error.message : "replacement listener installation failed");
-          throw error;
-        }
-        if (stopped || generation !== currentHandleGeneration || !sameHandle(nextHandle, currentHandle)) { nextUnsubscribe(); return; }
-        const previousUnsubscribe = unsubscribe;
-        unsubscribe = nextUnsubscribe;
-        listenerInstalledGeneration = generation;
-        previousUnsubscribe();
-      };
-      const enqueueExitListenerInstall = (nextHandle: ProviderActionHandle, generation: number) => {
-        const operation = listenerInstallTail.then(() => installExitListener(nextHandle, generation));
-        listenerInstallTail = operation.catch(() => undefined);
-        return operation;
-      };
-      const queueExitListenerInstall = (nextHandle: ProviderActionHandle) => {
-        // Promotion is intentionally before the await inside `onExit`: a late
-        // terminal from the superseded child is evidence, never a new restart.
-        currentHandle = nextHandle;
-        currentHandleGeneration += 1;
-        const generation = currentHandleGeneration;
-        return enqueueExitListenerInstall(nextHandle, generation);
-      };
-      let tickTail: Promise<void> = Promise.resolve();
-      const tick = () => {
-        const operation = tickTail.then(async () => {
-          if (stopped) return;
-          if (listenerInstalledGeneration !== currentHandleGeneration) await enqueueExitListenerInstall(currentHandle, currentHandleGeneration);
-          const result = await this.reconcile(entryId, { ...input(), handle: currentHandle }, watchdogThresholdMs, actor);
-          if (!stopped && result.replacementHandle) await queueExitListenerInstall(result.replacementHandle);
-        });
-        // A failed action is durably escalated by the caller, but must not
-        // prevent the next convergence edge from observing the new handle.
-        tickTail = operation.catch(() => undefined);
-        return operation;
-      };
-      timer = setInterval(() => {
-        trackCallback(tick().catch(async (error) => { try { await recordError(error); } catch { /* See terminal callback. */ } }));
-      }, intervalMs);
-      await queueExitListenerInstall(handle);
-      // A replacement may already exist when its listener bridge transiently
-      // fails. Keep the scheduler alive: the next serialized tick retries the
-      // same promoted handle instead of launching another child.
-      try { await tick(); } catch (error) {
-        if (error instanceof ReplacementListenerInstallError) await recordError(error);
-        else throw error;
-      }
-      const dispose = async () => {
-        cancel();
-        await Promise.all([...activeCallbacks]);
-      };
-      resolveReservation({ dispose });
-      return dispose;
-    } catch (error) {
-      this.scheduledConvergenceCancels.get(entryId)?.();
-      try { await this.recordSchedulerFailure(entryId, error, actor); } catch { /* Preserve the original setup failure for the caller. */ }
-      resolveReservation({ dispose: async () => {} });
-      if (this.scheduledConvergence.get(entryId) === reservation) this.scheduledConvergence.delete(entryId);
-      throw error;
-    }
+  async scheduleConvergence(
+    entryId: string,
+    handle: ProviderActionHandle,
+    input: () => DaemonReconcileInput,
+    watchdogThresholdMs: number,
+    intervalMs: number,
+    actor = "reconciler",
+  ): Promise<() => Promise<void>> {
+    const coordinator = this.providerReconciliation;
+    if (!coordinator) throw new Error("Provider action port is unavailable");
+    return coordinator.schedule(
+      entryId,
+      handle,
+      input,
+      watchdogThresholdMs,
+      intervalMs,
+      actor,
+    );
   }
 
   private async serializeManifestMutation<T>(operation: () => Promise<T>): Promise<T> {
