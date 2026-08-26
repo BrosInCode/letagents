@@ -1479,7 +1479,7 @@ test("successful polling cycles release backoff listeners instead of accumulatin
     void delivery.start(agent);
     await waitFor(() => internals.loops.has(agent.agentId));
     const controller = internals.loopControllers.get(agent.agentId)!;
-    await waitFor(() => !internals.loops.has(agent.agentId));
+    await waitFor(() => !internals.loops.has(agent.agentId), 5_000);
     assert.equal(polls, 15);
     assert.equal(getEventListeners(controller.signal, "abort").length, 0);
     await store.close();

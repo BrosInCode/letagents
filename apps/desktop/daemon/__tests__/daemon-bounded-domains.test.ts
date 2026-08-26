@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 const mainSource = read("../main.ts");
 const routerSource = read("../control-request-router.ts");
 const cloudSource = read("../cloud-http.ts");
+const roomAgentProjectionSource = read("../room-agent-state-projection.ts");
 
 const expectedControlMethods = [
   "attempt.read",
@@ -72,15 +73,36 @@ test("cloud requests are isolated from the daemon authority owner", () => {
 
 test("daemon policy and projection domains remain extracted", () => {
   for (const moduleName of [
+    "agent-stream-registry",
+    "bounded-effect-coordinator",
     "cloud-http",
+    "continuation-repair-coordinator",
+    "continuation-repair-policy",
     "control-request-router",
-    "manifest-view-projection",
+    "daemon-authority",
+    "daemon-error-policy",
+    "daemon-state-watch",
+    "delivery-cutover-coordinator",
+    "entry-concurrency-gate",
+    "legacy-lane-coordinator",
+    "lifecycle-administration-coordinator",
+    "manifest-administration-coordinator",
     "process-identity",
+    "provider-execution-coordinator",
+    "provider-reconciliation-coordinator",
     "provider-state-policy",
+    "provider-stream-coordinator",
     "provider-stream-policy",
+    "room-agent-state-projection",
+    "room-delivery-control",
+    "room-move-coordinator",
+    "turn-control-coordinator",
+    "worker-authority-coordinator",
+    "worker-runtime-custody",
   ]) {
     assert.match(mainSource, new RegExp(`from "\\./${moduleName}\\.js"`));
   }
+  assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
   assert.equal(matches(mainSource, /^export function providerStreamLifecycle/mg).length, 0);
   assert.equal(matches(mainSource, /^function projectDeliveryReceipts/mg).length, 0);
 });
