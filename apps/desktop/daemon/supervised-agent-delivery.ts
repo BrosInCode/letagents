@@ -491,9 +491,10 @@ export class SupervisedAgentDelivery {
       const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal });
       if (!await this.hasIngressAuthority(agent, controller)) return;
       const messages = activatedMessages(response.messages ?? []);
-      await this.inbox.ingestPoll({
+      await this.inbox.ingestSuccessfulPoll({
         agent_id: agent.agentId,
         room_id: agent.roomId,
+        execution_generation_id: agent.executionGenerationId,
         expected_cursor: cursor?.last_observed_message_id ?? null,
         // A worker-authenticated gap page can contain only prompt rows that
         // fresh authority classifies as silent. The server omits those bodies
@@ -504,7 +505,6 @@ export class SupervisedAgentDelivery {
         messages,
         observed_messages: observedMessages(response.messages ?? []),
       });
-      await this.inbox.setIngressHealth({ agent_id: agent.agentId, room_id: agent.roomId, execution_generation_id: agent.executionGenerationId, state: "observing" });
       // Ingest can be deliberately slow. Do not create detached delivery work
       // after a stop/rebind changed authority while its commit was pending.
       if (!await this.hasIngressAuthority(agent, controller)) return;

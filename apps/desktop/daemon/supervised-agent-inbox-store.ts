@@ -14,6 +14,22 @@ export type SupervisedInboxReceiptState = SupervisedInboxState | "queued_behind_
 export type InboxActivation = Record<string, unknown>;
 export type IngressMessage = { source_message_id: string; source_message: unknown; activation: InboxActivation };
 export type ObservedIngressMessage = IngressMessage & { activation_decision: string };
+type PollIngestionInput = {
+  agent_id: string;
+  room_id: string;
+  last_observed_message_id: string | null;
+  expected_cursor?: string | null;
+  messages: readonly IngressMessage[];
+  observed_messages?: readonly ObservedIngressMessage[];
+};
+type SuccessfulPollIngestionInput = PollIngestionInput & { execution_generation_id: string };
+type IngressHealthUpdate = {
+  agent_id: string;
+  room_id: string;
+  execution_generation_id: string;
+  state: "starting" | "observing" | "backoff" | "blocked" | "stopped";
+  detail?: string | null;
+};
 export type SupervisedInboxItem = {
   inbox_item_id: string; agent_id: string; room_id: string; source_message_id: string;
   source_message: unknown; activation: InboxActivation; fifo_sequence: number; state: SupervisedInboxState;
@@ -194,8 +210,23 @@ export class SupervisedAgentInboxStore {
     }, commitFence));
   }
 
-  /** One transaction: idempotently insert activated messages and persist the poll cursor. */
-  async ingestPoll(input: { agent_id: string; room_id: string; last_observed_message_id: string | null; expected_cursor?: string | null; messages: readonly IngressMessage[]; observed_messages?: readonly ObservedIngressMessage[] }): Promise<SupervisedInboxItem[]> {
+  /** Insert poll data without changing transport health. Used for durable recovery and test setup. */
+  async ingestPoll(input: PollIngestionInput): Promise<SupervisedInboxItem[]> {
+    return this.commitPollIngestion(input);
+  }
+
+  /**
+   * Commit every fact proven by one successful network poll together. The
+   * renderer must never observe newly received work while the same poll still
+   * carries an older backoff error.
+   */
+  async ingestSuccessfulPoll(input: SuccessfulPollIngestionInput): Promise<SupervisedInboxItem[]> {
+    this.require(input.execution_generation_id, "execution_generation_id");
+    return this.commitPollIngestion(input, input.execution_generation_id);
+  }
+
+  /** One transaction: idempotently insert activated messages, persist the cursor, and optionally restore observing health. */
+  private async commitPollIngestion(input: PollIngestionInput, observingExecutionGenerationId?: string): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
       const cursor = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
@@ -236,6 +267,14 @@ export class SupervisedAgentInboxStore {
         ? currentCursor : input.last_observed_message_id;
       run(database.prepare(`INSERT INTO supervised_agent_ingress_cursors(agent_id,room_id,last_observed_message_id,updated_at) VALUES (?,?,?,?)
         ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,last_observed_message_id=excluded.last_observed_message_id,updated_at=excluded.updated_at`), input.agent_id, input.room_id, nextCursor, timestamp);
+      if (observingExecutionGenerationId) {
+        this.writeIngressHealth(database, {
+          agent_id: input.agent_id,
+          room_id: input.room_id,
+          execution_generation_id: observingExecutionGenerationId,
+          state: "observing",
+        }, timestamp);
+      }
       this.pruneAgentHistory(database, input.agent_id);
       return created;
     }));
@@ -649,13 +688,16 @@ export class SupervisedAgentInboxStore {
       .reverse().map((row) => ({ source_message_id: String(row.source_message_id), source_message: JSON.parse(String(row.source_message_json)), activation: JSON.parse(String(row.activation_json)), activation_decision: String(row.activation_decision) })));
   }
 
-  async setIngressHealth(input: { agent_id: string; room_id: string; execution_generation_id: string; state: "starting" | "observing" | "backoff" | "blocked" | "stopped"; detail?: string | null }): Promise<void> {
+  async setIngressHealth(input: IngressHealthUpdate): Promise<void> {
     await this.exclusive(async (database) => this.transaction(database, () => {
-      const timestamp = this.now();
-      run(database.prepare(`INSERT INTO supervised_agent_ingress_health(agent_id,room_id,execution_generation_id,state,detail,observed_at,updated_at)
-        VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,execution_generation_id=excluded.execution_generation_id,state=excluded.state,detail=excluded.detail,observed_at=excluded.observed_at,updated_at=excluded.updated_at`),
-        input.agent_id, input.room_id, input.execution_generation_id, input.state, input.detail ?? null, timestamp, timestamp);
+      this.writeIngressHealth(database, input, this.now());
     }));
+  }
+
+  private writeIngressHealth(database: DatabaseSync, input: IngressHealthUpdate, timestamp: string): void {
+    run(database.prepare(`INSERT INTO supervised_agent_ingress_health(agent_id,room_id,execution_generation_id,state,detail,observed_at,updated_at)
+      VALUES (?,?,?,?,?,?,?) ON CONFLICT(agent_id) DO UPDATE SET room_id=excluded.room_id,execution_generation_id=excluded.execution_generation_id,state=excluded.state,detail=excluded.detail,observed_at=excluded.observed_at,updated_at=excluded.updated_at`),
+      input.agent_id, input.room_id, input.execution_generation_id, input.state, input.detail ?? null, timestamp, timestamp);
   }
 
   async ingressHealth(agentId: string): Promise<{ room_id: string; state: "starting" | "observing" | "backoff" | "blocked" | "stopped"; detail: string | null; execution_generation_id: string } | null> {
