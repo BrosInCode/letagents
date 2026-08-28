@@ -550,6 +550,7 @@ export type DesktopRoomAgentReceiptState =
   | "queued_behind_blocked";
 
 export interface DesktopRoomAgentCausalEvent {
+  sequence: number;
   phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled";
   observedAt: string;
   detail: string | null;
@@ -558,6 +559,8 @@ export interface DesktopRoomAgentCausalEvent {
 export interface DesktopRoomAgentDeliveryReceipt {
   inboxItemId: string;
   sourceMessageId: string;
+  /** Durable order of this receipt within the agent's inbox. */
+  fifoSequence: number;
   /** Deterministic daemon publication identity for this exact reply. */
   replyClientMessageId: string;
   /** Exact room message created by this supervised reply, when one exists. */

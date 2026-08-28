@@ -9,6 +9,7 @@ export function projectDeliveryReceipts(
   return receipts.map((receipt) => ({
     inbox_item_id: receipt.inbox_item_id,
     source_message_id: receipt.source_message_id,
+    fifo_sequence: receipt.fifo_sequence,
     reply_client_message_id: receipt.reply_client_message_id,
     canonical_message_id: receipt.canonical_message_id,
     state: receipt.inbox_item_id === restoringInboxItemId ? "restoring_conversation" : receipt.receipt_state,
