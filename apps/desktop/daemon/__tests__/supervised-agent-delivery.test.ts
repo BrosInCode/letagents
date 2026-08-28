@@ -1440,6 +1440,12 @@ test("the supervised runtime backs off after a poll error and resumes intake", a
     }, currentAuthority, 0);
     void delivery.start(agent);
     await waitFor(() => polls >= 3);
+    assert.deepEqual(await store.ingressHealth(agent.agentId), {
+      room_id: agent.roomId,
+      state: "observing",
+      detail: null,
+      execution_generation_id: agent.executionGenerationId,
+    }, "the successful recovery poll clears backoff before the received turn is exposed");
     await delivery.fenceAndDrain();
     assert.equal((await store.receipts(agent.agentId)).length, 1);
     await store.close();
@@ -1561,8 +1567,8 @@ test("refresh fences a poll paused in ingest and lets the successor recover befo
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const successorPoll = deferred<void>();
-    const ingest = store.ingestPoll.bind(store);
-    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+    const ingest = store.ingestSuccessfulPoll.bind(store);
+    (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; let turns = 0; const turnHandles: unknown[] = [];
@@ -1712,8 +1718,8 @@ test("concurrent refreshes install only the newest epoch and its handle drains r
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>(); const currentPoll = deferred<void>();
-    const ingest = store.ingestPoll.bind(store);
-    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+    const ingest = store.ingestSuccessfulPoll.bind(store);
+    (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; const turnHandles: unknown[] = [];
@@ -1754,8 +1760,8 @@ test("an external stop invalidates a refresh reservation still waiting on drain"
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const ingestEntered = deferred<void>(); const releaseIngest = deferred<void>();
-    const ingest = store.ingestPoll.bind(store);
-    (store as unknown as { ingestPoll(input: Parameters<typeof store.ingestPoll>[0]): ReturnType<typeof store.ingestPoll> }).ingestPoll = async (input) => {
+    const ingest = store.ingestSuccessfulPoll.bind(store);
+    (store as unknown as { ingestSuccessfulPoll(input: Parameters<typeof store.ingestSuccessfulPoll>[0]): ReturnType<typeof store.ingestSuccessfulPoll> }).ingestSuccessfulPoll = async (input) => {
       ingestEntered.resolve(); await releaseIngest.promise; return ingest(input);
     };
     let polls = 0; let turns = 0;

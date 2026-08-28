@@ -95,6 +95,56 @@ test("poll ingestion advances its cursor atomically, deduplicates replay, and re
   } finally { await env.cleanup(); }
 });
 
+test("a successful poll exposes received work and observing health in one notification", async () => {
+  const env = await fixture();
+  let observer: DatabaseSync | null = null;
+  const snapshots: Array<{ inboxCount: number; state: string | null; detail: string | null; generation: string | null }> = [];
+  const store = new SupervisedAgentInboxStore(
+    env.database,
+    () => "2026-08-28T00:28:08.282Z",
+    () => {
+      if (!observer) return;
+      const inbox = observer.prepare("SELECT COUNT(*) AS count FROM supervised_agent_inbox WHERE agent_id=?").get("cloudfern") as Record<string, unknown>;
+      const health = observer.prepare("SELECT state,detail,execution_generation_id FROM supervised_agent_ingress_health WHERE agent_id=?").get("cloudfern") as Record<string, unknown> | undefined;
+      snapshots.push({
+        inboxCount: Number(inbox.count),
+        state: health ? String(health.state) : null,
+        detail: health?.detail === null || health?.detail === undefined ? null : String(health.detail),
+        generation: health ? String(health.execution_generation_id) : null,
+      });
+    },
+  );
+  try {
+    await store.setIngressHealth({
+      agent_id: "cloudfern",
+      room_id: "focus_82",
+      execution_generation_id: "generation-current",
+      state: "backoff",
+      detail: "fetch failed",
+    });
+    observer = new DatabaseSync(env.database);
+
+    await store.ingestSuccessfulPoll({
+      agent_id: "cloudfern",
+      room_id: "focus_82",
+      execution_generation_id: "generation-current",
+      last_observed_message_id: "5",
+      messages: [{ source_message_id: "5", source_message: { text: "just checking if you are alive" }, activation: {} }],
+    });
+
+    assert.deepEqual(snapshots, [{
+      inboxCount: 1,
+      state: "observing",
+      detail: null,
+      generation: "generation-current",
+    }], "no observer can see the new message paired with the previous backoff state");
+  } finally {
+    observer?.close();
+    await store.close();
+    await env.cleanup();
+  }
+});
+
 test("an exact never-dispatched provider turn can be atomically reset without consuming an attempt", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-02T00:00:00.000Z");
