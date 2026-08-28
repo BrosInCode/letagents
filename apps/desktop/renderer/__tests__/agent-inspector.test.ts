@@ -65,6 +65,7 @@ function receipt(
   return {
     inboxItemId: `inbox_${sourceMessageId}`,
     sourceMessageId,
+    fifoSequence: 1,
     replyClientMessageId: `reply_${sourceMessageId}`,
     canonicalMessageId: null,
     state,
@@ -350,7 +351,7 @@ test("Inspector live announcements distinguish responding from idle Online", () 
 
 test("Now uses only sanitized activity observed after the exact turn_started event", () => {
   const delivery = receipt("message_1", "awaiting_result", {
-    timeline: [{ phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
+    timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
   });
   const responding = entry({
     activity: [
@@ -397,7 +398,7 @@ test("delivery progress follows durable turn phases without duplicating the thin
   const withTurn = (state: "dispatching" | "responding" | "retrying" | "publishing") => projectAgentInspector(entry({
     deliveryReceipts: state === "responding"
       ? [receipt("message_1", "awaiting_result", {
-        timeline: [{ phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
+        timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-23T10:00:02.000Z", detail: null }],
       })]
       : [],
     roomAgentState: {
@@ -917,6 +918,107 @@ test("missing-conversation recovery is actionable only before a provider turn st
   });
   assert.equal(ambiguous?.continuationRecovery?.canRestore, false, "started provider work cannot enter the replacement-conversation lane");
   assert.equal(ambiguous?.continuationRecovery?.canSkip, false, "started provider work can never be silently released");
+});
+
+test("restored-conversation notices use the durable event identity and detail", () => {
+  const restoredAt = "2026-07-23T10:00:06.000Z";
+  const restoredReceipt = receipt("message_restored", "acknowledged", {
+    updatedAt: "2026-07-23T10:00:07.000Z",
+    timeline: [{
+      sequence: 3,
+      phase: "conversation_restored",
+      observedAt: restoredAt,
+      detail: "The saved conversation became available again; no replacement was created.",
+    }],
+  });
+  const first = projectAgentInspector(entry({ deliveryReceipts: [restoredReceipt] }), {
+    roomId: "focus_1",
+  });
+  assert.equal(first?.continuationRecovery?.state, "restored");
+  assert.equal(
+    first?.continuationRecovery?.noticeId,
+    `supervised_1:${restoredReceipt.inboxItemId}:3`,
+  );
+  assert.equal(
+    first?.continuationRecovery?.detail,
+    "The saved conversation became available again; no replacement was created.",
+  );
+
+  const refreshed = projectAgentInspector(entry({
+    deliveryReceipts: [{ ...restoredReceipt, updatedAt: "2026-07-23T10:01:00.000Z" }],
+  }), { roomId: "focus_1" });
+  assert.equal(
+    refreshed?.continuationRecovery?.noticeId,
+    first?.continuationRecovery?.noticeId,
+    "ordinary receipt refreshes must not create a new notice",
+  );
+
+  const restoredAgain = projectAgentInspector(entry({
+    deliveryReceipts: [{
+      ...restoredReceipt,
+      timeline: [
+        ...restoredReceipt.timeline,
+        {
+          sequence: 4,
+          phase: "conversation_restored",
+          observedAt: restoredAt,
+          detail: "A tied-time restoration completed.",
+        },
+        {
+          sequence: 5,
+          phase: "conversation_restored",
+          observedAt: "2026-07-23T09:00:00.000Z",
+          detail: "A later-sequence restoration completed.",
+        },
+      ],
+    }],
+  }), { roomId: "focus_1" });
+  assert.notEqual(
+    restoredAgain?.continuationRecovery?.noticeId,
+    first?.continuationRecovery?.noticeId,
+    "a genuinely new restoration must create a new notice",
+  );
+  assert.equal(
+    restoredAgain?.continuationRecovery?.detail,
+    "A later-sequence restoration completed.",
+    "durable sequence, not equal or decreasing timestamps, chooses the latest event",
+  );
+  assert.equal(restoredAgain?.continuationRecovery?.noticeId, `supervised_1:${restoredReceipt.inboxItemId}:5`);
+
+  const newerReceipt = receipt("message_restored_again", "acknowledged", {
+    fifoSequence: 2,
+    updatedAt: "2026-07-23T09:00:00.000Z",
+    timeline: [{
+      sequence: 1,
+      phase: "conversation_restored",
+      observedAt: "2026-07-23T09:00:00.000Z",
+      detail: "A newer receipt was restored after the clock moved backward.",
+    }],
+  });
+  const restoredOnTiedReceipt = projectAgentInspector(entry({
+    deliveryReceipts: [
+      { ...restoredReceipt, updatedAt: newerReceipt.updatedAt },
+      newerReceipt,
+    ],
+  }), { roomId: "focus_1" });
+  assert.equal(
+    restoredOnTiedReceipt?.continuationRecovery?.noticeId,
+    `supervised_1:${newerReceipt.inboxItemId}:1`,
+    "durable FIFO order, not tied wall-clock timestamps, chooses the latest receipt",
+  );
+  assert.equal(
+    restoredOnTiedReceipt?.continuationRecovery?.detail,
+    "A newer receipt was restored after the clock moved backward.",
+  );
+
+  const restoredAfterClockDecrease = projectAgentInspector(entry({
+    deliveryReceipts: [restoredReceipt, newerReceipt],
+  }), { roomId: "focus_1" });
+  assert.equal(
+    restoredAfterClockDecrease?.continuationRecovery?.noticeId,
+    `supervised_1:${newerReceipt.inboxItemId}:1`,
+    "durable FIFO order chooses the latest receipt when its wall-clock timestamp decreases",
+  );
 });
 
 test("the shell resource folds exact pushes and preserves capped activity across polls", () => {

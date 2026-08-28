@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.104";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.106";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -344,14 +344,14 @@ export type DaemonManifestEntryView = DaemonManifestEntry & {
     task: { state: "none" | "assigned" | "working" | "blocked"; task_id: string | null; title: string | null };
   } | null;
   delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string;
+    inbox_item_id: string; source_message_id: string; fifo_sequence: number;
     /** Deterministic publication identity used even before a canonical id was checkpointed. */
     reply_client_message_id: string;
     /** Exact room message created by this inbox item's final-answer publication. */
     canonical_message_id: string | null;
     state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "acknowledged" | "acknowledged_no_reply" | "retryable" | "blocked" | "restoring_conversation" | "cancelled_by_room_move" | "cancelled_by_user" | "queued_behind_blocked";
     attempt_count: number; provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; updated_at: string;
-    timeline: Array<{ phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
+    timeline: Array<{ event_sequence: number; phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled"; observed_at: string; detail: string | null }>;
   }>;
 };
 

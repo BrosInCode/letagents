@@ -165,6 +165,7 @@ test("projects exact room authority without exposing credentials", () => {
     task: { state: "none", task_id: null, title: null },
   });
   assert.equal(projected.delivery_receipts?.[0]?.state, "pending");
+  assert.equal(projected.delivery_receipts?.[0]?.fifo_sequence, 1);
   assert.equal("credential_ref" in projected.worker_binding!, false);
 });
 
