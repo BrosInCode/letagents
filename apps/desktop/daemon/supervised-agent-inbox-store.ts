@@ -49,6 +49,7 @@ export type SupervisedProviderTurnBinding = {
 };
 export type SupervisedInboxReceipt = SupervisedInboxItem & { receipt_state: SupervisedInboxReceiptState };
 export type SupervisedInboxEvent = {
+  event_sequence: number;
   phase: "received" | "queued" | "turn_started" | "turn_finished" | "result_unreadable" | "publish_started" | "published" | "no_reply" | "retry_scheduled" | "blocked" | "room_move_cancelled" | "conversation_restoring" | "conversation_restored" | "user_cancelled";
   observed_at: string;
   detail: string | null;
@@ -404,7 +405,7 @@ export class SupervisedAgentInboxStore {
         return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, uncertain_effects: uncertainEffects, history_boundary: history };
       }
       const item = rowToItem(row);
-      const events = (database.prepare("SELECT phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
+      const events = (database.prepare("SELECT event_sequence,phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
       const terminal = database.prepare("SELECT outcome,normalized_text,evidence_source,observed_at FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const publication = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const repair = database.prepare("SELECT * FROM provider_continuation_repairs WHERE inbox_item_id=? ORDER BY created_at DESC LIMIT 1").get(item.inbox_item_id) as Row | undefined;
@@ -1620,7 +1621,7 @@ export class SupervisedAgentInboxStore {
             )
           )
         )
-        SELECT e.inbox_item_id,e.phase,e.observed_at,e.detail
+        SELECT e.inbox_item_id,e.event_sequence,e.phase,e.observed_at,e.detail
         FROM selected_inbox s
         JOIN supervised_agent_inbox_events e
           ON e.inbox_item_id=s.inbox_item_id
@@ -1640,6 +1641,7 @@ export class SupervisedAgentInboxStore {
         const inboxItemId = String(event.inbox_item_id);
         const timeline = timelines.get(inboxItemId) ?? [];
         timeline.push({
+          event_sequence: Number(event.event_sequence),
           phase: String(event.phase) as SupervisedInboxEvent["phase"],
           observed_at: String(event.observed_at),
           detail: event.detail === null ? null : String(event.detail),
@@ -1969,7 +1971,7 @@ function sameProviderTurnBinding(left: SupervisedProviderTurnBinding, right: Sup
     && left.provider_continuation_id === right.provider_continuation_id
     && left.provider_turn_id === right.provider_turn_id;
 }
-function rowToEvent(row: Row): SupervisedInboxEvent { return { phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail) }; }
+function rowToEvent(row: Row): SupervisedInboxEvent { return { event_sequence: Number(row.event_sequence), phase: String(row.phase) as SupervisedInboxEvent["phase"], observed_at: String(row.observed_at), detail: row.detail === null ? null : String(row.detail) }; }
 function rowToInspectorItem(row: Row): AgentInspectorDetail["items"][number] { const source = safeSource(JSON.parse(String(row.source_message_json)), String(row.source_message_id), "", {}); return { source_message_id: String(row.source_message_id), inbox_item_id: String(row.inbox_item_id), state: String(row.state) as SupervisedInboxState, attempt_count: Number(row.attempt_count), updated_at: String(row.updated_at), sender: source?.sender ?? null, text_preview: source?.text ? source.text.slice(0, 240) : null, created_at: source?.created_at ?? null, outcome: safeOutcome(row.outcome === null ? null : String(row.outcome)), provider_turn_id: row.provider_turn_id === null ? null : String(row.provider_turn_id), last_error: row.last_error === null ? null : String(row.last_error), failure_code: row.failure_code === null || row.failure_code === undefined ? null : String(row.failure_code) as "provider_continuation_missing", terminal_reason: row.terminal_reason === null || row.terminal_reason === undefined ? null : String(row.terminal_reason) as "upgrade_authority_unavailable", canonical_message_id: row.canonical_message_id === null ? null : String(row.canonical_message_id) }; }
 function rowToContinuationRepair(row: Row): ProviderContinuationRepair {
   return {

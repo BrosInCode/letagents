@@ -21,6 +21,7 @@ import {
   onSupervisorAgentStream,
   publishSupervisorActivity,
   setFocusedAgentStream,
+  supervisorStateWatchAcceptsStatus,
   supervisorStateWatchRetryDelay,
   supervisorDaemonSpawnEnvironment,
   supervisorRuntimeEnvironmentFingerprint,
@@ -51,11 +52,11 @@ function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
       task: { state: "none", task_id: null, title: null },
     },
     delivery_receipts: [{
-      inbox_item_id: "inbox_1", source_message_id: "msg_1", state: "blocked", attempt_count: 3,
+      inbox_item_id: "inbox_1", source_message_id: "msg_1", fifo_sequence: 7, state: "blocked", attempt_count: 3,
       canonical_message_id: "msg_reply_1",
       reply_client_message_id: "supervised-room:agent_1:msg_1:reply:v1",
       provider_turn_id: null, blocked_by_message_id: null, error: "failed", updated_at: "2026-01-01T00:00:00.000Z",
-      timeline: [{ phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+      timeline: [{ event_sequence: 1, phase: "blocked", observed_at: "2026-01-01T00:00:00.000Z", detail: "failed" }],
     }],
   };
 }
@@ -244,6 +245,15 @@ test("state-watch retry delay backs off exponentially and remains bounded", () =
   assert.equal(supervisorStateWatchRetryDelay(5), 16_000);
   assert.equal(supervisorStateWatchRetryDelay(6), 30_000);
   assert.equal(supervisorStateWatchRetryDelay(100), 30_000);
+});
+
+test("state watches reject an older implementation until handoff installs the current daemon", () => {
+  assert.equal(supervisorStateWatchAcceptsStatus({
+    implementationVersion: "2.0.105",
+  }), false);
+  assert.equal(supervisorStateWatchAcceptsStatus({
+    implementationVersion: SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+  }), true);
 });
 
 async function startWireDaemon(
@@ -504,12 +514,34 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
   assert.equal(projected.roomAgentState?.connection.state, "connected");
   assert.equal(projected.roomAgentState?.inbox.pendingCount, 2);
   assert.deepEqual(projected.deliveryReceipts, [{
-    inboxItemId: "inbox_1", sourceMessageId: "msg_1", state: "blocked", attemptCount: 3,
+    inboxItemId: "inbox_1", sourceMessageId: "msg_1", fifoSequence: 7, state: "blocked", attemptCount: 3,
     canonicalMessageId: "msg_reply_1",
     replyClientMessageId: "supervised-room:agent_1:msg_1:reply:v1",
     providerTurnId: null, blockedByMessageId: null, error: "failed", failureCode: null, terminalReason: null, updatedAt: "2026-01-01T00:00:00.000Z",
-    timeline: [{ phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
+    timeline: [{ sequence: 1, phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
+});
+
+test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
+  const legacy = wireEntryWithCausalProjection();
+  legacy.delivery_receipts![0]!.timeline = Array.from({ length: 64 }, (_, index) => ({
+    phase: index === 63 ? "conversation_restored" : "queued",
+    observed_at: "2026-01-01T00:00:00.000Z",
+    detail: null,
+  }));
+  assert.deepEqual(
+    mapEntry(legacy).deliveryReceipts,
+    [],
+    "a capped legacy array index is not the durable SQLite event sequence",
+  );
+
+  const withoutDurableReceiptOrder = wireEntryWithCausalProjection();
+  delete withoutDurableReceiptOrder.delivery_receipts![0]!.fifo_sequence;
+  assert.deepEqual(
+    mapEntry(withoutDurableReceiptOrder).deliveryReceipts,
+    [],
+    "a legacy array position is not the durable inbox FIFO sequence",
+  );
 });
 
 test("causal manifest projection synthesizes ingress only for an older daemon that omitted the axis", () => {
@@ -554,7 +586,7 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
     receipt: { state: "acknowledged", attempt_count: 1, provider_turn_id: "turn_1", outcome: { kind: "reply", text: "done", evidence: "transcript" }, last_error: null, blocked_by_inbox_item_id: null, next_attempt_at_ms: null },
     terminal: { outcome: "reply", normalized_text: "done", evidence_source: "transcript", observed_at: "2026-01-01T00:00:01.000Z" },
     publication: { client_message_id: "client_1", canonical_message_id: "msg_2", room_id: "room_1" },
-    timeline: [{ phase: "published", observed_at: "2026-01-01T00:00:02.000Z", detail: "msg_2" }],
+    timeline: [{ event_sequence: 1, phase: "published", observed_at: "2026-01-01T00:00:02.000Z", detail: "msg_2" }],
     items: [{ source_message_id: "msg_1", inbox_item_id: "inbox_1", state: "acknowledged", attempt_count: 1, updated_at: "2026-01-01T00:00:02.000Z", sender: "Ada", text_preview: "ship it", created_at: "2026-01-01T00:00:00.000Z", outcome: { kind: "reply", text: "done" }, provider_turn_id: "turn_1", last_error: null, canonical_message_id: "msg_2" }],
     uncertain_effects: [{ effect_id: "effect_1", tool_name: "send_message", mcp_request_id: "request_1", error: "May have completed.", created_at: "2026-01-01T00:00:01.000Z", updated_at: "2026-01-01T00:00:02.000Z" }],
     history_boundary: { earliest_retained_observed_message_id: "msg_1", earliest_retained_inbox_message_id: "msg_1", earliest_retained_receipt_sequence: 1, pruned_before_message_id: null, pruned_at: null },
@@ -563,6 +595,7 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.equal(mapped.requested_source_message_id, "msg_1");
   assert.equal(mapped.items[0]?.sender, "Ada");
   assert.equal(mapped.uncertain_effects[0]?.effect_id, "effect_1");
+  assert.equal(mapped.timeline[0]?.sequence, 1);
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
   assert.throws(() => mapAgentInspectorDetail({ ...wire, room_id: "room_2" }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, requested_source_message_id: "msg_other" }, input), /invalid or unfenced/);
@@ -571,6 +604,7 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.doesNotThrow(() => mapAgentInspectorDetail({ ...wire, availability: "not_loaded", requested_source_message_id: null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [] }, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }));
   assert.throws(() => mapAgentInspectorDetail({ ...wire, items: [{ ...wire.items[0], state: "invented" }] }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: Array.from({ length: 101 }, () => wire.timeline[0]) }, input), /invalid or unfenced/);
+  assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: [{ ...wire.timeline[0], event_sequence: 0 }] }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, uncertain_effects: Array.from({ length: 33 }, () => wire.uncertain_effects[0]) }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, history_boundary: { ...wire.history_boundary, earliest_retained_receipt_sequence: -1 } }, input), /invalid or unfenced/);
 });
@@ -1625,7 +1659,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.104");
+    assert.equal(status.implementationVersion, "2.0.106");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

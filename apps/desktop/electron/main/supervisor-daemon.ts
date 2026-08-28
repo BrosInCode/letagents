@@ -32,7 +32,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.104";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.106";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Retirement can queue behind one already-admitted worker mint (3 x 10s) so
@@ -213,9 +213,9 @@ type WireEntry = {
     task: { state: string; task_id: string | null; title: string | null };
   } | null;
   delivery_receipts?: Array<{
-    inbox_item_id: string; source_message_id: string; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
+    inbox_item_id: string; source_message_id: string; fifo_sequence?: number; reply_client_message_id: string; canonical_message_id?: string | null; state: string; attempt_count: number;
     provider_turn_id: string | null; blocked_by_message_id: string | null; error: string | null; failure_code?: string | null; terminal_reason?: string | null; updated_at: string;
-    timeline?: Array<{ phase: string; observed_at: string; detail: string | null }>;
+    timeline?: Array<{ event_sequence?: number; phase: string; observed_at: string; detail: string | null }>;
   }>;
 };
 type WireActivityEvent = {
@@ -1648,7 +1648,7 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   const rawUncertainEffects = value.uncertain_effects ?? [];
   if (!Array.isArray(value.timeline) || value.timeline.length > 100 || !Array.isArray(value.items) || value.items.length > 50 || !Array.isArray(rawUncertainEffects) || rawUncertainEffects.length > 32) fail();
   const timelineRows = value.timeline as unknown[]; const itemRows = value.items as unknown[]; const uncertainEffectRows = rawUncertainEffects as unknown[];
-  const timeline = timelineRows.map((candidate) => { const row = record(candidate) ?? fail(); const phase = enumValue(row.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); const detail = nullableString(row.detail); if (detail === undefined) fail(); return { phase, observedAt: at, detail }; });
+  const timeline = timelineRows.map((candidate) => { const row = record(candidate) ?? fail(); const phase = enumValue(row.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const) ?? fail(); const at = nonEmptyString(row.observed_at) ?? fail(); const detail = nullableString(row.detail); const rawSequence = row.event_sequence; if (detail === undefined || typeof rawSequence !== "number" || !Number.isSafeInteger(rawSequence) || rawSequence < 1) fail(); const sequence = Number(rawSequence); return { sequence, phase, observedAt: at, detail }; });
   const items = itemRows.map((candidate) => { const row = record(candidate) ?? fail(); const sourceId = nonEmptyString(row.source_message_id) ?? fail(); const itemId = nonEmptyString(row.inbox_item_id) ?? fail(); const state = enumValue(row.state, ["pending", "dispatching", "awaiting_result", "result_recovery", "publishing", "retryable", "blocked", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"] as const) ?? fail(); const updatedAt = nonEmptyString(row.updated_at) ?? fail(); const sender = nullableString(row.sender); const preview = nullableString(row.text_preview); const createdAt = nullableNonEmptyString(row.created_at); const providerTurn = nullableNonEmptyString(row.provider_turn_id); const error = nullableString(row.last_error); const failureCode = row.failure_code == null ? null : enumValue(row.failure_code, ["provider_continuation_missing"] as const); const terminalReason = row.terminal_reason == null ? null : enumValue(row.terminal_reason, ["upgrade_authority_unavailable"] as const); const canonical = nullableNonEmptyString(row.canonical_message_id); if (sender === undefined || preview === undefined || createdAt === undefined || providerTurn === undefined || error === undefined || (row.failure_code != null && !failureCode) || (row.terminal_reason != null && !terminalReason) || canonical === undefined || typeof row.attempt_count !== "number" || !Number.isSafeInteger(row.attempt_count) || row.attempt_count < 0) fail(); return { source_message_id: sourceId, inbox_item_id: itemId, state, attempt_count: row.attempt_count, updated_at: updatedAt, sender, text_preview: preview, created_at: createdAt, outcome: mapOutcome(row.outcome), provider_turn_id: providerTurn, last_error: error, failure_code: failureCode, terminal_reason: terminalReason, canonical_message_id: canonical }; });
   const uncertainEffects = uncertainEffectRows.map((candidate) => { const row = record(candidate) ?? fail(); return { effect_id: nonEmptyString(row.effect_id) ?? fail(), tool_name: nonEmptyString(row.tool_name) ?? fail(), mcp_request_id: nonEmptyString(row.mcp_request_id) ?? fail(), error: nonEmptyString(row.error) ?? fail(), created_at: nonEmptyString(row.created_at) ?? fail(), updated_at: nonEmptyString(row.updated_at) ?? fail() }; });
   const repair = value.continuation_repair == null ? null : (() => {
@@ -1833,6 +1833,7 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
     if (!receipt) return [];
     const inboxItemId = nonEmptyString(receipt.inbox_item_id);
     const sourceMessageId = nonEmptyString(receipt.source_message_id);
+    const fifoSequence = receipt.fifo_sequence;
     const replyClientMessageId = nonEmptyString(receipt.reply_client_message_id);
     const canonicalMessageId = receipt.canonical_message_id === undefined
       ? null
@@ -1848,7 +1849,7 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       ? null
       : enumValue(receipt.terminal_reason, ["upgrade_authority_unavailable"] as const);
     const updatedAt = nonEmptyString(receipt.updated_at);
-    if (!inboxItemId || !sourceMessageId || !replyClientMessageId || canonicalMessageId === undefined || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || failureCode === undefined || terminalReason === undefined || !updatedAt
+    if (!inboxItemId || !sourceMessageId || typeof fifoSequence !== "number" || !Number.isSafeInteger(fifoSequence) || fifoSequence < 1 || !replyClientMessageId || canonicalMessageId === undefined || !state || providerTurnId === undefined || blockedByMessageId === undefined || error === undefined || failureCode === undefined || terminalReason === undefined || !updatedAt
       || typeof receipt.attempt_count !== "number" || !Number.isFinite(receipt.attempt_count) || !Number.isInteger(receipt.attempt_count) || receipt.attempt_count < 0
       || !Array.isArray(receipt.timeline)) return [];
     const timeline: NonNullable<DesktopSupervisorManifestEntry["deliveryReceipts"]>[number]["timeline"] = [];
@@ -1858,10 +1859,12 @@ function projectDeliveryReceipts(value: unknown): DesktopSupervisorManifestEntry
       const phase = enumValue(value.phase, ["received", "queued", "turn_started", "turn_finished", "result_unreadable", "publish_started", "published", "no_reply", "retry_scheduled", "blocked", "room_move_cancelled", "conversation_restoring", "conversation_restored", "user_cancelled"] as const);
       const observedAt = nonEmptyString(value.observed_at);
       const detail = nullableString(value.detail);
-      if (!phase || !observedAt || detail === undefined) return [];
-      timeline.push({ phase, observedAt, detail });
+      const rawSequence = value.event_sequence;
+      if (!phase || !observedAt || detail === undefined || typeof rawSequence !== "number" || !Number.isSafeInteger(rawSequence) || rawSequence < 1) return [];
+      const sequence = Number(rawSequence);
+      timeline.push({ sequence, phase, observedAt, detail });
     }
-    return [{ inboxItemId, sourceMessageId, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
+    return [{ inboxItemId, sourceMessageId, fifoSequence, replyClientMessageId, canonicalMessageId, state, attemptCount: receipt.attempt_count, providerTurnId, blockedByMessageId, error, failureCode, terminalReason, updatedAt, timeline }];
   });
 }
 
@@ -1978,6 +1981,12 @@ export function supervisorStateWatchRetryDelay(failureCount: number): number {
   );
 }
 
+export function supervisorStateWatchAcceptsStatus(
+  status: Pick<DesktopSupervisorDaemonStatus, "implementationVersion">,
+): boolean {
+  return status.implementationVersion === SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION;
+}
+
 async function runSupervisorStateWatch(): Promise<void> {
   let afterDaemonGeneration = 0;
   let afterSequence = 0;
@@ -1986,6 +1995,13 @@ async function runSupervisorStateWatch(): Promise<void> {
     try {
       const status = await supervisorDaemonClient.connectIfRunning();
       if (!status) return;
+      if (!supervisorStateWatchAcceptsStatus(status)) {
+        // Startup may briefly attach to the previous desktop build's daemon
+        // while the lifecycle owner performs a negotiated handoff. Do not
+        // project its additive wire shape as current durable state.
+        await unrefDelay(STATE_WATCH_RETRY_BASE_MS);
+        continue;
+      }
       if (stateWatchUnsupportedGeneration === status.generation) return;
       if (!status.capabilities.agentStateSubscription) {
         stateWatchUnsupportedGeneration = status.generation;

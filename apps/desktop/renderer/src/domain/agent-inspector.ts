@@ -266,6 +266,7 @@ export interface AgentInspectorProjection {
   recentOutcome: { label: string; observedAt: string } | null;
   continuationRecovery: {
     state: "restoring" | "failed" | "restored";
+    noticeId: string | null;
     sourceMessageId: string;
     detail: string;
     canRestore: boolean;
@@ -904,18 +905,24 @@ function continuationRecovery(
   actions: readonly AgentInspectorActionAvailability[],
 ): AgentInspectorProjection["continuationRecovery"] {
   const receipt = [...(entry.deliveryReceipts ?? [])]
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))
+    .sort((left, right) => right.fifoSequence - left.fifoSequence)
     .find((candidate) =>
       candidate.failureCode === "provider_continuation_missing"
       || candidate.timeline.some((event) => event.phase === "conversation_restored"));
   if (!receipt) return null;
-  const restored = receipt.timeline.some((event) => event.phase === "conversation_restored");
+  const restoredEvent = receipt.timeline
+    .filter((event) => event.phase === "conversation_restored")
+    .sort((left, right) => right.sequence - left.sequence)[0] ?? null;
+  const restored = Boolean(restoredEvent);
   const restoring = receipt.state === "restoring_conversation";
   return {
     state: restored && !restoring ? "restored" : restoring ? "restoring" : "failed",
+    noticeId: restoredEvent
+      ? `${entry.id}:${receipt.inboxItemId}:${restoredEvent.sequence}`
+      : null,
     sourceMessageId: receipt.sourceMessageId,
     detail: restored && !restoring
-      ? "The agent’s identity and workspace were preserved, but its earlier private Codex conversation was unavailable."
+      ? restoredEvent?.detail?.trim() || "The agent’s conversation is available again."
       : restoring
         ? "The provider remains connected while LetAgents verifies and repairs the missing conversation."
         : "Couldn’t restore this agent’s Codex conversation.",

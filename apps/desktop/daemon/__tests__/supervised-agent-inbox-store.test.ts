@@ -2595,7 +2595,9 @@ test("causal event journal is idempotent when an ingress replay shares a constan
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-07-20T12:00:00.000Z");
     await store.ingestPoll({ agent_id: "replay", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
     await store.ingestPoll({ agent_id: "replay", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
-    assert.deepEqual((await store.receipts("replay"))[0]!.timeline.map((event) => event.phase), ["received", "queued"]);
+    const timeline = (await store.receipts("replay"))[0]!.timeline;
+    assert.deepEqual(timeline.map((event) => event.phase), ["received", "queued"]);
+    assert.deepEqual(timeline.map((event) => event.event_sequence), [1, 2]);
     await store.close();
   } finally { await env.cleanup(); }
 });

@@ -709,7 +709,7 @@ test("supervisor native activity drives the chat work indicator for the bound ro
       blockedByMessageId: null,
       error: null,
       updatedAt: "2026-07-15T18:00:00.500Z",
-      timeline: [{ phase: "turn_started", observedAt: "2026-07-15T18:00:00.500Z", detail: null }],
+      timeline: [{ sequence: 1, phase: "turn_started", observedAt: "2026-07-15T18:00:00.500Z", detail: null }],
     }],
     nativeLiveness: { state: "active", observedAt: "2026-07-15T18:00:01.000Z", detail: "tool running" },
     activity: [{
