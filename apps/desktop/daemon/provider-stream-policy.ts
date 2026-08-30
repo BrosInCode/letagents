@@ -36,9 +36,16 @@ export function providerStreamLifecycle(event: ProviderActionStreamEvent): "fail
       && (value === "wait_for_messages" || value === "mcp__letagents__wait_for_messages"));
     return failedRoomWait ? "idle" : "working";
   }
-  // A tool lifecycle status belongs to one tool call, not the provider turn.
-  const failedStatus = event.kind !== "tool_lifecycle"
-    && statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
+  // Item/command failures are execution evidence, not runtime-death evidence.
+  // Scope ALL generic failure checks, including method suffixes and nested
+  // item.error. Keep existing successful-completion presence signals intact.
+  // Do not exempt arbitrary process/terminal errors.
+  const executionScoped = /^(?:item\/|command\/exec(?:\/|$))/i.test(method) || event.kind === "tool_lifecycle";
+  // The Claude adapter labels only recognized turn-limit errors as lifecycle
+  // events. Keep their failure payload intact, but never fence the session
+  // ("terminal" would still fence legacy mcp_polling continuations).
+  if (event.provider === "claude-code" && event.kind === "turn_lifecycle" && /^result\/error_/.test(method)) return "idle";
+  const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
   const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
   const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);
   const failedItem = /^item\/completed$/i.test(method)
@@ -47,7 +54,7 @@ export function providerStreamLifecycle(event: ProviderActionStreamEvent): "fail
     || failedResult
     || failedItem
     || failedStatus && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)
-    || event.kind === "error" && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)) return "failed";
+    || event.kind === "error" && /^(?:result|turn|thread|item)(?:\/|$)/i.test(method)) return executionScoped ? "working" : "failed";
   if (/^(?:result(?:\/success)?|turn\/completed|thread\/completed)$/i.test(method)) return "terminal";
   if (/(?:completed|finished|idle|stopped|interrupted)$/i.test(method)) return "idle";
   return "working";

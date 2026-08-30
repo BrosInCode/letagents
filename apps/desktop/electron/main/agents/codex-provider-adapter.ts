@@ -172,8 +172,18 @@ export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
   return [`mcp_servers.letagents.cwd=${JSON.stringify(cwd)}`];
 }
 
+function isCodexExecutionMethod(method: string): boolean {
+  return /^(?:item\/|command\/exec(?:\/|$))/i.test(method);
+}
+
 function streamKind(method: string): ProviderStreamEventKind {
   if (/(?:approval|requestApproval|guardian)/i.test(method)) return "approval";
+  // Preserve execution identity even when a command/tool reports failure.
+  // Runtime process errors still go through the error classifier below.
+  if (isCodexExecutionMethod(method)) {
+    if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
+    if (/(?:command|process|terminal)/i.test(method)) return "command_output";
+  }
   if (/(?:error|warning|failed)/i.test(method)) return "error";
   if (/(?:usage|tokenUsage|rateLimit)/i.test(method)) return "usage";
   if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
@@ -1239,7 +1249,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
     const summary = summarizeCodexRuntimeNotification(notification);
     this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary);
-    const lifecycle = /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
+    // Execution status belongs to the item, never to the reusable app-server.
+    // Exact turn settlement above remains independent of this runtime state.
+    const lifecycle = isCodexExecutionMethod(notification.method) ? null
+      : /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
       ? "failed"
       : codexLifecycleStatus(notification.params)
         ?? (/^(?:turn|thread)\/(?:completed|interrupted|stopped)$/i.test(notification.method) ? "idle" : null)
