@@ -264,6 +264,8 @@ test("a canonical v4 database with no later additive tables upgrades through the
         BEGIN IMMEDIATE;
         DROP TABLE agent_room_moves;
         DROP TABLE agent_purge_operations;
+        -- A physical v4 fixture predates the v13 continuation-repair journal.
+        DROP TABLE provider_continuation_repairs;
         DROP TABLE supervised_agent_publications;
         DROP TABLE supervised_agent_provider_turn_bindings;
         DROP TABLE supervised_agent_history_boundaries;

@@ -1,10 +1,35 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 17;
+export const DAEMON_STATE_SCHEMA_VERSION = 18;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
+const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
+const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
 type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
+function quoteIdentifier(value: string): string { return `"${value.replaceAll('"', '""')}"`; }
+
+/** Read-only compatibility gate, also used before opening persistent WAL state. */
+export function assertDaemonStateVersionSupported(database: DatabaseSync): number {
+  const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+  const hasMetadata = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='manifest_metadata'").get();
+  const metadata = hasMetadata
+    ? database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get() as Row | undefined
+    : undefined;
+  const metadataVersion = metadata ? Number(metadata.schema_version) : undefined;
+  if (existingVersion > SCHEMA_VERSION) throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
+  if (metadataVersion !== undefined && metadataVersion > SCHEMA_VERSION) {
+    throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
+  }
+  if (existingVersion === 0 && metadataVersion !== undefined) {
+    throw new Error(`Daemon state version pair is inconsistent: user_version=0, metadata schema_version=${metadataVersion}.`);
+  }
+  if (existingVersion !== 0 && metadataVersion !== existingVersion) {
+    throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
+  }
+  return existingVersion;
+}
 
 /** Owns the single daemon-state schema and all version transitions. */
 export class DaemonStateSchema {
@@ -19,20 +44,7 @@ export class DaemonStateSchema {
   ) {}
 
 createSchema(database: DatabaseSync): void {
-  const existingVersion = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
-  const metadataVersion = this.metadataSchemaVersion(database);
-  if (existingVersion > SCHEMA_VERSION) {
-    throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
-  }
-  if (metadataVersion !== undefined && metadataVersion > SCHEMA_VERSION) {
-    throw new Error(`Unsupported daemon manifest metadata schema version ${metadataVersion}.`);
-  }
-  if (existingVersion === 0 && metadataVersion !== undefined) {
-    throw new Error(`Daemon state version pair is inconsistent: user_version=0, metadata schema_version=${metadataVersion}.`);
-  }
-  if (existingVersion !== 0 && metadataVersion !== existingVersion) {
-    throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
-  }
+  const existingVersion = assertDaemonStateVersionSupported(database);
   if (existingVersion === 1) {
     this.migrateV1ToV2(database);
     return;
@@ -97,11 +109,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV16ToV17(database);
     return;
   }
+  if (existingVersion === 17) {
+    this.migrateV17ToV18(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV17Shape(database);
+    this.repairAndValidateV18Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -714,6 +730,8 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -737,6 +755,8 @@ migrateV13ToV14(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -758,6 +778,8 @@ migrateV14ToV15(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -777,6 +799,8 @@ migrateV15ToV16(database: DatabaseSync): void {
     this.validateV16Shape(database);
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -794,6 +818,25 @@ migrateV16ToV17(database: DatabaseSync): void {
   try {
     this.applyV17Shape(database, true);
     this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V18 reserves typed execution storage without changing legacy delivery decisions. */
+migrateV17ToV18(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV17Shape(database);
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1118,6 +1161,8 @@ private applyCurrentSchemaTail(database: DatabaseSync): void {
   this.validateV16Shape(database);
   this.applyV17Shape(database, true);
   this.validateV17Shape(database);
+  this.applyV18Shape(database);
+  this.validateV18Shape(database);
 }
 
 private validateV12Shape(database: DatabaseSync): void {
@@ -1161,6 +1206,8 @@ private applyV13Shape(database: DatabaseSync): void {
   const inboxDefinition = database.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'",
   ).get() as Row | undefined;
+  const retainedInboxStates = INBOX_STATE_CONSTRAINT.exec(String(inboxDefinition?.sql))?.[1]?.replace(/\s/g, "") === `${INBOX_STATES_V17},'acknowledged_failed'`
+    ? `${INBOX_STATES_V17},'acknowledged_failed'` : INBOX_STATES_V17;
   const hasCanonicalFailureCodeConstraint = /CHECK\s*\(\s*failure_code\s+IS\s+NULL\s+OR\s+failure_code\s*=\s*'provider_continuation_missing'\s*\)/i
     .test(String(inboxDefinition?.sql));
   if (hasFailureCode && hasRepairJournal && hasCanonicalFailureCodeConstraint) {
@@ -1222,6 +1269,7 @@ private applyV13Shape(database: DatabaseSync): void {
     `);
     this.afterV13RepairJournalBackupHook?.();
   }
+  const restoreNativeTurnBindings = this.detachLaterInboxTables(database, ["supervised_agent_provider_turn_bindings"]);
   database.exec(`
     PRAGMA defer_foreign_keys = ON;
     ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_pre_v13;
@@ -1231,7 +1279,7 @@ private applyV13Shape(database: DatabaseSync): void {
       agent_id TEXT NOT NULL, room_id TEXT NOT NULL, source_message_id TEXT NOT NULL,
       source_message_json TEXT NOT NULL, activation_json TEXT NOT NULL,
       fifo_sequence INTEGER NOT NULL CHECK (fifo_sequence > 0),
-      state TEXT NOT NULL CHECK (state IN ('pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')),
+      state TEXT NOT NULL CHECK (state IN (${retainedInboxStates})),
       attempt_count INTEGER NOT NULL CHECK (attempt_count >= 0),
       action_id TEXT NOT NULL, reply_client_message_id TEXT NOT NULL,
       provider_turn_id TEXT, outcome TEXT, last_error TEXT,
@@ -1323,6 +1371,7 @@ private applyV13Shape(database: DatabaseSync): void {
       DROP TABLE temp.provider_continuation_repairs_v13_backup;
     `);
   }
+  restoreNativeTurnBindings();
 }
 
 private validateV13Shape(database: DatabaseSync): void {
@@ -2023,6 +2072,127 @@ repairAndValidateV17Shape(database: DatabaseSync): void {
   }
 }
 
+private applyV18Shape(database: DatabaseSync): void {
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'")
+    .get() as Row | undefined;
+  const sql = String(definition?.sql ?? "");
+  const states = INBOX_STATE_CONSTRAINT.exec(sql)?.[1]?.replace(/\s/g, "");
+  if (states !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
+    if (states !== INBOX_STATES_V17) throw new Error("Daemon state v18 cannot upgrade an unknown inbox state constraint.");
+    // Every direct dependent must be saved before dropping the parent: SQLite
+    // rewrites foreign keys on RENAME, and DROP can cascade native-turn and
+    // publication authority away even with deferred constraint checking.
+    const children = [
+      "supervised_agent_inbox_events", "supervised_agent_terminal_results",
+      "supervised_agent_publications", "provider_continuation_repairs",
+      "supervised_agent_provider_turn_bindings",
+    ];
+    const tables = ["supervised_agent_inbox", ...children];
+    for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Row[]) {
+      const table = String(row.name);
+      const referencesInbox = (database.prepare(`PRAGMA foreign_key_list(${quoteIdentifier(table)})`).all() as Row[])
+        .some((key) => key.table === "supervised_agent_inbox");
+      if (referencesInbox && !tables.includes(table)) {
+        throw new Error("Daemon state v18 found an unrecognized inbox dependency and cannot safely rebuild it.");
+      }
+    }
+    const definitions = tables.map((table) => {
+      const tableDefinition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
+      if (!tableDefinition?.sql) throw new Error("Daemon state v18 is missing an authoritative inbox dependency.");
+      const objects = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name")
+        .all(table) as Row[];
+      return { table, sql: String(tableDefinition.sql), objects: objects.map((object) => String(object.sql)) };
+    });
+    database.exec("PRAGMA defer_foreign_keys = ON");
+    for (const table of tables) {
+      database.exec(`CREATE TEMP TABLE ${quoteIdentifier(`v18_snapshot_${table}`)} AS SELECT * FROM ${quoteIdentifier(table)}`);
+    }
+    for (const table of children) database.exec(`DROP TABLE ${quoteIdentifier(table)}`);
+    database.exec("DROP TABLE supervised_agent_inbox");
+    for (const saved of definitions) {
+      database.exec(saved.table === "supervised_agent_inbox"
+        ? saved.sql.replace(INBOX_STATE_CONSTRAINT, `state TEXT NOT NULL CHECK(state IN (${INBOX_STATES_V17},'acknowledged_failed'))`)
+        : saved.sql);
+    }
+    for (const saved of definitions) {
+      database.exec(`INSERT INTO ${quoteIdentifier(saved.table)} SELECT * FROM temp.${quoteIdentifier(`v18_snapshot_${saved.table}`)}`);
+      database.exec(`DROP TABLE temp.${quoteIdentifier(`v18_snapshot_${saved.table}`)}`);
+      for (const object of saved.objects) database.exec(object);
+    }
+  }
+  applyExecutionStorageSchema(database);
+}
+
+private validateV18Shape(database: DatabaseSync): void {
+  this.validateV17Shape(database);
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
+  if (INBOX_STATE_CONSTRAINT.exec(String(definition?.sql))?.[1]?.replace(/\s/g, "") !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
+    throw new Error("Daemon state v18 inbox is missing its reserved failed-delivery terminal state.");
+  }
+  validateExecutionStorageSchema(database);
+  const expectedKeys: Record<string, string[]> = {
+    supervised_agent_inbox: ["blocked_by_inbox_item_id:inbox_item_id:NO ACTION"],
+    supervised_agent_inbox_events: ["inbox_item_id:inbox_item_id:CASCADE"],
+    supervised_agent_terminal_results: ["inbox_item_id:inbox_item_id:CASCADE"],
+    supervised_agent_publications: ["inbox_item_id:inbox_item_id:CASCADE|agent_id:agent_id:CASCADE|room_id:room_id:CASCADE"],
+    provider_continuation_repairs: ["inbox_item_id:inbox_item_id:CASCADE|agent_id:agent_id:CASCADE|room_id:room_id:CASCADE"],
+    supervised_agent_provider_turn_bindings: ["inbox_item_id:inbox_item_id:CASCADE", "inbox_item_id:inbox_item_id:CASCADE|agent_id:agent_id:CASCADE|room_id:room_id:CASCADE"],
+  };
+  for (const [table, expected] of Object.entries(expectedKeys)) {
+    const groups = new Map<number, Row[]>();
+    for (const key of database.prepare(`PRAGMA foreign_key_list(${quoteIdentifier(table)})`).all() as Row[]) {
+      if (key.table !== "supervised_agent_inbox" || key.on_update !== "NO ACTION") {
+        throw new Error(`Daemon state v18 table ${table} has an invalid inbox authority foreign key.`);
+      }
+      const group = groups.get(Number(key.id)) ?? [];
+      group.push(key); groups.set(Number(key.id), group);
+    }
+    const actual = [...groups.values()].map((group) => group.sort((a, b) => Number(a.seq) - Number(b.seq))
+      .map((key) => `${key.from}:${key.to}:${key.on_delete}`).join("|")).sort();
+    if (JSON.stringify(actual) !== JSON.stringify([...expected].sort())) {
+      throw new Error(`Daemon state v18 table ${table} has an invalid inbox authority foreign key.`);
+    }
+  }
+  if (database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v18 failed foreign-key validation.");
+}
+
+repairAndValidateV18Shape(database: DatabaseSync): void {
+  // Missing typed journals are lost authority, not permission to recreate an
+  // empty history. Check them before any predecessor's additive repair path.
+  validateExecutionStorageSchema(database);
+  this.repairAndValidateV17Shape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** Preserve later authority when repairing an older physical inbox shape. */
+private detachLaterInboxTables(database: DatabaseSync, names: string[]): () => void {
+  const saved = names.flatMap((table) => {
+    const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(table) as Row | undefined;
+    if (!definition) return [];
+    const objects = (database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL ORDER BY type,name")
+      .all(table) as Row[]).map((row) => String(row.sql));
+    database.exec(`CREATE TEMP TABLE ${quoteIdentifier(`inbox_repair_${table}`)} AS SELECT * FROM ${quoteIdentifier(table)}`);
+    database.exec(`DROP TABLE ${quoteIdentifier(table)}`);
+    return [{ table, sql: String(definition.sql), objects }];
+  });
+  return () => {
+    for (const item of saved) {
+      database.exec(item.sql);
+      database.exec(`INSERT INTO ${quoteIdentifier(item.table)} SELECT * FROM temp.${quoteIdentifier(`inbox_repair_${item.table}`)}`);
+      database.exec(`DROP TABLE temp.${quoteIdentifier(`inbox_repair_${item.table}`)}`);
+      for (const object of item.objects) database.exec(object);
+    }
+  };
+}
+
 private applyV8Shape(database: DatabaseSync): void {
   database.exec(`
     CREATE TABLE IF NOT EXISTS supervised_agent_publications (
@@ -2102,6 +2272,7 @@ repairAndValidateV8Shape(database: DatabaseSync): void {
  * collide across room moves for the same durable agent.
  */
 private applyV9Shape(database: DatabaseSync): void {
+  const restoreLaterAuthority = this.detachLaterInboxTables(database, ["provider_continuation_repairs", "supervised_agent_provider_turn_bindings"]);
   database.exec(`
     PRAGMA defer_foreign_keys = ON;
     ALTER TABLE supervised_agent_inbox RENAME TO supervised_agent_inbox_v8;
@@ -2198,6 +2369,7 @@ private applyV9Shape(database: DatabaseSync): void {
     DROP TABLE supervised_agent_history_boundaries_v8;
     CREATE INDEX supervised_agent_history_boundaries_updated ON supervised_agent_history_boundaries(agent_id,updated_at);
   `);
+  restoreLaterAuthority();
 }
 
 private validateV9Shape(database: DatabaseSync): void {
@@ -3379,12 +3551,17 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
     try {
       database = new DatabaseSync(path);
       database.exec("PRAGMA busy_timeout = 5000");
+      // A newer daemon owns this schema. Reject before journal-mode conversion,
+      // checkpointing, or initialization can persist changes to its database.
+      assertDaemonStateVersionSupported(database);
       const mode = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (mode.toLowerCase() !== "wal") database.exec("PRAGMA journal_mode = WAL");
       const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
       database.exec("PRAGMA foreign_keys = ON");
       database.exec("PRAGMA synchronous = FULL");
+      // Migration row snapshots must not spill a second plaintext copy to disk.
+      database.exec("PRAGMA temp_store = MEMORY");
       // v6 can retire a formerly-secret column. Zero deleted cells so a
       // successful migration does not leave its token in reusable SQLite pages.
       database.exec("PRAGMA secure_delete = ON");
