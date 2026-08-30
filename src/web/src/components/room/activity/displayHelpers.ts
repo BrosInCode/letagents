@@ -63,7 +63,7 @@ export function historyDetailNote(participant: HistoryParticipant): string {
 }
 
 export function reasoningCardTitle(session: RoomReasoningSession): string {
-  return session.title || session.summary || session.goal || 'Reasoning stream'
+  return session.title || session.summary || session.goal || 'Work stream'
 }
 
 export function reasoningCardSummary(session: RoomReasoningSession): string {

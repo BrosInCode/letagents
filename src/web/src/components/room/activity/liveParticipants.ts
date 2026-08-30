@@ -112,7 +112,7 @@ export function buildWorkSignal(input: {
   }
 
   if (input.activeReasoning.length > 0) {
-    return { state: 'responding', label: 'Responding', detail: 'Visible reasoning stream active' }
+    return { state: 'responding', label: 'Responding', detail: 'Live work stream active' }
   }
 
   if (input.currentTasks.length > 0) {

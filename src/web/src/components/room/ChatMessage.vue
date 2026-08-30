@@ -54,7 +54,7 @@
           v-else-if="thinkingCard"
           :card="thinkingCard"
           compact
-          kicker="Thinking update"
+          kicker="Work update"
         />
         <LongMessageContent
           v-else-if="message.text"
@@ -327,7 +327,7 @@ const threadActionLabel = computed(() => `Open ${threadLabel.value}`)
 const reasoningTitle = computed(() =>
   props.reasoningSession?.title
   || props.reasoningSession?.summary
-  || 'Open the current reasoning stream'
+  || 'Open the current work stream'
 )
 const reasoningSummary = computed(() =>
   props.reasoningSession?.latest_payload?.checking

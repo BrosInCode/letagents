@@ -1,4 +1,5 @@
 import type { DesktopAgentStreamEvent } from "../../../electron/ipc-types";
+import type { AgentInspectorOverallState } from "./agent-inspector";
 
 /**
  * A folded, renderable view of an agent's ephemeral live feed: reasoning and
@@ -22,6 +23,48 @@ export type LiveTranscriptItem =
 export interface AgentLiveTranscript {
   items: LiveTranscriptItem[];
   ended: boolean;
+  startedAt: string | null;
+  lastActivityAt: string | null;
+}
+
+/** Select only evidence owned by the durable room turn. An open provider
+ * stream can span many idle periods and turns, so its replay is not itself a
+ * work boundary. Idle views intentionally retain the bounded recent replay. */
+export function scopeAgentStreamEventsToWork(
+  events: readonly DesktopAgentStreamEvent[],
+  work: { active: boolean; startedAt: string | null },
+): readonly DesktopAgentStreamEvent[] {
+  if (!work.active) return events;
+  const startedAt = Date.parse(work.startedAt ?? "");
+  if (!Number.isFinite(startedAt)) return [];
+  return events.filter((event) => Date.parse(event.observedAt) >= startedAt);
+}
+
+export type AgentLiveAvailability =
+  | "closed"
+  | "stale"
+  | "active"
+  | "stopped"
+  | "paused"
+  | "disconnected"
+  | "attention"
+  | "transitioning"
+  | "idle";
+
+/** One precedence table for the Live tab's claims about availability. */
+export function agentLiveAvailability(
+  work: { active: boolean; freshness: "fresh" | "stale"; agentState: AgentInspectorOverallState },
+  streamEnded: boolean,
+): AgentLiveAvailability {
+  if (streamEnded) return "closed";
+  if (work.freshness === "stale") return "stale";
+  if (work.active) return "active";
+  if (work.agentState === "retired") return "stopped";
+  if (work.agentState === "paused") return "paused";
+  if (work.agentState === "disconnected") return "disconnected";
+  if (work.agentState === "needs_attention") return "attention";
+  if (["restoring_conversation", "recovering", "reconnecting", "starting"].includes(work.agentState)) return "transitioning";
+  return "idle";
 }
 
 function record(value: unknown): Record<string, unknown> | null {
@@ -113,7 +156,33 @@ export function foldAgentStreamEvents(
     }
   }
 
-  return { items, ended };
+  return {
+    items,
+    ended,
+    startedAt: events.find((event) => Boolean(event.observedAt))?.observedAt ?? null,
+    lastActivityAt: [...events].reverse().find((event) => Boolean(event.observedAt))?.observedAt ?? null,
+  };
+}
+
+/** Compact elapsed copy for the live-work header. Invalid timestamps are
+ * ignored instead of leaking `NaN` into the inspector. */
+export function formatLiveWorkDuration(
+  startedAt: string | null,
+  endedAt: string | null,
+  now = Date.now(),
+): string | null {
+  const started = Date.parse(startedAt || "");
+  const ended = endedAt ? Date.parse(endedAt) : now;
+  if (!Number.isFinite(started) || !Number.isFinite(ended)) return null;
+
+  const seconds = Math.max(0, Math.floor((ended - started) / 1_000));
+  if (seconds < 60) return `${seconds}s`;
+
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ${seconds % 60}s`;
+
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 /**
@@ -234,15 +303,15 @@ function action(
 }
 
 /** Headlines for the provider's own (non-MCP) tool surfaces. */
-const NATIVE_TOOL_HEADLINES: Readonly<Record<string, string>> = {
-  shellToolCall: "Ran a shell command",
-  terminalToolCall: "Ran a shell command",
-  editToolCall: "Edited a file",
-  writeToolCall: "Wrote a file",
-  readToolCall: "Read a file",
-  searchToolCall: "Searched the workspace",
-  grepToolCall: "Searched the workspace",
-  globToolCall: "Listed matching files",
+const NATIVE_TOOL_HEADLINES: Readonly<Record<string, { running: string; complete: string }>> = {
+  shellToolCall: { running: "Running a shell command", complete: "Ran a shell command" },
+  terminalToolCall: { running: "Running a shell command", complete: "Ran a shell command" },
+  editToolCall: { running: "Editing a file", complete: "Edited a file" },
+  writeToolCall: { running: "Writing a file", complete: "Wrote a file" },
+  readToolCall: { running: "Reading a file", complete: "Read a file" },
+  searchToolCall: { running: "Searching the workspace", complete: "Searched the workspace" },
+  grepToolCall: { running: "Searching the workspace", complete: "Searched the workspace" },
+  globToolCall: { running: "Listing matching files", complete: "Listed matching files" },
 };
 
 /**
@@ -266,7 +335,10 @@ export function describeLiveToolCall(
   const bareTool = tool.replace(MCP_SERVER_ALIAS_PREFIX, "");
   const known = describeLetAgentsTool(bareTool, inputRecord, outcome);
   if (known) return known;
-  const nativeHeadline = NATIVE_TOOL_HEADLINES[bareTool];
-  if (nativeHeadline) return action(nativeHeadline, inputRecord, bareTool);
+  const nativeHeadlines = NATIVE_TOOL_HEADLINES[bareTool];
+  if (nativeHeadlines) {
+    const headline = outcome?.status === "running" ? nativeHeadlines.running : nativeHeadlines.complete;
+    return action(headline, inputRecord, bareTool);
+  }
   return action(bareTool, inputRecord, bareTool);
 }

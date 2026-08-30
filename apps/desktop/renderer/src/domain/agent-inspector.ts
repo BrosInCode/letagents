@@ -1,4 +1,5 @@
 import type {
+  DesktopRoomAgentTurnState,
   DesktopSupervisorActivityEvent,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorRetirementEvent,
@@ -52,6 +53,17 @@ export interface AgentInspectorDeliveryProgressProjection {
    * make the request look idle or allow a duplicate click.
    */
   requestedLocally: boolean;
+}
+
+/** The durable room-turn boundary that owns whether the agent is working.
+ * Provider streams may span many turns, so they cannot answer this question. */
+export interface AgentInspectorLiveWorkProjection {
+  active: boolean;
+  state: DesktopRoomAgentTurnState;
+  startedAt: string | null;
+  detail: string | null;
+  freshness: "fresh" | "stale";
+  agentState: AgentInspectorOverallState;
 }
 
 export type AgentInspectorActionKind =
@@ -261,6 +273,7 @@ export interface AgentInspectorProjection {
   overallLabel: string;
   overallDetail: string;
   deliveryProgress: AgentInspectorDeliveryProgressProjection | null;
+  liveWork: AgentInspectorLiveWorkProjection;
   now: AgentInspectorNowProjection | null;
   assignedWork: AgentInspectorTaskProjection[];
   recentOutcome: { label: string; observedAt: string } | null;
@@ -452,14 +465,34 @@ function overallPresentation(state: AgentInspectorOverallState): { label: string
   }
 }
 
-function turnStartedAt(entry: DesktopSupervisorManifestEntry): number | null {
+function turnStartedAt(entry: DesktopSupervisorManifestEntry): string | null {
   const turn = entry.roomAgentState?.turn;
   const receipt = entry.deliveryReceipts?.find((candidate) =>
     (Boolean(turn?.inboxItemId) && candidate.inboxItemId === turn?.inboxItemId)
     || (Boolean(turn?.sourceMessageId) && candidate.sourceMessageId === turn?.sourceMessageId));
   const event = [...(receipt?.timeline ?? [])].reverse().find((candidate) => candidate.phase === "turn_started");
-  const timestamp = Date.parse(event?.observedAt ?? "");
-  return Number.isFinite(timestamp) ? timestamp : null;
+  return event?.observedAt ?? null;
+}
+
+function liveWorkProjection(
+  entry: DesktopSupervisorManifestEntry,
+  agentState: AgentInspectorOverallState,
+  freshness: "fresh" | "stale",
+): AgentInspectorLiveWorkProjection {
+  const turn = entry.roomAgentState?.turn;
+  const state = turn?.state ?? "idle";
+  const active = freshness === "fresh" && ACTIVE_TURN_STATES.has(state);
+  return {
+    active,
+    state,
+    // Only an active turn may own a live-work start. Keeping an old receipt
+    // out of the idle projection prevents a persistent provider process from
+    // making the elapsed clock run between room messages.
+    startedAt: active ? turnStartedAt(entry) : null,
+    detail: active ? turn?.detail?.trim() || null : null,
+    freshness,
+    agentState,
+  };
 }
 
 export function isAgentInspectorNowActivity(event: DesktopSupervisorActivityEvent): boolean {
@@ -474,8 +507,8 @@ function nowProjection(
   overallState: AgentInspectorOverallState,
 ): AgentInspectorNowProjection | null {
   if (overallState === "responding") {
-    const startedAt = turnStartedAt(entry);
-    if (startedAt === null) return null;
+    const startedAt = Date.parse(turnStartedAt(entry) ?? "");
+    if (!Number.isFinite(startedAt)) return null;
     const latest = [...entry.activity]
       .sort((left, right) => right.sequence - left.sequence)
       .find((event) => isAgentInspectorNowActivity(event)
@@ -980,6 +1013,7 @@ export function projectAgentInspector(
       options.deliveryRetryingKeys ?? new Set(),
       now?.kind === "progress" && overallState === "responding",
     ),
+    liveWork: liveWorkProjection(entry, overallState, resourceFreshness),
     now,
     assignedWork: exactAssignedWork(entry, options.tasks ?? []),
     recentOutcome: recentOutcome(entry),
