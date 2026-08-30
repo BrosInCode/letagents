@@ -6,6 +6,7 @@ import { parse, compileScript, compileTemplate } from "@vue/compiler-sfc";
 import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, transformWithEsbuild, type ViteDevServer } from "vite";
+import type { AgentInspectorProjection } from "../src/domain/agent-inspector";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../src/domain/agent-inspector-settings";
 
 interface HostNode {
@@ -390,10 +391,7 @@ test("mounted Settings keeps its two-step retirement confirmation", async () => 
   settings.app.unmount();
 });
 
-test("the lifecycle overflow never contains the destructive retire action and survives action refreshes", async () => {
-  // Retire lives in the surface's always-visible destructive footer. Burying
-  // it in the overflow made it a moving target: the menu closed on every
-  // live-facts refresh because its reset watched the rebuilt actions array.
+test("the lifecycle overflow leaves retirement at the base of Overview", async () => {
   const emitted: string[] = [];
   const lifecycle = mount(AgentInspectorLifecycleActions, {
     entryId: "agent_a",
@@ -415,19 +413,119 @@ test("the lifecycle overflow never contains the destructive retire action and su
   lifecycle.app.unmount();
 });
 
-test("the inspector surface renders retire as an entryId-keyed destructive footer", async () => {
-  const source = await readFile(
+test("mounted Overview retirement stays contextual and requires explicit confirmation", async () => {
+  const surfaceSource = await readFile(
     fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue", import.meta.url)),
     "utf8",
   );
-  assert.match(source, /agent-inspector-danger-footer/, "the surface owns the destructive footer");
-  assert.match(source, /Confirm retire agent/, "retiring stays a two-step confirmation");
-  assert.match(source, /AGENT_INSPECTOR_RETIRE_CONFIRMATION/, "the confirmation copy is the shared retire warning");
-  assert.match(
-    source,
-    /watch\(\(\) => props\.projection\.entryId, \(\) => \{ confirmRetire\.value = false; \}\)/,
-    "the confirm state resets only when the inspected agent changes, not on live-facts refreshes",
+  const settingsSource = await readFile(
+    fileURLToPath(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorSettings.vue", import.meta.url)),
+    "utf8",
   );
+  const actions: Array<Record<string, unknown>> = [];
+  const projection: AgentInspectorProjection = {
+    entryId: "agent_a",
+    roomId: "room_a",
+    agentKey: "emmymay/gardensignal",
+    displayName: "GardenSignal",
+    ownerAttribution: "EmmyMay's agent",
+    provider: "codex",
+    model: "gpt-next",
+    charter: "Coordinate work.",
+    overallState: "online",
+    overallLabel: "Online",
+    overallDetail: "",
+    deliveryProgress: null,
+    now: null,
+    assignedWork: [],
+    recentOutcome: null,
+    continuationRecovery: null,
+    turnControl: null,
+    actions: [
+      { kind: "mention", label: "Mention", available: true },
+      { kind: "retire_agent", label: "Retire agent", available: true, danger: true },
+    ],
+    mentionInsertText: "agent:emmymay/gardensignal",
+    resourceFreshness: "fresh",
+    entry: {
+      id: "agent_a",
+      roomId: "room_a",
+      displayName: "GardenSignal",
+      agentKey: "emmymay/gardensignal",
+      provider: "codex",
+      model: "gpt-next",
+      charter: "Coordinate work.",
+      desiredState: "running",
+      observedState: "idle",
+      condition: "none",
+      permissionProfileId: "full_access",
+      deliveryMode: "daemon_inbox",
+      createdBy: "desktop",
+      createdAt: "2026-08-29T00:00:00.000Z",
+      workspacePath: "/tmp/worktree",
+      workAttemptId: "work_a",
+      agentSessionId: "session_a",
+      agentSessionBindingState: "active",
+      bindingUpdatedAt: "2026-08-29T00:00:00.000Z",
+      executionGenerationId: "generation_a",
+      providerContinuationId: "continuation_a",
+      providerPid: 1234,
+      workplaceLiveness: { state: "reachable", observedAt: "2026-08-29T00:00:00.000Z", detail: null },
+      nativeLiveness: { state: "idle", observedAt: "2026-08-29T00:00:00.000Z", detail: null },
+      restartCount: 0,
+      lastTerminal: null,
+      activity: [],
+      lastTurnControlSequence: 0,
+      turnControl: null,
+    },
+  };
+  const mounted = mount(AgentInspectorSurface, {
+    projection,
+    actionState: null,
+    compact: false,
+    workResource: { status: "idle", detail: null, error: null, sourceMessageId: null },
+    selectedWorkSourceMessageId: null,
+    workArtifacts: [],
+    settingsResource: readyResource,
+    roomMoveResource: noMove,
+    roomMoveAvailable: true,
+    providers: [provider],
+    destinations: [],
+    settingsConflict: false,
+    liveFeed: { events: [], ended: false, droppedEvents: 0 },
+    onAction: (intent: Record<string, unknown>) => actions.push(intent),
+  });
+
+  assert.ok(descendants(mounted.root).some((node) => String(node.props.class).includes("agent-inspector-overview-retire")));
+  assert.equal(descendants(mounted.root).some((node) => node.props.role === "alert"), false);
+  const retire = buttonByText(mounted.root, "Retire agent");
+  retire.focus();
+  (retire.props.onClick as () => void)();
+  await nextTick();
+  assert.deepEqual(actions, []);
+  assert.ok(nodeByProp(mounted.root, "role", "alert"));
+  const keep = buttonByText(mounted.root, "Keep agent");
+  assert.equal(testDocument.activeElement, keep, "confirmation moves focus to the safe action");
+  (keep.props.onClick as () => void)();
+  await nextTick();
+  const restoredRetire = buttonByText(mounted.root, "Retire agent");
+  assert.equal(testDocument.activeElement, restoredRetire, "cancelling returns focus to the retire action");
+  (restoredRetire.props.onClick as () => void)();
+  await nextTick();
+  (buttonByText(mounted.root, "Confirm retire agent").props.onClick as () => void)();
+  assert.deepEqual(actions, [{ entryId: "agent_a", roomId: "room_a", kind: "retire_agent" }]);
+  mounted.app.unmount();
+
+  assert.doesNotMatch(surfaceSource, /agent-inspector-danger-footer/, "the inspector has no persistent destructive footer");
+  assert.match(surfaceSource, /class="agent-inspector-overview-retire"/, "Overview owns the visible retire action");
+  assert.match(surfaceSource, /Confirm retire agent/, "Overview retirement remains a two-step confirmation");
+  assert.match(surfaceSource, /AGENT_INSPECTOR_RETIRE_CONFIRMATION/, "Overview uses the shared retirement warning");
+  assert.match(surfaceSource, /<AgentInspectorSettings/, "retirement remains available through Settings");
+  assert.match(surfaceSource, /@retire="emit\('retire'\)"/, "Settings still forwards the retire action");
+  assert.match(settingsSource, /class="agent-inspector-danger"/, "retire is placed in the contextual danger zone");
+  assert.match(settingsSource, /Confirm retire agent/, "retiring stays a two-step confirmation");
+  assert.match(settingsSource, /AGENT_INSPECTOR_RETIRE_CONFIRMATION/, "the confirmation copy is the shared retire warning");
+  assert.match(settingsSource, /watch\(\(\) => props\.entryId/, "confirmation resets when the inspected agent changes");
 });
 
 test("mounted room-move recovery survives an inspector remount without an in-memory operation id", () => {

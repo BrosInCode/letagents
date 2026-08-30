@@ -74,6 +74,32 @@
           @restore-conversation="emitRecoveryControl('restore_conversation', $event)"
           @skip-message="emitRecoveryControl('skip_message', $event)"
         />
+        <section v-if="retireAction" class="agent-inspector-overview-retire" aria-labelledby="agent-inspector-retire-title">
+          <div class="agent-inspector-overview-retire-copy">
+            <p id="agent-inspector-retire-title">Retire agent</p>
+            <span>Retire this agent while keeping its history and worktree.</span>
+          </div>
+          <button
+            v-if="!confirmRetire"
+            ref="retireButton"
+            type="button"
+            class="danger"
+            :disabled="lifecycleActionBusy"
+            data-action="retire_agent"
+            @click="openRetireConfirmation"
+          >
+            Retire agent
+          </button>
+          <div v-else class="agent-inspector-overview-retire-confirmation" role="alert">
+            <p>{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
+            <div>
+              <button ref="keepAgentButton" type="button" :disabled="lifecycleActionBusy" @click="cancelRetireConfirmation">Keep agent</button>
+              <button type="button" class="danger" :disabled="lifecycleActionBusy" data-action="retire_agent" @click="handleRetire">
+                Confirm retire agent
+              </button>
+            </div>
+          </div>
+        </section>
       </div>
       <AgentInspectorLive
         v-else-if="selectedTab === 'live'" id="agent-inspector-live-panel" role="tabpanel" aria-labelledby="agent-inspector-live-tab"
@@ -101,38 +127,11 @@
       />
     </div>
 
-    <!-- Retiring an agent is a deliberate lifecycle decision, not a routine
-         action: it lives as an always-visible destructive footer instead of
-         inside the overflow menu, whose contents re-render on every live-facts
-         refresh and closed under the pointer. The confirm state resets only
-         when the inspected agent changes, so a poll tick cannot cancel it. -->
-    <footer v-if="retireAction" class="agent-inspector-danger-footer">
-      <p v-if="confirmRetire" role="alert">{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
-      <div class="agent-inspector-danger-footer-actions">
-        <button
-          v-if="confirmRetire"
-          type="button"
-          :disabled="lifecycleActionBusy"
-          @click="confirmRetire = false"
-        >
-          Keep agent
-        </button>
-        <button
-          type="button"
-          class="danger"
-          :disabled="lifecycleActionBusy"
-          data-action="retire_agent"
-          @click="handleRetire"
-        >
-          {{ confirmRetire ? "Confirm retire agent" : retireAction.label }}
-        </button>
-      </div>
-    </footer>
   </aside>
 </template>
 
 <script setup lang="ts">
-import { computed, defineAsyncComponent, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import type {
   AgentInspectorActionIntent,
   AgentInspectorActionState,
@@ -192,6 +191,8 @@ const emit = defineEmits<{
 const surfaceElement = ref<HTMLElement | null>(null);
 const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
+const retireButton = ref<HTMLButtonElement | null>(null);
+const keepAgentButton = ref<HTMLButtonElement | null>(null);
 const selectedTab = ref<InspectorTab>("overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
 const liveSupportsReasoning = computed(() => {
@@ -210,17 +211,22 @@ const visibleActionMessage = computed(() => {
   return props.actionState.message;
 });
 const retireAction = computed(() =>
-  props.projection.actions.find((action) => action.available && action.danger) ?? null);
+  props.projection.actions.find((action) => action.available && action.kind === "retire_agent") ?? null);
 const confirmRetire = ref(false);
-watch(() => props.projection.entryId, () => { confirmRetire.value = false; });
+
+function openRetireConfirmation(): void {
+  confirmRetire.value = true;
+  void nextTick(() => keepAgentButton.value?.focus({ preventScroll: true }));
+}
+
+function cancelRetireConfirmation(): void {
+  confirmRetire.value = false;
+  void nextTick(() => retireButton.value?.focus({ preventScroll: true }));
+}
 
 function handleRetire(): void {
   const action = retireAction.value;
   if (!action) return;
-  if (!confirmRetire.value) {
-    confirmRetire.value = true;
-    return;
-  }
   confirmRetire.value = false;
   emit("action", {
     entryId: props.projection.entryId,
@@ -240,11 +246,15 @@ function containsFocus(): boolean {
 
 defineExpose({ focusInitial, containsFocus });
 
-watch(() => props.projection.entryId, () => { selectedTab.value = "overview"; });
+watch(() => props.projection.entryId, () => {
+  selectedTab.value = "overview";
+  confirmRetire.value = false;
+});
 
 function selectTab(tab: InspectorTab): void {
   if (selectedTab.value === tab) return;
   if (selectedTab.value === "live" && tab !== "live") emit("live-dismissed");
+  if (tab !== "overview") confirmRetire.value = false;
   selectedTab.value = tab;
   if (tab === "live") emit("live-selected");
   if (tab === "work") emit("work-selected");

@@ -63,7 +63,7 @@
         <div class="agent-inspector-section-heading"><p id="agent-inspector-danger-title">Danger zone</p></div>
         <p>Retire stops this saved agent while retaining its history and worktree. Purge removes durable agent records but never deletes its worktree.</p>
         <template v-if="!retired">
-          <button v-if="!confirmRetire" type="button" :disabled="busy" @click="confirmRetire = true">Retire agent</button>
+          <button v-if="!confirmRetire" type="button" class="danger" :disabled="busy" @click="confirmRetire = true">Retire agent</button>
           <div v-else class="agent-inspector-retire-confirmation" role="alert">
             <p>{{ AGENT_INSPECTOR_RETIRE_CONFIRMATION }}</p>
             <button type="button" :disabled="busy" @click="confirmRetireAgent">Confirm retire agent</button>
