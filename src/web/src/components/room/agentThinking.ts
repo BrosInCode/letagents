@@ -98,7 +98,7 @@ function getPhaseLabel(phase: AgentThinkingPhase): string {
   if (phase === 'working') return 'Working'
   if (phase === 'reviewing') return 'Reviewing'
   if (phase === 'blocked') return 'Blocked'
-  return 'Reasoning note'
+  return 'Work note'
 }
 
 function dedupeStrings(values: readonly string[]): string[] {

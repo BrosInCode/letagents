@@ -104,6 +104,7 @@
       <AgentInspectorLive
         v-else-if="selectedTab === 'live'" id="agent-inspector-live-panel" role="tabpanel" aria-labelledby="agent-inspector-live-tab"
         :feed="liveFeed"
+        :work="projection.liveWork"
         :supports-reasoning="liveSupportsReasoning"
       />
       <AgentInspectorWork

@@ -1,12 +1,12 @@
 <template>
   <div class="reasoning-anchor">
     <div class="reasoning-anchor-copy">
-      <span class="reasoning-anchor-label">Reasoning trace</span>
+      <span class="reasoning-anchor-label">Live work</span>
       <strong>{{ title }}</strong>
       <p v-if="summary">{{ summary }}</p>
     </div>
     <button class="reasoning-anchor-button" type="button" @click="emit('open')">
-      Open reasoning
+      Open work log
     </button>
   </div>
 </template>

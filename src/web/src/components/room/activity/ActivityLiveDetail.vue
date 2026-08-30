@@ -54,13 +54,13 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Reasoning snapshot</h4>
+        <h4>Current work</h4>
         <span>Live</span>
       </div>
 
       <AgentThinkingCard
         :card="participant.thinkingSnapshot"
-        kicker="Latest visible reasoning"
+        kicker="Latest agent update"
         :timestampLabel="formatLastSeen(participant.lastSeenAt)"
       />
     </section>
@@ -113,7 +113,7 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Live reasoning</h4>
+        <h4>Active work streams</h4>
         <span>{{ participant.activeReasoning.length }}</span>
       </div>
 
@@ -121,7 +121,7 @@
         v-if="participant.activeReasoning.length === 0"
         class="activity-detail-empty"
       >
-        No active reasoning streams are exposed for this agent right now.
+        No active work streams are available for this agent right now.
       </div>
 
       <div v-else class="activity-reasoning-list">
@@ -144,7 +144,7 @@
             type="button"
             @click="emit('openReasoning', session.id)"
           >
-            Open reasoning
+            Open work stream
           </button>
         </article>
       </div>
@@ -155,7 +155,7 @@
       class="activity-detail-section"
     >
       <div class="activity-detail-section-header">
-        <h4>Reasoning trail</h4>
+        <h4>Work log</h4>
         <span>{{ participant.thinkingTimeline.length }}</span>
       </div>
 

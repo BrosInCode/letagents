@@ -55,9 +55,7 @@ const visibleDetails = computed(() => props.card.details.slice(0, props.compact 
   padding: 12px 14px;
   border-radius: 14px;
   border: 1px solid var(--thinking-border);
-  background:
-    radial-gradient(circle at top right, color-mix(in srgb, currentColor 12%, transparent), transparent 46%),
-    var(--thinking-surface);
+  background: var(--thinking-surface);
   color: var(--text, #fafafa);
 }
 

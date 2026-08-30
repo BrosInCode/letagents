@@ -1,7 +1,7 @@
 <template>
   <section v-if="summary" class="reasoning-summary" :data-updating="recentlyUpdated">
     <h3>
-      Current summary
+      Current update
       <small v-if="live" class="reasoning-live-dot" aria-label="Streaming" />
     </h3>
     <p>{{ summary }}</p>

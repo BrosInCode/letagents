@@ -3,7 +3,13 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { describeLiveToolCall, foldAgentStreamEvents } from "../src/domain/agent-inspector-live";
+import {
+  agentLiveAvailability,
+  describeLiveToolCall,
+  foldAgentStreamEvents,
+  formatLiveWorkDuration,
+  scopeAgentStreamEventsToWork,
+} from "../src/domain/agent-inspector-live";
 import type { DesktopAgentStreamEvent } from "../../electron/ipc-types";
 
 function source(relative: string): string {
@@ -98,6 +104,57 @@ test("fold preserves first-appearance order across interleaved kinds", () => {
     event({ sequence: 3, method: "item/agentMessage/delta", payload: { partId: "m1", delta: "done" } }),
   ]);
   assert.deepEqual(transcript.items.map((item) => item.kind), ["reasoning", "tool", "message"]);
+  assert.equal(transcript.startedAt, "2026-07-31T00:00:00.000Z");
+  assert.equal(transcript.lastActivityAt, "2026-07-31T00:00:00.000Z");
+});
+
+test("live-work duration copy stays compact and freezes at the last event", () => {
+  assert.equal(formatLiveWorkDuration(
+    "2026-07-31T00:00:00.000Z",
+    null,
+    Date.parse("2026-07-31T00:00:09.900Z"),
+  ), "9s");
+  assert.equal(formatLiveWorkDuration(
+    "2026-07-31T00:00:00.000Z",
+    "2026-07-31T00:01:12.000Z",
+  ), "1m 12s");
+  assert.equal(formatLiveWorkDuration(
+    "2026-07-31T00:00:00.000Z",
+    "2026-07-31T02:04:19.000Z",
+  ), "2h 4m");
+  assert.equal(formatLiveWorkDuration("not-a-date", null), null);
+});
+
+test("live work scopes a persistent provider replay to the durable room turn", () => {
+  const prior = event({ sequence: 1, observedAt: "2026-07-31T00:00:01.000Z" });
+  const current = event({ sequence: 2, observedAt: "2026-07-31T00:01:01.000Z" });
+  assert.deepEqual(scopeAgentStreamEventsToWork([prior, current], {
+    active: true,
+    startedAt: "2026-07-31T00:01:00.000Z",
+  }), [current]);
+  assert.deepEqual(scopeAgentStreamEventsToWork([prior, current], {
+    active: true,
+    startedAt: null,
+  }), [], "an active turn without its durable boundary never replays stale work");
+  assert.deepEqual(scopeAgentStreamEventsToWork([prior, current], {
+    active: false,
+    startedAt: null,
+  }), [prior, current], "idle inspectors may retain the bounded recent-work history without claiming it is active");
+});
+
+test("live availability never presents transitional or unavailable agents as ready", () => {
+  const work = (agentState: Parameters<typeof agentLiveAvailability>[0]["agentState"], active = false) => ({
+    active,
+    freshness: "fresh" as const,
+    agentState,
+  });
+  assert.equal(agentLiveAvailability(work("online"), false), "idle");
+  assert.equal(agentLiveAvailability(work("responding", true), false), "active");
+  for (const state of ["restoring_conversation", "recovering", "reconnecting", "starting"] as const) {
+    assert.equal(agentLiveAvailability(work(state), false), "transitioning");
+  }
+  assert.equal(agentLiveAvailability(work("retired"), true), "closed", "a closed stream wins over retained agent state");
+  assert.equal(agentLiveAvailability({ ...work("responding", true), freshness: "stale" }, false), "stale");
 });
 
 test("separate Cursor assistant events preserve every content block in wire order", () => {
@@ -229,12 +286,39 @@ test("describeLiveToolCall truncates long details but never truncates the room r
   assert.equal(reply.replyText, longText);
 });
 
-test("the live surface renders replies as message content and keeps raw payloads behind disclosure", () => {
+test("the live surface presents a work narrative and keeps technical payloads behind disclosure", () => {
   const surface = source("../src/components/desktop/content/agent-inspector/AgentInspectorLive.vue");
-  assert.match(surface, /Working aloud/);
+  assert.match(surface, /Live work/);
+  assert.match(surface, /Working for/);
+  assert.match(surface, /props\.work\.active && !props\.feed\.ended/);
+  assert.match(surface, /scopeAgentStreamEventsToWork\(props\.feed\.events, props\.work\)/);
+  assert.match(surface, /agentLiveAvailability\(props\.work, props\.feed\.ended\)/);
+  assert.match(surface, /This agent is retired and cannot receive new room work/);
+  assert.match(surface, /The agent is still starting and cannot receive room work yet/);
+  assert.match(surface, /Waiting for room work/);
+  assert.doesNotMatch(surface, /transcript\.value\.ended \? "Ended" : "In progress"/);
+  assert.match(surface, /Agent commentary/);
+  assert.match(surface, /Work note/);
+  assert.doesNotMatch(surface, />Thinking</);
+  assert.doesNotMatch(surface, /Working aloud/);
   assert.doesNotMatch(surface, />Response</);
   assert.match(surface, /agent-inspector-live-reply/);
   assert.match(surface, /<details/);
-  assert.match(surface, /Raw \{\{ entry\.tool\.toolName \}\} call/);
+  assert.match(surface, /Technical details · \{\{ entry\.tool\.toolName \}\}/);
   assert.match(surface, /describeLiveToolCall/);
+});
+
+test("running native actions use present-progressive copy", () => {
+  const running = describeLiveToolCall(
+    "readToolCall",
+    { path: "README.md" },
+    { status: "running", output: null, error: null },
+  );
+  const completed = describeLiveToolCall(
+    "readToolCall",
+    { path: "README.md" },
+    { status: "completed", output: null, error: null },
+  );
+  assert.equal(running.headline, "Reading a file");
+  assert.equal(completed.headline, "Read a file");
 });
