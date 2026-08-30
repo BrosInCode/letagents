@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
-import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning } from "./state-recovery-backup.js";
+import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, StateRecoveryError } from "./state-recovery-backup.js";
 
 export type StateRecoveryBootstrap = {
   getBackupKey?: typeof requestStateRecoveryKey;
@@ -33,7 +33,7 @@ export async function withProtectedStateUpgrade<T>(
 /** Bootstrap-only private parent channel. Never a renderer/control-socket API. */
 export function requestStateRecoveryKey(): Promise<{ key: Buffer; sealedKey: string }> {
   if (!process.send || !process.connected) {
-    return Promise.reject(new Error("A database upgrade requires Desktop secure storage. Start the supervisor from the updated Desktop app."));
+    return Promise.reject(new StateRecoveryError("desktop_channel_missing"));
   }
   const id = randomUUID();
   return new Promise((resolve, reject) => {
@@ -43,26 +43,26 @@ export function requestStateRecoveryKey(): Promise<{ key: Buffer; sealedKey: str
       process.off("disconnect", disconnected);
       if (error) reject(error); else resolve(result!);
     };
-    const disconnected = () => finish(new Error("Desktop disconnected before the database backup key was available."));
+    const disconnected = () => finish(new StateRecoveryError("key_unavailable"));
     const receive = (message: unknown) => {
       if (!message || typeof message !== "object") return;
       const value = message as Record<string, unknown>;
       if (value.type !== "state_recovery_key" || value.id !== id) return;
       if (value.error) {
-        finish(new Error("Secure storage is unavailable. Unlock it and retry the Desktop database upgrade."));
+        finish(new StateRecoveryError("key_unavailable"));
         return;
       }
       const key = typeof value.key === "string" && /^[A-Za-z0-9+/]{43}=$/.test(value.key)
         ? Buffer.from(value.key, "base64") : Buffer.alloc(0);
       if (key.length !== 32 || typeof value.sealedKey !== "string" || !value.sealedKey.length || value.sealedKey.length > 16384) {
         key.fill(0);
-        finish(new Error("Desktop supplied an invalid database backup key."));
+        finish(new StateRecoveryError("key_unavailable"));
         return;
       }
       finish(undefined, { key, sealedKey: value.sealedKey });
     };
     // This bounds key handoff before schema mutation, not provider work.
-    const timer = setTimeout(() => finish(new Error("Desktop did not provide a database backup key.")), 30_000);
+    const timer = setTimeout(() => finish(new StateRecoveryError("key_unavailable")), 30_000);
     process.on("message", receive);
     process.once("disconnect", disconnected);
     process.send!({ type: "state_recovery_key_request", id }, (error) => {

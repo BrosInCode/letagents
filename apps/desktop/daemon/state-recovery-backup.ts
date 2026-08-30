@@ -31,7 +31,14 @@ type TableRecord = { kind: "table"; name: string; sql: string | null; columns: s
 type SnapshotRecord = TableRecord | { kind: "row"; cells: Cell[] }
   | { kind: "ddl"; sql: string } | { kind: "end"; applicationId: number };
 
-function failure(): Error { return new Error("Encrypted daemon recovery snapshot could not be verified safely."); }
+type StateRecoveryFailureCode = "desktop_channel_missing" | "key_unavailable" | "snapshot_refused" | "verify_failed";
+/** Fixed codes reach the existing startup log through Error.message, never a source exception. */
+export class StateRecoveryError extends Error {
+  constructor(readonly code: StateRecoveryFailureCode) {
+    super(`Encrypted daemon recovery snapshot could not be verified safely. [${code}]`);
+  }
+}
+function failure(code: StateRecoveryFailureCode = "verify_failed"): StateRecoveryError { return new StateRecoveryError(code); }
 function quote(name: string): string { return `"${name.replaceAll('"', '""')}"`; }
 function backupPath(databasePath: string): string { return `${resolve(databasePath)}.recovery.enc`; }
 
@@ -98,7 +105,9 @@ function* snapshot(database: DatabaseSync): Generator<SnapshotRecord> {
   for (const entry of schema.filter((entry) => entry.type === "table").sort((a, b) =>
     Number(a.name === "sqlite_sequence") - Number(b.name === "sqlite_sequence"))) {
     const name = String(entry.name);
-    // SQLite-owned ANALYZE/virtual-table internals cannot be recreated by normal DDL.
+    // ANALYZE statistics are derived, not user data. Only known statistics are
+    // omitted; sequence state is preserved and all other internals fail closed.
+    if (/^sqlite_stat[1-4]$/.test(name)) continue;
     if (name.startsWith("sqlite_") && name !== "sqlite_sequence") throw failure();
     const table = tables.find((table) => table.name === name);
     if (!table) throw failure();
@@ -231,6 +240,7 @@ export async function prepareStateRecoveryBackup(
   let database: DatabaseSync | undefined;
   let key: Buffer | undefined;
   let ownedCandidate = false;
+  let failureCode: StateRecoveryFailureCode = "snapshot_refused";
   try {
     if (!Number.isSafeInteger(targetVersion) || targetVersion < 1) throw failure();
     if (!await regularFile(databasePath)) return null;
@@ -245,9 +255,11 @@ export async function prepareStateRecoveryBackup(
     await regularFile(path, true);
     // A prior crash can leave only ciphertext here. Never follow or truncate a link.
     if (await regularFile(candidate, true)) await unlink(candidate);
+    failureCode = "key_unavailable";
     const material = await getKey();
     key = material.key;
     if (!Buffer.isBuffer(key) || key.length !== 32 || !material.sealedKey) throw failure();
+    failureCode = "snapshot_refused";
     const header: Header = { format: MAGIC, sourceVersion, targetVersion, createdAt: (options.now ?? new Date()).toISOString(), sealedKey: material.sealedKey, nonce: randomBytes(12).toString("base64") };
     const aad = Buffer.from(`${JSON.stringify(header)}\n`);
     if (aad.length > HEADER_LIMIT) throw failure();
@@ -271,8 +283,10 @@ export async function prepareStateRecoveryBackup(
       await write(cipher.getAuthTag());
       await file.sync();
     } finally { await file.close(); }
+    failureCode = "verify_failed";
     const verified = await decryptStateRecoveryBackup(candidate, key);
     verified.close();
+    failureCode = "snapshot_refused";
     await regularFile(path, true);
     await rename(candidate, path);
     ownedCandidate = false;
@@ -280,7 +294,13 @@ export async function prepareStateRecoveryBackup(
     const result = Object.freeze({ ...header, path, sha256: hash.digest("hex") });
     authenticatedSnapshots.add(result);
     return result;
-  } catch { throw failure(); }
+  } catch (error) {
+    // Preserve only the known bootstrap distinction, not arbitrary error codes,
+    // messages, stacks, or causes supplied by key storage / SQLite / filesystem.
+    if (failureCode === "key_unavailable" && error instanceof StateRecoveryError
+      && error.code === "desktop_channel_missing") failureCode = "desktop_channel_missing";
+    throw failure(failureCode);
+  }
   finally {
     key?.fill(0);
     try { database?.close(); } catch { /* read transaction rolls back */ }

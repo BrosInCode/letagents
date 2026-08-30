@@ -89,6 +89,9 @@ const tables: Record<string, string> = {
     FOREIGN KEY(attempt_id,agent_id,room_id,execution_generation_id)
       REFERENCES execution_attempt_generations(attempt_id,agent_id,room_id,execution_generation_id)
   ) STRICT`,
+  // runtime_generation_id identifies the subject turn's original native lifetime,
+  // not the observer's current child. observer_epoch separates re-observation;
+  // ingestion must still prove the exact retained turn and current observer fence.
   execution_facts: `CREATE TABLE execution_facts (
     sequence INTEGER PRIMARY KEY AUTOINCREMENT,
     fact_id TEXT NOT NULL UNIQUE,
@@ -259,6 +262,8 @@ const tables: Record<string, string> = {
 // event IDs are correlation evidence, not assumed globally unique.
 
 const indexes: Record<string, string> = {
+  // agent_id is the stable manifest entry, preserved across room moves. One
+  // execution lane spans those moves; each attempt retains its source room.
   execution_turn_one_active: "CREATE UNIQUE INDEX execution_turn_one_active ON execution_turns(agent_id) WHERE state='active'",
   execution_facts_agent_sequence: "CREATE INDEX execution_facts_agent_sequence ON execution_facts(agent_id,sequence)",
   execution_facts_turn_sequence: "CREATE INDEX execution_facts_turn_sequence ON execution_facts(turn_id,sequence)",

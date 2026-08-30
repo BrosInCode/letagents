@@ -7,10 +7,11 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 import {
   cleanupStateRecoveryBackup, decryptStateRecoveryBackup, markStateRecoveryBackupValidated,
-  prepareStateRecoveryBackup, type StateRecoveryBackup,
+  prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,
 } from "../state-recovery-backup.js";
 import { DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
-import { withProtectedStateUpgrade } from "../state-recovery-key.js";
+import { requestStateRecoveryKey, withProtectedStateUpgrade } from "../state-recovery-key.js";
+import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "../lifecycle-log.js";
 
 const ERROR = /Encrypted daemon recovery snapshot could not be verified safely\./;
 const OLD = new Date("2026-08-30T00:00:00.000Z");
@@ -59,7 +60,10 @@ test("encrypted consistent snapshot includes WAL rows and roundtrips SQLite iden
     INSERT INTO compact VALUES('blob',X'0001FF');
     CREATE INDEX child_payload ON child(payload);
     CREATE VIEW child_view AS SELECT payload FROM child;
-    CREATE TRIGGER parent_deleted AFTER DELETE ON parent BEGIN DELETE FROM child WHERE parent_id=old.id; END;`);
+    CREATE TRIGGER parent_deleted AFTER DELETE ON parent BEGIN DELETE FROM child WHERE parent_id=old.id; END;
+    ANALYZE;`);
+  const statistics = env.database.prepare("SELECT * FROM sqlite_stat1").all();
+  assert.ok(statistics.length > 0, "ANALYZE generated optimizer statistics in the source");
   assert.ok((await lstat(`${env.path}-wal`)).size > 0, "committed content is still in the live WAL");
   const result = await env.prepare();
   assert.equal(result?.sourceVersion, 17);
@@ -69,6 +73,9 @@ test("encrypted consistent snapshot includes WAL rows and roundtrips SQLite iden
   assert.deepEqual((await readdir(env.directory)).filter((name) => name.includes("recovery")), ["daemon.sqlite.recovery.enc"]);
   const restored = await decryptStateRecoveryBackup(env.backup, env.key);
   try {
+    assert.equal(restored.prepare("SELECT 1 FROM sqlite_schema WHERE name GLOB 'sqlite_stat*'").get(), undefined);
+    const userDdl = "SELECT type,name,sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name";
+    assert.deepEqual(restored.prepare(userDdl).all(), env.database.prepare(userDdl).all(), "only derived statistics are omitted, not user DDL");
     assert.equal(restored.prepare("SELECT token FROM retained_worker_bindings").get()!.token, secret);
     assert.deepEqual(Buffer.from(restored.prepare("SELECT token FROM supervised_worker_mint_states").get()!.token as Uint8Array), Buffer.from(secret));
     const child = restored.prepare("SELECT rowid,parent_id,payload FROM child"); child.setReadBigInts(true);
@@ -84,6 +91,7 @@ test("encrypted consistent snapshot includes WAL rows and roundtrips SQLite iden
     restored.exec("DELETE FROM parent WHERE id=99");
     assert.equal(restored.prepare("SELECT count(*) AS count FROM child_view").get()!.count, 0);
   } finally { restored.close(); }
+  assert.deepEqual(env.database.prepare("SELECT * FROM sqlite_stat1").all(), statistics, "snapshotting leaves source statistics intact");
   assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 17, "inspection does not migrate or replace live state");
 });
 
@@ -131,10 +139,17 @@ test("unroundtrippable shapes fail closed without replacing the last valid recov
   const env = await fixture(t);
   await env.prepare();
   const before = await readFile(env.backup);
-  env.database.exec("CREATE TABLE unsupported(rowid TEXT,_rowid_ TEXT,oid TEXT)");
-  await assert.rejects(env.prepare(), ERROR);
-  assert.deepEqual(await readFile(env.backup), before);
-  assert.equal((await readdir(env.directory)).some((name) => name.endsWith(".pending")), false);
+  for (const ddl of [
+    "CREATE TABLE unsupported(rowid TEXT,_rowid_ TEXT,oid TEXT)",
+    // Synthetic unknown internal table: a broad sqlite_stat* skip would lose it.
+    "PRAGMA writable_schema=ON; CREATE TABLE sqlite_stat999(value TEXT); PRAGMA writable_schema=OFF",
+  ]) {
+    env.database.exec(ddl);
+    await assert.rejects(env.prepare(), { code: "snapshot_refused" });
+    assert.deepEqual(await readFile(env.backup), before);
+    assert.equal((await readdir(env.directory)).some((name) => name.endsWith(".pending")), false);
+    env.database.exec("DROP TABLE IF EXISTS unsupported");
+  }
 });
 
 test("valid Unicode and NUL text roundtrip, while invalid UTF-8 TEXT is refused without a lossy backup", async (t) => {
@@ -152,12 +167,42 @@ test("valid Unicode and NUL text roundtrip, while invalid UTF-8 TEXT is refused 
   assert.deepEqual(await readFile(env.backup), safe);
 });
 
-test("key custody failures never expose original exception payloads or produce a plaintext backup", async (t) => {
+test("recovery failures reach startup logs as fixed codes without original exception payloads", async (t) => {
   const env = await fixture(t);
-  await assert.rejects(prepareStateRecoveryBackup(env.path, 18, async () => { throw new Error(secret); }), (error: Error) => {
-    assert.match(error.message, ERROR); assert.equal(error.message.includes(secret), false); assert.equal(error.cause, undefined); return true;
-  });
+  const logPath = join(env.directory, "lifecycle.jsonl");
+  const log = new DaemonLifecycleLog(logPath);
+  t.after(() => log.close());
+  const logged = (code: string) => (error: Error) => {
+    assert.ok(error instanceof StateRecoveryError);
+    assert.equal(error.code, code);
+    assert.match(error.message, ERROR);
+    assert.equal(error.cause, undefined);
+    // The real entrypoint uses this formatter + consumer, not Error.code.
+    log.append({ event: "entrypoint_failure", detail: daemonLifecycleErrorDetail(error) });
+    return true;
+  };
+  await assert.rejects(withProtectedStateUpgrade(env.path, async () => assert.fail("must not migrate"), {
+    getBackupKey: async () => { throw Object.assign(new Error(secret), { code: "desktop_channel_missing", cause: secret }); },
+  }), logged("key_unavailable"));
+  assert.equal(process.connected, undefined, "test process has no Desktop bootstrap IPC");
+  await assert.rejects(withProtectedStateUpgrade(env.path, async () => assert.fail("must not migrate"), {
+    getBackupKey: requestStateRecoveryKey,
+  }), logged("desktop_channel_missing"));
   assert.equal((await readdir(env.directory)).some((name) => name.includes("recovery")), false);
+  env.database.exec("CREATE TABLE unsupported(rowid TEXT,_rowid_ TEXT,oid TEXT)");
+  await assert.rejects(env.prepare(), logged("snapshot_refused"));
+  env.database.exec("DROP TABLE unsupported");
+  await env.prepare();
+  await assert.rejects(decryptStateRecoveryBackup(env.backup, randomBytes(32)), logged("verify_failed"));
+  log.close();
+  const persisted = await readFile(logPath, "utf8");
+  assert.equal(persisted.includes(secret), false);
+  const details = persisted.trim().split("\n").map((line) => JSON.parse(line).detail as string);
+  assert.equal(details.length, 4);
+  ["key_unavailable", "desktop_channel_missing", "snapshot_refused", "verify_failed"].forEach((code, i) => {
+    assert.ok(details[i].includes(`[${code}]`));
+  });
+  assert.deepEqual((await readdir(env.directory)).filter((name) => name.includes("recovery")), ["daemon.sqlite.recovery.enc"]);
 });
 
 test("tampered headers, ciphertext, truncation, and wrong keys never execute snapshot SQL", async (t) => {
