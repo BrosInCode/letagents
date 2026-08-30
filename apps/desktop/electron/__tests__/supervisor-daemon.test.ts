@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, readFile, rm, stat, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, rm, stat, unlink } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
@@ -33,11 +33,204 @@ import {
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
 } from "../main/supervisor-grant.js";
 import { apiUrl as configuredApiUrl } from "../main/paths.js";
+import { createStateRecoveryKey, prepareSupervisorState } from "../main/supervisor-state-recovery.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
 const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
+
+test("recovery keys require functioning OS storage and reject plaintext backend", () => {
+  const storage = {
+    isEncryptionAvailable: () => true,
+    encryptString: (value: string) => Buffer.from(`sealed:${value}`),
+    decryptString: (value: Buffer) => value.toString().slice(7),
+  };
+  const material = createStateRecoveryKey(storage);
+  assert.equal(material.key.length, 32);
+  assert.equal(storage.decryptString(Buffer.from(material.sealedKey, "base64")), material.key.toString("base64"));
+  material.key.fill(0);
+  assert.throws(() => createStateRecoveryKey({ ...storage, isEncryptionAvailable: () => false }), /OS-backed/);
+  assert.throws(() => createStateRecoveryKey({ ...storage, getSelectedStorageBackend: () => "basic_text" }), /OS-backed/);
+  assert.throws(() => createStateRecoveryKey({ ...storage, decryptString: () => "different" }), /could not protect/);
+  assert.throws(() => createStateRecoveryKey({ ...storage, encryptString: () => { throw new Error("sensitive provider message"); } }), (error: unknown) => {
+    assert.equal((error as Error).message.includes("sensitive"), false);
+    return true;
+  });
+});
+
+test("current-schema startup does not request secure storage; bootstrap listeners are removed", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  const prepared = prepareSupervisorState(child, () => { throw new Error("Keychain must not be touched"); });
+  child.emit("message", { type: "state_recovery_ready" });
+  await prepared;
+  for (const event of ["message", "error", "exit", "disconnect"]) assert.equal(child.listenerCount(event), 0);
+});
+
+test("secure bootstrap key is one-shot and parent disconnect fails closed", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperty(child, "connected", { value: true });
+  const sent: unknown[] = [];
+  child.send = ((message: unknown, callback: (error: Error | null) => void) => { sent.push(message); callback(null); return true; }) as ChildProcess["send"];
+  const key = Buffer.alloc(32, 12);
+  const prepared = prepareSupervisorState(child, () => ({ key, sealedKey: "sealed" }));
+  const request = { type: "state_recovery_key_request", id: "00000000-0000-4000-8000-000000000000" };
+  child.emit("message", request);
+  child.emit("message", request);
+  assert.equal(sent.length, 1);
+  assert.equal(key.equals(Buffer.alloc(32)), true, "parent clears the raw key after handoff");
+  child.emit("disconnect");
+  await assert.rejects(prepared, /could not prepare/);
+});
+
+test("secure-storage failure reaches bootstrap caller without leaking original exception", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  Object.defineProperty(child, "connected", { value: true });
+  const sent: Array<Record<string, unknown>> = [];
+  child.send = ((message: Record<string, unknown>, callback: () => void) => { sent.push(message); callback(); return true; }) as ChildProcess["send"];
+  const prepared = prepareSupervisorState(child, () => { throw new Error("private material"); });
+  child.emit("message", { type: "state_recovery_key_request", id: "00000000-0000-4000-8000-000000000000" });
+  assert.equal(sent[0]?.error, "secure_storage_unavailable");
+  assert.equal(JSON.stringify(sent).includes("private material"), false);
+  // No acknowledgement from the child is needed to unblock the caller.
+  await assert.rejects(prepared, /Unlock it/);
+});
+
+test("silent bootstrap bounds caller wait without killing work and ignores late readiness", async () => {
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  child.kill = () => { assert.fail("a caller deadline cannot terminate migration"); };
+  const prepared = prepareSupervisorState(child, undefined, 5);
+  await assert.rejects(prepared, /may still be preparing.*has not been cancelled/);
+  for (const event of ["message", "error", "exit", "disconnect"]) assert.equal(child.listenerCount(event), 0);
+  child.emit("message", { type: "state_recovery_ready" });
+});
+
+test("a silent bootstrap releases shared startup and update waits; later readiness attaches without respawn", async () => {
+  const env = await fixture();
+  const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+  process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  let server: Server | null = null;
+  let spawns = 0;
+  let spawned!: () => void;
+  const didSpawn = new Promise<void>((resolve) => { spawned = resolve; });
+  const child = new EventEmitter() as ChildProcess;
+  child.send = (() => true) as ChildProcess["send"];
+  child.kill = () => { assert.fail("slow preparation must continue under its singleton"); };
+  const client = new SupervisorDaemonClient({
+    socketPath: env.socketPath, daemonScriptPath, statePreparationWaitMs: 25,
+    spawnDaemon: () => { spawns++; spawned(); return child; },
+    signalDaemon: () => { assert.fail("slow preparation must not be signalled"); },
+  });
+  try {
+    const start = client.ensureRunning();
+    const startCheck = assert.rejects(start, /has not confirmed database preparation/);
+    await didSpawn;
+    const updateCheck = assert.rejects(client.prepareForApplicationUpdate(), /has not confirmed database preparation/);
+    await Promise.all([startCheck, updateCheck]);
+    // Simulate the original child's slow migration finishing after the UI wait.
+    const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 42);
+    server = wire.server;
+    child.emit("message", { type: "state_recovery_ready" });
+    assert.equal((await client.ensureRunning()).generation, 42);
+    assert.equal(spawns, 1, "retry attaches to the original now-ready daemon");
+  } finally {
+    await closeServer(server, env.socketPath);
+    if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
+    else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous;
+    await env.cleanup();
+  }
+});
+
+test("real child requests its recovery key over private IPC and disconnects after preparation", async () => {
+  const keyModule = new URL("../../daemon/state-recovery-key.ts", import.meta.url).href;
+  const script = `
+    import assert from 'node:assert/strict';
+    import { requestStateRecoveryKey, reportStateRecoveryReady } from ${JSON.stringify(keyModule)};
+    const material = await requestStateRecoveryKey();
+    assert.equal(material.key.length, 32);
+    assert.equal(material.sealedKey, 'test-sealed-key');
+    material.key.fill(0);
+    await reportStateRecoveryReady();
+    assert.equal(process.connected, false);
+  `;
+  const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+    stdio: ["ignore", "pipe", "pipe", "ipc"],
+  });
+  let output = "";
+  child.stdout!.on("data", (data) => { output += data; });
+  child.stderr!.on("data", (data) => { output += data; });
+  const exit = new Promise<number | null>((resolve) => child.once("exit", resolve));
+  await prepareSupervisorState(child, () => ({ key: Buffer.alloc(32, 17), sealedKey: "test-sealed-key" }));
+  assert.equal(await exit, 0, output);
+  assert.equal(output.includes("test-sealed-key"), false);
+});
+
+test("real supervisor upgrades v17 through encrypted private bootstrap before socket admission", async () => {
+  const env = await fixture();
+  const statePath = join(env.root, "daemon-state.sqlite");
+  // Source-run contract test across the separately compiled Electron/daemon roots.
+  const schemaModule = await import(new URL("../../daemon/daemon-state-database.ts", import.meta.url).href);
+  const backupModule = await import(new URL("../../daemon/state-recovery-backup.ts", import.meta.url).href);
+  const database = new DatabaseSync(statePath);
+  new schemaModule.DaemonStateSchema().createSchema(database);
+  database.exec("PRAGMA foreign_keys=OFF");
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all()) {
+    database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
+  }
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
+    UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
+  database.close();
+  await chmod(statePath, 0o600);
+  const mainModule = new URL("../../daemon/main.ts", import.meta.url).href;
+  const keyModule = new URL("../../daemon/state-recovery-key.ts", import.meta.url).href;
+  const script = `
+    import { SupervisorDaemon } from ${JSON.stringify(mainModule)};
+    import { reportStateRecoveryReady } from ${JSON.stringify(keyModule)};
+    const daemon = new SupervisorDaemon(${JSON.stringify({
+      manifestPath: statePath, socketPath: env.socketPath,
+      lockPath: join(env.root, "daemon.lock"), auditPath: join(env.root, "audit.jsonl"),
+    })}, 'darwin');
+    try { await daemon.start({ onPrepared: reportStateRecoveryReady }); }
+    finally { await daemon.stop(); }
+  `;
+  let child: ChildProcess | undefined;
+  try {
+    child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+      stdio: ["ignore", "pipe", "pipe", "ipc"],
+    });
+    let output = "";
+    child.stdout!.on("data", (data) => { output += data; });
+    child.stderr!.on("data", (data) => { output += data; });
+    const exited = new Promise<number | null>((resolve) => child!.once("exit", resolve));
+    let keyRequests = 0;
+    try {
+      await prepareSupervisorState(child, () => {
+        keyRequests++;
+        return { key: Buffer.alloc(32, 17), sealedKey: "test-sealed-key" };
+      });
+    } catch (error) {
+      await exited;
+      assert.fail(`${String(error)}\n${output}`);
+    }
+    assert.equal(await exited, 0, output);
+    assert.equal(keyRequests, 1);
+    const current = new DatabaseSync(statePath, { readOnly: true });
+    try { assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, 18); }
+    finally { current.close(); }
+    const restored = await backupModule.decryptStateRecoveryBackup(`${statePath}.recovery.enc`, Buffer.alloc(32, 17));
+    try { assert.equal(restored.prepare("PRAGMA user_version").get()!.user_version, 17); }
+    finally { restored.close(); }
+    assert.equal(output.includes("test-sealed-key"), false);
+  } finally {
+    if (child?.exitCode === null) child.kill();
+    await env.cleanup();
+  }
+});
 
 function wireEntryWithCausalProjection(): Parameters<typeof mapEntry>[0] {
   return {
@@ -1659,7 +1852,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.106");
+    assert.equal(status.implementationVersion, "2.0.107");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

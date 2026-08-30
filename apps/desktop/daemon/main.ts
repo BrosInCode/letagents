@@ -26,6 +26,7 @@ import { LifecycleAdministrationCoordinator } from "./lifecycle-administration-c
 import { projectDaemonCreateRequestReplayParameters } from "./manifest-entry-projection.js";
 import { ManifestAdministrationCoordinator } from "./manifest-administration-coordinator.js";
 import { ManifestStore } from "./manifest-store.js";
+import { withProtectedStateUpgrade, reportStateRecoveryReady, type StateRecoveryBootstrap } from "./state-recovery-key.js";
 import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator.js";
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
@@ -95,6 +96,7 @@ type RecoveryClock = {
   clearTimeout?: typeof clearTimeout;
 };
 export class SupervisorDaemon {
+  private readonly stateDatabasePath: string;
   private readonly singleton: DaemonSingleton;
   private readonly authority: DaemonAuthority;
   private readonly store: ManifestStore;
@@ -161,6 +163,7 @@ export class SupervisorDaemon {
   }
 
   constructor(paths: DaemonPaths = defaultDaemonPaths(), private readonly platform = process.platform, private readonly providerPort?: ProviderActionPort, private readonly autoConverge = providerPort?.constructor.name === "CodexProviderActionPort", private readonly nativeHeartbeatIntervalMs = 15_000, private readonly controlRequestBarrier?: (request: DaemonRequest) => Promise<void>, recoveryClock: RecoveryClock = {}, private readonly supervisedDeliveryHttp: SupervisedDeliveryHttp = productionSupervisedDeliveryHttp, private readonly supervisorGrantHttp: SupervisorGrantHttp = productionSupervisorGrantHttp, private readonly loadSupervisedToolRuntime: () => Promise<SupervisedToolRuntime> = supervisedToolRuntime) {
+    this.stateDatabasePath = paths.manifestPath;
     this.handoffCompletion = new Promise<void>((resolve, reject) => {
       this.resolveHandoffCompletion = resolve;
       this.rejectHandoffCompletion = reject;
@@ -832,11 +835,19 @@ export class SupervisorDaemon {
     this.nowMs = recoveryClock.nowMs ?? Date.now;
   }
 
-  async start(): Promise<void> {
+  async start(storage: StateRecoveryBootstrap = {}): Promise<void> {
     assertMacOS(this.platform);
     await this.singleton.acquire();
-    this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
-    this.manifestGeneration = (await this.store.load()).generation;
+    try {
+      this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
+        this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
+        return (await this.store.load()).generation;
+      }, storage);
+    } catch (error) {
+      await this.store.close();
+      await this.singleton.release();
+      throw error;
+    }
     await this.supervisedInbox.normalizeInterruptedEffects();
     await this.quarantineDuplicateSupervisedLaneOwners();
     await this.runtimeRecovery.recoverTurnControls();
@@ -1463,7 +1474,7 @@ if (import.meta.url === `file://${process.argv[1]}`) {
   void (async () => {
     const { ProviderActionPortRouter } = await import("./provider-action-port-router.js");
     const daemon = new SupervisorDaemon(paths, process.platform, new ProviderActionPortRouter(), true);
-    await daemon.start();
+    await daemon.start({ onPrepared: reportStateRecoveryReady });
     lifecycle.append({ event: "daemon_ready" });
     await daemon.waitForHandoff();
     lifecycle.append({ event: "handoff_complete" });

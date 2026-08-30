@@ -2806,6 +2806,8 @@ function withRuntimeIdentity(item: DaemonManifestEntry): DaemonManifestEntry {
 
 function removePostV5DeliveryTables(database: DatabaseSync): void {
   database.exec(`
+    -- Physical v1-v4 databases cannot contain the later v13 repair journal.
+    DROP TABLE IF EXISTS provider_continuation_repairs;
     DROP TABLE IF EXISTS supervised_agent_provider_turn_bindings;
     DROP TABLE IF EXISTS supervised_agent_publications;
     DROP TABLE IF EXISTS supervised_agent_history_boundaries;
