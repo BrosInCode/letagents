@@ -203,7 +203,8 @@ function claudeStreamKind(message: ClaudeStreamMessage): ProviderStreamEventKind
   if (type === "assistant") return "text_delta";
   if (type === "user") return "tool_lifecycle";
   if (type === "tool_use_summary") return "tool_lifecycle";
-  if (type === "result") return isClaudeFailedResult(message) ? "error" : "turn_lifecycle";
+  if (type === "result") return isClaudeFailedResult(message) && !isClaudeTurnLimitResult(message)
+    ? "error" : "turn_lifecycle";
   if (type === "system") return "provider_event";
   if (/error/i.test(type)) return "error";
   return "provider_event";
@@ -213,6 +214,13 @@ function isClaudeFailedResult(message: ClaudeStreamMessage): boolean {
   if (message.type !== "result") return false;
   if ((message as { is_error?: unknown }).is_error === true) return true;
   return typeof message.subtype === "string" && /(?:error|failed)/i.test(message.subtype);
+}
+
+function isClaudeTurnLimitResult(message: ClaudeStreamMessage): boolean {
+  // These documented limits end one command, not the CLI session. Unknown
+  // failures retain the legacy recovery path until typed lifecycle rollout.
+  return message.type === "result" && typeof message.subtype === "string"
+    && /^(?:error_max_turns|error_max_budget_usd|error_max_structured_output_retries)$/.test(message.subtype);
 }
 
 function streamMethod(message: ClaudeStreamMessage): string {
@@ -1149,14 +1157,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         return;
       }
       if (isClaudeFailedResult(message)) {
-        handle.state = "failed";
+        const turnLimited = isClaudeTurnLimitResult(message);
+        handle.state = turnLimited ? "idle" : "failed";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
           summary: "Turn failed",
           status: "blocked",
           checking: "Claude Code reported a terminal turn failure.",
-          next_action: "Awaiting supervised recovery.",
+          next_action: turnLimited ? "Awaiting next room work." : "Awaiting supervised recovery.",
         });
         return;
       }

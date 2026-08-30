@@ -29,6 +29,10 @@ import type {
 } from "../main/agents/provider-adapter.js";
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
 
+// Cross-layer assertions load the daemon at test runtime without pulling its
+// separately compiled source tree into Electron's production rootDir.
+const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
+
 type RecordedRequest = { method: string; params: unknown };
 
 function assertProviderHandle(
@@ -1659,6 +1663,71 @@ test("native terminal failure status changes the Codex handle to failed", async 
   });
   await flush();
   assert.equal(handle.observedState(), "failed");
+});
+
+test("execution failures preserve the Codex runtime and subsequent exact room turns", async () => {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new CodexProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => stream.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const failures = [
+    { method: "item/commandExecution/failed", kind: "command_output", params: { status: "failed", exitCode: 1 } },
+    { method: "item/mcpToolCall/failed", kind: "tool_lifecycle", params: { status: "error" } },
+    { method: "item/fileChange/failed", kind: "tool_lifecycle", params: { status: "failed" } },
+    { method: "command/exec/failed", kind: "command_output", params: { status: "failed" } },
+    { method: "item/completed", kind: "item_lifecycle", params: { item: { type: "commandExecution", status: "failed", error: { message: "exit 1" } } } },
+    { method: "item/completed", kind: "item_lifecycle", params: { item: { type: "fileChange", status: "failed", error: { message: "write denied" } } } },
+    { method: "item/failed", kind: "error", params: { status: "failed" } },
+  ];
+  for (const failure of failures) {
+    client.emit(failure);
+    assert.equal(stream.at(-1)?.kind, failure.kind, failure.method);
+    assert.equal(providerStreamLifecycle(stream.at(-1)!), "working", failure.method);
+    assert.equal(handle.observedState(), "working", failure.method);
+  }
+  await flush();
+  assert.equal(harness.launches[0]!.alive, true);
+  assert.deepEqual(harness.signals, []);
+
+  // Item failures neither settle the containing turn nor poison its successor.
+  const originalRequest = client.request.bind(client);
+  let nativeTurn = 0;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: `turn-after-error-${nativeTurn++}` } } as T;
+    if (method === "thread/read") return { thread: {
+      id: handle.providerContinuationId,
+      turns: [{ id: `turn-after-error-${nativeTurn - 1}`, status: "completed" }],
+    } } as T;
+    return originalRequest<T>(method, params);
+  };
+  for (let index = 0; index < 2; index += 1) {
+    const running = adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-after-tool-error-${index}`,
+      actionId: `action-after-tool-error-${index}`,
+      sourceMessage: {}, activation: {},
+    }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+    await flush();
+    client.emit({ method: "item/commandExecution/failed", params: { status: "failed", exitCode: 1 } });
+    assert.equal(handle.observedState(), "working");
+    client.emit({ method: "item/agentMessage/delta", params: {
+      threadId: handle.providerContinuationId, turnId: `turn-after-error-${index}`,
+      itemId: `answer-${index}`, delta: "Recovered from command failure.",
+    } });
+    client.emit({ method: "turn/completed", params: {
+      threadId: handle.providerContinuationId, turnId: `turn-after-error-${index}`,
+    } });
+    assert.equal((await running).outcome, "reply");
+    assert.equal(handle.observedState(), "idle");
+  }
+  assert.equal(harness.launches.length, 1, "both turns reuse the same app-server");
+  assert.deepEqual(harness.signals, []);
+  client.emit({ method: "process/systemError", params: { status: "systemError" } });
+  assert.equal(stream.at(-1)?.kind, "error", "process errors are not command failures");
+  assert.equal(handle.observedState(), "failed", "genuine runtime failure still latches");
 });
 
 test("native stream bounds oversized provider payloads without dropping method identity", async () => {

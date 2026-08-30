@@ -7,6 +7,7 @@ import type {
   ProviderActionStreamEvent,
 } from "../provider-action-port.js";
 import { ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
+import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonManifestEntry } from "../types.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 
@@ -122,7 +123,9 @@ function coordinatorHarness(input: {
       deletePendingResumeBinding: (entryId) => runtimeCustody.deletePendingResumeBinding(entryId),
     },
     serializeEntry: async (_entryId, operation) => operation(),
-    transition: async () => {},
+    transition: async (_entryId, observed_state, condition) => {
+      manifest = { ...manifest, observed_state, condition };
+    },
     appendActivity: async (_entryId, event) => {
       await input.appendActivity?.(event.method);
     },
@@ -148,8 +151,81 @@ function coordinatorHarness(input: {
     pendingInstalled,
     stopCalls: () => stopCalls,
     setManifest: (next: DaemonManifestEntry) => { manifest = next; },
+    getManifest: () => manifest,
   };
 }
+
+for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
+  test(`execution errors do not fence or latch failure on a healthy ${delivery_mode} runtime`, async () => {
+    const harness = coordinatorHarness();
+    harness.setManifest({ ...entry(), delivery_mode });
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    const failures: Array<Pick<ProviderActionStreamEvent, "method" | "kind" | "payload">> = [
+      { method: "item/commandExecution/failed", kind: "command_output", payload: { status: "failed", exitCode: 1 } },
+      { method: "item/mcpToolCall/failed", kind: "tool_lifecycle", payload: { status: "failed" } },
+      { method: "item/fileChange/failed", kind: "tool_lifecycle", payload: { status: "error" } },
+      { method: "item/toolCall/error_during_execution", kind: "tool_lifecycle", payload: { status: "error" } },
+      { method: "command/exec/failed", kind: "command_output", payload: { status: "failed" } },
+      { method: "item/completed", kind: "item_lifecycle", payload: { item: { type: "commandExecution", status: "failed", error: { message: "exit 1" } } } },
+      { method: "item/completed", kind: "item_lifecycle", payload: { item: { type: "fileChange", status: "failed", error: { message: "write denied" } } } },
+      { method: "item/failed", kind: "error", payload: { status: "failed" } },
+    ];
+    for (const [index, failure] of failures.entries()) {
+      const event = { ...streamEvent(index + 1, failure.method), ...failure };
+      assert.equal(providerStreamLifecycle(event), "working", failure.method);
+      await harness.coordinator.enqueue("agent-1", handle, event);
+      assert.notEqual(harness.getManifest().observed_state, "failed", failure.method);
+    }
+    await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(9, "turn/completed"), kind: "turn_lifecycle" });
+    assert.equal(harness.stopCalls(), 0, "only the native turn ends, never the reusable runtime");
+    await harness.coordinator.disposeAll();
+  });
+
+  test(`Claude turn-limit results do not fence the ${delivery_mode} runtime but genuine failures still do`, async () => {
+    const harness = coordinatorHarness();
+    harness.setManifest({ ...entry(), provider: "claude-code", delivery_mode });
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    for (const [index, subtype] of ["error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries"].entries()) {
+      const event: ProviderActionStreamEvent = {
+        ...streamEvent(index + 1, `result/${subtype}`), provider: "claude-code", kind: "turn_lifecycle",
+        payload: { type: "result", subtype, is_error: true },
+      };
+      assert.equal(providerStreamLifecycle(event), "idle");
+      await harness.coordinator.enqueue("agent-1", handle, event);
+      assert.notEqual(harness.getManifest().observed_state, "failed");
+    }
+    assert.equal(harness.stopCalls(), 0);
+    await harness.coordinator.enqueue("agent-1", handle, {
+      ...streamEvent(4, "result/error_during_execution"), provider: "claude-code", kind: "error",
+      payload: { type: "result", subtype: "error_during_execution", is_error: true },
+    });
+    assert.equal(harness.getManifest().observed_state, "failed");
+    assert.equal(harness.stopCalls(), 1);
+    await harness.coordinator.disposeAll();
+  });
+}
+
+test("genuine runtime/turn failures and failed MCP waits keep their existing classification", () => {
+  assert.equal(providerStreamLifecycle({
+    ...streamEvent(1, "item/completed"), kind: "item_lifecycle",
+    payload: { item: { type: "commandExecution", status: "completed", exitCode: 0 } },
+  }), "idle", "successful item completion preserves the existing presence signal");
+  for (const failure of [
+    { method: "turn/failed", kind: "turn_lifecycle", payload: {} },
+    { method: "turn/completed", kind: "turn_lifecycle", payload: { turn: { status: "failed" } } },
+    { method: "thread/status/changed", kind: "provider_event", payload: { threadStatus: { type: "systemError" } } },
+    { method: "result", kind: "error", payload: { is_error: true } },
+    { method: "process/systemError", kind: "command_output", payload: { status: "systemError" } },
+  ] as const) {
+    assert.equal(providerStreamLifecycle({ ...streamEvent(1, failure.method), ...failure }), "failed", failure.method);
+  }
+  for (const tool of ["wait_for_messages", "mcp__letagents__wait_for_messages", "read_messages"]) {
+    assert.equal(providerStreamLifecycle({
+      ...streamEvent(1, "item/completed"), kind: "item_lifecycle",
+      payload: { item: { type: "mcpToolCall", status: "failed", tool, error: { message: "tool failed" } } },
+    }), tool.includes("wait_for_messages") ? "idle" : "working");
+  }
+});
 
 test("provider stream events are FIFO per entry and stale handles are ignored", async () => {
   const calls: string[] = [];

@@ -23,6 +23,10 @@ import type {
 } from "../main/agents/provider-adapter.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
+// Cross-layer assertions load the daemon at test runtime without pulling its
+// separately compiled source tree into Electron's production rootDir.
+const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
+
 // Fake-child harness proving the P2a adapter honors every #765 liveness
 // invariant with no live `claude` binary: birth-identity fencing, control-loss
 // is never death, recycled PIDs are never signalled, and startup failures
@@ -95,6 +99,7 @@ interface HarnessOptions {
   initSessionId?: string;
   noInit?: boolean;
   noLetagents?: boolean;
+  bootstrapResultSubtype?: string;
   /** Overrides per pid; undefined entries mean "cannot verify". */
   identities?: Map<number, string | null | undefined>;
   /** Defaults to true (a well-behaved CLI); fence tests opt out to exercise escalation. */
@@ -167,8 +172,8 @@ function createHarness(options: HarnessOptions = {}) {
           const frame = JSON.parse(json) as { uuid?: string };
           child.emit({
             type: "result",
-            subtype: "success",
-            is_error: false,
+            subtype: options.bootstrapResultSubtype ?? "success",
+            is_error: options.bootstrapResultSubtype !== undefined,
             session_id: initSessionId,
             user_message_uuid: frame.uuid,
             result: "LETAGENTS_CLAUDE_DAEMON_READY",
@@ -521,6 +526,15 @@ test("a silent CLI that never reports init is refused as unobservable, with no o
   await assert.rejects(adapter.spawn(spawnRequest()), /did not report its stream-json init/);
   assert.deepEqual(harness.signals[0], { pid: 4100, signal: "SIGTERM" });
   assert.equal(harness.children[0]!.alive, false);
+});
+
+test("a turn-limit failure during Claude bootstrap still rejects startup and reaps the child", async () => {
+  const harness = createHarness({ bootstrapResultSubtype: "error_max_turns" });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await assert.rejects(adapter.spawn(spawnRequest()), /did not complete its daemon-safe bootstrap turn/);
+  assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }]);
+  assert.equal(harness.children[0]!.alive, false);
+  assert.equal(harness.mcpConfigDisposals, 1);
 });
 
 test("observed crash emits one synthesized terminal payload and makes attach terminal evidence", async () => {
@@ -1084,23 +1098,85 @@ test("Claude turn control interrupts only the active bounded turn and refuses co
   assert.equal(child.written.length, writesAfterInterrupt);
 });
 
-test("error result messages settle the observed state to failed", async () => {
-  const harness = createHarness();
-  const stream: ProviderStreamEvent[] = [];
-  const adapter = new ClaudeCodeProviderAdapter({
-    dependencies: harness.dependencies,
-    streamSink: (event) => stream.push(event),
-  });
-  const handle = await adapter.spawn(spawnRequest());
-  harness.children[0]!.emit({
-    type: "result",
-    subtype: "error_during_execution",
-    is_error: true,
-    result: "native provider failure",
-  });
-  await flush();
+for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries"]) {
+  test(`Claude ${subtype} fails only the exact turn and leaves the continuation reusable`, async () => {
+    const harness = createHarness();
+    const stream: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: harness.dependencies,
+      streamSink: (event) => stream.push(event),
+    });
+    const handle = await adapter.spawn(spawnRequest());
+    const child = harness.children[0]!;
+    const request = { inboxItemId: "inbox-limited", actionId: "action-limited", sourceMessage: {}, activation: {} };
+    const options = { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} };
+    const running = adapter.runRoomTurn!(handle, request, options);
+    let settled = false;
+    void running.then(() => { settled = true; }, () => { settled = true; });
+    await flush();
+    const frame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+    for (const identity of [
+      { session_id: "different-session", user_message_uuid: frame.uuid },
+      { session_id: handle.providerContinuationId, user_message_uuid: "different-turn" },
+    ]) {
+      child.emit({ type: "result", subtype, is_error: true, ...identity });
+      await flush();
+      assert.equal(settled, false, "uncorrelated results cannot settle the active room turn");
+    }
+    child.emit({
+      type: "result", subtype, is_error: true,
+      session_id: handle.providerContinuationId, user_message_uuid: frame.uuid,
+      errors: ["Configured turn limit reached."],
+    });
+    await assert.rejects(running, /failed: Configured turn limit reached/);
+    assert.equal(handle.observedState(), "idle");
+    assert.equal(stream.at(-1)?.kind, "turn_lifecycle");
+    assert.equal(stream.at(-1)?.method, `result/${subtype}`);
+    assert.equal(providerStreamLifecycle(stream.at(-1)!), "idle");
+    assert.equal((stream.at(-1)?.payload as { is_error: boolean }).is_error, true);
 
-  assert.equal(handle.observedState(), "failed");
-  assert.equal(stream.at(-1)?.kind, "error");
-  assert.equal(stream.at(-1)?.method, "result/error_during_execution");
-});
+    const writesBeforeRecovery = child.written.length;
+    await assert.rejects(adapter.recoverRoomTurn!(handle, {
+      inboxItemId: request.inboxItemId, providerTurnId: frame.uuid,
+    }), /failed: Configured turn limit reached/);
+    assert.equal(child.written.length, writesBeforeRecovery, "exact failed-turn evidence is retained without replay");
+
+    const next = adapter.runRoomTurn!(handle, { ...request, inboxItemId: "inbox-next", actionId: "action-next" }, options);
+    await flush();
+    const nextFrame = JSON.parse(child.written.at(-1)!) as { uuid: string };
+    assert.notEqual(nextFrame.uuid, frame.uuid);
+    child.emit({
+      type: "result", subtype: "success", is_error: false,
+      session_id: handle.providerContinuationId, user_message_uuid: nextFrame.uuid,
+      result: "The next turn completed.",
+    });
+    assert.deepEqual(await next, { turnId: nextFrame.uuid, outcome: "reply", text: "The next turn completed.", evidence: "stream" });
+    assert.equal(harness.children.length, 1);
+    assert.equal(child.alive, true);
+    assert.deepEqual(harness.signals, []);
+  });
+}
+
+for (const subtype of ["error_during_execution", "error_max_unknown_limit", "error_max_turns_extra"]) {
+  test(`Claude ${subtype} retains legacy runtime failure handling`, async () => {
+    const harness = createHarness();
+    const stream: ProviderStreamEvent[] = [];
+    const adapter = new ClaudeCodeProviderAdapter({
+      dependencies: harness.dependencies,
+      streamSink: (event) => stream.push(event),
+    });
+    const handle = await adapter.spawn(spawnRequest());
+    harness.children[0]!.emit({
+      type: "result",
+      subtype,
+      is_error: true,
+      result: "native provider failure",
+    });
+    await flush();
+
+    assert.equal(handle.observedState(), "failed");
+    assert.equal(stream.at(-1)?.kind, "error");
+    assert.equal(stream.at(-1)?.method, `result/${subtype}`);
+    assert.equal(providerStreamLifecycle(stream.at(-1)!), "failed");
+  });
+}
