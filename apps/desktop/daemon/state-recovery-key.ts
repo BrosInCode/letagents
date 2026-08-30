@@ -1,0 +1,81 @@
+import { randomUUID } from "node:crypto";
+import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, StateRecoveryError } from "./state-recovery-backup.js";
+
+export type StateRecoveryBootstrap = {
+  getBackupKey?: typeof requestStateRecoveryKey;
+  onPrepared?: (failed?: boolean) => Promise<void>;
+};
+
+/** Caller holds the daemon singleton; initialize is the existing schema owner. */
+export async function withProtectedStateUpgrade<T>(
+  path: string, initialize: () => Promise<T>, bootstrap: StateRecoveryBootstrap,
+): Promise<T> {
+  try {
+    const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_SCHEMA_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
+    const result = await initialize();
+    const verified = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
+    try {
+      const validation = await markStateRecoveryBackupValidated(path, verified, { freshBackup });
+      if (validation.status !== "unverified") {
+        try { await cleanupStateRecoveryBackup(path, verified); }
+        catch { recordStateRecoveryBackupWarning(verified, "recovery_snapshot_cleanup_failed"); }
+      }
+    } finally { verified.close(); }
+    await bootstrap.onPrepared?.();
+    return result;
+  } catch (error) {
+    await bootstrap.onPrepared?.(true);
+    throw error;
+  }
+}
+
+/** Bootstrap-only private parent channel. Never a renderer/control-socket API. */
+export function requestStateRecoveryKey(): Promise<{ key: Buffer; sealedKey: string }> {
+  if (!process.send || !process.connected) {
+    return Promise.reject(new StateRecoveryError("desktop_channel_missing"));
+  }
+  const id = randomUUID();
+  return new Promise((resolve, reject) => {
+    const finish = (error?: Error, result?: { key: Buffer; sealedKey: string }) => {
+      clearTimeout(timer);
+      process.off("message", receive);
+      process.off("disconnect", disconnected);
+      if (error) reject(error); else resolve(result!);
+    };
+    const disconnected = () => finish(new StateRecoveryError("key_unavailable"));
+    const receive = (message: unknown) => {
+      if (!message || typeof message !== "object") return;
+      const value = message as Record<string, unknown>;
+      if (value.type !== "state_recovery_key" || value.id !== id) return;
+      if (value.error) {
+        finish(new StateRecoveryError("key_unavailable"));
+        return;
+      }
+      const key = typeof value.key === "string" && /^[A-Za-z0-9+/]{43}=$/.test(value.key)
+        ? Buffer.from(value.key, "base64") : Buffer.alloc(0);
+      if (key.length !== 32 || typeof value.sealedKey !== "string" || !value.sealedKey.length || value.sealedKey.length > 16384) {
+        key.fill(0);
+        finish(new StateRecoveryError("key_unavailable"));
+        return;
+      }
+      finish(undefined, { key, sealedKey: value.sealedKey });
+    };
+    // This bounds key handoff before schema mutation, not provider work.
+    const timer = setTimeout(() => finish(new StateRecoveryError("key_unavailable")), 30_000);
+    process.on("message", receive);
+    process.once("disconnect", disconnected);
+    process.send!({ type: "state_recovery_key_request", id }, (error) => {
+      if (error) disconnected();
+    });
+  });
+}
+
+/** Close the bootstrap channel so a detached daemon outlives Electron. */
+export async function reportStateRecoveryReady(error = false): Promise<void> {
+  if (!process.send || !process.connected) return;
+  await new Promise<void>((resolve) => {
+    process.send!({ type: error ? "state_recovery_failed" : "state_recovery_ready" }, () => resolve());
+  });
+  if (process.connected) process.disconnect();
+}

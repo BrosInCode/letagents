@@ -27,12 +27,13 @@ import {
 import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } from "./agents/provider-evidence.js";
 import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "./agents/letagents-mcp-runtime.js";
+import { prepareSupervisorState } from "./supervisor-state-recovery.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.106";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.107";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Retirement can queue behind one already-admitted worker mint (3 x 10s) so
@@ -318,6 +319,7 @@ export interface SupervisorDaemonLifecycleOptions {
   killTimeoutMs?: number;
   processPollIntervalMs?: number;
   startTimeoutMs?: number;
+  statePreparationWaitMs?: number;
   requestTimeoutMs?: number;
   turnControlRequestTimeoutMs?: number;
   now?: () => Date;
@@ -391,6 +393,7 @@ export class SupervisorDaemonClient {
   private readonly killTimeoutMs: number;
   private readonly processPollIntervalMs: number;
   private readonly startTimeoutMs: number;
+  private readonly statePreparationWaitMs: number;
   private readonly requestTimeoutMs: number;
   private readonly turnControlRequestTimeoutMs: number;
   private readonly now: () => Date;
@@ -421,6 +424,7 @@ export class SupervisorDaemonClient {
     this.killTimeoutMs = options.killTimeoutMs ?? KILL_EXIT_TIMEOUT_MS;
     this.processPollIntervalMs = options.processPollIntervalMs ?? PROCESS_POLL_INTERVAL_MS;
     this.startTimeoutMs = options.startTimeoutMs ?? START_TIMEOUT_MS;
+    this.statePreparationWaitMs = options.statePreparationWaitMs ?? 30_000;
     this.requestTimeoutMs = options.requestTimeoutMs ?? REQUEST_TIMEOUT_MS;
     this.turnControlRequestTimeoutMs = options.turnControlRequestTimeoutMs ?? TURN_CONTROL_REQUEST_TIMEOUT_MS;
     this.now = options.now ?? (() => new Date());
@@ -428,7 +432,7 @@ export class SupervisorDaemonClient {
       const child = spawn(process.execPath, [scriptPath], {
         cwd,
         detached: true,
-        stdio: "ignore",
+        stdio: ["ignore", "ignore", "ignore", "ipc"],
         env,
       });
       child.unref();
@@ -1190,6 +1194,7 @@ export class SupervisorDaemonClient {
     this.stopAttachedDaemonObservation();
     await mkdir(this.daemonWorkingDirectory, { recursive: true, mode: 0o700 });
     const child = this.spawnDaemon(this.daemonScriptPath, this.daemonWorkingDirectory, spawnEnvironment);
+    const statePreparation = prepareSupervisorState(child, undefined, this.statePreparationWaitMs);
     const childPid = Number.isSafeInteger(child.pid) && (child.pid ?? 0) > 0 ? child.pid! : null;
     this.ownedDaemonPid = childPid;
     appendDaemonLifecycleEvent(this.lifecycleLogPath, { event: "daemon_spawned", pid: childPid });
@@ -1209,6 +1214,9 @@ export class SupervisorDaemonClient {
         signal,
       });
     });
+    // Migration/OS-key custody has its own bootstrap protocol. The socket's
+    // short startup deadline must not expire while a large backup is fsyncing.
+    await statePreparation;
     return this.waitForHealthy(retiredGeneration, expectedRuntimeEnvironmentFingerprint);
   }
 
