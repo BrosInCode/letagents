@@ -492,12 +492,32 @@
   .agent-inspector-overview-section { border-color: rgba(255, 255, 255, 0.28); }
 }
 
-/* Live tab: an ephemeral, append-only transcript of the focused agent's
-   reasoning, replies, and tool calls while it works. */
+/* Live tab: a calm work narrative. Provider commentary and observed actions
+   share one timeline; transport payloads remain secondary disclosure. */
 .agent-inspector-live { display: flex; flex-direction: column; gap: 10px; }
-.agent-inspector-live-items { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 10px; }
-.agent-inspector-live-item { display: flex; flex-direction: column; gap: 4px; padding: 10px 12px; border: 1px solid rgba(255, 255, 255, 0.09); border-radius: 12px; background: rgba(255, 255, 255, 0.025); }
-.agent-inspector-live-item[data-kind="tool"] { border-color: rgba(96, 165, 250, 0.24); background: rgba(96, 165, 250, 0.06); }
+.agent-inspector-live-summary { display: grid; gap: 9px; padding: 14px 15px; border: 1px solid rgba(96, 165, 250, 0.22); border-radius: 14px; background: linear-gradient(180deg, rgba(59, 130, 246, 0.08), rgba(59, 130, 246, 0.025)); }
+.agent-inspector-live-summary[data-running="false"] { border-color: rgba(255, 255, 255, 0.1); background: rgba(255, 255, 255, 0.025); }
+.agent-inspector-live-summary-head { display: flex; align-items: center; gap: 10px; }
+.agent-inspector-live-summary-head > div { display: grid; gap: 2px; min-width: 0; }
+.agent-inspector-live-summary-head strong { color: var(--text, #fafafa); font-size: 0.9rem; line-height: 1.3; }
+.agent-inspector-live-summary-dot { flex: 0 0 auto; width: 9px; height: 9px; border-radius: 50%; background: #60a5fa; box-shadow: 0 0 0 4px rgba(96, 165, 250, 0.13); }
+.agent-inspector-live-summary[data-running="false"] .agent-inspector-live-summary-dot { background: var(--text-secondary, #a1a1aa); box-shadow: none; }
+.agent-inspector-live-eyebrow { color: #93c5fd; font-size: 0.62rem; font-weight: 740; letter-spacing: 0.06em; text-transform: uppercase; }
+.agent-inspector-live-summary[data-running="false"] .agent-inspector-live-eyebrow { color: var(--text-secondary, #a1a1aa); }
+.agent-inspector-live-state { margin-left: auto; color: var(--text-secondary, #a1a1aa); font-size: 0.66rem; font-weight: 650; }
+.agent-inspector-live-summary > p { margin: 0 0 0 19px; color: var(--text-secondary, #cbd5e1); font-size: 0.78rem; line-height: 1.5; overflow-wrap: anywhere; }
+.agent-inspector-live-items { list-style: none; margin: 0; padding: 2px 0 0; display: flex; flex-direction: column; }
+.agent-inspector-live-item { position: relative; display: grid; grid-template-columns: 18px minmax(0, 1fr); gap: 9px; padding: 8px 0 14px; }
+.agent-inspector-live-marker { position: relative; display: block; width: 10px; height: 10px; margin: 4px auto 0; border: 2px solid rgba(161, 161, 170, 0.5); border-radius: 50%; background: var(--surface, #18181b); }
+.agent-inspector-live-item:not(:last-child)::after { content: ""; position: absolute; top: 20px; bottom: -2px; left: 8px; width: 2px; border-radius: 999px; background: rgba(161, 161, 170, 0.16); }
+.agent-inspector-live-item[data-kind="tool"][data-status="running"] .agent-inspector-live-marker { border-color: #60a5fa; background: rgba(96, 165, 250, 0.2); }
+.agent-inspector-live-item[data-kind="tool"][data-status="completed"] .agent-inspector-live-marker,
+.agent-inspector-live-item[data-work-kind="result"] .agent-inspector-live-marker { border-color: #34d399; background: #34d399; }
+.agent-inspector-live-item[data-status="error"] .agent-inspector-live-marker,
+.agent-inspector-live-item[data-status="failed"] .agent-inspector-live-marker { border-color: #fb7185; background: rgba(251, 113, 133, 0.28); }
+.agent-inspector-live-item[data-status="interrupted"] .agent-inspector-live-marker { border-color: #fbbf24; background: rgba(251, 191, 36, 0.2); }
+.agent-inspector-live-item-content { min-width: 0; display: flex; flex-direction: column; gap: 4px; }
+.agent-inspector-live-item[data-work-kind="result"] .agent-inspector-live-item-content { padding: 11px 12px; border: 1px solid rgba(52, 211, 153, 0.24); border-radius: 12px; background: rgba(52, 211, 153, 0.055); }
 .agent-inspector-live-label { font-size: 0.62rem; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase; color: var(--text-secondary, #a1a1aa); }
 .agent-inspector-live-reasoning { margin: 0; color: var(--text-secondary, #a1a1aa); font-size: 0.78rem; line-height: 1.5; white-space: pre-wrap; overflow-wrap: anywhere; }
 .agent-inspector-live-message { margin: 0; color: var(--text, #fafafa); font-size: 0.82rem; line-height: 1.55; white-space: pre-wrap; overflow-wrap: anywhere; }
@@ -505,7 +525,10 @@
 .agent-inspector-live-tool-head strong { font-size: 0.8rem; color: var(--text, #fafafa); }
 .agent-inspector-live-tool-status { font-size: 0.64rem; font-weight: 670; padding: 1px 7px; border-radius: 999px; background: rgba(255, 255, 255, 0.08); color: var(--text-secondary, #a1a1aa); }
 .agent-inspector-live-tool-status[data-status="completed"] { background: rgba(52, 211, 153, 0.16); color: #6ee7b7; }
-.agent-inspector-live-tool-status[data-status="error"] { background: rgba(251, 113, 133, 0.16); color: #fecaca; }
+.agent-inspector-live-tool-status[data-status="error"],
+.agent-inspector-live-tool-status[data-status="failed"] { background: rgba(251, 113, 133, 0.16); color: #fecaca; }
+.agent-inspector-live-tool-status[data-status="running"] { background: rgba(96, 165, 250, 0.16); color: #bfdbfe; }
+.agent-inspector-live-tool-status[data-status="interrupted"] { background: rgba(251, 191, 36, 0.14); color: #fde68a; }
 .agent-inspector-live-tool-io { margin: 2px 0 0; padding: 8px 10px; border-radius: 9px; background: rgba(0, 0, 0, 0.28); color: var(--text-secondary, #cbd5e1); font-size: 0.72rem; line-height: 1.45; white-space: pre-wrap; overflow-wrap: anywhere; max-height: 220px; overflow-y: auto; }
 .agent-inspector-live-tool-error { margin: 2px 0 0; color: #fecaca; font-size: 0.74rem; line-height: 1.45; }
 /* The turn's published room reply is the product of the whole turn: render it
@@ -516,8 +539,10 @@
    sentence above is the default reading. */
 .agent-inspector-live-tool-raw { margin: 4px 0 0; }
 .agent-inspector-live-tool-raw summary { cursor: pointer; font-size: 0.66rem; font-weight: 650; letter-spacing: 0.04em; color: var(--text-secondary, #a1a1aa); user-select: none; }
-.agent-inspector-live-tool-raw summary:hover { color: var(--text, #fafafa); }
+.agent-inspector-live-tool-raw summary:hover,
+.agent-inspector-live-tool-raw summary:focus-visible { color: var(--text, #fafafa); }
+.agent-inspector-live-tool-raw summary:focus-visible { outline: 2px solid rgba(147, 197, 253, 0.9); outline-offset: 3px; border-radius: 3px; }
 .agent-inspector-live-empty { margin: 8px 0; color: var(--text-secondary, #a1a1aa); font-size: 0.76rem; }
 .agent-inspector-live-footer { display: flex; align-items: center; gap: 6px; margin: 4px 0 0; color: var(--text-secondary, #a1a1aa); font-size: 0.68rem; }
 .agent-inspector-live-footer span[aria-hidden="true"] { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 0 3px rgba(52, 211, 153, 0.18); }
-.agent-inspector-live-footer[data-ended="true"] span[aria-hidden="true"] { background: var(--text-secondary, #a1a1aa); box-shadow: none; }
+.agent-inspector-live-footer[data-running="false"] span[aria-hidden="true"] { background: var(--text-secondary, #a1a1aa); box-shadow: none; }

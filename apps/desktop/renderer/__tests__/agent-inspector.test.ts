@@ -366,6 +366,23 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
     },
   });
   assert.match(projectAgentInspector(responding, { roomId: "focus_1" })?.now?.summary ?? "", /Checking the workspace/);
+  assert.deepEqual(projectAgentInspector(responding, { roomId: "focus_1" })?.liveWork, {
+    active: true,
+    state: "responding",
+    startedAt: "2026-07-23T10:00:02.000Z",
+    detail: null,
+    freshness: "fresh",
+    agentState: "responding",
+  });
+
+  assert.deepEqual(projectAgentInspector(responding, { roomId: "focus_1", resourceFreshness: "stale" })?.liveWork, {
+    active: false,
+    state: "responding",
+    startedAt: null,
+    detail: null,
+    freshness: "stale",
+    agentState: "responding",
+  }, "stale last-good supervisor state cannot keep the live timer running");
 
   const withoutStart = entry({ ...responding, deliveryReceipts: [receipt("message_1", "awaiting_result")] });
   assert.equal(projectAgentInspector(withoutStart, { roomId: "focus_1" })?.now, null);
@@ -392,6 +409,14 @@ test("Now uses only sanitized activity observed after the exact turn_started eve
 
   const finished = entry({ ...responding, roomAgentState: { ...responding.roomAgentState!, turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null } } });
   assert.equal(projectAgentInspector(finished, { roomId: "focus_1" })?.now, null, "completion clears active Now instead of retaining a stale progress echo");
+  assert.deepEqual(projectAgentInspector(finished, { roomId: "focus_1" })?.liveWork, {
+    active: false,
+    state: "idle",
+    startedAt: null,
+    detail: null,
+    freshness: "fresh",
+    agentState: "online",
+  }, "an open provider stream cannot keep live work active after the durable turn becomes idle");
 });
 
 test("delivery progress follows durable turn phases without duplicating the thinking surface", () => {
