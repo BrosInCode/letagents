@@ -413,6 +413,132 @@ test("activation refuses a stale launch session before preparing or starting nat
   } finally { await env.close(); }
 });
 
+test("custodial forward requires explicit idle admission and transfers the worker ACK, not stale ingress", async () => {
+  const env = await activationFixture();
+  try {
+    const request = { ...env.request, operationId: "forward", requestId: "forward-request" };
+    env.base.events.length = 0;
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal(env.starts, 0);
+    assert.deepEqual(env.base.events, []);
+    await env.bindings.checkpointCursor("agent", "worker", "polling-run", "123");
+    assert.equal((await env.base.inbox.cursor("agent"))?.last_observed_message_id, "100");
+    env.provider.controlExactTurn = async () => { throw new Error("forward must not interrupt or adopt wait evidence"); };
+    const driver = env.driver();
+    assert.equal((await driver.prepareCustodialForward(request)).phase, "draining");
+    assert.equal(env.base.events.includes("stop"), false);
+    await driver.drive("agent", env.base.signal);
+    await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal((await driver.getDrain(request)).phase, "complete");
+    assert.equal((await env.base.store.getEntry("agent"))?.delivery_mode, "daemon_inbox");
+    assert.equal((await env.base.store.getAgentConfiguration("agent"))?.polling_contract, null);
+    assert.equal((await env.base.inbox.cursor("agent"))?.last_observed_message_id, "123");
+    assert.equal(env.starts, 0, "forward never dispatches a polling turn");
+    assert.equal((await driver.prepareCustodialForward(request)).phase, "complete");
+    await driver.drive("agent", env.base.signal);
+    assert.equal(env.base.events.filter(event => event === "stop").length, 1);
+    await assert.rejects(driver.prepareCustodialForward({ ...request, reverseOperationId: "other" }), /identity changed/);
+  } finally { await env.close(); }
+});
+
+test("custodial forward refuses active, unknown, and unresolved activation boundaries without stopping", async () => {
+  for (const boundary of ["active", "unknown", "activation", "started-activation"] as const) {
+    const env = await activationFixture();
+    try {
+      env.base.events.length = 0;
+      if (boundary === "active") env.base.state.activeTurn = "polling-turn";
+      if (boundary === "unknown") env.provider.inspectTurnBoundary = async () => ({ state: "unknown" });
+      if (boundary === "activation") await env.prepare();
+      if (boundary === "started-activation") await env.driver().activatePolling(env.request);
+      await assert.rejects(env.driver().prepareCustodialForward({ ...env.request, operationId: "forward", requestId: "forward-request" }));
+      assert.equal(await env.base.store.getDeliveryDrain("forward"), null);
+      assert.equal(env.base.events.includes("stop"), false);
+      assert.equal((await env.base.inbox.cursor("agent"))?.last_observed_message_id, "100");
+      assert.equal((await env.base.store.getAgentConfiguration("agent"))?.polling_contract, "custodial_polling_v1");
+    } finally { await env.close(); }
+  }
+});
+
+test("custodial forward refuses even a completed native polling activation; idle is not batch settlement", async () => {
+  const env = await activationFixture();
+  try {
+    assert.equal((await env.driver().activatePolling(env.request)).phase, "active");
+    env.observation = { state: "terminal", outcome: "completed" };
+    await env.driver().drive("agent", env.base.signal);
+    const receipt = await env.driver().getPollingActivation(env.request);
+    assert.equal(receipt.phase, "complete");
+    assert.equal(receipt.terminal_outcome, "completed");
+    assert.equal(receipt.provider_turn_id, "polling-turn");
+    env.base.events.length = 0;
+    await assert.rejects(env.driver().prepareCustodialForward({ ...env.request, operationId: "forward", requestId: "forward-request" }));
+    assert.equal(await env.base.store.getDeliveryDrain("forward"), null);
+    assert.equal(env.base.events.includes("stop"), false);
+    assert.equal((await env.base.inbox.cursor("agent"))?.last_observed_message_id, "100");
+  } finally { await env.close(); }
+});
+
+test("custodial forward permits an explicitly cancelled never-dispatched activation", async () => {
+  const env = await activationFixture();
+  try {
+    await env.prepare();
+    assert.equal((await env.driver().cancelPollingActivation(env.request)).phase, "cancelled");
+    const request = { ...env.request, operationId: "forward", requestId: "forward-request" };
+    await env.driver().prepareCustodialForward(request);
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal((await env.base.store.getDeliveryDrain("forward"))?.phase, "complete");
+    assert.equal(env.starts, 0);
+  } finally { await env.close(); }
+});
+
+test("custodial forward retains lost stop ACK across reopen until exact birth death", async () => {
+  const env = await activationFixture();
+  try {
+    const request = { ...env.request, operationId: "forward", requestId: "forward-request" };
+    await env.bindings.checkpointCursor("agent", "worker", "polling-run", "123");
+    env.base.events.length = 0;
+    await env.driver().prepareCustodialForward(request);
+    env.base.state.onStop = async () => { throw new Error("stop acknowledgement lost"); };
+    await assert.rejects(env.driver().drive("agent", env.base.signal), /stop acknowledgement lost/);
+    assert.equal((await env.base.store.getDeliveryDrain("forward"))?.phase, "uncertain");
+    await env.base.reopen();
+    await assert.rejects(env.driver().cancelDrain(request), /cannot be cancelled/);
+    env.base.state.birth = "unknown";
+    env.base.state.onStop = async () => {};
+    env.base.state.afterStop = "unknown";
+    await assert.rejects(env.driver().drive("agent", env.base.signal), /no hard proof/);
+    assert.equal((await env.base.inbox.cursor("agent"))?.last_observed_message_id, "100");
+    const stops = env.base.events.filter(event => event === "stop").length;
+    env.base.state.birth = "gone";
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal((await env.base.store.getDeliveryDrain("forward"))?.phase, "complete");
+    assert.equal((await env.base.inbox.cursor("agent"))?.last_observed_message_id, "123");
+    assert.equal(env.base.events.filter(event => event === "stop").length, stops, "hard death recovery never signals a new birth");
+  } finally { await env.close(); }
+});
+
+test("custodial forward leaves durable stop intent during handoff and rejects stale native ownership", async () => {
+  const env = await activationFixture();
+  try {
+    const request = { ...env.request, operationId: "forward", requestId: "forward-request" };
+    const original = env.base.handle.providerContinuationId;
+    env.base.handle.providerContinuationId = "other-thread";
+    await assert.rejects(env.driver().prepareCustodialForward(request), /exact owned/);
+    assert.equal(await env.base.store.getDeliveryDrain("forward"), null);
+    env.base.handle.providerContinuationId = original;
+    await env.driver().prepareCustodialForward(request);
+    const stopped = deferred<void>();
+    env.base.state.onStop = async () => { env.base.state.handoff = true; env.base.controller.abort(); await stopped.promise; };
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal((await env.base.store.getDeliveryDrain("forward"))?.phase, "dispatching");
+    assert.equal((await env.base.store.getAgentConfiguration("agent"))?.polling_contract, "custodial_polling_v1");
+    stopped.resolve();
+    await new Promise<void>(resolve => setImmediate(resolve));
+    env.base.state.handoff = false;
+    await env.driver().drive("agent", new AbortController().signal);
+    assert.equal((await env.base.store.getDeliveryDrain("forward"))?.phase, "complete");
+  } finally { await env.close(); }
+});
+
 async function activationFixture() {
   const base = await reverseFixture();
   await base.driver().prepareDrain(base.request);
@@ -448,7 +574,7 @@ async function activationFixture() {
     expires_at: new Date(Date.now() + 60_000).toISOString() });
   const grant: InstalledHostGrant = { entryId: "agent", roomId: "room", agentKey: "owner/agent", grantId: "grant", supervisorGrant: "test-grant",
     grantGeneration: 1, apiUrl: "https://example.test", daemonGeneration: 1, hostId: "host", installationId: "install", expiresAt: new Date(Date.now() + 60_000).toISOString() };
-  const env = { base, provider: { ...base.provider }, starts: 0, inspections: 0, workerAdmitted: false,
+  const env = { base, bindings, provider: { ...base.provider }, starts: 0, inspections: 0, workerAdmitted: false,
     observation: { state: "active" } as Awaited<ReturnType<NonNullable<ProviderActionPort["inspectCustodialPollingActivation"]>>>,
     request: { entryId: "agent", operationId: "activation", requestId: "activate-request", roomId: "room", executionGenerationId: "polling-run", reverseOperationId: "operation" },
     driver: () => base.driver({ provider: env.provider,
@@ -505,7 +631,8 @@ async function reverseFixture() {
       : { state: "idle", providerContinuationId: "thread", nativeProcessIdentity: BIRTH, latestProviderTurnId: null },
     stopRef: async (ref) => {
       assert.deepEqual(ref.providerConnection, connection);
-      assert.equal((await store.getDeliveryDrain("operation"))?.phase === "dispatching" || (await store.getDeliveryDrain("operation"))?.phase === "uncertain", true);
+      const stopping = await store.unresolvedDeliveryDrain("agent");
+      assert.ok(stopping?.phase === "dispatching" || stopping?.phase === "uncertain", "exact stop must follow durable dispatch intent");
       events.push("stop"); await state.onStop(); state.birth = state.afterStop;
       return { endedAt: new Date().toISOString(), exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: "thread" };
     },

@@ -58,6 +58,7 @@ const expectedControlMethods = [
   "supervisor.install_open_model_credential",
   "supervisor.install_worker_credential",
   "supervisor.prepare_bounded_effect",
+  "supervisor.prepare_custodial_forward",
   "supervisor.prepare_delivery_drain",
   "supervisor.prepare_room_move",
   "supervisor.purge_agent",
