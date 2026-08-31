@@ -696,6 +696,10 @@ function handleRoomStreamFrame(
     repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
     return;
   }
+  if (!payload || typeof payload !== "object" || Array.isArray(payload)) {
+    repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+    return;
+  }
 
   const eventRoomIdentifier =
     typeof payload.room_id === "string" ? payload.room_id : roomIdentifier;
@@ -930,7 +934,15 @@ function handleRoomStreamFrame(
     }, { deliverToManagedAgents: shouldDeliverToManagedAgents });
     return;
   }
-  repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+  // Newer servers may publish event types this client does not render. A
+  // bounded, well-formed unknown event is a no-op, not evidence of a gap.
+  const bytes = Buffer.byteLength(eventName) + Buffer.byteLength(data)
+    + (eventCursor ? Buffer.byteLength(eventCursor) : 0);
+  if (bytes > MAX_NATIVE_SSE_FRAME_BYTES) {
+    repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+    return;
+  }
+  stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
 }
 
 function queueOrHandleRoomStreamFrame(
