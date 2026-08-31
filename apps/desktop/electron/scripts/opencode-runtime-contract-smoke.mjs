@@ -1,4 +1,5 @@
 import { spawn, spawnSync } from "node:child_process";
+import assert from "node:assert/strict";
 import { randomBytes, randomUUID } from "node:crypto";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
@@ -19,7 +20,7 @@ const {
 const { OPENCODE_RUNTIME_VERSION } = await import(
   "../../dist-electron/main/agents/opencode-runtime.js"
 );
-const { OpenCodeServerClient, eventReferencesSession, mintNativeUserMessageId } = await import(
+const { OpenCodeServerClient, eventReferencesSession, mintNativeUserMessageId, parseOpenCodePermissionEvent } = await import(
   "../../dist-electron/main/agents/opencode-server-client.js"
 );
 
@@ -117,8 +118,9 @@ function assistantText(response, text) {
   ]);
 }
 
-function assistantToolCall(response, name) {
-  const command = "printf '%s|%s|%s|%s' \"$OPENCODE_AUTH_CONTENT\" \"$OPENCODE_CONFIG_CONTENT\" \"$OPENCODE_SERVER_USERNAME\" \"$OPENCODE_SERVER_PASSWORD\"";
+function assistantToolCall(response, name, commands = [
+  "printf '%s|%s|%s|%s' \"$OPENCODE_AUTH_CONTENT\" \"$OPENCODE_CONFIG_CONTENT\" \"$OPENCODE_SERVER_USERNAME\" \"$OPENCODE_SERVER_PASSWORD\"",
+]) {
   writeSse(response, [
     {
       id: `chatcmpl_${randomUUID()}`,
@@ -129,15 +131,15 @@ function assistantToolCall(response, name) {
         index: 0,
         delta: {
           role: "assistant",
-          tool_calls: [{
-            index: 0,
-            id: "call_credential_boundary",
+          tool_calls: commands.map((command, index) => ({
+            index,
+            id: `call_contract_${index}`,
             type: "function",
             function: {
               name,
               arguments: JSON.stringify({ command, description: "Verify runtime boundary" }),
             },
-          }],
+          })),
         },
         finish_reason: null,
       }],
@@ -169,6 +171,15 @@ async function startFixtureProvider() {
     const name = toolName(body);
     const serializedMessages = JSON.stringify(body.messages ?? []);
     const hasToolResult = (body.messages ?? []).some((message) => message?.role === "tool");
+    if (serializedMessages.includes("LETAGENTS_PERMISSION_REJECT_FIXTURE")
+      || serializedMessages.includes("LETAGENTS_PERMISSION_FOREIGN_FIXTURE")) {
+      if (hasToolResult) assistantText(response, "permission-contract-settled");
+      else if (name) assistantToolCall(response, name, serializedMessages.includes("LETAGENTS_PERMISSION_REJECT_FIXTURE")
+        ? ["printf 'rejected-first'", "printf 'rejected-second'"]
+        : ["printf 'foreign-pending'"]);
+      else assistantText(response, "contract-background-request-ok");
+      return;
+    }
     if (hasToolResult) {
       if (serializedMessages.includes(CONTRACT_SENTINEL)) {
         response.writeHead(500).end("provider credential escaped into the model shell");
@@ -229,29 +240,57 @@ async function waitForHealth(client, child, output) {
   throw new Error(`OpenCode server did not become healthy: ${output.value}`);
 }
 
-async function waitForTurn(client, sessionId, signal, eventTypes) {
-  const deadline = Date.now() + TURN_TIMEOUT_MS;
-  const events = client.events(signal)[Symbol.asyncIterator]();
-  while (Date.now() < deadline) {
-    let timeout;
-    const next = await Promise.race([
-      events.next(),
-      new Promise((_, reject) => {
-        timeout = setTimeout(
-          () => reject(new Error("OpenCode live contract turn timed out.")),
-          Math.max(1, deadline - Date.now()),
-        );
-      }),
-    ]).finally(() => clearTimeout(timeout));
-    if (next.done) break;
-    const event = next.value;
-    if (typeof event.type === "string") eventTypes.add(event.type);
-    if (eventReferencesSession(event, sessionId)
-      && (event.type === "session.idle" || event.type === "session.error")) {
-      return;
+async function watchEvents(client, eventTypes) {
+  const controller = new AbortController();
+  const seen = [];
+  const waiting = new Set();
+  let ended = false;
+  const reading = (async () => {
+    try {
+      for await (const event of client.events(controller.signal)) {
+        parseOpenCodePermissionEvent(event);
+        if (typeof event.type === "string") eventTypes.add(event.type);
+        seen.push(event);
+        for (const wake of waiting) wake();
+      }
+    } finally {
+      ended = true;
+      for (const wake of waiting) wake();
     }
+  })();
+  // Event-reader errors are surfaced by waitFor or close, never unhandled.
+  void reading.catch(() => {});
+  const watch = {
+    seen,
+    waitFor(predicate, after = 0) {
+      return new Promise((resolveEvent, reject) => {
+        const finish = (error, event) => {
+          clearTimeout(timer);
+          waiting.delete(check);
+          if (error) reject(error); else resolveEvent(event);
+        };
+        const check = () => {
+          const event = seen.slice(after).find(predicate);
+          if (event) finish(null, event);
+          else if (ended) finish(new Error("OpenCode contract event stream ended before its evidence arrived."));
+        };
+        const timer = setTimeout(() => finish(new Error("OpenCode contract event evidence timed out.")), TURN_TIMEOUT_MS);
+        waiting.add(check);
+        check();
+      });
+    },
+    async close() {
+      controller.abort();
+      await reading.catch((error) => { if (error?.name !== "AbortError") throw error; });
+    },
+  };
+  try {
+    await watch.waitFor((event) => event.type === "server.connected");
+    return watch;
+  } catch (error) {
+    await watch.close().catch(() => {});
+    throw error;
   }
-  throw new Error("OpenCode live contract event stream ended before the turn.");
 }
 
 const binary = resolveBinary();
@@ -276,6 +315,8 @@ const config = openCodeConfig({
   mcpCommand: [process.execPath, mcpPath],
   mcpEnvironment: {},
 });
+// Fixture-only prompting: production still launches with its unchanged full-access policy.
+config.permission = { "*": "allow", bash: "ask" };
 const environment = minimalOpenCodeEnvironment(process.env, {
   OPENCODE_SERVER_USERNAME: auth.username,
   OPENCODE_SERVER_PASSWORD: auth.password,
@@ -300,20 +341,25 @@ const child = spawn(binary, [
 });
 child.stdout.on("data", (chunk) => { output.value += chunk; });
 child.stderr.on("data", (chunk) => { output.value += chunk; });
+let observation;
 
 try {
+  let permissionReplyPosts = 0;
+  const nativeFetch = (input, init) => {
+    if (init?.method === "POST" && /\/permission\/[^/]+\/reply$/.test(new URL(input).pathname)) permissionReplyPosts += 1;
+    return fetch(input, init);
+  };
   const client = new OpenCodeServerClient(
     `http://127.0.0.1:${port}`,
     auth,
-    (input, init) => fetch(input, init),
+    nativeFetch,
   );
   await waitForHealth(client, child, output);
   const initial = await client.createSession("LetAgents live contract");
   const sessionId = typeof initial.id === "string" ? initial.id : "";
   if (!sessionId) throw new Error("OpenCode live contract did not create a session.");
   const eventTypes = new Set();
-  const controller = new AbortController();
-  const turn = waitForTurn(client, sessionId, controller.signal, eventTypes);
+  observation = await watchEvents(client, eventTypes);
   // The adapter dispatches user message IDs in OpenCode's own ascending
   // scheme; anything else breaks the native loop-exit ordering invariant.
   // The contract smoke must prove that exact discipline round-trips.
@@ -329,7 +375,23 @@ try {
       text: "Use the shell tool exactly once, then report its output.",
     }],
   });
-  await turn.finally(() => controller.abort());
+  const asked = await observation.waitFor((event) => event.type === "permission.asked"
+    && event.properties.sessionID === sessionId);
+  const pending = await client.listPendingPermissions(sessionId);
+  assert.deepEqual(pending, [asked.properties], "native ask must match the authoritative exact-session list");
+  assert.equal(pending[0].permission, "bash");
+  await observation.close();
+
+  // Reconnect the event channel and reconstruct the client while the same
+  // native request remains pending; do not replay its model prompt.
+  let reattached = new OpenCodeServerClient(`http://127.0.0.1:${port}`, auth, nativeFetch);
+  observation = await watchEvents(reattached, eventTypes);
+  assert.deepEqual(await reattached.listPendingPermissions(sessionId), pending);
+  assert.deepEqual(await reattached.replyPermission(sessionId, pending[0], "once"), { outcome: "processed", nativeScope: "request" });
+  await observation.waitFor((event) => event.type === "permission.replied"
+    && event.properties.requestID === pending[0].id && event.properties.reply === "once");
+  await observation.waitFor((event) => eventReferencesSession(event, sessionId)
+    && (event.type === "session.idle" || event.type === "session.error"));
   const messages = await client.messages(sessionId);
   if (!JSON.stringify(messages).includes("credential-boundary-ok")) {
     throw new Error(`OpenCode did not preserve the bounded-turn result: ${JSON.stringify(messages)}`);
@@ -337,14 +399,16 @@ try {
   if (!provider.state.credentialBoundaryObserved) {
     throw new Error("The live model-run shell credential boundary was not observed.");
   }
+  assert.equal(permissionReplyPosts, 1);
+  await observation.close();
+  reattached = new OpenCodeServerClient(`http://127.0.0.1:${port}`, auth, nativeFetch);
+  observation = await watchEvents(reattached, eventTypes);
+  assert.deepEqual(await reattached.listPendingPermissions(sessionId), [], "a processed request must remain absent after reconnect");
+  await assert.rejects(reattached.replyPermission(sessionId, pending[0], "once"), (error) => error?.outcome === "not_pending");
+  assert.equal(permissionReplyPosts, 1, "a repeated processed request must be refused before another native POST");
 
   // Reconstructing the authenticated client models desktop/daemon restart:
   // the process and session stay authoritative without another native launch.
-  const reattached = new OpenCodeServerClient(
-    `http://127.0.0.1:${port}`,
-    auth,
-    (input, init) => fetch(input, init),
-  );
   const sessions = await reattached.listSessions();
   if (!sessions.some((session) => session.id === sessionId)) {
     throw new Error("A fresh control client could not reattach to the exact session.");
@@ -355,6 +419,56 @@ try {
   if (!replacementSessionId || replacementSessionId === sessionId) {
     throw new Error("Same-process continuation repair did not create a distinct session.");
   }
+  const foreignSession = await reattached.createSession("LetAgents pending permission isolation");
+  assert.equal(typeof foreignSession.id, "string");
+  const permissionTurnsStart = observation.seen.length;
+  for (const [target, text] of [[replacementSessionId, "LETAGENTS_PERMISSION_REJECT_FIXTURE"],
+    [foreignSession.id, "LETAGENTS_PERMISSION_FOREIGN_FIXTURE"]]) {
+    await reattached.promptAsync(target, {
+      messageID: mintNativeUserMessageId(Date.now()),
+      model: { providerID: OPEN_MODEL_OPENCODE_PROVIDER_ID, modelID: "contract-model" },
+      parts: [{ type: "text", text }],
+    });
+  }
+  for (const command of ["printf 'rejected-first'", "printf 'rejected-second'", "printf 'foreign-pending'"]) {
+    await observation.waitFor((event) => event.type === "permission.asked" && event.properties.metadata.command === command);
+  }
+  const rejected = await reattached.listPendingPermissions(replacementSessionId);
+  const foreign = await reattached.listPendingPermissions(foreignSession.id);
+  assert.equal(rejected.length, 2, "the native session must have two simultaneous pending requests");
+  assert.equal(foreign.length, 1);
+  assert.deepEqual(await reattached.replyPermission(replacementSessionId, rejected[0], "reject"), {
+    outcome: "processed", nativeScope: "session_pending",
+  });
+  for (const request of rejected) await observation.waitFor((event) => event.type === "permission.replied"
+    && event.properties.requestID === request.id && event.properties.reply === "reject");
+  assert.deepEqual(await reattached.listPendingPermissions(replacementSessionId), []);
+  assert.deepEqual(await reattached.listPendingPermissions(foreignSession.id), foreign, "reject must not affect another session");
+  await observation.waitFor((event) => event.type === "session.idle" && eventReferencesSession(event, replacementSessionId), permissionTurnsStart);
+  const rejectedTools = (await reattached.messages(replacementSessionId)).flatMap((message) => message.parts ?? [])
+    .filter((part) => part.type === "tool" && part.tool === "bash");
+  assert.equal(rejectedTools.length, 2);
+  assert.ok(rejectedTools.every((part) => part.state?.status === "error"), "neither rejected command may complete execution");
+
+  // Native pending requests are instance-local, not durable session history.
+  // Dispose the instance while the foreign request is pending, without exiting
+  // the server PID, then prove that a new control instance cannot recover it.
+  const disposed = await fetch(`${reattached.url}/instance/dispose`, {
+    method: "POST",
+    headers: { authorization: `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString("base64")}` },
+    signal: AbortSignal.timeout(TURN_TIMEOUT_MS),
+  });
+  assert.equal(disposed.ok, true);
+  assert.equal(await disposed.json(), true);
+  await observation.waitFor((event) => event.type === "server.instance.disposed");
+  await observation.close();
+  assert.equal(child.exitCode, null, "instance loss is distinct from process death");
+  assert.deepEqual(await reattached.listPendingPermissions(foreignSession.id), []);
+  await assert.rejects(reattached.replyPermission(foreignSession.id, foreign[0], "once"),
+    (error) => error?.outcome === "not_pending");
+  await assert.rejects(reattached.replyPermission(sessionId, pending[0], "once"),
+    (error) => error?.outcome === "not_pending");
+  assert.equal(permissionReplyPosts, 2, "disposal must not permit re-dispatch of lost or previously processed requests");
   console.log(JSON.stringify({
     runtime: "opencode",
     version: actualVersion,
@@ -366,11 +480,19 @@ try {
     reattachedWithoutRelaunch: true,
     nativeAbortAccepted: true,
     sameProcessRepair: true,
+    permissionAskAndExactList: true,
+    permissionReconnectWithoutReplay: true,
+    permissionAllowOnce: true,
+    permissionProcessedReplayRefused: true,
+    permissionRejectScope: "all_pending_in_same_session",
+    permissionForeignSessionPreserved: true,
+    permissionInstanceDisposalLoss: true,
     eventTypes: [...eventTypes].sort(),
     providerRequests: provider.state.requestCount,
     providerPaths: provider.state.paths,
   }));
 } finally {
+  await observation?.close().catch(() => {});
   child.kill("SIGTERM");
   await Promise.race([
     new Promise((resolveExit) => child.once("exit", resolveExit)),

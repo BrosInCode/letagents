@@ -67,6 +67,7 @@ import {
   messageText,
   mintNativeUserMessageId,
   nativelyOrderedMessageId,
+  OpenCodePermissionReplyError,
   OpenCodeServerClient,
   parseOpenCodePermissionEvent,
   record,
@@ -918,6 +919,36 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     if (result.state === "lost") handle.controlLoss = result.controlEvidence;
     this.emitExecution(handle, { domain: "control", kind: "state_changed", sideEffects: "none", ...result });
     return result;
+  }
+
+  /** Host-only native decision boundary; durable decision/retry policy belongs to the caller. */
+  async replyPermission(
+    rawHandle: ProviderHandle,
+    expectedRequest: OpenCodePermissionRequest,
+    reply: "once" | "reject",
+  ) {
+    const currentHandle = (): OpenModelHandle => {
+      const current = this.handles.get(rawHandle.workAttemptId);
+      if (!current || current !== rawHandle || current.terminal
+        || current.observedState() === "stopping" || this.controlProof(current)) {
+        throw new OpenCodePermissionReplyError("not_dispatched");
+      }
+      return current;
+    };
+    const handle = currentHandle();
+    let dispatched = false;
+    try {
+      return await handle.client.replyPermission(handle.providerContinuationId, expectedRequest, reply, () => {
+        currentHandle();
+        dispatched = true;
+      });
+    } finally {
+      if (dispatched) {
+        // A replacement may answer even with 404. Neither that response nor
+        // loss of the original instance proves that the decision did not land.
+        try { currentHandle(); } catch { throw new OpenCodePermissionReplyError("uncertain"); }
+      }
+    }
   }
 
   async observePermissions(
