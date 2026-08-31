@@ -119,6 +119,29 @@ test("permission routing snapshots OpenCode payloads and refuses replacement dur
   assert.equal(sends, 1);
 });
 
+test("Codex file-change routing requires inspected edits and fences replacement during inspection", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const spawn = { provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  const native = Object.freeze({ id: 1, method: "item/fileChange/requestApproval", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 }) });
+  const request = { provider: "codex" as const, native };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  const changes = [{ path: "/repo/new.txt", kind: { type: "add" as const }, diff: "exact contents" }];
+  adapter.inspectPermissionFileChanges = async (_handle, expected) => { assert.equal(expected, native); return changes; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "file_change", fileChanges: changes });
+  adapter.replyPermission = async (_handle, expected, _reply, options) => {
+    assert.equal(expected, native); assert.deepEqual(options!.expectedFileChanges, changes);
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!();
+    return { outcome: "sent", scope: "request" };
+  };
+  await router.replyPermission(handle, request, "once", { expectedFileChanges: changes, beforeNativeDispatch: async () => {} });
+  adapter.inspectPermissionFileChanges = async () => { await router.spawn(spawn); return changes; };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+});
+
 test("permission correlation and post-dispatch results reject replacement across native awaits", async () => {
   const adapter = fakeAdapter("open-model", []);
   const router = new ProviderActionPortRouter({ "open-model": async () => adapter });

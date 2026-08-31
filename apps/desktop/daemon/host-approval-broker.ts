@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
 import type { HostApprovalCandidate, HostApprovalDecision, HostApprovalPresentation, HostApprovalReference, HostApprovalStatus } from "../shared/host-approvals.js";
-import type { ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
+import type { CodexPermissionFileChange, ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
 import type { ApprovalAuthority, ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import type { ManifestStore } from "./manifest-store.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
@@ -104,6 +104,10 @@ function literal(value: unknown): string {
     character => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`);
 }
 
+function inspectedRequest(native: ProviderPermissionRequest, fileChanges?: readonly CodexPermissionFileChange[]): unknown {
+  return fileChanges ? { request: native.native, changes: fileChanges } : native.native;
+}
+
 /** Native payloads live only in this process. Optional execution capture is not consulted. */
 export class HostApprovalBroker {
   private readonly lanes = new Map<string, Lane>();
@@ -187,8 +191,8 @@ export class HostApprovalBroker {
   }
 
   private presentation(entry: DaemonManifestEntry, native: ProviderPermissionRequest,
-    title: HostApprovalPresentation["title"]): HostApprovalPresentation {
-    const raw = literal(native.native);
+    title: HostApprovalPresentation["title"], fileChanges?: readonly CodexPermissionFileChange[]): HostApprovalPresentation {
+    const raw = literal(inspectedRequest(native, fileChanges));
     return { agentId: entry.id, displayName: entry.display_name, provider: native.provider, title,
       details: Buffer.byteLength(raw) <= MAX_PRESENTATION_BYTES ? raw : "The request is too large to present safely. No decision can be sent.",
       denyScope: native.provider === "open-model" ? "session_pending" : "request" };
@@ -197,14 +201,18 @@ export class HostApprovalBroker {
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
     const revision = lane.revision;
     if (!this.current(lane) || lane.state !== "pending" || !lane.connectionId || !lane.requests.includes(native)) throw new Error("Approval unavailable.");
-    // This native RPC identifies the item but does not contain its edits. The
-    // IDs/grantRoot alone cannot be the presentation a host approves.
-    if (native.provider === "codex" && native.native.method === "item/fileChange/requestApproval") throw new Error(CODEX_FILE_CHANGE_UNAVAILABLE);
     if (Buffer.byteLength(literal(native.native)) > MAX_PRESENTATION_BYTES) throw new Error("Approval presentation exceeds its limit.");
     const entry = await this.options.store.getEntry(lane.agentId);
     if (!entry || !await this.options.exactAuthority(entry, lane.handle, lane.generation)) throw new Error("Approval authority changed.");
     const correlated = await this.options.provider!.correlatePermissionTurn!(lane.handle, native);
     if (correlated.outcome !== "correlated") throw new Error("Approval turn is unproven.");
+    const requiresEdits = native.provider === "codex" && native.native.method === "item/fileChange/requestApproval";
+    const fileChanges = requiresEdits ? correlated.fileChanges : undefined;
+    if (requiresEdits && !fileChanges?.length) throw new Error(CODEX_FILE_CHANGE_UNAVAILABLE);
+    // The approved content includes the complete native proposal, not only
+    // the RPC's IDs/grantRoot. Never approve a truncated presentation.
+    const inspected = inspectedRequest(native, fileChanges);
+    if (Buffer.byteLength(literal(inspected)) > MAX_PRESENTATION_BYTES) throw new Error("Approval presentation exceeds its limit.");
     const head = await this.options.inbox.head(lane.agentId);
     if (!head || head.room_id !== entry.room_id || head.provider_turn_id !== correlated.providerTurnId) throw new Error("Approval turn changed.");
     const owned: ApprovalAuthority = { inboxItemId: head.inbox_item_id, workAttemptId: lane.handle.workAttemptId,
@@ -212,7 +220,7 @@ export class HostApprovalBroker {
       providerConnection: lane.connection as ApprovalAuthority["providerConnection"],
       configurationRevision: entry.runtime_configuration_revision ?? 1 };
     const requestId = `approval-${digest([lane.agentId, lane.connectionId, typeof native.native.id, native.native.id])}`;
-    const requestSha256 = digest(native.native);
+    const requestSha256 = digest(inspected);
     const prior = await this.options.store.readLatestExecutionApproval(requestId);
     const unchanged = prior?.request.requestSha256 === requestSha256;
     const now = this.now();
@@ -229,12 +237,12 @@ export class HostApprovalBroker {
     const { approval } = await this.options.store.admitExecutionApproval(admission, commit =>
       this.options.fenceCommit(async () => { assertCurrent(); await commit(); }));
     assertCurrent();
-    const presentation = this.presentation(entry, native, correlated.kind === "command" ? "Run a command" : "Change files");
+    const presentation = this.presentation(entry, native, correlated.kind === "command" ? "Run a command" : "Change files", fileChanges);
     const candidate: HostApprovalCandidate = { reference: reference(approval), presentation,
       recordedDecision: recordedDecision(approval),
       status: now >= approval.request.expiresAtMs ? "unavailable" : status(approval),
       detail: now >= approval.request.expiresAtMs ? "This approval has expired. No new decision can be sent from this card." : null };
-    return { candidate, owned, approval, assertCurrent };
+    return { candidate, owned, approval, assertCurrent, fileChanges };
   }
 
   async decide(input: unknown): Promise<HostApprovalStatus> {
@@ -271,6 +279,7 @@ export class HostApprovalBroker {
     let assertOperationalAuthority: (() => void) | null = null;
     try {
       const result = await this.options.provider!.replyPermission!(lane.handle, native, input.decision === "allow_once" ? "once" : "reject", {
+        expectedFileChanges: prepared.fileChanges,
         beforeNativeDispatch: async () => {
           prepared.assertCurrent();
           const entry = await this.options.store.getEntry(lane.agentId);

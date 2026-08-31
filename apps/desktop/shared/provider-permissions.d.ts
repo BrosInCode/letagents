@@ -12,8 +12,16 @@ export type ProviderPermissionRequest =
 export type ProviderPermissionObservation =
   | { type: "snapshot"; connectionId: string | null; requests: readonly ProviderPermissionRequest[] }
   | { type: "degraded" | "unavailable" };
+/** Exact native proposed edits, host-ephemeral like the permission request. */
+export type CodexPermissionFileChange = {
+  path: string;
+  kind: { type: "add" } | { type: "delete" } | { type: "update"; move_path: string | null };
+  diff: string;
+};
 export type ProviderPermissionCorrelation = { outcome: "correlation_unproven" }
-  | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string; kind: "command" | "file_change" };
-export type ProviderPermissionDispatchOptions = { beforeNativeDispatch: () => Promise<void>; assertNativeDispatch?: () => void };
+  | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string; kind: "command" | "file_change";
+    fileChanges?: readonly CodexPermissionFileChange[] };
+export type ProviderPermissionDispatchOptions = { beforeNativeDispatch: () => Promise<void>; assertNativeDispatch?: () => void;
+  expectedFileChanges?: readonly CodexPermissionFileChange[] };
 export type ProviderPermissionReply = { outcome: "sent_unacknowledged"; nativeScope: "request" }
   | { outcome: "native_processed"; nativeScope: "request" | "session_pending" };

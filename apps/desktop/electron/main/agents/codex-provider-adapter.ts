@@ -1,4 +1,6 @@
 import { execFile } from "node:child_process";
+import { isDeepStrictEqual } from "node:util";
+import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import {
   launchCodexAppServer,
   resolveCodexAppServerUrl,
@@ -274,6 +276,26 @@ function permissionParams(request: RpcServerRequest): Record<string, unknown> | 
   return params && nativeExecutionId(params.threadId) && nativeExecutionId(params.turnId)
     && nativeExecutionId(params.itemId) && Number.isSafeInteger(params.startedAtMs)
     && (params.startedAtMs as number) >= 0 ? params : null;
+}
+
+function permissionFileChanges(value: unknown): CodexPermissionFileChange[] | null {
+  if (!Array.isArray(value) || !value.length || value.length > 128) return null;
+  const path = (input: unknown): input is string => typeof input === "string" && input.trim().length > 0
+    && input.length <= 4096 && !/[\u0000-\u001f\u007f]/.test(input);
+  const changes: CodexPermissionFileChange[] = [];
+  for (const entry of value) {
+    const item = recordValue(entry); const kind = recordValue(item?.kind);
+    if (!item || Object.keys(item).length !== 3 || !path(item.path) || typeof item.diff !== "string"
+      || item.diff.length > 24 * 1024 || !kind) return null;
+    if (kind.type === "add" || kind.type === "delete") {
+      if (Object.keys(kind).length !== 1) return null;
+      changes.push({ path: item.path, kind: { type: kind.type }, diff: item.diff });
+    } else if (kind.type === "update" && Object.keys(kind).length === 2
+      && (kind.move_path === null || path(kind.move_path))) {
+      changes.push({ path: item.path, kind: { type: "update", move_path: kind.move_path }, diff: item.diff });
+    } else return null;
+  }
+  return Buffer.byteLength(JSON.stringify(changes)) <= 24 * 1024 ? changes : null;
 }
 
 function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | null {
@@ -611,9 +633,35 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
   }
 
+  /** Read the exact live proposed edits; historical thread items are not pending-edit evidence. */
+  async inspectPermissionFileChanges(rawHandle: ProviderHandle, request: RpcServerRequest): Promise<readonly CodexPermissionFileChange[] | null> {
+    try {
+      const handle = this.handles.get(rawHandle.workAttemptId);
+      if (!handle || handle !== rawHandle || request.method !== "item/fileChange/requestApproval") return null;
+      const params = permissionParams(request);
+      const continuation = handle.providerContinuationId;
+      const connection = { ...handle.providerConnection };
+      const rpcConnection = handle.client.currentConnectionId();
+      const current = () => this.permissionAuthority(handle, continuation, connection, rpcConnection) === "current"
+        && request.connectionId === rpcConnection && handle.client.listPendingRequests().includes(request)
+        && !handle.terminalTurns.has(exactTurnKey(continuation, params!.turnId as string));
+      if (!params || params.threadId !== continuation || !current()) return null;
+      const response = recordValue(await handle.client.request("thread/turns/list", {
+        threadId: continuation, limit: 1, sortDirection: "desc", itemsView: "full",
+      }));
+      if (!current() || !Array.isArray(response?.data) || response.data.length !== 1) return null;
+      const turn = recordValue(response.data[0]);
+      if (!turn || turn.id !== params.turnId || turn.status !== "inProgress" || turn.itemsView !== "full" || !Array.isArray(turn.items)) return null;
+      const matches = turn.items.filter(item => recordValue(item)?.id === params.itemId);
+      const item = recordValue(matches[0]);
+      if (matches.length !== 1 || !item || item.type !== "fileChange" || item.status !== "inProgress") return null;
+      return permissionFileChanges(item.changes);
+    } catch { return null; }
+  }
+
   /** Host-only dispatch. A successful WebSocket send is NOT evidence that Codex applied the decision. */
   async replyPermission(rawHandle: ProviderHandle, expectedRequest: RpcServerRequest, reply: "once" | "reject",
-    options?: { beforeNativeDispatch: () => Promise<void>; assertNativeDispatch?: () => void }):
+    options?: ProviderPermissionDispatchOptions):
     Promise<{ outcome: "sent"; scope: "request" }> {
     const handle = this.handles.get(rawHandle.workAttemptId);
     if (!handle || handle !== rawHandle) throw new CodexPermissionReplyError("not_dispatched");
@@ -621,8 +669,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const connection = { ...handle.providerConnection };
     const rpcConnection = handle.client.currentConnectionId();
     const params = expectedRequest && permissionParams(expectedRequest);
+    const fileChange = expectedRequest?.method === "item/fileChange/requestApproval";
+    const expectedChanges = fileChange ? permissionFileChanges(options?.expectedFileChanges) : null;
     const decision = reply === "once" ? "accept" : reply === "reject" ? "decline" : null;
-    if (!params || params.threadId !== continuation || !decision
+    if (!params || params.threadId !== continuation || !decision || (fileChange && !expectedChanges)
       || (decision === "accept" && expectedRequest.method === "item/fileChange/requestApproval" && params.grantRoot != null)
       || (params.availableDecisions != null && (!Array.isArray(params.availableDecisions) || !params.availableDecisions.includes(decision)))) {
       throw new CodexPermissionReplyError("not_dispatched");
@@ -635,12 +685,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
       }
     };
     assertCurrent();
-    const boundary = await this.inspectTurnBoundary(handle);
-    if (boundary.state !== "active" || boundary.providerContinuationId !== continuation || boundary.providerTurnId !== params.turnId) {
+    if (fileChange) {
+      if (!isDeepStrictEqual(await this.inspectPermissionFileChanges(handle, expectedRequest), expectedChanges)) {
+        throw new CodexPermissionReplyError("not_dispatched");
+      }
+    } else {
+      const boundary = await this.inspectTurnBoundary(handle);
+      if (boundary.state !== "active" || boundary.providerContinuationId !== continuation || boundary.providerTurnId !== params.turnId) {
+        throw new CodexPermissionReplyError("not_dispatched");
+      }
+    }
+    if (options) await options.beforeNativeDispatch();
+    if (fileChange && !isDeepStrictEqual(await this.inspectPermissionFileChanges(handle, expectedRequest), expectedChanges)) {
       throw new CodexPermissionReplyError("not_dispatched");
     }
     // No await or observer callback between the final fence and native response.
-    if (options) await options.beforeNativeDispatch();
     assertCurrent();
     options?.assertNativeDispatch?.();
     try { handle.client.respond(expectedRequest, { decision }); }
