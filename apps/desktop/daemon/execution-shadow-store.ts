@@ -27,6 +27,11 @@ export type ShadowObserver = Readonly<{
 export type ShadowIngestion =
   | { status: "accepted" | "duplicate"; journalSequence: number; gapPending: boolean }
   | { status: "gap"; expectedSourceSequence: number; observedSourceSequence: number };
+type RuntimeProjection = { projection: ExecutionProjection; unverifiedFacts: number; lastJournalSequence: number };
+// Count nested entries, not just runtimes: one long-lived runtime can have many
+// turns and operations. Every retained identity is protocol-bounded to 512 chars.
+const MAX_CACHED_RUNTIMES = 16;
+const MAX_CACHED_ENTRIES = 4096;
 
 function validated<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);
@@ -56,12 +61,55 @@ function unverifiedHistoricalFact(row: Row): boolean {
  */
 export class ExecutionShadowStore {
   private readonly observers = new WeakSet<ShadowObserver>();
+  private readonly projections = new Map<string, { value: RuntimeProjection; weight: number }>();
+  private projectionWeight = 0;
+  private projectionStamp: string | null = null;
   constructor(private readonly database: DatabaseSync) {}
 
   private transaction<T>(body: () => T): T {
     this.database.exec("BEGIN IMMEDIATE");
     try { const result = body(); this.database.exec("COMMIT"); return result; }
-    catch (error) { this.database.exec("ROLLBACK"); throw error; }
+    catch (error) { this.clearProjections(); this.database.exec("ROLLBACK"); throw error; }
+  }
+
+  private databaseStamp(): string {
+    // data_version detects other connections; total_changes also detects a
+    // second store sharing this connection (including rolled-back writes).
+    // schema_version prevents a same-connection DDL change being hidden by cache.
+    const stamp = this.required("SELECT total_changes() AS changes,data_version,schema_version FROM pragma_data_version,pragma_schema_version");
+    return `${stamp.changes}:${stamp.data_version}:${stamp.schema_version}`;
+  }
+  private clearProjections(): void {
+    this.projections.clear();
+    this.projectionWeight = 0;
+    this.projectionStamp = null;
+  }
+  private rememberProjection(runtimeId: string, value: RuntimeProjection): void {
+    const old = this.projections.get(runtimeId);
+    if (old) { this.projectionWeight -= old.weight; this.projections.delete(runtimeId); }
+    let weight = 1 + value.projection.turns.size * 4;
+    for (const turn of value.projection.turns.values()) weight += turn.operations.size;
+    if (weight > MAX_CACHED_ENTRIES) return;
+    while (this.projections.size >= MAX_CACHED_RUNTIMES || this.projectionWeight + weight > MAX_CACHED_ENTRIES) {
+      const oldest = this.projections.keys().next().value!;
+      this.projectionWeight -= this.projections.get(oldest)!.weight;
+      this.projections.delete(oldest);
+    }
+    this.projections.set(runtimeId, { value, weight });
+    this.projectionWeight += weight;
+  }
+  private cachedProjection(runtimeId: string): RuntimeProjection {
+    const stamp = this.databaseStamp();
+    if (stamp !== this.projectionStamp) { this.clearProjections(); this.projectionStamp = stamp; }
+    const cached = this.projections.get(runtimeId);
+    if (cached) {
+      this.projections.delete(runtimeId);
+      this.projections.set(runtimeId, cached);
+      return cached.value;
+    }
+    const value = this.replayRuntime(runtimeId);
+    this.rememberProjection(runtimeId, value);
+    return value;
   }
   private row(sql: string, ...values: SQLInputValue[]): Row | undefined {
     return this.database.prepare(sql).get(...values) as Row | undefined;
@@ -205,7 +253,8 @@ export class ExecutionShadowStore {
   ingest(token: ShadowObserver, value: unknown): ShadowIngestion {
     const fact = parseExecutionFact(value);
     if (!this.observers.has(token)) throw new ExecutionProtocolError("stale_observer");
-    return this.transaction(() => {
+    let committed: { value: RuntimeProjection; stamp: string } | undefined;
+    const result = this.transaction<ShadowIngestion>(() => {
       const current = this.required("SELECT * FROM execution_observers WHERE agent_id=?", token.agentId);
       if (current.observer_epoch !== token.epoch || current.daemon_generation_id !== token.daemonGenerationId
         || current.observer_runtime_generation_id !== token.observerRuntimeGenerationId || fact.observerEpoch !== token.epoch) {
@@ -263,7 +312,7 @@ export class ExecutionShadowStore {
           throw new ExecutionProtocolError("invalid_transition");
         }
       }
-      const previous = this.projectRuntime(fact.runtimeGenerationId);
+      const previous = this.cachedProjection(fact.runtimeGenerationId);
       const next = replay ? previous.projection : reduceExecutionFact(previous.projection, fact);
       this.insert("execution_facts", {
         fact_id: fact.factId, agent_id: fact.agentId, execution_generation_id: fact.executionGenerationId, runtime_generation_id: fact.runtimeGenerationId,
@@ -299,16 +348,36 @@ export class ExecutionShadowStore {
             .run(turn.state, sideEffects, turn.state, fact.observedAtMs, fact.turnId);
         }
       }
+      const journalSequence = Number(this.required("SELECT sequence FROM execution_facts WHERE fact_id=?", fact.factId).sequence);
+      // Capture under the write transaction, never bless an external commit
+      // racing after COMMIT. Publish this candidate to the cache only on success.
+      committed = { value: { projection: next, unverifiedFacts: previous.unverifiedFacts, lastJournalSequence: journalSequence }, stamp: this.databaseStamp() };
       return {
-        status: replay ? "duplicate" : "accepted", journalSequence: Number(this.required("SELECT sequence FROM execution_facts WHERE fact_id=?", fact.factId).sequence),
+        status: replay ? "duplicate" : "accepted", journalSequence,
         gapPending: Number(current.max_observed_sequence) > fact.sourceSequence,
       };
     });
+    if (committed) {
+      this.projectionStamp = committed.stamp;
+      this.rememberProjection(fact.runtimeGenerationId, committed.value);
+    }
+    return result;
   }
 
   /** History from v18 without typed terminal proof stays explicitly unverified. */
-  projectRuntime(runtimeGenerationId: string): { projection: ExecutionProjection; unverifiedFacts: number; lastJournalSequence: number } {
+  projectRuntime(runtimeGenerationId: string): RuntimeProjection {
     validated(id, runtimeGenerationId);
+    // The connection is caller-owned. Never cache a caller's uncommitted view:
+    // its later ROLLBACK need not change SQLite's total_changes counter.
+    if (this.database.isTransaction) {
+      this.clearProjections();
+      return this.replayRuntime(runtimeGenerationId);
+    }
+    // ReadonlyMap is compile-time only; no public object may alias cache state.
+    return structuredClone(this.cachedProjection(runtimeGenerationId));
+  }
+
+  private replayRuntime(runtimeGenerationId: string): RuntimeProjection {
     const facts = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
       LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? ORDER BY f.sequence`).all(runtimeGenerationId) as Row[];
     let projection = emptyExecutionProjection();
