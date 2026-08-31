@@ -65,7 +65,7 @@ const factSchema: z.ZodType<ExecutionFact> = z.union([
 export const nativeTurnIdentity = z.strictObject(nativeTurn);
 
 export class ExecutionProtocolError extends Error {
-  constructor(readonly code: "invalid_fact" | "identity_mismatch" | "stale_observer" | "sequence_conflict" | "invalid_transition" | "attempt_settled" | "source_unverified" | "source_gap") {
+  constructor(readonly code: "invalid_fact" | "identity_mismatch" | "stale_observer" | "sequence_conflict" | "invalid_transition" | "attempt_settled" | "source_unverified" | "source_gap" | "retention_limit") {
     // Never include untrusted event content in diagnostics.
     super(`Execution evidence rejected: ${code}.`);
     this.name = "ExecutionProtocolError";
