@@ -5,8 +5,9 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
-  assertNoDeliveryDrain, cancelDeliveryDrain, prepareDeliveryDrain, readDeliveryDrain, unresolvedDeliveryDrain,
-  type DeliveryDrainRecord, type PrepareDeliveryDrain,
+  assertNoDeliveryDrain, cancelDeliveryDrain, commitDeliveryDrain, deliveryDrainReadiness,
+  markDeliveryDrainDispatch, markDeliveryDrainUncertain, prepareDeliveryDrain, readDeliveryDrain, unresolvedDeliveryDrain,
+  type DeliveryDrainReadiness, type DeliveryDrainRecord, type DispatchDeliveryDrain, type PrepareDeliveryDrain,
 } from "./delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
 import {
@@ -243,6 +244,39 @@ export class ManifestStore {
   async cancelDeliveryDrain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
     const snapshot = { ...input };
     return this.writeDeliveryDrain((database) => cancelDeliveryDrain(database, snapshot), commitFence);
+  }
+
+  async deliveryDrainReadiness(operationId: string): Promise<DeliveryDrainReadiness> {
+    return this.writeDeliveryDrain((database) => deliveryDrainReadiness(database, operationId));
+  }
+
+  async markDeliveryDrainDispatch(input: DispatchDeliveryDrain, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
+    const snapshot = structuredClone(input);
+    return this.writeDeliveryDrain((database) => markDeliveryDrainDispatch(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async markDeliveryDrainUncertain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
+    const snapshot = { ...input };
+    return this.writeDeliveryDrain((database) => markDeliveryDrainUncertain(database, snapshot), commitFence);
+  }
+
+  /** The internal caller must prove the saved native birth is gone in this fence.
+   * It must invoke commit synchronously after that proof, while holding daemon ownership. */
+  async commitDeliveryDrain(expectedGeneration: number, input: { operationId: string; agentId: string },
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ generation: number; cutover: DeliveryDrainRecord }> {
+    if (typeof commitFence !== "function") throw new Error("Delivery drain requires a native-death commit fence.");
+    const snapshot = { ...input };
+    const prior = await this.getDeliveryDrain(snapshot.operationId);
+    if (prior?.phase === "complete" && prior.agent_id === snapshot.agentId && prior.authority_version === 1
+      && prior.from_mode === "daemon_inbox" && prior.to_mode === "mcp_polling" && prior.strategy === "drain") {
+      // A lost response may be retried after a successor is running. Return the
+      // immutable receipt without another cursor transfer, stop, or revision.
+      return { generation: (await this.load()).generation, cutover: prior };
+    }
+    const result = await this.writeTargeted(expectedGeneration, (database) => commitDeliveryDrain(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+    return { generation: result.generation, cutover: result.value };
   }
 
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
@@ -708,6 +742,7 @@ export class ManifestStore {
       let transactionOpen = false;
       const commit = async () => {
         database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
+        assertNoDeliveryDrain(database, input.agentId);
         const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
         if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
         const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);

@@ -1,6 +1,4 @@
-import { execFileSync } from "node:child_process";
-
-import { sameProcessBirthIdentity } from "./process-identity.js";
+import { systemProcessIdentity, type ProcessIdentity } from "./process-identity.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "./types.js";
 
 export type ReserveLegacyLaneInput = {
@@ -37,11 +35,7 @@ export type LegacyLaneMutationAuthority = {
   assertCurrent(): Promise<void>;
 };
 
-export type LegacyLaneProcessIdentity = {
-  readBirthIdentity(pid: number): string;
-  probe(pid: number): void;
-  sameBirthIdentity(actualIdentity: string, expectedIdentity: string): boolean;
-};
+export type LegacyLaneProcessIdentity = ProcessIdentity;
 
 export type LegacyLaneCoordinatorOptions = {
   storage: LegacyLaneManifestStorage;
@@ -50,20 +44,6 @@ export type LegacyLaneCoordinatorOptions = {
   processIdentity?: LegacyLaneProcessIdentity;
   isSupervisedLaneOwner(entry: DaemonManifestEntry): boolean;
   now?: () => string;
-};
-
-const systemProcessIdentity: LegacyLaneProcessIdentity = {
-  readBirthIdentity(pid) {
-    return execFileSync(
-      "/bin/ps",
-      ["-p", String(pid), "-o", "lstart="],
-      { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] },
-    );
-  },
-  probe(pid) {
-    process.kill(pid, 0);
-  },
-  sameBirthIdentity: sameProcessBirthIdentity,
 };
 
 /** Durable ownership boundary between legacy Electron and supervised lanes. */

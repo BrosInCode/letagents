@@ -112,6 +112,7 @@ function hostGrant(overrides: Partial<InstalledHostGrant> = {}): InstalledHostGr
 }
 
 type HarnessOptions = {
+  drainPhase?: "draining" | "dispatching" | "uncertain";
   entry?: DaemonManifestEntry;
   generation?: number;
   handoff?: boolean;
@@ -234,6 +235,8 @@ function fixture(options: HarnessOptions = {}) {
 
   const subject = new WorkerAuthorityCoordinator({
     store: {
+      getAgentConfiguration: async () => ({ polling_contract: null, config_revision: 1, runtime_configuration_revision: 1 }),
+      unresolvedDeliveryDrain: async () => options.drainPhase ? ({ phase: options.drainPhase } as never) : null,
       load: async () => ({ entries: [entry] }),
       getEntry: async (entryId) => entry.id === entryId ? entry : null,
     },
@@ -361,6 +364,27 @@ function fixture(options: HarnessOptions = {}) {
     bindings,
   };
 }
+
+test("dispatching and uncertain handoff deny worker mutation before effects", async () => {
+  for (const drainPhase of ["dispatching", "uncertain"] as const) {
+    const harness = fixture({ drainPhase });
+    harness.custody.installHostGrant(hostGrant());
+    await assert.rejects(harness.subject.mintHostWorkerAuthorization(harness.entry), /frozen/);
+    await assert.rejects(harness.subject.checkpointWorkerCursor({ entry_id: "agent-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1", agent_session_id: "session-1", room_cursor: "47" }), /frozen/);
+    assert.equal(harness.deliveryStarts, 0);
+    assert.deepEqual(harness.durableCheckpoints, []);
+    assert.equal(harness.events.some((event) => event.startsWith("mint:") || event.startsWith("binding:cursor:")), false);
+    const grant = hostGrant();
+    assert.deepEqual(await harness.subject.installHostGrant({
+      entry_id: grant.entryId, room_id: grant.roomId, agent_key: grant.agentKey,
+      grant_id: grant.grantId, supervisor_grant: grant.supervisorGrant, grant_generation: grant.grantGeneration,
+      api_url: grant.apiUrl, daemon_generation: grant.daemonGeneration, host_id: grant.hostId,
+      installation_id: grant.installationId, grant_expires_at: grant.expiresAt, credential_only: true,
+    }), { status: "installed" });
+    assert.equal(harness.convergenceRequests, 0);
+    assert.equal(harness.deliveryStarts, 0);
+  }
+});
 
 test("daemon ownership destroys all process credentials when handoff fences authority", async () => {
   const harness = fixture({ handoff: true });

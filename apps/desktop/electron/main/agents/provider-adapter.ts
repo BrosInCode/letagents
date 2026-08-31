@@ -431,6 +431,9 @@ export interface ProviderAdapter {
   /** The negotiated capability set (each `true` backed by a P0 spike cell). */
   capabilities(): ProviderAdapterCapabilities;
 
+  /** Verify the selected polling runtime without launching or controlling a provider. */
+  preflightCustodialPolling?(input: { devMcpServerEntryPath?: string }): Promise<void>;
+
   /** Explicit native facts, independent from legacy raw-stream classification. */
   onExecution?(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
   /** A failed/slow probe never interrupts work or restarts a runtime. */

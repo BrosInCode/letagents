@@ -1,11 +1,15 @@
 import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
 import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
+import type { DeliveryDrainIdentity, DeliveryDrainRequest } from "./delivery-cutover-execution-coordinator.js";
 
 /**
  * The socket router owns protocol parsing and response shaping. Operations are
  * bound by SupervisorDaemon, which remains the authority owner.
  */
 export interface DaemonControlOperations {
+  prepareDeliveryDrain(input: DeliveryDrainRequest): unknown;
+  getDeliveryDrain(input: DeliveryDrainIdentity): unknown;
+  cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   status(): unknown;
   prepareHandoff(): unknown;
   listManifest(): unknown;
@@ -156,6 +160,24 @@ export function createDaemonControlRequestHandler(
       return { accepted: true, generation: context.currentGeneration() };
     }
     if (request.method === "manifest.list") return operations.listManifest();
+    if (request.method === "supervisor.prepare_delivery_drain"
+      || request.method === "supervisor.get_delivery_drain"
+      || request.method === "supervisor.cancel_delivery_drain") {
+      const params = paramsRecord(request.params);
+      const error = "Delivery drain requires exact typed coordinates and the current daemon generation.";
+      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
+      const identity = {
+        entryId: requiredStringParam(params, "entry_id", error),
+        operationId: requiredStringParam(params, "operation_id", error),
+      };
+      if (request.method === "supervisor.get_delivery_drain") return operations.getDeliveryDrain(identity);
+      if (request.method === "supervisor.cancel_delivery_drain") return operations.cancelDeliveryDrain(identity);
+      return operations.prepareDeliveryDrain({ ...identity,
+        requestId: requiredStringParam(params, "request_id", error),
+        roomId: requiredStringParam(params, "room_id", error),
+        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+      });
+    }
     if (request.method === "manifest.watch_state") {
       const params = paramsRecord(request.params);
       return operations.watchState({

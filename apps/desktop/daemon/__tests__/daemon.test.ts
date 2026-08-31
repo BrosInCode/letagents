@@ -1182,7 +1182,7 @@ const entry: DaemonManifestEntry = {
 };
 
 /** Real daemon storage/lifecycle wiring with only the native observer faked. */
-async function observationDaemonFixture(onExecution: NonNullable<ProviderActionPort["onExecution"]>, provider: "codex" | "cursor" = "codex") {
+async function observationDaemonFixture(onExecution: NonNullable<ProviderActionPort["onExecution"]>, provider: "codex" | "cursor" = "codex", overrides: Partial<ProviderActionPort> = {}, codexConnection?: Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "codex_app_server" }>) {
   const env = await fixture();
   const id = "observed-agent";
   const paths = {
@@ -1196,7 +1196,7 @@ async function observationDaemonFixture(onExecution: NonNullable<ProviderActionP
     attach: async () => null, attachAction: async () => ({ state: "absent" }),
     resume: async () => { throw new Error("observation fixture must not resume a provider"); }, poke: async () => {},
     stop: async () => { throw new Error("observation must never control the provider"); },
-    onExit: async () => () => {}, onStream: async () => () => {}, onExecution,
+    onExit: async () => () => {}, onStream: async () => () => {}, onExecution, ...overrides,
   };
   const daemon = new SupervisorDaemon(paths, "darwin", port, false);
   const internals = daemon as unknown as {
@@ -1215,9 +1215,9 @@ async function observationDaemonFixture(onExecution: NonNullable<ProviderActionP
     const execution = await internals.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
     const handle: ProviderActionHandle = {
       workAttemptId: attempt.work_attempt_id, providerContinuationId: "observed-continuation", observedState: "working",
-      pid: provider === "cursor" ? null : 7123,
+      pid: provider === "cursor" ? null : codexConnection?.pid ?? 7123,
       providerConnection: provider === "cursor" ? { kind: "cursor_cli", pid: null, processIdentity: null }
-        : { kind: "codex_app_server", pid: 7123, processIdentity: "observed-birth", url: "ws://127.0.0.1:7123" },
+        : codexConnection ?? { kind: "codex_app_server", pid: 7123, processIdentity: "observed-birth", url: "ws://127.0.0.1:7123" },
     };
     const stored: DaemonManifestEntry = {
       ...entry, id, provider, delivery_mode: "daemon_inbox", workspace_path: attempt.workspace_path,
@@ -1235,6 +1235,63 @@ async function observationDaemonFixture(onExecution: NonNullable<ProviderActionP
     await daemon.stop().catch(() => undefined); await env.cleanup(); throw error;
   }
 }
+
+test("reverse drain socket and daemon restart preserve stop intent without a successor or cursor bootstrap", async () => {
+  let starts = 0;
+  let attaches = 0;
+  let stops = 0;
+  const birth = execFileSync("/bin/ps", ["-p", String(process.pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+  const connection = { kind: "codex_app_server" as const, pid: process.pid, processIdentity: birth, url: "ws://127.0.0.1:7123" };
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "codex", {
+    preflightCustodialPolling: async () => {},
+    inspectTurnBoundary: async () => ({ state: "idle", providerContinuationId: "observed-continuation", nativeProcessIdentity: birth, latestProviderTurnId: null }),
+    // This fixture deliberately keeps a demonstrably live process (this test)
+    // alive. Returning a protocol terminal must never authorize the mode flip.
+    stopRef: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "observed-continuation" }; },
+    spawn: async () => { starts += 1; throw new Error("unexpected successor spawn"); },
+    resume: async () => { starts += 1; throw new Error("unexpected successor resume"); },
+    attach: async () => { attaches += 1; return null; },
+    attachAction: async () => { attaches += 1; return { state: "absent" }; },
+    runRoomTurn: async () => { throw new Error("reverse must not activate a turn"); },
+  }, connection);
+  let successor: SupervisorDaemon | undefined;
+  try {
+    const stored = (await env.internals.store.getEntry(env.id))!;
+    env.internals.liveHandles.set(env.id, env.handle);
+    await env.internals.supervisedInbox.bootstrapCursor({ agent_id: env.id, room_id: stored.room_id, last_observed_message_id: "100" });
+    const status = await daemonRequest(env.paths.socketPath, "daemon.status");
+    const generation = (status.result as { generation: number }).generation;
+    const params = { entry_id: env.id, operation_id: "reverse-operation", request_id: "reverse-request", room_id: stored.room_id,
+      execution_generation_id: env.generation, daemon_generation: generation };
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", { ...params, daemon_generation: generation + 1 })).ok, false);
+    assert.equal(await env.internals.store.unresolvedDeliveryDrain(env.id), null);
+    assert.deepEqual((await env.internals.store.getEntry(env.id))?.provider_ref, stored.provider_ref);
+    assert.equal(env.internals.liveHandles.get(env.id)?.providerContinuationId, "observed-continuation");
+    const prepared = await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", params);
+    assert.equal(prepared.ok, true, prepared.error);
+    const firstDriver = env.daemon as unknown as { deliveryCutovers: { start(id: string): Promise<void> } };
+    await firstDriver.deliveryCutovers.start(env.id).catch(() => {});
+    assert.equal((await env.internals.store.getDeliveryDrain("reverse-operation"))?.phase, "uncertain");
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.cancel_delivery_drain", params)).ok, false);
+    await env.daemon.stop();
+    successor = new SupervisorDaemon(env.paths, "darwin", env.port, true);
+    await successor.start();
+    const restarted = successor as unknown as { store: ManifestStore; supervisedInbox: SupervisedAgentInboxStore; deliveryCutovers: { start(id: string): Promise<void> } };
+    await restarted.deliveryCutovers.start(env.id).catch(() => {});
+    const after = await daemonRequest(env.paths.socketPath, "daemon.status");
+    const currentGeneration = (after.result as { generation: number }).generation;
+    assert.notEqual(currentGeneration, generation);
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.get_delivery_drain", params)).ok, false, "old daemon controllers cannot mutate/read under stale authority");
+    const read = await daemonRequest(env.paths.socketPath, "supervisor.get_delivery_drain", { ...params, daemon_generation: currentGeneration });
+    assert.equal(read.ok, true, read.error);
+    assert.equal((read.result as { phase: string }).phase, "uncertain");
+    await assert.rejects(restarted.supervisedInbox.bootstrapCursor({ agent_id: env.id, room_id: stored.room_id, last_observed_message_id: "999" }), /freezes/);
+    assert.equal((await restarted.store.getEntry(env.id))?.delivery_mode, "daemon_inbox");
+    assert.equal(starts, 0);
+    assert.equal(attaches, 0, "restart cannot reattach/rebind the frozen process through normal convergence");
+    assert.ok(stops >= 1);
+  } finally { await successor?.stop(); await env.cleanup(); }
+});
 
 for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only committed native-turn identity and fences live observation on ${shutdown}`, async () => {
   let listener: ((event: NativeExecutionObservation) => void) | undefined;
@@ -4310,7 +4367,7 @@ test("legacy delivery cutover converges across pre-dispatch failure, dispatch cr
       liveHandles: Map<string, (typeof handles extends Map<string, infer T> ? T : never)>;
       requestConvergence: (entryId: string) => void;
       scheduleDeliveryCutoverRetry: (entryId: string, delayMs: number) => void;
-      startDeliveryCutover: (entryId: string) => Promise<void>;
+      deliveryCutovers: { start: (entryId: string) => Promise<void> };
     };
     internals.requestConvergence = () => {};
     // Timers are an availability mechanism, not part of these state-machine
@@ -4351,12 +4408,12 @@ test("legacy delivery cutover converges across pre-dispatch failure, dispatch cr
 
     const retryable = liveEntry("cutover-retryable", "attempt-retryable", "run-retryable", "thread-retryable");
     await installLive(retryable);
-    await internals.startDeliveryCutover(retryable.id);
+    await internals.deliveryCutovers.start(retryable.id);
     let saved = await internals.store.getEntry(retryable.id);
     assert.equal(saved?.delivery_mode ?? "mcp_polling", "mcp_polling");
     assert.equal(saved?.delivery_cutover?.phase, "retryable");
     assert.equal(saved?.delivery_cutover?.provider_turn_id, "turn-retryable-A");
-    await internals.startDeliveryCutover(retryable.id);
+    await internals.deliveryCutovers.start(retryable.id);
     saved = await internals.store.getEntry(retryable.id);
     assert.equal(saved?.delivery_mode, "daemon_inbox", "a pre-dispatch failure retries and completes without operator repair");
     assert.equal(saved?.delivery_cutover ?? null, null);
@@ -4368,7 +4425,7 @@ test("legacy delivery cutover converges across pre-dispatch failure, dispatch cr
       phase: "dispatching", error: null, updated_at: "2026-08-05T12:00:00.000Z",
     });
     await installLive(dispatchCrash);
-    await internals.startDeliveryCutover(dispatchCrash.id);
+    await internals.deliveryCutovers.start(dispatchCrash.id);
     saved = await internals.store.getEntry(dispatchCrash.id);
     assert.equal(saved?.delivery_mode, "daemon_inbox", "dispatching recovery re-inspects and safely redrives exact active A");
     assert.deepEqual(inspectTargets.get("attempt-dispatch-crash"), ["turn-dispatch-A", "turn-dispatch-A"]);
@@ -4380,7 +4437,7 @@ test("legacy delivery cutover converges across pre-dispatch failure, dispatch cr
       phase: "uncertain", error: "response lost", updated_at: "2026-08-05T12:01:00.000Z",
     });
     await installLive(uncertain);
-    await internals.startDeliveryCutover(uncertain.id);
+    await internals.deliveryCutovers.start(uncertain.id);
     saved = await internals.store.getEntry(uncertain.id);
     assert.equal(saved?.delivery_mode, "daemon_inbox", "terminal inspection converges an ambiguous dispatch without replay");
     assert.deepEqual(inspectTargets.get("attempt-uncertain"), ["turn-uncertain-A"]);
@@ -4399,7 +4456,7 @@ test("legacy delivery cutover converges across pre-dispatch failure, dispatch cr
       phase: "uncertain", error: "old response lost", updated_at: "2026-08-05T12:02:00.000Z",
     });
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: stale })).ok, true);
-    await internals.startDeliveryCutover(stale.id);
+    await internals.deliveryCutovers.start(stale.id);
     saved = await internals.store.getEntry(stale.id);
     assert.equal(saved?.delivery_mode ?? "mcp_polling", "mcp_polling", "a terminal stale generation cannot flip a successor runtime's ingress owner");
     assert.equal(saved?.delivery_cutover ?? null, null);
@@ -4415,7 +4472,7 @@ test("legacy delivery cutover converges across pre-dispatch failure, dispatch cr
       },
     };
     assert.equal((await daemonRequest(paths.socketPath, "manifest.put", { entry: detached })).ok, true);
-    await internals.startDeliveryCutover(detached.id);
+    await internals.deliveryCutovers.start(detached.id);
     saved = await internals.store.getEntry(detached.id);
     assert.equal(saved?.delivery_mode, "daemon_inbox", "terminal durability closes a detached cutover instead of leaving a permanent tombstone");
     assert.equal(saved?.delivery_cutover ?? null, null);

@@ -156,6 +156,7 @@ const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
 };
 
 const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input"]);
+const PS_BIRTH_EVIDENCE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
 
 function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
@@ -456,6 +457,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
       resume: this.resumeSupported,
       continuationRepair: "same_process",
     };
+  }
+
+  async preflightCustodialPolling(input: { devMcpServerEntryPath?: string }): Promise<void> {
+    await this.resolveCustodialPollingRuntime(input.devMcpServerEntryPath);
+  }
+
+  private async resolveCustodialPollingRuntime(devEntryPath?: string): Promise<{ runtime: LetAgentsMcpRuntime; tools: string[] }> {
+    const runtime = this.deps.resolveMcpRuntime(devEntryPath);
+    const tools = custodialPollingTools(await this.deps.readMcpRuntimeContract(runtime.entryPath));
+    return { runtime, tools };
   }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
@@ -931,6 +942,65 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
   }
 
+  async stopRef(
+    ref: ProviderContinuationRef,
+    options: ProviderStopOptions = {},
+  ): Promise<ProviderTerminalPayload> {
+    ref = { ...ref, providerConnection: ref.providerConnection && { ...ref.providerConnection } };
+    const connection = ref.providerConnection;
+    const graceMs = options.graceMs ?? DEFAULT_STOP_GRACE_MS;
+    const force = options.force === true;
+    if (!ref.workAttemptId?.trim() || !ref.providerContinuationId?.trim()
+      || connection?.kind !== "codex_app_server" || !connection.url?.trim()
+      || !Number.isSafeInteger(connection.pid) || connection.pid! <= 0
+      || typeof connection.processIdentity !== "string" || !PS_BIRTH_EVIDENCE.test(connection.processIdentity.trim())
+      || !Number.isFinite(graceMs) || graceMs < 0) {
+      throw new Error("Codex exact-reference stop requires an exact continuation and process birth.");
+    }
+    const pid = connection.pid!;
+    const birth = connection.processIdentity;
+    const isGone = () => {
+      const current = this.deps.getProcessIdentity(pid);
+      if (current === null) return true;
+      // Unequal malformed ps output is uncertainty, not PID-reuse evidence.
+      if (typeof current !== "string" || !PS_BIRTH_EVIDENCE.test(current.trim())) {
+        throw new Error("Codex exact-reference stop is ambiguous because process birth cannot be verified.");
+      }
+      return !sameProcessBirthIdentity(current, birth);
+    };
+    const terminal = () => synthesizeTerminalPayload({
+      endedAt: this.deps.now(), exitCode: null, signal: null,
+      providerContinuationId: ref.providerContinuationId, stopRequested: true,
+    });
+    if (isGone()) return terminal();
+    const known = [...this.handles.values()].find((handle) => handle.pid === pid
+      && handle.providerConnection.processIdentity
+      && sameProcessBirthIdentity(handle.providerConnection.processIdentity, birth));
+    if (known && (known.workAttemptId !== ref.workAttemptId
+      || known.providerContinuationId !== ref.providerContinuationId
+      || !sameProviderConnectionIdentity(known.providerConnection, connection))) {
+      throw new Error("Codex exact-reference stop conflicts with the known native process owner.");
+    }
+    if (known) { known.stopRequested = true; known.state = "stopping"; }
+    const awaitAbsence = async () => {
+      const deadline = Date.now() + graceMs;
+      for (;;) {
+        if (isGone()) return true;
+        if (Date.now() >= deadline) return false;
+        await delay(Math.min(25, deadline - Date.now()));
+      }
+    };
+    this.deps.signalProcess(pid, force ? "SIGKILL" : "SIGTERM");
+    if (await awaitAbsence()) return terminal();
+    if (!force) {
+      // Never escalate into a reused PID, nor accept a cached protocol error.
+      if (isGone()) return terminal();
+      this.deps.signalProcess(pid, "SIGKILL");
+      if (await awaitAbsence()) return terminal();
+    }
+    throw new Error("Codex exact-reference stop has not yet proved the recorded process birth is gone.");
+  }
+
   async stop(
     providerHandle: ProviderHandle,
     options: ProviderStopOptions = {},
@@ -1082,8 +1152,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           || (apiUrl.protocol !== "https:" && !(apiUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(apiUrl.hostname)))) throw new Error();
         custodialApiUrl = apiUrl.origin;
       } catch { throw new Error("Custodial polling requires an exact safe worker API origin."); }
-      custodialRuntime = this.deps.resolveMcpRuntime(req.devMcpServerEntryPath);
-      custodialTools = custodialPollingTools(await this.deps.readMcpRuntimeContract(custodialRuntime.entryPath));
+      ({ runtime: custodialRuntime, tools: custodialTools } = await this.resolveCustodialPollingRuntime(req.devMcpServerEntryPath));
     }
     if (hasCompleteSupervisorCoordinates) {
       await this.deps.writeSupervisorBridgeContext(req.cwd, {
