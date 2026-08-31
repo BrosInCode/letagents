@@ -13,6 +13,7 @@ export type PollingActivationRecord = {
   phase: "prepared" | "dispatching" | "active" | "uncertain" | "complete" | "cancelled";
   provider_turn_id: string | null; terminal_outcome: "completed" | "failed" | "interrupted" | "lost" | null;
   created_at_ms: number; updated_at_ms: number;
+  compacted_through_offer_id: string | null;
 };
 export type PreparePollingActivation = {
   operationId: string; requestId: string; agentId: string; roomId: string; executionGenerationId: string;
@@ -28,7 +29,9 @@ const table = "custodial_polling_activations";
 const identity = ["operation_id", "request_id", "agent_id", "room_id", "work_attempt_id", "execution_generation_id", "reverse_operation_id",
   "native_continuation_id", "native_connection_kind", "native_connection_sha256", "native_pid", "native_process_identity",
   "config_revision", "agent_session_id", "room_cursor", "created_at_ms"];
-const schema = [
+const compactionColumn = "compacted_through_offer_id TEXT CHECK(compacted_through_offer_id IS NULL OR length(trim(compacted_through_offer_id))>0)";
+export const POLLING_OFFER_REPLAY_WINDOW = 256;
+function activationSchema(version: 24 | 26 = 26): string[] { return [
   `CREATE TABLE ${table} (
     operation_id TEXT PRIMARY KEY CHECK(length(trim(operation_id))>0),
     request_id TEXT NOT NULL UNIQUE CHECK(length(trim(request_id))>0),
@@ -46,7 +49,7 @@ const schema = [
     phase TEXT NOT NULL CHECK(phase IN ('prepared','dispatching','active','uncertain','complete','cancelled')),
     provider_turn_id TEXT CHECK(provider_turn_id IS NULL OR length(trim(provider_turn_id))>0),
     terminal_outcome TEXT CHECK(terminal_outcome IN ('completed','failed','interrupted','lost')),
-    created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms>=created_at_ms),
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0), updated_at_ms INTEGER NOT NULL CHECK(updated_at_ms>=created_at_ms),${version === 26 ? `${compactionColumn},` : ""}
     CHECK((phase='complete')=(terminal_outcome IS NOT NULL)),
     CHECK(phase NOT IN ('prepared','dispatching','cancelled') OR provider_turn_id IS NULL),
     CHECK(phase<>'active' OR provider_turn_id IS NOT NULL),
@@ -55,7 +58,7 @@ const schema = [
   `CREATE UNIQUE INDEX custodial_polling_activation_one_unresolved ON ${table}(agent_id) WHERE phase NOT IN ('complete','cancelled')`,
   `CREATE UNIQUE INDEX custodial_polling_activation_native_turn ON ${table}(agent_id,execution_generation_id,native_continuation_id,provider_turn_id) WHERE provider_turn_id IS NOT NULL`,
   `CREATE TRIGGER custodial_polling_activation_predecessor BEFORE INSERT ON ${table}
-    WHEN NEW.phase<>'prepared' OR NOT EXISTS (SELECT 1 FROM execution_cutover_v2 WHERE operation_id=NEW.reverse_operation_id
+    WHEN NEW.phase<>'prepared' ${version === 26 ? "OR NEW.compacted_through_offer_id IS NOT NULL" : ""} OR NOT EXISTS (SELECT 1 FROM execution_cutover_v2 WHERE operation_id=NEW.reverse_operation_id
       AND agent_id=NEW.agent_id AND room_id=NEW.room_id AND work_attempt_id=NEW.work_attempt_id
       AND authority_version=1 AND provider='codex' AND from_mode='daemon_inbox' AND to_mode='mcp_polling'
       AND strategy='drain' AND phase='complete' AND execution_generation_id<>NEW.execution_generation_id)
@@ -73,7 +76,17 @@ const schema = [
           OR (OLD.phase='uncertain' AND NEW.phase IN ('active','complete'))))
       OR (OLD.phase IN ('complete','cancelled') AND (NEW.terminal_outcome IS NOT OLD.terminal_outcome OR NEW.updated_at_ms<>OLD.updated_at_ms))
     BEGIN SELECT RAISE(ABORT,'Polling activation transition is invalid'); END`,
-];
+  // A direct UPDATE cannot manufacture this state: the FK cascade has removed
+  // the old parent but not yet detached its child. Only that child can set the
+  // anchor before becoming the unique new root, in the same DELETE statement.
+  ...(version === 26 ? [`CREATE TRIGGER custodial_polling_compaction_forward BEFORE UPDATE OF compacted_through_offer_id ON ${table}
+    WHEN NEW.compacted_through_offer_id IS NOT OLD.compacted_through_offer_id AND
+      (NEW.compacted_through_offer_id IS NULL
+        OR EXISTS (SELECT 1 FROM custodial_polling_offers WHERE offer_id=NEW.compacted_through_offer_id)
+        OR NOT EXISTS (SELECT 1 FROM custodial_polling_offers WHERE predecessor_offer_id=NEW.compacted_through_offer_id AND activation_id=OLD.operation_id)
+        OR EXISTS (SELECT 1 FROM custodial_polling_offers WHERE activation_id=OLD.operation_id AND predecessor_offer_id IS NULL))
+    BEGIN SELECT RAISE(ABORT,'Polling offer compaction requires the exact deletion cascade'); END`] : []),
+]; }
 
 function normalizedSql(sql: string): string {
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map(part => part.startsWith("'") ? part
@@ -81,17 +94,17 @@ function normalizedSql(sql: string): string {
 }
 
 /** Operational journal, deliberately independent of the delete/reinsert manifest graph. */
-export function applyPollingActivationSchema(database: DatabaseSync): void {
+export function applyPollingActivationSchema(database: DatabaseSync, version: 24 | 26 = 26): void {
   if (!database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(table)) {
-    for (const definition of schema) database.exec(definition);
+    for (const definition of activationSchema(version)) database.exec(definition);
   }
-  validatePollingActivationSchema(database);
+  validatePollingActivationSchema(database, version);
 }
 
-export function validatePollingActivationSchema(database: DatabaseSync): void {
+export function validatePollingActivationSchema(database: DatabaseSync, version: 24 | 26 = 26): void {
   const actual = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL ORDER BY type,name").all(table)
     .map(row => normalizedSql(String(row.sql))).sort();
-  const expected = schema.map(normalizedSql).sort();
+  const expected = activationSchema(version).map(normalizedSql).sort();
   if (actual.length !== expected.length || actual.some((definition, index) => definition !== expected[index])) {
     throw new Error("Polling activation journal has invalid or missing schema.");
   }
@@ -236,7 +249,8 @@ export function preparePollingActivation(database: DatabaseSync, input: PrepareP
   const activation: PollingActivationRecord = { operation_id: input.operationId, request_id: input.requestId, agent_id: input.agentId,
     room_id: input.roomId, execution_generation_id: input.executionGenerationId, reverse_operation_id: input.reverseOperationId,
     ...native, config_revision: Number(config.config_revision), agent_session_id: binding.agent_session_id, room_cursor: binding.room_cursor,
-    phase: "prepared", provider_turn_id: null, terminal_outcome: null, created_at_ms: timestamp, updated_at_ms: timestamp };
+    phase: "prepared", provider_turn_id: null, terminal_outcome: null, created_at_ms: timestamp, updated_at_ms: timestamp,
+    compacted_through_offer_id: null };
   assertCurrent(database, activation, current);
   if (!matchesPollingActivationRuntime(activation, current!, input.handle)) throw new Error("Polling activation runtime changed.");
   assertNoPollingActivation(database, input.agentId);
@@ -329,7 +343,7 @@ export type AcknowledgePollingOffer = PollingOfferScope & { roomCursor: string }
 
 const offers = "custodial_polling_offers";
 const offerIdentity = ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "binding_epoch", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"];
-const offerSchema = [
+function offerSchema(version: 25 | 26 = 26): string[] { return [
   `CREATE TABLE ${offers} (
     offer_id TEXT PRIMARY KEY CHECK(length(trim(offer_id))>0),
     activation_id TEXT NOT NULL REFERENCES custodial_polling_activations(operation_id) ON DELETE RESTRICT,
@@ -344,7 +358,9 @@ const offerSchema = [
     created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0),
     acknowledged_at_ms INTEGER CHECK(acknowledged_at_ms>=created_at_ms),
     UNIQUE(activation_id,process_incarnation_id,mcp_request_id), UNIQUE(offer_id,activation_id),
-    FOREIGN KEY(predecessor_offer_id,activation_id) REFERENCES ${offers}(offer_id,activation_id) ON DELETE RESTRICT
+    ${version === 25
+      ? `FOREIGN KEY(predecessor_offer_id,activation_id) REFERENCES ${offers}(offer_id,activation_id) ON DELETE RESTRICT`
+      : `FOREIGN KEY(predecessor_offer_id) REFERENCES ${offers}(offer_id) ON DELETE SET NULL`}
   ) STRICT`,
   `CREATE UNIQUE INDEX custodial_polling_offer_one_root ON ${offers}(activation_id) WHERE predecessor_offer_id IS NULL`,
   `CREATE TRIGGER custodial_polling_offer_append BEFORE INSERT ON ${offers}
@@ -355,26 +371,42 @@ const offerSchema = [
           AND p.created_at_ms<=NEW.created_at_ms))
     BEGIN SELECT RAISE(ABORT,'Polling offers must append to the active chain tail'); END`,
   `CREATE TRIGGER custodial_polling_offer_immutable BEFORE UPDATE ON ${offers}
-    WHEN ${offerIdentity.map(column => `NEW.${column} IS NOT OLD.${column}`).join(" OR ")}
+    ${version === 25 ? "WHEN" : "BEGIN SELECT CASE WHEN"} ${offerIdentity.filter(column => version === 25 || column !== "predecessor_offer_id").map(column => `NEW.${column} IS NOT OLD.${column}`).join(" OR ")}
       OR (NEW.acknowledged_at_ms IS NOT OLD.acknowledged_at_ms AND
         (OLD.acknowledged_at_ms IS NOT NULL OR NEW.acknowledged_at_ms IS NULL
           OR EXISTS (SELECT 1 FROM ${offers} s WHERE s.predecessor_offer_id=OLD.offer_id)))
-    BEGIN SELECT RAISE(ABORT,'Polling offer identity and interior acknowledgements are immutable'); END`,
+    ${version === 25 ? "BEGIN SELECT RAISE(ABORT,'Polling offer identity and interior acknowledgements are immutable');" : `
+      THEN RAISE(ABORT,'Polling offer identity and interior acknowledgements are immutable') END;
+      UPDATE ${table} SET compacted_through_offer_id=OLD.predecessor_offer_id
+        WHERE operation_id=OLD.activation_id AND NEW.predecessor_offer_id IS NULL AND OLD.predecessor_offer_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM ${offers} WHERE offer_id=OLD.predecessor_offer_id);
+      SELECT CASE WHEN NEW.predecessor_offer_id IS NOT OLD.predecessor_offer_id AND NOT
+        (NEW.predecessor_offer_id IS NULL AND OLD.predecessor_offer_id IS NOT NULL
+          AND NOT EXISTS (SELECT 1 FROM ${offers} p WHERE p.offer_id=OLD.predecessor_offer_id)
+          AND EXISTS (SELECT 1 FROM ${table} a WHERE a.operation_id=OLD.activation_id
+            AND a.compacted_through_offer_id=OLD.predecessor_offer_id))
+        THEN RAISE(ABORT,'Polling offer predecessor is immutable outside compaction') END;
+    `} END`,
   `CREATE TRIGGER custodial_polling_offer_no_delete BEFORE DELETE ON ${offers}
-    BEGIN SELECT RAISE(ABORT,'Polling offer history cannot be removed'); END`,
-];
+    BEGIN ${version === 25 ? "SELECT RAISE(ABORT,'Polling offer history cannot be removed');" : `
+      SELECT CASE WHEN OLD.predecessor_offer_id IS NOT NULL
+        OR NOT EXISTS (SELECT 1 FROM ${offers} s WHERE s.predecessor_offer_id=OLD.offer_id AND s.activation_id=OLD.activation_id)
+        OR (SELECT COUNT(*) FROM ${offers} WHERE activation_id=OLD.activation_id)<=${POLLING_OFFER_REPLAY_WINDOW}
+        THEN RAISE(ABORT,'Polling offer tail or retained history cannot be removed') END;
+    `} END`,
+]; }
 
-export function applyPollingOfferSchema(database: DatabaseSync): void {
+export function applyPollingOfferSchema(database: DatabaseSync, version: 25 | 26 = 26): void {
   if (!database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(offers)) {
-    for (const definition of offerSchema) database.exec(definition);
+    for (const definition of offerSchema(version)) database.exec(definition);
   }
-  validatePollingOfferSchema(database);
+  validatePollingOfferSchema(database, version);
 }
 
-export function validatePollingOfferSchema(database: DatabaseSync): void {
+export function validatePollingOfferSchema(database: DatabaseSync, version: 25 | 26 = 26): void {
   const actual = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL").all(offers)
     .map(row => normalizedSql(String(row.sql))).sort();
-  const expected = offerSchema.map(normalizedSql).sort();
+  const expected = offerSchema(version).map(normalizedSql).sort();
   if (actual.length !== expected.length || actual.some((definition, index) => definition !== expected[index])) {
     throw new Error("Polling offer journal has invalid or missing schema.");
   }
@@ -382,6 +414,29 @@ export function validatePollingOfferSchema(database: DatabaseSync): void {
   if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok" || database.prepare(`PRAGMA foreign_key_check(${offers})`).get()) {
     throw new Error("Polling offer journal contains invalid authority.");
   }
+}
+
+/** Protected schema migration only: preserve every row and ACK; never compact
+ * historical evidence or claim it covers releases the journal never observed. */
+export function migratePollingOffersV25ToV26(database: DatabaseSync): void {
+  requireTransaction(database);
+  validatePollingActivationSchema(database, 24); validatePollingOfferSchema(database, 25);
+  database.exec(`ALTER TABLE ${table} ADD COLUMN ${compactionColumn}`);
+  database.exec("DROP TRIGGER custodial_polling_activation_predecessor");
+  database.exec(activationSchema().find(definition => definition.startsWith("CREATE TRIGGER custodial_polling_activation_predecessor "))!);
+  database.exec(activationSchema().at(-1)!);
+  // The old predecessor FK is RESTRICT. Defer it inside the migration's
+  // transaction while replacing this one self-referencing table, not the
+  // surrounding manifest graph. COMMIT still checks every foreign key.
+  database.exec(`PRAGMA defer_foreign_keys=ON;
+    CREATE TEMP TABLE polling_offer_migration AS SELECT rowid AS saved_rowid,* FROM ${offers};
+    DROP TABLE ${offers}`);
+  database.exec(offerSchema()[0]!);
+  database.exec(`INSERT INTO ${offers}(rowid,${[...offerIdentity, "acknowledged_at_ms"].join(",")})
+    SELECT saved_rowid,${[...offerIdentity, "acknowledged_at_ms"].join(",")} FROM temp.polling_offer_migration;
+    DROP TABLE temp.polling_offer_migration`);
+  for (const definition of offerSchema().slice(1)) database.exec(definition);
+  validatePollingActivationSchema(database); validatePollingOfferSchema(database);
 }
 
 export function getPollingOfferTail(database: DatabaseSync, activationId: string): PollingOfferRecord | null {
@@ -406,7 +461,10 @@ function currentOfferAuthority(database: DatabaseSync, input: PollingOfferScope,
 }
 
 /** Publish a bounded reply frontier before releasing it. Supersession is the
- * successor edge itself, never a state transition that can empty the chain. */
+ * successor edge itself, never a state transition that can empty the chain.
+ * Replay refusal is guaranteed only within the retained window. Beyond it,
+ * a pure-read replay may become a fresh offer under the identical authority
+ * fences. Neither reoffering nor compaction advances the worker cursor. */
 export function recordPollingOffer(database: DatabaseSync, input: RecordPollingOffer, current: DaemonManifestEntry | undefined): PollingOfferRecord {
   const activation = currentOfferAuthority(database, input, current);
   if (typeof input.requestId !== "string" && !Number.isSafeInteger(input.requestId)) throw new Error("Polling offer requires an exact SDK request id.");
@@ -430,6 +488,12 @@ export function recordPollingOffer(database: DatabaseSync, input: RecordPollingO
     mcp_request_id: requestId, input_cursor: input.inputCursor, offered_frontier: input.offeredFrontier, predecessor_offer_id: tail?.offer_id ?? null,
     created_at_ms: Math.max(Date.now(), tail?.created_at_ms ?? 0), acknowledged_at_ms: null };
   database.prepare(`INSERT INTO ${offers}(${Object.keys(offer).join(",")}) VALUES(${Object.keys(offer).map(() => "?").join(",")})`).run(...Object.values(offer));
+  const excess = Number(database.prepare(`SELECT COUNT(*) AS n FROM ${offers} WHERE activation_id=?`).get(input.operationId)!.n) - POLLING_OFFER_REPLAY_WINDOW;
+  for (let index = 0; index < excess; index++) {
+    // Only the tail is outstanding. Both acknowledged and superseded roots
+    // compact; preserving unACKed interiors would make retries unbounded.
+    database.prepare(`DELETE FROM ${offers} WHERE activation_id=? AND predecessor_offer_id IS NULL`).run(input.operationId);
+  }
   return getPollingOfferTail(database, input.operationId)!;
 }
 

@@ -13,7 +13,7 @@ import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
-import { matchesPollingActivationRuntime, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
+import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
@@ -164,7 +164,81 @@ test("polling offer SQL prevents forks, disconnected successors and rewriting or
       for (const value of [null, result.offer!.acknowledged_at_ms! + 1]) {
         assert.throws(() => database.prepare("UPDATE custodial_polling_offers SET acknowledged_at_ms=? WHERE offer_id=?").run(value, tail.offer_id), /immutable/);
       }
+      // The single-column SET NULL FK retains same-activation enforcement in
+      // the append trigger, even when both activations and the parent exist.
+      await store.completePollingActivation({ ...activation, providerTurnId: "native-turn", outcome: "completed" }, async commit => commit());
+      const other = { ...database.prepare("SELECT * FROM custodial_polling_activations WHERE operation_id=?").get(activation.operationId)!,
+        operation_id: "other-activation", request_id: "other-request", phase: "prepared", provider_turn_id: null, terminal_outcome: null };
+      const fabricated = { ...other, compacted_through_offer_id: "unrelated" };
+      assert.throws(() => database.prepare(`INSERT INTO custodial_polling_activations(${Object.keys(fabricated).join(",")}) VALUES(${Object.keys(fabricated).map(() => "?").join(",")})`).run(...Object.values(fabricated)), /completed reverse predecessor/);
+      database.prepare(`INSERT INTO custodial_polling_activations(${Object.keys(other).join(",")}) VALUES(${Object.keys(other).map(() => "?").join(",")})`).run(...Object.values(other));
+      database.exec("UPDATE custodial_polling_activations SET phase='dispatching' WHERE operation_id='other-activation'; UPDATE custodial_polling_activations SET phase='active',provider_turn_id='other-turn' WHERE operation_id='other-activation'");
+      const crossActivation = { ...tail, offer_id: "cross-activation", activation_id: "other-activation", predecessor_offer_id: tail.offer_id };
+      assert.throws(() => database.prepare(`INSERT INTO custodial_polling_offers(${Object.keys(crossActivation).join(",")}) VALUES(${Object.keys(crossActivation).map(() => "?").join(",")})`).run(...Object.values(crossActivation)), /active chain tail/);
       validatePollingOfferSchema(database); assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("polling offer compaction bounds repeated unACKed reads while preserving tail, cursor, rollback and the explicit replay window", async () => {
+  const env = await fixture(); let store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    await store.preparePollingActivation(activation, async commit => commit());
+    await store.markPollingActivationDispatch(activation, async commit => commit());
+    await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-turn" }, async commit => commit());
+    const input = { operationId: activation.operationId, agentId: activation.agentId,
+      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", inputCursor: "msg_47", offeredFrontier: "msg_47" };
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.exec("PRAGMA foreign_keys=ON");
+      const count = () => database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers").get()!.n;
+      const rows = () => database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all();
+      const watermark = () => database.prepare("SELECT compacted_through_offer_id FROM custodial_polling_activations WHERE operation_id=?").get(activation.operationId)!.compacted_through_offer_id;
+      let previousId: string | null = null;
+      for (let requestId = 0; requestId < POLLING_OFFER_REPLAY_WINDOW * 2; requestId++) {
+        const tail = await store.recordPollingOffer({ ...input, requestId }, async commit => commit());
+        assert.equal(tail.predecessor_offer_id, previousId); previousId = tail.offer_id;
+        assert.equal(count(), Math.min(requestId + 1, POLLING_OFFER_REPLAY_WINDOW));
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers WHERE predecessor_offer_id IS NULL").get()!.n, 1);
+      }
+      assert.ok(watermark());
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers WHERE acknowledged_at_ms IS NOT NULL").get()!.n, 0,
+        "superseded unACKed rows compact without fabricating consumption");
+      assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()!.room_cursor, "msg_47");
+      await assert.rejects(store.recordPollingOffer({ ...input, requestId: POLLING_OFFER_REPLAY_WINDOW }, async commit => commit()), /superseded/);
+      const before = { rows: rows(), watermark: watermark(), tail: await store.getPollingOfferTail(activation.operationId) };
+      database.exec("CREATE TRIGGER reject_offer_compaction AFTER UPDATE OF compacted_through_offer_id ON custodial_polling_activations BEGIN SELECT RAISE(ABORT,'test compaction rollback'); END");
+      await assert.rejects(store.recordPollingOffer({ ...input, requestId: "new" }, async commit => commit()), /test compaction rollback/);
+      assert.deepEqual({ rows: rows(), watermark: watermark(), tail: await store.getPollingOfferTail(activation.operationId) }, before);
+      database.exec("DROP TRIGGER reject_offer_compaction");
+      await store.close(); store = new ManifestStore(env.databasePath);
+      assert.deepEqual(await store.getPollingOfferTail(activation.operationId), before.tail);
+      assert.equal(watermark(), before.watermark);
+      // Beyond-window IDs are unknown-age, not permanently deduplicated. This
+      // pure read may reoffer, but must still start at the durable ACK cursor.
+      const replay = await store.recordPollingOffer({ ...input, requestId: 0, offeredFrontier: "msg_50" }, async commit => commit());
+      assert.notEqual(replay.offer_id, before.tail!.offer_id); assert.equal(count(), POLLING_OFFER_REPLAY_WINDOW);
+      assert.equal(replay.acknowledged_at_ms, null);
+      assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()!.room_cursor, "msg_47");
+      assert.equal((await store.acknowledgePollingOffer({ ...input, roomCursor: "msg_47" }, async commit => commit())).acknowledged, false);
+      assert.equal((await store.acknowledgePollingOffer({ ...input, roomCursor: "msg_50" }, async commit => commit())).acknowledged, true);
+      await assert.rejects(store.recordPollingOffer({ ...input, requestId: 1 }, async commit => commit()), /durable acknowledged cursor/);
+      const retainedRoot = database.prepare("SELECT offer_id FROM custodial_polling_offers WHERE predecessor_offer_id IS NULL").get()!;
+      for (const invalidAnchor of [null, "unrelated", retainedRoot.offer_id, replay.offer_id, before.watermark]) {
+        assert.throws(() => database.prepare("UPDATE custodial_polling_activations SET compacted_through_offer_id=? WHERE operation_id=?")
+          .run(invalidAnchor, activation.operationId), /exact deletion cascade/);
+      }
+      for (const sql of [
+        "UPDATE custodial_polling_offers SET predecessor_offer_id=NULL WHERE predecessor_offer_id IS NOT NULL",
+        "DELETE FROM custodial_polling_offers",
+        "UPDATE custodial_polling_activations SET compacted_through_offer_id=NULL",
+        "UPDATE custodial_polling_activations SET compacted_through_offer_id='unrelated'",
+      ]) assert.throws(() => database.exec(sql), /immutable|cannot be removed|exact deletion cascade/);
+      validatePollingActivationSchema(database); validatePollingOfferSchema(database);
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
     } finally { database.close(); }
   } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
 });

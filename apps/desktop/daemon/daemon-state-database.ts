@@ -2,9 +2,9 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, migrateExecutionStorageV20ToV21, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
-import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
+import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 25;
+export const DAEMON_STATE_SCHEMA_VERSION = 26;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -118,8 +118,8 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
-  if (existingVersion >= 25) validatePollingOfferSchema(database);
-  if (existingVersion >= 24) { validatePollingActivationSchema(database); validateCustodialLaunchSession(database); }
+  if (existingVersion >= 25) validatePollingOfferSchema(database, existingVersion >= 26 ? 26 : 25);
+  if (existingVersion >= 24) { validatePollingActivationSchema(database, existingVersion >= 26 ? 26 : 24); validateCustodialLaunchSession(database); }
   if (existingVersion >= 23) validatePollingContract(database);
   if (existingVersion >= 18) validateExecutionStorageSchema(database,
     existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : existingVersion === 21 ? 20 : 21);
@@ -243,8 +243,8 @@ createSchema(database: DatabaseSync): void {
     this.migrateV23ToV24(database);
     return;
   }
-  if (existingVersion === 24) {
-    this.migrateV24ToV25(database);
+  if (existingVersion === 24 || existingVersion === 25) {
+    this.migratePollingOfferStorage(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1120,7 +1120,7 @@ migrateV23ToV24(database: DatabaseSync): void {
 }
 
 /** Offers remain dormant. Old activations acquire no fabricated offer coverage. */
-migrateV24ToV25(database: DatabaseSync): void {
+migratePollingOfferStorage(database: DatabaseSync): void {
   this.repairAndValidateCurrentShape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
@@ -1145,8 +1145,15 @@ private applyCurrentConfigurationShape(database: DatabaseSync): void {
     database.exec(`ALTER TABLE runtime_deployments ADD COLUMN ${CUSTODIAL_LAUNCH_SESSION_COLUMN}`);
   }
   validateCustodialLaunchSession(database);
-  applyPollingActivationSchema(database);
-  applyPollingOfferSchema(database);
+  if (this.tableColumns(database, "custodial_polling_activations").size
+    && !this.tableColumns(database, "custodial_polling_activations").has("compacted_through_offer_id")) {
+    applyPollingActivationSchema(database, 24);
+    applyPollingOfferSchema(database, 25);
+    migratePollingOffersV25ToV26(database);
+  } else {
+    applyPollingActivationSchema(database);
+    applyPollingOfferSchema(database);
+  }
 }
 
 private applyV20Shape(database: DatabaseSync): void {
@@ -2468,9 +2475,10 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
 }
 
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion: 19 | 20 | 21 = 21): void {
-  if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 25) validatePollingOfferSchema(database);
+  const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+  if (version >= 25) validatePollingOfferSchema(database, version >= 26 ? 26 : 25);
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 24) {
-    validatePollingActivationSchema(database); validateCustodialLaunchSession(database);
+    validatePollingActivationSchema(database, version >= 26 ? 26 : 24); validateCustodialLaunchSession(database);
   }
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 23) validatePollingContract(database);
   if (!this.tableColumns(database, "supervised_agent_inbox_events").size
