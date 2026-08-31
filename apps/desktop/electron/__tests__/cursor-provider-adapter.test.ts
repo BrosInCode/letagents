@@ -2354,7 +2354,10 @@ test("Cursor Stop after native release but before init preserves the lane and pe
   }), "pre-init Stop");
   await bounded(assert.rejects(firstTurn, (error: unknown) =>
     error instanceof Error
-    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched"), "first turn rejection");
+    && (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "ambiguous"), "first turn rejection");
+  assert.equal(harness.children[0]!.isReleased, true, "absence of init does not make an admitted turn safe to redispatch");
+  assert.equal(harness.children[0]!.alive, false, "the exact released child is reaped before Stop completes");
+  assert.equal(harness.children.length, 1, "post-release interruption does not launch a replacement turn");
   assert.equal(control.interrupted, true);
   assert.equal(control.state, "idle");
   assert.equal(handle.observedState(), "idle", "a normal turn Stop does not terminalize the Cursor attempt");

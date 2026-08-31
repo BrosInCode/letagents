@@ -2258,9 +2258,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
       if (handle.liveTurn === turn) handle.liveTurn = null;
       handle.state = "idle";
       await checkpointReleasedTurnIdle();
-      throw new CursorRoomTurnNotDispatchedError(
-        "Cursor turn was interrupted before its stream-json init; the continuation remains available.",
-        roomTurnId,
+      // Release already admitted native work. Missing init cannot prove that
+      // nothing ran; the exact Stop reservation must settle this invocation.
+      throw new CursorRoomTurnRecoveryError(
+        "Cursor turn was interrupted after native release but before stream-json init; native work may have begun. The continuation remains available.",
       );
     }
     if (first === "timeout") {
