@@ -85,6 +85,7 @@ const expectedDirectChannels = [
   "desktop:room:mark-thread-read",
   "desktop:room:open-github-install",
   "desktop:room:pick-attachments",
+  "desktop:room:poll-agent-work",
   "desktop:room:release-board-manager",
   "desktop:room:rename",
   "desktop:room:repair-stream-delivery",

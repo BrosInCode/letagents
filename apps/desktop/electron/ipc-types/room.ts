@@ -2,6 +2,37 @@ import type { DesktopActivityEntry, DesktopAgentPresence, DesktopParticipantSumm
 import type { RepoStatus } from "./core.js";
 import type { DesktopRentalActivityEvent, DesktopRentalOwnQuotaStatus, DesktopRentalRenterTriggerSignal } from "./rental.js";
 import type { DesktopTaskSummary } from "./tasks.js";
+import type {
+  ClearedRoomAgentWorkSummary,
+  RoomAgentWorkSummary,
+} from "../../../../shared/room-agent-work.mjs";
+
+export interface DesktopRoomAgentWork {
+  attemptId: string;
+  roomId: string;
+  sourceMessageId: string;
+  agentKey: string;
+  revision: number;
+  summary: RoomAgentWorkSummary | ClearedRoomAgentWorkSummary;
+  updatedAt: string;
+}
+
+export interface DesktopRoomAgentWorkSnapshot {
+  work: DesktopRoomAgentWork[];
+  truncated: boolean;
+}
+
+export type DesktopRoomAgentWorkPollResponse = {
+  roomId: string;
+  cursor: string;
+} & (
+  | { changed: true; snapshot: DesktopRoomAgentWorkSnapshot }
+  | { changed: false; snapshot: null }
+);
+
+export type DesktopRoomAgentWorkPollResult =
+  | { status: "ready"; response: DesktopRoomAgentWorkPollResponse }
+  | { status: "local" | "access_revoked" | "invalid"; response: null };
 
 export interface DesktopRoomAccess {
   status: "ready" | "missing_room" | "auth_required" | "forbidden" | "unavailable";
