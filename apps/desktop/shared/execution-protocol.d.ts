@@ -48,6 +48,14 @@ export type NativeExecutionSubscription = {
 export type ControlProbeResult =
   | { state: "responsive" | "degraded" | "unprobeable" }
   | { state: "lost"; controlEvidence: HardControlEvidence };
+/**
+ * Read-only native snapshot, not permission to dispatch or change delivery mode.
+ * A caller must fence admission and revalidate this exact runtime before acting.
+ */
+export type NativeTurnBoundary =
+  | { state: "unknown" }
+  | { state: "idle"; providerContinuationId: string; nativeProcessIdentity: string; latestProviderTurnId: string | null }
+  | { state: "active"; providerContinuationId: string; nativeProcessIdentity: string; providerTurnId: string };
 export type NativeExecutionCapabilities = {
   controlProbe: "rpc" | "http" | "unsupported";
   approvals: {

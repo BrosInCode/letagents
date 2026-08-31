@@ -18,7 +18,7 @@ import type {
   ProviderTurnControlResult,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
-import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 
 type NativeHandle = {
   workAttemptId: string;
@@ -38,6 +38,7 @@ export type NativeProviderAdapter = {
   poke(handle: NativeHandle, message: string): Promise<void>;
   controlTurn(handle: NativeHandle, correction?: string | null, options?: { targetTurnId?: string | null; checkpointTurnStarted?: (turnId: string) => Promise<void>; markDispatched?: () => Promise<void> }): Promise<ProviderTurnControlResult>;
   inspectTurn?(handle: NativeHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
+  inspectTurnBoundary?(handle: NativeHandle): Promise<NativeTurnBoundary>;
   controlExactTurn?(handle: NativeHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult>;
   recoverRoomTurn?(handle: NativeHandle, request: ProviderRoomTurnRecoveryRequest, options?: { detachSignal?: AbortSignal; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void> }): Promise<ProviderRoomTurnResult>;
@@ -163,6 +164,23 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const adapter = await this.adapter(remembered.provider);
     if (!adapter.controlExactTurn) throw new Error(`Provider '${remembered.provider}' does not support exact turn control.`);
     return adapter.controlExactTurn(remembered.handle, options);
+  }
+
+  async inspectTurnBoundary(handle: ProviderActionHandle): Promise<NativeTurnBoundary> {
+    const remembered = this.required(handle);
+    const expected = handle.providerConnection ? { ...handle.providerConnection } : null;
+    const continuation = handle.providerContinuationId;
+    const current = () => this.handles.get(handle.workAttemptId) === remembered
+      && remembered.handle.providerContinuationId === continuation
+      && sameProviderActionConnectionIdentity(expected, remembered.handle.providerConnection);
+    if (!current()) return { state: "unknown" };
+    const adapter = await this.adapter(remembered.provider);
+    if (!current() || !adapter.inspectTurnBoundary) return { state: "unknown" };
+    const result = await adapter.inspectTurnBoundary(remembered.handle);
+    if (!current() || (result.state !== "unknown"
+      && (result.providerContinuationId !== continuation
+        || result.nativeProcessIdentity !== expected?.processIdentity))) return { state: "unknown" };
+    return result;
   }
 
   async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {

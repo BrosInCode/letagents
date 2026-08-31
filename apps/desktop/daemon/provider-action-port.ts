@@ -3,7 +3,7 @@
  * control-socket bridge; keeping this structural port here keeps reconciliation
  * outside Electron's failure domain.
  */
-import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 export type ProviderActionCapabilities = {
   execution?: NativeExecutionCapabilities;
   /** Explicit adapter admission for durable room-ingress ownership. */
@@ -177,6 +177,8 @@ export interface ProviderActionPort {
     markDispatched?: () => Promise<void>;
   }): Promise<ProviderTurnControlResult>;
   inspectTurn?(handle: ProviderActionHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
+  /** Read-only discovery; an idle snapshot does not itself fence new native work. */
+  inspectTurnBoundary?(handle: ProviderActionHandle): Promise<NativeTurnBoundary>;
   controlExactTurn?(handle: ProviderActionHandle, options: { targetTurnId?: string | null; checkpointTargetTurn: (turnId: string) => Promise<void>; markDispatched: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderExactTurnControlResult>;
   runRoomTurn?(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: {
     /** Durable intent checkpoint; completes before the first native turn/start side effect. */

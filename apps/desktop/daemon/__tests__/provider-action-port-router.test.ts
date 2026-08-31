@@ -30,7 +30,7 @@ import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
+import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -176,6 +176,69 @@ test("provider router carries native shadow facts and probes without invoking le
   await assert.rejects(router.probeControl(stale), /not owned/);
   await assert.rejects(router.onExecution(stale, () => {}), /not owned/);
 });
+
+test("provider router forwards exact turn-boundary snapshots and rejects mismatched native authority", async () => {
+  const calls: string[] = [];
+  const native = nativeHandle("codex", "boundary", "thread-boundary");
+  let inspected = 0;
+  let result: NativeTurnBoundary = { state: "idle", providerContinuationId: native.providerContinuationId,
+    nativeProcessIdentity: native.providerConnection.processIdentity, latestProviderTurnId: null };
+  const adapter: NativeProviderAdapter = { ...fakeAdapter("codex", calls), spawn: async () => native,
+    inspectTurnBoundary: async exact => { assert.equal(exact, native); inspected++; return result; } };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
+  const request: ProviderActionSpawn = { provider: "codex", workAttemptId: native.workAttemptId, roomId: "room", cwd: "/tmp/boundary", launchPolicy: {} };
+  const handle = await router.spawn(request);
+  assert.deepEqual(await router.inspectTurnBoundary(handle), result);
+  result = { state: "active", providerContinuationId: native.providerContinuationId,
+    nativeProcessIdentity: native.providerConnection.processIdentity, providerTurnId: "active-turn" };
+  assert.deepEqual(await router.inspectTurnBoundary(handle), result);
+  for (const mismatch of ["continuation", "process_birth"] as const) {
+    result = { state: "idle", providerContinuationId: mismatch === "continuation" ? "wrong-thread" : native.providerContinuationId,
+      nativeProcessIdentity: mismatch === "process_birth" ? "forged-birth" : native.providerConnection.processIdentity, latestProviderTurnId: null };
+    assert.deepEqual(await router.inspectTurnBoundary(handle), { state: "unknown" }, mismatch);
+  }
+  const inspectedBefore = inspected;
+  for (const connection of [null, { ...native.providerConnection, processIdentity: "fabricated-birth" }, { ...native.providerConnection, processIdentity: "" }]) {
+    assert.deepEqual(await router.inspectTurnBoundary({ ...handle, providerConnection: connection }), { state: "unknown" });
+  }
+  await assert.rejects(router.inspectTurnBoundary({ ...handle, providerContinuationId: "stale-thread" }), /not owned/);
+  assert.equal(inspected, inspectedBefore, "unfenced handles never reach the adapter");
+  const unsupported = await router.spawn({ ...request, provider: "claude-code", workAttemptId: "unsupported" });
+  assert.deepEqual(await router.inspectTurnBoundary(unsupported), { state: "unknown" });
+  assert.deepEqual(calls, ["claude-code:spawn:unsupported"], "boundary inspection invokes no turn, stop, or launch action");
+});
+
+for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
+  test(`provider router discards a turn-boundary result after ${race} changes during inspection`, async () => {
+    let native = nativeHandle("codex", "raced-boundary", "thread-boundary");
+    const original = native;
+    const calls: string[] = [];
+    let release!: () => void; let markReading!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { markReading = resolve; });
+    const adapter: NativeProviderAdapter = { ...fakeAdapter("codex", calls), spawn: async () => native,
+      inspectTurnBoundary: async exact => {
+        assert.equal(exact, original);
+        const result: NativeTurnBoundary = { state: "idle", providerContinuationId: exact.providerContinuationId!,
+          nativeProcessIdentity: exact.providerConnection!.processIdentity!, latestProviderTurnId: "completed-turn" };
+        markReading(); await waiting; return result;
+      } };
+    const router = new ProviderActionPortRouter({ codex: async () => adapter });
+    const request: ProviderActionSpawn = { provider: "codex", workAttemptId: native.workAttemptId, roomId: "room", cwd: "/tmp/boundary", launchPolicy: {} };
+    const handle = await router.spawn(request);
+    const pending = router.inspectTurnBoundary(handle);
+    await reading;
+    if (race === "process_birth") native.providerConnection.processIdentity += "-replaced";
+    else if (race === "continuation") native.providerContinuationId = "thread-replaced";
+    else {
+      native = nativeHandle("codex", original.workAttemptId, original.providerContinuationId, original.pid);
+      await router.spawn(request); // Different owned handle with the same apparent native identity.
+    }
+    release();
+    assert.deepEqual(await pending, { state: "unknown" });
+    assert.deepEqual(calls, [], "observation does not dispatch control actions while ownership changes");
+  });
+}
 
 test("provider router selects the native adapter by manifest provider and fences stale handles", async () => {
   const calls: string[] = [];

@@ -21,7 +21,7 @@
 // independent of the daemon's three-axis `ObservedState` (separate compilation
 // unit / process): the daemon/reconciler maps this to its own vocabulary at the
 // control-socket boundary. Deliberately no cross-rootDir import into the daemon.
-import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
 
 export type ProviderObservedState =
@@ -463,6 +463,9 @@ export interface ProviderAdapter {
 
   /** Inspect only one already-persisted native turn; never choose a latest turn. */
   inspectTurn?(handle: ProviderHandle, turnId: string): Promise<"active" | "terminal" | "unknown">;
+
+  /** Discover the current native boundary without interrupting, starting, or publishing facts. */
+  inspectTurnBoundary?(handle: ProviderHandle): Promise<NativeTurnBoundary>;
 
   /** Run one bounded room turn without launching or replacing the provider. */
   runRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRequest, options?: ProviderRoomTurnOptions): Promise<ProviderRoomTurnResult>;
