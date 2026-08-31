@@ -746,6 +746,7 @@ test("current v13 repair rolls back its temporary journal backup as one atomic u
     // graph that the repair path is designed to heal. Keep the v13 repair
     // journal in place so applyV13Shape must use its TEMP backup path.
     const database = new DatabaseSync(env.database);
+    const terminalSql = database.prepare("SELECT sql FROM sqlite_master WHERE name='supervised_agent_terminal_results'").get()!.sql;
     database.exec(`
       PRAGMA foreign_keys=OFF;
       BEGIN IMMEDIATE;
@@ -782,13 +783,7 @@ test("current v13 repair rolls back its temporary journal backup as one atomic u
         PRIMARY KEY(inbox_item_id,event_sequence), UNIQUE(inbox_item_id,idempotency_key)
       ) STRICT;
       CREATE INDEX supervised_agent_inbox_events_timeline ON supervised_agent_inbox_events(inbox_item_id,event_sequence);
-      CREATE TABLE supervised_agent_terminal_results (
-        inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-        agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-        outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
-        normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
-        terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
-      ) STRICT;
+      ${terminalSql};
       CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id);
       CREATE TABLE supervised_agent_publications (
         inbox_item_id TEXT PRIMARY KEY, agent_id TEXT NOT NULL, room_id TEXT NOT NULL,
