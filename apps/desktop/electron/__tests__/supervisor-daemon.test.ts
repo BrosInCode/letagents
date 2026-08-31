@@ -182,6 +182,10 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
   database.exec("PRAGMA writable_schema=ON");
   database.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
+  database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
+    ",'failed','interrupted'",
+    ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))",
+  );
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
     UPDATE manifest_metadata SET schema_version=17 WHERE singleton=1; PRAGMA user_version=17`);
   database.close();

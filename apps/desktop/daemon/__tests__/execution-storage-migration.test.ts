@@ -23,7 +23,18 @@ async function fixture() {
 }
 
 /** Physically restore the preceding constraint, not merely its version marker. */
+function restoreV19TerminalFixture(database: DatabaseSync): void {
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare("UPDATE sqlite_master SET sql=replace(replace(sql, ?, ''), ?, '') WHERE name='supervised_agent_terminal_results'").run(
+    ",'failed','interrupted'",
+    ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))",
+  );
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+}
+
 function restoreV17Fixture(database: DatabaseSync): void {
+  restoreV19TerminalFixture(database);
   database.exec("PRAGMA foreign_keys=OFF");
   for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all() as Row[]) {
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
@@ -37,12 +48,18 @@ function restoreV17Fixture(database: DatabaseSync): void {
 }
 
 function restoreV18Fixture(database: DatabaseSync): void {
+  restoreV19TerminalFixture(database);
   database.exec("PRAGMA foreign_keys=OFF");
   for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all() as Row[]) {
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
   }
   applyExecutionStorageSchema(database, 18);
   database.exec("UPDATE manifest_metadata SET schema_version=18 WHERE singleton=1; PRAGMA user_version=18; PRAGMA foreign_keys=ON");
+}
+
+function restoreV19Fixture(database: DatabaseSync): void {
+  restoreV19TerminalFixture(database);
+  database.exec("UPDATE manifest_metadata SET schema_version=19 WHERE singleton=1; PRAGMA user_version=19");
 }
 
 function seedV18Evidence(database: DatabaseSync): void {
@@ -164,10 +181,10 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-test("a killed migrator leaves the complete v17 graph recoverable from WAL", async () => {
+for (const version of [17, 19]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
-    restoreV17Fixture(env.database);
+    (version === 17 ? restoreV17Fixture : restoreV19Fixture)(env.database);
     seedLegacyEvidence(env.database);
     const before = legacyRows(env.database);
     const script = `
@@ -180,18 +197,20 @@ test("a killed migrator leaves the complete v17 graph recoverable from WAL", asy
     const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: 10_000 });
     assert.equal(child.signal, "SIGKILL", child.stderr);
     assert.deepEqual(legacyRows(env.database), before);
-    assert.equal((env.database.prepare("PRAGMA user_version").get() as Row).user_version, 17);
+    assert.equal((env.database.prepare("PRAGMA user_version").get() as Row).user_version, version);
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(legacyRows(env.database), before);
   } finally { await env.cleanup(); }
 });
 
-test("current predecessor repair preserves populated native-turn authority and the v18 terminal allowance", async () => {
+test("current predecessor repair preserves native-turn authority and failed terminal evidence", async () => {
   const env = await fixture();
   try {
     seedLegacyEvidence(env.database);
     env.database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_failed' WHERE inbox_item_id='tail'").run();
+    env.database.prepare(`INSERT INTO supervised_agent_terminal_results VALUES
+      ('tail','agent','generation','turn-tail','failed',NULL,'transcript','{"native":true}',?,?)`).run(now, now);
     const before = legacyRows(env.database);
     const schemaVersion = Number((env.database.prepare("PRAGMA schema_version").get() as Row).schema_version);
     env.database.exec("PRAGMA writable_schema=ON");
@@ -290,7 +309,7 @@ test("v19 adds observer and proof slots without rewriting v18 evidence or rebuil
     ]);
     assert.equal(env.database.prepare("SELECT projection_sha256 FROM execution_approval_decisions").get()!.projection_sha256, null);
     assert.equal(env.database.prepare("SELECT COUNT(*) AS count FROM execution_observers").get()!.count, 0);
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 19);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
     assert.throws(() => env.database.exec(`UPDATE execution_approval_decisions SET projection_sha256='${"a".repeat(64)}'`), /immutable/);
     new DaemonStateSchema().createSchema(env.database);
@@ -333,4 +352,137 @@ test("malformed v18 and missing current observers fail before WAL or initializer
     assert.throws(() => new DaemonStateSchema().createSchema(env.database), /execution_observers/);
     assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='execution_observers'").get(), undefined);
   } finally { await env.cleanup(); }
+});
+
+test("v20 rebuilds only terminal evidence, preserving old outcomes, identity and rowids", async () => {
+  const env = await fixture();
+  try {
+    restoreV19Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database);
+    env.database.exec(`UPDATE supervised_agent_terminal_results SET rowid=71;
+      INSERT INTO supervised_agent_terminal_results VALUES('tail','agent','generation','turn-tail','no_reply',NULL,'none','{ "opaque": true }','then','now');
+      INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,created_at,updated_at)
+        VALUES('unreadable','agent','room','unreadable','{}','{}',3,'blocked',1,'unreadable','unreadable','then','now');
+      INSERT INTO supervised_agent_terminal_results VALUES('unreadable','agent','generation','turn-unreadable','unreadable',NULL,'none','{ "original": "unreadable" }','then','now')`);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
+    const retainedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
+      WHERE tbl_name<>'supervised_agent_terminal_results' ORDER BY type,name`).all();
+    const unrelatedSchema = retainedSchema();
+    const rowids = env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all();
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
+    assert.deepEqual(retainedSchema(), unrelatedSchema, "no other table, index or trigger is rebuilt");
+    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all(), rowids);
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.throws(() => env.database.exec("UPDATE supervised_agent_terminal_results SET provider_turn_id='turn-head' WHERE inbox_item_id='tail'"), /UNIQUE/);
+    assert.throws(() => env.database.exec("UPDATE supervised_agent_terminal_results SET inbox_item_id='missing' WHERE inbox_item_id='tail'"), /FOREIGN KEY/);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 20);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 20);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
+  } finally { await env.cleanup(); }
+});
+
+for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19]) test(`fresh/legacy v${version} reaches v20 with constrained native failure slots`, async () => {
+  const env = await fixture();
+  try {
+    if (version === 17) restoreV17Fixture(env.database);
+    else if (version === 18) restoreV18Fixture(env.database);
+    else if (version) {
+      restoreV19Fixture(env.database);
+      env.database.exec(`UPDATE manifest_metadata SET schema_version=${version} WHERE singleton=1; PRAGMA user_version=${version}`);
+    }
+    seedLegacyEvidence(env.database);
+    const before = legacyRows(env.database);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual(legacyRows(env.database), before);
+    const update = env.database.prepare("UPDATE supervised_agent_terminal_results SET outcome=?,normalized_text=?,evidence_source=? WHERE inbox_item_id='head'");
+    for (const outcome of ["failed", "interrupted"]) {
+      assert.throws(() => update.run(outcome, "not a reply", "stream"), /CHECK/);
+      assert.throws(() => update.run(outcome, null, "none"), /CHECK/);
+      for (const source of ["transcript", "stream"]) update.run(outcome, null, source);
+      new DaemonStateSchema().createSchema(env.database);
+      assert.equal(env.database.prepare("SELECT outcome FROM supervised_agent_terminal_results WHERE inbox_item_id='head'").get()!.outcome, outcome);
+    }
+    update.run("unreadable", null, "none");
+    assert.throws(() => update.run("invented", null, "stream"), /CHECK/);
+    assert.equal(env.database.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='head'").get()!.state, "blocked", "storage never settles delivery");
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 20);
+  } finally { await env.cleanup(); }
+});
+
+test("v20 terminal rebuild and paired markers roll back together after validation", async () => {
+  const env = await fixture();
+  try {
+    restoreV19Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database) };
+    const schema = env.database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all();
+    assert.throws(() => new DaemonStateSchema((database) => {
+      assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 19);
+      assert.equal(database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 19);
+      database.exec("UPDATE supervised_agent_terminal_results SET outcome='interrupted',normalized_text=NULL,evidence_source='stream'");
+      throw new Error("interrupt v20 after evidence validation");
+    }).createSchema(env.database), /interrupt v20/);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database) }, before);
+    assert.deepEqual(env.database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all(), schema);
+    assert.throws(() => env.database.exec("UPDATE supervised_agent_terminal_results SET outcome='failed'"), /CHECK/);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, { legacy: before.legacy, typed: before.typed });
+  } finally { await env.cleanup(); }
+});
+
+for (const version of [19, 20]) test(`v${version} refuses missing or weakened terminal authority before WAL or repair writes`, async () => {
+  const corruptions = [
+    "DROP TABLE supervised_agent_terminal_results",
+    "UPDATE sqlite_master SET sql=replace(sql, 'outcome TEXT NOT NULL CHECK(outcome IN (''reply'',''no_reply'',''unreadable''))', 'outcome TEXT NOT NULL') WHERE name='supervised_agent_terminal_results'",
+    "UPDATE sqlite_master SET sql=replace(sql, 'ON DELETE CASCADE', 'ON DELETE SET NULL') WHERE name='supervised_agent_terminal_results'",
+    "UPDATE sqlite_master SET sql=replace(sql, 'REFERENCES supervised_agent_inbox', 'REFERENCES missing_inbox') WHERE name='supervised_agent_terminal_results'",
+    "UPDATE sqlite_master SET sql=replace(sql, '''reply''', '''REPLY''') WHERE name='supervised_agent_terminal_results'",
+    "DROP INDEX supervised_agent_terminal_result_turn; CREATE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id)",
+    "DROP INDEX supervised_agent_terminal_result_turn; CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,provider_turn_id)",
+    "CREATE TABLE unexpected_terminal_child(inbox_item_id TEXT REFERENCES supervised_agent_terminal_results(inbox_item_id) ON DELETE CASCADE) STRICT",
+  ];
+  if (version === 20) corruptions[1] = "UPDATE sqlite_master SET sql=replace(sql, ',CHECK(outcome NOT IN (''failed'',''interrupted'') OR (normalized_text IS NULL AND evidence_source <> ''none''))', '') WHERE name='supervised_agent_terminal_results'";
+  for (const corruption of corruptions) {
+    const env = await fixture();
+    try {
+      if (version === 19) restoreV19Fixture(env.database);
+      const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
+      env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
+        PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
+      const before = await readFile(env.path);
+      let initialized = false;
+      await assert.rejects(() => openDaemonStateDatabase(env.path, () => { initialized = true; }), /terminal-result authority/, corruption);
+      assert.equal(initialized, false);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, version);
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("v19 refuses an unexpected populated terminal dependency without cascading its evidence", async () => {
+  const env = await fixture();
+  try {
+    restoreV19Fixture(env.database); seedLegacyEvidence(env.database);
+    env.database.exec(`CREATE TABLE unexpected_terminal_child(inbox_item_id TEXT REFERENCES supervised_agent_terminal_results(inbox_item_id) ON DELETE CASCADE) STRICT;
+      INSERT INTO unexpected_terminal_child VALUES('head')`);
+    const before = legacyRows(env.database);
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database), /unrecognized inbound dependency/);
+    assert.deepEqual(legacyRows(env.database), before);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 19);
+  } finally { await env.cleanup(); }
+});
+
+test("v20 refuses populated orphan or fabricated terminal evidence without changing it", async () => {
+  for (const corruption of [
+    "PRAGMA foreign_keys=OFF; UPDATE supervised_agent_terminal_results SET inbox_item_id='missing'",
+    "PRAGMA ignore_check_constraints=ON; UPDATE supervised_agent_terminal_results SET outcome='failed',evidence_source='none'",
+  ]) {
+    const env = await fixture();
+    try {
+      seedLegacyEvidence(env.database); env.database.exec(corruption);
+      const before = legacyRows(env.database);
+      assert.throws(() => new DaemonStateSchema().createSchema(env.database), /terminal-result authority contains invalid evidence/);
+      assert.deepEqual(legacyRows(env.database), before);
+    } finally { await env.cleanup(); }
+  }
 });
