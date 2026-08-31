@@ -1,8 +1,8 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, validateExecutionStorageSchema } from "./execution-storage-schema.js";
+import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 20;
+export const DAEMON_STATE_SCHEMA_VERSION = 21;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -78,9 +78,9 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
-  if (existingVersion >= 18) validateExecutionStorageSchema(database, existingVersion === 18 ? 18 : 19);
-  if (existingVersion >= 17) validateTerminalResults(database, existingVersion === 20 ? 20 : undefined);
-  if (existingVersion === 20) {
+  if (existingVersion >= 18) validateExecutionStorageSchema(database, existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : 20);
+  if (existingVersion >= 17) validateTerminalResults(database, existingVersion >= 20 ? 20 : undefined);
+  if (existingVersion >= 20) {
     // Reject inconsistent new terminal authority before legacy upgrade repair
     // can relabel a missing binding as an old, unrecoverable no-reply turn.
     for (const row of database.prepare(`SELECT i.inbox_item_id FROM supervised_agent_inbox i
@@ -183,11 +183,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV19ToV20(database);
     return;
   }
+  if (existingVersion === 20) {
+    this.migrateV20ToV21(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV20Shape(database);
+    this.repairAndValidateCurrentShape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -929,6 +933,7 @@ migrateV18ToV19(database: DatabaseSync): void {
   try {
     this.validateV18Shape(database, 18);
     migrateExecutionStorageV18ToV19(database);
+    migrateExecutionStorageV19ToV20(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
@@ -941,12 +946,33 @@ migrateV18ToV19(database: DatabaseSync): void {
   }
 }
 
-/** Only the terminal-result CHECK changes; native evidence is not reinterpreted. */
+/** Upgrade terminal constraints and observer provenance without reinterpreting evidence. */
 migrateV19ToV20(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
+    this.validateV18Shape(database, 19);
+    migrateExecutionStorageV19ToV20(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** Add nullable source provenance without resetting observer cursors or rebuilding tables. */
+migrateV20ToV21(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 19);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV18Shape(database, 19);
+    migrateExecutionStorageV19ToV20(database);
+    this.validateV18Shape(database);
+    validateTerminalResults(database, 20);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -2191,7 +2217,7 @@ repairAndValidateV17Shape(database: DatabaseSync): void {
   }
 }
 
-private applyV18Shape(database: DatabaseSync): void {
+private applyV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 19 | 20 = 20): void {
   const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'")
     .get() as Row | undefined;
   const sql = String(definition?.sql ?? "");
@@ -2239,10 +2265,10 @@ private applyV18Shape(database: DatabaseSync): void {
       for (const object of saved.objects) database.exec(object);
     }
   }
-  applyExecutionStorageSchema(database);
+  applyExecutionStorageSchema(database, executionStorageVersion);
 }
 
-private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 19 = 19): void {
+private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 19 | 20 = 20): void {
   this.validateV17Shape(database);
   const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
   if (INBOX_STATE_CONSTRAINT.exec(String(definition?.sql))?.[1]?.replace(/\s/g, "") !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
@@ -2275,20 +2301,20 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
   if (database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v18 failed foreign-key validation.");
 }
 
-repairAndValidateV20Shape(database: DatabaseSync): void {
+repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion: 19 | 20 = 20): void {
   if (!this.tableColumns(database, "supervised_agent_inbox_events").size
     && database.prepare("SELECT 1 FROM supervised_agent_inbox LIMIT 1").get()) {
     throw new Error("Daemon state is missing inbox retry history and cannot safely reconstruct consumed retry budgets.");
   }
   // Missing typed journals are lost authority, not permission to recreate an
   // empty history. Check them before any predecessor's additive repair path.
-  validateExecutionStorageSchema(database);
+  validateExecutionStorageSchema(database, executionStorageVersion);
   validateTerminalResults(database, 20);
   this.repairAndValidateV17Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.applyV18Shape(database);
-    this.validateV18Shape(database);
+    this.applyV18Shape(database, executionStorageVersion);
+    this.validateV18Shape(database, executionStorageVersion);
     validateTerminalResults(database, 20);
     database.exec("COMMIT");
   } catch (error) {
