@@ -898,16 +898,26 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (handle.pid === null) {
       throw new Error("Cannot stop a Codex app-server without an observed process id.");
     }
+    const pid = handle.pid;
+    const processIdentity = handle.providerConnection.processIdentity;
+    const assertProcessIdentity = () => {
+      const currentIdentity = this.deps.getProcessIdentity(pid);
+      if (!processIdentity || typeof currentIdentity !== "string"
+        || !sameProcessBirthIdentity(currentIdentity, processIdentity)) {
+        throw new Error("Cannot stop the Codex app-server because its exact process birth cannot be verified.");
+      }
+    };
 
+    assertProcessIdentity();
     handle.stopRequested = true;
     handle.state = "stopping";
     const exitPromise = this.requireExitPromise(handle);
     if (options.force) {
-      this.deps.signalProcess(handle.pid, "SIGKILL");
+      this.deps.signalProcess(pid, "SIGKILL");
       return exitPromise;
     }
 
-    this.deps.signalProcess(handle.pid, "SIGTERM");
+    this.deps.signalProcess(pid, "SIGTERM");
     const graceMs = options.graceMs ?? DEFAULT_STOP_GRACE_MS;
     const graceful = await Promise.race([
       exitPromise.then((payload) => ({ payload })),
@@ -915,7 +925,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ]);
     if (graceful) return graceful.payload;
 
-    this.deps.signalProcess(handle.pid, "SIGKILL");
+    // A PID observed before the grace period may now belong to another child.
+    assertProcessIdentity();
+    this.deps.signalProcess(pid, "SIGKILL");
     return exitPromise;
   }
 
