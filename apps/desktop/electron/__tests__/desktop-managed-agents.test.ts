@@ -4713,10 +4713,11 @@ test("Codex app-server launcher redacts inherited environment secrets", async ()
   }
 });
 
-test("Codex app-server launcher strips ambient LetAgents credentials only for supervised bounded turns", async () => {
+test("Codex app-server launcher strips ambient LetAgents credentials for bounded and custodial polling profiles", async () => {
   const bin = join(tempDir, "codex-reporting-supervised-environment");
   const boundedReport = join(tempDir, "codex-supervised-environment.json");
   const ordinaryReport = join(tempDir, "codex-ordinary-environment.json");
+  const pollingReport = join(tempDir, "codex-polling-environment.json");
   const ownerToken = "inherited-owner-token-for-bounded-launch";
   const workerBearer = "inherited-worker-bearer-for-bounded-launch";
   const previousOwner = process.env.LETAGENTS_TOKEN;
@@ -4730,6 +4731,7 @@ test("Codex app-server launcher strips ambient LetAgents credentials only for su
     "  owner: process.env.LETAGENTS_TOKEN ?? null,",
     "  bearer: process.env.LETAGENTS_AGENT_SESSION_BEARER ?? null,",
     "  bounded: process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS ?? null,",
+    "  turn: process.env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID ?? null,",
     "  retained: process.env.LETAGENTS_ENV_CANARY ?? null,",
     "}));",
     "",
@@ -4748,7 +4750,22 @@ test("Codex app-server launcher strips ambient LetAgents credentials only for su
       owner: null,
       bearer: null,
       bounded: "1",
+      turn: null,
       retained: "retained-in-bounded-mode",
+    });
+
+    const polling = launchCodexAppServer("ws://127.0.0.1:1", bin, {
+      env: {
+        LAUNCH_ENV_REPORT: pollingReport,
+        LETAGENTS_EXECUTION_PROFILE: "supervised_mcp_polling",
+        LETAGENTS_SUPERVISED_BOUNDED_TURNS: "1",
+        LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "obsolete-native-turn",
+        LETAGENTS_ENV_CANARY: "retained-in-polling-mode",
+      },
+    });
+    assert.equal((await waitForCodexLaunchExitForTest(polling)).type, "exit");
+    assert.deepEqual(JSON.parse(readFileSync(pollingReport, "utf8")), {
+      owner: null, bearer: null, bounded: null, turn: null, retained: "retained-in-polling-mode",
     });
 
     const ordinary = launchCodexAppServer("ws://127.0.0.1:1", bin, {
@@ -4762,6 +4779,7 @@ test("Codex app-server launcher strips ambient LetAgents credentials only for su
       owner: ownerToken,
       bearer: workerBearer,
       bounded: null,
+      turn: null,
       retained: "retained-in-ordinary-mode",
     });
   } finally {

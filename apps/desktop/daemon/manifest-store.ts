@@ -5,7 +5,7 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
-  assertNoDeliveryDrain, cancelDeliveryDrain, prepareDeliveryDrain, readDeliveryDrain,
+  assertNoDeliveryDrain, cancelDeliveryDrain, prepareDeliveryDrain, readDeliveryDrain, unresolvedDeliveryDrain,
   type DeliveryDrainRecord, type PrepareDeliveryDrain,
 } from "./delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
@@ -42,7 +42,7 @@ import type {
 
 type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
-type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number };
+type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"] };
 type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
 
 function roomMoveFromRow(row: Row): DaemonRoomMoveRecord {
@@ -236,6 +236,10 @@ export class ManifestStore {
     return readDeliveryDrain(await this.getDatabase(), operationId);
   }
 
+  async unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null> {
+    return unresolvedDeliveryDrain(await this.getDatabase(), agentId);
+  }
+
   async cancelDeliveryDrain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
     const snapshot = { ...input };
     return this.writeDeliveryDrain((database) => cancelDeliveryDrain(database, snapshot), commitFence);
@@ -243,9 +247,9 @@ export class ManifestStore {
 
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
     const database = await this.getDatabase();
-    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
+    const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision,polling_contract FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
     if (!row) return undefined;
-    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision) };
+    return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"] };
   }
 
   async prepareRoomMove(
@@ -2062,6 +2066,9 @@ export class ManifestStore {
   }
 
   private preserveInspectorConfiguration(projection: DaemonManifestDomainProjection, row: Row): void {
+    // Custody, like Inspector revisions, is database-owned and cannot be
+    // replaced by the compatibility manifest's stale or caller-supplied fields.
+    projection.configuration.polling_contract = nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"];
     projection.configuration.provider = String(row.provider);
     projection.configuration.model = nullableString(row.model);
     projection.configuration.reasoning_effort = nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"];
@@ -2089,9 +2096,9 @@ export class ManifestStore {
     run(database.prepare(`
       INSERT INTO agent_configurations(
         agent_id, provider, model, reasoning_effort, charter, permission_profile_id, config_revision, runtime_configuration_revision, delivery_mode, delivery_cutover_json,
-        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json
-      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null);
+        provider_launch_policy_present, provider_launch_policy_undefined, provider_launch_policy_json, polling_contract
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), identity.agent_id, configuration.provider, configuration.model, configuration.reasoning_effort ?? null, configuration.charter, configuration.permission_profile_id, configuration.config_revision ?? 1, configuration.runtime_configuration_revision ?? configuration.config_revision ?? 1, configuration.delivery_mode ?? "mcp_polling", configuration.delivery_cutover === undefined ? null : json(configuration.delivery_cutover), Number(policyPresent), Number(policyUndefined), policyPresent && !policyUndefined ? json(configuration.provider_launch_policy) : null, configuration.polling_contract ?? null);
     const sourcePresent = Object.hasOwn(launch, "source_repo_path");
     run(database.prepare("INSERT INTO agent_launch_intents VALUES (?, ?, ?, ?)"), identity.agent_id, launch.desired_state, Number(sourcePresent), sourcePresent ? launch.source_repo_path ?? null : null);
 

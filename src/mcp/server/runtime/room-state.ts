@@ -16,7 +16,7 @@ import {
   currentAgentIdentity,
   currentAgentIdentityKey,
 } from "./identity.js";
-import { isSupervisedBoundedTurn } from "./worker-bearer.js";
+import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
 import {
   getCurrentSupervisedRoomAuthority,
   runWithSupervisedRoomAuthority,
@@ -167,7 +167,7 @@ export function toPublicRoomResponse(
 
 export function rememberRoom(state: RoomState, lastMessageId?: string): RoomState {
   currentRoom = state;
-  if (isSupervisedBoundedTurn()) return state;
+  if (hasSupervisedWorkerAuthority()) return state;
   saveRoomSession({
     room_id: state.room_id,
     project_id: state.project_id ?? null,
@@ -202,7 +202,7 @@ export function rememberRoom(state: RoomState, lastMessageId?: string): RoomStat
 }
 
 export function touchCurrentRoom(lastMessageId?: string): void {
-  if (isSupervisedBoundedTurn()) return;
+  if (hasSupervisedWorkerAuthority()) return;
   if (!currentRoom) {
     return;
   }
@@ -211,7 +211,7 @@ export function touchCurrentRoom(lastMessageId?: string): void {
 }
 
 export function getTargetRoomId(roomId?: string): string | null {
-  if (isSupervisedBoundedTurn()) {
+  if (hasSupervisedWorkerAuthority()) {
     const exactRoomAuthority = getCurrentSupervisedRoomAuthority();
     if (!exactRoomAuthority) {
       throw new Error("The daemon-supervised tool has not received its exact room authority.");
@@ -244,7 +244,7 @@ export function toPublicCurrentRoomState(): Record<string, unknown> | null {
  * repository inspection and can safely rebind after a durable room move.
  */
 export function runWithCurrentSupervisedRoom<T>(roomId: string, callback: () => T): T {
-  if (!isSupervisedBoundedTurn()) {
+  if (!hasSupervisedWorkerAuthority()) {
     throw new Error("Only a daemon-supervised bounded turn can bind supervisor room authority.");
   }
   const normalized = roomId.trim();
@@ -255,6 +255,6 @@ export function runWithCurrentSupervisedRoom<T>(roomId: string, callback: () => 
 }
 
 export function getFallbackProjectId(): string | null {
-  if (isSupervisedBoundedTurn()) return null;
+  if (hasSupervisedWorkerAuthority()) return null;
   return currentRoom?.project_id ?? null;
 }

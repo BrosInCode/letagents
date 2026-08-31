@@ -42,7 +42,7 @@ export type DaemonReadModelPorts = {
     "detail" | "ingressHealth" | "latestContinuationRepair" | "receipts"
   >;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
-  workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant">;
+  workerAuthority: Pick<WorkerAuthorityCoordinator, "currentHostGrant" | "pollingContract">;
   liveHandles: Map<string, ProviderActionHandle>;
   delivery: Pick<SupervisedAgentDelivery, "activeTurn"> | null;
 };
@@ -71,6 +71,7 @@ export class DaemonReadModel {
         agent_runtime_recovery_v1: true,
         agent_state_subscription_v1: true,
         agent_activity_stream_v1: true,
+        custodialPollingV1: true,
       },
       generation: this.ports.currentDaemonGeneration(),
       pid: process.pid,
@@ -150,7 +151,7 @@ export class DaemonReadModel {
           deliveryMode: entry.delivery_mode ?? "mcp_polling",
         }) ?? null
       : null;
-    return projectRoomAgentManifestEntry({
+    const projected = projectRoomAgentManifestEntry({
       ...authorityFacts,
       currentHostGrantAvailable,
       ingressHealth: persistedIngress,
@@ -161,6 +162,8 @@ export class DaemonReadModel {
       workplaceLivenessStaleAfterMs: workplaceLivenessStaleAfterMs(),
       nativeLivenessStaleAfterMs: NATIVE_LIVENESS_STALE_AFTER_MS,
     });
+    const pollingContract = await this.ports.workerAuthority.pollingContract(entry);
+    return pollingContract ? { ...projected, polling_contract: pollingContract } : projected;
   }
 
   async attempt(entryId: string) {

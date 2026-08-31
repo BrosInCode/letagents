@@ -20,7 +20,7 @@ import {
   detectAgentRuntimeLabel,
   ensureAgentIdentity,
 } from "./identity.js";
-import { isSupervisedBoundedTurn, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
+import { hasSupervisedWorkerAuthority, requireValidWorkerBearerRuntime } from "./worker-bearer.js";
 import { resolveCurrentSupervisedWorkerSession } from "./supervisor-bridge.js";
 import { getDaemonToolExecutionContext, getRuntimeWorkingDirectory } from "./daemon-tool-context.js";
 
@@ -212,7 +212,7 @@ export async function resolveWorkerToolIdentity(input: {
   }
   const agentSession = input.agentSessionId
     ? requireWorkerAgentSession(input.roomId, input.agentSessionId)
-    : input.roomId && !isSupervisedBoundedTurn() && await isLocalRoomStorageEnabled(input.roomId)
+    : input.roomId && !hasSupervisedWorkerAuthority() && await isLocalRoomStorageEnabled(input.roomId)
       ? await ensureLocalWorkerAgentSession(input.roomId)
       : requireWorkerAgentSession(input.roomId, input.agentSessionId);
   return {

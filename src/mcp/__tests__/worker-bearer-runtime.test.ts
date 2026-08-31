@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createServer } from "node:net";
 import test from "node:test";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 
@@ -33,6 +34,7 @@ const { roomScopedApiCall } = await import("../server/runtime/room-api.js");
 const { autoJoinFromContext } = await import("../server/runtime/rooms.js");
 const { registerSendMessageTool } = await import("../server/tools/messages/send-tool.js");
 const { registerWaitForMessagesTool } = await import("../server/tools/messages/wait-tool.js");
+const { profileAwareToolServer } = await import("../server/supervised-tool-facade.js");
 const { registerDeviceAuthTools } = await import("../server/tools/onboarding/device-auth-tools.js");
 const { registerRoomJoinTools } = await import("../server/tools/rooms/join-tools.js");
 
@@ -398,6 +400,98 @@ test("worker bearer mode disables local Codex session orchestration", async () =
       message: "Local Codex session orchestration is disabled while LETAGENTS_AGENT_SESSION_BEARER is configured.",
     });
   });
+});
+
+test("custodial polling borrows authority and cannot fall back to owner or environment bearer", async () => {
+  for (const credentials of [{ owner: "owner-secret" }, { bearer: "worker-secret" }]) {
+    await withAuthEnv({ ...credentials, executionProfile: "supervised_mcp_polling" }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "invalid");
+      assert.throws(requireValidWorkerBearerRuntime, /Custodial polling refuses/);
+    });
+  }
+  const originalFetch = globalThis.fetch;
+  try {
+    await withAuthEnv({ executionProfile: "supervised_mcp_polling", supervisorRoomId: "room_exact" }, async () => {
+      assert.equal(getWorkerBearerRuntime().mode, "supervised");
+      setOwnerAuthStoreLoaderForTest(async () => { throw new Error("must not load owner auth"); });
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "stale", code: "SUPERVISED_CREDENTIAL_STALE" }));
+      globalThis.fetch = async () => assert.fail("stale borrowed authority must fail before HTTP");
+      await assert.rejects(apiCall("/rooms/room_exact/messages"), SupervisedWorkerCredentialError);
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "borrowed-exact" }));
+      globalThis.fetch = async (_url, init) => {
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer borrowed-exact");
+        return new Response(JSON.stringify({ success: true }), { status: 200 });
+      };
+      await runWithCurrentSupervisedRoom("room_exact", () => roomScopedApiCall({
+        room_id: "room_exact", project_id: null, room_path: () => "/rooms/room_exact/messages", project_path: () => "unused",
+      }));
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    setOwnerAuthStoreLoaderForTest(null);
+    setSupervisedCredentialBorrowerForTest(null);
+  }
+});
+
+test("custodial wait acknowledges input before polling, defaults to durable cursor and gates response", async () => {
+  const root = mkdtempSync(join(tmpdir(), "custodial-wait-"));
+  const socketPath = join(root, "daemon.sock");
+  const phases: string[] = [];
+  const acknowledgements: string[] = [];
+  let rejectRelease = false;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      let result: unknown;
+      let ok = true;
+      if (request.method === "daemon.negotiate") result = { protocol_version: 2, generation: 17, pid: 123, started_at: "now", capabilities: { custodialPollingV1: true } };
+      else if (request.method === "supervisor.authorize_custodial_polling") {
+        phases.push(request.params.phase);
+        ok = !(rejectRelease && request.params.phase === "release");
+        result = { status: "authorized", contract: "custodial_polling_v1", room_id: "room_exact", agent_session_id: "session_exact", room_cursor: "msg_7", configuration_revision: 3 };
+      } else if (request.method === "supervisor.checkpoint_worker_cursor") {
+        phases.push("ack"); acknowledgements.push(request.params.room_cursor); result = { checkpointed: true };
+      } else throw new Error(`Unexpected request ${request.method}`);
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok, result })}\n`);
+    });
+  });
+  const originalFetch = globalThis.fetch;
+  try {
+    await new Promise<void>((resolve) => server.listen(socketPath, resolve));
+    await withAuthEnv({ executionProfile: "supervised_mcp_polling", supervisorRoomId: "room_exact" }, async () => {
+      process.env.LETAGENTS_SUPERVISOR_DAEMON_SOCKET = socketPath;
+      process.env.LETAGENTS_SUPERVISOR_PROVIDER = "codex";
+      setOwnerAuthStoreLoaderForTest(async () => { throw new Error("owner auth forbidden"); });
+      setSupervisedCredentialBorrowerForTest(async () => ({ state: "available", credential: "exact-worker" }));
+      globalThis.fetch = async (url, init) => {
+        assert.equal(new Headers(init?.headers).get("authorization"), "Bearer exact-worker");
+        if (String(url).includes("/messages/poll?")) {
+          phases.push("poll");
+          assert.equal(new URL(String(url)).searchParams.get("after"), acknowledgements.at(-1));
+          return new Response(JSON.stringify({ room_id: "room_exact", messages: [], last_observed_message_id: "msg_99" }), { status: 200 });
+        }
+        return new Response(null, { status: 204 });
+      };
+      const wait = toolHandler((recorder) => registerWaitForMessagesTool(profileAwareToolServer(recorder, "supervised_mcp_polling")), "wait_for_messages");
+      await wait({});
+      assert.deepEqual(phases, ["before", "ack", "poll", "release"]);
+      assert.deepEqual(acknowledgements, ["msg_7"], "response msg_99 must never be checkpointed");
+      phases.length = 0;
+      rejectRelease = true;
+      await assert.rejects(wait({ after_message_id: "msg_8" }), /stale/);
+      assert.deepEqual(phases, ["before", "ack", "poll", "release"]);
+      assert.deepEqual(acknowledgements, ["msg_7", "msg_8"]);
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+    setOwnerAuthStoreLoaderForTest(null); setSupervisedCredentialBorrowerForTest(null);
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("supervised bounded turns refuse wait_for_messages before any local or network work", async () => {

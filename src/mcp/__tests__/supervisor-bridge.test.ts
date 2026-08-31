@@ -12,6 +12,7 @@ import {
 } from "../server/runtime/supervised-room-authority.js";
 import {
   borrowSupervisedWorkerCredential,
+  authorizeCustodialPolling,
   borrowCurrentSupervisedWorkerCredential,
   bindSupervisedWorkerSession,
   bindSupervisedWorkerSessionWithContext,
@@ -39,6 +40,54 @@ const session: StoredAgentSessionState = {
   updated_at: "2026-01-01T00:00:00.000Z",
   last_seen_at: "2026-01-01T00:00:00.000Z",
 };
+
+test("custodial gate requires capability and release retains original generation and revision", async () => {
+  const root = await mkdtemp(join(tmpdir(), "custodial-gate-"));
+  const socketPath = join(root, "daemon.sock");
+  const requests: any[] = [];
+  let capable = false;
+  let generation = 17;
+  const server = createServer((socket) => {
+    let buffer = "";
+    socket.setEncoding("utf8");
+    socket.on("data", (chunk: string) => {
+      buffer += chunk;
+      if (!buffer.includes("\n")) return;
+      const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
+      const negotiation = request.method === "daemon.negotiate";
+      const stale = !negotiation && request.params.daemon_generation !== generation;
+      const result = negotiation
+        ? { protocol_version: 2, generation, pid: 123, started_at: "2026-08-02T00:00:00.000Z", capabilities: { custodialPollingV1: capable } }
+        : { status: "authorized", contract: "custodial_polling_v1", room_id: "room_exact", agent_session_id: "session_exact", room_cursor: "msg_7", configuration_revision: 3 };
+      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: !stale, result })}\n`);
+    });
+  });
+  try {
+    await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
+    const env = {
+      LETAGENTS_EXECUTION_PROFILE: "supervised_mcp_polling", LETAGENTS_API_URL: "https://example.test",
+      LETAGENTS_SUPERVISOR_PROVIDER: "codex", LETAGENTS_SUPERVISOR_ENTRY_ID: "entry_exact",
+      LETAGENTS_SUPERVISOR_DAEMON_SOCKET: socketPath, LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: "attempt_exact",
+      LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID: "generation_exact", LETAGENTS_SUPERVISOR_AGENT_SESSION_ID: "session_exact",
+      LETAGENTS_SUPERVISOR_ROOM_ID: "room_exact",
+    };
+    const options = { trustedDaemonSocketPath: socketPath, cwd: root };
+    await assert.rejects(authorizeCustodialPolling("wait_for_messages", undefined, env, options), /does not support/);
+    assert.equal(requests.length, 1);
+    capable = true;
+    const before = await authorizeCustodialPolling("wait_for_messages", undefined, env, options);
+    generation++;
+    await assert.rejects(authorizeCustodialPolling("wait_for_messages", before, env, options), /stale/);
+    assert.equal(requests.filter((r) => r.method === "daemon.negotiate").length, 2, "release must not negotiate a successor");
+    assert.equal(requests.at(-1).params.daemon_generation, 17);
+    assert.equal(requests.at(-1).params.expected_configuration_revision, 3);
+    assert.equal(requests.at(-1).params.phase, "release");
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("supervisor bridge is inert outside a daemon-supervised provider", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-absent-"));

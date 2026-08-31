@@ -13,7 +13,7 @@ import {
 import { sameProviderActionConnectionSnapshot, type ProviderActionHandle } from "./provider-action-port.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
-import type { DaemonManifestEntry, TaskWorkAttempt } from "./types.js";
+import type { DaemonAgentConfiguration, DaemonManifestEntry, TaskWorkAttempt } from "./types.js";
 import type { WorkerBindingStore, WorkerSessionBinding } from "./worker-binding-store.js";
 import {
   WORKER_BEARER_ROTATION_LEAD_MS,
@@ -54,6 +54,12 @@ export type BindWorkerSessionInput = {
 
 export type VerifyWorkerSessionInput = Omit<BindWorkerSessionInput, "credential_ref">;
 
+export type CustodialPollingAuthorizationInput = {
+  entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string;
+  agent_session_id: string; daemon_generation: number; api_url: string;
+  contract: string; phase: string; tool_name: string; expected_configuration_revision?: number;
+};
+
 export type InstallHostGrantInput = {
   entry_id: string;
   room_id: string;
@@ -73,6 +79,8 @@ export type InstallHostGrantInput = {
 type WorkerAuthorityStore = {
   load(): Promise<{ entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | null | undefined>;
+  getAgentConfiguration(entryId: string): Promise<Pick<DaemonAgentConfiguration, "polling_contract" | "config_revision" | "runtime_configuration_revision"> | undefined>;
+  unresolvedDeliveryDrain(agentId: string): Promise<unknown>;
 };
 
 type WorkerAuthorityDurability = {
@@ -195,8 +203,15 @@ export class WorkerAuthorityCoordinator {
 
   constructor(private readonly options: WorkerAuthorityCoordinatorOptions) {}
 
-  requiresHostGrant(entry: DaemonManifestEntry): boolean {
-    return entry.delivery_mode === "daemon_inbox";
+  async pollingContract(entry: DaemonManifestEntry): Promise<"custodial_polling_v1" | null> {
+    if ((entry.delivery_mode ?? "mcp_polling") !== "mcp_polling") return null;
+    const configuration = await this.options.store.getAgentConfiguration(entry.id);
+    if (!configuration) throw new Error("Agent credential custody configuration is unavailable.");
+    return configuration.polling_contract ?? null;
+  }
+
+  async requiresHostGrant(entry: DaemonManifestEntry): Promise<boolean> {
+    return entry.delivery_mode === "daemon_inbox" || await this.pollingContract(entry) !== null;
   }
 
   currentHostGrant(entry: DaemonManifestEntry): InstalledHostGrant | null {
@@ -205,6 +220,21 @@ export class WorkerAuthorityCoordinator {
       this.options.authority.currentGeneration(),
       this.options.authority.isHandoffScheduled(),
     );
+  }
+
+  private unexpiredHostGrant(entry: DaemonManifestEntry): InstalledHostGrant | null {
+    const grant = this.currentHostGrant(entry);
+    return grant && Date.parse(grant.expiresAt) > this.options.nowMs() ? grant : null;
+  }
+
+  private async hasUnexpiredWorkerSession(entryId: string): Promise<boolean> {
+    const binding = await this.options.bindings.get(entryId);
+    const session = await this.options.bindings.supervisedWorkerSession(entryId);
+    return Boolean(binding && session && session.room_id === binding.room_id
+      && session.agent_session_id === binding.agent_session_id
+      && session.execution_generation_id === binding.execution_generation_id
+      && session.credential_ref === binding.credential_ref
+      && session.expires_at && Date.parse(session.expires_at) > this.options.nowMs());
   }
 
   async ownsDaemonGeneration(expectedGeneration: number): Promise<boolean> {
@@ -241,6 +271,9 @@ export class WorkerAuthorityCoordinator {
   ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
+    if (await this.pollingContract(entry) && !authorization) {
+      throw new Error("Custodial polling binds only daemon-minted worker authority.");
+    }
     if (entry.room_id !== input.room_id) throw new Error("Worker session room does not match the supervised manifest entry.");
     if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker session work attempt does not match the supervised manifest entry.");
     if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
@@ -301,7 +334,13 @@ export class WorkerAuthorityCoordinator {
     await assertAuthorityCurrent();
     const binding = exactCurrentBinding && currentBinding
       ? currentBinding
-      : await this.options.bindings.bind(input);
+      : await this.options.bindings.bind(input, await this.pollingContract(entry) ? {
+          // A remint changes the bearer, not what this worker acknowledged.
+          roomCursor: currentBinding?.room_id === entry.room_id
+            && currentBinding.work_attempt_id === entry.work_attempt_id
+            ? currentBinding.room_cursor
+            : attempt.checkpoints.at(-1)?.room_cursor ?? null,
+        } : undefined);
     this.options.custody.installLiveBinding(input.entry_id, {
       agentSessionId: binding.agent_session_id,
       executionGenerationId: binding.execution_generation_id,
@@ -360,7 +399,9 @@ export class WorkerAuthorityCoordinator {
       };
     });
     this.options.custody.deletePendingResumeBinding(input.entry_id);
-    if (mayPublish()) void this.options.delivery.start(input.entry_id).catch(() => undefined);
+    if (mayPublish() && !await this.pollingContract(entry)) {
+      void this.options.delivery.start(input.entry_id).catch(() => undefined);
+    }
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
 
@@ -780,7 +821,7 @@ export class WorkerAuthorityCoordinator {
         throw new Error("Host grant api_url must be HTTPS or exact loopback HTTP.");
       }
       let entry = await this.options.store.getEntry(input.entry_id);
-      if (!entry || !this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
+      if (!entry || !await this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
       const currentGrant = this.currentHostGrant(entry);
       const currentGrantIsAtLeastInput = Boolean(currentGrant?.grantId === input.grant_id
@@ -789,7 +830,7 @@ export class WorkerAuthorityCoordinator {
             && Date.parse(currentGrant.expiresAt) >= inputExpiry)));
       if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only && !input.recovery_only) {
         if (entry.desired_state === "running"
-          && (!this.requiresHostGrant(entry) || await this.options.inbox.cursor(entry.id))) {
+          && (entry.delivery_mode !== "daemon_inbox" || await this.options.inbox.cursor(entry.id))) {
           this.options.convergence.request(entry.id);
         }
         return { status: "installed" };
@@ -848,7 +889,7 @@ export class WorkerAuthorityCoordinator {
               this.revokeHostGrantIfCurrent(entry.id, grant);
               return { status: "stale" };
             }
-            if (input.credential_only) await this.options.delivery.start(entry.id);
+            if (input.credential_only && entry.delivery_mode === "daemon_inbox") await this.options.delivery.start(entry.id);
             return { status: "installed", agent_session_id: minted.agentSessionId };
           }
         }
@@ -863,7 +904,7 @@ export class WorkerAuthorityCoordinator {
         return { status: "stale" };
       }
       if (entry.desired_state === "running"
-        && (!this.requiresHostGrant(entry) || await this.options.inbox.cursor(entry.id))) {
+        && (entry.delivery_mode !== "daemon_inbox" || await this.options.inbox.cursor(entry.id))) {
         this.options.convergence.request(entry.id);
       }
       return { status: "installed" };
@@ -877,7 +918,7 @@ export class WorkerAuthorityCoordinator {
     return this.options.serializeEntry(input.entry_id, async () => {
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
       const entry = await this.options.store.getEntry(input.entry_id);
-      if (!entry || !this.requiresHostGrant(entry)) return { status: "stale", last_observed_message_id: null };
+      if (!entry || entry.delivery_mode !== "daemon_inbox") return { status: "stale", last_observed_message_id: null };
       const initialMessage = input.initial_message?.trim() || null;
       if (input.initial_message !== undefined && !initialMessage) throw new Error("A non-empty initial agent message is required.");
       if (initialMessage) {
@@ -943,7 +984,7 @@ export class WorkerAuthorityCoordinator {
   private async requestAdmittedRunningConvergence(entryId: string, daemonGeneration: number): Promise<void> {
     if (!await this.ownsDaemonGeneration(daemonGeneration)) return;
     const entry = await this.options.store.getEntry(entryId);
-    if (!entry || !this.requiresHostGrant(entry) || entry.desired_state !== "running") return;
+    if (!entry || entry.delivery_mode !== "daemon_inbox" || entry.desired_state !== "running") return;
     if (!await this.options.inbox.cursor(entryId)) return;
     this.options.convergence.request(entryId);
   }
@@ -990,6 +1031,8 @@ export class WorkerAuthorityCoordinator {
   }): Promise<{ status: "installed" | "stale" }> {
     return this.options.serializeEntry(input.entry_id, async () => {
       if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
+      const entry = await this.options.store.getEntry(input.entry_id);
+      if (entry && await this.pollingContract(entry)) return { status: "stale" };
       const installed = await this.options.bindings.installCredential(input);
       if (installed) void this.options.delivery.start(input.entry_id).catch(() => undefined);
       return { status: installed ? "installed" : "stale" };
@@ -1009,6 +1052,13 @@ export class WorkerAuthorityCoordinator {
     return this.options.serializeEntry(input.entry_id, async () => {
       if (!await this.isExactCredentialRoute(input)) return { status: "stale" };
       const entry = await this.options.store.getEntry(input.entry_id);
+      const custodialPolling = entry && await this.pollingContract(entry);
+      const grant = entry ? this.unexpiredHostGrant(entry) : null;
+      if (custodialPolling) {
+        if (entry.desired_state !== "running" || !grant
+          || !await this.ownsDaemonGeneration(input.daemon_generation)
+          || await this.options.store.unresolvedDeliveryDrain(entry.id)) return { status: "stale" };
+      }
       if (entry?.provider === "cursor") {
         try {
           await this.options.boundedContext({
@@ -1023,7 +1073,59 @@ export class WorkerAuthorityCoordinator {
         }
       }
       const credential = await this.options.bindings.credentialFor(input);
+      if (custodialPolling && (!await this.hasUnexpiredWorkerSession(input.entry_id)
+        || !await this.isExactCredentialRoute(input)
+        || !await this.ownsDaemonGeneration(input.daemon_generation)
+        || this.unexpiredHostGrant(entry) !== grant)) return { status: "stale" };
       return credential ? { status: "available", credential } : { status: "deferred" };
+    });
+  }
+
+  /** Negotiated read admission, never provider wait-output evidence or a new credential. */
+  async authorizeCustodialPolling(input: CustodialPollingAuthorizationInput) {
+    return this.options.serializeEntry(input.entry_id, async () => {
+      if (input.contract !== "custodial_polling_v1"
+        || !["before", "release"].includes(input.phase) || !input.tool_name.trim()
+        || !await this.ownsDaemonGeneration(input.daemon_generation)
+        || !await this.isExactCredentialRoute(input)) {
+        throw new Error("Custodial polling authority is stale or unsupported.");
+      }
+      const entry = await this.options.store.getEntry(input.entry_id);
+      const configuration = await this.options.store.getAgentConfiguration(input.entry_id);
+      const handle = this.options.runtime.currentHandle(input.entry_id);
+      const binding = await this.options.bindings.get(input.entry_id);
+      const grant = entry ? this.unexpiredHostGrant(entry) : null;
+      if (!entry || entry.provider !== "codex" || (entry.delivery_mode ?? "mcp_polling") !== "mcp_polling"
+        || entry.desired_state !== "running" || configuration?.polling_contract !== input.contract
+        || !Number.isSafeInteger(configuration.config_revision)
+        || configuration.runtime_configuration_revision !== configuration.config_revision
+        || (handle?.appliedConfigurationRevision !== undefined
+          && handle.appliedConfigurationRevision !== configuration.config_revision)
+        || (input.phase === "release" && input.expected_configuration_revision !== configuration.config_revision)
+        || !grant || !binding?.room_cursor
+        || !await this.options.bindings.credentialFor(binding)
+        || !handle || handle.workAttemptId !== input.work_attempt_id
+        || handle.providerContinuationId !== entry.provider_ref?.provider_continuation_id
+        || !sameProviderActionConnectionSnapshot(handle.providerConnection, entry.provider_ref?.provider_connection)
+        || ["failed", "stopped", "stopping"].includes(handle.observedState)
+        || await this.options.store.unresolvedDeliveryDrain(entry.id)
+        || !await this.ownsDaemonGeneration(input.daemon_generation)) {
+        throw new Error("Custodial polling is not authorized by the current worker binding.");
+      }
+      // Provider exit/handoff can arrive while the durable checks await I/O.
+      // Never authorize a successor just because it shares the saved entry.
+      if (!await this.hasUnexpiredWorkerSession(input.entry_id)
+        || !await this.isExactCredentialRoute(input)
+        || this.options.runtime.currentHandle(entry.id) !== handle
+        || this.unexpiredHostGrant(entry) !== grant
+        || ["failed", "stopped", "stopping"].includes(handle.observedState)) {
+        throw new Error("Custodial polling authority changed during admission.");
+      }
+      return {
+        status: "authorized" as const, contract: "custodial_polling_v1" as const,
+        room_id: entry.room_id, agent_session_id: binding.agent_session_id,
+        room_cursor: binding.room_cursor, configuration_revision: configuration.config_revision!,
+      };
     });
   }
 
@@ -1071,6 +1173,9 @@ export class WorkerAuthorityCoordinator {
     return this.options.serializeEntry(input.entry_id, () => this.options.serializeCursorCheckpoint(input.entry_id, async () => {
       const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
+      if (await this.pollingContract(entry) && await this.options.store.unresolvedDeliveryDrain(entry.id)) {
+        throw new Error("Custodial polling cursor is frozen by delivery drain.");
+      }
       if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker cursor work attempt does not match the supervised manifest entry.");
       if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
         throw new Error("Worker cursor execution generation does not match the active supervised manifest entry.");

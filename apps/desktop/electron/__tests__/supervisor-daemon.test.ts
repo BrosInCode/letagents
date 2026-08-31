@@ -175,6 +175,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
   const backupModule = await import(new URL("../../daemon/state-recovery-backup.ts", import.meta.url).href);
   const database = new DatabaseSync(statePath);
   new schemaModule.DaemonStateSchema().createSchema(database);
+  database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract");
   database.exec("PRAGMA foreign_keys=OFF");
   for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all()) {
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
@@ -1874,7 +1875,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.109");
+    assert.equal(status.implementationVersion, "2.0.110");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

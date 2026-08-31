@@ -624,6 +624,7 @@ export class SupervisorDaemon {
       manifest: {
         getEntry: (entryId) => this.store.getEntry(entryId),
         pendingRoomMoves: (entryId) => this.store.pendingRoomMoves(entryId),
+        getAgentConfiguration: (entryId) => this.store.getAgentConfiguration(entryId),
       },
       roomMoves: {
         reconcile: (move) => this.roomMoves.reconcile(move),
@@ -787,6 +788,7 @@ export class SupervisorDaemon {
       bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),
       bootstrapRoomIngress: (input) => this.beginBootstrap(this.workerAuthority.bootstrapRoomIngress.bind(this.workerAuthority), input),
       borrowWorkerCredential: this.workerAuthority.borrowWorkerCredential.bind(this.workerAuthority),
+      authorizeCustodialPolling: this.workerAuthority.authorizeCustodialPolling.bind(this.workerAuthority),
       checkpointWorkerCursor: this.workerAuthority.checkpointWorkerCursor.bind(this.workerAuthority),
       commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
       compareAndSetDesiredState: this.desiredStates.compareAndSet.bind(this.desiredStates),

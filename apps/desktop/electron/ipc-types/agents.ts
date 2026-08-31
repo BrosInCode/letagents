@@ -626,6 +626,8 @@ export interface DesktopSupervisorManifestEntry {
   permissionProfileId: string | null;
   /** Durable room-ingress owner for this supervised provider. */
   deliveryMode: DesktopManagedAgentDeliveryMode;
+  /** Read-only daemon-owned custody; selecting delivery mode cannot enable it. */
+  pollingContract?: "custodial_polling_v1" | null;
   createdBy: string;
   createdAt: string;
   /** User-selected source checkout. Distinct from the daemon's private work-attempt workspace. */

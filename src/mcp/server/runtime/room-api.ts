@@ -10,7 +10,7 @@ import {
 import { maybeHandleRepoRoomAuthRequired } from "./device-auth.js";
 import { getLastMessageId } from "./messages.js";
 import { currentRoom, getCurrentSupervisedRoomAuthority } from "./room-state.js";
-import { isSupervisedBoundedTurn } from "./worker-bearer.js";
+import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
 
 export async function roomScopedApiCall<T>(input: {
   room_id?: string | null;
@@ -23,7 +23,7 @@ export async function roomScopedApiCall<T>(input: {
   // last_message_id alone so the cursor never moves backwards.
   preserve_session_cursor?: boolean;
 }): Promise<T> {
-  const supervised = isSupervisedBoundedTurn();
+  const supervised = hasSupervisedWorkerAuthority();
   const exactRoomAuthority = supervised ? getCurrentSupervisedRoomAuthority() : null;
   if (supervised && (!exactRoomAuthority || input.room_id !== exactRoomAuthority)) {
     throw new Error("The daemon-supervised API request is missing its exact per-call room authority.");

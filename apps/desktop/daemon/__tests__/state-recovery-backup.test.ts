@@ -321,6 +321,7 @@ async function realStateFixture(t: test.TestContext) {
   const path = join(directory, "daemon.sqlite");
   const database = new DatabaseSync(path);
   new DaemonStateSchema().createSchema(database);
+  database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract");
   database.exec("PRAGMA foreign_keys=OFF");
   for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all()) {
     database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);

@@ -108,7 +108,7 @@ export type ProviderStreamCoordinatorOptions = {
   };
   heartbeat: {
     intervalMs: number;
-    requiresHostGrant(entry: DaemonManifestEntry): boolean;
+    requiresHostGrant(entry: DaemonManifestEntry): boolean | Promise<boolean>;
     currentHostGrant(entry: DaemonManifestEntry): InstalledHostGrant | null;
     hostGrantNeedsRenewal(grant: InstalledHostGrant): boolean;
     hostWorkerBearerNeedsRotation(
@@ -239,7 +239,7 @@ export class ProviderStreamCoordinator {
         if (!["working", "idle"].includes(manifestEntry.observed_state)
           && !retriesCredentialHandoff) return;
         if (!["working", "idle"].includes(current.observedState)) return;
-        const hostGrant = this.options.heartbeat.requiresHostGrant(manifestEntry)
+        const hostGrant = await this.options.heartbeat.requiresHostGrant(manifestEntry)
           ? this.options.heartbeat.currentHostGrant(manifestEntry)
           : null;
         if (hostGrant && this.options.heartbeat.hostGrantNeedsRenewal(hostGrant)) {
@@ -455,10 +455,12 @@ export class ProviderStreamCoordinator {
     const entry = await this.options.manifest.getEntry(entryId);
     if (!entry) return;
     const daemonInbox = entry.delivery_mode === "daemon_inbox";
+    const custodialPolling = !daemonInbox && await this.options.heartbeat.requiresHostGrant(entry);
     const legacyCodexCutover = entry.provider === "codex"
       && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
+      && !custodialPolling
       && entry.desired_state === "running";
-    const effectiveLifecycle = (daemonInbox || legacyCodexCutover)
+    const effectiveLifecycle = (daemonInbox || custodialPolling || legacyCodexCutover)
       && observedLifecycle === "terminal"
       ? "idle"
       : observedLifecycle;
@@ -496,6 +498,7 @@ export class ProviderStreamCoordinator {
       await this.options.appendActivity(entryId, sanitizedEvent);
     }
     const waitEvidence = (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
+      && !custodialPolling
       ? supervisedWaitEvidenceFromProviderEvent(event)
       : null;
     if (waitEvidence) {

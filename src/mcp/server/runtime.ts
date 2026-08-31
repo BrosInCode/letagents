@@ -5,15 +5,15 @@ import {
   isLocalRoomStorageEnabled as isStoredLocalRoomStorageEnabled,
   touchRoomSession as touchStoredRoomSession,
 } from "../local-state.js";
-import { isSupervisedBoundedTurn } from "./runtime/worker-bearer.js";
+import { hasSupervisedWorkerAuthority } from "./runtime/worker-bearer.js";
 
 /** A daemon-supervised turn must always use its exact cloud worker route. */
 export async function isLocalRoomStorageEnabled(roomId: string): Promise<boolean> {
-  return !isSupervisedBoundedTurn() && isStoredLocalRoomStorageEnabled(roomId);
+  return !hasSupervisedWorkerAuthority() && isStoredLocalRoomStorageEnabled(roomId);
 }
 
 export function touchRoomSession(roomId: string, lastMessageId?: string): void {
-  if (!isSupervisedBoundedTurn()) touchStoredRoomSession(roomId, lastMessageId);
+  if (!hasSupervisedWorkerAuthority()) touchStoredRoomSession(roomId, lastMessageId);
 }
 
 export {

@@ -1,3 +1,4 @@
+import { execFile } from "node:child_process";
 import {
   launchCodexAppServer,
   resolveCodexAppServerUrl,
@@ -15,6 +16,7 @@ import {
   type TurnStartResult,
 } from "./codex-rpc-client.js";
 import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
+import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagents-mcp-runtime.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
@@ -97,6 +99,8 @@ export interface CodexAdapterRpc {
 }
 
 export interface CodexProviderAdapterDependencies {
+  resolveMcpRuntime(devEntryPath?: string): LetAgentsMcpRuntime;
+  readMcpRuntimeContract(entryPath: string): Promise<unknown>;
   resolveServerUrl(): Promise<string>;
   launchServer(
     serverUrl: string,
@@ -176,6 +180,42 @@ function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
  */
 export function codexMcpWorkplaceConfigOverrides(cwd: string): string[] {
   return [`mcp_servers.letagents.cwd=${JSON.stringify(cwd)}`];
+}
+
+function readMcpRuntimeContract(entryPath: string): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const child = execFile(process.execPath, [entryPath, "--letagents-runtime-contract"], {
+      encoding: "utf8", timeout: 8_000, killSignal: "SIGKILL", maxBuffer: 64 * 1024,
+      // The read-only contract probe needs neither user auth nor daemon authority.
+      env: { ELECTRON_RUN_AS_NODE: "1" },
+    }, (error, stdout) => {
+      if (error) return reject(new Error("The verified LetAgents MCP runtime contract could not be read."));
+      try { resolve(JSON.parse(stdout)); }
+      catch { reject(new Error("The verified LetAgents MCP runtime contract is malformed.")); }
+    });
+    child.stdin?.end();
+  });
+}
+
+function custodialPollingTools(value: unknown): string[] {
+  const report = recordValue(value);
+  const profile = recordValue(recordValue(report?.profiles)?.supervised_mcp_polling);
+  const tools = profile?.tools;
+  if (report?.format !== 1 || profile?.contract !== "custodial_polling_v1"
+    || !Array.isArray(tools) || !tools.every((name) => typeof name === "string")
+    || !["wait_for_messages", "read_messages", "send_message"].every((name) => tools.includes(name))
+    || tools.some((name) => /^(?:register_agent_session|disconnect_agent_session|start_device_auth|poll_device_auth|clear_saved_auth|resume_room_session|rental_.*)$/.test(name))) {
+    throw new Error("The verified LetAgents MCP runtime does not support custodial_polling_v1.");
+  }
+  return tools;
+}
+
+function custodialMcpOverride(entryPath: string, cwd: string, environment: Record<string, string>, tools: string[]): string {
+  const env = Object.entries({ ...environment, ELECTRON_RUN_AS_NODE: "1" })
+    .map(([key, value]) => `${JSON.stringify(key)} = ${JSON.stringify(value)}`).join(", ");
+  // Codex merges installed config beneath CLI overrides. Pin every authority
+  // coordinate and clear inherited credential names/tool filters explicitly.
+  return `mcp_servers.letagents={ command = ${JSON.stringify(process.execPath)}, args = [${JSON.stringify(entryPath)}], cwd = ${JSON.stringify(cwd)}, env = { ${env} }, env_vars = [], enabled = true, enabled_tools = ${JSON.stringify(tools)}, disabled_tools = [] }`;
 }
 
 function isCodexExecutionMethod(method: string): boolean {
@@ -321,6 +361,8 @@ async function requireLetAgentsWorkplace(client: CodexAdapterRpc): Promise<void>
 }
 
 const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
+  resolveMcpRuntime: (devEntryPath) => resolveLetAgentsMcpRuntime({ devEntryPath, env: desktopRuntimeEnvironment() }),
+  readMcpRuntimeContract,
   resolveServerUrl: () => resolveCodexAppServerUrl(null, { dedicated: true }),
   launchServer: (serverUrl, codexBin, options) =>
     launchCodexAppServer(serverUrl, codexBin, options),
@@ -998,6 +1040,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CodexProviderHandle> {
+    if (req.pollingContract !== undefined && req.pollingContract !== "custodial_polling_v1") {
+      throw new Error("Unsupported Codex polling contract.");
+    }
+    const custodialPolling = req.pollingContract === "custodial_polling_v1";
+    if (custodialPolling) {
+      req = { ...req, supervisorWorkerSession: req.supervisorWorkerSession && { ...req.supervisorWorkerSession } };
+      resumeRef = resumeRef && { ...resumeRef };
+    }
     const current = this.handles.get(req.workAttemptId);
     if (current && !current.terminal) {
       throw new Error(`Codex work attempt '${req.workAttemptId}' already has a live process.`);
@@ -1017,6 +1067,24 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (hasSupervisorCoordinate && !hasCompleteSupervisorCoordinates) {
       throw new Error("Codex supervisor bridge coordinates are incomplete.");
     }
+    let custodialRuntime: LetAgentsMcpRuntime | null = null;
+    let custodialTools: string[] = [];
+    let custodialApiUrl: string | null = null;
+    if (custodialPolling) {
+      if (req.deliveryMode !== "mcp_polling" || !hasCompleteSupervisorCoordinates
+        || !req.roomId.trim() || !req.workAttemptId.trim() || !req.supervisorWorkerSession?.agentSessionId.trim()
+        || !req.supervisorWorkerSession.apiUrl?.trim()) {
+        throw new Error("Custodial polling requires exact supervisor, worker, room and API coordinates.");
+      }
+      try {
+        const apiUrl = new URL(req.supervisorWorkerSession.apiUrl);
+        if (apiUrl.username || apiUrl.password || apiUrl.search || apiUrl.hash || apiUrl.pathname !== "/"
+          || (apiUrl.protocol !== "https:" && !(apiUrl.protocol === "http:" && ["localhost", "127.0.0.1", "[::1]"].includes(apiUrl.hostname)))) throw new Error();
+        custodialApiUrl = apiUrl.origin;
+      } catch { throw new Error("Custodial polling requires an exact safe worker API origin."); }
+      custodialRuntime = this.deps.resolveMcpRuntime(req.devMcpServerEntryPath);
+      custodialTools = custodialPollingTools(await this.deps.readMcpRuntimeContract(custodialRuntime.entryPath));
+    }
     if (hasCompleteSupervisorCoordinates) {
       await this.deps.writeSupervisorBridgeContext(req.cwd, {
         entry_id: req.supervisorEntryId!,
@@ -1029,15 +1097,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
         } : {}),
       });
     }
-    const devOverrides = req.devMcpServerEntryPath
+    const devOverrides = !custodialPolling && req.devMcpServerEntryPath
       ? await buildCodexDevMcpEntryOverrides(req.devMcpServerEntryPath)
       : [];
-    const serverUrl = await this.deps.resolveServerUrl();
-    const launch = this.deps.launchServer(serverUrl, this.codexBin, {
-      trustedProjectPath: req.cwd,
-      configOverrides: [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
-      ...(req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId ? {
-        env: {
+    const supervisorEnvironment: Record<string, string> | undefined = req.supervisorEntryId && req.supervisorSocketPath && req.supervisorExecutionGenerationId
+      ? {
           LETAGENTS_SUPERVISOR_ENTRY_ID: req.supervisorEntryId,
           LETAGENTS_SUPERVISOR_DAEMON_SOCKET: req.supervisorSocketPath,
           LETAGENTS_SUPERVISOR_WORK_ATTEMPT_ID: req.workAttemptId,
@@ -1056,9 +1120,22 @@ export class CodexProviderAdapter implements ProviderAdapter {
             ...(req.supervisorEntryId.startsWith("supervised_rental_") ? {
               [rentalCredentialIsolationMarker]: "1",
             } : {}),
-          } : { LETAGENTS_EXECUTION_PROFILE: "interactive_desktop" }),
-        },
-      } : {}),
+          } : { LETAGENTS_EXECUTION_PROFILE: custodialPolling ? "supervised_mcp_polling" : "interactive_desktop" }),
+          ...(custodialPolling ? {
+            LETAGENTS_API_URL: custodialApiUrl!,
+            LETAGENTS_SUPERVISED_BOUNDED_TURNS: "",
+            LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID: "",
+            LETAGENTS_TOKEN: "",
+            LETAGENTS_AGENT_SESSION_BEARER: "",
+          } : {}),
+        } : undefined;
+    const serverUrl = await this.deps.resolveServerUrl();
+    const launch = this.deps.launchServer(serverUrl, this.codexBin, {
+      trustedProjectPath: req.cwd,
+      configOverrides: custodialRuntime
+        ? [custodialMcpOverride(custodialRuntime.entryPath, req.cwd, supervisorEnvironment!, custodialTools)]
+        : [...codexMcpWorkplaceConfigOverrides(req.cwd), ...devOverrides],
+      ...(supervisorEnvironment ? { env: supervisorEnvironment } : {}),
     });
     const ready = await this.deps.waitForServer(serverUrl, launch);
     if (!ready) {
@@ -1159,9 +1236,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
         await this.emitTranscriptTail(handle);
       }
 
-      // Daemon-inbox Codex starts only an idle app-server/thread.  The daemon
-      // begins the first native turn after its durable inbox claim exists.
-      if (req.deliveryMode === "daemon_inbox") {
+      // Both custodial profiles return idle. Daemon-inbox starts work only
+      // after its inbox claim; custodial polling activation is a later action.
+      if (req.deliveryMode === "daemon_inbox" || custodialPolling) {
         handle.state = "idle";
         return handle;
       }
