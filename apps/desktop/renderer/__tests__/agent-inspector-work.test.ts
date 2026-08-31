@@ -33,6 +33,7 @@ test("work response and artifact joins are exact durable identifiers", () => {
 
 test("work labels present human language instead of raw causal enums", () => {
   assert.equal(humanizeAgentInspectorReceiptState("acknowledged"), "Reply published");
+  assert.equal(humanizeAgentInspectorReceiptState("acknowledged_failed"), "Work did not finish");
   assert.equal(
     humanizeAgentInspectorReceiptState("acknowledged_no_reply", "upgrade_authority_unavailable"),
     "Retired during a safety upgrade",

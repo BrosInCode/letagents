@@ -1,5 +1,6 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, validateExecutionStorageSchema } from "./execution-storage-schema.js";
+import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 
 export const DAEMON_STATE_SCHEMA_VERSION = 20;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
@@ -79,6 +80,16 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   }
   if (existingVersion >= 18) validateExecutionStorageSchema(database, existingVersion === 18 ? 18 : 19);
   if (existingVersion >= 17) validateTerminalResults(database, existingVersion === 20 ? 20 : undefined);
+  if (existingVersion === 20) {
+    // Reject inconsistent new terminal authority before legacy upgrade repair
+    // can relabel a missing binding as an old, unrecoverable no-reply turn.
+    for (const row of database.prepare(`SELECT i.inbox_item_id FROM supervised_agent_inbox i
+      LEFT JOIN supervised_agent_terminal_results t ON t.inbox_item_id=i.inbox_item_id
+      WHERE t.outcome IN ('failed','interrupted') OR i.state='acknowledged_failed'
+        OR CASE WHEN json_valid(i.outcome) THEN json_extract(i.outcome,'$.kind') END IN ('failed','interrupted')`).all() as Row[]) {
+      readDurableNativeFailure(database, String(row.inbox_item_id));
+    }
+  }
   return existingVersion;
 }
 

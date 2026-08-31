@@ -4,12 +4,13 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import {
   pruneSupervisedAgentHistory,
+  readDurableNativeFailure,
   RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
   RETAINED_TERMINAL_RECEIPTS_PER_AGENT,
   settlePreparedSupervisedEffectsForTerminalItem,
 } from "./supervised-agent-history-retention.js";
 
-export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "cancelled_by_room_move" | "cancelled_by_user";
+export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "cancelled_by_room_move" | "cancelled_by_user";
 export type SupervisedInboxReceiptState = SupervisedInboxState | "queued_behind_blocked";
 export type InboxActivation = Record<string, unknown>;
 export type IngressMessage = { source_message_id: string; source_message: unknown; activation: InboxActivation };
@@ -142,13 +143,13 @@ export type ProviderContinuationRepair = {
   created_at: string;
   updated_at: string;
 };
-const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"]);
+const finalStates = new Set<SupervisedInboxState>(["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"]);
 const RETAINED_TIMELINE_EVENTS_PER_RECEIPT = 64;
 const transitions: Readonly<Record<SupervisedInboxState, readonly SupervisedInboxState[]>> = {
-  pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "retryable", "blocked"],
-  awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "retryable", "blocked"],
-  result_recovery: ["publishing", "acknowledged_no_reply", "blocked"], publishing: ["acknowledged", "retryable", "blocked"],
-  retryable: ["pending", "blocked"], blocked: ["pending", "cancelled_by_user"], acknowledged: [], acknowledged_no_reply: [], cancelled_by_room_move: [], cancelled_by_user: [],
+  pending: ["dispatching", "blocked"], dispatching: ["awaiting_result", "acknowledged_failed", "retryable", "blocked"],
+  awaiting_result: ["result_recovery", "publishing", "acknowledged_no_reply", "acknowledged_failed", "retryable", "blocked"],
+  result_recovery: ["publishing", "acknowledged_no_reply", "acknowledged_failed", "blocked"], publishing: ["acknowledged", "retryable", "blocked"],
+  retryable: ["pending", "blocked"], blocked: ["pending", "cancelled_by_user"], acknowledged: [], acknowledged_no_reply: [], acknowledged_failed: [], cancelled_by_room_move: [], cancelled_by_user: [],
 };
 
 /** Durable, provider-neutral room delivery queue. It owns neither polling nor turns. */
@@ -331,7 +332,7 @@ export class SupervisedAgentInboxStore {
 
   async head(agentId: string): Promise<SupervisedInboxItem | null> {
     return this.read(async (database) => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       return row ? rowToItem(row) : null;
     });
   }
@@ -424,6 +425,22 @@ export class SupervisedAgentInboxStore {
       if (!current) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(current);
       if (!transitions[item.state].includes(next)) throw new Error(`Invalid supervised inbox transition: ${item.state} -> ${next}.`);
+      const nativeFailure = readDurableNativeFailure(database, inboxItemId);
+      if (nativeFailure && ((Object.hasOwn(patch, "outcome") && patch.outcome !== item.outcome)
+        || ["pending", "publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(next))) {
+        throw new Error("Exact native terminal failure cannot be overwritten or replayed.");
+      }
+      if (Object.hasOwn(patch, "outcome") && patch.outcome !== item.outcome) {
+        let kind: unknown;
+        try { kind = patch.outcome ? JSON.parse(patch.outcome).kind : null; } catch { /* Existing opaque outcomes remain supported. */ }
+        if (kind === "failed" || kind === "interrupted") throw new Error("Native failure outcomes require the exact terminal checkpoint.");
+      }
+      if (next === "acknowledged_failed") {
+        this.assertCurrentHead(database, item);
+        if (Object.keys(patch).length || !nativeFailure) {
+          throw new Error("Failed settlement requires unchanged exact native terminal evidence.");
+        }
+      }
       // Every in-flight state is causally owned by the true FIFO head. This
       // prevents a later item becoming blocked and hiding the real stall.
       if (!finalStates.has(next)) this.assertCurrentHead(database, item);
@@ -454,7 +471,7 @@ export class SupervisedAgentInboxStore {
   }
   async claimHead(agentId: string): Promise<SupervisedInboxItem | null> {
     return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
+      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(agentId) as Row | undefined;
       if (!row) return null;
       const item = rowToItem(row);
       const turnControlBarrier = database.prepare(`SELECT inbox_item_id,status FROM turn_control_journals
@@ -623,7 +640,7 @@ export class SupervisedAgentInboxStore {
     agent_id: string;
     execution_generation_id: string;
     provider_turn_id: string;
-    outcome: "reply" | "no_reply" | "unreadable";
+    outcome: "reply" | "no_reply" | "unreadable" | "failed" | "interrupted";
     text: string | null;
     evidence: "transcript" | "stream" | "none";
     terminal_evidence: unknown;
@@ -644,12 +661,31 @@ export class SupervisedAgentInboxStore {
         || String(binding.provider_turn_id) !== input.provider_turn_id) {
         throw new Error("Normalized terminal evidence does not match the durable provider-turn authority binding.");
       }
-      const priorTerminal = database.prepare(`SELECT agent_id,execution_generation_id,provider_turn_id
+      const nativeFailure = input.outcome === "failed" || input.outcome === "interrupted";
+      if (nativeFailure) {
+        const evidence = input.terminal_evidence as Record<string, unknown> | null;
+        if (input.text !== null || input.evidence === "none" || !evidence
+          || evidence.outcome !== input.outcome || evidence.turnId !== input.provider_turn_id
+          || evidence.text !== null || evidence.evidence !== input.evidence
+          || evidence.providerContinuationId !== binding.provider_continuation_id) {
+          throw new Error("Native terminal failure requires exact continuation, turn, and terminal evidence.");
+        }
+      }
+      const priorTerminal = database.prepare(`SELECT agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text
         FROM supervised_agent_terminal_results WHERE inbox_item_id=?`).get(input.inbox_item_id) as Row | undefined;
       if (priorTerminal && (String(priorTerminal.agent_id) !== input.agent_id
         || String(priorTerminal.execution_generation_id) !== input.execution_generation_id
         || String(priorTerminal.provider_turn_id) !== input.provider_turn_id)) {
         throw new Error("Normalized terminal evidence conflicts with an earlier provider-turn authority identity.");
+      }
+      // A definitive completion is monotonic. Re-reading can resolve an
+      // unreadable result, but cleanup or a late observation cannot demote an
+      // already accepted room reply/no-reply or change an exact native failure.
+      if (priorTerminal && priorTerminal.outcome !== "unreadable") {
+        if (input.outcome === "unreadable"
+          || (nativeFailure && ["reply", "no_reply"].includes(String(priorTerminal.outcome)))
+          || (priorTerminal.outcome === input.outcome && priorTerminal.normalized_text === input.text)) return item;
+        throw new Error("Normalized terminal evidence conflicts with an already accepted completion.");
       }
       const timestamp = this.now();
       run(database.prepare(`INSERT INTO supervised_agent_terminal_results
@@ -665,6 +701,10 @@ export class SupervisedAgentInboxStore {
       }
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row);
     }));
+  }
+
+  async nativeFailure(inboxItemId: string): Promise<"failed" | "interrupted" | null> {
+    return this.read(async (database) => readDurableNativeFailure(database, inboxItemId));
   }
 
   async recordResultRecoveryRetry(inboxItemId: string, error: string): Promise<number> {
@@ -1091,7 +1131,7 @@ export class SupervisedAgentInboxStore {
   ): Promise<number> {
     return this.exclusive(async (database) => this.transactionFenced(database, () => {
       const rows = database.prepare(`SELECT * FROM supervised_agent_inbox
-        WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+        WHERE agent_id=? AND room_id=? AND fifo_sequence>? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence`).all(input.agent_id, input.old_room_id, input.after_fifo_sequence) as Row[];
       const timestamp = this.now();
       for (const row of rows) {
@@ -1201,6 +1241,13 @@ export class SupervisedAgentInboxStore {
       const item = rowToItem(current);
       if (item.state !== "dispatching" && item.state !== "awaiting_result") throw new Error("Provider terminal evidence may only be checkpointed while delivery is in-flight.");
       this.assertCurrentHead(database, item);
+      if (readDurableNativeFailure(database, inboxItemId)) {
+        if (outcome !== item.outcome) throw new Error("Exact native terminal failure cannot be overwritten.");
+        return item;
+      }
+      let kind: unknown;
+      try { kind = JSON.parse(outcome).kind; } catch { /* Legacy opaque outcomes remain supported. */ }
+      if (kind === "failed" || kind === "interrupted") throw new Error("Native failure outcomes require the exact terminal checkpoint.");
       const timestamp = this.now();
       run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, timestamp, inboxItemId);
       this.recordEvent(database, inboxItemId, `turn_finished:${item.attempt_count}`, "turn_finished", timestamp, null);
@@ -1482,6 +1529,13 @@ export class SupervisedAgentInboxStore {
       if (!cancellable.has(item.state)) return item;
       this.assertCurrentHead(database, item);
       const timestamp = this.now();
+      if (readDurableNativeFailure(database, inboxItemId)) {
+        run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',
+          last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
+        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.pruneAgentHistory(database, item.agent_id);
+        return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+      }
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
@@ -1523,14 +1577,17 @@ export class SupervisedAgentInboxStore {
     return this.exclusive(async (database) => this.transaction(database, () => {
       const interruptedAt = this.now();
       this.normalizeInterruptedEffectsInTransaction(database, agentId, interruptedAt);
-      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
+      const rows = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence").all(agentId) as Row[];
       const recovered: SupervisedInboxItem[] = [];
       for (const row of rows) {
         const item = rowToItem(row);
         const terminal = persistedTerminalOutcome(item.outcome);
         let next: SupervisedInboxState | null = null;
         let error: string | null = item.last_error;
-        if (item.state === "result_recovery") {
+        if (readDurableNativeFailure(database, item.inbox_item_id)) {
+          next = "acknowledged_failed";
+          error = null;
+        } else if (item.state === "result_recovery") {
           next = "result_recovery";
           error = "Re-reading the same completed provider turn; no new model turn will start.";
         } else if (item.state === "dispatching" || item.state === "awaiting_result" || item.state === "publishing" || item.state === "retryable") {
@@ -1601,10 +1658,10 @@ export class SupervisedAgentInboxStore {
         FROM supervised_agent_inbox i
         LEFT JOIN supervised_agent_publications p ON p.inbox_item_id=i.inbox_item_id
         WHERE i.agent_id=? AND (
-          i.state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+          i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           OR i.inbox_item_id IN (
             SELECT inbox_item_id FROM supervised_agent_inbox
-            WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+            WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence DESC LIMIT ?
           )
         ) ORDER BY i.fifo_sequence`).all(agentId, agentId, limit) as Row[];
@@ -1613,10 +1670,10 @@ export class SupervisedAgentInboxStore {
           SELECT inbox_item_id,fifo_sequence
           FROM supervised_agent_inbox
           WHERE agent_id=? AND (
-            state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+            state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             OR inbox_item_id IN (
               SELECT inbox_item_id FROM supervised_agent_inbox
-              WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+              WHERE agent_id=? AND state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
               ORDER BY fifo_sequence DESC LIMIT ?
             )
           )
@@ -1857,7 +1914,7 @@ export class SupervisedAgentInboxStore {
       throw new EffectAuthorityError("A supervised effect requires one exact active durable provider-turn authority binding.");
     }
     const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-      WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+      WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       ORDER BY fifo_sequence LIMIT 1`).get(input.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== String(rows[0]?.inbox_item_id)) {
       throw new EffectAuthorityError("The supervised effect provider turn is no longer the exact FIFO head.");
@@ -1883,7 +1940,7 @@ export class SupervisedAgentInboxStore {
     return { inbox_item_id: String(rows[0]!.inbox_item_id) };
   }
   private assertCurrentHead(database: DatabaseSync, item: SupervisedInboxItem): void {
-    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
+    const head = database.prepare("SELECT inbox_item_id FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') ORDER BY fifo_sequence LIMIT 1").get(item.agent_id) as Row | undefined;
     if (!head || String(head.inbox_item_id) !== item.inbox_item_id) throw new Error("Only the current FIFO head may change delivery state.");
   }
   private normalizeInterruptedEffectsInTransaction(database: DatabaseSync, agentId: string | undefined, interruptedAt: string): void {

@@ -542,6 +542,7 @@ export type DesktopRoomAgentReceiptState =
   | "publishing"
   | "acknowledged"
   | "acknowledged_no_reply"
+  | "acknowledged_failed"
   | "retryable"
   | "blocked"
   | "restoring_conversation"

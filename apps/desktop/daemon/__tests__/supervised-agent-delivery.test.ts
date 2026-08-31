@@ -2920,6 +2920,106 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
   }
 });
 
+test("exact native failure settles once, advances FIFO, and survives cleanup errors and restart", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-native-terminal-"));
+  try {
+    for (const outcome of ["failed", "interrupted"] as const) {
+      for (const cleanupFails of [false, true]) {
+        const path = join(root, `${outcome}-${cleanupFails}.sqlite`);
+        let store = new SupervisedAgentInboxStore(path);
+        let runs = 0;
+        let recoveries = 0;
+        const port = provider(async (_handle, _request, options) => {
+          runs += 1;
+          await options?.beforeNativeDispatch?.();
+          const turnId = `turn-${runs}`;
+          await options?.checkpointTurnStarted?.(turnId);
+          if (runs > 1) return { turnId, outcome: "no_reply", text: null };
+          const result = { turnId, providerContinuationId: "thread", outcome, text: null, evidence: "stream" as const };
+          const checkpoint = await options?.checkpointTerminalResult?.(result);
+          assert.equal(checkpoint?.acceptedResult.outcome, outcome);
+          assert.equal(checkpoint?.cleanupRecoveryEvidence, true);
+          if (cleanupFails) throw new Error("native journal cleanup unavailable after terminal commit");
+          return result;
+        }, async () => { recoveries += 1; throw new Error("must not re-read a settled native failure"); });
+        const http = { poll: async () => ({}), publish: async () => { throw new Error("failure has no room reply"); } };
+        const delivery = new SupervisedAgentDelivery(store, port, http, currentAuthority);
+        try {
+          await delivery.pump(agent);
+          await ingest(store, "1"); await ingest(store, "2");
+          await delivery.pump(agent);
+          const receipts = await store.receipts(agent.agentId);
+          assert.deepEqual(receipts.map((item) => item.state), ["acknowledged_failed", "acknowledged_no_reply"]);
+          assert.equal(JSON.parse(receipts[0]!.outcome!).kind, outcome);
+          assert.equal(receipts[0]!.canonical_message_id, null);
+          assert.equal(receipts[0]!.attempt_count, 1);
+          assert.equal(receipts[0]!.timeline.filter((event) => event.phase === "turn_finished").length, 1);
+          assert.equal(receipts[0]!.timeline.some((event) => ["retry_scheduled", "published", "no_reply"].includes(event.phase)), false);
+          await delivery.fenceAndDrain(); await store.close();
+          store = new SupervisedAgentInboxStore(path);
+          const reopened = new SupervisedAgentDelivery(store, port, http, currentAuthority);
+          await reopened.pump({ ...agent, executionGenerationId: "generation-2", daemonGeneration: 2 });
+          assert.equal(runs, 2); assert.equal(recoveries, 0);
+          assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_failed");
+          await reopened.fenceAndDrain();
+        } finally { await delivery.fenceAndDrain(); await store.close(); }
+      }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native failure cannot invent a dispatch checkpoint or use another continuation", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-invalid-terminal-"));
+  try {
+    for (const defect of ["missing_dispatch", "wrong_continuation"] as const) {
+      const store = new SupervisedAgentInboxStore(join(root, `${defect}.sqlite`));
+      let runs = 0;
+      const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+        runs += 1;
+        if (defect !== "missing_dispatch") await options?.checkpointTurnStarted?.("turn");
+        return { turnId: "turn", providerContinuationId: defect === "wrong_continuation" ? "other" : "thread",
+          outcome: "failed", text: null, evidence: "stream" };
+      }, async () => { throw Object.assign(new Error("exact native state unknown"), { roomTurnRecoveryOutcome: "ambiguous" }); }),
+      { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 1, async () => {});
+      try {
+        await delivery.pump(agent); await ingest(store); await delivery.pump(agent);
+        const receipt = (await store.receipts(agent.agentId))[0]!;
+        assert.equal(receipt.state, "blocked"); assert.equal(receipt.outcome, null); assert.equal(runs, 1);
+        assert.equal(await store.nativeFailure(receipt.inbox_item_id), null);
+      } finally { await delivery.fenceAndDrain(); await store.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("a saved reply or Cursor completion proposal wins a late exact native failure", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-terminal-winner-"));
+  try {
+    for (const candidate of ["codex", "cursor"]) {
+      const store = new SupervisedAgentInboxStore(join(root, `${candidate}.sqlite`));
+      const recordCompletion = installCursorCompletionProjectionFixture(store);
+      const published: string[] = [];
+      const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+        await options?.checkpointTurnStarted?.("turn");
+        if (candidate === "cursor") {
+          recordCompletion("turn", { outcome: "reply", text: "Saved answer." });
+        } else {
+          await options?.checkpointTerminalResult?.({ turnId: "turn", outcome: "reply", text: "Saved answer.", evidence: "stream" });
+        }
+        const failure = { turnId: "turn", providerContinuationId: "thread", outcome: "failed" as const, text: null, evidence: "stream" as const };
+        const accepted = await options?.checkpointTerminalResult?.(failure);
+        assert.equal(accepted?.acceptedResult.outcome, "reply");
+        return failure;
+      }), { poll: async () => ({}), publish: async ({ text, roomId }) => { published.push(text); return { roomId, messageId: "published" }; } }, currentAuthority);
+      try {
+        const currentAgent = { ...agent, provider: candidate };
+        await delivery.pump(currentAgent); await ingest(store); await delivery.pump(currentAgent);
+        assert.deepEqual(published, ["Saved answer."], candidate);
+        assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged");
+      } finally { await delivery.fenceAndDrain(); await store.close(); }
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("startup recovery republishes a durable publishing outcome without rerunning its provider turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-republish-recovery-"));
   try {

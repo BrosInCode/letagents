@@ -203,10 +203,12 @@ export class SupervisedAgentDelivery {
       result.turnId,
     );
     if (proposals.length !== 1 || proposals[0]!.state !== "completed") {
+      if (result.outcome === "failed" || result.outcome === "interrupted") return result;
       return { turnId: result.turnId, outcome: "unreadable", text: null, evidence: "none" };
     }
     const completion = structuredRoomTurnCompletion(proposals[0]!.request);
     if (!completion) {
+      if (result.outcome === "failed" || result.outcome === "interrupted") return result;
       return { turnId: result.turnId, outcome: "unreadable", text: null, evidence: "none" };
     }
     return completion.outcome === "no_reply"
@@ -619,7 +621,7 @@ export class SupervisedAgentDelivery {
    * manifest+FIFO commit. This method intentionally does not settle or wake. */
   async prepareActiveDeliveryInterrupt(
     reservation: SupervisedDeliveryInterruptReservation,
-  ): Promise<"interruptible" | "publication_won"> {
+  ): Promise<"interruptible" | "publication_won" | "terminal_won"> {
     const reserved = this.exactInterruptReservation(reservation);
     if (!reserved) throw new Error("Delivery interrupt reservation is stale or belongs to a different turn.");
     const agent = reservation.agent;
@@ -644,6 +646,7 @@ export class SupervisedAgentDelivery {
         providerConnection: agent.handle.providerConnection,
       });
     }
+    if (await this.inbox.nativeFailure(current.inbox_item_id)) return "terminal_won";
     return ["publishing", "acknowledged", "acknowledged_no_reply"].includes(current.state)
       ? "publication_won"
       : "interruptible";
@@ -719,7 +722,7 @@ export class SupervisedAgentDelivery {
     agent: SupervisedIngressAgent,
     inboxItemId?: string,
     reservation?: SupervisedDeliveryInterruptReservation,
-  ): Promise<"settled" | "published" | "no_active_turn"> {
+  ): Promise<"settled" | "published" | "terminal_won" | "no_active_turn"> {
     const active = this.activeTurns.get(agent.agentId);
     const exactActive = active?.recoveryContext === this.recoveryContext(agent) ? active : null;
     // Cursor waits for its wrapper/reaper to settle before reporting a native
@@ -772,6 +775,7 @@ export class SupervisedAgentDelivery {
       // arbitration lease so a failed HTTP publish can retry that same payload
       // and client id; this never reruns the provider turn.
       if (reserved) this.resolveInterruptReservation(reserved, "resume");
+      if (settled && await this.inbox.nativeFailure(settled.inbox_item_id)) return "terminal_won";
       return "published";
     }
     const abort = this.activeTurnAborts.get(agent.agentId);
@@ -1113,6 +1117,12 @@ export class SupervisedAgentDelivery {
       });
     };
     try {
+      if (await this.inbox.nativeFailure(item.inbox_item_id)) {
+        if (!await this.hasLaneAuthority(agent, controller)) return;
+        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+        return;
+      }
       const persistedTerminal = persistedAcceptedTerminal(item.outcome);
       if (persistedTerminal?.kind === "reply") {
         setActive("publishing");
@@ -1174,6 +1184,21 @@ export class SupervisedAgentDelivery {
       // promise owns preflight/helper cleanup and must settle before drain can
       // release this daemon generation.
       const checkpointTerminalResult = async (result: ProviderRoomTurnResult): Promise<ProviderRoomTurnCheckpointDisposition> => {
+        const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
+        if (result.outcome === "failed" || result.outcome === "interrupted") {
+          // Failure is exact native evidence, never an exception classifier or
+          // a terminal callback that fabricates the missing dispatch boundary.
+          const binding = await this.inbox.providerTurnBinding(item.inbox_item_id);
+          if (!binding || !admittedProviderTurnId || admittedProviderTurnId !== result.turnId
+            || binding.agent_id !== agent.agentId || binding.room_id !== agent.roomId
+            || binding.work_attempt_id !== agent.workAttemptId
+            || binding.origin_execution_generation_id !== providerTurnOriginExecutionGenerationId
+            || binding.provider_turn_id !== result.turnId
+            || binding.provider_continuation_id !== providerContinuationId
+            || result.providerContinuationId !== providerContinuationId) {
+            throw new Error("Native failure does not match the exact admitted provider turn and continuation.");
+          }
+        }
         const publicationResult = await this.publicationResult(
           agent,
           result,
@@ -1186,7 +1211,6 @@ export class SupervisedAgentDelivery {
           throw new Error("Provider terminal result belongs to a different delivery invocation.");
         }
         if (item.state !== "result_recovery") {
-          const providerContinuationId = agent.handle?.providerContinuationId ?? agent.providerContinuationId;
           if (!providerContinuationId) throw new Error("Provider turn terminal checkpoint has no exact continuation authority.");
           await this.inbox.checkpointTurnStarted(item.inbox_item_id, publicationResult.turnId, {
             work_attempt_id: agent.workAttemptId,
@@ -1197,7 +1221,7 @@ export class SupervisedAgentDelivery {
         admittedProviderTurnId = publicationResult.turnId;
         this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, publicationResult.turnId);
         const evidence = publicationResult.evidence ?? (publicationResult.outcome === "unreadable" ? "none" : "transcript");
-        await this.inbox.checkpointNormalizedTerminal({
+        const checkpointed = await this.inbox.checkpointNormalizedTerminal({
           inbox_item_id: item.inbox_item_id,
           agent_id: agent.agentId,
           execution_generation_id: providerTurnOriginExecutionGenerationId,
@@ -1207,9 +1231,26 @@ export class SupervisedAgentDelivery {
           evidence,
           terminal_evidence: publicationResult,
         });
+        // A late failure or unreadable re-read cannot replace a definitive
+        // checkpoint. Return the durable winner to the adapter and caller.
+        const saved = JSON.parse(checkpointed.outcome!) as { kind: ProviderRoomTurnResult["outcome"]; text: string | null; evidence: "stream" | "transcript" | "none" };
+        let acceptedResult: ProviderRoomTurnResult = publicationResult;
+        if (saved.kind === "reply" && saved.text && (publicationResult.outcome !== "reply" || publicationResult.text !== saved.text)) {
+          acceptedResult = { turnId: publicationResult.turnId, outcome: "reply", text: saved.text,
+            evidence: saved.evidence === "none" ? undefined : saved.evidence };
+        } else if (saved.kind === "no_reply" && publicationResult.outcome !== "no_reply") {
+          acceptedResult = { turnId: publicationResult.turnId, outcome: "no_reply", text: null,
+            evidence: saved.evidence === "none" ? undefined : saved.evidence };
+        } else if (saved.kind === "failed" || saved.kind === "interrupted") {
+          if (!providerContinuationId || !await this.inbox.nativeFailure(item.inbox_item_id) || saved.evidence === "none") {
+            throw new Error("Native failure lost its durable terminal proof.");
+          }
+          acceptedResult = { turnId: publicationResult.turnId, providerContinuationId,
+            outcome: saved.kind, text: null, evidence: saved.evidence };
+        }
         return {
-          acceptedResult: publicationResult,
-          cleanupRecoveryEvidence: publicationResult.outcome !== "unreadable",
+          acceptedResult,
+          cleanupRecoveryEvidence: acceptedResult.outcome !== "unreadable",
         };
       };
       const checkpointProviderState = async (state: {
@@ -1364,18 +1405,18 @@ export class SupervisedAgentDelivery {
       );
       if (!providerResult) throw new Error("Provider does not support bounded room turns.");
       if (!await hasProviderAuthority()) return;
-      const result = await this.publicationResult(
-        agent,
-        providerResult,
-        providerTurnOriginExecutionGenerationId,
-      );
       // Real provider adapters invoke this before releasing their in-memory
       // stream accumulator. The repeat is intentionally idempotent for simple
       // test adapters and future provider implementations.
-      await checkpointTerminalResult(result);
+      const { acceptedResult: result } = await checkpointTerminalResult(providerResult);
       const evidence = result.evidence ?? (result.outcome === "unreadable" ? "none" : "transcript");
       const outcome = JSON.stringify({ kind: result.outcome, text: result.text?.trim() || null, evidence });
       if (!await this.hasExecutionAuthority(agent, turnController)) return;
+      if (result.outcome === "failed" || result.outcome === "interrupted") {
+        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+        return;
+      }
       if (item.state !== "result_recovery") {
         await this.inbox.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: result.turnId, outcome });
       }
@@ -1432,11 +1473,17 @@ export class SupervisedAgentDelivery {
       interruptDispositionForFinalizer = interruptDisposition;
       if (interruptDisposition === "cancelled" || interruptDisposition === "freeze") return;
       const current = await this.inbox.get(item.inbox_item_id);
-      if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply" || current.state === "cancelled_by_user" || current.state === "cancelled_by_room_move") return;
+      if (!current || current.state === "acknowledged" || current.state === "acknowledged_no_reply" || current.state === "acknowledged_failed" || current.state === "cancelled_by_user" || current.state === "cancelled_by_room_move") return;
       // A turn-scoped abort that landed during the async read above is a user
       // interrupt, not a delivery failure: leave the head for interruptActiveDelivery
       // to settle rather than retrying/blocking (and rerunning) the stopped turn.
       if (turnController.signal.aborted) return;
+      if (await this.inbox.nativeFailure(current.inbox_item_id)) {
+        if (!await this.hasLaneAuthority(agent, controller)) return;
+        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+        await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
+        return;
+      }
       const acceptedTerminal = persistedAcceptedTerminal(current.outcome);
       if (acceptedTerminal?.kind === "no_reply"
         && ["dispatching", "awaiting_result", "result_recovery"].includes(current.state)) {
