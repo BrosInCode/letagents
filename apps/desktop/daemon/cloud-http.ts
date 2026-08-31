@@ -1,5 +1,6 @@
 import type { SupervisedDeliveryHttp, SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
+import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
@@ -71,6 +72,41 @@ export function lastRoomMessageId(messages: readonly Record<string, unknown>[]):
 function boundedCloudSignal(signal?: AbortSignal, timeoutMs = CLOUD_REQUEST_TIMEOUT_MS): AbortSignal {
   const deadline = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
+
+export type RoomWorkPublishInput = {
+  apiOrigin: string; grantId: string; supervisorGrant: string; grantGeneration: number;
+  sessionId: string; roomId: string; sourceMessageId: string; agentKey: string;
+  revision: number; summary: RoomAgentWorkSummary; signal: AbortSignal;
+};
+export type RoomWorkPublishResult = "acknowledged" | "cleared" | "conflict";
+
+/** Optional evidence publication. This must never renew credentials or execute work. */
+export async function publishRoomWork(input: RoomWorkPublishInput): Promise<RoomWorkPublishResult> {
+  const summary = parseRoomAgentWorkSummary(input.summary);
+  if (!summary || hostGrantApiOrigin(input.apiOrigin) !== input.apiOrigin) throw new Error("Invalid room work publication.");
+  const response = await fetch(`${input.apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions/${encodeURIComponent(input.sessionId)}/agent-work`, {
+    method: "POST", redirect: "error",
+    headers: { authorization: `Bearer ${input.supervisorGrant}`, "content-type": "application/json", "x-letagents-supervisor-generation": String(input.grantGeneration) },
+    body: JSON.stringify({ generation: input.grantGeneration, room_id: input.roomId,
+      source_message_id: input.sourceMessageId, revision: input.revision, summary }),
+    signal: boundedCloudSignal(input.signal),
+  });
+  const body = await response.json() as Record<string, unknown>;
+  if (response.status === 409 && body.code === "payload_cleared") return "cleared";
+  if (response.status === 409 && ["publisher_conflict", "revision_conflict"].includes(String(body.code))) return "conflict";
+  if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Room work publication");
+  const work = body.work as Record<string, unknown> | undefined;
+  if (!["created", "updated", "replayed"].includes(String(body.status)) || !work
+    || typeof work.attempt_id !== "string" || !/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(work.attempt_id)
+    || work.room_id !== input.roomId || work.source_message_id !== input.sourceMessageId
+    || work.agent_key !== input.agentKey || work.revision !== input.revision) {
+    throw new Error("Room work publication returned a different receipt.");
+  }
+  if (body.status === "replayed" && isClearedRoomAgentWorkSummary(work.summary)) return "cleared";
+  const accepted = parseRoomAgentWorkSummary(work.summary);
+  if (!accepted || JSON.stringify(accepted) !== JSON.stringify(summary)) throw new Error("Room work publication returned a different summary.");
+  return "acknowledged";
 }
 
 /** The daemon talks to the room API only through the live worker bearer. */

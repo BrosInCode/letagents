@@ -33,6 +33,7 @@ import { ManifestTransitionCoordinator } from "./manifest-transition-coordinator
 import { LegacyLaneCoordinator } from "./legacy-lane-coordinator.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "./lifecycle-log.js";
 import { NativeActivityPublicationCoordinator } from "./native-activity-publication-coordinator.js";
+import { RoomWorkPublisher } from "./room-work-publisher.js";
 import { assertMacOS } from "./platform.js";
 import { type ProviderActionHandle, type ProviderActionPort, type ProviderActionStreamEvent, type ProviderActionTerminal } from "./provider-action-port.js";
 import { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
@@ -134,6 +135,7 @@ export class SupervisorDaemon {
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly providerStreams: ProviderStreamCoordinator;
   private executionCapture: ExecutionCaptureCoordinator | null = null;
+  private roomWorkPublisher: RoomWorkPublisher | null = null;
   private readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
   private readonly providerCheckpoints: ProviderCheckpointCoordinator;
   private readonly providerExecution: ProviderExecutionCoordinator | null;
@@ -595,6 +597,7 @@ export class SupervisorDaemon {
         (input) => this.restoreMissingProviderContinuation(input),
         (input) => this.providerCheckpoints.checkpointDynamicState(input),
         (input) => this.providerCheckpoints.checkpointPreparedTurn(input),
+        (agent) => this.roomWorkPublisher?.observeNewSources(agent),
       )
       : null;
     this.readModel = new DaemonReadModel({
@@ -866,9 +869,16 @@ export class SupervisorDaemon {
       await this.singleton.release();
       throw error;
     }
-    if (!this.handoffScheduled) this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
-      currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
-    });
+    if (!this.handoffScheduled) {
+      this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {
+        custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
+        isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
+      });
+      this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
+        currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
+        changed: (agentId) => this.roomWorkPublisher?.changed(agentId),
+      });
+    }
     await this.supervisedInbox.normalizeInterruptedEffects();
     await this.quarantineDuplicateSupervisedLaneOwners();
     await this.runtimeRecovery.recoverTurnControls();
@@ -894,6 +904,7 @@ export class SupervisorDaemon {
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
     this.hostApprovals.close();
+    this.roomWorkPublisher?.close();
     this.executionCapture?.close();
     this.supervisedDelivery?.fence();
     this.wakeRoomMoveReconciliationWaiters();
@@ -1069,6 +1080,7 @@ export class SupervisorDaemon {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
     this.hostApprovals.close();
+    this.roomWorkPublisher?.close();
     this.executionCapture?.close();
     // Authority revocation and delivery cancellation are one synchronous
     // edge. No claimed FIFO item may observe the public fence before its

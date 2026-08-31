@@ -178,6 +178,7 @@ export class SupervisedAgentDelivery {
     private readonly restoreMissingContinuation?: SupervisedContinuationRestorer,
     private readonly checkpointProviderState?: SupervisedProviderStateCheckpointer,
     private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
+    private readonly observeNewSources?: (agent: SupervisedIngressAgent) => ((sourceMessageIds: readonly string[]) => void) | undefined,
   ) {}
 
   /**
@@ -489,6 +490,10 @@ export class SupervisedAgentDelivery {
         cursor = await this.inbox.cursor(agent.agentId);
         if (!cursor || !await this.hasIngressAuthority(agent, controller)) return;
       }
+      // Freeze nonsecret observation custody before the asynchronous poll.
+      // A later grant/room replacement cannot reattribute this source batch.
+      let onInserted: ((sourceMessageIds: readonly string[]) => void) | undefined;
+      try { onInserted = this.observeNewSources?.(agent); } catch { /* optional observation */ }
       const response = await this.http.poll({ roomId: agent.roomId, apiUrl: agent.apiUrl, bearer: agent.bearer, afterMessageId: cursor?.last_observed_message_id ?? null, signal: controller.signal });
       if (!await this.hasIngressAuthority(agent, controller)) return;
       const messages = activatedMessages(response.messages ?? []);
@@ -505,6 +510,7 @@ export class SupervisedAgentDelivery {
           response.last_observed_message_id ?? lastMessageId(response.messages ?? []),
         messages,
         observed_messages: observedMessages(response.messages ?? []),
+        onInserted,
       });
       // Ingest can be deliberately slow. Do not create detached delivery work
       // after a stop/rebind changed authority while its commit was pending.
