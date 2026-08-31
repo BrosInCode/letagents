@@ -17,12 +17,15 @@ const turnInput = z.strictObject({
 });
 const observerInput = z.strictObject({
   agentId: id, subjectRuntimeGenerationId: id, observerRuntimeGenerationId: id, daemonGenerationId: id,
-  expectedEpoch: time, boundAtMs: time, recovery: nativeTurnIdentity.optional(),
+  sourceId: id, expectedEpoch: time, boundAtMs: time, recovery: nativeTurnIdentity.optional(),
 });
 export type ShadowObserver = Readonly<{
   agentId: string; runtimeGenerationId: string; executionGenerationId: string;
   observerRuntimeGenerationId: string; observerExecutionGenerationId: string;
   daemonGenerationId: string; epoch: number; recoveryTurnId: string | null;
+  sourceId: string;
+  /** Durable cursor snapshot at admission; skip this source's committed replay prefix. */
+  lastSourceSequence: number; maxObservedSequence: number;
 }>;
 export type ShadowIngestion =
   | { status: "accepted" | "duplicate"; journalSequence: number; gapPending: boolean }
@@ -230,35 +233,66 @@ export class ExecutionShadowStore {
       if ((current?.observer_epoch ?? 0) !== input.expectedEpoch || input.expectedEpoch === Number.MAX_SAFE_INTEGER) {
         throw new ExecutionProtocolError("stale_observer");
       }
+      // A migrated cursor has no known source. Neither a new subscription nor
+      // a matching process birth can prove its provenance retroactively.
+      if (current && current.source_id === null) throw new ExecutionProtocolError("source_unverified");
+      if (current && !this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?", input.agentId, current.source_id)) {
+        throw new ExecutionProtocolError("source_unverified");
+      }
+      const sameSource = current?.source_id === input.sourceId;
+      // Retain admission IDs independently of fact retention. Otherwise A→B→A
+      // could reset A's cursor and count its old output again under a new epoch.
+      if (!sameSource && this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?", input.agentId, input.sourceId)) {
+        throw new ExecutionProtocolError("stale_observer");
+      }
+      if (!current && (this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? LIMIT 1", input.agentId)
+        || this.row("SELECT 1 FROM execution_facts WHERE agent_id=? LIMIT 1", input.agentId))) {
+        throw new ExecutionProtocolError("source_unverified");
+      }
+      if (current && !sameSource && Number(current.max_observed_sequence) > Number(current.last_source_sequence)) {
+        throw new ExecutionProtocolError("source_gap");
+      }
+      const lastSourceSequence = sameSource ? Number(current.last_source_sequence) : 0;
+      const maxObservedSequence = sameSource ? Number(current.max_observed_sequence) : 0;
       const epoch = input.expectedEpoch + 1;
       this.database.prepare(`INSERT INTO execution_observers(agent_id,execution_generation_id,runtime_generation_id,
         observer_execution_generation_id,observer_runtime_generation_id,daemon_generation_id,observer_epoch,
-        last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms) VALUES(?,?,?,?,?,?,?,0,0,?,?)
+        last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms,source_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
         ON CONFLICT(agent_id) DO UPDATE SET execution_generation_id=excluded.execution_generation_id,runtime_generation_id=excluded.runtime_generation_id,
         observer_execution_generation_id=excluded.observer_execution_generation_id,observer_runtime_generation_id=excluded.observer_runtime_generation_id,
-        daemon_generation_id=excluded.daemon_generation_id,observer_epoch=excluded.observer_epoch,last_source_sequence=0,max_observed_sequence=0,
-        recovery_turn_id=excluded.recovery_turn_id,bound_at_ms=excluded.bound_at_ms`)
+        daemon_generation_id=excluded.daemon_generation_id,observer_epoch=excluded.observer_epoch,
+        last_source_sequence=excluded.last_source_sequence,max_observed_sequence=excluded.max_observed_sequence,
+        recovery_turn_id=excluded.recovery_turn_id,bound_at_ms=excluded.bound_at_ms,source_id=excluded.source_id`)
         .run(input.agentId, subject.execution_generation_id, subject.runtime_generation_id, observer.execution_generation_id,
-          observer.runtime_generation_id, input.daemonGenerationId, epoch, input.recovery?.turnId ?? null, input.boundAtMs);
+          observer.runtime_generation_id, input.daemonGenerationId, epoch, lastSourceSequence, maxObservedSequence,
+          input.recovery?.turnId ?? null, input.boundAtMs, input.sourceId);
+      if (!sameSource) this.insert("execution_observer_sources", { agent_id: input.agentId, source_id: input.sourceId });
       return Object.freeze({
         agentId: input.agentId, runtimeGenerationId: String(subject.runtime_generation_id), executionGenerationId: String(subject.execution_generation_id),
         observerRuntimeGenerationId: String(observer.runtime_generation_id), observerExecutionGenerationId: String(observer.execution_generation_id),
         daemonGenerationId: input.daemonGenerationId, epoch, recoveryTurnId: input.recovery?.turnId ?? null,
+        sourceId: input.sourceId, lastSourceSequence, maxObservedSequence,
       });
     });
     this.observers.add(token);
     return token;
   }
 
-  ingest(token: ShadowObserver, value: unknown): ShadowIngestion {
+  /** sourceId must come from the observation, not be copied from the token. */
+  ingest(sourceId: string, token: ShadowObserver, value: unknown): ShadowIngestion {
     const fact = parseExecutionFact(value);
     if (!this.observers.has(token)) throw new ExecutionProtocolError("stale_observer");
+    if (validated(id, sourceId) !== token.sourceId) throw new ExecutionProtocolError("identity_mismatch");
     let committed: { value: RuntimeProjection; stamp: string } | undefined;
     const result = this.transaction<ShadowIngestion>(() => {
       const current = this.required("SELECT * FROM execution_observers WHERE agent_id=?", token.agentId);
       if (current.observer_epoch !== token.epoch || current.daemon_generation_id !== token.daemonGenerationId
-        || current.observer_runtime_generation_id !== token.observerRuntimeGenerationId || fact.observerEpoch !== token.epoch) {
+        || current.source_id !== token.sourceId || current.observer_runtime_generation_id !== token.observerRuntimeGenerationId
+        || fact.observerEpoch !== token.epoch) {
         throw new ExecutionProtocolError("stale_observer");
+      }
+      if (!this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?", token.agentId, sourceId)) {
+        throw new ExecutionProtocolError("source_unverified");
       }
       if (fact.agentId !== token.agentId) throw new ExecutionProtocolError("identity_mismatch");
       let retainedTurn: Row | undefined;

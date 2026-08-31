@@ -45,6 +45,7 @@ function seed(store: ExecutionShadowStore, suffix = "") {
 function observer(store: ExecutionShadowStore, extra: Record<string, unknown> = {}): ShadowObserver {
   return store.bindObserver({
     agentId: "agent", subjectRuntimeGenerationId: "runtime", observerRuntimeGenerationId: "runtime",
+    sourceId: extra.expectedEpoch ? `replacement-source-${extra.expectedEpoch}` : "source",
     daemonGenerationId: "daemon", expectedEpoch: 0, boundAtMs: 100, ...extra,
   });
 }
@@ -82,9 +83,9 @@ test("a failed tool leaves its native turn, runtime and continuation alive", () 
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, fact(1)); store.ingest(token, turnFact(2));
-    store.ingest(token, operationFact(3, { sideEffects: "possible" }));
-    store.ingest(token, operationFact(4, { kind: "completed", outcome: "failed", exitCode: 1, sideEffects: "observed" }));
+    store.ingest(token.sourceId, token, fact(1)); store.ingest(token.sourceId, token, turnFact(2));
+    store.ingest(token.sourceId, token, operationFact(3, { sideEffects: "possible" }));
+    store.ingest(token.sourceId, token, operationFact(4, { kind: "completed", outcome: "failed", exitCode: 1, sideEffects: "observed" }));
     const { projection } = store.projectRuntime("runtime");
     assert.equal(projection.runtime, "ready");
     assert.equal(projection.continuation, "available");
@@ -110,13 +111,13 @@ test("journal ordering ignores clock order; duplicate observations have no repea
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, fact(1, { observedAtMs: 1000 }));
-    store.ingest(token, turnFact(2, { observedAtMs: 0 }));
+    store.ingest(token.sourceId, token, fact(1, { observedAtMs: 1000 }));
+    store.ingest(token.sourceId, token, turnFact(2, { observedAtMs: 0 }));
     const output = operationFact(3, { kind: "output", outputBytes: 42, observedAtMs: 1 });
-    assert.equal(store.ingest(token, output).status, "accepted");
-    assert.equal(store.ingest(token, output).status, "duplicate");
-    assert.throws(() => store.ingest(token, { ...output, outputBytes: 43 }), /sequence_conflict/);
-    assert.throws(() => store.ingest(token, { ...output, factId: "replacement" }), /sequence_conflict/);
+    assert.equal(store.ingest(token.sourceId, token, output).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, output).status, "duplicate");
+    assert.throws(() => store.ingest(token.sourceId, token, { ...output, outputBytes: 43 }), /sequence_conflict/);
+    assert.throws(() => store.ingest(token.sourceId, token, { ...output, factId: "replacement" }), /sequence_conflict/);
     assert.equal(store.projectRuntime("runtime").projection.turns.get("turn")?.operations.get("command")?.outputBytes, 42);
     assert.deepEqual(db.prepare("SELECT sequence FROM execution_facts ORDER BY sequence").all().map(r => r.sequence), [1, 2, 3]);
   } finally { db.close(); }
@@ -129,12 +130,12 @@ test("warm ingestion reuses projection history and matches cold replay", (t) => 
     const peerToken = observer(store, { agentId: peer.runtime.agentId, subjectRuntimeGenerationId: peer.runtime.runtimeGenerationId,
       observerRuntimeGenerationId: peer.runtime.runtimeGenerationId });
     const reads = countHistoryReads(t, db);
-    store.ingest(token, fact(1)); store.ingest(token, turnFact(2));
-    store.ingest(peerToken, fact(1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
+    store.ingest(token.sourceId, token, fact(1)); store.ingest(token.sourceId, token, turnFact(2));
+    store.ingest(peerToken.sourceId, peerToken, fact(1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
       runtimeGenerationId: peer.runtime.runtimeGenerationId, factId: "peer-ready" }));
     for (let sequence = 3; sequence <= 100; sequence++) {
-      store.ingest(token, operationFact(sequence, { kind: "output", outputBytes: 1 }));
-      store.ingest(peerToken, fact(sequence - 1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
+      store.ingest(token.sourceId, token, operationFact(sequence, { kind: "output", outputBytes: 1 }));
+      store.ingest(peerToken.sourceId, peerToken, fact(sequence - 1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
         runtimeGenerationId: peer.runtime.runtimeGenerationId, factId: `peer-${sequence}`, domain: "control", state: "responsive" }));
     }
     const warm = store.projectRuntime("runtime");
@@ -151,8 +152,8 @@ test("public projections cannot mutate cached nested maps or subsequent ingestio
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, turnFact(1));
-    store.ingest(token, operationFact(2, { kind: "output", outputBytes: 42 }));
+    store.ingest(token.sourceId, token, turnFact(1));
+    store.ingest(token.sourceId, token, operationFact(2, { kind: "output", outputBytes: 42 }));
     const exposed = store.projectRuntime("runtime");
     const turn = exposed.projection.turns.get("turn")!;
     turn.operations.get("command")!.outputBytes = 9000;
@@ -161,7 +162,7 @@ test("public projections cannot mutate cached nested maps or subsequent ingestio
     (exposed.projection.turns as Map<string, unknown>).clear();
     exposed.projection.runtime = "exited";
     exposed.lastJournalSequence = 999;
-    store.ingest(token, operationFact(3, { kind: "output", outputBytes: 5 }));
+    store.ingest(token.sourceId, token, operationFact(3, { kind: "output", outputBytes: 5 }));
     const actual = store.projectRuntime("runtime");
     assert.equal(actual.projection.runtime, "starting");
     assert.equal(actual.projection.turns.get("turn")?.providerTurnId, "native-turn");
@@ -178,14 +179,14 @@ test("cache invalidates other stores on shared and separate connections", async 
     const writerDb = sharedConnection ? db : new DatabaseSync(path);
     try {
       seed(store); const first = observer(store);
-      store.ingest(first, turnFact(1));
-      store.ingest(first, operationFact(2, { kind: "output", outputBytes: 42 }));
+      store.ingest(first.sourceId, first, turnFact(1));
+      store.ingest(first.sourceId, first, operationFact(2, { kind: "output", outputBytes: 42 }));
       store.projectRuntime("runtime");
       const writer = new ExecutionShadowStore(writerDb);
       const rebound = observer(writer, { expectedEpoch: 1 });
-      writer.ingest(rebound, operationFact(1, { factId: "new-output", observerEpoch: 2, kind: "output", outputBytes: 5 }));
+      writer.ingest(rebound.sourceId, rebound, operationFact(1, { factId: "new-output", observerEpoch: 2, kind: "output", outputBytes: 5 }));
       assert.equal(store.projectRuntime("runtime").projection.turns.get("turn")?.operations.get("command")?.outputBytes, 47);
-      assert.throws(() => store.ingest(first, fact(3)), /stale_observer/);
+      assert.throws(() => store.ingest(first.sourceId, first, fact(3)), /stale_observer/);
       // Prefix deletion does not change MAX(sequence). It must still invalidate
       // the read cache; this is not a new retention/compaction implementation.
       writerDb.prepare("DELETE FROM execution_facts WHERE sequence=2").run();
@@ -204,7 +205,7 @@ test("caller-owned rollback and same-connection schema changes cannot poison cac
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, fact(1));
+    store.ingest(token.sourceId, token, fact(1));
     assert.equal(store.projectRuntime("runtime").projection.runtime, "ready");
     db.exec("BEGIN; DELETE FROM execution_facts");
     assert.equal(store.projectRuntime("runtime").projection.runtime, "starting");
@@ -237,9 +238,9 @@ test("a single oversized runtime cannot stay in the bounded projection cache", (
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, turnFact(1));
+    store.ingest(token.sourceId, token, turnFact(1));
     for (let index = 0; index < 4096; index++) {
-      store.ingest(token, operationFact(index + 2, { executionId: `command-${index}` }));
+      store.ingest(token.sourceId, token, operationFact(index + 2, { executionId: `command-${index}` }));
     }
     const reads = countHistoryReads(t, db);
     const first = store.projectRuntime("runtime");
@@ -253,13 +254,154 @@ test("source gaps persist diagnostics, never fabricate terminals, and can be fil
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    assert.deepEqual(store.ingest(token, turnFact(3)), { status: "gap", expectedSourceSequence: 1, observedSourceSequence: 3 });
+    assert.deepEqual(store.ingest(token.sourceId, token, turnFact(3)), { status: "gap", expectedSourceSequence: 1, observedSourceSequence: 3 });
     assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 0);
     assert.equal(db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()?.runtime_state, "starting");
-    assert.equal((store.ingest(token, fact(1)) as { gapPending: boolean }).gapPending, true);
-    store.ingest(token, fact(2, { domain: "control", state: "responsive" }));
-    assert.equal((store.ingest(token, turnFact(3)) as { gapPending: boolean }).gapPending, false);
+    const before = db.prepare("SELECT * FROM execution_observers").get();
+    assert.throws(() => observer(store, { expectedEpoch: 1 }), /source_gap/, "replacement source cannot erase a known missing range");
+    assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
+    const resumed = observer(store, { expectedEpoch: 1, sourceId: token.sourceId });
+    assert.equal(resumed.lastSourceSequence, 0); assert.equal(resumed.maxObservedSequence, 3);
+    assert.throws(() => store.ingest(token.sourceId, token, fact(1)), /stale_observer/);
+    assert.equal((store.ingest(resumed.sourceId, resumed, fact(1, { observerEpoch: 2 })) as { gapPending: boolean }).gapPending, true);
+    store.ingest(resumed.sourceId, resumed, fact(2, { observerEpoch: 2, domain: "control", state: "responsive" }));
+    assert.equal((store.ingest(resumed.sourceId, resumed, turnFact(3, { observerEpoch: 2 })) as { gapPending: boolean }).gapPending, false);
     assert.equal(store.projectRuntime("runtime").projection.turns.get("turn")?.state, "active");
+    const replaced = observer(store, { expectedEpoch: 2 });
+    assert.notEqual(replaced.sourceId, resumed.sourceId);
+    assert.equal(replaced.lastSourceSequence, 0); assert.equal(replaced.maxObservedSequence, 0);
+    assert.throws(() => store.ingest(resumed.sourceId, replaced, fact(1, { factId: "new-source", observerEpoch: 3 })), /identity_mismatch/);
+    assert.equal(store.ingest(replaced.sourceId, replaced, fact(1, { factId: "new-source", observerEpoch: 3 })).status, "accepted",
+      "a new helper starts at sequence one even when the native runtime has not changed");
+  } finally { db.close(); }
+});
+
+test("same-source admission survives store replacement and database reopen without replaying the prefix", async () => {
+  const root = await mkdtemp(join(tmpdir(), "execution-source-"));
+  const path = join(root, "state.sqlite");
+  let db: DatabaseSync | undefined;
+  try {
+    const first = fixture(path); db = first.db;
+    seed(first.store); const old = observer(first.store);
+    first.store.ingest(old.sourceId, old, fact(1));
+    const second = new ExecutionShadowStore(db);
+    const rebound = observer(second, { expectedEpoch: 1, sourceId: old.sourceId });
+    assert.equal(rebound.lastSourceSequence, 1); assert.equal(rebound.maxObservedSequence, 1);
+    assert.throws(() => first.store.ingest(old.sourceId, old, fact(2)), /stale_observer/);
+    assert.throws(() => second.ingest(rebound.sourceId, { ...rebound }, fact(2, { observerEpoch: 2 })), /stale_observer/);
+    assert.throws(() => second.ingest(rebound.sourceId, rebound, fact(1, { factId: "replay", observerEpoch: 2 })), /sequence_conflict/,
+      "admission cursor tells the consumer to skip committed replay, not renumber it");
+    second.ingest(rebound.sourceId, rebound, turnFact(2, { observerEpoch: 2 }));
+    db.close(); db = undefined;
+    const third = fixture(path); db = third.db;
+    const reopened = observer(third.store, { expectedEpoch: 2, sourceId: old.sourceId, daemonGenerationId: "new-daemon" });
+    assert.equal(reopened.lastSourceSequence, 2); assert.equal(reopened.maxObservedSequence, 2);
+    third.store.ingest(reopened.sourceId, reopened, operationFact(3, { observerEpoch: 3, kind: "output", outputBytes: 7 }));
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 3);
+    assert.equal(third.store.projectRuntime("runtime").projection.turns.get("turn")?.operations.get("command")?.outputBytes, 7);
+    const before = db.prepare("SELECT * FROM execution_observers").get();
+    db.exec("CREATE TRIGGER reject_rebind BEFORE UPDATE ON execution_observers BEGIN SELECT RAISE(ABORT,'injected rebind failure'); END");
+    assert.throws(() => observer(third.store, { expectedEpoch: 3, sourceId: old.sourceId }), /injected rebind failure/);
+    assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
+    db.exec("DROP TRIGGER reject_rebind");
+    third.store.ingest(reopened.sourceId, reopened, operationFact(4, { observerEpoch: 3, kind: "output", outputBytes: 5 }));
+    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 4);
+  } finally { db?.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("unknown migrated source provenance suspends admission without erasing evidence", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    store.ingest(token.sourceId, token, fact(1));
+    db.exec("UPDATE execution_observers SET source_id=NULL");
+    const before = db.prepare("SELECT * FROM execution_observers").get();
+    for (const sourceId of [token.sourceId, "replacement"]) {
+      assert.throws(() => observer(store, { expectedEpoch: 1, sourceId }), /source_unverified/);
+    }
+    assert.throws(() => store.ingest(token.sourceId, token, fact(2)), /stale_observer/);
+    assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 1);
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "ready");
+  } finally { db.close(); }
+});
+
+test("admitted source IDs cannot return as fresh after replacement or fact retention", async () => {
+  for (const withFacts of [false, true]) {
+    const root = await mkdtemp(join(tmpdir(), "execution-retired-source-"));
+    const path = join(root, "state.sqlite");
+    let db: DatabaseSync | undefined;
+    try {
+      const first = fixture(path); db = first.db;
+      seed(first.store); const a = observer(first.store);
+      if (withFacts) {
+        first.store.ingest(a.sourceId, a, turnFact(1));
+        first.store.ingest(a.sourceId, a, operationFact(2, { kind: "output", outputBytes: 7 }));
+      }
+      const beforeFailure = db.prepare("SELECT * FROM execution_observers").get();
+      db.exec("CREATE TRIGGER reject_source BEFORE INSERT ON execution_observer_sources WHEN NEW.source_id='source-b' BEGIN SELECT RAISE(ABORT,'injected source failure'); END");
+      assert.throws(() => observer(first.store, { expectedEpoch: 1, sourceId: "source-b" }), /injected source failure/);
+      assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), beforeFailure, "failed registry insert rolls the cursor and epoch back");
+      assert.equal(db.prepare("SELECT 1 FROM execution_observer_sources WHERE source_id='source-b'").get(), undefined);
+      db.exec("DROP TRIGGER reject_source");
+      const b = observer(first.store, { expectedEpoch: 1, sourceId: "source-b" });
+      const before = db.prepare("SELECT * FROM execution_observers").get();
+      assert.throws(() => observer(first.store, { expectedEpoch: 2, sourceId: a.sourceId }), /stale_observer/);
+      assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
+      if (withFacts) {
+        assert.equal(first.store.projectRuntime("runtime").projection.turns.get("turn")?.operations.get("command")?.outputBytes, 7);
+      }
+      // Admission fences outlive ordinary fact retention, including sources
+      // retired before their first observation was recorded.
+      db.exec("DELETE FROM execution_facts");
+      db.close(); db = undefined;
+      const reopened = fixture(path); db = reopened.db;
+      assert.throws(() => observer(reopened.store, { expectedEpoch: 2, sourceId: a.sourceId }), /stale_observer/);
+      const resumed = observer(reopened.store, { expectedEpoch: 2, sourceId: b.sourceId });
+      assert.equal(resumed.lastSourceSequence, 0);
+      const peer = seed(reopened.store, "peer");
+      assert.doesNotThrow(() => observer(reopened.store, { agentId: peer.runtime.agentId,
+        subjectRuntimeGenerationId: peer.runtime.runtimeGenerationId, observerRuntimeGenerationId: peer.runtime.runtimeGenerationId, sourceId: a.sourceId }),
+      "admission fencing is agent-scoped");
+      db.exec("DELETE FROM execution_observer_sources WHERE agent_id='agent'");
+      assert.throws(() => observer(reopened.store, { expectedEpoch: 3, sourceId: b.sourceId }), /source_unverified/,
+        "lost admission history must not be recreated silently");
+      assert.throws(() => reopened.store.ingest(resumed.sourceId, resumed, fact(1, { observerEpoch: 3 })), /source_unverified/);
+    } finally { db?.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("one source follows distinct child lifetimes without misattributing a late old-child exit", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const first = observer(store);
+    store.ingest(first.sourceId, first, fact(1)); store.ingest(first.sourceId, first, turnFact(2));
+    store.ingest(first.sourceId, first, turnFact(3, { state: "terminal", turnOutcome: "completed" }));
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "child2", provider: "codex", configRevision: 1, createdAtMs: 100 });
+    const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message2", executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
+    const turn2 = { turnId: "turn2", providerContinuationId: "conversation", providerTurnId: "native-turn2" };
+    store.trackNativeTurn({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "child2", ...turn2, attemptId, roomId: "room", createdAtMs: 100 });
+    const second = observer(store, { expectedEpoch: 1, sourceId: first.sourceId, subjectRuntimeGenerationId: "child2", observerRuntimeGenerationId: "child2" });
+    assert.equal(second.lastSourceSequence, 3);
+    store.ingest(second.sourceId, second, fact(4, { observerEpoch: 2, runtimeGenerationId: "child2" }));
+    store.ingest(second.sourceId, second, turnFact(5, { observerEpoch: 2, runtimeGenerationId: "child2", ...turn2 }));
+    const oldExit = fact(6, { observerEpoch: 2, domain: "control", state: "lost", controlEvidence: "process_exit" });
+    assert.throws(() => store.ingest(second.sourceId, second, oldExit), /identity_mismatch/);
+    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 5);
+    // The consumer must independently map the captured birth to the retained
+    // child. Rebind that exact runtime; never relabel the old exit as child2.
+    const late = observer(store, { expectedEpoch: 2, sourceId: first.sourceId });
+    assert.equal(late.lastSourceSequence, 5);
+    store.ingest(late.sourceId, late, { ...oldExit, observerEpoch: 3 });
+    store.ingest(late.sourceId, late, fact(7, { observerEpoch: 3, state: "exited", controlEvidence: "process_exit" }));
+    const current = observer(store, { expectedEpoch: 3, sourceId: first.sourceId, subjectRuntimeGenerationId: "child2", observerRuntimeGenerationId: "child2" });
+    assert.equal(current.lastSourceSequence, 7);
+    assert.throws(() => store.ingest(second.sourceId, second, fact(8)), /stale_observer/);
+    store.ingest(current.sourceId, current, turnFact(8, { observerEpoch: 4, runtimeGenerationId: "child2", ...turn2, state: "terminal", turnOutcome: "completed" }));
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "exited");
+    assert.equal(store.projectRuntime("child2").projection.runtime, "ready");
+    assert.equal(store.projectRuntime("child2").projection.turns.get("turn2")?.outcome, "completed");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 8);
   } finally { db.close(); }
 });
 
@@ -267,15 +409,15 @@ test("native event replay across observers advances the cursor without duplicati
   const { db, store } = fixture();
   try {
     seed(store); const first = observer(store);
-    store.ingest(first, fact(1)); store.ingest(first, turnFact(2));
+    store.ingest(first.sourceId, first, fact(1)); store.ingest(first.sourceId, first, turnFact(2));
     const output = operationFact(3, { kind: "output", outputBytes: 42, nativeEventId: "native-output" });
-    store.ingest(first, output);
+    store.ingest(first.sourceId, first, output);
     const second = observer(store, { expectedEpoch: 1 });
     const replay = { ...output, factId: "replayed-output", observerEpoch: 2, sourceSequence: 1, observedAtMs: 200 };
-    assert.equal(store.ingest(second, replay).status, "duplicate");
+    assert.equal(store.ingest(second.sourceId, second, replay).status, "duplicate");
     assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
-    assert.throws(() => store.ingest(second, { ...replay, factId: "changed-native", sourceSequence: 2, outputBytes: 43 }), /sequence_conflict/);
-    store.ingest(second, operationFact(2, { factId: "next-output", observerEpoch: 2, kind: "output", outputBytes: 5, nativeEventId: "next-native-output" }));
+    assert.throws(() => store.ingest(second.sourceId, second, { ...replay, factId: "changed-native", sourceSequence: 2, outputBytes: 43 }), /sequence_conflict/);
+    store.ingest(second.sourceId, second, operationFact(2, { factId: "next-output", observerEpoch: 2, kind: "output", outputBytes: 5, nativeEventId: "next-native-output" }));
     // A new store reconstructs from durable observations, not a process cache.
     const warm = store.projectRuntime("runtime");
     const cold = new ExecutionShadowStore(db).projectRuntime("runtime");
@@ -293,12 +435,12 @@ test("replaying earlier native facts after terminal or lost state does not reque
       seed(store); const first = observer(store);
       const active = turnFact(1, { nativeEventId: "native-active" });
       const output = operationFact(2, { kind: "output", outputBytes: 42, nativeEventId: "native-output" });
-      store.ingest(first, active); store.ingest(first, output);
-      store.ingest(first, turnFact(3, { state, ...(state === "terminal" ? { turnOutcome: "completed" } : {}) }));
-      assert.equal(store.ingest(first, output).status, "duplicate");
+      store.ingest(first.sourceId, first, active); store.ingest(first.sourceId, first, output);
+      store.ingest(first.sourceId, first, turnFact(3, { state, ...(state === "terminal" ? { turnOutcome: "completed" } : {}) }));
+      assert.equal(store.ingest(first.sourceId, first, output).status, "duplicate");
       const second = observer(store, { expectedEpoch: 1 });
-      assert.equal(store.ingest(second, { ...active, factId: "replayed-active", observerEpoch: 2 }).status, "duplicate");
-      assert.equal(store.ingest(second, { ...output, factId: "replayed-output", observerEpoch: 2 }).status, "duplicate");
+      assert.equal(store.ingest(second.sourceId, second, { ...active, factId: "replayed-active", observerEpoch: 2 }).status, "duplicate");
+      assert.equal(store.ingest(second.sourceId, second, { ...output, factId: "replayed-output", observerEpoch: 2 }).status, "duplicate");
       assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 2);
       assert.equal(db.prepare("SELECT state FROM execution_turns").get()?.state, state);
       assert.equal(store.projectRuntime("runtime").projection.turns.get("turn")?.state, state);
@@ -311,15 +453,15 @@ test("append and projection/cursor updates are atomic across a failed write or c
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, fact(1));
+    store.ingest(token.sourceId, token, fact(1));
     const before = store.projectRuntime("runtime");
     db.exec("CREATE TRIGGER refuse_shadow_update BEFORE UPDATE ON execution_runtime_generations BEGIN SELECT RAISE(ABORT,'injected'); END");
-    assert.throws(() => store.ingest(token, fact(2, { state: "stopping" })), /injected/);
+    assert.throws(() => store.ingest(token.sourceId, token, fact(2, { state: "stopping" })), /injected/);
     assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 1);
     assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
     assert.deepEqual(store.projectRuntime("runtime"), before);
     db.exec("DROP TRIGGER refuse_shadow_update");
-    assert.equal(store.ingest(token, fact(2, { state: "stopping" })).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, fact(2, { state: "stopping" })).status, "accepted");
     assert.equal(store.projectRuntime("runtime").projection.runtime, "stopping");
     const after = store.projectRuntime("runtime");
     const exec = db.exec.bind(db);
@@ -329,10 +471,10 @@ test("append and projection/cursor updates are atomic across a failed write or c
       exec(sql);
     });
     const exit = fact(3, { state: "exited", controlEvidence: "process_exit" });
-    assert.throws(() => store.ingest(token, exit), /injected commit failure/);
+    assert.throws(() => store.ingest(token.sourceId, token, exit), /injected commit failure/);
     assert.deepEqual(store.projectRuntime("runtime"), after);
     assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 2);
-    assert.equal(store.ingest(token, exit).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, exit).status, "accepted");
     assert.equal(store.projectRuntime("runtime").projection.runtime, "exited");
   } finally { db.close(); }
 });
@@ -344,21 +486,21 @@ test("recovery fences stale observers and binds the exact retained native turn a
   try {
     const first = fixture(path); db = first.db;
     seed(first.store); const old = observer(first.store);
-    first.store.ingest(old, fact(1)); first.store.ingest(old, turnFact(2));
-    first.store.ingest(old, turnFact(3, { state: "lost" }));
-    first.store.ingest(old, fact(4, { domain: "control", state: "lost", controlEvidence: "process_exit" }));
+    first.store.ingest(old.sourceId, old, fact(1)); first.store.ingest(old.sourceId, old, turnFact(2));
+    first.store.ingest(old.sourceId, old, turnFact(3, { state: "lost" }));
+    first.store.ingest(old.sourceId, old, fact(4, { domain: "control", state: "lost", controlEvidence: "process_exit" }));
     first.store.registerRuntime({ agentId: "agent", executionGenerationId: "next-generation", runtimeGenerationId: "next-runtime", provider: "codex", configRevision: 1, createdAtMs: 200 });
     const second = new ExecutionShadowStore(db);
     assert.throws(() => observer(second, { expectedEpoch: 1, subjectRuntimeGenerationId: "runtime", observerRuntimeGenerationId: "next-runtime" }), /identity_mismatch/);
     assert.throws(() => observer(second, { expectedEpoch: 1, observerRuntimeGenerationId: "next-runtime", recovery: { ...native, providerTurnId: "different" } }), /identity_mismatch/);
     const rebound = observer(second, { expectedEpoch: 1, observerRuntimeGenerationId: "next-runtime", daemonGenerationId: "daemon2", recovery: native });
-    assert.throws(() => first.store.ingest(old, fact(5)), /stale_observer/);
-    assert.throws(() => second.ingest({ ...rebound }, turnFact(1, { observerEpoch: 2 })), /stale_observer/);
-    second.ingest(rebound, turnFact(1, { factId: "recovered-active", observerEpoch: 2 }));
-    assert.throws(() => second.ingest(rebound, turnFact(2, { factId: "wrong-native", observerEpoch: 2, providerTurnId: "wrong" })), /identity_mismatch/);
-    second.ingest(rebound, turnFact(2, { factId: "recovered-terminal", observerEpoch: 2, state: "terminal", turnOutcome: "failed" }));
-    second.ingest(rebound, fact(3, { factId: "new-runtime-ready", observerEpoch: 2, runtimeGenerationId: "next-runtime", executionGenerationId: "next-generation" }));
-    second.ingest(rebound, fact(4, { factId: "new-control-responsive", domain: "control", state: "responsive", observerEpoch: 2, runtimeGenerationId: "next-runtime", executionGenerationId: "next-generation" }));
+    assert.throws(() => first.store.ingest(old.sourceId, old, fact(5)), /stale_observer/);
+    assert.throws(() => second.ingest(rebound.sourceId, { ...rebound }, turnFact(1, { observerEpoch: 2 })), /stale_observer/);
+    second.ingest(rebound.sourceId, rebound, turnFact(1, { factId: "recovered-active", observerEpoch: 2 }));
+    assert.throws(() => second.ingest(rebound.sourceId, rebound, turnFact(2, { factId: "wrong-native", observerEpoch: 2, providerTurnId: "wrong" })), /identity_mismatch/);
+    second.ingest(rebound.sourceId, rebound, turnFact(2, { factId: "recovered-terminal", observerEpoch: 2, state: "terminal", turnOutcome: "failed" }));
+    second.ingest(rebound.sourceId, rebound, fact(3, { factId: "new-runtime-ready", observerEpoch: 2, runtimeGenerationId: "next-runtime", executionGenerationId: "next-generation" }));
+    second.ingest(rebound.sourceId, rebound, fact(4, { factId: "new-control-responsive", domain: "control", state: "responsive", observerEpoch: 2, runtimeGenerationId: "next-runtime", executionGenerationId: "next-generation" }));
     assert.equal(second.projectRuntime("runtime").projection.turns.get("turn")?.outcome, "failed");
     assert.equal(second.projectRuntime("runtime").projection.control, "lost");
     assert.equal(second.projectRuntime("next-runtime").projection.control, "responsive");
@@ -376,19 +518,19 @@ test("unknown historical terminal evidence cannot resurrect a terminal turn or e
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, turnFact(1));
-    store.ingest(token, turnFact(2, { state: "terminal", turnOutcome: "failed" }));
-    store.ingest(token, fact(3, { state: "exited", controlEvidence: "process_exit" }));
+    store.ingest(token.sourceId, token, turnFact(1));
+    store.ingest(token.sourceId, token, turnFact(2, { state: "terminal", turnOutcome: "failed" }));
+    store.ingest(token.sourceId, token, fact(3, { state: "exited", controlEvidence: "process_exit" }));
     // Simulate preserved v18 evidence: terminal state was recorded but its
     // native outcome/proof wasn't. Migration must not invent those fields.
     db.exec("DROP TRIGGER execution_facts_immutable; UPDATE execution_facts SET turn_outcome=NULL,control_evidence=NULL");
     applyExecutionStorageSchema(db);
     assert.equal(store.projectRuntime("runtime").unverifiedFacts, 2);
-    assert.throws(() => store.ingest(token, turnFact(4)), /invalid_transition/);
-    assert.throws(() => store.ingest(token, fact(4)), /invalid_transition/);
-    store.ingest(token, fact(4, { domain: "control", state: "lost", controlEvidence: "process_exit" }));
+    assert.throws(() => store.ingest(token.sourceId, token, turnFact(4)), /invalid_transition/);
+    assert.throws(() => store.ingest(token.sourceId, token, fact(4)), /invalid_transition/);
+    store.ingest(token.sourceId, token, fact(4, { domain: "control", state: "lost", controlEvidence: "process_exit" }));
     const retained = db.prepare("SELECT state,ended_at_ms FROM execution_turns").get();
-    store.ingest(token, operationFact(5, { kind: "completed", outcome: "failed", sideEffects: "observed" }));
+    store.ingest(token.sourceId, token, operationFact(5, { kind: "completed", outcome: "failed", sideEffects: "observed" }));
     assert.deepEqual(db.prepare("SELECT state,ended_at_ms FROM execution_turns").get(), retained);
     assert.equal(db.prepare("SELECT side_effects FROM execution_turns").get()?.side_effects, "observed");
     assert.equal(db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()?.runtime_state, "exited");
@@ -418,12 +560,12 @@ test("one execution lane follows the agent across rooms and lost turns cannot re
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
-    store.ingest(token, turnFact(1)); store.ingest(token, turnFact(2, { state: "lost" }));
+    store.ingest(token.sourceId, token, turnFact(1)); store.ingest(token.sourceId, token, turnFact(2, { state: "lost" }));
     const attemptId = store.trackMessage({ agentId: "agent", roomId: "new-room", sourceMessageId: "message", executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 200 });
     const otherTurn = { ...native, turnId: "other-turn", providerTurnId: "other-native", attemptId, agentId: "agent", roomId: "new-room", executionGenerationId: "generation", runtimeGenerationId: "runtime", createdAtMs: 200 };
     assert.throws(() => store.trackNativeTurn(otherTurn), /invalid_transition/);
     const recover = observer(store, { expectedEpoch: 1, recovery: native });
-    store.ingest(recover, turnFact(1, { factId: "terminal", observerEpoch: 2, state: "terminal", turnOutcome: "failed" }));
+    store.ingest(recover.sourceId, recover, turnFact(1, { factId: "terminal", observerEpoch: 2, state: "terminal", turnOutcome: "failed" }));
     assert.doesNotThrow(() => store.trackNativeTurn(otherTurn));
     assert.equal(db.prepare("SELECT room_id FROM execution_turns WHERE turn_id='turn'").get()?.room_id, "room");
   } finally { db.close(); }
@@ -434,8 +576,8 @@ test("shadow projections cannot mutate the legacy inbox or invoke effects", () =
   try {
     db.exec("CREATE TABLE supervised_agent_inbox(id TEXT PRIMARY KEY,state TEXT); INSERT INTO supervised_agent_inbox VALUES('head','blocked')");
     seed(store); const token = observer(store);
-    store.ingest(token, turnFact(1));
-    store.ingest(token, turnFact(2, { state: "terminal", turnOutcome: "failed" }));
+    store.ingest(token.sourceId, token, turnFact(1));
+    store.ingest(token.sourceId, token, turnFact(2, { state: "terminal", turnOutcome: "failed" }));
     assert.equal(db.prepare("SELECT state FROM supervised_agent_inbox").get()?.state, "blocked");
     for (const name of ["settle", "publish", "stop", "restart", "approve", "dispatch"]) assert.equal(name in store, false);
     assert.equal(db.prepare("SELECT authority_mode FROM execution_runtime_generations").get()?.authority_mode, "typed_shadow");
