@@ -5,6 +5,7 @@ import { createConnection } from "node:net";
 import { execFileSync, spawn, type ChildProcess } from "node:child_process";
 import { access, appendFile, chmod, mkdir, stat } from "node:fs/promises";
 import { EventEmitter } from "node:events";
+import { z } from "zod";
 
 import type {
   DesktopSupervisorActivityEvent,
@@ -28,12 +29,15 @@ import { defaultGetProcessIdentity, redactCredentialText, safeStreamPayload } fr
 import { supervisedDeliveryModeForProvider } from "./agents/provider-registry.js";
 import { LETAGENTS_MCP_RUNTIME_TREE_SHA256 } from "./agents/letagents-mcp-runtime.js";
 import { prepareSupervisorState } from "./supervisor-state-recovery.js";
+import { loadHostApprovalSigner, type HostApprovalSigner } from "./host-approval-auth.js";
+import type { HostApprovalChallenge } from "../../shared/host-approval-auth.js";
+import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCandidate, HostApprovalChoice, HostApprovalStatus } from "../../shared/host-approvals.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.116";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.117";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Retirement can queue behind one already-admitted worker mint (3 x 10s) so
@@ -304,7 +308,26 @@ export class SupervisorDaemonProtocolMismatchError extends Error {
   }
 }
 
+const approvalId = z.string().min(1).max(256);
+const approvalSha = z.string().regex(/^[a-f0-9]{64}$/);
+const approvalStatus = z.enum(["pending", "decision_recorded", "decision_sent", "uncertain", "resolved", "unavailable"]);
+const approvalChallenge = z.strictObject({ daemonGeneration: z.number().int().positive().safe(),
+  bootNonce: z.string().regex(/^[A-Za-z0-9_-]{43}$/), keyFingerprint: approvalSha });
+const approvalCandidate = z.strictObject({
+  reference: z.strictObject({ requestId: approvalId, requestVersion: z.number().int().positive().safe(), requestSha256: approvalSha,
+    agentId: approvalId, roomId: approvalId, executionGenerationId: approvalId, runtimeGenerationId: approvalId,
+    turnId: approvalId, providerContinuationId: approvalId, providerTurnId: approvalId, connectionId: approvalId,
+    nativeRequestId: z.union([approvalId, z.number().int().nonnegative().safe()]) }).nullable(),
+  presentation: z.strictObject({ agentId: approvalId, displayName: z.string().max(256),
+    provider: z.enum(["codex", "open-model"]), title: z.enum(["Run a command", "Change files", "Approval unavailable"]),
+    details: z.string().max(24 * 1024), denyScope: z.enum(["request", "session_pending"]) }),
+  status: approvalStatus, detail: z.string().max(1024).nullable(),
+  recordedDecision: z.strictObject({ decisionId: approvalId, actorId: approvalId,
+    decision: z.enum(["allow_once", "deny"]), projectionSha256: approvalSha.nullable() }).nullable(),
+});
+
 export interface SupervisorDaemonLifecycleOptions {
+  loadApprovalSigner?: typeof loadHostApprovalSigner;
   socketPath?: string;
   daemonScriptPath?: string;
   daemonWorkingDirectory?: string;
@@ -403,8 +426,15 @@ export class SupervisorDaemonClient {
     generation: number;
   } | null = null;
   private ownedDaemonPid: number | null = null;
+  private readonly loadApprovalSigner: typeof loadHostApprovalSigner;
+  private approvalSigner: { fingerprint: string; promise: Promise<HostApprovalSigner> } | null = null;
+  private readonly approvalPresentations = new Map<string, {
+    roomId: string; view: DesktopHostApproval; candidate: HostApprovalCandidate; challenge: HostApprovalChallenge;
+    presentationSha256: string; touchedAt: number; decision: { id: string; choice: HostApprovalChoice } | null;
+  }>();
 
   constructor(options: SupervisorDaemonLifecycleOptions = {}) {
+    this.loadApprovalSigner = options.loadApprovalSigner ?? loadHostApprovalSigner;
     this.socketPath = options.socketPath ?? join(homedir(), ".letagents", "daemon.sock");
     this.daemonScriptPath = options.daemonScriptPath ?? join(desktopRoot, "dist-daemon", "main.js");
     this.daemonWorkingDirectory = options.daemonWorkingDirectory ?? dirname(this.socketPath);
@@ -455,6 +485,152 @@ export class SupervisorDaemonClient {
         .finally(() => { this.ensureOperation = null; });
     }
     return this.ensureOperation;
+  }
+
+  /** Main computes and remembers what it actually presents; renderer IDs carry no authority. */
+  async listHostApprovals(roomId: string): Promise<DesktopHostApprovalSnapshot> {
+    try {
+      if (!approvalId.safeParse(roomId).success) throw new Error("Invalid approval room.");
+      // Opening a composer must not spawn, hand off, or reconfigure a provider.
+      const rawChallenge = await this.request<unknown>("supervisor.host_approval_challenge");
+      if (rawChallenge === null) {
+        this.clearApprovalPresentations(roomId);
+        return { available: false, approvals: [], error: "Host approval signing was not enrolled. Unlock secure storage and restart the background service before approving." };
+      }
+      const challenge = approvalChallenge.parse(rawChallenge);
+      const signer = await this.signerForApproval(challenge);
+      const raw = await this.request<unknown>("supervisor.host_approval_request",
+        signer.sign(challenge, "list", { roomId }), undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS);
+      if (!Array.isArray(raw) || raw.length > 128) throw new Error("Invalid approval presentation.");
+      for (const candidate of raw) {
+        const parsed = approvalCandidate.safeParse(candidate);
+        if (!parsed.success || Buffer.byteLength(JSON.stringify(candidate)) > 32 * 1024
+          || (parsed.data.reference && (parsed.data.reference.roomId !== roomId
+            || parsed.data.reference.agentId !== parsed.data.presentation.agentId))
+          || (!parsed.data.reference && parsed.data.status !== "unavailable")
+          || (parsed.data.presentation.title === "Approval unavailable" && parsed.data.status !== "unavailable"
+            && !(parsed.data.status === "uncertain" && parsed.data.reference && parsed.data.recordedDecision))
+          || (parsed.data.presentation.provider === "open-model") !== (parsed.data.presentation.denyScope === "session_pending")) {
+          throw new Error("Invalid approval presentation.");
+        }
+      }
+      // Preserve the transmitted property order used by the daemon's digest.
+      const candidates = structuredClone(raw) as HostApprovalCandidate[];
+      const now = this.now().getTime();
+      for (const [key, item] of this.approvalPresentations) {
+        if (now - item.touchedAt > 30 * 60 * 1000) this.approvalPresentations.delete(key);
+      }
+      const approvals: DesktopHostApproval[] = [];
+      for (const candidate of candidates) {
+        const presentationSha256 = createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex");
+        let cached = [...this.approvalPresentations.values()].find(item =>
+          item.roomId === roomId && JSON.stringify(item.challenge) === JSON.stringify(challenge) && item.presentationSha256 === presentationSha256
+          && JSON.stringify(item.candidate.reference) === JSON.stringify(candidate.reference));
+        if (!cached) {
+          cached = { roomId, view: { id: randomUUID(), presentation: candidate.presentation, status: candidate.status, detail: candidate.detail, retryDecision: null },
+            candidate, challenge, presentationSha256, touchedAt: now, decision: null };
+          this.approvalPresentations.set(cached.view.id, cached);
+        }
+        cached.candidate = candidate;
+        cached.touchedAt = now;
+        cached.view.status = candidate.status;
+        cached.view.detail = candidate.detail;
+        cached.view.retryDecision = null;
+        const recorded = candidate.recordedDecision;
+        if (recorded) {
+          cached.decision = { id: recorded.decisionId, choice: recorded.decision };
+          if (candidate.status === "decision_recorded" && recorded.actorId === `host-${challenge.keyFingerprint}`
+            && recorded.projectionSha256 === presentationSha256) cached.view.retryDecision = recorded.decision;
+          else if (candidate.status === "pending" || candidate.status === "decision_recorded") {
+            cached.view.status = "unavailable";
+            cached.view.detail = "The recorded decision cannot be retried against this presentation. No new decision will be created.";
+          }
+        } else if (candidate.status === "decision_recorded") {
+          cached.view.status = "unavailable";
+          cached.view.detail = "The recorded decision identity is unavailable. No new decision will be created.";
+        }
+        approvals.push(structuredClone(cached.view));
+      }
+      const retained = new Set(approvals.map(item => item.id));
+      for (const [key, item] of this.approvalPresentations) if (item.roomId === roomId && !retained.has(key)) this.approvalPresentations.delete(key);
+      while (this.approvalPresentations.size > 128) this.approvalPresentations.delete(this.approvalPresentations.keys().next().value!);
+      return { available: true, approvals, error: null };
+    } catch {
+      this.clearApprovalPresentations(roomId);
+      return { available: false, approvals: [], error: "Could not load host approvals. Check secure storage and the background service, then refresh." };
+    }
+  }
+
+  private clearApprovalPresentations(roomId: string): void {
+    for (const [key, item] of this.approvalPresentations) if (item.roomId === roomId) this.approvalPresentations.delete(key);
+  }
+
+  private signerForApproval(challenge: HostApprovalChallenge): Promise<HostApprovalSigner> {
+    if (this.approvalSigner?.fingerprint === challenge.keyFingerprint) return this.approvalSigner.promise;
+    const pending = { fingerprint: challenge.keyFingerprint, promise: this.loadApprovalSigner().then(signer => {
+      if (createHash("sha256").update(Buffer.from(signer.publicKey, "base64")).digest("hex") !== challenge.keyFingerprint) {
+        throw new Error("Host approval signer does not match this daemon.");
+      }
+      return signer;
+    }) };
+    this.approvalSigner = pending;
+    void pending.promise.catch(() => { if (this.approvalSigner === pending) this.approvalSigner = null; });
+    return pending.promise;
+  }
+
+  async decideHostApproval(input: { id: string; decision: HostApprovalChoice }, assertCaller?: () => void): Promise<HostApprovalStatus> {
+    if (!input || Object.keys(input).length !== 2 || typeof input.id !== "string"
+      || (input.decision !== "allow_once" && input.decision !== "deny")) throw new Error("Invalid approval decision.");
+    const selection = { id: input.id, decision: input.decision };
+    assertCaller?.();
+    const cached = this.approvalPresentations.get(selection.id);
+    if (!cached?.candidate.reference || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000) throw new Error("Refresh the approval before deciding.");
+    const assertEligible = () => {
+      if (this.approvalPresentations.get(selection.id) !== cached || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000
+        || (cached.view.status !== "pending" && !(cached.view.status === "decision_recorded" && cached.view.retryDecision === selection.decision))) {
+        throw new Error("Refresh the approval before deciding; this request cannot currently be sent.");
+      }
+      if (cached.decision && cached.decision.choice !== selection.decision) throw new Error("A different decision is already recorded for this request.");
+    };
+    assertEligible();
+    const presented = cached.candidate;
+    const expected = structuredClone(cached.candidate.reference);
+    const signer = await this.signerForApproval(cached.challenge);
+    const challenge = approvalChallenge.parse(await this.request<unknown>("supervisor.host_approval_challenge"));
+    if (JSON.stringify(challenge) !== JSON.stringify(cached.challenge)) throw new Error("The background service changed. Refresh the approval before deciding.");
+    assertCaller?.();
+    assertEligible();
+    if (cached.candidate !== presented) throw new Error("The approval was refreshed while deciding. Check it before trying again.");
+    const decision = cached.decision ?? { id: randomUUID(), choice: selection.decision };
+    const envelope = signer.sign(challenge, "decide", { expected,
+      decisionId: decision.id, actorId: `host-${challenge.keyFingerprint}`,
+      decision: decision.choice, projectionSha256: cached.presentationSha256 });
+    cached.decision = decision;
+    cached.view.status = "uncertain";
+    cached.view.retryDecision = null;
+    try {
+      const status = await this.request<HostApprovalStatus>("supervisor.host_approval_request", envelope,
+        undefined, MANIFEST_LIST_REQUEST_TIMEOUT_MS, false, undefined, () => {
+          assertCaller?.();
+          if (this.approvalPresentations.get(selection.id) !== cached || cached.candidate !== presented
+            || this.now().getTime() - cached.touchedAt > 30 * 60 * 1000 || cached.decision !== decision) {
+            throw new Error("The approval changed before dispatch.");
+          }
+        });
+      if (!approvalStatus.safeParse(status).success || status === "pending") throw new Error();
+      if (cached.candidate === presented && cached.decision === decision) {
+        cached.view.status = status;
+        cached.view.retryDecision = null;
+      }
+      return status;
+    } catch {
+      // Keep the exact decision identity: the daemon may have committed it.
+      if (cached.candidate === presented && cached.decision === decision) {
+        cached.view.status = "uncertain";
+        cached.view.retryDecision = null;
+      }
+      throw new Error("Could not confirm the decision. Refresh to check it; no new decision has been created.");
+    }
   }
 
   /**
@@ -1516,6 +1692,7 @@ export class SupervisorDaemonClient {
     timeoutMs = this.requestTimeoutMs,
     unrefSocket = false,
     signal?: AbortSignal,
+    assertDispatch?: () => void,
   ): Promise<T> {
     return new Promise<T>((resolve, reject) => {
       const id = randomUUID();
@@ -1559,7 +1736,9 @@ export class SupervisorDaemonClient {
         }
       });
       socket.once("connect", () => {
-        if (!settled) socket.write(`${JSON.stringify({ version, id, method, params })}\n`);
+        if (settled) return;
+        try { assertDispatch?.(); socket.write(`${JSON.stringify({ version, id, method, params })}\n`); }
+        catch (error) { finish(error instanceof Error ? error : new Error("Supervisor request was not dispatched.")); }
       });
     });
   }

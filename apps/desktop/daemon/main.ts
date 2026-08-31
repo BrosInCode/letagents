@@ -11,6 +11,7 @@ import {
 } from "./cloud-http.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
+import { createHostApprovalBridge } from "./host-approval-broker.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { DaemonAuthority } from "./daemon-authority.js";
 import { DaemonReadModel } from "./daemon-read-model.js";
@@ -133,6 +134,7 @@ export class SupervisorDaemon {
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly providerStreams: ProviderStreamCoordinator;
   private executionCapture: ExecutionCaptureCoordinator | null = null;
+  private readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
   private readonly providerCheckpoints: ProviderCheckpointCoordinator;
   private readonly providerExecution: ProviderExecutionCoordinator | null;
   private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
@@ -354,6 +356,7 @@ export class SupervisorDaemon {
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
       observeExecution: (entryId, handle, generation) => this.executionCapture?.install(entryId, handle, generation) ?? (() => {}),
+      observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
         getEntry: (entryId) => this.store.getEntry(entryId),
@@ -774,7 +777,16 @@ export class SupervisorDaemon {
       },
       policy: { structuredRoomTurnCompletion },
     });
+    this.hostApprovals = createHostApprovalBridge({
+      store: this.store, inbox: this.supervisedInbox, provider: this.providerPort,
+      workerBindings: this.workerBindings, providerCheckpoints: this.providerCheckpoints,
+      currentGeneration: () => this.singleton.currentGeneration,
+      currentHandle: entryId => this.liveHandles.get(entryId),
+      isCurrent: () => !this.handoffScheduled,
+      fenceCommit: commit => this.fenceDaemonCommit(commit),
+    });
     const controlOperations = {
+      hostApprovals: this.hostApprovals,
       activateCustodialPolling: (input) => this.deliveryCutoverExecution.activatePolling(input),
       getPollingActivation: (input) => this.deliveryCutoverExecution.getPollingActivation(input),
       cancelPollingActivation: (input) => this.deliveryCutoverExecution.cancelPollingActivation(input),
@@ -791,8 +803,8 @@ export class SupervisorDaemon {
       checkpointWorkerCursor: this.workerAuthority.checkpointWorkerCursor.bind(this.workerAuthority),
       commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
       compareAndSetDesiredState: this.desiredStates.compareAndSet.bind(this.desiredStates),
-      completeBoundedEffect: this.completeBoundedEffect.bind(this),
-      executeBoundedTool: this.executeBoundedTool.bind(this),
+      completeBoundedEffect: this.boundedEffects.complete.bind(this.boundedEffects),
+      executeBoundedTool: this.boundedEffects.execute.bind(this.boundedEffects),
       controlTurn: (input) => this.turnControls.control(input),
       entryWithDerivedLiveness: this.entryWithDerivedLiveness.bind(this),
       getAgentConfiguration: this.getAgentConfiguration.bind(this),
@@ -803,7 +815,7 @@ export class SupervisorDaemon {
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
-      prepareBoundedEffect: this.prepareBoundedEffect.bind(this),
+      prepareBoundedEffect: this.boundedEffects.prepare.bind(this.boundedEffects),
       prepareHandoff: this.prepareHandoff.bind(this),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
       purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
@@ -844,6 +856,7 @@ export class SupervisorDaemon {
     assertMacOS(this.platform);
     await this.singleton.acquire();
     try {
+      await this.hostApprovals.enroll(storage);
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
         return (await this.store.load()).generation;
@@ -880,6 +893,7 @@ export class SupervisorDaemon {
     // continuations before awaiting any drain so they cannot retain a socket
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
+    this.hostApprovals.close();
     this.executionCapture?.close();
     this.supervisedDelivery?.fence();
     this.wakeRoomMoveReconciliationWaiters();
@@ -1007,29 +1021,6 @@ export class SupervisorDaemon {
     return this.supervisedDeliveryLifecycle.exactActiveBoundedContext(input);
   }
 
-  private prepareBoundedEffect(input: {
-    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
-    providerTurnId: string;
-    mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
-  }): Promise<Record<string, unknown>> {
-    return this.boundedEffects.prepare(input);
-  }
-
-  private async executeBoundedTool(input: {
-    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
-    providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown;
-  }): Promise<Record<string, unknown>> {
-    return this.boundedEffects.execute(input);
-  }
-
-  private completeBoundedEffect(input: {
-    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
-    providerTurnId: string;
-    effectId: string; result?: unknown; error?: string;
-  }): Promise<{ completed: true }> {
-    return this.boundedEffects.complete(input);
-  }
-
   private async completeBoundedEffectOnce(input: {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
     providerTurnId: string;
@@ -1077,6 +1068,7 @@ export class SupervisorDaemon {
   private async prepareHandoff(): Promise<void> {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
+    this.hostApprovals.close();
     this.executionCapture?.close();
     // Authority revocation and delivery cancellation are one synchronous
     // edge. No claimed FIFO item may observe the public fence before its

@@ -612,7 +612,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   /** Host-only dispatch. A successful WebSocket send is NOT evidence that Codex applied the decision. */
-  async replyPermission(rawHandle: ProviderHandle, expectedRequest: RpcServerRequest, reply: "once" | "reject"):
+  async replyPermission(rawHandle: ProviderHandle, expectedRequest: RpcServerRequest, reply: "once" | "reject",
+    options?: { beforeNativeDispatch: () => Promise<void>; assertNativeDispatch?: () => void }):
     Promise<{ outcome: "sent"; scope: "request" }> {
     const handle = this.handles.get(rawHandle.workAttemptId);
     if (!handle || handle !== rawHandle) throw new CodexPermissionReplyError("not_dispatched");
@@ -639,7 +640,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new CodexPermissionReplyError("not_dispatched");
     }
     // No await or observer callback between the final fence and native response.
+    if (options) await options.beforeNativeDispatch();
     assertCurrent();
+    options?.assertNativeDispatch?.();
     try { handle.client.respond(expectedRequest, { decision }); }
     catch { throw new CodexPermissionReplyError("uncertain"); }
     if (this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") {

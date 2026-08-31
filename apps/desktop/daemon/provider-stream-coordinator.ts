@@ -77,6 +77,8 @@ export type ProviderStreamCoordinatorOptions = {
   provider?: Pick<ProviderActionPort, "stop" | "onExit" | "onStream">;
   /** Optional non-authoritative capture; never awaited by provider delivery. */
   observeExecution?(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): () => void;
+  /** Operational approvals have their own lifetime, independent of optional capture. */
+  observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
   bindings: ProviderStreamBindings;
   durability: ProviderStreamDurability;
@@ -191,11 +193,12 @@ export class ProviderStreamCoordinator {
     );
     this.options.streams.reset(entryId);
     this.liveHandles.set(entryId, handle);
+    const disposePermissions = this.options.observePermissions?.(entryId, handle, executionGenerationId) ?? (() => {});
     let disposeExecution = () => {};
     try { disposeExecution = this.options.observeExecution?.(entryId, handle, executionGenerationId) ?? disposeExecution; }
     catch { /* optional observation must not reject provider installation */ }
     const disposeCapture = () => { try { disposeExecution(); } catch { /* observation owns no execution authority */ } };
-    this.liveDisposers.set(entryId, [disposeCapture]);
+    this.liveDisposers.set(entryId, [disposeCapture, disposePermissions]);
     const binding = await this.options.bindings.get(entryId);
     const currentBinding = this.options.runtimeCustody.liveBinding(entryId);
     if (binding?.execution_generation_id === executionGenerationId) {
@@ -267,6 +270,7 @@ export class ProviderStreamCoordinator {
       disposeExit,
       disposeStream,
       disposeCapture,
+      disposePermissions,
       () => this.clearHeartbeat(heartbeat),
       () => this.options.streams.end(entryId),
     ]);

@@ -47,7 +47,7 @@ import {
 } from "../supervisor-retirement-operations.js";
 import { transferSupervisorOwnership } from "../supervisor-ownership.js";
 import { assertDesktopUpdateMutationAllowed } from "../updates.js";
-import { emitToMainWindow } from "../window.js";
+import { assertHostApprovalSender, emitToMainWindow } from "../window.js";
 
 let supervisorActivityBridgeRegistered = false;
 let supervisorStateBridgeRegistered = false;
@@ -74,6 +74,24 @@ function normalizeLaunchId(creationRequestId?: string | null): string {
 }
 
 export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): void {
+  targetIpcMain.handle("desktop:supervisor:list-host-approvals", async (event, roomIdentifier: string) => {
+    assertHostApprovalSender(event);
+    if (typeof roomIdentifier !== "string" || !roomIdentifier.trim() || roomIdentifier.length > 256) throw new Error("Choose an approval room.");
+    const storage = await getDesktopRoomStorage(roomIdentifier);
+    assertHostApprovalSender(event);
+    if (storage.effectiveMode !== "cloud") return { available: false, approvals: [], error: null };
+    const result = await supervisorDaemonClient.listHostApprovals(roomIdentifier);
+    assertHostApprovalSender(event);
+    return result;
+  });
+  targetIpcMain.handle("desktop:supervisor:decide-host-approval", async (event, input) => {
+    assertHostApprovalSender(event);
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.decideHostApproval(input, () => {
+      assertHostApprovalSender(event);
+      assertDesktopUpdateMutationAllowed();
+    });
+  });
   targetIpcMain.handle(
     "desktop:supervisor:get-status",
     async (): Promise<DesktopSupervisorDaemonStatus> => supervisorDaemonClient.ensureRunning(),

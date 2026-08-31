@@ -301,6 +301,8 @@ const api: DesktopApi = {
       ipcRenderer.invoke("desktop:workers:run-agent-provider-setup", providerId, input),
   },
   supervisor: {
+    listHostApprovals: roomIdentifier => ipcRenderer.invoke("desktop:supervisor:list-host-approvals", roomIdentifier),
+    decideHostApproval: input => ipcRenderer.invoke("desktop:supervisor:decide-host-approval", input),
     getStatus: () => ipcRenderer.invoke("desktop:supervisor:get-status"),
     listAgents: (roomIdentifier) => ipcRenderer.invoke("desktop:supervisor:list-agents", roomIdentifier ?? null),
     createAgent: (input) => ipcRenderer.invoke("desktop:supervisor:create-agent", input),
