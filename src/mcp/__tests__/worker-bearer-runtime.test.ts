@@ -41,8 +41,8 @@ const { registerRoomJoinTools } = await import("../server/tools/rooms/join-tools
 function toolHandler(
   register: (server: McpServer) => void,
   name: string,
-): (input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }> {
-  let handler: ((input: Record<string, unknown>) => Promise<{ content: Array<{ text: string }> }>) | null = null;
+): (input: Record<string, unknown>, extra?: { requestId?: string | number }) => Promise<{ content: Array<{ text: string }> }> {
+  let handler: ((input: Record<string, unknown>, extra?: { requestId?: string | number }) => Promise<{ content: Array<{ text: string }> }>) | null = null;
   register({ tool(toolName: string, _description: string, _schema: unknown, callback: unknown) {
     if (toolName === name) handler = callback as typeof handler;
   } } as unknown as McpServer);
@@ -433,12 +433,13 @@ test("custodial polling borrows authority and cannot fall back to owner or envir
   }
 });
 
-test("custodial wait acknowledges input before polling, defaults to durable cursor and gates response", async () => {
+test("custodial wait uses exact BEFORE cursor and records only bounded RELEASE without legacy checkpoints", async () => {
   const root = mkdtempSync(join(tmpdir(), "custodial-wait-"));
   const socketPath = join(root, "daemon.sock");
   const phases: string[] = [];
-  const acknowledgements: string[] = [];
+  const requests: any[] = [];
   let rejectRelease = false;
+  let returnedPage: Record<string, unknown> = { messages: [], last_observed_message_id: "msg_99" };
   const server = createServer((socket) => {
     let buffer = "";
     socket.setEncoding("utf8");
@@ -446,15 +447,17 @@ test("custodial wait acknowledges input before polling, defaults to durable curs
       buffer += chunk;
       if (!buffer.includes("\n")) return;
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
+      requests.push(request);
       let result: unknown;
       let ok = true;
-      if (request.method === "daemon.negotiate") result = { protocol_version: 2, generation: 17, pid: 123, started_at: "now", capabilities: { custodialPollingV1: true } };
+      if (request.method === "daemon.negotiate") result = { protocol_version: 2, generation: 17, pid: 123, started_at: "now", capabilities: { custodialPollingV1: true, custodialPollingOffersV1: true } };
       else if (request.method === "supervisor.authorize_custodial_polling") {
         phases.push(request.params.phase);
         ok = !(rejectRelease && request.params.phase === "release");
-        result = { status: "authorized", contract: "custodial_polling_v1", room_id: "room_exact", agent_session_id: "session_exact", room_cursor: "msg_7", configuration_revision: 3 };
+        result = { status: "authorized", contract: "custodial_polling_v1", room_id: "room_exact", agent_session_id: "session_exact", room_cursor: "msg_7", configuration_revision: 3,
+          activation_id: "activation_exact", binding_epoch: 4 };
       } else if (request.method === "supervisor.checkpoint_worker_cursor") {
-        phases.push("ack"); acknowledgements.push(request.params.room_cursor); result = { checkpointed: true };
+        phases.push("legacy-ack"); result = { checkpointed: true };
       } else throw new Error(`Unexpected request ${request.method}`);
       socket.end(`${JSON.stringify({ version: 2, id: request.id, ok, result })}\n`);
     });
@@ -471,20 +474,50 @@ test("custodial wait acknowledges input before polling, defaults to durable curs
         assert.equal(new Headers(init?.headers).get("authorization"), "Bearer exact-worker");
         if (String(url).includes("/messages/poll?")) {
           phases.push("poll");
-          assert.equal(new URL(String(url)).searchParams.get("after"), acknowledgements.at(-1));
-          return new Response(JSON.stringify({ room_id: "room_exact", messages: [], last_observed_message_id: "msg_99" }), { status: 200 });
+          assert.equal(new URL(String(url)).searchParams.get("after"), "msg_7");
+          return new Response(JSON.stringify({ room_id: "room_exact", ...returnedPage }), { status: 200 });
         }
         return new Response(null, { status: 204 });
       };
       const wait = toolHandler((recorder) => registerWaitForMessagesTool(profileAwareToolServer(recorder, "supervised_mcp_polling")), "wait_for_messages");
-      await wait({});
-      assert.deepEqual(phases, ["before", "ack", "poll", "release"]);
-      assert.deepEqual(acknowledgements, ["msg_7"], "response msg_99 must never be checkpointed");
+      for (const mismatched of [{ room_id: "other" }, { agent_session_id: "other" }]) {
+        await assert.rejects(wait(mismatched, { requestId: "wrong-identity" }), /exact authority/);
+      }
+      assert.equal(requests.length, 0, "wrong room or session must fail before BEFORE could acknowledge a cursor");
+      assert.deepEqual(phases, []);
+      const silent = await wait({}, { requestId: 1 });
+      assert.equal(JSON.parse(silent.content[0]!.text).last_observed_message_id, "msg_99");
+      assert.deepEqual(phases, ["before", "poll", "release"]);
+      assert.equal(requests.find(request => request.params?.phase === "before").params.room_cursor, null);
+      assert.equal(requests.at(-1).params.offered_frontier, "msg_99", "silent-page progress still needs a durable offer");
+      const incarnation = requests.at(-1).params.process_incarnation_id;
+      const extra = { requestId: "1" };
+      phases.length = 0;
+      returnedPage = { messages: [] };
+      await wait({ after_message_id: "msg_900" }, extra);
+      assert.deepEqual(phases, ["before", "poll", "release"]);
+      assert.equal(requests.at(-2).params.room_cursor, "msg_900", "BEFORE sees the caller's requested ACK");
+      assert.equal(requests.at(-1).params.input_cursor, "msg_7", "callback always polls from returned authoritative cursor");
+      assert.equal(requests.at(-1).params.offered_frontier, "msg_7", "empty no-progress still validates RELEASE, without fabricating progress");
+      assert.equal(requests.at(-1).params.mcp_request_id, "1");
+      assert.equal(requests.at(-1).params.process_incarnation_id, incarnation);
+      phases.length = 0;
+      returnedPage = { messages: Array.from({ length: 3 }, (_, index) => ({
+        id: `msg_${8 + index}`, source: "human", text: "x".repeat(950_000),
+      })), last_observed_message_id: "msg_99" };
+      const bounded = JSON.parse((await wait({}, { requestId: 2 })).content[0]!.text);
+      assert.equal(bounded.truncated, true);
+      assert.equal(requests.at(-1).params.offered_frontier, bounded.last_observed_message_id);
+      assert.notEqual(requests.at(-1).params.offered_frontier, "msg_99", "never receipt omitted visible messages using the API's larger frontier");
       phases.length = 0;
       rejectRelease = true;
-      await assert.rejects(wait({ after_message_id: "msg_8" }), /stale/);
-      assert.deepEqual(phases, ["before", "ack", "poll", "release"]);
-      assert.deepEqual(acknowledgements, ["msg_7", "msg_8"]);
+      returnedPage = { messages: [], last_observed_message_id: "msg_99" };
+      await assert.rejects(wait({ after_message_id: "msg_8" }, { requestId: 3 }), /stale/);
+      assert.deepEqual(phases, ["before", "poll", "release"]);
+      assert.equal(requests.some(request => request.method === "supervisor.checkpoint_worker_cursor"), false);
+      assert.ok(requests.filter(request => request.params?.phase === "release").every(request =>
+        request.params.expected_activation_id === "activation_exact" && request.params.expected_binding_epoch === 4
+        && request.params.expected_configuration_revision === 3 && request.params.input_cursor === "msg_7"));
     });
   } finally {
     globalThis.fetch = originalFetch;

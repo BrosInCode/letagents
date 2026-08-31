@@ -114,6 +114,9 @@ function hostGrant(overrides: Partial<InstalledHostGrant> = {}): InstalledHostGr
 }
 
 type HarnessOptions = {
+  acknowledgePollingOffer?: WorkerAuthorityCoordinatorOptions["store"]["acknowledgePollingOffer"];
+  recordPollingOffer?: WorkerAuthorityCoordinatorOptions["store"]["recordPollingOffer"];
+  fenceCommit?: WorkerAuthorityCoordinatorOptions["authority"]["fenceCommit"];
   activation?: PollingActivationRecord | null;
   getAgentConfiguration?: WorkerAuthorityCoordinatorOptions["store"]["getAgentConfiguration"];
   drainPhase?: "draining" | "dispatching" | "uncertain";
@@ -240,6 +243,8 @@ function fixture(options: HarnessOptions = {}) {
 
   const subject = new WorkerAuthorityCoordinator({
     store: {
+      acknowledgePollingOffer: (...args) => options.acknowledgePollingOffer ? options.acknowledgePollingOffer(...args) : Promise.reject(new Error("Unexpected polling ACK")),
+      recordPollingOffer: (...args) => options.recordPollingOffer ? options.recordPollingOffer(...args) : Promise.reject(new Error("Unexpected polling offer")),
       getAgentConfiguration: options.getAgentConfiguration ?? (async () => ({ polling_contract: null, config_revision: 1, runtime_configuration_revision: 1 })),
       unresolvedDeliveryDrain: async () => options.drainPhase ? ({ phase: options.drainPhase } as never) : null,
       unresolvedPollingActivation: async () => options.activation ?? null,
@@ -282,6 +287,7 @@ function fixture(options: HarnessOptions = {}) {
       latest: options.latest ?? (async () => ({ messages: [{ id: "20" }] })),
     },
     authority: {
+      fenceCommit: commit => options.fenceCommit ? options.fenceCommit(commit) : commit(),
       currentGeneration: () => generation,
       isHandoffScheduled: () => handoff,
       assertCurrent: async () => {
@@ -394,16 +400,28 @@ test("custodial effects and cursor writes require exact active activation while 
     } }),
     getAgentConfiguration: async () => ({ polling_contract: "custodial_polling_v1", config_revision: configurationRevision, runtime_configuration_revision: runtimeConfigurationRevision }),
     createWorkerSession: async () => ({ sessionId: mintedSessionId, bearer: "rotated-secret", bearerId: "rotated-id", expiresAt: new Date(now + 60_000).toISOString() }),
+    acknowledgePollingOffer: async (input, fence) => {
+      assert.equal(input.operationId, "activation-1");
+      await fence(async () => {});
+      return { acknowledged: false, offer: null, roomCursor: "12", bindingEpoch: 2 };
+    },
+    recordPollingOffer: async (input, fence) => {
+      assert.equal(input.expectedBindingEpoch, 2);
+      assert.equal(input.inputCursor, "12");
+      await fence(async () => {});
+      return null;
+    },
   };
   const harness = fixture(options);
   harness.custody.installHostGrant(hostGrant());
   const request = { entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
-    agent_session_id: "session-1", daemon_generation: 7, api_url: "https://letagents.test", contract: "custodial_polling_v1", phase: "before", tool_name: "send_message" };
+    agent_session_id: "session-1", daemon_generation: 7, api_url: "https://letagents.test", contract: "custodial_polling_v1", phase: "before", tool_name: "wait_for_messages",
+    process_incarnation_id: "01234567-89ab-4cde-8f01-23456789abcd", mcp_request_id: 1, room_cursor: "47" };
   const cursor = { entry_id: "agent-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1", agent_session_id: "session-1", room_cursor: "47" };
   for (const phase of [null, "prepared", "dispatching", "uncertain"] as const) {
     options.activation = phase ? { ...activation, phase } : null;
     await assert.rejects(harness.subject.authorizeCustodialPolling(request), /activation/);
-    await assert.rejects(harness.subject.checkpointWorkerCursor(cursor), /activation/);
+    await assert.rejects(harness.subject.checkpointWorkerCursor(cursor), /legacy cursor checkpoints are disabled/);
     assert.equal(harness.binding?.room_cursor, "12");
   }
   options.activation = activation;
@@ -420,16 +438,23 @@ test("custodial effects and cursor writes require exact active activation while 
   await assert.rejects(harness.subject.authorizeCustodialPolling(request), /activation/);
 
   options.activation = { ...activation, phase: "active", provider_turn_id: "native-turn" };
-  assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
-  assert.equal((await harness.subject.authorizeCustodialPolling({ ...request, phase: "release", expected_configuration_revision: 1 })).status, "authorized");
-  await harness.subject.checkpointWorkerCursor(cursor);
-  assert.equal(harness.binding?.room_cursor, "47");
+  const admitted = await harness.subject.authorizeCustodialPolling(request);
+  assert.equal(admitted.status, "authorized");
+  assert.equal(admitted.room_cursor, "12", "mismatched ACK returns the journal's authoritative cursor");
+  assert.equal(admitted.binding_epoch, 2);
+  assert.equal(admitted.activation_id, "activation-1");
+  const release = { ...request, phase: "release", expected_configuration_revision: 1,
+    expected_activation_id: admitted.activation_id, expected_binding_epoch: admitted.binding_epoch, input_cursor: admitted.room_cursor, offered_frontier: admitted.room_cursor };
+  assert.equal((await harness.subject.authorizeCustodialPolling(release)).status, "authorized");
+  await assert.rejects(harness.subject.authorizeCustodialPolling({ ...release, expected_activation_id: "successor" }), /stale activation/);
+  await assert.rejects(harness.subject.checkpointWorkerCursor(cursor), /legacy cursor checkpoints are disabled/);
+  assert.equal(harness.binding?.room_cursor, "12");
   for (const wrong of [
     { phase: "release", expected_configuration_revision: 2 }, { daemon_generation: 8 },
     { room_id: "other-room" }, { agent_session_id: "unowned-worker" }, { execution_generation_id: "other-generation" },
   ]) {
     assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
-    await assert.rejects(harness.subject.authorizeCustodialPolling({ ...request, ...wrong }), /stale|not authorized/);
+    await assert.rejects(harness.subject.authorizeCustodialPolling({ ...release, ...wrong }), /stale|not authorized/);
     assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
   }
   const currentSession = harness.bindings.supervisedWorkerSession;
@@ -443,8 +468,7 @@ test("custodial effects and cursor writes require exact active activation while 
     else grant.expiresAt = new Date(now - 1).toISOString();
     await assert.rejects(harness.subject.authorizeCustodialPolling(request), /authority changed|not authorized/);
     assert.deepEqual(await harness.subject.borrowWorkerCredential({ ...request, provider_turn_id: "" }), { status: "stale" });
-    await assert.rejects(harness.subject.checkpointWorkerCursor({ ...cursor, room_cursor: "48" }), /authority is unavailable/);
-    assert.equal(harness.binding?.room_cursor, "47");
+    assert.equal(harness.binding?.room_cursor, "12");
     harness.bindings.supervisedWorkerSession = currentSession; grant.expiresAt = freshExpiry;
     assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
     assert.deepEqual(await harness.subject.borrowWorkerCredential({ ...request, provider_turn_id: "" }), { status: "available", credential: "rotated-secret" });
@@ -460,12 +484,37 @@ test("custodial effects and cursor writes require exact active activation while 
     if (change === "execution") options.activation = { ...options.activation!, execution_generation_id: "another-generation" };
     if (change === "launch_receipt") harness.setEntry({ ...entry, provider_ref: { ...entry.provider_ref!, custodial_launch_agent_session_id: "another-worker" } });
     await assert.rejects(harness.subject.authorizeCustodialPolling(request), /activation|worker binding/);
-    await assert.rejects(harness.subject.checkpointWorkerCursor({ ...cursor, room_cursor: "48" }), /activation/);
-    assert.equal(harness.binding?.room_cursor, "47");
+    assert.equal(harness.binding?.room_cursor, "12");
     configurationRevision = 1; runtimeConfigurationRevision = 1; harness.setHandle(handle); harness.setEntry(entry);
     options.activation = { ...activation, phase: "active", provider_turn_id: "native-turn" };
     assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
   }
+  // These changes happen after asynchronous preflight, inside the commit
+  // fence. No queued binding-store getter may run while that fence is held.
+  const queuedGet = harness.bindings.get;
+  for (const change of ["host_expiry", "handoff", "generation", "native_birth", "native_revision", "stopped"] as const) {
+    options.fenceCommit = async commit => {
+      harness.bindings.get = async () => { throw new Error("Queued binding read inside commit fence"); };
+      if (change === "host_expiry") grant.expiresAt = new Date(now - 1).toISOString();
+      if (change === "handoff") harness.setHandoff(true);
+      if (change === "generation") harness.setGeneration(8);
+      if (change === "native_birth") handle.providerConnection = { ...connection, processIdentity: "successor" };
+      if (change === "native_revision") handle.appliedConfigurationRevision = 2;
+      if (change === "stopped") handle.observedState = "stopped";
+      await commit();
+    };
+    await assert.rejects(harness.subject.authorizeCustodialPolling(release), /changed before receipt commit/);
+    harness.bindings.get = queuedGet; grant.expiresAt = freshExpiry;
+    harness.setHandoff(false); harness.setGeneration(7); handle.providerConnection = connection;
+    handle.appliedConfigurationRevision = 1; handle.observedState = "working";
+    options.fenceCommit = undefined;
+  }
+  options.fenceCommit = async commit => {
+    harness.bindings.get = async () => { throw new Error("Queued binding read inside commit fence"); };
+    try { await commit(); } finally { harness.bindings.get = queuedGet; }
+  };
+  assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+  options.fenceCommit = undefined;
   mintedSessionId = "new-worker-same-process";
   await assert.rejects(harness.subject.mintHostWorkerSession(harness.entry, "execution-1", true), /activation/);
   assert.equal(harness.binding?.agent_session_id, "session-1", "a new session cannot replace the worker embedded in the live native MCP environment");

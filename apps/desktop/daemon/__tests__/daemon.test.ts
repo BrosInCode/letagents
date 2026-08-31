@@ -1310,6 +1310,7 @@ for (const scenario of ["activation", "pre_activation_forward"] as const) test(s
   const pollingPid = pollingProcess?.pid ?? process.pid;
   const currentConnection = { ...oldConnection, pid: pollingPid, processIdentity: birth(pollingPid) };
   let nativeStarts = 0;
+  let expectedPollingCursor = "100";
   let behavior: "success" | "before_dispatch_failure" | "lost_ack" = "success";
   let terminal = false;
   let currentHandle: ProviderActionHandle | undefined;
@@ -1329,7 +1330,7 @@ for (const scenario of ["activation", "pre_activation_forward"] as const) test(s
       assert.equal(handle, currentHandle);
       assert.equal(request.launchReceipt.agentSessionId, "polling-worker");
       assert.deepEqual(request.launchReceipt.providerConnection, currentConnection);
-      assert.equal(request.workerSession.roomCursor, "100");
+      assert.equal(request.workerSession.roomCursor, expectedPollingCursor);
       if (behavior === "before_dispatch_failure") throw new Error("test transport unavailable before dispatch");
       await callbacks.beforeNativeDispatch(); nativeStarts += 1;
       if (behavior === "lost_ack") throw new Error("test native acknowledgement lost");
@@ -1437,6 +1438,47 @@ for (const scenario of ["activation", "pre_activation_forward"] as const) test(s
     assert.equal(record.execution_generation_id, execution.execution_generation_id);
     assert.equal(record.native_process_identity, currentConnection.processIdentity);
     assert.equal(record.agent_session_id, "polling-worker"); assert.equal(nativeStarts, 1);
+    const negotiated = await daemonRequest(env.paths.socketPath, "daemon.negotiate");
+    assert.equal((negotiated.result as { capabilities: { custodialPollingOffersV1: boolean } }).capabilities.custodialPollingOffersV1, true);
+    const wait = { entry_id: env.id, room_id: entry.room_id, work_attempt_id: env.handle.workAttemptId,
+      execution_generation_id: execution.execution_generation_id, agent_session_id: binding.agent_session_id,
+      daemon_generation: await generation(), api_url: "https://example.test", contract: "custodial_polling_v1",
+      tool_name: "wait_for_messages", phase: "before", process_incarnation_id: "01234567-89ab-4cde-8f01-23456789abcd",
+      mcp_request_id: 1, room_cursor: "999" };
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", { ...wait, mcp_request_id: null })).ok, false);
+    const before = await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", wait);
+    assert.equal(before.ok, true, before.error);
+    const receipt = before.result as { activation_id: string; binding_epoch: number; room_cursor: string; configuration_revision: number };
+    assert.equal(receipt.room_cursor, "100", "unknown ACK cannot jump past unread work");
+    assert.equal(receipt.activation_id, record.operation_id);
+    const release = { ...wait, phase: "release", expected_activation_id: receipt.activation_id,
+      expected_binding_epoch: receipt.binding_epoch, expected_configuration_revision: receipt.configuration_revision,
+      input_cursor: receipt.room_cursor, offered_frontier: "102" };
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", release)).ok, true);
+    const firstOffer = (await internals.store.getPollingOfferTail(record.operation_id))!;
+    assert.equal(firstOffer.mcp_request_id, "1");
+    assert.equal((await internals.workerBindings.get(env.id))?.room_cursor, "100", "offering does not ACK");
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", { ...release, mcp_request_id: "1", offered_frontier: "103" })).ok, true);
+    const tail = (await internals.store.getPollingOfferTail(record.operation_id))!;
+    assert.equal(tail.mcp_request_id, '"1"', "router must not collapse numeric and string SDK IDs");
+    assert.equal(tail.predecessor_offer_id, firstOffer.offer_id);
+    const staleAck = await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", { ...wait, room_cursor: "102" });
+    assert.equal((staleAck.result as { room_cursor: string }).room_cursor, "100");
+    // Recent-tail context reads are fenced but never grant a delivery ACK.
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", { ...wait, tool_name: "read_messages", room_cursor: "103" })).ok, true);
+    assert.equal((await internals.workerBindings.get(env.id))?.room_cursor, "100");
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.checkpoint_worker_cursor", { ...wait, room_cursor: "103" })).ok, false);
+    const acknowledged = await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", { ...wait, mcp_request_id: 2, room_cursor: "103" });
+    assert.equal(acknowledged.ok, true, acknowledged.error);
+    assert.equal((acknowledged.result as { room_cursor: string }).room_cursor, "103");
+    expectedPollingCursor = "103";
+    const noProgress = { ...release, mcp_request_id: 2, input_cursor: "103", offered_frontier: "103" };
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", noProgress)).ok, true);
+    assert.equal((await internals.store.getPollingOfferTail(record.operation_id))?.offer_id, tail.offer_id);
+    await internals.workerBindings.bind({ ...binding, agent_session_token: "test-worker" });
+    const staleRelease = await daemonRequest(env.paths.socketPath, "supervisor.authorize_custodial_polling", { ...noProgress, offered_frontier: "104" });
+    assert.equal(staleRelease.ok, false, "same-session rebind must invalidate the old BEFORE epoch");
+    assert.equal((await internals.store.getPollingOfferTail(record.operation_id))?.offer_id, tail.offer_id);
     terminal = true;
     await eventually(async () => {
       await internals.deliveryCutovers.start(env.id);
@@ -7223,6 +7265,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
           execution_generation_id: current.provider_ref!.execution_generation_id, agent_session_id: `session_daemon_${current.id}`,
           daemon_generation: generation, api_url: "http://127.0.0.1:9", contract: "custodial_polling_v1",
           phase: "before", tool_name: "wait_for_messages",
+          process_incarnation_id: "01234567-89ab-4cde-8f01-23456789abcd", mcp_request_id: 1, room_cursor: "msg_47",
         };
         const admitted = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params);
         assert.equal(admitted.ok, false, "changing the contract does not authorize native work");
@@ -7230,9 +7273,13 @@ test(`two Codex room agents keep independent provider executions across stop, re
         // Active expiry/revision/identity tests now live beside the explicit
         // activation gate in worker-authority-coordinator.test.ts. This older
         // fixture proves only dormant grant/worker recovery, not activation.
-        assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
+        const released = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
           ...params, phase: "release", expected_configuration_revision: 1,
-        })).ok, false);
+          expected_activation_id: "unactivated", expected_binding_epoch: 1,
+          input_cursor: "msg_47", offered_frontier: "msg_48",
+        });
+        assert.equal(released.ok, false);
+        assert.match(released.error ?? "", /activation/);
         assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
           ...params, room_cursor: "msg_48",
         })).ok, false, "dormant processes cannot advance the acknowledged cursor");

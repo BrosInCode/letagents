@@ -14,6 +14,7 @@ import {
 } from "../server/runtime/supervised-room-authority.js";
 
 const result = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
+const waitResult = (data: Record<string, unknown> = {}): CallToolResult => result(JSON.stringify({ messages: [], ...data }));
 const withRoom = <T>(roomId: string, callback: () => T): T => runWithSupervisedRoomAuthority(roomId, callback);
 
 test("custodial tools gate before work and fence read release without bounded effects", async () => {
@@ -33,10 +34,10 @@ test("custodial tools gate before work and fence read release without bounded ef
         prepareEffect: async () => { throw new Error("polling must not use bounded effects"); },
         completeEffect: async () => { throw new Error("polling must not checkpoint bounded effects"); },
         withRoom,
-      }, async () => { calls++; assert.equal(getCurrentSupervisedRoomAuthority(), "room_exact"); return result("data"); }, tool, "codex", "supervised_mcp_polling");
+      }, async () => { calls++; assert.equal(getCurrentSupervisedRoomAuthority(), "room_exact"); return tool === "wait_for_messages" ? waitResult() : result("data"); }, tool, "codex", "supervised_mcp_polling");
       const fails = rejectAt === "before" || (rejectAt === "release" && tool !== "send_message");
-      if (fails) await assert.rejects(handler({}, {}), /stale authority/);
-      else assert.deepEqual(await handler({}, {}), result("data"));
+      if (fails) await assert.rejects(handler({}, { requestId: 1 }), /stale authority/);
+      else assert.deepEqual(await handler({}, { requestId: 1 }), tool === "wait_for_messages" ? waitResult() : result("data"));
       assert.equal(calls, rejectAt === "before" ? 0 : 1);
       assert.deepEqual(phases, rejectAt === "before" || tool === "send_message" ? ["before"] : ["before", "release"]);
     }
@@ -49,19 +50,85 @@ test("custodial wait refuses missing durable cursor and cross-room inputs before
     authorizePolling: async () => ({ roomId: "room_exact", roomCursor: null } as import("../server/runtime/supervisor-bridge.js").CustodialPollingAuthorization),
     prepareEffect: async () => { throw new Error("not reached"); }, completeEffect: async () => {}, withRoom,
   }, async () => { calls++; return result("not reached"); }, "wait_for_messages", "codex", "supervised_mcp_polling");
-  await assert.rejects(handler({}, {}), /no durable cursor/);
-  await assert.rejects(handler({ room_id: "other" }, {}), /exact authority/);
+  await assert.rejects(handler({}, { requestId: 1 }), /no durable cursor/);
+  await assert.rejects(handler({ room_id: "other" }, { requestId: 1 }), /exact authority/);
   assert.equal(calls, 0);
+});
+
+test("custodial waits preserve typed SDK identity, correct caller cursors and await exact bounded release", async () => {
+  for (const [requestId, page, frontier] of [
+    [1, {}, "msg_7"],
+    [0, { last_observed_message_id: "msg_7", skipped_message_count: 0, skipped_message_ids: [] }, "msg_7"],
+    ["1", { last_observed_message_id: "msg_19" }, "msg_19"],
+    [2, { messages: [{ id: "msg_8" }], last_observed_message_id: "msg_8", truncated: true, omitted_message_count: 1 }, "msg_8"],
+  ] as const) {
+    const phases: string[] = [];
+    const input = { after_message_id: "msg_900", timeout: 1000 };
+    const authority = { roomId: "room_exact", roomCursor: "msg_7" } as import("../server/runtime/supervisor-bridge.js").CustodialPollingAuthorization;
+    let release!: () => void;
+    let reachedRelease!: () => void;
+    const releaseGate = new Promise<void>(resolve => { release = resolve; });
+    const reachedGate = new Promise<void>(resolve => { reachedRelease = resolve; });
+    const handler = registeredHandler({
+      authorizePolling: async (name, prior, wait) => {
+        assert.equal(name, "wait_for_messages");
+        phases.push(prior ? "release" : "before");
+        assert.deepEqual(wait, { mcpRequestId: requestId, roomCursor: "msg_900", ...(prior ? { offeredFrontier: frontier } : {}) });
+        if (prior) { assert.equal(prior, authority); reachedRelease(); await releaseGate; }
+        return authority;
+      }, prepareEffect: async () => { throw new Error("not reached"); }, completeEffect: async () => {}, withRoom,
+    }, async received => {
+      phases.push("callback");
+      assert.deepEqual(received, { ...input, after_message_id: "msg_7" });
+      return waitResult(page);
+    }, "wait_for_messages", "codex", "supervised_mcp_polling");
+    let returned = false;
+    const pending = handler(input, { requestId }).then(value => { returned = true; return value; });
+    await reachedGate;
+    assert.equal(returned, false, "the provider cannot see messages before release is durable");
+    assert.equal(input.after_message_id, "msg_900", "do not mutate the caller's request object");
+    release();
+    assert.deepEqual(await pending, waitResult(page));
+    assert.deepEqual(phases, ["before", "callback", "release"]);
+  }
+});
+
+test("custodial wait refuses missing SDK identity and never offers callback errors or malformed pages", async () => {
+  for (const failure of ["missing_id", "unsafe_id", "callback", "error_result", "invalid_json", "missing_frontier", "silent_missing_frontier", "regressed_frontier", "equal_visible", "equal_skipped", "equal_truncated", "other_room"] as const) {
+    const phases: string[] = [];
+    const handler = registeredHandler({
+      authorizePolling: async (_name, prior) => {
+        phases.push(prior ? "release" : "before");
+        return { roomId: "room_exact", roomCursor: "msg_7" } as import("../server/runtime/supervisor-bridge.js").CustodialPollingAuthorization;
+      }, prepareEffect: async () => { throw new Error("not reached"); }, completeEffect: async () => {}, withRoom,
+    }, async () => {
+      phases.push("callback");
+      if (failure === "callback") throw new Error("original callback error");
+      if (failure === "error_result") return { ...waitResult(), isError: true };
+      if (failure === "invalid_json") return result("invalid");
+      if (failure === "missing_frontier") return waitResult({ messages: [{ id: "msg_8" }] });
+      if (failure === "silent_missing_frontier") return waitResult({ skipped_message_count: 1 });
+      if (failure === "regressed_frontier") return waitResult({ last_observed_message_id: "msg_6" });
+      if (failure === "equal_visible") return waitResult({ messages: [{ id: "msg_7" }], last_observed_message_id: "msg_7" });
+      if (failure === "equal_skipped") return waitResult({ skipped_message_count: 1, last_observed_message_id: "msg_7" });
+      if (failure === "equal_truncated") return waitResult({ truncated: true, last_observed_message_id: "msg_7" });
+      if (failure === "other_room") return waitResult({ room_id: "other" });
+      return waitResult();
+    }, "wait_for_messages", "codex", "supervised_mcp_polling");
+    await assert.rejects(handler({ requestId: "not-an-SDK-id" }, failure === "missing_id" ? {} : { requestId: failure === "unsafe_id" ? Number.MAX_SAFE_INTEGER + 1 : 1 }),
+      failure === "callback" ? /original callback error/ : /Custodial wait/);
+    assert.deepEqual(phases, failure === "missing_id" || failure === "unsafe_id" ? [] : ["before", "callback"]);
+  }
 });
 
 function registeredHandler(
   dependencies: SupervisedToolFacadeDependencies,
-  callback: () => Promise<CallToolResult>,
+  callback: (input?: Record<string, unknown>) => Promise<CallToolResult>,
   toolName = "send_message",
   supervisedProvider: string | null = null,
   profile: "supervised_room_turn" | "supervised_mcp_polling" = "supervised_room_turn",
 ) {
-  let handler: ((input: unknown, extra: { requestId?: string }) => Promise<CallToolResult>) | null = null;
+  let handler: ((input: unknown, extra: { requestId?: string | number }) => Promise<CallToolResult>) | null = null;
   const server = {
     tool(_name: string, ...registration: unknown[]) {
       handler = registration.at(-1) as typeof handler;

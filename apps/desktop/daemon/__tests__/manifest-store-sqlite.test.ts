@@ -34,30 +34,50 @@ test("polling offers persist a single successor chain without advancing the curs
     try {
       database.exec("CREATE TRIGGER reject_offer_manifest_reinsert BEFORE DELETE ON agent_identities BEGIN SELECT RAISE(ABORT,'offer cannot replace manifest graph'); END");
       const before = await store.load();
-      const scope = { operationId: activation.operationId, agentId: activation.agentId,
+      const identity = { operationId: activation.operationId, agentId: activation.agentId,
         processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab" };
-      assert.equal((await store.acknowledgePollingOffer({ ...scope, roomCursor: "msg_49" }, async commit => commit())).acknowledged, false);
+      const initial = await store.acknowledgePollingOffer({ ...identity, roomCursor: null }, async commit => commit());
+      assert.deepEqual(initial, { acknowledged: false, offer: null, roomCursor: "msg_47",
+        bindingEpoch: database.prepare("SELECT binding_epoch FROM worker_session_bindings").get()!.binding_epoch });
+      const scope = { ...identity, expectedBindingEpoch: initial.bindingEpoch };
+      assert.deepEqual(await store.acknowledgePollingOffer({ ...scope, roomCursor: "msg_49" }, async commit => commit()), initial);
+      assert.equal(await store.recordPollingOffer({ ...scope, requestId: "empty", inputCursor: "msg_47", offeredFrontier: "msg_47" }, async commit => commit()), null);
+      assert.equal(await store.getPollingOfferTail(activation.operationId), null);
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers").get()!.n, 0);
       const first = await store.recordPollingOffer({ ...scope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_49" }, async commit => commit());
+      assert.ok(first);
       assert.equal(first.mcp_request_id, "1"); assert.equal(first.predecessor_offer_id, null);
       assert.deepEqual(await store.recordPollingOffer({ ...scope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_49" }, async commit => commit()), first);
       const second = await store.recordPollingOffer({ ...scope, requestId: "1", inputCursor: "msg_47", offeredFrontier: "msg_50" }, async commit => commit());
+      assert.ok(second);
       assert.equal(second.mcp_request_id, '"1"'); assert.equal(second.predecessor_offer_id, first.offer_id);
       await assert.rejects(store.recordPollingOffer({ ...scope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_49" }, async commit => commit()), /superseded/);
-      assert.equal((await store.acknowledgePollingOffer({ ...scope, roomCursor: "msg_49" }, async commit => commit())).acknowledged, false);
+      for (const requestId of [1, "1"]) await assert.rejects(store.recordPollingOffer({ ...scope, requestId, inputCursor: "msg_47", offeredFrontier: "msg_47" }, async commit => commit()), /invocation changed/);
+      assert.equal(await store.recordPollingOffer({ ...scope, requestId: "empty-tail", inputCursor: "msg_47", offeredFrontier: "msg_47" }, async commit => commit()), null);
+      assert.deepEqual(await store.getPollingOfferTail(activation.operationId), second, "no-progress reads cannot supersede an outstanding offer");
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers").get()!.n, 2);
+      for (const roomCursor of [null, "msg_49"]) assert.deepEqual(await store.acknowledgePollingOffer({ ...scope, roomCursor }, async commit => commit()),
+        { ...initial, offer: second });
+      await assert.rejects(store.acknowledgePollingOffer({ ...scope, roomCursor: "opaque" }, async commit => commit()), /numeric room cursor/);
       assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()?.room_cursor, "msg_47");
       assert.deepEqual(await store.load(), before, "offering/superseding does not rewrite the manifest or consume work");
       await store.close(); store = new ManifestStore(env.databasePath);
       assert.deepEqual(await store.getPollingOfferTail(activation.operationId), second, "outstanding offer survives daemon restart");
       const replacementScope = { ...scope, processIncarnationId: "fedcba98-7654-4321-8fab-0123456789ab" };
       const replacement = await store.recordPollingOffer({ ...replacementScope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_50" }, async commit => commit());
+      assert.ok(replacement);
       assert.equal(replacement.predecessor_offer_id, second.offer_id);
       assert.equal((await store.acknowledgePollingOffer({ ...scope, roomCursor: "msg_50" }, async commit => commit())).acknowledged, false,
         "a previous MCP process cannot acknowledge the replacement process's offer");
       const repeatedFrontier = await store.recordPollingOffer({ ...replacementScope, requestId: 2, inputCursor: "msg_47", offeredFrontier: "msg_50" }, async commit => commit());
+      assert.ok(repeatedFrontier);
       const acknowledged = await store.acknowledgePollingOffer({ ...replacementScope, roomCursor: "msg_50" }, async commit => commit());
       assert.equal(acknowledged.acknowledged, true); assert.equal(acknowledged.offer?.offer_id, repeatedFrontier.offer_id);
       assert.equal(acknowledged.roomCursor, "msg_50"); assert.ok(acknowledged.offer?.acknowledged_at_ms);
+      assert.equal(acknowledged.bindingEpoch, initial.bindingEpoch);
       assert.deepEqual(await store.acknowledgePollingOffer({ ...replacementScope, roomCursor: "msg_50" }, async commit => commit()), acknowledged);
+      assert.equal(await store.recordPollingOffer({ ...replacementScope, requestId: "empty-after-ack", inputCursor: "msg_50", offeredFrontier: "msg_50" }, async commit => commit()), null);
+      assert.deepEqual(await store.getPollingOfferTail(activation.operationId), acknowledged.offer);
       assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers WHERE acknowledged_at_ms IS NOT NULL").get()?.n, 1,
         "same-frontier acknowledgement marks only the current tail, never its superseded history");
       const last = await store.recordPollingOffer({ ...replacementScope, requestId: 3, inputCursor: "msg_50", offeredFrontier: "msg_51" }, async commit => commit());
@@ -78,20 +98,23 @@ test("polling offer and ACK transactions recheck exact authority and roll back t
   try {
     const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
     const input = { operationId: activation.operationId, agentId: activation.agentId,
-      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_50" };
+      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_50", expectedBindingEpoch: 1 };
     await store.preparePollingActivation(activation, async commit => commit());
     await assert.rejects(store.recordPollingOffer(input, async commit => commit()), /active native activation/);
     await store.markPollingActivationDispatch(activation, async commit => commit());
     await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-turn" }, async commit => commit());
+    input.expectedBindingEpoch = (await store.acknowledgePollingOffer({ ...input, roomCursor: null }, async commit => commit())).bindingEpoch;
     await assert.rejects(store.recordPollingOffer(input, undefined as never), /ownership commit fence/);
     await assert.rejects(store.recordPollingOffer(input, async () => {}), /without committing/);
     for (const bad of [
       { ...input, operationId: "missing" }, { ...input, agentId: "other" }, { ...input, processIncarnationId: "4312" },
       { ...input, requestId: 1.5 }, { ...input, inputCursor: "opaque" },
       { ...input, offeredFrontier: "msg_46" }, { ...input, inputCursor: "msg_49" },
+      ...[0, -1, 1.5, Number.NaN, input.expectedBindingEpoch + 1].map(expectedBindingEpoch => ({ ...input, expectedBindingEpoch })),
     ]) await assert.rejects(store.recordPollingOffer(bad, async commit => commit()));
     assert.equal(await store.getPollingOfferTail(activation.operationId), null);
     let offer = await store.recordPollingOffer(input, async commit => commit());
+    assert.ok(offer);
     const ack = { ...input, roomCursor: "msg_50" };
     const database = new DatabaseSync(env.databasePath);
     try {
@@ -100,19 +123,40 @@ test("polling offer and ACK transactions recheck exact authority and roll back t
         ["UPDATE worker_session_bindings SET room_cursor='msg_48'", "UPDATE worker_session_bindings SET room_cursor='msg_47'"],
         ["UPDATE agent_configurations SET config_revision=3", "UPDATE agent_configurations SET config_revision=2"],
         ["UPDATE runtime_deployments SET custodial_launch_agent_session_id='other'", "UPDATE runtime_deployments SET custodial_launch_agent_session_id='session_2'"],
+        ["UPDATE supervised_worker_sessions SET room_id='other'", "UPDATE supervised_worker_sessions SET room_id=(SELECT room_id FROM worker_session_bindings)"],
+        ["UPDATE supervised_worker_sessions SET agent_session_id='other'", "UPDATE supervised_worker_sessions SET agent_session_id='session_2'"],
+        ["UPDATE supervised_worker_sessions SET execution_generation_id='other'", "UPDATE supervised_worker_sessions SET execution_generation_id='run_2'"],
+        ["UPDATE supervised_worker_sessions SET credential_ref='other'", "UPDATE supervised_worker_sessions SET credential_ref=(SELECT credential_ref FROM worker_session_bindings)"],
+        ...["'2000-01-01T00:00:00.000Z'", "'invalid'", "NULL"].map(expires => [`UPDATE supervised_worker_sessions SET expires_at=${expires}`, "UPDATE supervised_worker_sessions SET expires_at='2099-01-01T00:00:00.000Z'"]),
       ]) {
+        assert.equal((await store.acknowledgePollingOffer({ ...ack, roomCursor: null }, async commit => commit())).bindingEpoch, input.expectedBindingEpoch);
         database.exec(sql!);
         await assert.rejects(store.acknowledgePollingOffer(ack, async commit => commit()), /changed/);
         await assert.rejects(store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit()));
         assert.deepEqual(await store.getPollingOfferTail(activation.operationId), offer);
         database.exec(undo!);
+        assert.deepEqual(await store.recordPollingOffer(input, async commit => commit()), offer, "restored exact session authority accepts the original tail");
       }
+      await assert.rejects(store.recordPollingOffer({ ...input, requestId: "expired-before-commit" }, async commit => {
+        database.exec("UPDATE supervised_worker_sessions SET expires_at='2000-01-01T00:00:00.000Z'");
+        await commit();
+      }), /expired/);
+      assert.deepEqual(await store.getPollingOfferTail(activation.operationId), offer, "worker expiry is checked inside the fenced transaction");
+      database.exec("UPDATE supervised_worker_sessions SET expires_at='2099-01-01T00:00:00.000Z'");
       const previousBinding = (await bindings.get(input.agentId))!;
       await bindings.bind({ ...previousBinding, agent_session_token: "test-rebound-token" }, { roomCursor: "msg_47" });
-      assert.equal((await store.acknowledgePollingOffer(ack, async commit => commit())).acknowledged, false,
+      const rebound = await store.acknowledgePollingOffer(ack, async commit => commit());
+      assert.equal(rebound.acknowledged, false,
         "same-session formal rebinding must invalidate the old offer's delayed ACK");
+      assert.equal(rebound.roomCursor, "msg_47"); assert.ok(rebound.bindingEpoch > input.expectedBindingEpoch);
+      assert.deepEqual(await store.acknowledgePollingOffer({ ...ack, roomCursor: null }, async commit => commit()), rebound);
+      await assert.rejects(store.recordPollingOffer(input, async commit => commit()), /binding epoch changed/);
+      await assert.rejects(store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit()), /binding epoch changed/);
+      await assert.rejects(store.recordPollingOffer({ ...input, requestId: "empty", offeredFrontier: "msg_47" }, async commit => commit()), /binding epoch changed/);
+      input.expectedBindingEpoch = rebound.bindingEpoch;
       await assert.rejects(store.recordPollingOffer(input, async commit => commit()), /invocation changed/);
       const replacement = await store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit());
+      assert.ok(replacement);
       assert.equal(replacement.predecessor_offer_id, offer.offer_id);
       assert.ok(replacement.binding_epoch > offer.binding_epoch);
       offer = replacement;
@@ -138,9 +182,11 @@ test("polling offer SQL prevents forks, disconnected successors and rewriting or
     await store.markPollingActivationDispatch(activation, async commit => commit());
     await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-turn" }, async commit => commit());
     const input = { operationId: activation.operationId, agentId: activation.agentId,
-      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", inputCursor: "msg_47", offeredFrontier: "msg_50" };
+      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", inputCursor: "msg_47", offeredFrontier: "msg_50", expectedBindingEpoch: 1 };
+    input.expectedBindingEpoch = (await store.acknowledgePollingOffer({ ...input, roomCursor: null }, async commit => commit())).bindingEpoch;
     const first = await store.recordPollingOffer({ ...input, requestId: 1 }, async commit => commit());
     const tail = await store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit());
+    assert.ok(first); assert.ok(tail);
     const database = new DatabaseSync(env.databasePath);
     try {
       database.exec("PRAGMA foreign_keys=ON");
@@ -190,7 +236,8 @@ test("polling offer compaction bounds repeated unACKed reads while preserving ta
     await store.markPollingActivationDispatch(activation, async commit => commit());
     await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-turn" }, async commit => commit());
     const input = { operationId: activation.operationId, agentId: activation.agentId,
-      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", inputCursor: "msg_47", offeredFrontier: "msg_47" };
+      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", inputCursor: "msg_47", offeredFrontier: "msg_49", expectedBindingEpoch: 1 };
+    input.expectedBindingEpoch = (await store.acknowledgePollingOffer({ ...input, roomCursor: null }, async commit => commit())).bindingEpoch;
     const database = new DatabaseSync(env.databasePath);
     try {
       database.exec("PRAGMA foreign_keys=ON");
@@ -200,6 +247,7 @@ test("polling offer compaction bounds repeated unACKed reads while preserving ta
       let previousId: string | null = null;
       for (let requestId = 0; requestId < POLLING_OFFER_REPLAY_WINDOW * 2; requestId++) {
         const tail = await store.recordPollingOffer({ ...input, requestId }, async commit => commit());
+        assert.ok(tail);
         assert.equal(tail.predecessor_offer_id, previousId); previousId = tail.offer_id;
         assert.equal(count(), Math.min(requestId + 1, POLLING_OFFER_REPLAY_WINDOW));
         assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers WHERE predecessor_offer_id IS NULL").get()!.n, 1);
@@ -220,6 +268,7 @@ test("polling offer compaction bounds repeated unACKed reads while preserving ta
       // Beyond-window IDs are unknown-age, not permanently deduplicated. This
       // pure read may reoffer, but must still start at the durable ACK cursor.
       const replay = await store.recordPollingOffer({ ...input, requestId: 0, offeredFrontier: "msg_50" }, async commit => commit());
+      assert.ok(replay);
       assert.notEqual(replay.offer_id, before.tail!.offer_id); assert.equal(count(), POLLING_OFFER_REPLAY_WINDOW);
       assert.equal(replay.acknowledged_at_ms, null);
       assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()!.room_cursor, "msg_47");
@@ -4045,8 +4094,10 @@ async function seedPollingActivationRuntime(env: Awaited<ReturnType<typeof fixtu
       custodial_launch_agent_session_id: "session_2" } });
   await store.replaceEntry((await store.load()).generation, next);
   await store.markRuntimeConfigurationApplied((await store.load()).generation, { agentId: agent.id, executionGenerationId: "run_2", appliedRevision: 2 });
-  await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1", execution_generation_id: "run_2",
+  const binding = await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1", execution_generation_id: "run_2",
     agent_session_id: "session_2", agent_session_token: "test-token", api_url: "https://example.test" }, { roomCursor: "msg_47" });
+  await bindings.recordSupervisedWorkerSession({ agent_id: agent.id, room_id: agent.room_id, execution_generation_id: "run_2",
+    agent_session_id: binding.agent_session_id, credential_ref: binding.credential_ref, expires_at: "2099-01-01T00:00:00.000Z" });
   return { operationId: "activation", requestId: "activation-request", agentId: agent.id, roomId: agent.room_id,
     executionGenerationId: "run_2", reverseOperationId: input.operationId,
     handle: { workAttemptId: "attempt_1", pid: 4312, providerConnection: connection, providerContinuationId: "thread_1", observedState: "idle", appliedConfigurationRevision: 2 },

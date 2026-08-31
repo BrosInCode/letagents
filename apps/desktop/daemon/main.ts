@@ -174,9 +174,14 @@ export class SupervisorDaemon {
     // Keep the rejection observed while preserving it for waitForHandoff().
     void this.handoffCompletion.catch(() => undefined);
     this.singleton = new DaemonSingleton(paths.lockPath, platform);
-    this.authority = new DaemonAuthority({
-      assertCurrent: () => this.singleton.assertCurrent(),
+    const daemonAuthority = {
+      currentGeneration: () => this.singleton.currentGeneration,
       isHandoffScheduled: () => this.handoffScheduled,
+      assertCurrent: () => this.singleton.assertCurrent(),
+      fenceCommit: (commit: () => Promise<void>) => this.fenceDaemonCommit(commit),
+    };
+    this.authority = new DaemonAuthority({
+      ...daemonAuthority,
       notifyStateChanged: () => this.notifyStateChanged(),
     });
     this.entryConcurrency = new EntryConcurrencyGate({
@@ -267,9 +272,7 @@ export class SupervisorDaemon {
       startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
     });
     this.stateWatch = new DaemonStateWatch({
-      currentGeneration: () => this.singleton.currentGeneration,
-      isHandoffScheduled: () => this.handoffScheduled,
-      assertCurrent: () => this.singleton.assertCurrent(),
+      ...daemonAuthority,
       entries: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
     });
     this.agentStreamRegistry = new AgentStreamRegistry({
@@ -316,11 +319,7 @@ export class SupervisorDaemon {
       inbox: this.supervisedInbox,
       supervisorGrantHttp: this.supervisorGrantHttp,
       deliveryHttp: this.supervisedDeliveryHttp,
-      authority: {
-        currentGeneration: () => this.singleton.currentGeneration,
-        isHandoffScheduled: () => this.handoffScheduled,
-        assertCurrent: () => this.singleton.assertCurrent(),
-      },
+      authority: daemonAuthority,
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeCursorCheckpoint: (entryId, operation) => this.serializeCursorCheckpoint(entryId, operation),
       manifest: {

@@ -358,7 +358,7 @@ export class ManifestStore {
     return getPollingOfferTail(await this.getDatabase(), activationId);
   }
 
-  async recordPollingOffer(input: RecordPollingOffer, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingOfferRecord> {
+  async recordPollingOffer(input: RecordPollingOffer, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingOfferRecord | null> {
     this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
     return this.writeOperationalJournal(database => recordPollingOffer(database, snapshot,
       this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
