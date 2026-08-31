@@ -31,7 +31,11 @@ import {
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
+  type NativeExecutionObservation,
+  type ControlProbeResult,
 } from "./provider-adapter.js";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
+import { nativeExecutionId, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import {
   CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
   CURSOR_MCP_CONNECTOR_PARENT,
@@ -211,6 +215,10 @@ export interface CursorProviderAdapterOptions {
 }
 
 const BASE_CURSOR_CAPABILITIES: ProviderAdapterCapabilities = {
+  execution: {
+    controlProbe: "unsupported",
+    approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
+  },
   deliveryModes: ["mcp_polling", "daemon_inbox"],
   // `--resume <session_id>` is the documented continuation across per-turn
   // children (the legacy engine already relies on it); the adapter asserts the
@@ -536,6 +544,9 @@ interface LiveTurn {
   workspaceGeneration: SupervisedWorkspaceGenerationHandle | null;
   workspaceGenerationManifestPath: string | null;
   liveDisplayTools: Map<string, { tool: string; input: unknown }>;
+  executionTools: Map<string, { tool: string; completed: boolean }>;
+  executionTurnFinished: boolean;
+  executionContinuationId: string | null;
   completion?: Promise<CursorTurnTerminal>;
 }
 
@@ -644,6 +655,7 @@ class CursorProviderHandle implements ProviderHandle {
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
   streamSequence = 0;
+  readonly execution: ProviderExecutionObserver;
 
   constructor(
     readonly workAttemptId: string,
@@ -652,7 +664,8 @@ class CursorProviderHandle implements ProviderHandle {
     readonly deliveryMode: "mcp_polling" | "daemon_inbox",
     readonly spawnRequest: ProviderSpawnRequest,
     readonly supervisedProfile: CursorManagedProfile | null,
-  ) {}
+    now: () => string,
+  ) { this.execution = new ProviderExecutionObserver(now); }
 
   /**
    * Honest process claim: a pid exists only while a turn runs. Between turns
@@ -1461,6 +1474,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
+  onExecution(providerHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void {
+    return this.requireHandle(providerHandle).execution.subscribe(listener);
+  }
+
+  async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
+    this.requireHandle(providerHandle);
+    // The wrapper IPC is not Cursor's control loop; an idle lane has no child.
+    return { state: "unprobeable" };
+  }
+
   private async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
@@ -1506,6 +1529,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       deliveryMode,
       req,
       supervisedProfile,
+      this.deps.now,
     );
     if (resumeRef) handle.providerContinuationId = resumeRef.providerContinuationId;
 
@@ -2063,7 +2087,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
       workspaceGeneration,
       workspaceGenerationManifestPath: workspaceGeneration?.manifestPath ?? null,
       liveDisplayTools: new Map(),
+      executionTools: new Map(),
+      executionTurnFinished: false,
+      executionContinuationId: null,
     };
+    void child.exited.then(async (exit) => {
+      // As in completeTurn, drain final stdout before deciding what was lost.
+      await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
+      this.observeNativeExit(handle, turn, exit);
+    });
     handle.liveTurn = turn;
     handle.state = "working";
     let turnCheckpointed = false;
@@ -2648,6 +2680,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       return;
     }
     const safeProviderPayload = safeStreamPayload(message);
+    this.observeNativeExecution(handle, turn, message, sessionId);
     const duplicateInit = message.type === "system" && message.subtype === "init" && turn.sawInit;
     // The daemon uses the first verified init as the per-turn display boundary.
     // Preserve duplicate same-session init as diagnostics under a distinct
@@ -2734,6 +2767,92 @@ export class CursorProviderAdapter implements ProviderAdapter {
       }, "tool_lifecycle");
     }
     turn.liveDisplayTools.clear();
+  }
+
+  private observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): void {
+    if (!sessionId || !nativeExecutionId(sessionId) || turn.executionTurnFinished || handle.protocolError) return;
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity);
+    const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
+    if (message.type === "system" && message.subtype === "init" && !turn.sawInit) {
+      turn.executionContinuationId = sessionId;
+      emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
+      emit({ domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" });
+      emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", ...nativeTurn });
+      return;
+    }
+    if (!turn.sawInit || sessionId !== handle.providerContinuationId) return;
+    if (message.type === "result") {
+      if (typeof message.subtype !== "string" || !message.subtype
+        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return;
+      emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...nativeTurn,
+        turnOutcome: message.subtype === "success" && message.is_error === false ? "completed" : "failed" });
+      turn.executionTurnFinished = true;
+      return;
+    }
+    if (message.type !== "tool_call" || !nativeExecutionId(message.call_id)) return;
+    const calls = cursorRecord(message.tool_call);
+    if (!calls) return;
+    // Only exact native envelopes have defined operation semantics. Unknown
+    // variants remain diagnostics rather than inferring execution from text.
+    const operations = { shellToolCall: "command", readToolCall: "file_read", writeToolCall: "file_change" } as const;
+    const entries = Object.entries(operations).filter(([name]) => cursorRecord(calls[name]));
+    if (entries.length !== 1 || Object.keys(calls).filter((key) => key.endsWith("ToolCall")).length !== 1) return;
+    const [tool, operation] = entries[0]!;
+    const call = cursorRecord(calls[tool])!;
+    const identity = { domain: "execution" as const, executionId: message.call_id, operation, ...nativeTurn };
+    const sideEffects = operation === "file_read" ? "none" as const : "possible" as const;
+    const prior = turn.executionTools.get(message.call_id);
+    if (message.subtype === "started" && !prior) {
+      // Native toolCallStarted precedes permission/spawn outcomes. It proves
+      // request identity, not that a process ran or a file was touched.
+      turn.executionTools.set(message.call_id, { tool, completed: false });
+    } else if (message.subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
+      const result = cursorRecord(call.result);
+      if (!result) return;
+      const variants = (operation === "command"
+        ? ["success", "failure", "timeout", "rejected", "permissionDenied", "spawnError"]
+        : ["success", "error", "failure"]).filter((key) => Object.hasOwn(result, key));
+      if (variants.length !== 1 || !cursorRecord(result[variants[0]!])) return;
+      const variant = variants[0]!;
+      let exitCode: number | undefined;
+      if (operation === "command") {
+        // Cursor 2026.07.09's ShellResult uses foreground success/failure
+        // records with an int32 exitCode (protobuf JSON emits default zero).
+        // A background handoff is not command completion.
+        if (result.isBackground !== undefined && typeof result.isBackground !== "boolean") return;
+        if (result.isBackground === true || variant === "timeout") return;
+        if (variant === "rejected" || variant === "permissionDenied" || variant === "spawnError") {
+          prior.completed = true;
+          emit({ ...identity, kind: "completed", outcome: variant === "spawnError" ? "failed" : "denied_before_start", sideEffects: "none" });
+          return;
+        }
+        const terminal = cursorRecord(result[variant])!;
+        if (!Number.isInteger(terminal.exitCode)
+          || (terminal.exitCode as number) < -2_147_483_648 || (terminal.exitCode as number) > 2_147_483_647) return;
+        exitCode = terminal.exitCode as number;
+      }
+      prior.completed = true;
+      emit({ ...identity, kind: "completed", outcome: variant === "success" && (exitCode === undefined || exitCode === 0)
+        ? "succeeded" : "failed", ...(exitCode === undefined ? {} : { exitCode }), sideEffects });
+    }
+  }
+
+  private observeNativeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
+    if (exit.type !== "exit") return;
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity);
+    const sessionId = turn.executionContinuationId;
+    if (turn.sawInit && nativeExecutionId(sessionId)) {
+      const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
+      // Outstanding requests have no execution-start proof. Process loss
+      // terminates the turn, but cannot invent interrupted/lost executions.
+      if (!turn.executionTurnFinished) emit(turn.interruptRequested
+        ? { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: "interrupted", sideEffects: "none", ...nativeTurn }
+        : { domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none", ...nativeTurn });
+    }
+    turn.executionTools.clear();
+    turn.executionTurnFinished = true;
+    emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" });
+    emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" });
   }
 
   private rememberRoomTurnTerminal(

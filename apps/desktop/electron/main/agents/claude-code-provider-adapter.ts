@@ -28,7 +28,11 @@ import {
   type ProviderStreamEvent,
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
+  type NativeExecutionObservation,
+  type ControlProbeResult,
 } from "./provider-adapter.js";
+import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
+import { nativeExecutionId, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   isRentalCredentialIsolationRequested,
@@ -111,6 +115,10 @@ export interface ClaudeCodeProviderAdapterOptions {
 }
 
 const BASE_CLAUDE_CAPABILITIES: ProviderAdapterCapabilities = {
+  execution: {
+    controlProbe: "unsupported",
+    approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
+  },
   deliveryModes: ["daemon_inbox"],
   // Empirically proven by the task_36 acceptance spike (msg_1382): `--resume
   // <session_id>` continues the SAME session id. The adapter asserts that
@@ -526,6 +534,11 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly roomTurnResults = new Map<string, ClaudeRoomTurnTerminal>();
   activeRoomTurnId: string | null = null;
   roomTurnOperationId: string | null = null;
+  readonly execution: ProviderExecutionObserver;
+  executionTurnId: string | null = null;
+  executionTurnStarted = false;
+  readonly executionTools = new Map<string, { operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"]; completed: boolean }>();
+  executionExitObserved = false;
 
   constructor(
     readonly workAttemptId: string,
@@ -534,7 +547,8 @@ class ClaudeProviderHandle implements ProviderHandle {
     readonly providerConnection: ProviderConnectionRef,
     readonly child: ClaudeCliChild,
     readonly exitEvidence: Promise<ProviderProcessExit>,
-  ) {}
+    now: () => string,
+  ) { this.execution = new ProviderExecutionObserver(now); }
 
   observedState(): ProviderObservedState {
     return this.state;
@@ -714,6 +728,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       terminalPromise = this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
       handle.activeRoomTurnId = turnId;
       handle.state = "working";
+      handle.executionTurnId = turnId;
+      handle.executionTurnStarted = false;
+      handle.executionTools.clear();
       try {
         handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request), turnId));
       } catch (error) {
@@ -723,6 +740,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         handle.activeRoomTurnId = null;
         handle.state = "failed";
         handle.protocolError = true;
+        handle.executionTurnId = null;
+        handle.executionTurnStarted = false;
         throw error;
       }
       const terminal = await terminalPromise;
@@ -835,6 +854,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const handle = this.requireHandle(providerHandle);
     handle.streamListeners.add(listener);
     return () => handle.streamListeners.delete(listener);
+  }
+
+  onExecution(providerHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void {
+    return this.requireHandle(providerHandle).execution.subscribe(listener);
+  }
+
+  async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
+    const handle = this.requireHandle(providerHandle);
+    // A live PID or quiet stdout cannot prove the native control loop responds.
+    return handle.executionExitObserved
+      ? { state: "lost", controlEvidence: "process_exit" }
+      : { state: "unprobeable" };
   }
 
   private async start(
@@ -997,6 +1028,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         { kind: "claude_cli", pid: child.pid, processIdentity },
         child,
         observeFencedExit(child, child.pid, processIdentity, child.exited, this.deps),
+        this.deps.now,
       );
       this.handles.set(req.workAttemptId, handle);
       const exitPromise = handle.exitEvidence.then((exit) => this.observeExit(handle!, exit));
@@ -1116,6 +1148,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "stdout/raw", { line }, "provider_event");
       return;
     }
+    this.observeNativeExecution(handle, message);
     this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message));
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
@@ -1191,6 +1224,61 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         checking: "",
         next_action: "",
       });
+    }
+  }
+
+  private observeNativeExecution(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+    const turnId = handle.executionTurnId;
+    if (!turnId || message.session_id !== handle.providerContinuationId
+      || !nativeExecutionId(handle.providerContinuationId)) return;
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
+      handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined);
+    const turn = { providerTurnId: turnId, providerContinuationId: handle.providerContinuationId };
+    // command_uuid names the user turn, never a shell command. Only an exact
+    // native started event proves receipt; writing stdin alone is insufficient.
+    if (message.type === "command_lifecycle" && message.command_uuid === turnId && message.state === "started") {
+      if (!handle.executionTurnStarted) {
+        handle.executionTurnStarted = true;
+        emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
+        emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", ...turn });
+      }
+    } else if (message.type === "result" && message.user_message_uuid === turnId) {
+      if (typeof message.subtype !== "string" || !message.subtype
+        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return;
+      emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...turn,
+        turnOutcome: message.subtype === "success" && message.is_error === false ? "completed"
+          : message.subtype === "interrupted" ? "interrupted" : "failed" });
+      handle.executionTurnId = null;
+      handle.executionTurnStarted = false;
+      handle.executionTools.clear();
+    } else if (handle.executionTurnStarted && (message.type === "assistant" || message.type === "user")
+      && message.parent_tool_use_id == null) {
+      // Tool messages carry session/tool identity, not the caller's turn UUID.
+      // Do not attribute a bootstrap or previous-turn tail before exact receipt.
+      const body = message.message as { content?: unknown } | undefined;
+      if (!Array.isArray(body?.content)) return;
+      for (const value of body.content) {
+        if (!value || typeof value !== "object" || Array.isArray(value)) continue;
+        const block = value as Record<string, unknown>;
+        if (message.type === "assistant" && block.type === "tool_use" && nativeExecutionId(block.id)
+          && typeof block.name === "string" && !handle.executionTools.has(block.id)) {
+          // Tool requests precede permission. Record correlation only, never
+          // claim execution.started (nor expose agent-authored input/text).
+          const operation = block.name === "Bash" ? "command"
+            : ["Read", "Glob", "Grep"].includes(block.name) ? "file_read"
+              : ["Write", "Edit", "MultiEdit", "NotebookEdit"].includes(block.name) ? "file_change"
+                : ["WebFetch", "WebSearch"].includes(block.name) ? "network"
+                  : block.name === "AskUserQuestion" ? "question" : "other";
+          handle.executionTools.set(block.id, { operation, completed: false });
+        } else if (message.type === "user" && block.type === "tool_result" && nativeExecutionId(block.tool_use_id)) {
+          const tool = handle.executionTools.get(block.tool_use_id);
+          if (!tool || tool.completed || (block.is_error !== undefined && typeof block.is_error !== "boolean")
+            || (typeof block.content !== "string" && !Array.isArray(block.content))) continue;
+          tool.completed = true;
+          emit({ domain: "execution", kind: "completed", executionId: block.tool_use_id, operation: tool.operation,
+            outcome: block.is_error === true ? "failed" : "succeeded", sideEffects: tool.operation === "file_read" ? "none" : "possible", ...turn });
+        }
+      }
     }
   }
 
@@ -1336,6 +1424,19 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     handle: ClaudeProviderHandle,
     exit: ProviderProcessExit,
   ): ProviderTerminalPayload {
+    if (exit.type === "exit") {
+      handle.executionExitObserved = true;
+      const identity = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined;
+      if (handle.executionTurnId && nativeExecutionId(handle.providerContinuationId)) {
+        handle.execution.emit({ domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none",
+          providerContinuationId: handle.providerContinuationId, providerTurnId: handle.executionTurnId }, identity);
+        handle.executionTurnId = null;
+        handle.executionTurnStarted = false;
+        handle.executionTools.clear();
+      }
+      handle.execution.emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" }, identity);
+      handle.execution.emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" }, identity);
+    }
     const terminal = exit.type === "error"
       ? {
         ...synthesizeTerminalPayload({

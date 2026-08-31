@@ -30,6 +30,7 @@ import { devMcpServerEntryFromEnv } from "../dev-spawn-options.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 
 const execFileAsync = promisify(execFile);
 
@@ -132,6 +133,37 @@ function nativeHandle(
     observedState: () => "working" as const,
   };
 }
+
+test("provider router carries native shadow facts and probes without invoking legacy actions", async () => {
+  const calls: string[] = [];
+  let listener: ((event: NativeExecutionObservation) => void) | undefined;
+  const native = fakeAdapter("codex", calls);
+  const adapter: NativeProviderAdapter = {
+    ...native,
+    onExecution: (_handle, next) => { listener = next; return () => { listener = undefined; }; },
+    probeControl: async () => ({ state: "degraded" }),
+  };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
+  const request: ProviderActionSpawn = { provider: "codex", workAttemptId: "shadow", roomId: "room", cwd: "/tmp/shadow", launchPolicy: {} };
+  const handle = await router.spawn(request);
+  const received: NativeExecutionObservation[] = [];
+  const detach = await router.onExecution(handle, (event) => received.push(event));
+  const observation: NativeExecutionObservation = {
+    sequence: 1, observedAtMs: 1, nativeProcessIdentity: "codex:101",
+    fact: { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+  };
+  listener!(observation);
+  assert.deepEqual(received, [observation]);
+  assert.deepEqual(await router.probeControl(handle), { state: "degraded" });
+  assert.deepEqual(calls, ["codex:spawn:shadow"], "no stop, poke, turn, or restart effect from observation/probe");
+  detach();
+  assert.equal(listener, undefined);
+  const unprobeable = await router.spawn({ ...request, provider: "claude-code", workAttemptId: "unprobeable" });
+  assert.deepEqual(await router.probeControl(unprobeable), { state: "unprobeable" });
+  const stale = { ...handle, providerContinuationId: "stale" };
+  await assert.rejects(router.probeControl(stale), /not owned/);
+  await assert.rejects(router.onExecution(stale, () => {}), /not owned/);
+});
 
 test("provider router selects the native adapter by manifest provider and fences stale handles", async () => {
   const calls: string[] = [];
