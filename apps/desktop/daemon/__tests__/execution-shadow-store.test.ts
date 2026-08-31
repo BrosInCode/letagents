@@ -26,6 +26,29 @@ function countHistoryReads(t: TestContext, db: DatabaseSync): () => number {
   });
   return () => count;
 }
+function countBudgetReads(t: TestContext, db: DatabaseSync): () => number {
+  const prepare = db.prepare.bind(db);
+  let count = 0;
+  t.mock.method(db, "prepare", (sql: string) => {
+    if (sql.includes("SELECT COUNT(*) AS facts,COALESCE(SUM(")) {
+      assert.match(sql, /FROM \(SELECT .* FROM execution_facts WHERE agent_id=\? LIMIT 10001\)/s,
+        "the row bound must apply before aggregation");
+      count++;
+    }
+    return prepare(sql);
+  });
+  return () => count;
+}
+// Real retained-row limits, seeded without 10,000 separate store transactions.
+// The rows are the same strict runtime facts emitted by fact(sequence).
+function retainFacts(db: DatabaseSync, from: number, through: number): void {
+  db.prepare(`WITH RECURSIVE positions(value) AS (SELECT CAST(? AS INTEGER) UNION ALL SELECT value+1 FROM positions WHERE value<?)
+    INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      source_sequence,domain,kind,state,side_effects,observed_at_ms)
+    SELECT 'fact-'||value,'agent','generation','runtime',1,value,'runtime','state_changed','ready','none',100+value
+    FROM positions`).run(from, through);
+  db.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=? WHERE agent_id='agent'").run(through, through);
+}
 const native = { turnId: "turn", providerContinuationId: "conversation", providerTurnId: "native-turn" };
 function seed(store: ExecutionShadowStore, suffix = "") {
   const runtime = {
@@ -130,21 +153,218 @@ test("warm ingestion reuses projection history and matches cold replay", (t) => 
     const peerToken = observer(store, { agentId: peer.runtime.agentId, subjectRuntimeGenerationId: peer.runtime.runtimeGenerationId,
       observerRuntimeGenerationId: peer.runtime.runtimeGenerationId });
     const reads = countHistoryReads(t, db);
+    const budgetReads = countBudgetReads(t, db);
     store.ingest(token.sourceId, token, fact(1)); store.ingest(token.sourceId, token, turnFact(2));
     store.ingest(peerToken.sourceId, peerToken, fact(1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
       runtimeGenerationId: peer.runtime.runtimeGenerationId, factId: "peer-ready" }));
     for (let sequence = 3; sequence <= 100; sequence++) {
+      store.trackMessage({ agentId: "agent", executionGenerationId: "generation", workspaceId: "workspace", roomId: "room",
+        sourceMessageId: `metadata-${sequence}`, createdAtMs: sequence });
       store.ingest(token.sourceId, token, operationFact(sequence, { kind: "output", outputBytes: 1 }));
       store.ingest(peerToken.sourceId, peerToken, fact(sequence - 1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
         runtimeGenerationId: peer.runtime.runtimeGenerationId, factId: `peer-${sequence}`, domain: "control", state: "responsive" }));
     }
     const warm = store.projectRuntime("runtime");
     assert.equal(reads(), 2, "only each runtime's initial projection should replay journal history");
+    assert.equal(budgetReads(), 2, "hot appends and own metadata writes must not rescan per-agent history");
     assert.equal(warm.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 98);
     assert.equal(warm.lastJournalSequence, 198);
     assert.deepEqual(warm, new ExecutionShadowStore(db).projectRuntime("runtime"));
     assert.deepEqual(store.projectRuntime("runtimepeer"), new ExecutionShadowStore(db).projectRuntime("runtimepeer"));
     assert.equal(reads(), 4);
+    assert.equal(budgetReads(), 4);
+  } finally { db.close(); }
+});
+
+test("retention caps physical witnesses without deleting evidence, advancing accepted cursors, or affecting peers", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    retainFacts(db, 1, 9999);
+    const last = fact(10000, { nativeEventId: "last-ready" });
+    assert.equal(store.ingest(token.sourceId, token, last).status, "accepted");
+    for (const reason of ["active_turn", "active_execution", "pending_approval", "uncertain_dispatch", "unresolved_cutover", "replay_authority"]) {
+      db.prepare("INSERT INTO execution_retention_pins VALUES(?,'agent',1,?,100)").run(reason, reason);
+    }
+    db.exec("CREATE TABLE supervised_agent_inbox(id TEXT PRIMARY KEY,state TEXT); INSERT INTO supervised_agent_inbox VALUES('message','dispatching')");
+    const before = store.projectRuntime("runtime");
+    const protectedRows = ["execution_runtime_generations", "execution_turns", "execution_message_attempts", "execution_retention_pins", "supervised_agent_inbox"]
+      .map(table => db.prepare(`SELECT * FROM ${table}`).all());
+    const reads = countBudgetReads(t, db);
+    assert.deepEqual(store.ingest(token.sourceId, token, fact(10001, { nativeEventId: "last-ready" })), {
+      status: "retention_limit", limit: "facts", expectedSourceSequence: 10001, observedSourceSequence: 10001,
+    }, "native-event re-observation at a new source position still requires a physical witness");
+    assert.deepEqual(store.ingest(token.sourceId, token, last), { status: "duplicate", journalSequence: 10000, gapPending: true });
+    assert.deepEqual(store.ingest(token.sourceId, token, fact(10005)), {
+      status: "retention_limit", limit: "facts", expectedSourceSequence: 10001, observedSourceSequence: 10005,
+    });
+    assert.equal(reads(), 0, "repeated cap markers and exact duplicates keep the committed budget cache");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 10000);
+    assert.deepEqual({ ...db.prepare("SELECT last_source_sequence,max_observed_sequence FROM execution_observers").get() },
+      { last_source_sequence: 10000, max_observed_sequence: 10005 });
+    assert.deepEqual(store.projectRuntime("runtime"), before);
+    assert.deepEqual(["execution_runtime_generations", "execution_turns", "execution_message_attempts", "execution_retention_pins", "supervised_agent_inbox"]
+      .map(table => db.prepare(`SELECT * FROM ${table}`).all()), protectedRows);
+    assert.throws(() => observer(store, { expectedEpoch: 1 }), /source_gap/, "a replacement source must not erase suspended capture");
+    store.registerRuntime({ agentId: "agent", executionGenerationId: "generation2", runtimeGenerationId: "runtime2", provider: "codex", configRevision: 1, createdAtMs: 200 });
+    const rebound = observer(store, { sourceId: token.sourceId, expectedEpoch: 1, subjectRuntimeGenerationId: "runtime2", observerRuntimeGenerationId: "runtime2" });
+    assert.equal(rebound.lastSourceSequence, 10000); assert.equal(rebound.maxObservedSequence, 10005);
+    assert.equal(store.ingest(rebound.sourceId, rebound, fact(10006, { observerEpoch: 2, runtimeGenerationId: "runtime2", executionGenerationId: "generation2" })).status,
+      "retention_limit", "a new runtime cannot reset its agent's budget");
+    const peer = seed(store, "peer");
+    const peerToken = observer(store, { agentId: peer.runtime.agentId, subjectRuntimeGenerationId: peer.runtime.runtimeGenerationId, observerRuntimeGenerationId: peer.runtime.runtimeGenerationId });
+    assert.equal(store.ingest(peerToken.sourceId, peerToken, fact(1, { factId: "peer-ready", agentId: peer.runtime.agentId,
+      runtimeGenerationId: peer.runtime.runtimeGenerationId, executionGenerationId: peer.runtime.executionGenerationId })).status, "accepted");
+  } finally { db.close(); }
+});
+
+test("capacity candidates and suspended-source markers roll back with a failed commit", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store); retainFacts(db, 1, 9999);
+    const before = store.projectRuntime("runtime");
+    const exec = db.exec.bind(db);
+    let failCommit = true;
+    t.mock.method(db, "exec", (sql: string) => {
+      if (sql === "COMMIT" && failCommit) { failCommit = false; throw new Error("injected commit failure"); }
+      exec(sql);
+    });
+    assert.throws(() => store.ingest(token.sourceId, token, fact(10000)), /injected commit failure/);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 9999);
+    assert.deepEqual(store.projectRuntime("runtime"), before);
+    assert.equal(store.ingest(token.sourceId, token, fact(10000)).status, "accepted", "a rolled-back candidate did not consume capacity");
+    failCommit = true;
+    assert.throws(() => store.ingest(token.sourceId, token, fact(10001)), /injected commit failure/);
+    assert.equal(db.prepare("SELECT max_observed_sequence FROM execution_observers").get()?.max_observed_sequence, 10000);
+    assert.equal(store.ingest(token.sourceId, token, fact(10001)).status, "retention_limit");
+    assert.equal(db.prepare("SELECT max_observed_sequence FROM execution_observers").get()?.max_observed_sequence, 10001);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 10000);
+  } finally { db.close(); }
+});
+
+test("retained budgets invalidate on shared and external commits but never cache caller-owned transactions", async () => {
+  for (const sharedConnection of [true, false]) {
+    const root = await mkdtemp(join(tmpdir(), "execution-budget-cache-"));
+    const { db, store } = fixture(join(root, "state.sqlite"));
+    const writer = sharedConnection ? db : new DatabaseSync(join(root, "state.sqlite"));
+    try {
+      seed(store); const token = observer(store); retainFacts(db, 1, 9999);
+      store.projectRuntime("runtime");
+      db.exec("BEGIN");
+      retainFacts(db, 10000, 10001);
+      assert.throws(() => store.projectRuntime("runtime"), /retention_limit/);
+      db.exec("ROLLBACK");
+      assert.equal(store.projectRuntime("runtime").lastJournalSequence, 9999, "uncommitted oversize was not cached");
+      retainFacts(writer, 10000, 10000);
+      assert.equal(store.ingest(token.sourceId, token, fact(10001)).status, "retention_limit");
+      // A separate writer grows an already warm history past the cap. Reading
+      // must fail, not return the previously cached healthy projection.
+      retainFacts(writer, 10001, 10002);
+      assert.throws(() => store.projectRuntime("runtime"), /retention_limit/);
+      assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 10002);
+    } finally {
+      if (!sharedConnection) writer.close();
+      db.close(); await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("cold replay aggregates a bounded prefix and never materializes an unbounded history array", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); observer(store); retainFacts(db, 1, 10000);
+    const budgetReads = countBudgetReads(t, db);
+    const prepare = db.prepare.bind(db);
+    let historyReads = 0;
+    t.mock.method(db, "prepare", (sql: string) => {
+      const statement = prepare(sql);
+      if (sql.includes("WHERE f.runtime_generation_id=? ORDER BY f.sequence")) {
+        historyReads++;
+        assert.match(sql, /LIMIT 10001$/);
+        t.mock.method(statement, "all", () => { throw new Error("unbounded history allocation"); });
+      }
+      return statement;
+    });
+    assert.equal(new ExecutionShadowStore(db).projectRuntime("runtime").lastJournalSequence, 10000);
+    assert.equal(historyReads, 1); assert.equal(budgetReads(), 1);
+    retainFacts(db, 10001, 10002);
+    assert.throws(() => new ExecutionShadowStore(db).projectRuntime("runtime"), { name: "ExecutionProtocolError", code: "retention_limit" });
+    assert.equal(historyReads, 1, "oversized history is rejected before any fact-row replay");
+    assert.equal(budgetReads(), 2);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 10002);
+  } finally { db.close(); }
+});
+
+test("public replay reads one WAL snapshot across agent capacity and every runtime, then invalidates it", async (t) => {
+  for (const [sameRuntime, rejectReadCommit] of [[true, false], [false, false], [false, true]]) {
+    const root = await mkdtemp(join(tmpdir(), "execution-budget-snapshot-"));
+    const path = join(root, "state.sqlite");
+    const { db, store } = fixture(path);
+    db.exec("PRAGMA journal_mode=WAL");
+    const writer = new DatabaseSync(path);
+    writer.exec("PRAGMA foreign_keys=ON");
+    try {
+      seed(store); observer(store); retainFacts(db, 1, 9999);
+      store.registerRuntime({ agentId: "agent", executionGenerationId: "generation-b", runtimeGenerationId: "runtime-b",
+        provider: "codex", configRevision: 1, createdAtMs: 200 });
+      const prepare = db.prepare.bind(db);
+      const exec = db.exec.bind(db);
+      let growBeforeReplay = true;
+      let failCommit = rejectReadCommit;
+      t.mock.method(db, "exec", (sql: string) => {
+        if (sql === "COMMIT" && failCommit) { failCommit = false; throw new Error("injected read commit failure"); }
+        exec(sql);
+      });
+      t.mock.method(db, "prepare", (sql: string) => {
+        if (growBeforeReplay && sql.includes("WHERE f.runtime_generation_id=? ORDER BY f.sequence")) {
+          growBeforeReplay = false;
+          assert.equal(db.isTransaction, true);
+          writer.prepare(`WITH positions(value) AS (VALUES(10000),(10001))
+            INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+              source_sequence,domain,kind,state,side_effects,observed_at_ms)
+            SELECT 'fact-'||value,'agent',?,?,1,value,'runtime','state_changed','ready','none',100+value FROM positions`)
+            .run(sameRuntime ? "generation" : "generation-b", sameRuntime ? "runtime" : "runtime-b");
+        }
+        return prepare(sql);
+      });
+      if (rejectReadCommit) assert.throws(() => store.projectRuntime("runtime"), /injected read commit failure/);
+      else assert.equal(store.projectRuntime("runtime").lastJournalSequence, 9999, "the entire read uses the pre-write snapshot");
+      assert.equal(growBeforeReplay, false, "the other connection committed after budget admission, before replay");
+      assert.equal(db.isTransaction, false);
+      assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 10001);
+      assert.throws(() => store.projectRuntime("runtime"), /retention_limit/, "a pre-commit view cannot be cached under the newer writer's stamp");
+      assert.equal(db.isTransaction, false, "failed reads release their snapshots too");
+    } finally { writer.close(); db.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test("byte capacity counts persisted UTF-8 including embedded NUL, not characters or output counters", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    const ceiling = 50 * 1024 * 1024;
+    const fixedFactBytes = 256 + Buffer.byteLength("fact-1agentgenerationruntimeruntimestate_changedreadynone", "utf8");
+    const payloadBytes = ceiling - 2 * fixedFactBytes + 1;
+    // An old DB may contain text beyond the protocol's current identity bound.
+    // The next valid fact would cross the byte cap, even though character-count
+    // accounting (or SQLite length(TEXT), which stops at NUL) would allow it.
+    const payload = "é".repeat(Math.floor((payloadBytes - 1) / 2)) + ((payloadBytes - 1) % 2 ? "x" : "");
+    assert.equal(1 + Buffer.byteLength(payload), payloadBytes);
+    db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+      source_sequence,native_event_id,domain,kind,state,side_effects,observed_at_ms)
+      VALUES('fact-1','agent','generation','runtime',1,1,char(0)||?,'runtime','state_changed','ready','none',101)`).run(payload);
+    db.exec("UPDATE execution_observers SET last_source_sequence=1,max_observed_sequence=1 WHERE agent_id='agent'");
+    assert.equal(db.prepare("SELECT length(CAST(native_event_id AS BLOB)) n FROM execution_facts").get()?.n, payloadBytes);
+    const reads = countHistoryReads(t, db);
+    assert.deepEqual(store.ingest(token.sourceId, token, fact(2)), {
+      status: "retention_limit", limit: "bytes", expectedSourceSequence: 2, observedSourceSequence: 2,
+    });
+    assert.equal(reads(), 0, "capacity rejection precedes decoding the oversized historical value");
+    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
+    retainFacts(db, 2, 2);
+    assert.throws(() => store.projectRuntime("runtime"), /retention_limit/);
+    assert.equal(reads(), 0, "oversized cold byte history fails before row replay too");
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 2);
   } finally { db.close(); }
 });
 
@@ -223,14 +443,18 @@ test("runtime cache evicts least-recently-used projections and reconstructs them
   try {
     for (let index = 0; index < 17; index++) seed(store, String(index));
     const reads = countHistoryReads(t, db);
+    const budgets = countBudgetReads(t, db);
     for (let index = 0; index < 16; index++) store.projectRuntime(`runtime${index}`);
     store.projectRuntime("runtime0"); // Make runtime1 the oldest.
     store.projectRuntime("runtime16");
     assert.equal(reads(), 17);
+    assert.equal(budgets(), 17);
     store.projectRuntime("runtime0");
     assert.equal(reads(), 17);
+    assert.equal(budgets(), 17);
     assert.deepEqual(store.projectRuntime("runtime1").projection, emptyExecutionProjection());
     assert.equal(reads(), 18);
+    assert.equal(budgets(), 18, "retained per-agent budget entries must be bounded too");
   } finally { db.close(); }
 });
 

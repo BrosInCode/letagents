@@ -29,12 +29,31 @@ export type ShadowObserver = Readonly<{
 }>;
 export type ShadowIngestion =
   | { status: "accepted" | "duplicate"; journalSequence: number; gapPending: boolean }
-  | { status: "gap"; expectedSourceSequence: number; observedSourceSequence: number };
+  | { status: "gap"; expectedSourceSequence: number; observedSourceSequence: number }
+  | { status: "retention_limit"; limit: "facts" | "bytes"; expectedSourceSequence: number; observedSourceSequence: number };
 type RuntimeProjection = { projection: ExecutionProjection; unverifiedFacts: number; lastJournalSequence: number };
+type RetainedBudget = { facts: number; bytes: number };
 // Count nested entries, not just runtimes: one long-lived runtime can have many
 // turns and operations. Every retained identity is protocol-bounded to 512 chars.
 const MAX_CACHED_RUNTIMES = 16;
 const MAX_CACHED_ENTRIES = 4096;
+const MAX_CACHED_AGENT_BUDGETS = 16;
+const MAX_RETAINED_FACTS_PER_AGENT = 10_000;
+const MAX_RETAINED_BYTES_PER_AGENT = 50 * 1024 * 1024;
+// A logical retention budget: stored TEXT bytes plus a conservative fixed
+// allowance for each fact's scalar fields and bookkeeping. This is neither
+// provider output/wire bytes nor the physical shared SQLite/index/WAL size.
+const FACT_BOOKKEEPING_BYTES = 256;
+const FACT_TEXT_COLUMNS = ["fact_id", "agent_id", "execution_generation_id", "runtime_generation_id", "native_event_id",
+  "turn_id", "execution_id", "domain", "kind", "state", "operation", "outcome", "side_effects", "turn_outcome", "control_evidence"] as const;
+const FACT_BYTE_COST_SQL = `${FACT_BOOKKEEPING_BYTES}+${FACT_TEXT_COLUMNS.map((column) => `length(CAST(COALESCE(${column},'') AS BLOB))`).join("+")}`;
+
+function factBytes(row: Row): number {
+  return FACT_BOOKKEEPING_BYTES + FACT_TEXT_COLUMNS.reduce((bytes, column) => bytes + Buffer.byteLength(String(row[column] ?? ""), "utf8"), 0);
+}
+function exceededBudget(budget: RetainedBudget): "facts" | "bytes" | null {
+  return budget.facts > MAX_RETAINED_FACTS_PER_AGENT ? "facts" : budget.bytes > MAX_RETAINED_BYTES_PER_AGENT ? "bytes" : null;
+}
 
 function validated<S extends z.ZodType>(schema: S, value: unknown): z.output<S> {
   const result = schema.safeParse(value);
@@ -65,13 +84,23 @@ function unverifiedHistoricalFact(row: Row): boolean {
 export class ExecutionShadowStore {
   private readonly observers = new WeakSet<ShadowObserver>();
   private readonly projections = new Map<string, { value: RuntimeProjection; weight: number }>();
+  private readonly budgets = new Map<string, RetainedBudget>();
   private projectionWeight = 0;
   private projectionStamp: string | null = null;
   constructor(private readonly database: DatabaseSync) {}
 
   private transaction<T>(body: () => T): T {
     this.database.exec("BEGIN IMMEDIATE");
-    try { const result = body(); this.database.exec("COMMIT"); return result; }
+    try {
+      this.synchronizeCaches();
+      const result = body();
+      // Own metadata/cursor writes do not invalidate fact budgets or replay.
+      // Capture before COMMIT; an external commit afterwards must invalidate us.
+      const stamp = this.databaseStamp();
+      this.database.exec("COMMIT");
+      this.projectionStamp = stamp;
+      return result;
+    }
     catch (error) { this.clearProjections(); this.database.exec("ROLLBACK"); throw error; }
   }
 
@@ -84,8 +113,31 @@ export class ExecutionShadowStore {
   }
   private clearProjections(): void {
     this.projections.clear();
+    this.budgets.clear();
     this.projectionWeight = 0;
     this.projectionStamp = null;
+  }
+  private synchronizeCaches(): void {
+    const stamp = this.databaseStamp();
+    if (stamp !== this.projectionStamp) { this.clearProjections(); this.projectionStamp = stamp; }
+  }
+  private rememberBudget(agentId: string, budget: RetainedBudget): void {
+    this.budgets.delete(agentId);
+    if (this.budgets.size >= MAX_CACHED_AGENT_BUDGETS) this.budgets.delete(this.budgets.keys().next().value!);
+    this.budgets.set(agentId, budget);
+  }
+  private retainedBudget(agentId: string): RetainedBudget {
+    this.synchronizeCaches();
+    let budget = this.budgets.get(agentId);
+    if (!budget) {
+      // Aggregate in SQLite, not a JS array. The extra row proves oversize
+      // without scanning an arbitrarily large pre-existing agent journal.
+      const row = this.required(`SELECT COUNT(*) AS facts,COALESCE(SUM(${FACT_BYTE_COST_SQL}),0) AS bytes
+        FROM (SELECT ${FACT_TEXT_COLUMNS.join(",")} FROM execution_facts WHERE agent_id=? LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1})`, agentId);
+      budget = { facts: Number(row.facts), bytes: Number(row.bytes) };
+    }
+    this.rememberBudget(agentId, budget);
+    return budget;
   }
   private rememberProjection(runtimeId: string, value: RuntimeProjection): void {
     const old = this.projections.get(runtimeId);
@@ -102,8 +154,9 @@ export class ExecutionShadowStore {
     this.projectionWeight += weight;
   }
   private cachedProjection(runtimeId: string): RuntimeProjection {
-    const stamp = this.databaseStamp();
-    if (stamp !== this.projectionStamp) { this.clearProjections(); this.projectionStamp = stamp; }
+    this.synchronizeCaches();
+    const runtime = this.row("SELECT agent_id FROM execution_runtime_generations WHERE runtime_generation_id=?", runtimeId);
+    if (runtime && exceededBudget(this.retainedBudget(String(runtime.agent_id)))) throw new ExecutionProtocolError("retention_limit");
     const cached = this.projections.get(runtimeId);
     if (cached) {
       this.projections.delete(runtimeId);
@@ -283,7 +336,7 @@ export class ExecutionShadowStore {
     const fact = parseExecutionFact(value);
     if (!this.observers.has(token)) throw new ExecutionProtocolError("stale_observer");
     if (validated(id, sourceId) !== token.sourceId) throw new ExecutionProtocolError("identity_mismatch");
-    let committed: { value: RuntimeProjection; stamp: string } | undefined;
+    let committed: { value: RuntimeProjection; budget: RetainedBudget; stamp: string } | undefined;
     const result = this.transaction<ShadowIngestion>(() => {
       const current = this.required("SELECT * FROM execution_observers WHERE agent_id=?", token.agentId);
       if (current.observer_epoch !== token.epoch || current.daemon_generation_id !== token.daemonGenerationId
@@ -310,10 +363,33 @@ export class ExecutionShadowStore {
       fact.factId, fact.agentId, fact.observerEpoch, fact.sourceSequence);
       if (duplicate) {
         if (JSON.stringify(this.decodeFact(duplicate)) !== JSON.stringify(fact)) throw new ExecutionProtocolError("sequence_conflict");
+        // An exact stored witness consumes no capacity. A native-event replay
+        // at a new source position still needs its own durable row below.
         return { status: "duplicate", journalSequence: Number(duplicate.sequence), gapPending: Number(current.max_observed_sequence) > Number(current.last_source_sequence) };
       }
       const expected = Number(current.last_source_sequence) + 1;
       if (fact.sourceSequence < expected) throw new ExecutionProtocolError("sequence_conflict");
+      const stored: Row = {
+        fact_id: fact.factId, agent_id: fact.agentId, execution_generation_id: fact.executionGenerationId, runtime_generation_id: fact.runtimeGenerationId,
+        observer_epoch: fact.observerEpoch, source_sequence: fact.sourceSequence, native_event_id: fact.nativeEventId ?? null,
+        turn_id: "turnId" in fact ? fact.turnId : null, execution_id: fact.domain === "execution" ? fact.executionId : null,
+        domain: fact.domain, kind: fact.kind, state: "state" in fact ? fact.state : null,
+        operation: fact.domain === "execution" ? fact.operation : null, outcome: "outcome" in fact ? fact.outcome : null,
+        side_effects: fact.sideEffects, output_bytes: "outputBytes" in fact ? fact.outputBytes : null,
+        exit_code: "exitCode" in fact ? fact.exitCode ?? null : null, signal_number: "signalNumber" in fact ? fact.signalNumber ?? null : null,
+        observed_at_ms: fact.observedAtMs, turn_outcome: "turnOutcome" in fact ? fact.turnOutcome ?? null : null,
+        control_evidence: "controlEvidence" in fact ? fact.controlEvidence ?? null : null,
+      };
+      const retained = this.retainedBudget(fact.agentId);
+      const budget = { facts: retained.facts + 1, bytes: retained.bytes + factBytes(stored) };
+      const limit = exceededBudget(budget);
+      if (limit) {
+        // Capture is suspended, not provider work. Remember the unaccepted
+        // source position so neither rebind nor a new source can erase the gap.
+        this.database.prepare("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
+          .run(fact.sourceSequence, fact.agentId);
+        return { status: "retention_limit", limit, expectedSourceSequence: expected, observedSourceSequence: fact.sourceSequence };
+      }
       if (fact.sourceSequence > expected) {
         this.database.prepare("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
           .run(fact.sourceSequence, fact.agentId);
@@ -323,10 +399,10 @@ export class ExecutionShadowStore {
       if (fact.nativeEventId !== undefined) {
         const observations = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
           LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? AND f.native_event_id=?
-          AND f.domain=? AND f.kind=? AND f.turn_id IS ? AND f.execution_id IS ? ORDER BY f.sequence`).all(
+          AND f.domain=? AND f.kind=? AND f.turn_id IS ? AND f.execution_id IS ? ORDER BY f.sequence`).iterate(
           fact.runtimeGenerationId, fact.nativeEventId, fact.domain, fact.kind, "turnId" in fact ? fact.turnId : null,
           fact.domain === "execution" ? fact.executionId : null,
-        ) as Row[];
+        ) as Iterable<Row>;
         for (const observation of observations) {
           if (unverifiedHistoricalFact(observation)) continue;
           if (semanticFact(this.decodeFact(observation)) !== semanticFact(fact)) throw new ExecutionProtocolError("sequence_conflict");
@@ -348,17 +424,7 @@ export class ExecutionShadowStore {
       }
       const previous = this.cachedProjection(fact.runtimeGenerationId);
       const next = replay ? previous.projection : reduceExecutionFact(previous.projection, fact);
-      this.insert("execution_facts", {
-        fact_id: fact.factId, agent_id: fact.agentId, execution_generation_id: fact.executionGenerationId, runtime_generation_id: fact.runtimeGenerationId,
-        observer_epoch: fact.observerEpoch, source_sequence: fact.sourceSequence, native_event_id: fact.nativeEventId ?? null,
-        turn_id: "turnId" in fact ? fact.turnId : null, execution_id: fact.domain === "execution" ? fact.executionId : null,
-        domain: fact.domain, kind: fact.kind, state: "state" in fact ? fact.state : null,
-        operation: fact.domain === "execution" ? fact.operation : null, outcome: "outcome" in fact ? fact.outcome : null,
-        side_effects: fact.sideEffects, output_bytes: "outputBytes" in fact ? fact.outputBytes : null,
-        exit_code: "exitCode" in fact ? fact.exitCode ?? null : null, signal_number: "signalNumber" in fact ? fact.signalNumber ?? null : null,
-        observed_at_ms: fact.observedAtMs, turn_outcome: "turnOutcome" in fact ? fact.turnOutcome ?? null : null,
-        control_evidence: "controlEvidence" in fact ? fact.controlEvidence ?? null : null,
-      });
+      this.insert("execution_facts", stored);
       this.database.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
         .run(fact.sourceSequence, fact.sourceSequence, fact.agentId);
       if (!replay && fact.domain === "runtime") {
@@ -385,7 +451,7 @@ export class ExecutionShadowStore {
       const journalSequence = Number(this.required("SELECT sequence FROM execution_facts WHERE fact_id=?", fact.factId).sequence);
       // Capture under the write transaction, never bless an external commit
       // racing after COMMIT. Publish this candidate to the cache only on success.
-      committed = { value: { projection: next, unverifiedFacts: previous.unverifiedFacts, lastJournalSequence: journalSequence }, stamp: this.databaseStamp() };
+      committed = { value: { projection: next, unverifiedFacts: previous.unverifiedFacts, lastJournalSequence: journalSequence }, budget, stamp: this.databaseStamp() };
       return {
         status: replay ? "duplicate" : "accepted", journalSequence,
         gapPending: Number(current.max_observed_sequence) > fact.sourceSequence,
@@ -394,6 +460,7 @@ export class ExecutionShadowStore {
     if (committed) {
       this.projectionStamp = committed.stamp;
       this.rememberProjection(fact.runtimeGenerationId, committed.value);
+      this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
   }
@@ -405,19 +472,39 @@ export class ExecutionShadowStore {
     // its later ROLLBACK need not change SQLite's total_changes counter.
     if (this.database.isTransaction) {
       this.clearProjections();
-      return this.replayRuntime(runtimeGenerationId);
+      try { return this.replayRuntime(runtimeGenerationId); }
+      finally { this.clearProjections(); }
     }
-    // ReadonlyMap is compile-time only; no public object may alias cache state.
-    return structuredClone(this.cachedProjection(runtimeGenerationId));
+    // Capacity is agent-wide, replay is runtime-specific. Both must see the
+    // same snapshot when another connection appends to a different runtime.
+    this.database.exec("BEGIN");
+    try {
+      // ReadonlyMap is compile-time only; no public object may alias cache state.
+      const result = structuredClone(this.cachedProjection(runtimeGenerationId));
+      const stamp = this.databaseStamp();
+      this.database.exec("COMMIT");
+      // Never bless a concurrent writer's newer stamp after releasing our view.
+      this.projectionStamp = stamp;
+      return result;
+    } catch (error) { this.clearProjections(); this.database.exec("ROLLBACK"); throw error; }
   }
 
   private replayRuntime(runtimeGenerationId: string): RuntimeProjection {
+    const runtime = this.row("SELECT agent_id FROM execution_runtime_generations WHERE runtime_generation_id=?", runtimeGenerationId);
+    if (runtime && exceededBudget(this.retainedBudget(String(runtime.agent_id)))) throw new ExecutionProtocolError("retention_limit");
     const facts = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
-      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? ORDER BY f.sequence`).all(runtimeGenerationId) as Row[];
+      LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? ORDER BY f.sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}`)
+      .iterate(runtimeGenerationId) as Iterable<Row>;
     let projection = emptyExecutionProjection();
     let unverifiedFacts = 0;
+    let lastJournalSequence = 0;
+    const replayBudget = { facts: 0, bytes: 0 };
     const nativeEvents = new Map<string, string>();
     for (const row of facts) {
+      replayBudget.facts++;
+      replayBudget.bytes += factBytes(row);
+      if (exceededBudget(replayBudget)) throw new ExecutionProtocolError("retention_limit");
+      lastJournalSequence = Number(row.sequence);
       if (unverifiedHistoricalFact(row)) {
         unverifiedFacts += 1;
         continue;
@@ -435,7 +522,7 @@ export class ExecutionShadowStore {
       }
       projection = reduceExecutionFact(projection, fact);
     }
-    return { projection, unverifiedFacts, lastJournalSequence: Number(facts.at(-1)?.sequence ?? 0) };
+    return { projection, unverifiedFacts, lastJournalSequence };
   }
 
   private decodeFact(row: Row): ExecutionFact {
