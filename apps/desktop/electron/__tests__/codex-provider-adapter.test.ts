@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdtemp, mkdir, readFile, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, mkdir, readFile, readdir, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -29,6 +29,7 @@ import type {
 } from "../main/agents/provider-adapter.js";
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
 import { ProviderExecutionObserver } from "../main/agents/provider-execution-observer.js";
+import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
@@ -183,6 +184,13 @@ type FakeLaunch = CodexAppServerLaunch & {
   resolveExit(exit: CodexAppServerExit): void;
 };
 
+const custodialRuntimeContract = {
+  format: 1,
+  profiles: { supervised_mcp_polling: {
+    contract: "custodial_polling_v1", tools: ["wait_for_messages", "read_messages", "send_message"],
+  } },
+};
+
 function createHarness(options: {
   resumeSupported?: boolean;
   placeholderResumeIsFatal?: boolean;
@@ -207,12 +215,15 @@ function createHarness(options: {
     context: Parameters<CodexProviderAdapterDependencies["writeSupervisorBridgeContext"]>[1];
   }> = [];
   const sleeps: number[] = [];
+  const mcpRuntimeProbes: string[] = [];
   let nextPid = 4100;
   let nextThread = 1;
   let clock = 0;
   let identityObservable = !(options.identityUnavailableAtLaunch ?? false);
 
   const dependencies: CodexProviderAdapterDependencies = {
+    resolveMcpRuntime: (devEntryPath) => ({ entryPath: devEntryPath ?? "/verified/runtime/dist/mcp/server.js", readRoots: ["/verified/runtime"] }),
+    readMcpRuntimeContract: async (entryPath) => { mcpRuntimeProbes.push(entryPath); return custodialRuntimeContract; },
     resolveServerUrl: async () => `ws://127.0.0.1:${4700 + launches.length}`,
     launchServer: (serverUrl, codexBin, options) => {
       let resolveExit!: (exit: CodexAppServerExit) => void;
@@ -278,6 +289,7 @@ function createHarness(options: {
     launchOptions,
     supervisorBridgeContexts,
     sleeps,
+    mcpRuntimeProbes,
     setIdentityObservable: (observable: boolean) => { identityObservable = observable; },
   };
 }
@@ -1002,6 +1014,125 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
   };
   assert.deepEqual(harness.supervisorBridgeContexts.map(({ context }) => context), [expectedBridgeContext, expectedBridgeContext]);
   assert.doesNotMatch(JSON.stringify(harness.launchOptions), /session-secret|authorization|bearer/i);
+});
+
+test("Codex custodial polling verifies its exact MCP runtime and leaves fresh and resumed threads idle", async () => {
+  const harness = createHarness();
+  const request = spawnRequest({
+    pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling",
+    supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact",
+    supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
+  });
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+  assert.equal(first.observedState(), "idle");
+  harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  const second = await new CodexProviderAdapter({ dependencies: harness.dependencies }).resume({
+    workAttemptId: request.workAttemptId, providerContinuationId: first.providerContinuationId!,
+  }, { ...request, supervisorExecutionGenerationId: "execution_successor" });
+  assert.equal(second.observedState(), "idle");
+  assert.equal(second.providerContinuationId, first.providerContinuationId);
+  assert.deepEqual(harness.mcpRuntimeProbes, ["/verified/runtime/dist/mcp/server.js", "/verified/runtime/dist/mcp/server.js"]);
+  for (const [index, launch] of harness.launchOptions.entries()) {
+    assert.equal(harness.clients[index]!.requests.some((call) => call.method === "turn/start"), false);
+    const env = launch.options.env!;
+    assert.equal(env.LETAGENTS_EXECUTION_PROFILE, "supervised_mcp_polling");
+    assert.equal(env.LETAGENTS_SUPERVISED_BOUNDED_TURNS, "");
+    assert.equal(env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID, "");
+    assert.equal(env.LETAGENTS_TOKEN, "");
+    assert.equal(env.LETAGENTS_AGENT_SESSION_BEARER, "");
+    assert.equal(env.LETAGENTS_API_URL, "https://letagents.chat");
+    assert.equal(env.LETAGENTS_SUPERVISOR_AGENT_SESSION_ID, "agent_session_exact");
+    assert.equal(env.LETAGENTS_SUPERVISOR_ROOM_ID, request.roomId);
+    assert.equal(env.LETAGENTS_SUPERVISOR_EXECUTION_GENERATION_ID, index ? "execution_successor" : "execution_exact");
+    assert.equal(launch.options.configOverrides.length, 1, "pin the MCP executable, custody coordinates and advertised tools together");
+    const override = launch.options.configOverrides[0]!;
+    assert.ok(override.startsWith("mcp_servers.letagents={ "));
+    assert.ok(override.includes(`command = ${JSON.stringify(process.execPath)}`));
+    assert.ok(override.includes('args = ["/verified/runtime/dist/mcp/server.js"]'));
+    assert.ok(override.includes("env_vars = [], enabled = true"));
+    assert.ok(override.includes(`enabled_tools = ${JSON.stringify(custodialRuntimeContract.profiles.supervised_mcp_polling.tools)}, disabled_tools = []`));
+    for (const [key, value] of Object.entries({ ...env, ELECTRON_RUN_AS_NODE: "1" })) {
+      assert.ok(override.includes(`${JSON.stringify(key)} = ${JSON.stringify(value)}`), `exact MCP env ${key}`);
+    }
+    assert.doesNotMatch(override, /npx|interactive_desktop/);
+  }
+});
+
+test("Codex custodial polling fails closed on old runtime contracts and incomplete authority before native launch", async () => {
+  const request = spawnRequest({
+    pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling",
+    supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
+    supervisorExecutionGenerationId: "execution_exact",
+    supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
+  });
+  for (const report of [
+    { format: 1, profiles: { cursor_supervised_room_turn: { tools: ["complete_room_turn"] } } },
+    { ...custodialRuntimeContract, format: 2 },
+    { format: 1, profiles: { supervised_mcp_polling: { contract: "custodial_polling_v1", tools: ["read_messages", "send_message"] } } },
+    { format: 1, profiles: { supervised_mcp_polling: { contract: "custodial_polling_v1", tools: [...custodialRuntimeContract.profiles.supervised_mcp_polling.tools, "register_agent_session"] } } },
+  ]) {
+    const harness = createHarness();
+    harness.dependencies.readMcpRuntimeContract = async () => report;
+    await assert.rejects(new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request), /does not support custodial_polling_v1/);
+    assert.deepEqual(harness.launches, []);
+    assert.deepEqual(harness.supervisorBridgeContexts, []);
+  }
+  for (const patch of [
+    { deliveryMode: "daemon_inbox" as const }, { supervisorSocketPath: undefined },
+    { supervisorWorkerSession: undefined },
+    { supervisorWorkerSession: { ...request.supervisorWorkerSession!, apiUrl: undefined } },
+    { supervisorWorkerSession: { ...request.supervisorWorkerSession!, apiUrl: "https://user:secret@example.test" } },
+  ]) {
+    const harness = createHarness();
+    await assert.rejects(new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn({ ...request, ...patch }), /coordinates|API origin/);
+    assert.deepEqual(harness.launches, []);
+    assert.deepEqual(harness.mcpRuntimeProbes, []);
+  }
+});
+
+test("Codex custodial polling reads the selected built executable contract without owner environment or fallback", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-codex-contract-"));
+  const entry = join(directory, "dist", "mcp", "server.js");
+  const previousDev = process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+  const previousToken = process.env.LETAGENTS_TOKEN;
+  process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = "http://127.0.0.1:5174";
+  process.env.LETAGENTS_TOKEN = "contract-probe-owner-canary";
+  try {
+    await mkdir(join(directory, "dist", "mcp"), { recursive: true });
+    await mkdir(join(directory, "node_modules"));
+    await writeFile(join(directory, "package.json"), JSON.stringify({ name: "letagents", version: LETAGENTS_MCP_RUNTIME_VERSION, type: "module" }));
+    const request = spawnRequest({
+      pollingContract: "custodial_polling_v1", deliveryMode: "mcp_polling", devMcpServerEntryPath: entry,
+      supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock",
+      supervisorExecutionGenerationId: "execution_exact",
+      supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
+    });
+    const harness = createHarness();
+    const { resolveMcpRuntime: _resolve, readMcpRuntimeContract: _read, ...nativeDependencies } = harness.dependencies;
+    const adapter = new CodexProviderAdapter({ dependencies: nativeDependencies });
+    await writeFile(entry, `process.stdout.write(${JSON.stringify(JSON.stringify({ format: 1, profiles: {} }))});`);
+    await assert.rejects(adapter.spawn(request), /does not support custodial_polling_v1/, "a matching package version cannot replace contract proof");
+    assert.equal(harness.launches.length, 0);
+    await writeFile(entry, "throw new Error('contract-probe-owner-canary');");
+    await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
+      && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
+    await writeFile(entry, [
+      "if (process.argv[2] !== '--letagents-runtime-contract' || process.env.LETAGENTS_TOKEN) process.exit(2);",
+      `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
+    ].join("\n"));
+    const handle = await adapter.spawn(request);
+    assert.equal(handle.observedState(), "idle");
+    assert.equal(harness.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
+    assert.ok(harness.launchOptions[0]!.options.configOverrides[0]!.includes(JSON.stringify(await realpath(entry))), "launch uses the resolver's canonical executable");
+  } finally {
+    if (previousDev === undefined) delete process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL;
+    else process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL = previousDev;
+    if (previousToken === undefined) delete process.env.LETAGENTS_TOKEN;
+    else process.env.LETAGENTS_TOKEN = previousToken;
+    await rm(directory, { recursive: true, force: true });
+  }
 });
 
 test("Codex supervised launch fails closed before app-server start when bridge coordinates are partial", async () => {

@@ -31,6 +31,7 @@ export type SupervisedDeliveryLifecyclePorts = {
   > | null;
   manifest: {
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
+    getAgentConfiguration(entryId: string): Promise<{ polling_contract?: "custodial_polling_v1" | null } | undefined>;
     pendingRoomMoves(entryId: string): Promise<DaemonRoomMoveRecord[]>;
   };
   roomMoves: {
@@ -126,6 +127,8 @@ export class SupervisedDeliveryLifecycleCoordinator {
     // Legacy worker polling and daemon ingress are mutually exclusive across
     // every crash boundary; complete the durable cutover first.
     if (entry?.provider === "codex" && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling") {
+      const configuration = await this.ports.manifest.getAgentConfiguration(entry.id);
+      if (!configuration || configuration.polling_contract) return;
       await this.ports.cutovers.start(entryId);
       return;
     }

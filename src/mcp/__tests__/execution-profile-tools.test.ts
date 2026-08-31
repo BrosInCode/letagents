@@ -80,3 +80,11 @@ test("interactive desktop sessions retain rental tools", () => {
   assert.equal(names.has("rental_list_requests"), true);
   assert.equal(names.has("rental_read_file"), true);
 });
+
+test("custodial polling advertises the restricted real tool surface with delivery enabled", () => {
+  const names = discovered("supervised_mcp_polling", "codex");
+  assert.deepEqual([...names].sort(), [...discovered("supervised_room_turn", "codex"), "wait_for_messages"].sort());
+  assert.deepEqual(letAgentsRuntimeContract().profiles.supervised_mcp_polling, {
+    contract: "custodial_polling_v1", tools: [...names].sort(),
+  });
+});

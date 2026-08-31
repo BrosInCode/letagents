@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.109";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.110";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -157,6 +157,8 @@ export type DaemonAgentConfiguration = {
   runtime_configuration_revision?: number;
   /** Explicit inbox owner; never infer daemon delivery from native policy. */
   delivery_mode?: DaemonAgentDeliveryMode;
+  /** Daemon-owned polling custody, never accepted from the flat manifest. */
+  polling_contract?: "custodial_polling_v1" | null;
   /** Present only while a legacy Codex polling turn is being fenced. */
   delivery_cutover?: DaemonDeliveryCutover | null;
   /** Provider-native policy selected in Add Agent; passed through unchanged. */
@@ -334,6 +336,8 @@ export type DaemonManifestEntry = {
 };
 
 export type DaemonManifestEntryView = DaemonManifestEntry & {
+  /** Read-only credential contract from configuration, never caller-owned manifest input. */
+  polling_contract?: "custodial_polling_v1" | null;
   worker_binding?: DaemonWorkerBindingProjection | null;
   /** Ephemeral causal delivery projection; never persisted in the manifest. */
   room_agent_state?: {

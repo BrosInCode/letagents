@@ -456,6 +456,60 @@ test("grant reconciliation follows daemon_inbox ownership instead of provider id
   assert.equal(h.events.some((event) => event.startsWith("bootstrap:")), true);
 });
 
+test("custodial polling restores grants without starting inbox delivery; legacy polling stays untouched", async () => {
+  for (const contract of [undefined, "custodial_polling_v1"] as const) {
+    const h = harness();
+    const agent = { ...entry(), deliveryMode: "mcp_polling" as const, pollingContract: contract };
+    const key = `owner/${agent.id}`;
+    h.grants.set(key, { metadata: metadata(key), token: "secret_same", entryId: agent.id, lastInstalledDaemonGeneration: 7 });
+    h.daemon.list = async () => [agent];
+    await h.coordinator.reconcileDesiredRunning();
+    assert.equal(h.events.includes("install:7"), Boolean(contract));
+    assert.deepEqual(h.bootstrapMessages, [], "grant recovery never starts the polling turn or daemon inbox");
+    assert.equal(h.events.some((event) => /^(create|provision):/.test(event)), false);
+  }
+});
+
+test("custodial polling reconnect and runtime recovery only reinstall exact authority", async () => {
+  const h = harness();
+  const agent = { ...entry(), deliveryMode: "mcp_polling" as const, pollingContract: "custodial_polling_v1" as const };
+  const key = `owner/${agent.id}`;
+  h.grants.set(key, { metadata: metadata(key), token: "secret_same", entryId: agent.id, lastInstalledDaemonGeneration: 7 });
+  const modes: unknown[] = [];
+  h.daemon.installHostGrant = async (input) => {
+    modes.push(input);
+    return "installed";
+  };
+  await h.coordinator.reconnectEntry(agent);
+  await h.coordinator.prepareEntryForRuntimeRecovery(agent);
+  assert.equal((modes[0] as { credentialOnly: boolean }).credentialOnly, true);
+  assert.equal((modes[1] as { recoveryOnly: boolean }).recoveryOnly, true);
+  assert.deepEqual(h.bootstrapMessages, []);
+  assert.equal(h.events.some((event) => /^(create|provision):/.test(event)), false);
+});
+
+test("stopped custodial polling agents revoke authority instead of reinstalling it", async () => {
+  const h = harness();
+  const agent = { ...entry(), desiredState: "stopped" as const, deliveryMode: "mcp_polling" as const, pollingContract: "custodial_polling_v1" as const };
+  h.daemon.list = async () => [agent];
+  await h.coordinator.reconcileDesiredRunning();
+  assert.equal(h.events.includes(`revoke:${agent.id}:session_1`), true);
+  assert.equal(h.events.some((event) => event.startsWith("install:")), false);
+  assert.deepEqual(h.bootstrapMessages, []);
+});
+
+test("custodial polling stays unactivated when secure grant storage is unavailable", async () => {
+  const h = harness({ readGrant: async () => { throw new DesktopSecureStorageUnavailableError("storage unavailable"); } });
+  const agent = { ...entry(), deliveryMode: "mcp_polling" as const, pollingContract: "custodial_polling_v1" as const };
+  h.daemon.list = async () => [agent];
+  await assert.rejects(h.coordinator.reconcileDesiredRunning(), /storage unavailable/);
+  let activated = false;
+  await assert.rejects(h.coordinator.activateEntry(agent, async () => { activated = true; }), /storage unavailable/);
+  assert.equal(activated, false);
+  assert.equal(h.events.some((event) => /^(install|create|provision):/.test(event)), false);
+  assert.deepEqual(h.bootstrapMessages, []);
+});
+
 test("reconciliation revokes a stopped entry instead of reinstalling ghost room authority", async () => {
   const h = harness();
   const stopped = { ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const, providerPid: null };

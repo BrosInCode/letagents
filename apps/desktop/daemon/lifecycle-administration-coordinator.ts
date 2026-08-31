@@ -21,6 +21,7 @@ export type LifecycleAdministrationStore = Pick<ManifestStore,
   | "commitPurge"
   | "durablePurgeWorkerSessionAttestation"
   | "getEntry"
+  | "getAgentConfiguration"
   | "getPurge"
   | "load"
   | "markPurgeCredentialsRevoked"
@@ -152,7 +153,7 @@ export class LifecycleAdministrationCoordinator {
     const release = this.ports.beginLifecycle(entryId);
     try {
       const stoppedEntry = await this.ports.setDesiredStateExclusive(entryId, "stopped");
-      if (!this.requiresHostGrant(stoppedEntry)) {
+      if (!await this.requiresHostGrant(stoppedEntry)) {
         return {
           outcome: "retired",
           entry: await this.ports.entryWithDerivedLiveness(stoppedEntry),
@@ -324,7 +325,7 @@ export class LifecycleAdministrationCoordinator {
         }
         if (!purge) {
           try {
-            const externalRevokeRequired = this.requiresHostGrant(entry);
+            const externalRevokeRequired = await this.requiresHostGrant(entry);
             const evidence = externalRevokeRequired
               ? await this.ports.store.durablePurgeWorkerSessionAttestation(entryId)
               : { workerSessionAttestation: "not_required" as const, agentSessionId: null };
@@ -493,8 +494,11 @@ export class LifecycleAdministrationCoordinator {
     await this.ports.ephemeralProvisioner.garbageCollectOrphans(retained);
   }
 
-  private requiresHostGrant(entry: DaemonManifestEntry): boolean {
-    return entry.delivery_mode === "daemon_inbox";
+  private async requiresHostGrant(entry: DaemonManifestEntry): Promise<boolean> {
+    if (entry.delivery_mode === "daemon_inbox") return true;
+    const configuration = await this.ports.store.getAgentConfiguration(entry.id);
+    if (!configuration) throw new Error("Agent credential custody configuration is unavailable.");
+    return Boolean(configuration.polling_contract);
   }
 
   private providerRef(entry: DaemonManifestEntry): ProviderActionRef {

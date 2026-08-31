@@ -21,6 +21,7 @@ export type StoredAgentConfiguration = {
   provider_launch_policy: unknown;
   config_revision: number;
   runtime_configuration_revision: number;
+  polling_contract?: DaemonAgentConfiguration["polling_contract"];
 };
 
 export type ManifestAdministrationStore = {
@@ -183,6 +184,9 @@ export class ManifestAdministrationCoordinator {
   }
 
   async putManifestEntry(entry: DaemonManifestEntry): Promise<DaemonManifestEntry> {
+    if (Object.hasOwn(entry, "polling_contract")) {
+      throw new Error("Polling custody is daemon-owned and cannot be supplied to manifest.put.");
+    }
     this.validateEntry(entry);
     const updated = await this.options.authority.serialize(async () => {
       await this.options.authority.assertCurrent();

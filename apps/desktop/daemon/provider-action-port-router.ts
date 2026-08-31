@@ -85,6 +85,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
 
   async spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle> {
     const provider = this.requiredProvider(request.provider);
+    if (request.pollingContract && provider !== "codex") throw new Error("Custodial polling is only supported by Codex.");
     const handle = await (await this.adapter(provider)).spawn(request);
     this.remember(provider, request, handle);
     return publicHandle(handle, request.configurationRevision);
@@ -130,6 +131,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
+    if (request.pollingContract && provider !== "codex") throw new Error("Custodial polling is only supported by Codex.");
     const handle = await (await this.adapter(provider)).resume(ref, request);
     this.remember(provider, request, handle);
     return publicHandle(handle, request.configurationRevision);

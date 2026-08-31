@@ -5,6 +5,8 @@ import type { LetAgentsExecutionProfile } from "./runtime/execution-profile.js";
 import { runWithCurrentSupervisedRoom } from "./runtime/room-state.js";
 import {
   completeCurrentSupervisedEffect,
+  authorizeCustodialPolling,
+  type CustodialPollingAuthorization,
   executeCurrentSupervisedTool,
   prepareCurrentSupervisedEffect,
   type PreparedSupervisedEffect,
@@ -66,6 +68,7 @@ export function durableCompletionResult(
  * Engine mechanics are not registered, so they are absent from discovery.
  */
 export interface SupervisedToolFacadeDependencies {
+  authorizePolling?: (toolName: string, prior?: CustodialPollingAuthorization) => Promise<CustodialPollingAuthorization>;
   executeTool?: (input: {
     toolName: string;
     input: unknown;
@@ -94,7 +97,7 @@ export function profileAwareToolServer(
   dependencies: SupervisedToolFacadeDependencies = productionDependencies,
   supervisedProvider: string | null = process.env.LETAGENTS_SUPERVISOR_PROVIDER?.trim() || null,
 ): McpServer {
-  if (profile !== "supervised_room_turn") return server;
+  if (profile !== "supervised_room_turn" && profile !== "supervised_mcp_polling") return server;
   return new Proxy(server, {
     get(target, property, receiver) {
       if (property !== "tool") {
@@ -106,6 +109,21 @@ export function profileAwareToolServer(
         const callback = registration.at(-1);
         if (typeof callback !== "function") throw new Error(`Tool ${name} has no callback.`);
         const wrapped = async (...call: unknown[]): Promise<CallToolResult> => {
+          if (profile === "supervised_mcp_polling") {
+            const authorize = dependencies.authorizePolling ?? authorizeCustodialPolling;
+            const authority = await authorize(name);
+            return dependencies.withRoom(authority.roomId, async () => {
+              const input = call[0] as Record<string, unknown> | undefined;
+              if (input?.room_id && input.room_id !== authority.roomId) throw new Error("Custodial tool room does not match its exact authority.");
+              if (name === "wait_for_messages") {
+                if (!authority.roomCursor) throw new Error("Custodial polling has no durable cursor; refusing a tail fallback.");
+                call[0] = { ...input, after_message_id: input?.after_message_id ?? authority.roomCursor };
+              }
+              const result = await callback(...call) as CallToolResult;
+              if (name === "read_messages" || name === "wait_for_messages") await authorize(name, authority);
+              return result;
+            });
+          }
           const extra = (call.at(-1) ?? {}) as { requestId?: string | number };
           const input = call.length > 1 ? call[0] : {};
           if (extra.requestId === undefined || extra.requestId === null || String(extra.requestId).trim() === "") {

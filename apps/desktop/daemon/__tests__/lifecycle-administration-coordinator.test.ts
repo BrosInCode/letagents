@@ -207,6 +207,18 @@ function harness() {
         getEntryHook?.(getEntryReads);
         return currentEntry?.id === entryId ? currentEntry : undefined;
       },
+      async getAgentConfiguration(entryId) {
+        if (currentEntry?.id !== entryId) return null;
+        return {
+          agent_id: currentEntry.id,
+          provider: currentEntry.provider,
+          model: currentEntry.model,
+          charter: currentEntry.charter,
+          permission_profile_id: currentEntry.permission_profile_id,
+          delivery_mode: currentEntry.delivery_mode,
+          polling_contract: null,
+        };
+      },
       async getPurge(operationId) {
         events.push(`store:get-purge:${operationId}`);
         return currentPurge?.operation_id === operationId ? currentPurge : null;

@@ -8,6 +8,7 @@ export const LETAGENTS_RUNTIME_CONTRACT_ARG = "--letagents-runtime-contract";
 export type LetAgentsRuntimeContract = {
   format: 1;
   profiles: {
+    supervised_mcp_polling: { contract: "custodial_polling_v1"; tools: string[] };
     cursor_supervised_room_turn: {
       tools: string[];
     };
@@ -37,6 +38,7 @@ export function letAgentsRuntimeContract(): LetAgentsRuntimeContract {
   return {
     format: 1,
     profiles: {
+      supervised_mcp_polling: { contract: "custodial_polling_v1", tools: registeredToolNames("supervised_mcp_polling", "codex") },
       cursor_supervised_room_turn: {
         tools: registeredToolNames("supervised_room_turn", "cursor"),
       },

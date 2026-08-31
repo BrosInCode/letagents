@@ -26,13 +26,17 @@ export function getWorkerBearerRuntime(): WorkerBearerRuntime {
   const bearer = process.env.LETAGENTS_AGENT_SESSION_BEARER?.trim();
   const supervised = process.env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1";
   const profile = process.env.LETAGENTS_EXECUTION_PROFILE?.trim();
+  const polling = profile === "supervised_mcp_polling";
   if (supervised !== (profile === "supervised_room_turn")) {
     return {
       mode: "invalid",
       error: "LETAGENTS_EXECUTION_PROFILE=supervised_room_turn and LETAGENTS_SUPERVISED_BOUNDED_TURNS=1 must be configured together.",
     };
   }
-  if (!bearer && !supervised) return { mode: "owner" };
+  if (polling && (bearer || process.env.LETAGENTS_TOKEN?.trim())) {
+    return { mode: "invalid", error: "Custodial polling refuses environment credentials; borrow exact daemon worker authority." };
+  }
+  if (!bearer && !supervised && !polling) return { mode: "owner" };
 
   if (bearer && supervised) {
     return {
@@ -86,6 +90,15 @@ export function requireValidWorkerBearerRuntime(): WorkerBearerRuntime {
 }
 
 export function isSupervisedBoundedTurn(): boolean {
+  return hasSupervisedWorkerAuthority() && !isCustodialPolling();
+}
+
+export function isCustodialPolling(): boolean {
+  return process.env.LETAGENTS_EXECUTION_PROFILE?.trim() === "supervised_mcp_polling";
+}
+
+/** Credential custody is independent of who owns room delivery. */
+export function hasSupervisedWorkerAuthority(): boolean {
   return requireValidWorkerBearerRuntime().mode === "supervised";
 }
 

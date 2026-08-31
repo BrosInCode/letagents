@@ -215,8 +215,11 @@ export class WorkerBindingStore {
     for (const credentialRef of retiredCredentialRefs) this.credentials.delete(credentialRef);
   }
 
-  async bind(input: WorkerSessionBindingInput): Promise<WorkerSessionBinding> {
+  async bind(input: WorkerSessionBindingInput, custodialPolling?: { roomCursor: string | null }): Promise<WorkerSessionBinding> {
     this.validate(input);
+    if (custodialPolling && parseRoomMessageNumber(custodialPolling.roomCursor) === null) {
+      throw new Error("Custodial polling requires an acknowledged numeric room cursor before binding.");
+    }
     // Test/fence seam must remain outside the SQLite transaction: a stalled
     // pre-commit caller must not lock unrelated manifest work during handoff.
     await this.write(input);
@@ -231,7 +234,7 @@ export class WorkerBindingStore {
         entry_id: input.entry_id, room_id: input.room_id, work_attempt_id: input.work_attempt_id,
         execution_generation_id: input.execution_generation_id, agent_session_id: input.agent_session_id,
         credential_ref: input.credential_ref?.trim() || randomUUID(), api_url: new URL(input.api_url).origin,
-        room_cursor: sameSession ? prior!.room_cursor : null,
+        room_cursor: custodialPolling ? custodialPolling.roomCursor : sameSession ? prior!.room_cursor : null,
         // Credentials may rotate, but the native API's sequence authority is
         // per durable agent entry. Never reuse a journal/API sequence.
         last_sequence: Math.max(prior?.last_sequence ?? 0, watermark?.last_sequence ?? 0),

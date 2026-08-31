@@ -3,7 +3,7 @@ import { pathToFileURL } from "node:url";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, migrateExecutionStorageV20ToV21, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 22;
+export const DAEMON_STATE_SCHEMA_VERSION = 23;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -13,6 +13,7 @@ function run(statement: StatementSync, ...values: unknown[]): void { statement.r
 function quoteIdentifier(value: string): string { return `"${value.replaceAll('"', '""')}"`; }
 
 const TERMINAL_RESULTS_TABLE = "supervised_agent_terminal_results";
+const POLLING_CONTRACT_COLUMN = "polling_contract TEXT CHECK(polling_contract IS NULL OR (polling_contract='custodial_polling_v1' AND delivery_mode='mcp_polling'))";
 const TERMINAL_RESULTS_INDEX = "CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id)";
 function terminalResultsSql(version: 19 | 20, table = TERMINAL_RESULTS_TABLE): string {
   return `CREATE TABLE ${table} (
@@ -30,6 +31,24 @@ function normalizedTerminalSql(sql: string): string {
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map((part) => part.startsWith("'") ? part
     : part.replace(/\bIF\s+NOT\s+EXISTS\s+/gi, "").replaceAll('"', "").replace(/\s+/g, "").toLowerCase())
     .join("").replace(/;$/, "");
+}
+
+/** Custody is durable configuration: never repair a missing value or weakened contract. */
+function validatePollingContract(database: DatabaseSync): void {
+  const column = (database.prepare("PRAGMA table_xinfo(agent_configurations)").all() as Row[])
+    .find((entry) => entry.name === "polling_contract");
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='agent_configurations'").get() as Row | undefined;
+  const sql = normalizedTerminalSql(String(definition?.sql ?? ""));
+  const declaration = `,${normalizedTerminalSql(POLLING_CONTRACT_COLUMN)}`;
+  if (!column || column.type !== "TEXT" || Number(column.notnull) !== 0 || column.dflt_value !== null
+    || Number(column.hidden) !== 0 || Number(column.pk) !== 0
+    || !(sql.includes(`${declaration},`) || sql.endsWith(`${declaration})strict`))) {
+    throw new Error("Daemon polling custody has an invalid or missing column definition.");
+  }
+  if (database.prepare(`SELECT 1 FROM agent_configurations WHERE polling_contract IS NOT NULL
+    AND (polling_contract <> 'custodial_polling_v1' OR delivery_mode IS NOT 'mcp_polling') LIMIT 1`).get()) {
+    throw new Error("Daemon polling custody contains invalid configuration.");
+  }
 }
 
 /** Terminal rows are authority: never repair a lost or weakened definition. */
@@ -79,6 +98,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
+  if (existingVersion >= 23) validatePollingContract(database);
   if (existingVersion >= 18) validateExecutionStorageSchema(database,
     existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : existingVersion === 21 ? 20 : 21);
   if (existingVersion >= 17) validateTerminalResults(database, existingVersion >= 20 ? 20 : undefined);
@@ -191,6 +211,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 21) {
     this.migrateV21ToV22(database);
+    return;
+  }
+  if (existingVersion === 22) {
+    this.migrateV22ToV23(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -475,6 +499,7 @@ createSchema(database: DatabaseSync): void {
       sort_order INTEGER NOT NULL UNIQUE
     ) STRICT;
     `);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
@@ -513,6 +538,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -538,6 +564,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -563,6 +590,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -627,6 +655,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     // either version marker.
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -678,6 +707,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -701,6 +731,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV6Shape(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -720,6 +751,7 @@ migrateV7ToV8(database: DatabaseSync): void {
   try {
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -737,6 +769,7 @@ migrateV8ToV9(database: DatabaseSync): void {
   try {
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -753,6 +786,7 @@ migrateV9ToV10(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -769,6 +803,7 @@ migrateV10ToV11(database: DatabaseSync): void {
   try {
     if (this.tableColumns(database, "agent_purge_operations").size) this.rebuildPurgeOperationsV11(database);
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -785,6 +820,7 @@ migrateV11ToV12(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.applyCurrentSchemaTail(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -813,6 +849,7 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -839,6 +876,7 @@ migrateV13ToV14(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -863,6 +901,7 @@ migrateV14ToV15(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -885,6 +924,7 @@ migrateV15ToV16(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -905,6 +945,7 @@ migrateV16ToV17(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -923,6 +964,7 @@ migrateV17ToV18(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -943,6 +985,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -962,6 +1005,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -982,6 +1026,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1001,6 +1046,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
+    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1009,6 +1055,29 @@ migrateV21ToV22(database: DatabaseSync): void {
     try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
     throw error;
   }
+}
+
+/** Preserve all existing polling behavior; only a future exact cutover may select custody. */
+migrateV22ToV23(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyV23Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+private applyV23Shape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "agent_configurations").has("polling_contract")) {
+    database.exec(`ALTER TABLE agent_configurations ADD COLUMN ${POLLING_CONTRACT_COLUMN}`);
+  }
+  validatePollingContract(database);
 }
 
 private applyV20Shape(database: DatabaseSync): void {
@@ -2330,6 +2399,7 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
 }
 
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion: 19 | 20 | 21 = 21): void {
+  if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 23) validatePollingContract(database);
   if (!this.tableColumns(database, "supervised_agent_inbox_events").size
     && database.prepare("SELECT 1 FROM supervised_agent_inbox LIMIT 1").get()) {
     throw new Error("Daemon state is missing inbox retry history and cannot safely reconstruct consumed retry budgets.");

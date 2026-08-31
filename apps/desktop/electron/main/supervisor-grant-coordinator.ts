@@ -345,7 +345,7 @@ export class SupervisorGrantCoordinator {
       // admission first: installHostGrant cannot converge a cursorless entry,
       // bootstrapRoomIngress writes the boundary before running convergence,
       // and stopped entries remain stopped.
-      .filter((entry) => entry.deliveryMode === "daemon_inbox"
+      .filter((entry) => requiresSupervisorGrant(entry)
         && (entry.desiredState === "running" || entry.desiredState === "stopped"))
       .map((entry) => entry.desiredState === "stopped"
         ? this.retireStoppedEntry(entry.id, status.generation)
@@ -360,7 +360,7 @@ export class SupervisorGrantCoordinator {
 
   /** Install authority and commit running state in one retirement-exclusion lane. */
   async activateEntry<T>(entry: DesktopSupervisorManifestEntry, activate: () => Promise<T>): Promise<T> {
-    if (entry.deliveryMode !== "daemon_inbox") return activate();
+    if (!requiresSupervisorGrant(entry)) return activate();
     return this.serialize(entry.id, async () => {
       const status = await this.daemon.ensureRunning();
       await this.reconcileEntryWithinEntryTail(
@@ -416,7 +416,7 @@ export class SupervisorGrantCoordinator {
    * session retirement, and successor convergence.
    */
   async prepareEntryForRuntimeRecovery(entry: DesktopSupervisorManifestEntry): Promise<void> {
-    if (entry.deliveryMode !== "daemon_inbox") {
+    if (!requiresSupervisorGrant(entry)) {
       throw new Error("This supervised provider does not support runtime recovery.");
     }
     const status = await this.daemon.ensureRunning();
@@ -437,7 +437,7 @@ export class SupervisorGrantCoordinator {
    * choice rather than an accidental side effect of "Reconnect".
    */
   async reconnectEntry(entry: DesktopSupervisorManifestEntry): Promise<void> {
-    if (entry.deliveryMode !== "daemon_inbox") {
+    if (!requiresSupervisorGrant(entry)) {
       throw new Error("This supervised provider does not support credential reconnection.");
     }
     // Reconnect is deliberately narrower than recovery. It can only rotate
@@ -843,6 +843,11 @@ export class SupervisorGrantCoordinator {
       lastInstalledDaemonGeneration: daemonGeneration,
     });
   }
+}
+
+function requiresSupervisorGrant(entry: DesktopSupervisorManifestEntry): boolean {
+  return entry.deliveryMode === "daemon_inbox"
+    || (entry.deliveryMode === "mcp_polling" && entry.pollingContract === "custodial_polling_v1");
 }
 
 function hasExactReconnectTarget(entry: DesktopSupervisorManifestEntry): boolean {
