@@ -11,10 +11,11 @@ import type {
 import {
   CodexProviderAdapter,
   codexMcpWorkplaceConfigOverrides,
+  type CodexPermissionObservation,
   type CodexAdapterRpc,
   type CodexProviderAdapterDependencies,
 } from "../main/agents/codex-provider-adapter.js";
-import type { RpcNotification } from "../main/agents/codex-rpc-client.js";
+import type { RpcNotification, RpcServerRequest } from "../main/agents/codex-rpc-client.js";
 import {
   CODEX_SUPERVISOR_BRIDGE_CONTEXT_FILE,
   writeCodexSupervisorBridgeContext,
@@ -57,6 +58,11 @@ class FakeRpc implements CodexAdapterRpc {
   private readonly missingThreadReads = new Map<string, number>();
   private readonly missingThreadResumes = new Map<string, number>();
   private readonly disconnectListeners = new Set<() => void>();
+  readonly pendingPermissions = new Map<RpcServerRequest["id"], RpcServerRequest>();
+  readonly permissionResponses: Array<{ request: RpcServerRequest; result: unknown }> = [];
+  readonly permissionListeners = new Set<() => void>();
+  connectionEpoch = "initial";
+  responseError = false;
 
   constructor(
     readonly threadId: string,
@@ -158,6 +164,32 @@ class FakeRpc implements CodexAdapterRpc {
 
   close(): void {
     this.closed = true;
+    this.pendingPermissions.clear();
+    this.permissionsChanged();
+  }
+
+  currentConnectionId(): string | null { return this.connected && !this.closed ? `${this.threadId}-${this.connectionEpoch}` : null; }
+  listPendingRequests(): readonly RpcServerRequest[] { return [...this.pendingPermissions.values()]; }
+  onPendingRequestsChanged(listener: () => void): () => void {
+    this.permissionListeners.add(listener);
+    return () => { this.permissionListeners.delete(listener); };
+  }
+  private permissionsChanged(): void {
+    queueMicrotask(() => { for (const listener of this.permissionListeners) listener(); });
+  }
+  askPermission(params: Record<string, unknown>, id: RpcServerRequest["id"] = 1,
+    method = "item/commandExecution/requestApproval"): RpcServerRequest {
+    const request = Object.freeze({ id, method, params: Object.freeze(structuredClone(params)), connectionId: this.currentConnectionId()! });
+    this.pendingPermissions.set(id, request);
+    this.permissionsChanged();
+    return request;
+  }
+  respond(request: RpcServerRequest, result: unknown): void {
+    if (request.connectionId !== this.currentConnectionId() || this.pendingPermissions.get(request.id) !== request) throw new Error("not pending");
+    this.pendingPermissions.delete(request.id);
+    this.permissionResponses.push({ request, result });
+    this.permissionsChanged();
+    if (this.responseError) throw new Error("uncertain send");
   }
 
   onDisconnect(listener: () => void): () => void {
@@ -166,11 +198,16 @@ class FakeRpc implements CodexAdapterRpc {
   }
 
   disconnect(): void {
+    this.close();
     for (const listener of this.disconnectListeners) listener();
     this.disconnectListeners.clear();
   }
 
   emit(notification: RpcNotification): void {
+    if (notification.method === "serverRequest/resolved") {
+      this.pendingPermissions.delete((notification.params as { requestId: RpcServerRequest["id"] }).requestId);
+      this.permissionsChanged();
+    }
     this.notify(notification);
   }
 
@@ -320,6 +357,242 @@ function requestByMethod(client: FakeRpc, method: string): RecordedRequest {
 async function flush(): Promise<void> {
   await new Promise<void>((resolve) => setImmediate(resolve));
 }
+
+const approvalParams = (overrides: Record<string, unknown> = {}) => ({
+  threadId: "thread-1", turnId: "turn-thread-1", itemId: "item-1", startedAtMs: 1,
+  command: "npm test", ...overrides,
+});
+
+test("Codex permission replies target exact pending requests and report sent, never applied", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  client.turnStatus = "inProgress";
+  const facts: NativeExecutionObservation[] = [];
+  const subscription = adapter.onExecution(handle, event => facts.push(event));
+  for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"]) {
+    // Same native item, distinct typed RPC IDs: neither callback can authorize the other.
+    const once = client.askPermission(approvalParams({ approvalId: "callback-1", availableDecisions: ["accept", "decline"] }), 1, method);
+    const reject = client.askPermission(approvalParams({ approvalId: "callback-2", grantRoot: "/host/private" }), "1", method);
+    assert.deepEqual(await adapter.replyPermission(handle, once, "once"), { outcome: "sent", scope: "request" });
+    assert.equal(client.listPendingRequests()[0], reject);
+    assert.deepEqual(await adapter.replyPermission(handle, reject, "reject"), { outcome: "sent", scope: "request" });
+    assert.deepEqual(client.permissionResponses.slice(-2), [
+      { request: once, result: { decision: "accept" } }, { request: reject, result: { decision: "decline" } },
+    ]);
+    await assert.rejects(adapter.replyPermission(handle, once, "once"), { outcome: "not_dispatched" });
+  }
+  assert.equal(client.permissionResponses.length, 4);
+  assert.equal(client.requests.filter(request => request.method === "thread/read").length, 4);
+  assert.deepEqual(facts, [], "approval payloads and decisions never enter execution evidence");
+  assert.deepEqual(harness.signals, []);
+  assert.equal(client.requests.some(request => request.method === "turn/start"), false);
+  subscription.dispose();
+});
+
+test("Codex rejects unsupported, stale, malformed, or broader-than-once approval decisions before dispatch", async (t) => {
+  const cases: Array<{ name: string; params?: Record<string, unknown>; method?: string; reply?: "once" | "reject"; clone?: boolean }> = [
+    { name: "foreign thread", params: { threadId: "foreign" } },
+    { name: "foreign turn", params: { turnId: "foreign" } },
+    { name: "missing item", params: { itemId: undefined } },
+    { name: "invalid start time", params: { startedAtMs: "1" } },
+    { name: "unknown method", method: "item/permissions/requestApproval" },
+    { name: "file grantRoot cannot mean once", method: "item/fileChange/requestApproval", params: { grantRoot: "/repo" } },
+    { name: "session-only choices", params: { availableDecisions: ["acceptForSession", "cancel"] } },
+    { name: "amendment-only choices", params: { availableDecisions: [{ acceptWithExecpolicyAmendment: { execpolicy_amendment: ["npm"] } }] } },
+    { name: "decline unavailable", params: { availableDecisions: ["accept"] }, reply: "reject" },
+    { name: "malformed choices", params: { availableDecisions: "accept" } },
+    { name: "empty choices", params: { availableDecisions: [] } },
+    { name: "copied request", clone: true },
+    { name: "unknown reply", reply: "acceptForSession" as "once" },
+  ];
+  for (const entry of cases) await t.test(entry.name, async () => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.turnStatus = "inProgress";
+    const request = client.askPermission(approvalParams(entry.params), 1, entry.method);
+    await assert.rejects(adapter.replyPermission(handle, entry.clone ? { ...request } : request, entry.reply ?? "once"), {
+      name: "CodexPermissionReplyError", outcome: "not_dispatched",
+    });
+    assert.deepEqual(client.permissionResponses, []);
+    assert.equal(client.listPendingRequests()[0], request, "refusal does not consume native pending authority");
+    assert.deepEqual(harness.signals, []);
+  });
+});
+
+test("Codex permission dispatch refuses non-active or inconclusive native turn snapshots", async (t) => {
+  for (const status of ["completed", "failed", "interrupted", "unknown", "read-error"]) await t.test(status, async () => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.turnStatus = status;
+    if (status === "read-error") client.request = async () => { throw new Error("timed out"); };
+    const request = client.askPermission(approvalParams());
+    await assert.rejects(adapter.replyPermission(handle, request, "once"), { outcome: "not_dispatched" });
+    assert.deepEqual(client.permissionResponses, []);
+    assert.equal(handle.observedState(), "idle", "read uncertainty is not runtime failure");
+  });
+});
+
+test("Codex permission responses do not replay after an uncertain send or changed post-send identity", async (t) => {
+  for (const failure of ["send_throw", "process_birth", "unverifiable", "disconnect"]) await t.test(failure, async () => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.turnStatus = "inProgress";
+    const request = client.askPermission(approvalParams());
+    const respond = client.respond.bind(client);
+    client.respond = (expected, result) => {
+      if (failure === "send_throw") client.responseError = true;
+      respond(expected, result);
+      if (failure === "process_birth") harness.launches[0]!.processIdentity += "-replaced";
+      if (failure === "unverifiable") harness.setIdentityObservable(false);
+      if (failure === "disconnect") client.disconnect();
+    };
+    await assert.rejects(adapter.replyPermission(handle, request, "once"), { outcome: "uncertain" });
+    assert.equal(client.permissionResponses.length, 1);
+    await assert.rejects(adapter.replyPermission(handle, request, "once"), { outcome: "not_dispatched" });
+    assert.equal(client.permissionResponses.length, 1);
+    assert.deepEqual(harness.signals, failure === "disconnect" ? [{ pid: handle.pid, signal: "SIGTERM" }] : [],
+      "only the existing observeFencedExit disconnect policy may signal the process");
+  });
+});
+
+test("Codex permission observation tracks pending requests without projecting resolution as an applied decision", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  client.turnStatus = "inProgress";
+  const initial = client.askPermission(approvalParams());
+  client.askPermission(approvalParams({ threadId: "foreign" }), "foreign");
+  const controller = new AbortController();
+  const events: CodexPermissionObservation[] = [];
+  const observation = adapter.observePermissions(handle, event => { events.push(event); }, controller.signal);
+  const throwing = adapter.observePermissions(handle, () => { throw new Error("consumer failed"); }, controller.signal);
+  assert.deepEqual(events[0], { type: "snapshot", requests: [initial] });
+  const second = client.askPermission(approvalParams({ itemId: "item-2" }), "second");
+  await flush();
+  assert.deepEqual(events.at(-1), { type: "snapshot", requests: [initial, second] });
+  client.emit({ method: "serverRequest/resolved", params: { requestId: initial.id, threadId: "thread-1" } });
+  await flush();
+  assert.deepEqual(events.at(-1), { type: "snapshot", requests: [second] });
+  assert.deepEqual(client.permissionResponses, [], "remote resolution is not evidence of our decision or dispatch");
+  await adapter.replyPermission(handle, second, "reject");
+  await flush();
+  assert.deepEqual(events.at(-1), { type: "snapshot", requests: [] });
+  harness.setIdentityObservable(false);
+  client.askPermission(approvalParams(), "degraded");
+  await flush();
+  assert.deepEqual(events.at(-1), { type: "degraded" });
+  harness.setIdentityObservable(true);
+  client.disconnect();
+  await Promise.all([observation, throwing]);
+  assert.deepEqual(events.at(-1), { type: "unavailable" });
+  assert.equal(client.permissionListeners.size, 0);
+  const count = events.length;
+  controller.abort();
+  client.askPermission(approvalParams(), "after-close");
+  await flush();
+  assert.equal(events.length, count);
+});
+
+test("Codex permission dispatch revalidates exact authority after an awaited native read", async (t) => {
+  for (const race of ["resolved", "request_replaced", "process_birth", "unverifiable", "connection", "continuation", "handle", "stopping", "turn_terminal"]) {
+    await t.test(race, async () => {
+      const harness = createHarness({ exitOnSignal: true });
+      const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+      const spawn = spawnRequest({ deliveryMode: "daemon_inbox" });
+      const handle = await adapter.spawn(spawn);
+      const client = harness.clients[0]!;
+      const permission = client.askPermission(approvalParams());
+      let release!: () => void;
+      let reading!: () => void;
+      const barrier = new Promise<void>(resolve => { release = resolve; });
+      const started = new Promise<void>(resolve => { reading = resolve; });
+      const originalRequest = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        if (method !== "thread/read") return originalRequest<T>(method, params);
+        reading();
+        await barrier;
+        return { thread: { id: "thread-1", turns: [{ id: "turn-thread-1", status: "inProgress" }] } } as T;
+      };
+      const response = adapter.replyPermission(handle, permission, "once");
+      const rejected = assert.rejects(response, { outcome: "not_dispatched" });
+      await started;
+      if (race === "resolved") client.emit({ method: "serverRequest/resolved", params: { requestId: permission.id, threadId: "thread-1" } });
+      if (race === "request_replaced") client.askPermission(approvalParams({ command: "different command" }));
+      if (race === "process_birth") harness.launches[0]!.processIdentity += "-replaced";
+      if (race === "unverifiable") harness.setIdentityObservable(false);
+      if (race === "connection") client.connectionEpoch = "replacement";
+      if (race === "continuation") await adapter.repairContinuation(handle, {
+        workAttemptId: handle.workAttemptId, expectedProviderContinuationId: "thread-1",
+        checkpointedReplacementProviderContinuationId: "thread-repaired", cwd: spawn.cwd, launchPolicy: spawn.launchPolicy,
+      }, { checkpointReplacement: async () => {} });
+      if (race === "handle") {
+        harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+        await flush();
+        await adapter.spawn(spawn);
+      }
+      if (race === "stopping") await adapter.stop(handle, { force: true });
+      if (race === "turn_terminal") client.emit({ method: "turn/completed", params: {
+        threadId: "thread-1", turn: { id: "turn-thread-1", status: "completed" },
+      } });
+      release();
+      await rejected;
+      assert.deepEqual(client.permissionResponses, []);
+    });
+  }
+});
+
+test("Codex concurrent permission replies send only once for one frozen pending request", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  client.turnStatus = "inProgress";
+  const request = client.askPermission(approvalParams());
+  const outcomes = await Promise.allSettled([
+    adapter.replyPermission(handle, request, "once"), adapter.replyPermission(handle, request, "reject"),
+  ]);
+  assert.equal(outcomes[0]!.status, "fulfilled");
+  assert.equal(outcomes[1]!.status, "rejected");
+  assert.equal((outcomes[1] as PromiseRejectedResult).reason.outcome, "not_dispatched");
+  assert.equal(client.permissionResponses.length, 1);
+});
+
+test("Codex permission observation withdraws replaced/stopped bindings and disposes on abort", async (t) => {
+  for (const end of ["abort", "continuation", "stop", "already_aborted"]) await t.test(end, async () => {
+    const harness = createHarness({ exitOnSignal: true });
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const spawn = spawnRequest({ deliveryMode: "daemon_inbox" });
+    const handle = await adapter.spawn(spawn);
+    const client = harness.clients[0]!;
+    client.askPermission(approvalParams());
+    const controller = new AbortController();
+    if (end === "already_aborted") controller.abort();
+    const events: CodexPermissionObservation[] = [];
+    const observation = adapter.observePermissions(handle, event => events.push(event), controller.signal);
+    if (end === "abort") controller.abort();
+    if (end === "continuation") await adapter.repairContinuation(handle, {
+      workAttemptId: handle.workAttemptId, expectedProviderContinuationId: "thread-1",
+      checkpointedReplacementProviderContinuationId: "thread-repaired", cwd: spawn.cwd, launchPolicy: spawn.launchPolicy,
+    }, { checkpointReplacement: async () => {} });
+    if (end === "stop") await adapter.stop(handle, { force: true });
+    await observation;
+    assert.equal(events.at(-1)?.type, end === "already_aborted" ? undefined : end === "abort" ? "snapshot" : "unavailable");
+    assert.equal(client.permissionListeners.size, 0);
+    const count = events.length;
+    client.askPermission(approvalParams(), "later");
+    await flush();
+    assert.equal(events.length, count);
+  });
+});
 
 test("Codex adapter launches app-server, forwards native policy unchanged, and boots the MCP workplace", async () => {
   const harness = createHarness();

@@ -82,6 +82,8 @@ export class CodexRpcClient {
   private connectionId = "";
   private readonly inbound = new Map<RpcRequestId, RpcServerRequest>();
   private readonly requestListeners = new Set<(request: RpcServerRequest) => void>();
+  private readonly pendingRequestListeners = new Set<() => void>();
+  private pendingRequestsNotificationQueued = false;
   private intentionalClose = false;
   private disconnectNotified = false;
   private readonly disconnectListeners = new Set<() => void>();
@@ -128,6 +130,7 @@ export class CodexRpcClient {
         if (this.ws !== ws) { rejectConnect(new Error("WebSocket connection replaced")); return; }
         if (!settled) {
           settled = true;
+          this.notifyPendingRequestsChanged();
           resolve();
         }
       };
@@ -220,6 +223,16 @@ export class CodexRpcClient {
 
   listPendingRequests(): readonly RpcServerRequest[] { return [...this.inbound.values()]; }
 
+  currentConnectionId(): string | null {
+    const ws = this.ws;
+    return ws && ws.readyState === getWebSocketCtor().OPEN ? this.connectionId : null;
+  }
+
+  onPendingRequestsChanged(listener: () => void): () => void {
+    this.pendingRequestListeners.add(listener);
+    return () => this.pendingRequestListeners.delete(listener);
+  }
+
   respond(request: RpcServerRequest, result: unknown): void {
     if (!request || request.connectionId !== this.connectionId || this.inbound.get(request.id) !== request) {
       throw new Error("Codex app-server request is no longer pending on this connection.");
@@ -227,16 +240,32 @@ export class CodexRpcClient {
     // Retire before send: a transport exception can leave delivery uncertain,
     // never permission to repeat an approval response.
     this.inbound.delete(request.id);
+    this.notifyPendingRequestsChanged();
     this.send({ id: request.id, result });
   }
 
   private invalidateRequests(): void {
     this.inbound.clear();
+    this.notifyPendingRequestsChanged();
     for (const pending of this.pending.values()) {
       clearTimeout(pending.timeout);
       pending.reject(new Error("WebSocket closed"));
     }
     this.pending.clear();
+  }
+
+  private notifyPendingRequestsChanged(): void {
+    if (this.pendingRequestsNotificationQueued) return;
+    this.pendingRequestsNotificationQueued = true;
+    // Invalidation only: observers reread the latest map/connection. In
+    // particular, no observer may intervene between response retirement and send.
+    queueMicrotask(() => {
+      this.pendingRequestsNotificationQueued = false;
+      for (const listener of [...this.pendingRequestListeners]) {
+        if (!this.pendingRequestListeners.has(listener)) continue;
+        try { listener(); } catch { /* Observers must not disrupt transport or each other. */ }
+      }
+    });
   }
 
   onDisconnect(listener: () => void): () => void {
@@ -267,13 +296,23 @@ export class CodexRpcClient {
         freezeJson(message.params);
         const request = Object.freeze({ id: message.id, method: message.method, params: message.params, connectionId: this.connectionId });
         this.inbound.set(request.id, request);
+        this.notifyPendingRequestsChanged();
         for (const listener of this.requestListeners) {
           try { listener(request); } catch { /* A consumer failure must not disrupt the transport or other observers. */ }
         }
         return;
       }
       if (message.method === "serverRequest/resolved" && record(message.params) && validId(message.params.requestId)) {
-        this.inbound.delete(message.params.requestId);
+        const request = this.inbound.get(message.params.requestId);
+        // Thread-bearing native requests can only be retired by that exact
+        // thread. Generic requests without a thread retain ID-only resolution.
+        const threadMatches = !record(request?.params) || !Object.hasOwn(request.params, "threadId")
+          || (typeof request.params.threadId === "string" && request.params.threadId.length > 0
+            && request.params.threadId === message.params.threadId);
+        if (request && threadMatches) {
+          this.inbound.delete(request.id);
+          this.notifyPendingRequestsChanged();
+        }
       }
       this.onNotification?.({ method: message.method, params: message.params });
       return;

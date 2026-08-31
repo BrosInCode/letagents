@@ -11,6 +11,7 @@ import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 import {
   CodexRpcClient,
   type RpcNotification,
+  type RpcServerRequest,
   type ThreadReadResult,
   type ThreadReadTurn,
   type TurnStartResult,
@@ -99,6 +100,23 @@ export interface CodexAdapterRpc {
   request<T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T>;
   close(): void;
   onDisconnect(listener: () => void): () => void;
+  currentConnectionId(): string | null;
+  listPendingRequests(): readonly RpcServerRequest[];
+  onPendingRequestsChanged(listener: () => void): () => void;
+  respond(request: RpcServerRequest, result: unknown): void;
+}
+
+/** Native approval payloads stay host-ephemeral, outside execution facts and room projections. */
+export type CodexPermissionObservation =
+  | { type: "snapshot"; requests: readonly RpcServerRequest[] }
+  | { type: "degraded" }
+  | { type: "unavailable" };
+
+export class CodexPermissionReplyError extends Error {
+  constructor(readonly outcome: "not_dispatched" | "uncertain") {
+    super(`Codex permission decision ${outcome}.`);
+    this.name = "CodexPermissionReplyError";
+  }
 }
 
 export interface CodexProviderAdapterDependencies {
@@ -250,6 +268,14 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function permissionParams(request: RpcServerRequest): Record<string, unknown> | null {
+  if (request.method !== "item/commandExecution/requestApproval" && request.method !== "item/fileChange/requestApproval") return null;
+  const params = recordValue(request.params);
+  return params && nativeExecutionId(params.threadId) && nativeExecutionId(params.turnId)
+    && nativeExecutionId(params.itemId) && Number.isSafeInteger(params.startedAtMs)
+    && (params.startedAtMs as number) >= 0 ? params : null;
+}
+
 function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | null {
   const root = recordValue(value);
   if (!root) return null;
@@ -393,6 +419,7 @@ class CodexProviderHandle implements ProviderHandle {
   readonly exitListeners = new Set<(payload: ProviderTerminalPayload) => void>();
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
+  readonly permissionInvalidationListeners = new Set<() => void>();
   streamSequence = 0;
   /** At most one terminal fact per recent native turn; never infer a latest turn. */
   readonly terminalTurns = new Map<string, string>();
@@ -422,6 +449,13 @@ class CodexProviderHandle implements ProviderHandle {
     this.roomTurnResults.clearAll();
     this.providerContinuationId = providerContinuationId;
     this.state = "idle";
+    this.invalidatePermissions();
+  }
+
+  invalidatePermissions(): void {
+    for (const listener of this.permissionInvalidationListeners) {
+      try { listener(); } catch { /* Observation never controls native work. */ }
+    }
   }
 
   observedState(): ProviderObservedState {
@@ -525,6 +559,93 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
   async poke(_handle: ProviderHandle, _message: string): Promise<void> {
     throw new Error("Codex mid-turn injection is not enabled: P0 proved room delivery, not native poke.");
+  }
+
+  private permissionAuthority(
+    handle: CodexProviderHandle, continuation: string, connection: ProviderConnectionRef, rpcConnection: string | null,
+  ): "current" | "degraded" | "unavailable" {
+    if (handle.terminal || handle.stopRequested || handle.protocolError || this.handles.get(handle.workAttemptId) !== handle
+      || handle.providerContinuationId !== continuation || !sameProviderConnectionIdentity(handle.providerConnection, connection)
+      || !rpcConnection || handle.client.currentConnectionId() !== rpcConnection) return "unavailable";
+    if (handle.pid === null || handle.pid !== connection.pid || !connection.processIdentity) return "degraded";
+    try {
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      if (actual === undefined) return "degraded";
+      return typeof actual === "string" && sameProcessBirthIdentity(actual, connection.processIdentity) ? "current" : "unavailable";
+    } catch { return "degraded"; }
+  }
+
+  /** Connection-only observation: disconnect loses pending authority, never reconnects or replays it. */
+  async observePermissions(
+    rawHandle: ProviderHandle, listener: (event: CodexPermissionObservation) => void, signal: AbortSignal,
+  ): Promise<void> {
+    const handle = this.requireHandle(rawHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
+    if (signal.aborted) return;
+    await new Promise<void>(resolve => {
+      let disposed = false;
+      const finish = () => {
+        if (disposed) return;
+        disposed = true;
+        unsubscribe();
+        handle.permissionInvalidationListeners.delete(refresh);
+        signal.removeEventListener("abort", finish);
+        resolve();
+      };
+      const refresh = () => {
+        if (disposed || signal.aborted) return;
+        const authority = this.permissionAuthority(handle, continuation, connection, rpcConnection);
+        const event: CodexPermissionObservation = authority === "current"
+          ? { type: "snapshot", requests: handle.client.listPendingRequests().filter(request =>
+            request.connectionId === rpcConnection && permissionParams(request)?.threadId === continuation) }
+          : { type: authority };
+        try { listener(event); } catch { /* Observation never controls native work. */ }
+        if (authority === "unavailable") finish();
+      };
+      const unsubscribe = handle.client.onPendingRequestsChanged(refresh);
+      handle.permissionInvalidationListeners.add(refresh);
+      signal.addEventListener("abort", finish, { once: true });
+      refresh();
+    });
+  }
+
+  /** Host-only dispatch. A successful WebSocket send is NOT evidence that Codex applied the decision. */
+  async replyPermission(rawHandle: ProviderHandle, expectedRequest: RpcServerRequest, reply: "once" | "reject"):
+    Promise<{ outcome: "sent"; scope: "request" }> {
+    const handle = this.handles.get(rawHandle.workAttemptId);
+    if (!handle || handle !== rawHandle) throw new CodexPermissionReplyError("not_dispatched");
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const rpcConnection = handle.client.currentConnectionId();
+    const params = expectedRequest && permissionParams(expectedRequest);
+    const decision = reply === "once" ? "accept" : reply === "reject" ? "decline" : null;
+    if (!params || params.threadId !== continuation || !decision
+      || (decision === "accept" && expectedRequest.method === "item/fileChange/requestApproval" && params.grantRoot != null)
+      || (params.availableDecisions != null && (!Array.isArray(params.availableDecisions) || !params.availableDecisions.includes(decision)))) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
+    const assertCurrent = () => {
+      if (this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current"
+        || expectedRequest.connectionId !== rpcConnection || !handle.client.listPendingRequests().includes(expectedRequest)
+        || handle.terminalTurns.has(exactTurnKey(continuation, params.turnId as string))) {
+        throw new CodexPermissionReplyError("not_dispatched");
+      }
+    };
+    assertCurrent();
+    const boundary = await this.inspectTurnBoundary(handle);
+    if (boundary.state !== "active" || boundary.providerContinuationId !== continuation || boundary.providerTurnId !== params.turnId) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
+    // No await or observer callback between the final fence and native response.
+    assertCurrent();
+    try { handle.client.respond(expectedRequest, { decision }); }
+    catch { throw new CodexPermissionReplyError("uncertain"); }
+    if (this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") {
+      throw new CodexPermissionReplyError("uncertain");
+    }
+    return { outcome: "sent", scope: "request" };
   }
 
   async controlTurn(
@@ -1067,7 +1188,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       || !sameProviderConnectionIdentity(known.providerConnection, connection))) {
       throw new Error("Codex exact-reference stop conflicts with the known native process owner.");
     }
-    if (known) { known.stopRequested = true; known.state = "stopping"; }
+    if (known) { known.stopRequested = true; known.state = "stopping"; known.invalidatePermissions(); }
     const awaitAbsence = async () => {
       const deadline = Date.now() + graceMs;
       for (;;) {
@@ -1109,6 +1230,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     assertProcessIdentity();
     handle.stopRequested = true;
     handle.state = "stopping";
+    handle.invalidatePermissions();
     const exitPromise = this.requireExitPromise(handle);
     if (options.force) {
       this.deps.signalProcess(pid, "SIGKILL");
