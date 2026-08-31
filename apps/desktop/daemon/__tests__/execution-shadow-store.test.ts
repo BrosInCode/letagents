@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import test from "node:test";
+import test, { type TestContext } from "node:test";
 
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { ExecutionProtocolError, parseExecutionFact, type ExecutionFact } from "../execution-protocol.js";
@@ -16,6 +16,15 @@ function fixture(path = ":memory:") {
   applyExecutionStorageSchema(db);
   const store = new ExecutionShadowStore(db);
   return { db, store };
+}
+function countHistoryReads(t: TestContext, db: DatabaseSync): () => number {
+  const prepare = db.prepare.bind(db);
+  let count = 0;
+  t.mock.method(db, "prepare", (sql: string) => {
+    if (sql.includes("WHERE f.runtime_generation_id=? ORDER BY f.sequence")) count++;
+    return prepare(sql);
+  });
+  return () => count;
 }
 const native = { turnId: "turn", providerContinuationId: "conversation", providerTurnId: "native-turn" };
 function seed(store: ExecutionShadowStore, suffix = "") {
@@ -113,6 +122,133 @@ test("journal ordering ignores clock order; duplicate observations have no repea
   } finally { db.close(); }
 });
 
+test("warm ingestion reuses projection history and matches cold replay", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const peer = seed(store, "peer"); const token = observer(store);
+    const peerToken = observer(store, { agentId: peer.runtime.agentId, subjectRuntimeGenerationId: peer.runtime.runtimeGenerationId,
+      observerRuntimeGenerationId: peer.runtime.runtimeGenerationId });
+    const reads = countHistoryReads(t, db);
+    store.ingest(token, fact(1)); store.ingest(token, turnFact(2));
+    store.ingest(peerToken, fact(1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
+      runtimeGenerationId: peer.runtime.runtimeGenerationId, factId: "peer-ready" }));
+    for (let sequence = 3; sequence <= 100; sequence++) {
+      store.ingest(token, operationFact(sequence, { kind: "output", outputBytes: 1 }));
+      store.ingest(peerToken, fact(sequence - 1, { agentId: peer.runtime.agentId, executionGenerationId: peer.runtime.executionGenerationId,
+        runtimeGenerationId: peer.runtime.runtimeGenerationId, factId: `peer-${sequence}`, domain: "control", state: "responsive" }));
+    }
+    const warm = store.projectRuntime("runtime");
+    assert.equal(reads(), 2, "only each runtime's initial projection should replay journal history");
+    assert.equal(warm.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 98);
+    assert.equal(warm.lastJournalSequence, 198);
+    assert.deepEqual(warm, new ExecutionShadowStore(db).projectRuntime("runtime"));
+    assert.deepEqual(store.projectRuntime("runtimepeer"), new ExecutionShadowStore(db).projectRuntime("runtimepeer"));
+    assert.equal(reads(), 4);
+  } finally { db.close(); }
+});
+
+test("public projections cannot mutate cached nested maps or subsequent ingestion", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    store.ingest(token, turnFact(1));
+    store.ingest(token, operationFact(2, { kind: "output", outputBytes: 42 }));
+    const exposed = store.projectRuntime("runtime");
+    const turn = exposed.projection.turns.get("turn")!;
+    turn.operations.get("command")!.outputBytes = 9000;
+    turn.providerTurnId = "spoofed";
+    (turn.operations as Map<string, unknown>).clear();
+    (exposed.projection.turns as Map<string, unknown>).clear();
+    exposed.projection.runtime = "exited";
+    exposed.lastJournalSequence = 999;
+    store.ingest(token, operationFact(3, { kind: "output", outputBytes: 5 }));
+    const actual = store.projectRuntime("runtime");
+    assert.equal(actual.projection.runtime, "starting");
+    assert.equal(actual.projection.turns.get("turn")?.providerTurnId, "native-turn");
+    assert.equal(actual.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 47);
+    assert.deepEqual(actual, new ExecutionShadowStore(db).projectRuntime("runtime"));
+  } finally { db.close(); }
+});
+
+test("cache invalidates other stores on shared and separate connections", async () => {
+  for (const sharedConnection of [true, false]) {
+    const root = await mkdtemp(join(tmpdir(), "execution-shadow-cache-"));
+    const path = join(root, "state.sqlite");
+    const { db, store } = fixture(path);
+    const writerDb = sharedConnection ? db : new DatabaseSync(path);
+    try {
+      seed(store); const first = observer(store);
+      store.ingest(first, turnFact(1));
+      store.ingest(first, operationFact(2, { kind: "output", outputBytes: 42 }));
+      store.projectRuntime("runtime");
+      const writer = new ExecutionShadowStore(writerDb);
+      const rebound = observer(writer, { expectedEpoch: 1 });
+      writer.ingest(rebound, operationFact(1, { factId: "new-output", observerEpoch: 2, kind: "output", outputBytes: 5 }));
+      assert.equal(store.projectRuntime("runtime").projection.turns.get("turn")?.operations.get("command")?.outputBytes, 47);
+      assert.throws(() => store.ingest(first, fact(3)), /stale_observer/);
+      // Prefix deletion does not change MAX(sequence). It must still invalidate
+      // the read cache; this is not a new retention/compaction implementation.
+      writerDb.prepare("DELETE FROM execution_facts WHERE sequence=2").run();
+      const afterDelete = store.projectRuntime("runtime");
+      assert.equal(afterDelete.lastJournalSequence, 3);
+      assert.equal(afterDelete.projection.turns.get("turn")?.operations.get("command")?.outputBytes, 5);
+      assert.deepEqual(afterDelete, new ExecutionShadowStore(db).projectRuntime("runtime"));
+    } finally {
+      if (!sharedConnection) writerDb.close();
+      db.close(); await rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
+test("caller-owned rollback and same-connection schema changes cannot poison cache", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    store.ingest(token, fact(1));
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "ready");
+    db.exec("BEGIN; DELETE FROM execution_facts");
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "starting");
+    db.exec("ROLLBACK");
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "ready");
+    db.exec("ALTER TABLE execution_facts RENAME TO unavailable_facts");
+    assert.throws(() => store.projectRuntime("runtime"), /no such table/);
+    db.exec("ALTER TABLE unavailable_facts RENAME TO execution_facts");
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "ready");
+  } finally { db.close(); }
+});
+
+test("runtime cache evicts least-recently-used projections and reconstructs them", (t) => {
+  const { db, store } = fixture();
+  try {
+    for (let index = 0; index < 17; index++) seed(store, String(index));
+    const reads = countHistoryReads(t, db);
+    for (let index = 0; index < 16; index++) store.projectRuntime(`runtime${index}`);
+    store.projectRuntime("runtime0"); // Make runtime1 the oldest.
+    store.projectRuntime("runtime16");
+    assert.equal(reads(), 17);
+    store.projectRuntime("runtime0");
+    assert.equal(reads(), 17);
+    assert.deepEqual(store.projectRuntime("runtime1").projection, emptyExecutionProjection());
+    assert.equal(reads(), 18);
+  } finally { db.close(); }
+});
+
+test("a single oversized runtime cannot stay in the bounded projection cache", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    store.ingest(token, turnFact(1));
+    for (let index = 0; index < 4096; index++) {
+      store.ingest(token, operationFact(index + 2, { executionId: `command-${index}` }));
+    }
+    const reads = countHistoryReads(t, db);
+    const first = store.projectRuntime("runtime");
+    assert.equal(first.projection.turns.get("turn")?.operations.size, 4096);
+    assert.deepEqual(first, store.projectRuntime("runtime"));
+    assert.equal(reads(), 2, "oversized projections must use durable replay, not a retained cache entry");
+  } finally { db.close(); }
+});
+
 test("source gaps persist diagnostics, never fabricate terminals, and can be filled", () => {
   const { db, store } = fixture();
   try {
@@ -141,7 +277,10 @@ test("native event replay across observers advances the cursor without duplicati
     assert.throws(() => store.ingest(second, { ...replay, factId: "changed-native", sourceSequence: 2, outputBytes: 43 }), /sequence_conflict/);
     store.ingest(second, operationFact(2, { factId: "next-output", observerEpoch: 2, kind: "output", outputBytes: 5, nativeEventId: "next-native-output" }));
     // A new store reconstructs from durable observations, not a process cache.
-    const projection = new ExecutionShadowStore(db).projectRuntime("runtime").projection;
+    const warm = store.projectRuntime("runtime");
+    const cold = new ExecutionShadowStore(db).projectRuntime("runtime");
+    assert.deepEqual(warm, cold);
+    const projection = cold.projection;
     assert.equal(projection.turns.get("turn")?.operations.get("command")?.outputBytes, 47);
     assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 5);
   } finally { db.close(); }
@@ -168,16 +307,33 @@ test("replaying earlier native facts after terminal or lost state does not reque
   }
 });
 
-test("append and projection/cursor updates are atomic across a failed write", () => {
+test("append and projection/cursor updates are atomic across a failed write or commit", (t) => {
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
+    store.ingest(token, fact(1));
+    const before = store.projectRuntime("runtime");
     db.exec("CREATE TRIGGER refuse_shadow_update BEFORE UPDATE ON execution_runtime_generations BEGIN SELECT RAISE(ABORT,'injected'); END");
-    assert.throws(() => store.ingest(token, fact(1)), /injected/);
-    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 0);
-    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 0);
+    assert.throws(() => store.ingest(token, fact(2, { state: "stopping" })), /injected/);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 1);
+    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
+    assert.deepEqual(store.projectRuntime("runtime"), before);
     db.exec("DROP TRIGGER refuse_shadow_update");
-    assert.equal(store.ingest(token, fact(1)).status, "accepted");
+    assert.equal(store.ingest(token, fact(2, { state: "stopping" })).status, "accepted");
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "stopping");
+    const after = store.projectRuntime("runtime");
+    const exec = db.exec.bind(db);
+    let failCommit = true;
+    t.mock.method(db, "exec", (sql: string) => {
+      if (sql === "COMMIT" && failCommit) { failCommit = false; throw new Error("injected commit failure"); }
+      exec(sql);
+    });
+    const exit = fact(3, { state: "exited", controlEvidence: "process_exit" });
+    assert.throws(() => store.ingest(token, exit), /injected commit failure/);
+    assert.deepEqual(store.projectRuntime("runtime"), after);
+    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 2);
+    assert.equal(store.ingest(token, exit).status, "accepted");
+    assert.equal(store.projectRuntime("runtime").projection.runtime, "exited");
   } finally { db.close(); }
 });
 
