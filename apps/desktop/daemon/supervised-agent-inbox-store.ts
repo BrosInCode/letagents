@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import { assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import {
   pruneSupervisedAgentHistory,
   readDurableNativeFailure,
@@ -446,6 +447,7 @@ export class SupervisedAgentInboxStore {
       // prevents a later item becoming blocked and hiding the real stall.
       if (!finalStates.has(next)) this.assertCurrentHead(database, item);
       if (next === "dispatching" && item.state !== "pending") throw new Error("Only the current pending FIFO head may be dispatched.");
+      if (next === "dispatching" && !deliveryDrainAllowsAdmission(database, item)) throw new Error("Delivery drain blocks new turn admission.");
       if (Object.hasOwn(patch, "provider_turn_id")
         && patch.provider_turn_id !== item.provider_turn_id) {
         throw new Error("Provider turn identity may change only through the atomic turn-start checkpoint.");
@@ -493,6 +495,7 @@ export class SupervisedAgentInboxStore {
         // blocked after A finishes until the accepted action completes.
         if (status !== "retryable" || linkedInboxItemId === null || item.inbox_item_id !== linkedInboxItemId) return null;
       }
+      if (!deliveryDrainAllowsAdmission(database, item)) return null;
       if (item.state === "result_recovery") return item;
       if (item.state !== "pending") return null;
       this.assertCurrentHead(database, item);
@@ -514,6 +517,7 @@ export class SupervisedAgentInboxStore {
       const item = rowToItem(current);
       if (item.state !== "dispatching" || item.provider_turn_id) throw new Error("Provider dispatch intent requires an unstarted dispatching inbox item.");
       this.assertCurrentHead(database, item);
+      if (!deliveryDrainAllowsAdmission(database, item)) throw new Error("Delivery drain blocks new turn dispatch.");
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
@@ -1092,6 +1096,7 @@ export class SupervisedAgentInboxStore {
         const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
           WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id);
         if (unresolvedControl) throw new Error("Room move is blocked by unresolved turn control.");
+        assertNoDeliveryDrain(database, input.agent_id);
         const timestamp = this.now();
         const sourceCursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?")
           .get(input.agent_id, input.room_id) as Row | undefined;
@@ -1308,6 +1313,7 @@ export class SupervisedAgentInboxStore {
     missing_continuation: string;
   }): Promise<ProviderContinuationRepair> {
     return this.exclusive(async (database) => this.transaction(database, () => {
+      assertNoDeliveryDrain(database, input.agent_id);
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
       if (!row) throw new Error("The blocked room message no longer exists.");
       const item = rowToItem(row);

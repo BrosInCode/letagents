@@ -4,6 +4,10 @@ import { chmod, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import {
+  assertNoDeliveryDrain, cancelDeliveryDrain, prepareDeliveryDrain, readDeliveryDrain,
+  type DeliveryDrainRecord, type PrepareDeliveryDrain,
+} from "./delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
 import {
   pruneSupervisedAgentHistory,
@@ -221,6 +225,22 @@ export class ManifestStore {
     return this.readEntryFromDatabase(database, agentId);
   }
 
+  /** Internal drain admission only. This does not switch modes or interrupt a provider. */
+  async prepareDeliveryDrain(input: PrepareDeliveryDrain, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; cutover: DeliveryDrainRecord }> {
+    const snapshot = structuredClone(input);
+    return this.writeDeliveryDrain((database) => prepareDeliveryDrain(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async getDeliveryDrain(operationId: string): Promise<DeliveryDrainRecord | null> {
+    return readDeliveryDrain(await this.getDatabase(), operationId);
+  }
+
+  async cancelDeliveryDrain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
+    const snapshot = { ...input };
+    return this.writeDeliveryDrain((database) => cancelDeliveryDrain(database, snapshot), commitFence);
+  }
+
   async getAgentConfiguration(agentId: string): Promise<StoredAgentConfiguration | undefined> {
     const database = await this.getDatabase();
     const row = database.prepare(`SELECT provider,model,reasoning_effort,charter,permission_profile_id,provider_launch_policy_present,provider_launch_policy_undefined,provider_launch_policy_json,config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?`).get(agentId) as Row | undefined;
@@ -248,6 +268,7 @@ export class ManifestStore {
             if (move.operation_id !== input.operation_id || move.agent_id !== input.agent_id || move.source_room_id !== input.source_room_id || move.destination_room_id !== input.destination_room_id || move.execution_generation_id !== input.execution_generation_id) throw new Error("Room-move request id is already bound to different coordinates.");
             result = { created: false, move };
           } else {
+            assertNoDeliveryDrain(database, input.agent_id);
             const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
               WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id) as Row | undefined;
             if (unresolvedControl) {
@@ -816,6 +837,7 @@ export class ManifestStore {
     }
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
+      assertNoDeliveryDrain(database, input.agentId);
       if (!current
         || current.room_id !== input.roomId
         || current.desired_state !== "running"
@@ -2056,6 +2078,9 @@ export class ManifestStore {
 
   private insertProjection(database: DatabaseSync, projection: DaemonManifestDomainProjection, sortOrder: number): void {
     const { identity, profile, membership, configuration, launch_intent: launch, runtime_deployment: runtime, lifecycle, readiness, turn_control_journal: turnJournal, retained_worker_binding: bindingRecord, reconciliation: reconciliationRecord } = projection;
+    // Legacy cutover preparation commits through all projection replacement
+    // paths; a preflight check alone would race native drain acceptance.
+    if (configuration.delivery_cutover) assertNoDeliveryDrain(database, identity.agent_id);
     run(database.prepare("INSERT INTO agent_identities VALUES (?, ?, ?, ?)"), identity.agent_id, identity.created_by, identity.created_at, sortOrder);
     run(database.prepare("INSERT INTO agent_profiles VALUES (?, ?)"), identity.agent_id, profile.display_name);
     run(database.prepare("INSERT INTO agent_room_memberships VALUES (?, ?)"), identity.agent_id, membership.room_id);
@@ -2442,6 +2467,34 @@ export class ManifestStore {
     database.exec("DELETE FROM legacy_lane_owners");
     const insert = database.prepare("INSERT INTO legacy_lane_owners VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)");
     owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
+  }
+
+  /** Cutover journals do not mutate the flat manifest or its generation. */
+  private writeDeliveryDrain<T>(mutation: (database: DatabaseSync) => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      let open = false;
+      let committed = false;
+      let value!: T;
+      try {
+        const commit = async () => {
+          if (committed) throw new Error("Delivery drain transaction was already committed.");
+          database.exec("BEGIN IMMEDIATE");
+          open = true;
+          value = mutation(database);
+          database.exec("COMMIT");
+          open = false;
+          committed = true;
+        };
+        if (commitFence) await commitFence(commit);
+        else await commit();
+        if (!committed) throw new Error("Delivery drain fence returned without committing the transaction.");
+        return value;
+      } catch (error) {
+        if (open) { try { database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ } }
+        throw error;
+      }
+    });
   }
 
   private writeTargeted<T>(

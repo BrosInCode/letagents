@@ -70,6 +70,7 @@ async function completeCapturedReceipt(store: SupervisedAgentInboxStore, databas
 
 async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: {
   agentId: string; roomId: string; workAttemptId: string; executionGenerationId: string; providerContinuationId: string;
+  operationalExecution?: boolean;
 }): Promise<void> {
   const manifest = new ManifestStore(env.database);
   const loaded = await manifest.load();
@@ -92,6 +93,31 @@ async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: 
   };
   await manifest.write(loaded.generation, [...loaded.entries.filter((entry) => entry.id !== input.agentId), active]);
   await manifest.close();
+  if (input.operationalExecution) {
+    const database = new DatabaseSync(env.database);
+    try {
+      database.prepare(`INSERT INTO work_attempts
+        (work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,
+          workspace_resolved_revision,workspace_bare_path,state,created_at)
+        VALUES (?,?,?,1,?,'repo','https://example.test/repo.git',?,?,'active',?)`).run(
+        input.workAttemptId, "task", "lease", active.workspace_path!, "a".repeat(40), join(env.root, "bare.git"), active.created_at,
+      );
+      database.prepare("INSERT INTO work_attempt_lease_epochs VALUES(?,0,'lease',1,?)").run(input.workAttemptId, active.created_at);
+      database.prepare("INSERT INTO work_attempt_executions VALUES(?,?,?,'provider',1,NULL)")
+        .run(input.executionGenerationId, input.workAttemptId, active.created_at);
+    } finally { database.close(); }
+  }
+}
+
+function inboxDrainRequest(agentId: string, providerTurnId: string | null): Parameters<ManifestStore["prepareDeliveryDrain"]>[0] {
+  return {
+    requestId: "drain-request", operationId: "drain-operation", agentId, roomId: "room", executionGenerationId: "generation",
+    handle: { workAttemptId: "attempt", pid: 4311, providerContinuationId: "continuation", observedState: "working",
+      providerConnection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "test:4311" } },
+    boundary: providerTurnId === null
+      ? { state: "idle", providerContinuationId: "continuation", nativeProcessIdentity: "test:4311", latestProviderTurnId: null }
+      : { state: "active", providerContinuationId: "continuation", nativeProcessIdentity: "test:4311", providerTurnId },
+  };
 }
 
 async function prepareSecretBearingV5(env: Awaited<ReturnType<typeof fixture>>): Promise<void> {
@@ -358,6 +384,223 @@ test("pre-dispatch, exact-result recovery, and publication have independent dura
       }
     }
   } finally { await store.close(); await env.cleanup(); }
+});
+
+for (const outcome of ["reply", "no_reply", "failed", "interrupted"] as const) {
+  test(`delivery drain preserves exact A ${outcome} recovery and freezes B until cancellation`, async () => {
+    const env = await fixture();
+    let store = new SupervisedAgentInboxStore(env.database);
+    const manifest = new ManifestStore(env.database);
+    try {
+      await seedActiveAgent(env, { agentId: "draining", roomId: "room", workAttemptId: "attempt",
+        executionGenerationId: "generation", providerContinuationId: "continuation", operationalExecution: true });
+      const [first, second] = await store.ingestPoll({ agent_id: "draining", room_id: "room", last_observed_message_id: "2",
+        messages: ["1", "2"].map((source_message_id) => ({ source_message_id, source_message: {}, activation: {} })) });
+      await store.claimHead("draining");
+      await store.checkpointTurnStarted(first!.inbox_item_id, "exact-A", TEST_PROVIDER_TURN_AUTHORITY);
+      const binding = await store.providerTurnBinding(first!.inbox_item_id);
+      await store.checkpointNormalizedTerminal({ inbox_item_id: first!.inbox_item_id, agent_id: "draining",
+        execution_generation_id: "generation", provider_turn_id: "exact-A", outcome: "unreadable", text: null,
+        evidence: "none", terminal_evidence: {} });
+      await store.transition(first!.inbox_item_id, "awaiting_result");
+      await store.transition(first!.inbox_item_id, "result_recovery");
+      const accepted = await manifest.prepareDeliveryDrain(inboxDrainRequest("draining", "exact-A"));
+      assert.equal(accepted.cutover.admitted_inbox_item_id, first!.inbox_item_id);
+      assert.equal(accepted.cutover.admitted_source_message_id, "1");
+      assert.equal(accepted.cutover.admitted_action_id, first!.action_id);
+
+      for (let attempt = 1; attempt <= 2; attempt += 1) {
+        const failure = await store.recordRetryFailure(first!.inbox_item_id, { domain: "result_recovery", error: "read unavailable" });
+        assert.equal(failure.attempt, attempt);
+        assert.equal((await store.claimHead("draining"))?.inbox_item_id, first!.inbox_item_id);
+        assert.equal(failure.item.state, "result_recovery");
+      }
+      await store.close(); store = new SupervisedAgentInboxStore(env.database);
+      await store.normalizeStartupRecovery("draining");
+      assert.equal((await store.claimHead("draining"))?.state, "result_recovery");
+      assert.deepEqual(await store.providerTurnBinding(first!.inbox_item_id), binding);
+      const text = outcome === "reply" ? "Saved answer from A" : null;
+      await store.checkpointNormalizedTerminal({ inbox_item_id: first!.inbox_item_id, agent_id: "draining",
+        execution_generation_id: "generation", provider_turn_id: "exact-A", outcome, text, evidence: "transcript",
+        terminal_evidence: { turnId: "exact-A", providerContinuationId: "continuation", outcome, text, evidence: "transcript" } });
+      if (outcome === "reply") {
+        const saved = (await store.get(first!.inbox_item_id))!.outcome;
+        await store.transition(first!.inbox_item_id, "publishing");
+        await store.recordRetryFailure(first!.inbox_item_id, { domain: "publication", error: "publication disconnected" });
+        await store.close(); store = new SupervisedAgentInboxStore(env.database);
+        await store.normalizeStartupRecovery("draining");
+        assert.equal((await store.claimHead("draining"))?.inbox_item_id, first!.inbox_item_id,
+          "the drain permits the saved reply's publication-only retry after restart");
+        assert.equal((await store.get(first!.inbox_item_id))?.outcome, saved);
+        assert.equal((await store.get(first!.inbox_item_id))?.reply_client_message_id, first!.reply_client_message_id);
+        await store.transition(first!.inbox_item_id, "awaiting_result");
+        await store.transition(first!.inbox_item_id, "publishing");
+        await store.checkpointPublication({ inbox_item_id: first!.inbox_item_id, room_id: "room", canonical_message_id: "published-A" });
+      } else await store.transition(first!.inbox_item_id, outcome === "no_reply" ? "acknowledged_no_reply" : "acknowledged_failed");
+
+      assert.equal((await store.get(first!.inbox_item_id))?.attempt_count, 1, "recovery/publication never starts a second native turn");
+      assert.deepEqual(await store.providerTurnBinding(first!.inbox_item_id), binding);
+      assert.equal((await store.head("draining"))?.inbox_item_id, second!.inbox_item_id);
+      assert.equal(await store.claimHead("draining"), null, "A's terminal receipt does not release the drain's admission barrier");
+      await assert.rejects(store.transition(second!.inbox_item_id, "dispatching"), /Delivery drain/);
+      assert.equal((await store.get(second!.inbox_item_id))?.attempt_count, 0);
+      assert.equal((await store.cursor("draining"))?.last_observed_message_id, "2");
+      const database = new DatabaseSync(env.database);
+      try {
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_generations").get()?.n, 0,
+          "operational admission does not require or create typed-shadow authority");
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_publications").get()?.n, outcome === "reply" ? 1 : 0);
+        assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally { database.close(); }
+      await manifest.cancelDeliveryDrain({ operationId: "drain-operation", agentId: "draining" });
+      assert.equal((await store.claimHead("draining"))?.inbox_item_id, second!.inbox_item_id);
+    } finally { await store.close(); await manifest.close(); await env.cleanup(); }
+  });
+}
+
+for (const reset of ["pre_dispatch_retry", "clean_handoff"] as const) {
+  test(`delivery drain does not admit a fresh A after ${reset} removes its pending dispatch`, async () => {
+    const env = await fixture();
+    const store = new SupervisedAgentInboxStore(env.database);
+    const manifest = new ManifestStore(env.database);
+    try {
+      await seedActiveAgent(env, { agentId: "draining", roomId: "room", workAttemptId: "attempt",
+        executionGenerationId: "generation", providerContinuationId: "continuation", operationalExecution: true });
+      const [first] = await store.ingestPoll({ agent_id: "draining", room_id: "room", last_observed_message_id: "2",
+        messages: ["1", "2"].map((source_message_id) => ({ source_message_id, source_message: {}, activation: {} })) });
+      await store.claimHead("draining");
+      const { cutover } = await manifest.prepareDeliveryDrain(inboxDrainRequest("draining", null));
+      assert.equal(cutover.admitted_inbox_item_id, first!.inbox_item_id);
+      assert.equal((await store.checkpointDispatchIntent(first!.inbox_item_id)).state, "dispatching",
+        "the invocation claimed before acceptance remains admitted before its native ID arrives");
+      if (reset === "pre_dispatch_retry") {
+        await store.recordRetryFailure(first!.inbox_item_id, { domain: "pre_dispatch", error: "provider did not receive the prompt" });
+        await store.transition(first!.inbox_item_id, "pending");
+      } else await store.resetPreNativeHandoff(first!.inbox_item_id);
+      assert.equal(await store.claimHead("draining"), null);
+      await assert.rejects(store.transition(first!.inbox_item_id, "dispatching"), /Delivery drain/);
+      assert.equal((await store.get(first!.inbox_item_id))?.state, "pending");
+      assert.equal((await store.get(first!.inbox_item_id))?.provider_turn_id, null);
+      assert.equal((await store.get(first!.inbox_item_id))?.attempt_count, 0);
+      assert.equal(await store.providerTurnBinding(first!.inbox_item_id), null);
+      await manifest.cancelDeliveryDrain({ operationId: "drain-operation", agentId: "draining" });
+      assert.equal((await store.claimHead("draining"))?.inbox_item_id, first!.inbox_item_id);
+    } finally { await store.close(); await manifest.close(); await env.cleanup(); }
+  });
+}
+
+test("historical NULL-authority delivery drains block claims, direct transitions, and dispatch intent", async () => {
+  for (const state of ["pending", "dispatching", "result_recovery"] as const) {
+    const env = await fixture();
+    let store = new SupervisedAgentInboxStore(env.database);
+    try {
+      const [item] = await store.ingestPoll({ agent_id: "historical", room_id: "room", last_observed_message_id: "1",
+        messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+      if (state !== "pending") await store.claimHead("historical");
+      if (state === "result_recovery") {
+        await store.checkpointTurnStarted(item!.inbox_item_id, "exact-A", TEST_PROVIDER_TURN_AUTHORITY);
+        await store.transition(item!.inbox_item_id, "awaiting_result");
+        await store.transition(item!.inbox_item_id, "result_recovery");
+      }
+      const database = new DatabaseSync(env.database);
+      try {
+        database.prepare(`INSERT INTO execution_cutover_v2
+          (operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms)
+          VALUES ('historic-op','historic-request','historical','generation','daemon_inbox','mcp_polling','drain','draining',1,1)`).run();
+        assert.equal(database.prepare("SELECT authority_version FROM execution_cutover_v2").get()?.authority_version, null);
+        assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally { database.close(); }
+      await store.close(); store = new SupervisedAgentInboxStore(env.database);
+      const before = await store.get(item!.inbox_item_id);
+      assert.equal(await store.claimHead("historical"), null, state);
+      if (state === "pending") await assert.rejects(store.transition(item!.inbox_item_id, "dispatching"), /Delivery drain/);
+      if (state === "dispatching") await assert.rejects(store.checkpointDispatchIntent(item!.inbox_item_id), /Delivery drain/);
+      assert.deepEqual(await store.get(item!.inbox_item_id), before, "refused admission leaves the historical FIFO unchanged");
+      assert.equal((await store.cursor("historical"))?.last_observed_message_id, "1");
+    } finally { await store.close(); await env.cleanup(); }
+  }
+});
+
+test("delivery drain pins exact terminal A inside the 200-receipt bound and cancellation releases it", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  const manifest = new ManifestStore(env.database);
+  try {
+    await seedActiveAgent(env, { agentId: "draining", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation", operationalExecution: true });
+    const items = await store.ingestPoll({ agent_id: "draining", room_id: "room", last_observed_message_id: "205",
+      messages: Array.from({ length: 205 }, (_, i) => ({ source_message_id: String(i + 1), source_message: {}, activation: {} })) });
+    const first = items[0]!;
+    await store.claimHead("draining");
+    await store.checkpointTurnStarted(first.inbox_item_id, "exact-A", TEST_PROVIDER_TURN_AUTHORITY);
+    await manifest.prepareDeliveryDrain(inboxDrainRequest("draining", "exact-A"));
+    await store.checkpointNormalizedTerminal({ inbox_item_id: first.inbox_item_id, agent_id: "draining",
+      execution_generation_id: "generation", provider_turn_id: "exact-A", outcome: "no_reply", text: null,
+      evidence: "stream", terminal_evidence: {} });
+    await store.transition(first.inbox_item_id, "awaiting_result");
+    await store.transition(first.inbox_item_id, "acknowledged_no_reply");
+    const database = new DatabaseSync(env.database);
+    try {
+      // Seed later retained receipts directly: the drain deliberately forbids
+      // manufacturing this retention fixture by claiming B through live APIs.
+      database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?
+        WHERE agent_id='draining' AND inbox_item_id<>?`).run(
+        JSON.stringify({ kind: "no_reply", text: null, evidence: "none" }), new Date().toISOString(), first.inbox_item_id,
+      );
+      await store.pruneHistory("draining");
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox").get()?.n, 200);
+      assert.equal((await store.get(first.inbox_item_id))?.state, "acknowledged_no_reply");
+      assert.ok(await store.providerTurnBinding(first.inbox_item_id));
+      assert.equal(await store.get(items[5]!.inbox_item_id), null, "the exact pin consumes one of the fixed 200 slots");
+      assert.ok(await store.get(items[6]!.inbox_item_id));
+      const accepted = await manifest.getDeliveryDrain("drain-operation");
+      assert.equal(accepted?.admitted_inbox_item_id, first.inbox_item_id);
+      await manifest.cancelDeliveryDrain({ operationId: "drain-operation", agentId: "draining" });
+      // One later terminal receipt makes the previously pinned A the oldest
+      // unpinned row over the bound; cancellation itself must not delete data.
+      assert.ok(await store.get(first.inbox_item_id));
+      const [later] = await store.ingestPoll({ agent_id: "draining", room_id: "room", last_observed_message_id: "206",
+        messages: [{ source_message_id: "206", source_message: {}, activation: {} }] });
+      await store.claimHead("draining");
+      await store.cancelInterruptedTurn(later!.inbox_item_id);
+      await store.pruneHistory("draining");
+      assert.equal(await store.get(first.inbox_item_id), null);
+      assert.equal(await store.providerTurnBinding(first.inbox_item_id), null);
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox").get()?.n, 200);
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { database.close(); }
+  } finally { await store.close(); await manifest.close(); await env.cleanup(); }
+});
+
+test("delivery drain reciprocally rejects a room-move effect without leaving its prepared journal", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  const manifest = new ManifestStore(env.database);
+  try {
+    await seedActiveAgent(env, { agentId: "draining", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation", operationalExecution: true });
+    const [item] = await store.ingestPoll({ agent_id: "draining", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    await store.claimHead("draining");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "exact-A", TEST_PROVIDER_TURN_AUTHORITY);
+    await manifest.prepareDeliveryDrain(inboxDrainRequest("draining", "exact-A"));
+    const move = { agent_id: "draining", room_id: "room", effect_execution_generation_id: "generation", provider_turn_id: "exact-A",
+      mcp_request_id: "join-new-room", request: { name: "destination" }, destination_room_id: "destination", daemon_generation: 1,
+      work_attempt_id: "attempt", execution_generation_id: "generation", provider_continuation_id: "continuation",
+      agent_session_id: "session", activating_inbox_item_id: item!.inbox_item_id };
+    await assert.rejects(store.prepareRoomMoveEffect(move), /unresolved delivery drain/);
+    const database = new DatabaseSync(env.database);
+    try {
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_effects").get()?.n, 0,
+        "the effect insert and prepared result roll back with refused room-move admission");
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM agent_room_moves").get()?.n, 0);
+      assert.equal((await store.get(item!.inbox_item_id))?.state, "dispatching");
+      await manifest.cancelDeliveryDrain({ operationId: "drain-operation", agentId: "draining" });
+      assert.equal((await store.prepareRoomMoveEffect(move)).created, true);
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM agent_room_moves").get()?.n, 1);
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { database.close(); }
+  } finally { await store.close(); await manifest.close(); await env.cleanup(); }
 });
 
 for (const domain of ["pre_dispatch", "result_recovery", "publication"] as const) {

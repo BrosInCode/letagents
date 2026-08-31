@@ -237,15 +237,21 @@ export function pruneSupervisedAgentHistory(
   // binding that validates those coordinates on reopen, so retention must keep
   // that row until a later control replaces the journal. Count the pin inside
   // the fixed receipt budget rather than growing history around it.
+  // A native drain also needs its exact admitted receipt after settlement to
+  // distinguish finished A from missing evidence; release that pin at its end.
   const pinnedTerminalCount = Number((database.prepare(`SELECT COUNT(*) AS count
     FROM supervised_agent_inbox i
     WHERE i.agent_id=?
       AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
-      AND EXISTS (
+      AND (EXISTS (
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
           AND j.inbox_item_id=i.inbox_item_id
-      )`).get(agentId) as Row).count);
+      ) OR EXISTS (
+        SELECT 1 FROM execution_cutover_v2 c
+        WHERE c.agent_id=i.agent_id AND c.admitted_inbox_item_id=i.inbox_item_id
+          AND c.phase NOT IN ('complete','cancelled','failed')
+      ))`).get(agentId) as Row).count);
   const retainedUnpinnedReceipts = Math.max(
     0,
     RETAINED_TERMINAL_RECEIPTS_PER_AGENT - pinnedTerminalCount,
@@ -260,6 +266,11 @@ export function pruneSupervisedAgentHistory(
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
           AND j.inbox_item_id=i.inbox_item_id
+      )
+      AND NOT EXISTS (
+        SELECT 1 FROM execution_cutover_v2 c
+        WHERE c.agent_id=i.agent_id AND c.admitted_inbox_item_id=i.inbox_item_id
+          AND c.phase NOT IN ('complete','cancelled','failed')
       )
       AND NOT EXISTS (
         SELECT 1 FROM supervised_agent_effects e
