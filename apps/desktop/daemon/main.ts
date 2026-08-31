@@ -18,6 +18,7 @@ import { DeliveryCutoverCoordinator } from "./delivery-cutover-coordinator.js";
 import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-execution-coordinator.js";
 import { schedulerErrorDetail } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
+import { ExecutionCaptureCoordinator } from "./execution-capture-coordinator.js";
 import { DesiredStateCoordinator } from "./desired-state-coordinator.js";
 import { WorkDurabilityStore } from "./durability-store.js";
 import { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
@@ -131,6 +132,7 @@ export class SupervisorDaemon {
   private readonly deliveryCutoverExecution: DeliveryCutoverExecutionCoordinator;
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly providerStreams: ProviderStreamCoordinator;
+  private executionCapture: ExecutionCaptureCoordinator | null = null;
   private readonly providerCheckpoints: ProviderCheckpointCoordinator;
   private readonly providerExecution: ProviderExecutionCoordinator | null;
   private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
@@ -352,6 +354,7 @@ export class SupervisorDaemon {
     });
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
+      observeExecution: (entryId, handle, generation) => this.executionCapture?.install(entryId, handle, generation) ?? (() => {}),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
         getEntry: (entryId) => this.store.getEntry(entryId),
@@ -556,6 +559,7 @@ export class SupervisorDaemon {
       scheduleRecovery: (entryId, delayMs) => this.scheduleRecoveryConvergence(entryId, delayMs),
     });
     this.providerCheckpoints = new ProviderCheckpointCoordinator({
+      observePreparedRuntime: (runtime) => this.executionCapture?.prepared(runtime),
       store: this.store,
       bindings: this.workerBindings,
       inbox: this.supervisedInbox,
@@ -848,6 +852,9 @@ export class SupervisorDaemon {
       await this.singleton.release();
       throw error;
     }
+    if (!this.handoffScheduled) this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
+      currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
+    });
     await this.supervisedInbox.normalizeInterruptedEffects();
     await this.quarantineDuplicateSupervisedLaneOwners();
     await this.runtimeRecovery.recoverTurnControls();
@@ -869,6 +876,7 @@ export class SupervisorDaemon {
     // continuations before awaiting any drain so they cannot retain a socket
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
+    this.executionCapture?.close();
     this.supervisedDelivery?.fence();
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
@@ -1070,6 +1078,7 @@ export class SupervisorDaemon {
   private async prepareHandoff(): Promise<void> {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
+    this.executionCapture?.close();
     // Authority revocation and delivery cancellation are one synchronous
     // edge. No claimed FIFO item may observe the public fence before its
     // controller is aborted and its cleanup owner is established.
@@ -1193,6 +1202,7 @@ export class SupervisorDaemon {
 
   private notifyStateChanged(): void {
     this.stateWatch.notify();
+    try { this.executionCapture?.refresh(); } catch { /* optional observation */ }
   }
 
   private pushAgentStreamEvent(entryId: string, event: DaemonActivityEvent): void {
