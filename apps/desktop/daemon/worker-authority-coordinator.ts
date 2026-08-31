@@ -7,6 +7,7 @@ import {
 import { redactCredentialText } from "./credential-redaction.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
+import type { ManifestStore } from "./manifest-store.js";
 import {
   retryableWorkerMintFailure,
   schedulerErrorDetail,
@@ -60,6 +61,8 @@ export type CustodialPollingAuthorizationInput = {
   entry_id: string; room_id: string; work_attempt_id: string; execution_generation_id: string;
   agent_session_id: string; daemon_generation: number; api_url: string;
   contract: string; phase: string; tool_name: string; expected_configuration_revision?: number;
+  process_incarnation_id?: string; mcp_request_id?: string | number; room_cursor?: string | null;
+  expected_activation_id?: string; expected_binding_epoch?: number; input_cursor?: string; offered_frontier?: string;
 };
 
 export type InstallHostGrantInput = {
@@ -78,7 +81,7 @@ export type InstallHostGrantInput = {
   recovery_only?: boolean;
 };
 
-type WorkerAuthorityStore = {
+type WorkerAuthorityStore = Pick<ManifestStore, "acknowledgePollingOffer" | "recordPollingOffer"> & {
   load(): Promise<{ entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | null | undefined>;
   getAgentConfiguration(entryId: string): Promise<Pick<DaemonAgentConfiguration, "polling_contract" | "config_revision" | "runtime_configuration_revision"> | undefined>;
@@ -152,6 +155,7 @@ export type WorkerAuthorityCoordinatorOptions = {
     currentGeneration(): number;
     isHandoffScheduled(): boolean;
     assertCurrent(): Promise<void>;
+    fenceCommit(commit: () => Promise<void>): Promise<void>;
   };
   serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   serializeCursorCheckpoint<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
@@ -1123,7 +1127,17 @@ export class WorkerAuthorityCoordinator {
   }
 
   /** Negotiated read admission, never provider wait-output evidence or a new credential. */
-  async authorizeCustodialPolling(input: CustodialPollingAuthorizationInput) {
+  async authorizeCustodialPolling(request: CustodialPollingAuthorizationInput) {
+    const input = { ...request };
+    const wait = input.tool_name === "wait_for_messages";
+    if (wait && (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(input.process_incarnation_id ?? "")
+      || (typeof input.mcp_request_id !== "string" && !Number.isSafeInteger(input.mcp_request_id))
+      || (input.room_cursor != null && !/^(?:msg_)?\d+$/.test(input.room_cursor))
+      || (input.phase === "release" && (!input.expected_activation_id?.trim()
+        || !Number.isSafeInteger(input.expected_binding_epoch) || input.expected_binding_epoch! < 1
+        || !/^(?:msg_)?\d+$/.test(input.input_cursor ?? "") || !/^(?:msg_)?\d+$/.test(input.offered_frontier ?? ""))))) {
+      throw new Error("Custodial polling requires an exact invocation and BEFORE receipt; upgrade the MCP runtime.");
+    }
     return this.options.serializeEntry(input.entry_id, async () => {
       if (input.contract !== "custodial_polling_v1"
         || !["before", "release"].includes(input.phase) || !input.tool_name.trim()
@@ -1166,10 +1180,44 @@ export class WorkerAuthorityCoordinator {
       if ((await this.checkPollingActivationWorker(entry, input.agent_session_id, input.execution_generation_id, true))?.operation_id !== activation?.operation_id) {
         throw new Error("Custodial polling activation changed during admission.");
       }
+      let roomCursor = binding.room_cursor;
+      let receipt: { activation_id: string; binding_epoch: number } | undefined;
+      if (wait) {
+        if (!activation || (input.phase === "release" && input.expected_activation_id !== activation.operation_id)) {
+          throw new Error("Custodial polling BEFORE receipt names a stale activation.");
+        }
+        // Binding reads above join a queue whose writes acquire fenceCommit.
+        // Never await that queue while holding the commit fence. The journal
+        // rechecks durable activation/config/binding/expiry in its transaction.
+        const fence = (commit: () => Promise<void>) => this.options.authority.fenceCommit(async () => {
+          if (this.options.authority.currentGeneration() !== input.daemon_generation
+            || this.options.authority.isHandoffScheduled()
+            || this.options.runtime.currentHandle(entry.id) !== handle
+            || this.unexpiredHostGrant(entry) !== grant
+            || !matchesPollingActivationRuntime(activation, entry, handle)
+            || (handle.appliedConfigurationRevision !== undefined && handle.appliedConfigurationRevision !== activation.config_revision)
+            || ["failed", "stopped", "stopping"].includes(handle.observedState)) {
+            throw new Error("Custodial polling authority changed before receipt commit.");
+          }
+          await commit();
+        });
+        const scope = { operationId: activation.operation_id, agentId: entry.id, processIncarnationId: input.process_incarnation_id! };
+        if (input.phase === "before") {
+          const acknowledgement = await this.options.store.acknowledgePollingOffer({ ...scope, roomCursor: input.room_cursor ?? null }, fence);
+          roomCursor = acknowledgement.roomCursor;
+          receipt = { activation_id: activation.operation_id, binding_epoch: acknowledgement.bindingEpoch };
+        } else {
+          await this.options.store.recordPollingOffer({ ...scope, requestId: input.mcp_request_id!,
+            expectedBindingEpoch: input.expected_binding_epoch!, inputCursor: input.input_cursor!, offeredFrontier: input.offered_frontier! }, fence);
+          roomCursor = input.input_cursor!;
+          receipt = { activation_id: activation.operation_id, binding_epoch: input.expected_binding_epoch! };
+        }
+      }
       return {
         status: "authorized" as const, contract: "custodial_polling_v1" as const,
         room_id: entry.room_id, agent_session_id: binding.agent_session_id,
-        room_cursor: binding.room_cursor, configuration_revision: configuration.config_revision!,
+        room_cursor: roomCursor, configuration_revision: configuration.config_revision!,
+        ...receipt,
       };
     });
   }
@@ -1220,8 +1268,8 @@ export class WorkerAuthorityCoordinator {
       await this.assertRuntimeAdmission(input.entry_id);
       const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
-      if (await this.pollingContract(entry) && await this.options.store.unresolvedDeliveryDrain(entry.id)) {
-        throw new Error("Custodial polling cursor is frozen by delivery drain.");
+      if (await this.pollingContract(entry)) {
+        throw new Error("Custodial polling requires exact offer acknowledgement; legacy cursor checkpoints are disabled.");
       }
       if (entry.work_attempt_id !== input.work_attempt_id) throw new Error("Worker cursor work attempt does not match the supervised manifest entry.");
       if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
@@ -1238,11 +1286,6 @@ export class WorkerAuthorityCoordinator {
         || currentBinding.agent_session_id !== input.agent_session_id
         || currentBinding.execution_generation_id !== input.execution_generation_id) {
         throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
-      }
-      if (await this.pollingContract(entry)) {
-        if (!this.unexpiredHostGrant(entry) || !await this.hasUnexpiredWorkerSession(entry.id)
-          || !await this.ownsDaemonGeneration(this.options.authority.currentGeneration())) throw new Error("Custodial polling cursor authority is unavailable.");
-        await this.checkPollingActivationWorker(entry, input.agent_session_id, input.execution_generation_id, true);
       }
       const checkpoint = await this.options.bindings.checkpointCursorMonotonic(
         input.entry_id,

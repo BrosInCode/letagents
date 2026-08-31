@@ -40,7 +40,6 @@ import {
   supervisedBoundedDeliveryDisabledToolResult,
 } from "../../runtime/worker-bearer.js";
 import { resolveWorkerToolIdentity } from "../../runtime/agent-sessions.js";
-import { checkpointSupervisedWorkerCursor } from "../../runtime/supervisor-bridge.js";
 import {
   attachAgentMessageActivations,
   createGlobalAgentAddressResolver,
@@ -614,7 +613,6 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       const agentSession = exactIdentity?.agentSession ?? resolveWaitAgentSession(sessionRoomId, agent_session_id);
       if (custodial) {
         if (!agentSession || !after_message_id) throw new Error("Custodial polling requires exact worker identity and durable cursor.");
-        if (!await checkpointSupervisedWorkerCursor(agentSession, after_message_id)) throw new Error("Custodial cursor acknowledgement lost exact worker authority.");
       } else if (agentSession) {
         // Registration (or a successor generation) must bind strictly once.
         // Later waits use a read-only exact verification capped at 250ms, so a

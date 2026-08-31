@@ -320,6 +320,7 @@ export class SupervisorDaemon {
         currentGeneration: () => this.singleton.currentGeneration,
         isHandoffScheduled: () => this.handoffScheduled,
         assertCurrent: () => this.singleton.assertCurrent(),
+        fenceCommit: (commit) => this.fenceDaemonCommit(commit),
       },
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeCursorCheckpoint: (entryId, operation) => this.serializeCursorCheckpoint(entryId, operation),
