@@ -45,6 +45,56 @@ class FakeEventSource {
 ;(globalThis as any).EventSource = FakeEventSource
 
 const { createRoomStream } = await import('./room/stream.js')
+const { lastMessageInfoInvalidation, invalidationCoversMessage } = await import('../components/room/messageInfoInvalidation.js')
+
+test('message-info null preserves room scope, refresh signaling, and the subscribed cursor without a gap', () => {
+  let reconciles = 0
+  const stream = createRoomStream({
+    setConnectionState: () => {},
+    setStreaming: () => {},
+    appendMessage: () => true,
+    onGitHubMessage: () => {},
+    onGitHubEvent: () => {},
+    onTaskLifecycleMessage: () => {},
+    onArtifactUpdate: () => {},
+    onAgentActivityMessage: () => {},
+    onParticipantActivityMessage: () => {},
+    upsertTask: () => {},
+    upsertReasoningSession: () => {},
+    removeReasoningSession: () => {},
+    getMessageCursor: () => null,
+    resyncMessages: async (_roomIdentifier, after) => ({ success: true, cursor: after }),
+    reconcileFullState: async () => { reconciles += 1; return true },
+  })
+  const alias = 'github.com/example/project'
+  try {
+    stream.start(alias)
+    const source = FakeEventSource.instances.at(-1)!
+    for (const messageIds of [['msg_7'], [], null]) {
+      source.dispatch('message_info_updated', {
+        room_id: 'room_canonical', message_ids: messageIds,
+      }, 'broker_info')
+      const invalidation = lastMessageInfoInvalidation.value
+      assert.equal(invalidation?.roomId, 'room_canonical')
+      assert.deepEqual(invalidation?.messageIds, messageIds)
+      assert.equal(invalidationCoversMessage(invalidation, 'room_canonical', 'msg_7'),
+        messageIds === null || messageIds.includes('msg_7'))
+      assert.equal(invalidationCoversMessage(invalidation, 'room_canonical', 'msg_8'), messageIds === null)
+      assert.equal(invalidationCoversMessage(invalidation, 'another_room', 'msg_7'), false)
+    }
+    assert.equal(reconciles, 0, 'valid room-wide invalidation must not initiate a snapshot repair')
+    const lastInvalidation = lastMessageInfoInvalidation.value
+    stream.stop()
+    stream.start(alias)
+    const replacement = FakeEventSource.instances.at(-1)!
+    assert.equal(new URL(replacement.url, 'https://example.test').searchParams.get('event_cursor'), 'broker_info')
+    source.dispatch('message_info_updated', { room_id: 'room_canonical', message_ids: null }, 'broker_stale')
+    assert.equal(lastMessageInfoInvalidation.value, lastInvalidation, 'a retired stream cannot invalidate an open card')
+  } finally {
+    stream.stop()
+    lastMessageInfoInvalidation.value = null
+  }
+})
 
 test('room stream forwards typed GitHub event invalidations', () => {
   const githubEventRooms: Array<string | null | undefined> = []
@@ -296,6 +346,12 @@ test('a semantically malformed typed frame repairs without committing its broker
     ['github_event', '{malformed'],
     ['artifact_update', '{malformed'],
     ['message_info_updated', '{malformed'],
+    ['message_info_updated', '{}'],
+    ['message_info_updated', '{"message_ids":false}'],
+    ['message_info_updated', '{"message_ids":7}'],
+    ['message_info_updated', '{"message_ids":"bad"}'],
+    ['message_info_updated', '{"message_ids":["msg_1",7]}'],
+    ['message_info_updated', '{"message_ids":[""]}'],
   ]) initial.dispatchRaw(eventName, data, `broker_malformed_${eventName}`)
   await waitFor(() => reconciles.length > 0)
   stream.stop()
@@ -398,6 +454,7 @@ test('room stream retries a gap until both repair lanes recover', async () => {
 })
 
 test('room stream subscribes before bootstrap and replays every typed resource over the snapshot', async () => {
+  const previousInvalidation = lastMessageInfoInvalidation.value
   const applied: string[] = []
   const stream = createRoomStream({
     setConnectionState: () => {},
@@ -424,12 +481,16 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   source.dispatch('reasoning_update', { session: { id: 'reason-live' } }, 'broker_3')
   source.dispatch('github_event', { room_id: 'room_bootstrap' }, 'broker_4')
   source.dispatch('message', { id: 'msg_live', source: 'agent', sender: 'agent' }, 'broker_5')
+  source.dispatch('message_info_updated', { room_id: 'room_bootstrap', message_ids: null }, 'broker_6')
   assert.deepEqual(applied, [], 'typed resources remain behind the startup snapshot boundary')
+  assert.equal(lastMessageInfoInvalidation.value, previousInvalidation, 'info refresh also waits for the installed snapshot')
 
-  source.dispatch('room_sync', { gap: false, event_cursor: 'broker_5' })
+  source.dispatch('room_sync', { gap: false, event_cursor: 'broker_6' })
   await barrier
   ;(applied as string[]).push('snapshot')
   stream.finishBootstrap('room_bootstrap', true)
+  assert.equal(lastMessageInfoInvalidation.value?.roomId, 'room_bootstrap')
+  assert.equal(lastMessageInfoInvalidation.value?.messageIds, null)
   assert.deepEqual(applied, [
     'snapshot',
     'task', 'artifact', 'artifact', 'reasoning', 'github', 'message', 'presence',
@@ -438,8 +499,9 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   stream.stop()
   stream.start('room_bootstrap')
   const resumed = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(resumed.url, '/rooms/room_bootstrap/messages/stream?event_cursor=broker_5')
+  assert.equal(resumed.url, '/rooms/room_bootstrap/messages/stream?event_cursor=broker_6')
   stream.stop()
+  lastMessageInfoInvalidation.value = null
 })
 
 test('room bootstrap byte overflow releases bodies and forces one authoritative repair', async () => {

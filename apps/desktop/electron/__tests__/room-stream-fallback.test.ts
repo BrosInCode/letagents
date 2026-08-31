@@ -962,7 +962,7 @@ test("malformed or oversized unknown frames cannot advance the broker cursor", a
   }
 });
 
-test("message-info invalidations advance without a room repair while malformed payloads gap", async () => {
+for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.stringify(messageIds)} advances without repair while malformed payloads gap`, async () => {
   const router = installFetchRouter();
   try {
     const initial = makeSse();
@@ -970,17 +970,25 @@ test("message-info invalidations advance without a room repair while malformed p
     router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
     router.enqueueCatchUp([]);
     router.enqueueCatchUp([]);
-    await startDesktopRoomStream(ROOM, "msg_1");
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    initial.pushRoomSync("msg_1", false, "broker_before_info");
+    await starting;
+    await new Promise((resolve) => setImmediate(resolve));
     const gapCount = emitted.filter(
       (event) => event.type === "open" && event.gap === true && event.verified === true,
     ).length;
+    const emittedCount = emitted.length;
+    const managedCount = managedEmitted.length;
     initial.pushRaw(
       `id: broker_info\nevent: message_info_updated\ndata: ${JSON.stringify({
         room_id: ROOM,
-        message_ids: ["msg_7"],
+        message_ids: messageIds,
       })}\n\n`,
     );
     await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(emitted.length, emittedCount, "Message Info remains fetched on demand, without new renderer events");
+    assert.equal(managedEmitted.length, managedCount, "an invalidation must not deliver work to managed agents");
     assert.equal(emitted.filter(
       (event) => event.type === "open" && event.gap === true && event.verified === true,
     ).length, gapCount);

@@ -897,14 +897,17 @@ function handleRoomStreamFrame(
 
   if (eventName === "message_info_updated") {
     if (
-      !Array.isArray(payload.message_ids)
-      || payload.message_ids.some((messageId) => typeof messageId !== "string" || !messageId)
+      payload.message_ids !== null && (
+        !Array.isArray(payload.message_ids)
+        || payload.message_ids.some((messageId) => typeof messageId !== "string" || !messageId)
+      )
     ) {
       repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
       return;
     }
     // Desktop Message Info is fetched on demand and has no live invalidation
-    // surface yet. Treat the bounded server invalidation as a valid no-op so
+    // surface yet. Null is the server's concealment-safe room invalidation;
+    // arrays retain their existing compatibility. Treat both as a valid no-op so
     // it advances the broker cursor without turning every read receipt into a
     // full room gap/snapshot repair. Malformed typed frames still fail closed.
     stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
