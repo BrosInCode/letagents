@@ -739,6 +739,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
             appendIncludePromptOnly(`/rooms/${encodeRoomIdPath(targetRoomId)}/messages/poll?${queryString}`),
           project_path: (targetProjectId) =>
             appendIncludePromptOnly(`/projects/${encodeURIComponent(targetProjectId)}/messages/poll?${queryString}`),
+          preserve_session_cursor: true,
           options: buildWaitForMessagesRequestOptions({
             deliveryHeaders,
             signal: AbortSignal.timeout(clientTimeout),
@@ -801,12 +802,14 @@ export function registerWaitForMessagesTool(server: McpServer): void {
       if (bounded.omittedMessageCount > 0) {
         output.omitted_message_count = bounded.omittedMessageCount;
       }
-      if (apiObservedCursor) output.last_observed_message_id = apiObservedCursor;
+      // The API cursor can cover concealed messages, but not visible messages
+      // omitted by our own byte bound. Resume after the retained page instead.
+      const observedCursor = !bounded.truncated && apiObservedCursor
+        ? apiObservedCursor
+        : routing.last_observed_message_id ?? undefined;
+      if (observedCursor) output.last_observed_message_id = observedCursor;
 
       if (targetRoomId) {
-        const observedCursor = apiObservedCursor
-          ?? routing.last_observed_message_id
-          ?? getLastMessageId(output);
         touchRoomSession(targetRoomId, observedCursor);
 
         if (allMessages.length > 0 && agentSession) {
