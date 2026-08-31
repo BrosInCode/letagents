@@ -886,14 +886,16 @@ test("bounded room turns never resolve or inject the legacy charter", async () =
   }
 });
 
-test("result recovery uses bounded backoff and blocks instead of hot-looping forever", async () => {
+for (const initialState of ["dispatching", "result_recovery"] as const) test(`exact result recovery from ${initialState} uses its own bounded backoff`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-result-recovery-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const item = await enqueue(store);
     await store.checkpointTurnStarted(item.inbox_item_id, "turn-unreadable", TEST_PROVIDER_TURN_AUTHORITY);
-    await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-unreadable" });
-    await store.transition(item.inbox_item_id, "result_recovery", { outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }) });
+    if (initialState === "result_recovery") {
+      await store.transition(item.inbox_item_id, "awaiting_result", { provider_turn_id: "turn-unreadable" });
+      await store.transition(item.inbox_item_id, "result_recovery", { outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }) });
+    }
     let recoveries = 0;
     const delays: number[] = [];
     const delivery = new SupervisedAgentDelivery(store, provider(
@@ -905,6 +907,8 @@ test("result recovery uses bounded backoff and blocks instead of hot-looping for
     assert.equal(recoveries, 3);
     assert.deepEqual(delays, [25, 50]);
     assert.equal(receipt.state, "blocked");
+    assert.equal(receipt.provider_turn_id, "turn-unreadable", "recovery never clears its native turn");
+    assert.equal(receipt.attempt_count, 1, "recovery failures are not new model turns");
     assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3);
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -1162,14 +1166,27 @@ test("a generic failure after an exact turn checkpoint recovers that turn withou
   }
 });
 
-test("a publish retry reuses the persisted terminal reply without rerunning the turn", async () => {
+test("publication exhausts only its own budget and explicit Retry reuses the saved reply", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    let turns = 0; let publishes = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), { poll: async () => ({ messages: [{ id: "1", activation: { for_current_agent: { decision: "activate" } } }] }), publish: async (input) => { if (++publishes === 1) throw new Error("crash before ack"); return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId }; } }, currentAuthority, 0);
-    await delivery.poll(agent); await new Promise((resolve) => setTimeout(resolve, 20));
-    assert.equal(turns, 1); assert.equal(publishes, 2);
+    let turns = 0; let publishes = 0; const clientIds: string[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: `turn:${++turns}`, outcome: "reply", text: "durable" })), {
+      poll: async () => ({}), publish: async (input) => {
+        clientIds.push(input.clientMessageId);
+        if (++publishes <= 3) throw new Error("crash before ack");
+        return { messageId: `msg:${input.clientMessageId}`, roomId: input.roomId };
+      },
+    }, currentAuthority, 0);
+    await delivery.pump(agent); await ingest(store); await delivery.pump(agent);
+    assert.equal(turns, 1); assert.equal(publishes, 3);
+    const blocked = (await store.receipts("stone"))[0]!;
+    assert.equal(blocked.state, "blocked");
+    assert.equal(JSON.parse(blocked.outcome!).text, "durable");
+    await delivery.retry(agent, "1");
+    await waitForAsync(async () => (await store.receipts("stone"))[0]?.state === "acknowledged");
+    assert.equal(turns, 1); assert.equal(publishes, 4, "manual Retry admits an attempt without erasing durable debt");
+    assert.deepEqual(clientIds, Array(4).fill(blocked.reply_client_message_id));
     assert.equal((await store.receipts("stone"))[0]?.state, "acknowledged");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
@@ -1228,8 +1245,8 @@ test("a normalized no-reply terminal survives partial provider-journal retiremen
     await store.transition(item.inbox_item_id, "result_recovery", {
       outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }),
     });
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior recovery failure one");
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior recovery failure two");
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior recovery failure one" });
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior recovery failure two" });
     let recoveries = 0;
     const delivery = new SupervisedAgentDelivery(store, provider(
       async () => { throw new Error("must not start a new turn"); },
@@ -1264,20 +1281,21 @@ test("a normalized no-reply terminal survives partial provider-journal retiremen
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("a normalized reply in result recovery publishes before consulting a partially retired provider journal", async () => {
+for (const cleanupFails of [false, true]) test(`a saved reply has its own publication budget after recovery (cleanup fails: ${cleanupFails})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-reply-recovery-retirement-"));
   try {
-    const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const store = new SupervisedAgentInboxStore(join(root, `daemon-${cleanupFails}.sqlite`));
     const item = await enqueue(store);
     await store.checkpointTurnStarted(item.inbox_item_id, "cursor:recover-reply", TEST_PROVIDER_TURN_AUTHORITY);
     await store.transition(item.inbox_item_id, "awaiting_result");
     await store.transition(item.inbox_item_id, "result_recovery", {
       outcome: JSON.stringify({ kind: "unreadable", text: null, evidence: "none" }),
     });
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior reply recovery failure one");
-    await store.recordResultRecoveryRetry(item.inbox_item_id, "prior reply recovery failure two");
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior reply recovery failure one" });
+    await store.recordRetryFailure(item.inbox_item_id, { domain: "result_recovery", error: "prior reply recovery failure two" });
     let recoveries = 0;
     const published: string[] = [];
+    const clientIds: string[] = [];
     const delivery = new SupervisedAgentDelivery(store, provider(
       async () => { throw new Error("must not start a new turn"); },
       async (_handle, request) => {
@@ -1293,21 +1311,25 @@ test("a normalized reply in result recovery publishes before consulting a partia
           evidence: "stream",
           terminal_evidence: terminal,
         });
-        throw new Error("reply recovery journal was partially retired after normalized checkpoint");
+        if (cleanupFails) throw new Error("reply recovery journal was partially retired after normalized checkpoint");
+        return terminal;
       },
     ), {
       poll: async () => ({}),
       publish: async (input) => {
         published.push(input.text);
+        clientIds.push(input.clientMessageId);
+        if (published.length < 3) throw new Error("publication acknowledgement unavailable");
         return { messageId: "message:normalized-reply", roomId: input.roomId };
       },
     }, currentAuthority, 0);
     await delivery.pump({ ...agent, provider: "cursor" });
     assert.equal((await store.get(item.inbox_item_id))?.state, "acknowledged");
-    assert.deepEqual(published, ["Durable normalized reply."]);
+    assert.deepEqual(published, Array(3).fill("Durable normalized reply."));
+    assert.deepEqual(clientIds, Array(3).fill(item.reply_client_message_id), "all publication retries keep the same idempotency key");
     assert.equal(recoveries, 1);
-    assert.equal((await store.receipts(agent.agentId))[0]?.timeline.filter((event) => event.phase === "retry_scheduled").length, 2,
-      "accepted reply publishes without spending the last recovery retry on provider-journal cleanup");
+    assert.equal((await store.receipts(agent.agentId))[0]?.timeline.filter((event) => event.phase === "retry_scheduled").length, 4,
+      "two prior recovery failures leave all three publication attempts; journal cleanup spends neither budget");
     await store.close();
   } finally { await rm(root, { recursive: true, force: true }); }
 });
@@ -3211,7 +3233,7 @@ test("startup recovery retries exactly once when wrapper evidence proves native 
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
-test("persistent undispatched wrapper failures back off and block after the bounded retry budget", async () => {
+for (const admitted of [false, true]) test(`persistent undispatched wrapper failures are bounded (turn admitted: ${admitted})`, async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-not-dispatched-cap-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
@@ -3222,7 +3244,7 @@ test("persistent undispatched wrapper failures back off and block after the boun
       async (_handle, _request, options) => {
         turns += 1;
         await options?.beforeNativeDispatch?.();
-        await options?.checkpointTurnStarted?.(`cursor:prepared-only:${turns}`);
+        if (admitted) await options?.checkpointTurnStarted?.(`cursor:prepared-only:${turns}`);
         throw Object.assign(new Error("persistent pre-release provider checkpoint failure"), {
           roomTurnRecoveryOutcome: "not_dispatched" as const,
         });
@@ -3232,15 +3254,47 @@ test("persistent undispatched wrapper failures back off and block after the boun
       publish: async () => { throw new Error("an undispatched turn cannot publish"); },
     }, currentAuthority, 10, async (ms) => { delays.push(ms); });
 
-    await delivery.pump(agent);
+    await delivery.pump({ ...agent, provider: "cursor" });
 
     const receipt = (await store.receipts(agent.agentId))[0]!;
     assert.equal(turns, 3, "safe redispatch is capped at the same three-attempt budget as ordinary delivery");
     assert.deepEqual(delays, [10, 20], "undispatched retries use exponential backoff");
     assert.equal(receipt.state, "blocked");
-    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 2);
-    assert.match(receipt.last_error ?? "", /failed 3 times without native dispatch/);
+    assert.equal(receipt.timeline.filter((event) => event.phase === "retry_scheduled").length, 3,
+      "the exhausted failure is journaled atomically with its block");
+    assert.match(receipt.last_error ?? "", /failed 3 times/);
   } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("failed Cursor idle compensation spends only recovery budget and retains exact authority", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-compensation-budget-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  try {
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "cursor:prepared", TEST_PROVIDER_TURN_AUTHORITY);
+    const binding = await store.providerTurnBinding(item.inbox_item_id);
+    let recoveries = 0; let compensations = 0; const delays: number[] = [];
+    const delivery = new SupervisedAgentDelivery(store, provider(
+      async () => { throw new Error("must never redispatch before compensation succeeds"); },
+      async () => {
+        recoveries += 1;
+        throw Object.assign(new Error("wrapper never released"), { roomTurnRecoveryOutcome: "not_dispatched" });
+      },
+    ), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority,
+    10, async (ms) => { delays.push(ms); }, undefined, undefined, undefined, undefined,
+    async () => { compensations += 1; throw new Error("idle checkpoint unavailable"); });
+    await delivery.pump({ ...agent, provider: "cursor" });
+    assert.equal(recoveries, 3); assert.equal(compensations, 3);
+    assert.deepEqual(delays, [10, 20]);
+    const blocked = (await store.receipts(agent.agentId))[0]!;
+    assert.equal(blocked.state, "blocked"); assert.equal(blocked.provider_turn_id, "cursor:prepared");
+    assert.deepEqual(await store.providerTurnBinding(item.inbox_item_id), binding);
+    const inspection = new DatabaseSync(join(root, "daemon.sqlite"));
+    try {
+      const events = inspection.prepare("SELECT idempotency_key FROM supervised_agent_inbox_events WHERE phase='retry_scheduled'").all();
+      assert.deepEqual(events.map((event) => event.idempotency_key), [1, 2, 3].map((ordinal) => `retry_failure:result_recovery:${ordinal}`));
+    } finally { inspection.close(); }
+  } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test("a terminal provider rejection blocks once without result recovery or model rerun", async () => {
