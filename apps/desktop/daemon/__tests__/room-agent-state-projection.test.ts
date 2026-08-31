@@ -120,6 +120,18 @@ function facts(overrides: Partial<RoomAgentStateProjectionInput> = {}): RoomAgen
   };
 }
 
+test("a failed delivery receipt is terminal without marking its healthy runtime failed", () => {
+  const projected = projectRoomAgentManifestEntry(facts({ receipts: [receipt({
+    state: "acknowledged_failed", receipt_state: "acknowledged_failed", outcome: JSON.stringify({ kind: "failed", text: null, evidence: "stream" }),
+  })] }));
+  assert.equal(projected.delivery_receipts?.[0]?.state, "acknowledged_failed");
+  assert.equal(projected.room_agent_state?.inbox.state, "empty");
+  assert.equal(projected.room_agent_state?.inbox.pending_count, 0);
+  assert.equal(projected.room_agent_state?.turn.state, "idle");
+  assert.equal(projected.room_agent_state?.connection.state, "connected");
+  assert.equal(projected.observed_state, "working");
+});
+
 test("projects exact room authority without exposing credentials", () => {
   const input = facts();
   assert.equal(bindingMatchesRoomAgentGeneration(input.entry, input.binding), true);

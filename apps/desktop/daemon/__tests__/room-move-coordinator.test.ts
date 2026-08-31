@@ -157,6 +157,7 @@ type Harness = {
   setHandoff: (handoff: boolean) => void;
   setJoinRoom: (joinRoom: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["joinRoom"]>) => void;
   setLatest: (latest: NonNullable<RoomMoveCoordinatorPorts["deliveryHttp"]["latest"]>) => void;
+  setActivatingTurn: (item: SupervisedInboxItem, failure: "failed" | "interrupted" | null) => void;
 };
 
 function harness(): Harness {
@@ -178,6 +179,7 @@ function harness(): Harness {
   const items = new Map<string, SupervisedInboxItem>();
   const effects = new Map<string, SupervisedEffectRecord>();
   const turnBindings = new Map<string, SupervisedProviderTurnBinding>();
+  const nativeFailures = new Map<string, "failed" | "interrupted">();
   const custody = new WorkerRuntimeCustody();
   const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => handoff });
 
@@ -249,6 +251,13 @@ function harness(): Harness {
     async get(itemId) {
       events.push(`inbox:get:${itemId}`);
       return items.get(itemId) ?? null;
+    },
+    async nativeFailure(itemId) {
+      events.push(`inbox:native-failure:${itemId}`);
+      if (items.get(itemId)?.state === "acknowledged_failed" && !nativeFailures.has(itemId)) {
+        throw new Error("Failed delivery has no exact native terminal evidence.");
+      }
+      return nativeFailures.get(itemId) ?? null;
     },
     async receipts(agentId) {
       events.push(`inbox:receipts:${agentId}`);
@@ -359,6 +368,21 @@ function harness(): Harness {
     setHandoff(next) { handoff = next; },
     setJoinRoom(next) { joinRoom = next; },
     setLatest(next) { latest = next; },
+    setActivatingTurn(item, failure) {
+      items.set(item.inbox_item_id, item);
+      effects.set("effect-1", effect());
+      turnBindings.set(item.inbox_item_id, {
+        inbox_item_id: item.inbox_item_id,
+        agent_id: item.agent_id,
+        room_id: item.room_id,
+        work_attempt_id: "attempt-1",
+        origin_execution_generation_id: "origin-execution-1",
+        provider_continuation_id: "continuation-1",
+        provider_turn_id: "turn-1",
+      });
+      if (failure) nativeFailures.set(item.inbox_item_id, failure);
+      else nativeFailures.delete(item.inbox_item_id);
+    },
   };
 }
 
@@ -616,6 +640,43 @@ test("terminal prepared-effect replay settles the split before enumerating nonte
   await h.coordinator.reconcilePreparedEffect(effect());
 
   assert.equal(h.events.includes("store:advance:active->active"), true);
+});
+
+test("an agent-requested room move fails before joining when its activating turn ended unsuccessfully", async () => {
+  for (const failure of ["failed", "interrupted"] as const) {
+    for (const state of ["awaiting_result", "acknowledged_failed"] as const) {
+      const h = harness();
+      const moving = roomMove({
+        phase: "waiting_for_current_turn", activating_inbox_item_id: "inbox-1",
+        provider_turn_id: "turn-1", effect_id: "effect-1",
+      });
+      h.setMove(moving);
+      h.setActivatingTurn(inboxItem({ state }), failure);
+
+      const result = await h.coordinator.reconcile(moving);
+
+      assert.equal(result.phase, "failed", "no indefinite wait after the activating turn ends");
+      assert.match(result.error ?? "", /activating provider turn ended unsuccessfully/);
+      assert.equal(h.events.some((event) => event.startsWith("http:")), false);
+      assert.equal(h.getEntry()?.room_id, "source-room");
+      assert.equal(h.events.includes("store:advance:waiting_for_current_turn->failed"), true);
+    }
+  }
+});
+
+test("a failed inbox label alone cannot authorize room-move terminalization", async () => {
+  const h = harness();
+  const moving = roomMove({
+    phase: "waiting_for_current_turn", activating_inbox_item_id: "inbox-1",
+    provider_turn_id: "turn-1", effect_id: "effect-1",
+  });
+  h.setMove(moving);
+  h.setActivatingTurn(inboxItem({ state: "acknowledged_failed" }), null);
+
+  await assert.rejects(() => h.coordinator.reconcile(moving), /no exact native terminal evidence/);
+
+  assert.equal(h.getMove()?.phase, "waiting_for_current_turn");
+  assert.equal(h.events.some((event) => event.startsWith("http:")), false);
 });
 
 test("queued admission and active external effects both return the captured snapshot when handoff fences them", async () => {

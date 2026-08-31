@@ -7,6 +7,7 @@ import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js"
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
 import {
   pruneSupervisedAgentHistory,
+  readDurableNativeFailure,
   settlePreparedSupervisedEffectsForTerminalItem,
 } from "./supervised-agent-history-retention.js";
 
@@ -659,7 +660,7 @@ export class ManifestStore {
     if (bool(state.turn_control_present) && ![null, "completed"].includes(state.turn_status as string | null)) throw new Error("Purge cannot remove an agent with nonterminal turn control.");
     const blockers = [
       database.prepare("SELECT 1 FROM worker_session_bindings WHERE entry_id=? LIMIT 1").get(agentId),
-      database.prepare("SELECT 1 FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') LIMIT 1").get(agentId),
+      database.prepare("SELECT 1 FROM supervised_agent_inbox WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM supervised_agent_effects WHERE agent_id=? AND state IN ('prepared','executing') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM supervised_agent_ingress_health WHERE agent_id=? AND state NOT IN ('stopped','blocked') LIMIT 1").get(agentId),
       database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed') LIMIT 1").get(agentId),
@@ -898,10 +899,11 @@ export class ManifestStore {
         WHERE agent_id=? AND execution_generation_id=? AND provider_turn_id=? AND state='prepared' AND tool_name<>'join_room'`),
       input.recordedAt, input.agentId, String(turnBinding.origin_execution_generation_id), input.expectedProviderTurnId);
       const retryingExactAction = existing?.action_id === input.actionId;
-      const terminalOrPublishing = ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linkedState ?? "");
+      const terminalOrPublishing = Boolean(readDurableNativeFailure(database, input.expectedInboxItemId))
+        || ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linkedState ?? "");
       if (!retryingExactAction || !terminalOrPublishing) {
         const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
         if (!head || String(head.inbox_item_id) !== input.expectedInboxItemId
           || !["dispatching", "awaiting_result"].includes(linkedState ?? "")) {
@@ -1003,7 +1005,7 @@ export class ManifestStore {
         if (!linked
           || String(linked.agent_id) !== input.agentId
           || String(linked.room_id) !== input.roomId
-          || ["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linked.state))
+          || ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linked.state))
           || (nullableString(linked.provider_turn_id) && nullableString(linked.provider_turn_id) !== input.providerTurnId)) {
           throw new ManifestConflictError("Turn-control target checkpoint lost its exact linked FIFO invocation.");
         }
@@ -1062,10 +1064,10 @@ export class ManifestStore {
     },
     buildEntry: (
       current: DaemonManifestEntry,
-      outcome: { original: "cancelled" | "publication_won" | "resumed" | "none"; inboxItemId: string | null; correctionInboxItemId: string | null; providerTurnId: string | null },
+      outcome: { original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none"; inboxItemId: string | null; correctionInboxItemId: string | null; providerTurnId: string | null },
     ) => DaemonManifestEntry,
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry; original: "cancelled" | "publication_won" | "resumed" | "none"; correctionInboxItemId: string | null; providerTurnId: string | null }> {
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none"; correctionInboxItemId: string | null; providerTurnId: string | null }> {
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
       const control = current?.turn_control;
@@ -1112,6 +1114,9 @@ export class ManifestStore {
       }
       const linkedState = linkedRow ? String(linkedRow.state) : null;
       const linkedProviderTurnId = linkedRow ? nullableString(linkedRow.provider_turn_id) : null;
+      const linkedNativeFailure = linkedRow
+        ? readDurableNativeFailure(database, String(linkedRow.inbox_item_id))
+        : null;
       let durableOutcomeKind: "reply" | "no_reply" | null = null;
       if (linkedRow?.outcome) {
         try {
@@ -1122,7 +1127,7 @@ export class ManifestStore {
       }
       const linkedHasPublicationOnlyOutcome = durableOutcomeKind !== null;
       const linkedIsTerminal = linkedState !== null
-        && (linkedHasPublicationOnlyOutcome
+        && (linkedHasPublicationOnlyOutcome || linkedNativeFailure !== null
           || ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(linkedState));
       const linkedWasV16MigrationCancelled = Boolean(linkedRow
         && linkedState === "cancelled_by_user"
@@ -1151,9 +1156,9 @@ export class ManifestStore {
       // A may have settled before B acquired the head. Historical resolution
       // can retire the control barrier, but it may mutate a FIFO row only when
       // the journal carries that row's exact durable identity.
-      if (linkedRow && !["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
+      if (linkedRow && !["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
         const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+          WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
           ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
         if (!head || String(head.inbox_item_id) !== String(linkedRow.inbox_item_id)) {
           throw new ManifestConflictError("Turn-control commit target is no longer the exact FIFO head.");
@@ -1170,7 +1175,7 @@ export class ManifestStore {
         throw new ManifestConflictError("Turn-control correction semantics were not durably prepared.");
       }
 
-      let original: "cancelled" | "publication_won" | "resumed" | "none" = "none";
+      let original: "cancelled" | "publication_won" | "terminal_won" | "resumed" | "none" = "none";
       if (linkedRow && String(linkedRow.state) === "cancelled_by_room_move") {
         throw new ManifestConflictError("Turn-control target was cancelled by a committed room move.");
       } else if (linkedRow && String(linkedRow.state) === "cancelled_by_user") {
@@ -1201,6 +1206,21 @@ export class ManifestStore {
             WHERE inbox_item_id=?`), input.observedAt, input.observedAt, String(linkedRow.inbox_item_id));
         }
         original = "publication_won";
+      } else if (linkedRow && linkedNativeFailure !== null) {
+        // Exact native failure is terminal authority, not proof that Stop
+        // cancelled anything or that a reply was published. Never resurrect
+        // the original prompt when resolving an uncertain native control.
+        if (String(linkedRow.state) !== "acknowledged_failed") {
+          const detail = linkedNativeFailure === "interrupted"
+            ? "The provider turn was interrupted before completing this room request."
+            : "The provider turn failed before completing this room request.";
+          run(database.prepare(`UPDATE supervised_agent_inbox
+            SET state='acknowledged_failed',last_error=?,failure_code=NULL,
+                blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=?
+            WHERE inbox_item_id=?`), detail, input.observedAt, input.observedAt, String(linkedRow.inbox_item_id));
+          linkedRow = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(String(linkedRow.inbox_item_id)) as Row;
+        }
+        original = "terminal_won";
       } else if (input.mode === "operator_not_applied" && linkedRow) {
         const state = String(linkedRow.state);
         if (["publishing", "acknowledged", "acknowledged_no_reply"].includes(state)) {
@@ -1281,15 +1301,15 @@ export class ManifestStore {
           // current head is old A or an already-admitted successor B. Never
           // reorder or cancel it; place the accepted correction behind it.
           correctionPredecessor = database.prepare(`SELECT * FROM supervised_agent_inbox
-            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
           if (correctionPredecessor && String(correctionPredecessor.room_id) !== input.roomId) {
             throw new ManifestConflictError("Historical turn-control correction found a current FIFO head in a different room.");
           }
         }
-        if (linkedRow && ["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
+        if (linkedRow && ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(linkedRow.state))) {
           const successor = database.prepare(`SELECT * FROM supervised_agent_inbox
-            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+            WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
             ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
           const pristinePendingSuccessor = successor
             && String(successor.state) === "pending"
@@ -1312,7 +1332,7 @@ export class ManifestStore {
         const sourceMessage = { text: correction, sender: { kind: "supervisor_correction" } };
         const activation = { decision: "activate", reason: "human_correction", addressed: true };
         const sequenceBounds = database.prepare(`SELECT
-            MIN(CASE WHEN state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user') THEN fifo_sequence END) AS first_active,
+            MIN(CASE WHEN state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user') THEN fifo_sequence END) AS first_active,
             COALESCE(MAX(fifo_sequence),0) AS maximum
           FROM supervised_agent_inbox WHERE agent_id=?`).get(input.agentId) as Row;
         const insertionSequence = correctionPredecessor
@@ -1332,7 +1352,7 @@ export class ManifestStore {
           }
           const existingSequence = Number(existing.fifo_sequence);
           if (existingSequence !== insertionSequence
-            && !["acknowledged", "acknowledged_no_reply"].includes(existingState)) {
+            && !["acknowledged", "acknowledged_no_reply", "acknowledged_failed"].includes(existingState)) {
             const pristinePending = existingState === "pending"
               && Number(existing.attempt_count) === 0
               && existing.provider_turn_id === null
@@ -1430,7 +1450,7 @@ export class ManifestStore {
       if (control.inbox_item_id) {
         const terminal = database.prepare(`SELECT inbox_item_id,agent_id,provider_turn_id,state
           FROM supervised_agent_inbox WHERE inbox_item_id=?`).get(control.inbox_item_id) as Row | undefined;
-        if (terminal && ["acknowledged", "acknowledged_no_reply", "cancelled_by_room_move", "cancelled_by_user"].includes(String(terminal.state))) {
+        if (terminal && ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(terminal.state))) {
           settlePreparedSupervisedEffectsForTerminalItem(database, {
             inboxItemId: String(terminal.inbox_item_id),
             agentId: String(terminal.agent_id),
@@ -1509,7 +1529,7 @@ export class ManifestStore {
         throw new ManifestConflictError("Cursor prepared turn no longer owns the exact dispatching FIFO item.");
       }
       const head = database.prepare(`SELECT inbox_item_id FROM supervised_agent_inbox
-        WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+        WHERE agent_id=? AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
         ORDER BY fifo_sequence LIMIT 1`).get(input.agentId) as Row | undefined;
       if (!head || String(head.inbox_item_id) !== input.inboxItemId) {
         throw new ManifestConflictError("Cursor prepared turn is no longer the exact FIFO head.");

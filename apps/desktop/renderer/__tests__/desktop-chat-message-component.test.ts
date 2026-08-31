@@ -136,6 +136,7 @@ test("one room message groups delivery receipts for every activated agent", asyn
         { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null },
         { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked" },
         { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null },
+        { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null },
       ],
     }),
   });
@@ -150,6 +151,11 @@ test("one room message groups delivery receipts for every activated agent", asyn
   assert.match(html, /disabled aria-label="Retry delivery for Oak is unavailable"/);
   assert.match(html, />Retry unavailable<\/button>/);
   assert.match(html, /Retry will be available when delivery recovery is connected/);
+  const failedReceipt = html.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(failedReceipt);
+  assert.match(failedReceipt, /aria-label="Ash: Work did not finish"/);
+  assert.match(failedReceipt, /Work did not finish<\/small>/);
+  assert.doesNotMatch(failedReceipt, /<button|delivery-dots|Needs attention|replied|lucide-check/);
 });
 
 test("GitHub event task chips expose the shared Board navigation contract", async () => {

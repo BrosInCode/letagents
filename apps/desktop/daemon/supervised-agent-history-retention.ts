@@ -13,6 +13,42 @@ function run(statement: StatementSync, ...values: unknown[]): void {
   statement.run(...values as never[]);
 }
 
+/** Only the exact operational terminal journal may authorize failed settlement. */
+export function readDurableNativeFailure(database: DatabaseSync, inboxItemId: string): "failed" | "interrupted" | null {
+  const item = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
+  if (!item) return null;
+  let outcome: { kind?: unknown; text?: unknown; evidence?: unknown } | null = null;
+  try { outcome = item.outcome ? JSON.parse(String(item.outcome)) : null; } catch { /* Invalid outcomes are not authority. */ }
+  // Read independently of the binding join: a missing binding must not hide a
+  // retained failure and turn inconsistent state into retry/publication authority.
+  const recorded = database.prepare("SELECT outcome FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+    .get(inboxItemId) as Row | undefined;
+  if (outcome?.kind !== "failed" && outcome?.kind !== "interrupted") {
+    if (item.state === "acknowledged_failed" || recorded?.outcome === "failed" || recorded?.outcome === "interrupted") {
+      throw new Error("Failed delivery has no exact native terminal evidence.");
+    }
+    return null;
+  }
+  const terminal = database.prepare(`SELECT t.*,b.provider_continuation_id
+    FROM supervised_agent_terminal_results t
+    JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=t.inbox_item_id
+      AND b.agent_id=t.agent_id AND b.origin_execution_generation_id=t.execution_generation_id
+      AND b.provider_turn_id=t.provider_turn_id
+    WHERE t.inbox_item_id=? AND t.agent_id=? AND b.room_id=? AND t.provider_turn_id=?`)
+    .get(inboxItemId, String(item.agent_id), String(item.room_id), item.provider_turn_id as string | null) as Row | undefined;
+  let evidence: Record<string, unknown> | null = null;
+  try { evidence = terminal ? JSON.parse(String(terminal.terminal_evidence_json)) : null; } catch { /* Fail closed below. */ }
+  if (!terminal || terminal.outcome !== outcome.kind || terminal.normalized_text !== null
+    || !["stream", "transcript"].includes(String(terminal.evidence_source))
+    || outcome.text !== null || outcome.evidence !== terminal.evidence_source
+    || !evidence || evidence.outcome !== outcome.kind || evidence.text !== null
+    || evidence.turnId !== item.provider_turn_id || evidence.evidence !== terminal.evidence_source
+    || evidence.providerContinuationId !== terminal.provider_continuation_id) {
+    throw new Error("Failed delivery does not match its exact native terminal and provider-turn binding.");
+  }
+  return outcome.kind;
+}
+
 /**
  * Terminal inbox ownership proves that an ordinary prepared effect never won
  * its execution CAS. It also makes an executing read irrelevant: reads are
@@ -102,7 +138,7 @@ export function pruneSupervisedAgentHistory(
   const pinnedTerminalCount = Number((database.prepare(`SELECT COUNT(*) AS count
     FROM supervised_agent_inbox i
     WHERE i.agent_id=?
-      AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+      AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       AND EXISTS (
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1
@@ -117,7 +153,7 @@ export function pruneSupervisedAgentHistory(
     FROM supervised_agent_inbox i
     LEFT JOIN supervised_agent_provider_turn_bindings b ON b.inbox_item_id=i.inbox_item_id
     WHERE i.agent_id=?
-      AND i.state IN ('acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user')
+      AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
       AND NOT EXISTS (
         SELECT 1 FROM turn_control_journals j
         WHERE j.agent_id=i.agent_id AND j.turn_control_present=1

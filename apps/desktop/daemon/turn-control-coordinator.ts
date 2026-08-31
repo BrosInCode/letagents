@@ -73,7 +73,7 @@ export type TurnControlCoordinatorPorts = {
   >;
   durability: Pick<WorkDurabilityStore, "getAttempt">;
   workerBindings: Pick<WorkerBindingStore, "get">;
-  inbox: Pick<SupervisedAgentInboxStore, "get">;
+  inbox: Pick<SupervisedAgentInboxStore, "get" | "nativeFailure">;
   delivery: Pick<SupervisedAgentDelivery,
     | "activeTurn"
     | "captureActiveDeliveryInterrupt"
@@ -233,7 +233,8 @@ export class TurnControlCoordinator {
           observedAt: updatedAt,
         }, (entry, outcome) => {
           const publicationWon = outcome.original === "publication_won";
-          const interrupted = input.resolution === "applied" && !publicationWon;
+          const terminalWon = outcome.original === "terminal_won";
+          const interrupted = input.resolution === "applied" && !publicationWon && !terminalWon;
           const resumed = control.correction_strategy === "stop_then_resend"
             || (input.resolution === "applied" && control.has_correction);
           const activity = [...(entry.activity ?? []), sanitizeDaemonActivityEvent({
@@ -242,7 +243,11 @@ export class TurnControlCoordinator {
             provider: entry.provider,
             kind: "turn_lifecycle",
             method: "supervisor/resolve-turn-control",
-            summary: input.resolution === "not_applied"
+            summary: terminalWon
+              ? control.correction_strategy === "stop_then_resend"
+                ? "The original turn already ended unsuccessfully; the durable human correction was queued"
+                : "The original turn already ended unsuccessfully; its terminal outcome was preserved without replay"
+              : input.resolution === "not_applied"
               ? publicationWon
                 ? "Operator verified the native control was not applied; the committed reply stands"
                 : outcome.original === "cancelled"
@@ -276,7 +281,9 @@ export class TurnControlCoordinator {
               resumed,
               state: entry.observed_state === "working" ? "working" : "idle",
               stages: input.resolution === "applied" ? ["already_applied"] : [],
-              error: input.resolution === "not_applied"
+              error: terminalWon
+                ? "The original provider turn already ended unsuccessfully. Its exact terminal outcome was preserved, not cancelled or replayed."
+                : input.resolution === "not_applied"
                 ? control.has_correction && (!control.correction_text?.trim() || !control.correction_strategy)
                   ? "Operator verified that the prior native effect was not applied. The legacy correction payload was not durable and must be reissued."
                   : outcome.original === "cancelled"
@@ -308,6 +315,8 @@ export class TurnControlCoordinator {
         : null;
       const original = recoveredInbox?.state === "cancelled_by_user"
         ? "cancelled" as const
+        : recoveredInbox && await this.ports.inbox.nativeFailure(recoveredInbox.inbox_item_id)
+          ? "terminal_won" as const
         : recoveredInbox && ["publishing", "acknowledged", "acknowledged_no_reply"].includes(recoveredInbox.state)
           ? "publication_won" as const
           : input.resolution === "not_applied" && recoveredInbox
@@ -487,7 +496,8 @@ export class TurnControlCoordinator {
         const active = this.ports.delivery?.activeTurn(deliveryAgent);
         if (active?.inboxItemId === existingControl.inbox_item_id) break;
         const linked = await this.ports.inbox.get(existingControl.inbox_item_id);
-        if (linked && ["publishing", "acknowledged", "acknowledged_no_reply"].includes(linked.state)) {
+        if (linked && (["publishing", "acknowledged", "acknowledged_no_reply"].includes(linked.state)
+          || await this.ports.inbox.nativeFailure(linked.inbox_item_id))) {
           foldCompletedRetryWithoutNativeControl = true;
           break;
         }
@@ -568,7 +578,8 @@ export class TurnControlCoordinator {
         }
         if (!interruptedDelivery.current) {
           const linked = await this.ports.inbox.get(prepared.linkedInboxItemId);
-          if (linked && ["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linked.state)) {
+          if (linked && (["publishing", "acknowledged", "acknowledged_no_reply", "cancelled_by_user"].includes(linked.state)
+            || await this.ports.inbox.nativeFailure(linked.inbox_item_id))) {
             foldCompletedRetryWithoutNativeControl = true;
           } else {
             const message = "Turn control is waiting for its exact admitted FIFO invocation; no native latest-turn control was dispatched.";
@@ -731,7 +742,8 @@ export class TurnControlCoordinator {
           activateCorrection: correctionStrategy === "stop_then_resend",
           observedAt,
         }, (current, outcome) => {
-          const interrupted = outcome.original === "publication_won" ? false : providerResult.interrupted;
+          const terminalWon = outcome.original === "terminal_won";
+          const interrupted = outcome.original === "publication_won" || terminalWon ? false : providerResult.interrupted;
           const resumed = correctionStrategy === "stop_then_resend" ? true : providerResult.resumed;
           const stages: DaemonTurnControlResult["stages"] = ["delivered"];
           if (interrupted) stages.push("interrupting");
@@ -747,7 +759,11 @@ export class TurnControlCoordinator {
             provider: current.provider,
             kind: "turn_lifecycle",
             method: correction ? "supervisor/steer" : "supervisor/stop-turn",
-            summary: correctionStrategy === "stop_then_resend"
+            summary: terminalWon
+              ? correctionStrategy === "stop_then_resend"
+                ? "The original turn already ended unsuccessfully; human correction queued as the next bounded turn"
+                : "The original turn already ended unsuccessfully; its terminal outcome stands"
+              : correctionStrategy === "stop_then_resend"
               ? "Active turn stopped; human correction queued as the next bounded turn"
               : correction
                 ? "Human correction applied; same continuation resumed"
@@ -766,7 +782,11 @@ export class TurnControlCoordinator {
             native_liveness: {
               state: providerResult.state === "working" ? "active" : "idle",
               observed_at: observedAt,
-              detail: correctionStrategy === "stop_then_resend"
+              detail: terminalWon
+                ? correctionStrategy === "stop_then_resend"
+                  ? "original turn ended unsuccessfully; correction queued on the same supervised lane"
+                  : "original turn ended unsuccessfully; terminal outcome preserved"
+                : correctionStrategy === "stop_then_resend"
                 ? "turn interrupted; correction queued on the same supervised lane"
                 : correction
                   ? "human correction resumed on the same continuation"
@@ -820,6 +840,8 @@ export class TurnControlCoordinator {
           : null;
         const original = recoveredInbox?.state === "cancelled_by_user"
           ? "cancelled" as const
+          : recoveredInbox && await this.ports.inbox.nativeFailure(recoveredInbox.inbox_item_id)
+            ? "terminal_won" as const
           : recoveredInbox && ["publishing", "acknowledged", "acknowledged_no_reply"].includes(recoveredInbox.state)
             ? "publication_won" as const
             : "none" as const;

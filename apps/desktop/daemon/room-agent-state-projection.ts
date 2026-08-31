@@ -107,6 +107,7 @@ export function projectRoomAgentManifestEntry(
   const nonfinal = receipts.filter((receipt) => ![
     "acknowledged",
     "acknowledged_no_reply",
+    "acknowledged_failed",
     "cancelled_by_room_move",
     "cancelled_by_user",
   ].includes(receipt.state));

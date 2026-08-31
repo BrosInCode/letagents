@@ -717,6 +717,12 @@ test("causal manifest projection accepts a fully valid room state and receipt ti
     providerTurnId: null, blockedByMessageId: null, error: "failed", failureCode: null, terminalReason: null, updatedAt: "2026-01-01T00:00:00.000Z",
     timeline: [{ sequence: 1, phase: "blocked", observedAt: "2026-01-01T00:00:00.000Z", detail: "failed" }],
   }]);
+  const settled = wireEntryWithCausalProjection();
+  settled.delivery_receipts![0]!.state = "acknowledged_failed";
+  settled.delivery_receipts![0]!.canonical_message_id = null;
+  const settledReceipt = mapEntry(settled).deliveryReceipts?.[0];
+  assert.equal(settledReceipt?.state, "acknowledged_failed");
+  assert.equal(settledReceipt?.canonicalMessageId, null);
 });
 
 test("legacy retained timeline indexes are never promoted to durable event sequences", () => {
@@ -794,6 +800,18 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.equal(mapped.uncertain_effects[0]?.effect_id, "effect_1");
   assert.equal(mapped.timeline[0]?.sequence, 1);
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
+  for (const kind of ["failed", "interrupted"]) {
+    const settled = mapAgentInspectorDetail({ ...wire,
+      receipt: { ...wire.receipt, state: "acknowledged_failed", outcome: { kind } },
+      terminal: { ...wire.terminal, outcome: kind, normalized_text: null },
+      publication: null,
+      items: [{ ...wire.items[0], state: "acknowledged_failed", outcome: { kind }, canonical_message_id: null }],
+    }, input);
+    assert.equal(settled.receipt?.state, "acknowledged_failed");
+    assert.equal(settled.receipt?.outcome?.kind, kind);
+    assert.equal(settled.items[0]?.state, "acknowledged_failed");
+    assert.equal(settled.publication, null);
+  }
   assert.throws(() => mapAgentInspectorDetail({ ...wire, room_id: "room_2" }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, requested_source_message_id: "msg_other" }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, source_message: { ...wire.source_message, id: "msg_other" } }, input), /invalid or unfenced/);

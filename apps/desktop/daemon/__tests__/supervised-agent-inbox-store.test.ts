@@ -995,6 +995,128 @@ test("startup recovery requeues only checkpoint-gated unstarted work and preserv
   } finally { await env.cleanup(); }
 });
 
+test("exact native failures settle without replay and preserve terminal winners across restart", async () => {
+  for (const kind of ["failed", "interrupted"] as const) {
+    for (const winner of ["failure", "reply", "no_reply", "stop", "transition"] as const) {
+      const env = await fixture();
+      let store = new SupervisedAgentInboxStore(env.database);
+      try {
+        const [item, tail] = await store.ingestPoll({ agent_id: "native", room_id: "room", last_observed_message_id: "2",
+          messages: ["1", "2"].map((source_message_id) => ({ source_message_id, source_message: {}, activation: {} })) });
+        await store.claimHead("native");
+        await store.checkpointTurnStarted(item!.inbox_item_id, "native-turn", TEST_PROVIDER_TURN_AUTHORITY);
+        const proof = { turnId: "native-turn", providerContinuationId: "continuation", outcome: kind, text: null, evidence: "stream" };
+        const checkpoint = { inbox_item_id: item!.inbox_item_id, agent_id: "native", execution_generation_id: "generation",
+          provider_turn_id: "native-turn", outcome: kind, text: null, evidence: "stream" as const, terminal_evidence: proof };
+        await assert.rejects(() => store.transition(item!.inbox_item_id, "acknowledged_failed"), /exact native terminal/);
+        await assert.rejects(() => store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind })), /exact terminal checkpoint/);
+        await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, terminal_evidence: { ...proof, providerContinuationId: "wrong" } }), /exact continuation/);
+        await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, evidence: "none" }), /exact continuation/);
+        await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, execution_generation_id: "other-generation" }), /authority binding/);
+        if (winner === "reply" || winner === "no_reply") {
+          await store.checkpointNormalizedTerminal({ ...checkpoint, outcome: winner,
+            text: winner === "reply" ? "saved reply" : null, terminal_evidence: {} });
+          await store.checkpointNormalizedTerminal(checkpoint);
+          assert.equal(await store.nativeFailure(item!.inbox_item_id), null);
+          assert.equal(JSON.parse((await store.get(item!.inbox_item_id))!.outcome!).kind, winner);
+          continue;
+        }
+        await store.checkpointNormalizedTerminal(checkpoint);
+        await store.checkpointNormalizedTerminal(checkpoint);
+        await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, outcome: "reply", text: "late reply" }), /already accepted/);
+        await assert.rejects(() => store.transition(item!.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "spoof" }) }), /overwritten/);
+        await assert.rejects(() => store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind: "no_reply" })), /overwritten/);
+        if (winner === "stop") {
+          assert.equal((await store.cancelInterruptedTurn(item!.inbox_item_id))?.state, "acknowledged_failed");
+        } else if (winner === "transition") {
+          assert.equal((await store.transition(item!.inbox_item_id, "acknowledged_failed"))?.state, "acknowledged_failed");
+        }
+        await store.close(); store = new SupervisedAgentInboxStore(env.database);
+        await store.normalizeStartupRecovery("native");
+        assert.equal((await store.get(item!.inbox_item_id))?.state, "acknowledged_failed");
+        assert.equal(await store.nativeFailure(item!.inbox_item_id), kind);
+        assert.equal((await store.head("native"))?.inbox_item_id, tail!.inbox_item_id);
+        assert.equal((await store.cursor("native"))?.last_observed_message_id, "2");
+        const events = (await store.receipts("native"))[0]!.timeline;
+        assert.equal(events.filter((event) => event.phase === "turn_finished").length, 1);
+        assert.equal(events.some((event) => ["published", "no_reply", "user_cancelled"].includes(event.phase)), false);
+        assert.deepEqual(await store.normalizeStartupRecovery("native"), []);
+      } finally { await store.close(); await env.cleanup(); }
+    }
+  }
+});
+
+test("inconsistent native failure journals refuse recovery and Stop without changing delivery", async () => {
+  for (const kind of ["failed", "interrupted"] as const) {
+    for (const corruption of ["null", "malformed", "unreadable", "reply", "missing_binding", "wrong_binding", "null_and_missing_binding"] as const) {
+      const env = await fixture(); let store = new SupervisedAgentInboxStore(env.database);
+      const database = new DatabaseSync(env.database);
+      try {
+        const [item] = await store.ingestPoll({ agent_id: "native", room_id: "room", last_observed_message_id: "1",
+          messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+        await store.claimHead("native");
+        await store.checkpointTurnStarted(item!.inbox_item_id, "native-turn", TEST_PROVIDER_TURN_AUTHORITY);
+        await store.checkpointNormalizedTerminal({ inbox_item_id: item!.inbox_item_id, agent_id: "native",
+          execution_generation_id: "generation", provider_turn_id: "native-turn", outcome: kind, text: null, evidence: "stream",
+          terminal_evidence: { turnId: "native-turn", providerContinuationId: "continuation", outcome: kind, text: null, evidence: "stream" } });
+        if (["null", "malformed", "unreadable", "reply", "null_and_missing_binding"].includes(corruption)) {
+          const outcome = corruption === "malformed" ? "{" : corruption === "reply" || corruption === "unreadable"
+            ? JSON.stringify({ kind: corruption, text: corruption === "reply" ? "must not publish" : null, evidence: "stream" }) : null;
+          database.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id=?").run(outcome, item!.inbox_item_id);
+        }
+        if (corruption === "missing_binding" || corruption === "null_and_missing_binding") {
+          database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").run(item!.inbox_item_id);
+        } else if (corruption === "wrong_binding") {
+          database.prepare("UPDATE supervised_agent_provider_turn_bindings SET provider_continuation_id='other' WHERE inbox_item_id=?").run(item!.inbox_item_id);
+        }
+        const before = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id);
+        await assert.rejects(() => store.nativeFailure(item!.inbox_item_id), /exact native terminal/);
+        await assert.rejects(() => store.cancelInterruptedTurn(item!.inbox_item_id), /exact native terminal/);
+        await assert.rejects(() => store.normalizeStartupRecovery("native"), /exact native terminal/);
+        await store.close(); store = new SupervisedAgentInboxStore(env.database);
+        await assert.rejects(() => store.normalizeStartupRecovery("native"), /exact native terminal/, `${kind}:${corruption}`);
+        assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id), before);
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_publications").get()?.n, 0);
+      } finally { database.close(); await store.close(); await env.cleanup(); }
+    }
+  }
+});
+
+test("failed receipts retain bounded history without hiding uncertain partial mutations", async () => {
+  const env = await fixture(); const store = new SupervisedAgentInboxStore(env.database);
+  try {
+    const items = await store.ingestPoll({ agent_id: "native", room_id: "room", last_observed_message_id: "202",
+      messages: Array.from({ length: 202 }, (_, index) => ({ source_message_id: String(index + 1), source_message: {}, activation: {} })) });
+    await seedActiveAgent(env, { agentId: "native", roomId: "room", workAttemptId: "attempt", executionGenerationId: "generation", providerContinuationId: "continuation" });
+    for (const [index, item] of items.entries()) {
+      await store.claimHead("native");
+      const turnId = `native-${index}`;
+      await store.checkpointTurnStarted(item.inbox_item_id, turnId, TEST_PROVIDER_TURN_AUTHORITY);
+      if (index === 201) {
+        const request = { agent_id: "native", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "generation",
+          current_execution_generation_id: "generation", provider_continuation_id: "continuation", provider_turn_id: turnId,
+          mcp_request_id: "partial-mutation", tool_name: "send_message", request: { text: "partially applied" } };
+        const prepared = await store.prepareEffect(request);
+        await store.markEffectExecuting({ ...request, effect_id: prepared.effect.effect_id });
+      }
+      await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: "native", execution_generation_id: "generation",
+        provider_turn_id: turnId, outcome: "failed", text: null, evidence: "stream",
+        terminal_evidence: { turnId, providerContinuationId: "continuation", outcome: "failed", text: null, evidence: "stream" } });
+      await store.transition(item.inbox_item_id, "acknowledged_failed");
+    }
+    assert.equal(await store.head("native"), null);
+    assert.equal((await store.receipts("native")).length, 200);
+    const database = new DatabaseSync(env.database);
+    try {
+      assert.equal(database.prepare("SELECT state FROM supervised_agent_effects WHERE mcp_request_id='partial-mutation'").get()?.state, "executing");
+      await store.normalizeStartupRecovery("native");
+      assert.equal(database.prepare("SELECT state FROM supervised_agent_effects WHERE mcp_request_id='partial-mutation'").get()?.state, "uncertain");
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_terminal_results").get()?.n, 200);
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_publications").get()?.n, 0);
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("cancelInterruptedTurn never overrides a committed publication or a terminal outcome", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database);
