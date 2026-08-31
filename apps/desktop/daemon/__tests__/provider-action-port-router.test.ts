@@ -61,6 +61,86 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
 
 type FakeProvider = "codex" | "claude-code" | "open-model";
 
+test("permission routing preserves frozen Codex request identity and fences native dispatch", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("codex", calls);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = Object.freeze({ id: 1, method: "item/commandExecution/requestApproval", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1 }) });
+  const request = { provider: "codex" as const, native };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", requests: [native] }); };
+  await router.observePermissions(handle, event => {
+    assert.equal(event.type, "snapshot");
+    if (event.type === "snapshot") { assert.equal(event.requests[0]!.native, native); assert.equal(event.connectionId, "socket-1"); }
+  }, new AbortController().signal);
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "command" });
+  adapter.replyPermission = async (_handle, expected, _reply, options) => {
+    assert.equal(expected, native);
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); calls.push("send");
+    return { outcome: "sent", scope: "request" };
+  };
+  assert.deepEqual(await router.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => { calls.push("intent"); }, assertNativeDispatch: () => { calls.push("fence"); },
+  }), { outcome: "sent_unacknowledged", nativeScope: "request" });
+  assert.deepEqual(calls.slice(-3), ["intent", "fence", "send"]);
+  await assert.rejects(router.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => {}, assertNativeDispatch: () => { throw new Error("closed"); },
+  }), /closed/);
+  assert.equal(calls.filter(value => value === "send").length, 1);
+  await assert.rejects(router.replyPermission({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "forged" } }, request, "once", { beforeNativeDispatch: async () => {} }), /binding changed/);
+});
+
+test("permission routing snapshots OpenCode payloads and refuses replacement during broker checkpoint", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  const handle = await router.spawn(spawn);
+  const native = { id: "request", sessionID: handle.providerContinuationId!, permission: "bash", patterns: [], metadata: {}, always: [] };
+  const request = { provider: "open-model" as const, native };
+  adapter.observePermissions = async (_handle, listener) => { listener({ type: "snapshot", requests: [native] }); };
+  let observedConnection: string | null = null;
+  await router.observePermissions(handle, event => {
+    if (event.type === "snapshot") {
+      assert.notEqual(event.requests[0]!.native, native);
+      assert.deepEqual(event.requests[0]!.native, native);
+      observedConnection = event.connectionId;
+    }
+  }, new AbortController().signal);
+  assert.match(observedConnection!, /^[a-f0-9]{64}$/);
+  let sends = 0;
+  adapter.replyPermission = async (_handle, expected, _reply, options) => {
+    assert.notEqual(expected, native); assert.deepEqual(expected, native);
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); sends++;
+    return { outcome: "processed", nativeScope: "session_pending" };
+  };
+  assert.deepEqual(await router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "native_processed", nativeScope: "session_pending" });
+  await assert.rejects(router.replyPermission(handle, request, "once", { beforeNativeDispatch: async () => { await router.spawn(spawn); } }), /binding changed/);
+  assert.equal(sends, 1);
+});
+
+test("permission correlation and post-dispatch results reject replacement across native awaits", async () => {
+  const adapter = fakeAdapter("open-model", []);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const spawn = { provider: "open-model", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} };
+  let handle = await router.spawn(spawn);
+  const request = { provider: "open-model" as const, native: { id: "request", sessionID: handle.providerContinuationId!, permission: "bash", patterns: [], metadata: {}, always: [] } };
+  adapter.correlatePermissionTurn = async nativeHandle => {
+    await router.spawn(spawn);
+    return { outcome: "correlated", providerContinuationId: nativeHandle.providerContinuationId!, providerTurnId: "turn" };
+  };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, request), { outcome: "correlation_unproven" });
+  handle = await router.spawn(spawn);
+  let sends = 0;
+  adapter.replyPermission = async (_handle, _request, _reply, options) => {
+    await options!.beforeNativeDispatch(); options!.assertNativeDispatch!(); sends++;
+    await router.spawn(spawn);
+    throw Object.assign(new Error("native response lost"), { outcome: "not_pending" });
+  };
+  await assert.rejects(router.replyPermission(handle, request, "reject", { beforeNativeDispatch: async () => {} }), { outcome: "uncertain" });
+  assert.equal(sends, 1);
+});
+
 test("custodial activation router forwards exact Codex callbacks and refuses unsupported or forged handles", async () => {
   const calls: string[] = [];
   const adapter = fakeAdapter("codex", calls);

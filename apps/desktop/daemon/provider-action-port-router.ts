@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import type {
   CustodialPollingActivationRequest,
   CustodialPollingActivationOptions,
@@ -21,6 +22,7 @@ import type {
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
+import type { CodexNativePermissionRequest, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
 type NativeHandle = {
   custodyLaunchAgentSessionId?: string;
@@ -32,6 +34,9 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
+  observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest)[] } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
+  replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
+  correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
   activateCustodialPolling?(handle: NativeHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
   inspectCustodialPollingActivation?(handle: NativeHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
@@ -199,6 +204,86 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       && (result.providerContinuationId !== continuation
         || result.nativeProcessIdentity !== expected?.processIdentity))) return { state: "unknown" };
     return result;
+  }
+
+  private permissionBinding(handle: ProviderActionHandle) {
+    const remembered = this.required(handle);
+    const connection = structuredClone(handle.providerConnection);
+    const continuation = handle.providerContinuationId;
+    const current = () => this.handles.get(handle.workAttemptId) === remembered
+      && remembered.handle.pid === handle.pid && remembered.handle.providerContinuationId === continuation
+      && sameProviderActionConnectionIdentity(connection, remembered.handle.providerConnection)
+      && sameProviderActionConnectionIdentity(connection, handle.providerConnection);
+    return { remembered, connection, continuation, current };
+  }
+
+  async observePermissions(handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, signal: AbortSignal): Promise<void> {
+    const binding = this.permissionBinding(handle);
+    const { remembered, current } = binding;
+    const notify = (event: ProviderPermissionObservation) => { try { listener(event); } catch { /* Observer cannot control providers. */ } };
+    const adapter = await this.adapter(remembered.provider);
+    if (signal.aborted) return;
+    if (!current() || !["codex", "open-model"].includes(remembered.provider) || !adapter.observePermissions) { notify({ type: "unavailable" }); return; }
+    await adapter.observePermissions(remembered.handle, event => {
+      if (signal.aborted) return;
+      if (!current()) { notify({ type: "unavailable" }); return; }
+      if (event.type !== "snapshot") { notify(event); return; }
+      const requests: ProviderPermissionRequest[] = event.requests.map(native => remembered.provider === "codex"
+        ? { provider: "codex", native: native as CodexNativePermissionRequest }
+        : { provider: "open-model", native: structuredClone(native as OpenCodeNativePermissionRequest) });
+      notify({ type: "snapshot", requests, connectionId: remembered.provider === "codex"
+        ? (requests[0]?.native as CodexNativePermissionRequest | undefined)?.connectionId ?? null
+        : createHash("sha256").update(JSON.stringify(binding.connection)).digest("hex") });
+    }, signal);
+  }
+
+  async correlatePermissionTurn(handle: ProviderActionHandle, request: ProviderPermissionRequest): Promise<ProviderPermissionCorrelation> {
+    try {
+      const { remembered, current, continuation } = this.permissionBinding(handle);
+      if (!current() || request.provider !== remembered.provider) return { outcome: "correlation_unproven" };
+      if (request.provider === "codex") {
+        const params = request.native.params as Record<string, unknown> | null;
+        const kind = request.native.method === "item/commandExecution/requestApproval" ? "command"
+          : request.native.method === "item/fileChange/requestApproval" ? "file_change" : null;
+        if (!kind || !params || Array.isArray(params) || params.threadId !== continuation
+          || typeof params.turnId !== "string" || !params.turnId.trim() || params.turnId.length > 512
+          || typeof params.itemId !== "string" || !params.itemId.trim() || params.itemId.length > 512
+          || !Number.isSafeInteger(params.startedAtMs) || (params.startedAtMs as number) < 0) return { outcome: "correlation_unproven" };
+        return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: params.turnId, kind };
+      }
+      const expected = structuredClone(request.native);
+      const kind = expected.permission === "bash" ? "command" : expected.permission === "edit" ? "file_change" : null;
+      if (!kind) return { outcome: "correlation_unproven" };
+      const adapter = await this.adapter(remembered.provider);
+      if (!current() || !adapter.correlatePermissionTurn) return { outcome: "correlation_unproven" };
+      const result = await adapter.correlatePermissionTurn(remembered.handle, expected);
+      if (!current() || result.outcome !== "correlated" || result.providerContinuationId !== continuation) return { outcome: "correlation_unproven" };
+      return { outcome: "correlated", providerContinuationId: result.providerContinuationId, providerTurnId: result.providerTurnId, kind };
+    } catch { return { outcome: "correlation_unproven" }; }
+  }
+
+  async replyPermission(handle: ProviderActionHandle, request: ProviderPermissionRequest, reply: "once" | "reject", options: ProviderPermissionDispatchOptions): Promise<ProviderPermissionReply> {
+    const { remembered, current } = this.permissionBinding(handle);
+    const assertCurrent = () => {
+      if (!current() || request.provider !== remembered.provider) throw Object.assign(new Error("Permission provider binding changed."), { outcome: "not_dispatched" });
+    };
+    assertCurrent();
+    const native = request.provider === "codex" ? request.native : structuredClone(request.native);
+    const adapter = await this.adapter(remembered.provider);
+    assertCurrent();
+    if (!adapter.replyPermission || typeof options?.beforeNativeDispatch !== "function") throw Object.assign(new Error("Permission dispatch is unsupported."), { outcome: "not_dispatched" });
+    let admitted = false;
+    const result = await adapter.replyPermission(remembered.handle, native, reply, {
+      beforeNativeDispatch: async () => { assertCurrent(); await options.beforeNativeDispatch(); assertCurrent(); },
+      assertNativeDispatch: () => { assertCurrent(); options.assertNativeDispatch?.(); admitted = true; },
+    }).catch(error => {
+      if (admitted && !current()) throw Object.assign(new Error("Permission dispatch cannot be confirmed."), { outcome: "uncertain" });
+      throw error;
+    });
+    if (!admitted || !current()) throw Object.assign(new Error("Permission dispatch cannot be confirmed."), { outcome: "uncertain" });
+    if (request.provider === "codex" && result.outcome === "sent") return { outcome: "sent_unacknowledged", nativeScope: "request" };
+    if (request.provider === "open-model" && result.outcome === "processed") return { outcome: "native_processed", nativeScope: result.nativeScope };
+    throw Object.assign(new Error("Permission dispatch returned unexpected evidence."), { outcome: "uncertain" });
   }
 
   async activateCustodialPolling(handle: ProviderActionHandle, request: CustodialPollingActivationRequest,

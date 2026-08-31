@@ -952,6 +952,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     rawHandle: ProviderHandle,
     expectedRequest: OpenCodePermissionRequest,
     reply: "once" | "reject",
+    options?: { beforeNativeDispatch: () => Promise<void>; assertNativeDispatch?: () => void },
   ) {
     const currentHandle = (): OpenModelHandle => {
       const current = this.handles.get(rawHandle.workAttemptId);
@@ -966,8 +967,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     try {
       return await handle.client.replyPermission(handle.providerContinuationId, expectedRequest, reply, () => {
         currentHandle();
+        options?.assertNativeDispatch?.();
         dispatched = true;
-      });
+      }, options?.beforeNativeDispatch);
     } finally {
       if (dispatched) {
         // A replacement may answer even with 404. Neither that response nor

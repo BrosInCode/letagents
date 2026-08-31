@@ -2,13 +2,25 @@ import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { executionIdentity } from "./execution-protocol.js";
 import type { ApprovalState } from "./execution-reducer.js";
+import { executionStorageIdentity, materializeExecutionIdentity } from "./execution-shadow-store.js";
+import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
+import type { DaemonManifestEntry } from "./types.js";
 
 // Structural, host-only storage. These operations run inside ManifestStore's
 // fenced transaction; none invokes a provider or authenticates a UI caller.
-// A future broker must prove native pendingness/ownership and produce a trusted
+// The broker must prove native pendingness/ownership and produce a trusted
 // presentation before calling them. Optional shadow capture is not authority.
 const time = z.number().int().min(0).max(Number.MAX_SAFE_INTEGER);
 const digest = z.string().regex(/^[a-f0-9]{64}$/);
+// Native process birth witnesses are ps lstart strings on macOS, not journal IDs.
+const processBirth = z.string().min(1).max(512);
+const connection = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("codex_app_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth }),
+  z.strictObject({ kind: z.literal("opencode_server"), url: z.string().min(1).max(4096), pid: time.min(1), processIdentity: processBirth, serverAuthPath: z.string().min(1).max(4096) }),
+]);
+const authority = z.strictObject({ inboxItemId: executionIdentity, workAttemptId: executionIdentity,
+  executionGenerationId: executionIdentity, provider: z.enum(["codex", "open-model"]),
+  providerConnection: connection, configurationRevision: time.min(1) });
 const reference = z.strictObject({
   requestId: executionIdentity, requestVersion: time.min(1), requestSha256: digest,
   agentId: executionIdentity, roomId: executionIdentity, executionGenerationId: executionIdentity,
@@ -16,16 +28,21 @@ const reference = z.strictObject({
   providerContinuationId: executionIdentity, providerTurnId: executionIdentity,
   connectionId: executionIdentity, nativeRequestId: z.union([executionIdentity, z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)]),
 });
-const admission = reference.extend({
+const requestDetails = reference.extend({
   kind: z.enum(["command", "file_change"]), risk: z.enum(["low", "medium", "high"]),
   recoveryBoundary: z.enum(["none", "connection", "runtime"]), createdAtMs: time, expiresAtMs: time,
-}).refine(v => v.expiresAtMs > v.createdAtMs);
+});
+const admission = requestDetails.refine(v => v.expiresAtMs > v.createdAtMs);
+const operationalAdmission = z.strictObject({
+  request: requestDetails.omit({ executionGenerationId: true, runtimeGenerationId: true, turnId: true })
+    .refine(v => v.expiresAtMs > v.createdAtMs), authority,
+});
 const selection = z.strictObject({
-  expected: reference, decisionId: executionIdentity, actorId: executionIdentity,
+  expected: reference, authority, decisionId: executionIdentity, actorId: executionIdentity,
   decision: z.enum(["allow_once", "deny"]), projectionSha256: digest, atMs: time,
 });
 const dispatch = z.strictObject({
-  expected: reference, decisionId: executionIdentity, dispatchId: executionIdentity,
+  expected: reference, authority, decisionId: executionIdentity, dispatchId: executionIdentity,
   projectionSha256: digest, atMs: time,
 });
 const outcome = z.strictObject({
@@ -35,6 +52,8 @@ const outcome = z.strictObject({
 const loss = z.strictObject({ expected: reference, atMs: time });
 export type ApprovalReference = z.infer<typeof reference>;
 export type AdmitExecutionApproval = z.infer<typeof admission>;
+export type ApprovalAuthority = z.infer<typeof authority>;
+export type AdmitOperationalExecutionApproval = z.infer<typeof operationalAdmission>;
 export type SelectHostApproval = z.infer<typeof selection>;
 export type DispatchExecutionApproval = z.infer<typeof dispatch>;
 export type RecordExecutionApprovalOutcome = z.infer<typeof outcome>;
@@ -96,23 +115,59 @@ function exact(db: DatabaseSync, expected: ApprovalReference): ExecutionApproval
   if (!found || Object.entries(expected).some(([key, value]) => found.request[key as keyof ApprovalReference] !== value)) reject("identity_mismatch");
   return found;
 }
-function activeTurn(db: DatabaseSync, expected: ApprovalReference): "codex" | "open-model" {
-  // This checks structural ownership, not whether the native callback is still
-  // pending. A live broker must independently revalidate that exact occurrence.
+function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agentId" | "roomId" | "providerContinuationId" | "providerTurnId">, owned: ApprovalAuthority,
+  current: DaemonManifestEntry | undefined): { generation: string; runtimeId: string; turnId: string; sourceMessageId: string; createdAtMs: number } {
+  // Native pendingness comes from the broker's exact adapter callback. Storage
+  // authority comes from the operational checkpoint, never observer projections.
   requireForeignKeys(db);
-  const row = db.prepare(`SELECT r.provider FROM execution_turns t JOIN execution_runtime_generations r
-    ON r.runtime_generation_id=t.runtime_generation_id AND r.execution_generation_id=t.execution_generation_id AND r.agent_id=t.agent_id
-    WHERE t.turn_id=? AND t.agent_id=? AND t.room_id=? AND t.execution_generation_id=? AND t.runtime_generation_id=?
-      AND t.provider_continuation_id=? AND t.provider_turn_id=? AND t.state='active'`).get(
-    expected.turnId, expected.agentId, expected.roomId, expected.executionGenerationId, expected.runtimeGenerationId,
-    expected.providerContinuationId, expected.providerTurnId);
-  if (row?.provider !== "codex" && row?.provider !== "open-model") reject("missing_turn");
-  return row.provider;
+  if (!current || current.id !== expected.agentId || current.room_id !== expected.roomId
+    || current.provider !== owned.provider || current.delivery_mode !== "daemon_inbox" || current.desired_state !== "running"
+    || current.work_attempt_id !== owned.workAttemptId || current.provider_ref?.work_attempt_id !== owned.workAttemptId
+    || current.provider_ref.execution_generation_id !== owned.executionGenerationId
+    || current.provider_ref.provider_continuation_id !== expected.providerContinuationId
+    || owned.providerConnection.kind !== (owned.provider === "codex" ? "codex_app_server" : "opencode_server")
+    || !sameProviderActionConnectionIdentity(current.provider_ref.provider_connection, owned.providerConnection)) reject("missing_turn");
+  const configuration = db.prepare("SELECT config_revision,runtime_configuration_revision FROM agent_configurations WHERE agent_id=?").get(expected.agentId);
+  if (configuration?.config_revision !== owned.configurationRevision || configuration.runtime_configuration_revision !== owned.configurationRevision
+    || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=? AND terminal_json IS NULL")
+      .get(owned.executionGenerationId, owned.workAttemptId)) reject("missing_turn");
+  const head = db.prepare(`SELECT inbox_item_id,room_id,state,provider_turn_id,outcome,source_message_id,created_at
+    FROM supervised_agent_inbox WHERE agent_id=?
+    AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+    ORDER BY fifo_sequence LIMIT 1`).get(expected.agentId);
+  if (!head || head.inbox_item_id !== owned.inboxItemId || head.room_id !== expected.roomId
+    || !["dispatching", "awaiting_result", "result_recovery"].includes(String(head.state))
+    || head.provider_turn_id !== expected.providerTurnId || head.outcome !== null
+    || db.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(owned.inboxItemId)) reject("missing_turn");
+  const binding = db.prepare(`SELECT origin_execution_generation_id FROM supervised_agent_provider_turn_bindings
+    WHERE inbox_item_id=? AND agent_id=? AND room_id=? AND work_attempt_id=? AND provider_continuation_id=? AND provider_turn_id=?`)
+    .get(owned.inboxItemId, expected.agentId, expected.roomId, owned.workAttemptId, expected.providerContinuationId, expected.providerTurnId);
+  if (!binding || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=?")
+    .get(String(binding.origin_execution_generation_id), owned.workAttemptId)) reject("missing_turn");
+  const generation = String(binding.origin_execution_generation_id);
+  const runtimeId = executionStorageIdentity("runtime", expected.agentId, generation, owned.providerConnection.kind, owned.providerConnection.processIdentity);
+  // Current durable reference attests this birth only in its own generation.
+  // Never retroactively invent an old birth after an uncaptured recovery.
+  if (generation !== owned.executionGenerationId && !db.prepare(`SELECT 1 FROM execution_runtime_generations
+    WHERE runtime_generation_id=? AND execution_generation_id=? AND agent_id=? AND provider=? AND config_revision=?`)
+    .get(runtimeId, generation, expected.agentId, owned.provider, owned.configurationRevision)) reject("missing_turn");
+  const createdAtMs = Date.parse(String(head.created_at));
+  if (!Number.isSafeInteger(createdAtMs) || createdAtMs < 0) reject("missing_turn");
+  return { generation, runtimeId, turnId: executionStorageIdentity("turn", expected.agentId, expected.providerContinuationId, expected.providerTurnId),
+    sourceMessageId: String(head.source_message_id), createdAtMs };
 }
-function liveSelection(db: DatabaseSync, record: ExecutionApprovalRecord, atMs: number): void {
+export function validateExecutionApprovalAuthority(db: DatabaseSync, expected: ApprovalReference, input: ApprovalAuthority,
+  current: DaemonManifestEntry | undefined): void {
+  const r = parse(reference, expected); const owned = parse(authority, input);
+  const turn = eligibleTurn(db, r, owned, current);
+  if (r.executionGenerationId !== turn.generation || r.runtimeGenerationId !== turn.runtimeId || r.turnId !== turn.turnId) reject("missing_turn");
+}
+function liveSelection(db: DatabaseSync, record: ExecutionApprovalRecord, owned: ApprovalAuthority,
+  current: DaemonManifestEntry | undefined, atMs: number): void {
   if (atMs < record.request.createdAtMs || atMs < (record.decision?.decidedAtMs ?? 0)) reject("invalid_input");
   if (atMs >= record.request.expiresAtMs) reject("expired");
-  activeTurn(db, record.request);
+  const expected = Object.fromEntries(Object.keys(reference.shape).map(key => [key, record.request[key as keyof ApprovalReference]])) as ApprovalReference;
+  validateExecutionApprovalAuthority(db, expected, owned, current);
 }
 
 export function getExecutionApproval(db: DatabaseSync, input: ApprovalReference): ExecutionApprovalRecord | null {
@@ -120,14 +175,33 @@ export function getExecutionApproval(db: DatabaseSync, input: ApprovalReference)
   return read(db, expected.requestId, expected.requestVersion) ? exact(db, expected) : null;
 }
 
-export function admitExecutionApproval(db: DatabaseSync, input: AdmitExecutionApproval): { created: boolean; approval: ExecutionApprovalRecord } {
-  const value = parse(admission, input);
-  const prior = read(db, value.requestId, value.requestVersion);
+/** Internal broker recovery by its deterministic native-occurrence ID. */
+export function readLatestExecutionApproval(db: DatabaseSync, requestId: string): ExecutionApprovalRecord | null {
+  const id = parse(executionIdentity, requestId);
+  const row = db.prepare("SELECT request_version FROM execution_approval_requests WHERE request_id=? ORDER BY request_version DESC LIMIT 1").get(id);
+  return row ? read(db, id, Number(row.request_version)) : null;
+}
+
+/** Bounded structural recovery cards; absence from native pending lists is not a terminal outcome. */
+export function listExecutionApprovals(db: DatabaseSync, roomId: string, limit = 64): ExecutionApprovalRecord[] {
+  const room = parse(executionIdentity, roomId);
+  const count = parse(time.min(1).max(64), limit);
+  const rows = db.prepare(`SELECT request_id,request_version FROM execution_approval_requests r WHERE room_id=?
+    AND NOT EXISTS (SELECT 1 FROM execution_approval_requests newer WHERE newer.request_id=r.request_id AND newer.request_version>r.request_version)
+    ORDER BY created_at_ms DESC,request_id LIMIT ?`).all(room, count);
+  return rows.map(row => read(db, String(row.request_id), Number(row.request_version))!);
+}
+
+export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperationalExecutionApproval,
+  current: DaemonManifestEntry | undefined): { created: boolean; approval: ExecutionApprovalRecord } {
+  const parsed = parse(operationalAdmission, input);
+  const prior = read(db, parsed.request.requestId, parsed.request.requestVersion);
   if (prior) {
-    if (Object.entries(value).some(([key, item]) => prior.request[key as keyof AdmitExecutionApproval] !== item)) reject("identity_mismatch");
+    if (Object.entries(parsed.request).some(([key, item]) => prior.request[key as keyof AdmitExecutionApproval] !== item)) reject("identity_mismatch");
     return { created: false, approval: prior }; // Receipt only; never reopens a request.
   }
-  activeTurn(db, value);
+  const turn = eligibleTurn(db, parsed.request, parsed.authority, current);
+  const value = parse(admission, { ...parsed.request, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId, turnId: turn.turnId });
   // A caller cannot alias one native callback under another logical request ID.
   // The existing unique key has no occurrence/turn component: sequential reuse
   // of a native ID in this connection is conservatively unsupported here.
@@ -151,6 +225,14 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitExecutionAp
     db.prepare("UPDATE execution_approval_requests SET state='superseded' WHERE request_id=? AND request_version=?")
       .run(value.requestId, old.request.requestVersion);
   }
+  const common = { agentId: value.agentId, roomId: value.roomId, executionGenerationId: turn.generation, createdAtMs: turn.createdAtMs };
+  materializeExecutionIdentity(db, {
+    runtime: { agentId: value.agentId, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId,
+      provider: parsed.authority.provider, configRevision: parsed.authority.configurationRevision, createdAtMs: turn.createdAtMs },
+    message: { ...common, sourceMessageId: turn.sourceMessageId, workspaceId: parsed.authority.workAttemptId },
+    turn: { ...common, turnId: turn.turnId, runtimeGenerationId: turn.runtimeId,
+      providerContinuationId: value.providerContinuationId, providerTurnId: value.providerTurnId },
+  });
   db.prepare(`INSERT INTO execution_approval_requests
     (request_id,request_version,agent_id,room_id,execution_generation_id,runtime_generation_id,turn_id,provider_continuation_id,provider_turn_id,
       connection_id,native_request_id_type,native_request_id,kind,risk,delegatable,request_sha256,state,recovery_boundary,created_at_ms,expires_at_ms)
@@ -161,7 +243,7 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitExecutionAp
   return { created: true, approval: read(db, value.requestId, value.requestVersion)! };
 }
 
-export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval): ExecutionApprovalRecord {
+export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval, entry: DaemonManifestEntry | undefined): ExecutionApprovalRecord {
   const value = parse(selection, input); const current = exact(db, value.expected);
   if (current.decision) {
     const old = current.decision;
@@ -170,7 +252,7 @@ export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval):
     return current;
   }
   if (current.request.state !== "requested") reject("invalid_transition");
-  liveSelection(db, current, value.atMs);
+  liveSelection(db, current, value.authority, entry, value.atMs);
   const r = current.request;
   db.prepare(`INSERT INTO execution_approval_decisions
     (decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256,
@@ -184,7 +266,7 @@ export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval):
 }
 
 /** A true result is a first committed intent, not proof of current native authority. */
-export function beginExecutionApprovalDispatch(db: DatabaseSync, input: DispatchExecutionApproval): { dispatch: boolean; approval: ExecutionApprovalRecord } {
+export function beginExecutionApprovalDispatch(db: DatabaseSync, input: DispatchExecutionApproval, entry: DaemonManifestEntry | undefined): { dispatch: boolean; approval: ExecutionApprovalRecord } {
   const value = parse(dispatch, input); const current = exact(db, value.expected); const d = current.decision;
   if (!d || d.decisionId !== value.decisionId || !d.projectionSha256 || d.projectionSha256 !== value.projectionSha256) reject("identity_mismatch");
   if (d.dispatchId) {
@@ -192,7 +274,7 @@ export function beginExecutionApprovalDispatch(db: DatabaseSync, input: Dispatch
     return { dispatch: false, approval: current }; // Restart/lost response is not a second dispatch permit.
   }
   if (current.request.state !== "decision_recorded" || d.dispatchState !== "not_dispatched") reject("invalid_transition");
-  liveSelection(db, current, value.atMs);
+  liveSelection(db, current, value.authority, entry, value.atMs);
   db.prepare("UPDATE execution_approval_decisions SET dispatch_state='dispatching',dispatch_id=?,dispatch_started_at_ms=? WHERE decision_id=?")
     .run(value.dispatchId, value.atMs, d.decisionId);
   db.prepare("UPDATE execution_approval_requests SET state='dispatching' WHERE request_id=? AND request_version=?")

@@ -1,8 +1,7 @@
-import { createHash } from "node:crypto";
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type { NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
 import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
-import { ExecutionShadowStore, type ShadowObserver } from "./execution-shadow-store.js";
+import { ExecutionShadowStore, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
@@ -33,9 +32,6 @@ export type PreparedRuntime = {
 const QUEUE_FACTS = 256;
 const QUEUE_BYTES = 256 * 1024;
 const BATCH_FACTS = 32;
-function opaque(kind: string, ...identity: string[]): string {
-  return `${kind}-${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
-}
 function runtimeId(agentId: string, generation: string, kind: string, birth: string): string {
   return opaque("runtime", agentId, generation, kind, birth);
 }

@@ -1,5 +1,5 @@
 import electron from "electron";
-import type { BrowserWindow as ElectronBrowserWindow } from "electron";
+import type { BrowserWindow as ElectronBrowserWindow, IpcMainInvokeEvent } from "electron";
 import { existsSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,6 +15,21 @@ let mainWindow: ElectronBrowserWindow | null = null;
 
 export function getMainWindow(): ElectronBrowserWindow | null {
   return mainWindow;
+}
+
+/** Privileged approval IPC is never accepted from a subframe or another window. */
+export function assertHostApprovalSender(event: IpcMainInvokeEvent): void {
+  const contents = mainWindow?.webContents;
+  if (!contents || mainWindow?.isDestroyed() || contents.isDestroyed()
+    || event.sender !== contents || !event.senderFrame || event.senderFrame !== contents.mainFrame) {
+    throw new Error("Host approvals require the main application window.");
+  }
+  const expected = new URL(devServerUrl || pathToFileURL(rendererDistPath).toString());
+  const actual = new URL(event.senderFrame.url);
+  if (devServerUrl ? actual.origin !== expected.origin
+    : actual.protocol !== "file:" || actual.pathname !== expected.pathname) {
+    throw new Error("Host approvals require the trusted application page.");
+  }
 }
 
 export function hasOpenWindows(): boolean {

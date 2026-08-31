@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { z } from "zod";
 
@@ -74,6 +74,73 @@ function semanticFact(fact: ExecutionFact): string {
 function unverifiedHistoricalFact(row: Row): boolean {
   return (row.domain === "turn" && row.state === "terminal" && row.turn_outcome === null)
     || ((row.domain === "runtime" && row.state === "exited" || row.domain === "control" && row.state === "lost") && row.control_evidence === null);
+}
+
+/** Shared structural identity; neither this recipe nor these rows grant execution authority. */
+export function executionStorageIdentity(kind: string, ...identity: string[]): string {
+  return `${kind}-${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
+}
+
+/** Caller owns the transaction. Preserve existing projections, including lagging terminal state. */
+export function materializeExecutionIdentity(database: DatabaseSync, value: {
+  runtime: z.input<typeof runtimeInput>; message: z.input<typeof attemptInput>;
+  turn: Omit<z.input<typeof turnInput>, "attemptId">;
+}): void {
+  const runtime = validated(runtimeInput, value.runtime);
+  const message = validated(attemptInput, value.message);
+  const turn = validated(turnInput.omit({ attemptId: true }), value.turn);
+  if (!database.isTransaction || runtime.agentId !== message.agentId || runtime.agentId !== turn.agentId
+    || runtime.executionGenerationId !== message.executionGenerationId || runtime.executionGenerationId !== turn.executionGenerationId
+    || runtime.runtimeGenerationId !== turn.runtimeGenerationId || message.roomId !== turn.roomId) {
+    throw new ExecutionProtocolError("identity_mismatch");
+  }
+  materializeRuntime(database, runtime);
+  const attemptId = materializeMessage(database, message);
+  materializeTurn(database, { ...turn, attemptId });
+}
+
+function exactRow(database: DatabaseSync, table: string, key: string, value: string,
+  fields: Record<string, SQLInputValue>): boolean {
+  const row = database.prepare(`SELECT * FROM ${table} WHERE ${key}=?`).get(value);
+  if (!row) return false;
+  if (Object.entries(fields).some(([column, expected]) => row[column] !== expected)) throw new ExecutionProtocolError("identity_mismatch");
+  return true;
+}
+function insertIdentity(database: DatabaseSync, table: string, fields: Record<string, SQLInputValue>): void {
+  database.prepare(`INSERT INTO ${table}(${Object.keys(fields).join(",")}) VALUES(${Object.keys(fields).map(() => "?").join(",")})`)
+    .run(...Object.values(fields));
+}
+function materializeRuntime(database: DatabaseSync, input: z.output<typeof runtimeInput>): void {
+  if (!exactRow(database, "execution_generations", "execution_generation_id", input.executionGenerationId, { agent_id: input.agentId })) {
+    insertIdentity(database, "execution_generations", { execution_generation_id: input.executionGenerationId, agent_id: input.agentId, created_at_ms: input.createdAtMs });
+  }
+  const fields = { runtime_generation_id: input.runtimeGenerationId, execution_generation_id: input.executionGenerationId,
+    agent_id: input.agentId, provider: input.provider, config_revision: input.configRevision };
+  if (!exactRow(database, "execution_runtime_generations", "runtime_generation_id", input.runtimeGenerationId, fields)) {
+    insertIdentity(database, "execution_runtime_generations", { ...fields, authority_mode: "typed_shadow", runtime_state: "starting",
+      control_state: "connecting", continuation_state: "available", created_at_ms: input.createdAtMs });
+  }
+}
+function materializeMessage(database: DatabaseSync, input: z.output<typeof attemptInput>): string {
+  const attempt = database.prepare("SELECT attempt_id FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?")
+    .get(input.agentId, input.roomId, input.sourceMessageId);
+  const attemptId = attempt ? String(attempt.attempt_id) : randomUUID();
+  if (!attempt) insertIdentity(database, "execution_message_attempts", { attempt_id: attemptId, agent_id: input.agentId,
+    room_id: input.roomId, source_message_id: input.sourceMessageId, state: "active", created_at_ms: input.createdAtMs });
+  const bound = database.prepare("SELECT workspace_id FROM execution_attempt_generations WHERE attempt_id=? AND execution_generation_id=?")
+    .get(attemptId, input.executionGenerationId);
+  if (bound && bound.workspace_id !== input.workspaceId) throw new ExecutionProtocolError("identity_mismatch");
+  if (!bound) insertIdentity(database, "execution_attempt_generations", { attempt_id: attemptId, agent_id: input.agentId,
+    room_id: input.roomId, execution_generation_id: input.executionGenerationId, workspace_id: input.workspaceId, created_at_ms: input.createdAtMs });
+  return attemptId;
+}
+function materializeTurn(database: DatabaseSync, input: z.output<typeof turnInput>): void {
+  const fields = { turn_id: input.turnId, attempt_id: input.attemptId, agent_id: input.agentId, room_id: input.roomId,
+    execution_generation_id: input.executionGenerationId, runtime_generation_id: input.runtimeGenerationId,
+    provider_continuation_id: input.providerContinuationId, provider_turn_id: input.providerTurnId };
+  if (!exactRow(database, "execution_turns", "turn_id", input.turnId, fields)) {
+    insertIdentity(database, "execution_turns", { ...fields, state: "none", side_effects: "none", created_at_ms: input.createdAtMs });
+  }
 }
 
 /**
@@ -184,24 +251,9 @@ export class ExecutionShadowStore {
   registerRuntime(value: z.input<typeof runtimeInput>): void {
     const input = validated(runtimeInput, value);
     this.transaction(() => {
-      const generation = this.row("SELECT * FROM execution_generations WHERE execution_generation_id=?", input.executionGenerationId);
-      if (generation && generation.agent_id !== input.agentId) throw new ExecutionProtocolError("identity_mismatch");
-      if (!generation) this.insert("execution_generations", {
-        execution_generation_id: input.executionGenerationId, agent_id: input.agentId, created_at_ms: input.createdAtMs,
-      });
       const existing = this.row("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?", input.runtimeGenerationId);
-      if (existing) {
-        if (existing.agent_id !== input.agentId || existing.execution_generation_id !== input.executionGenerationId
-          || existing.provider !== input.provider || existing.config_revision !== input.configRevision || existing.authority_mode !== "typed_shadow") {
-          throw new ExecutionProtocolError("identity_mismatch");
-        }
-        return;
-      }
-      this.insert("execution_runtime_generations", {
-        runtime_generation_id: input.runtimeGenerationId, execution_generation_id: input.executionGenerationId,
-        agent_id: input.agentId, provider: input.provider, config_revision: input.configRevision, authority_mode: "typed_shadow",
-        runtime_state: "starting", control_state: "connecting", continuation_state: "available", created_at_ms: input.createdAtMs,
-      });
+      if (existing && existing.authority_mode !== "typed_shadow") throw new ExecutionProtocolError("identity_mismatch");
+      materializeRuntime(this.database, input);
     });
   }
 
@@ -209,26 +261,13 @@ export class ExecutionShadowStore {
     const input = validated(attemptInput, value);
     return this.transaction(() => {
       this.required("SELECT 1 FROM execution_generations WHERE agent_id=? AND execution_generation_id=?", input.agentId, input.executionGenerationId);
-      let attempt = this.row("SELECT * FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?",
+      const attempt = this.row("SELECT * FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?",
         input.agentId, input.roomId, input.sourceMessageId);
-      if (!attempt) {
-        attempt = {
-          attempt_id: randomUUID(), agent_id: input.agentId, room_id: input.roomId, source_message_id: input.sourceMessageId,
-          state: "active", created_at_ms: input.createdAtMs,
-        };
-        this.insert("execution_message_attempts", attempt);
+      if (attempt && attempt.state !== "active"
+        && !this.row("SELECT 1 FROM execution_attempt_generations WHERE attempt_id=? AND execution_generation_id=?", attempt.attempt_id, input.executionGenerationId)) {
+        throw new ExecutionProtocolError("attempt_settled");
       }
-      const attemptId = String(attempt.attempt_id);
-      const bound = this.row("SELECT * FROM execution_attempt_generations WHERE attempt_id=? AND execution_generation_id=?", attemptId, input.executionGenerationId);
-      if (bound && bound.workspace_id !== input.workspaceId) throw new ExecutionProtocolError("identity_mismatch");
-      if (!bound) {
-        if (attempt.state !== "active") throw new ExecutionProtocolError("attempt_settled");
-        this.insert("execution_attempt_generations", {
-          attempt_id: attemptId, agent_id: input.agentId, room_id: input.roomId, execution_generation_id: input.executionGenerationId,
-          workspace_id: input.workspaceId, created_at_ms: input.createdAtMs,
-        });
-      }
-      return attemptId;
+      return materializeMessage(this.database, input);
     });
   }
 
@@ -243,11 +282,7 @@ export class ExecutionShadowStore {
         input.agentId, input.executionGenerationId, input.runtimeGenerationId);
       const existing = this.row("SELECT * FROM execution_turns WHERE turn_id=?", input.turnId);
       if (existing) {
-        if (existing.attempt_id !== input.attemptId || existing.agent_id !== input.agentId || existing.room_id !== input.roomId
-          || existing.execution_generation_id !== input.executionGenerationId || existing.runtime_generation_id !== input.runtimeGenerationId
-          || existing.provider_continuation_id !== input.providerContinuationId || existing.provider_turn_id !== input.providerTurnId) {
-          throw new ExecutionProtocolError("identity_mismatch");
-        }
+        materializeTurn(this.database, input);
         return;
       }
       if (attempt.state !== "active") throw new ExecutionProtocolError("attempt_settled");
@@ -255,12 +290,7 @@ export class ExecutionShadowStore {
         || this.row("SELECT 1 FROM execution_turns WHERE agent_id=? AND state IN ('none','active','lost')", input.agentId)) {
         throw new ExecutionProtocolError("invalid_transition");
       }
-      this.insert("execution_turns", {
-        turn_id: input.turnId, attempt_id: input.attemptId, agent_id: input.agentId, room_id: input.roomId,
-        execution_generation_id: input.executionGenerationId, runtime_generation_id: input.runtimeGenerationId,
-        provider_continuation_id: input.providerContinuationId, provider_turn_id: input.providerTurnId,
-        state: "none", side_effects: "none", created_at_ms: input.createdAtMs,
-      });
+      materializeTurn(this.database, input);
     });
   }
 

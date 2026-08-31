@@ -1453,6 +1453,32 @@ test("OpenCode client preserves uncertain permission dispatch and does not retry
     error instanceof OpenCodePermissionReplyError && error.outcome === "not_pending");
 });
 
+test("Open Model permission dispatch fences the awaited broker hook before native POST", async () => {
+  const harness = createHarness();
+  let identity: string | undefined = "opencode-birth-6101";
+  const root = await mkdtemp(join(tmpdir(), "letagents-permission-hook-"));
+  try {
+    const adapter = new OpenModelProviderAdapter({ runtimeRoot: root, dependencies: { ...harness.dependencies, getProcessIdentity: () => identity } });
+    const handle = await adapter.spawn(spawnRequest());
+    const expected = permissionFixture("per_hook", handle.providerContinuationId!);
+    harness.setPermissions([expected]);
+    let syncChecks = 0;
+    await assert.rejects(adapter.replyPermission(handle, expected, "once", {
+      beforeNativeDispatch: async () => { identity = undefined; }, assertNativeDispatch: () => { syncChecks++; },
+    }), { outcome: "not_dispatched" });
+    assert.equal(syncChecks, 0); assert.equal(harness.permissionReplies.length, 0);
+    identity = "opencode-birth-6101";
+    await assert.rejects(adapter.replyPermission(handle, expected, "once", {
+      beforeNativeDispatch: async () => {}, assertNativeDispatch: () => { throw new Error("broker closed"); },
+    }), /broker closed/);
+    assert.equal(harness.permissionReplies.length, 0);
+    await adapter.replyPermission(handle, expected, "once", {
+      beforeNativeDispatch: async () => {}, assertNativeDispatch: () => { syncChecks++; },
+    });
+    assert.equal(syncChecks, 1); assert.equal(harness.permissionReplies.length, 1);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
 test("Open Model decisions use the exact live handle and retain native once/reject scope without other actions", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const first = permissionFixture("per_first", handle.providerContinuationId!);

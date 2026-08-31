@@ -4,6 +4,7 @@
  * outside Electron's failure domain.
  */
 import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
+import type { ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 export type ProviderActionCapabilities = {
   execution?: NativeExecutionCapabilities;
   /** Explicit adapter admission for durable room-ingress ownership. */
@@ -177,6 +178,9 @@ export class ProviderActionFailure extends Error {
 export interface ProviderActionPort {
   onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;
   probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
+  observePermissions?(handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, signal: AbortSignal): Promise<void>;
+  correlatePermissionTurn?(handle: ProviderActionHandle, request: ProviderPermissionRequest): Promise<ProviderPermissionCorrelation>;
+  replyPermission?(handle: ProviderActionHandle, request: ProviderPermissionRequest, reply: "once" | "reject", options: ProviderPermissionDispatchOptions): Promise<ProviderPermissionReply>;
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
   /** Verify the selected polling runtime before an existing writer is stopped. */
   preflightCustodialPolling?(input: { provider: string; devMcpServerEntryPath?: string }): Promise<void>;

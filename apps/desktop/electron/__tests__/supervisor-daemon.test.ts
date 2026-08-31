@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, mkdir, readFile, rm, stat, unlink } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readFile, readdir, rm, stat, symlink, unlink, writeFile } from "node:fs/promises";
+import { createCipheriv, createDecipheriv, createHash, createPrivateKey, randomBytes, sign as nativeSign } from "node:crypto";
 import { createServer, type Server } from "node:net";
 import { EventEmitter } from "node:events";
 import { tmpdir } from "node:os";
@@ -34,11 +35,357 @@ import {
 } from "../main/supervisor-grant.js";
 import { apiUrl as configuredApiUrl } from "../main/paths.js";
 import { createStateRecoveryKey, prepareSupervisorState } from "../main/supervisor-state-recovery.js";
+import { loadHostApprovalSigner } from "../main/host-approval-auth.js";
+import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
 
 const daemonScriptPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/main.ts");
 const daemonTypesPath = join(dirname(fileURLToPath(import.meta.url)), "../../daemon/types.ts");
 const desktopPackagePath = join(dirname(fileURLToPath(import.meta.url)), "../../package.json");
 const daemonClientPath = join(dirname(fileURLToPath(import.meta.url)), "../main/supervisor-daemon.ts");
+
+function approvalStorage() {
+  const key = randomBytes(32);
+  return {
+    isEncryptionAvailable: () => true,
+    encryptString(value: string) {
+      const nonce = randomBytes(12); const cipher = createCipheriv("aes-256-gcm", key, nonce);
+      const ciphertext = Buffer.concat([cipher.update(value, "utf8"), cipher.final()]);
+      return Buffer.concat([nonce, cipher.getAuthTag(), ciphertext]);
+    },
+    decryptString(value: Buffer) {
+      const cipher = createDecipheriv("aes-256-gcm", key, value.subarray(0, 12));
+      cipher.setAuthTag(value.subarray(12, 28));
+      return Buffer.concat([cipher.update(value.subarray(28)), cipher.final()]).toString("utf8");
+    },
+  };
+}
+
+function hostApprovalCandidate(): HostApprovalCandidate {
+  return { reference: { requestId: "request_1", requestVersion: 1, requestSha256: "a".repeat(64),
+    agentId: "agent_1", roomId: "room_1", executionGenerationId: "execution_1", runtimeGenerationId: "runtime_1",
+    turnId: "turn_1", providerContinuationId: "session_1", providerTurnId: "native_turn_1", connectionId: "connection_1", nativeRequestId: 1 },
+    presentation: { agentId: "agent_1", displayName: "GardenPoint", provider: "codex", title: "Run a command",
+      details: '{"command":"private-host-command"}', denyScope: "request" },
+    status: "pending", detail: null, recordedDecision: null };
+}
+
+test("host approval client authenticates raw presentations and restores exact recorded decisions after reopen and cache expiry", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey); const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge();
+  const decisions: HostApprovalDecision[] = []; let loseResponse = true; let loads = 0; let now = Date.now();
+  wire.hostApprovals.request = envelope => {
+    const authenticated = verifier.verify(envelope); assert.ok(authenticated, "raw presentation reads must also authenticate");
+    if (authenticated.operation === "list") { assert.deepEqual(authenticated.input, { roomId: "room_1" }); return [candidate]; }
+    const input = authenticated.input as HostApprovalDecision; decisions.push(input);
+    candidate.recordedDecision = { decisionId: input.decisionId, actorId: input.actorId,
+      decision: input.decision, projectionSha256: input.projectionSha256 };
+    candidate.status = "decision_recorded";
+    if (loseResponse) throw new Error("lost receipt after durable decision");
+    return "decision_recorded";
+  };
+  const options = { socketPath: env.socketPath, daemonScriptPath, now: () => new Date(now),
+    loadApprovalSigner: async () => { loads += 1; return signer; },
+    spawnDaemon: () => { assert.fail("viewing approvals cannot spawn the daemon"); } };
+  try {
+    const client = new SupervisorDaemonClient(options);
+    const first = await client.listHostApprovals("room_1"); assert.equal(first.available, true);
+    const view = first.approvals[0]!;
+    assert.deepEqual(Object.keys(view).sort(), ["detail", "id", "presentation", "retryDecision", "status"]);
+    assert.equal(view.presentation.details, candidate.presentation.details); assert.equal(view.retryDecision, null);
+    assert.equal((await client.listHostApprovals("room_1")).approvals[0]!.id, view.id);
+    assert.equal(loads, 1, "repeated polling reuses the already-unsealed main-process signer");
+    view.presentation.details = "renderer replacement";
+    const input = { id: view.id, decision: "allow_once" as const };
+    const pending = client.decideHostApproval(input);
+    Object.assign(input, { id: "renderer-replaced-id", decision: "deny" });
+    await assert.rejects(pending, /Could not confirm/);
+    assert.equal(decisions.length, 1); assert.equal(decisions[0]!.decision, "allow_once");
+    assert.deepEqual(decisions[0]!.expected, candidate.reference);
+    assert.equal(decisions[0]!.projectionSha256, createHash("sha256").update(JSON.stringify(candidate.presentation)).digest("hex"));
+    assert.equal(decisions[0]!.actorId, `host-${verifier.challenge()!.keyFingerprint}`);
+    await assert.rejects(client.decideHostApproval({ id: view.id, decision: "allow_once" }), /Refresh/);
+    const restarted = new SupervisorDaemonClient(options); const restored = await restarted.listHostApprovals("room_1");
+    assert.equal(restored.approvals[0]!.retryDecision, "allow_once");
+    await assert.rejects(restarted.decideHostApproval({ id: restored.approvals[0]!.id, decision: "deny" }), /Refresh|different decision/);
+    loseResponse = false;
+    await restarted.decideHostApproval({ id: restored.approvals[0]!.id, decision: "allow_once" });
+    assert.equal(decisions[1]!.decisionId, decisions[0]!.decisionId, "Electron restart cannot mint another decision");
+    now += 31 * 60 * 1000;
+    const expired = await client.listHostApprovals("room_1"); assert.notEqual(expired.approvals[0]!.id, view.id);
+    assert.equal(expired.approvals[0]!.retryDecision, "allow_once");
+    await client.decideHostApproval({ id: expired.approvals[0]!.id, decision: "allow_once" });
+    assert.equal(decisions[2]!.decisionId, decisions[0]!.decisionId);
+    for (const status of ["decision_sent", "uncertain", "resolved", "unavailable"] as const) {
+      candidate.status = status;
+      const current = await restarted.listHostApprovals("room_1"); assert.equal(current.approvals[0]!.retryDecision, null);
+      await assert.rejects(restarted.decideHostApproval({ id: current.approvals[0]!.id, decision: "allow_once" }), /Refresh/);
+    }
+    // Exact structural fallback from HostApprovalBroker.list after the native
+    // request disappears: retained dispatch uncertainty is not a new prompt.
+    candidate.status = "uncertain";
+    candidate.presentation.title = "Approval unavailable";
+    candidate.presentation.details = "The native request is no longer available to inspect on this connection.";
+    candidate.detail = "A dispatch was recorded. Missing native evidence is not confirmation that the decision was applied.";
+    for (const reader of [restarted, new SupervisorDaemonClient(options)]) {
+      for (let refresh = 0; refresh < 2; refresh += 1) {
+        const snapshot = await reader.listHostApprovals("room_1");
+        assert.equal(snapshot.available, true); assert.equal(snapshot.approvals.length, 1);
+        const retained = snapshot.approvals[0]!;
+        assert.equal(retained.status, "uncertain"); assert.equal(retained.retryDecision, null);
+        assert.equal(retained.presentation.title, "Approval unavailable");
+        assert.equal(retained.detail, candidate.detail);
+        assert.doesNotMatch(JSON.stringify(snapshot), /private-host-command|recordedDecision|projectionSha256/);
+        for (const decision of ["allow_once", "deny"] as const) {
+          await assert.rejects(reader.decideHostApproval({ id: retained.id, decision }), /Refresh/);
+        }
+      }
+    }
+    assert.equal(decisions.length, 3);
+    assert.ok(wire.requests.every(request => request.method.startsWith("supervisor.host_approval_")), "no startup, handoff, configuration, or native action RPCs");
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client rejects stale recorded hashes, foreign actors, malformed candidates, and renderer authority fields", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  const verifier = new HostApprovalVerifier(7, signer.publicKey); const base = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge(); let candidates: unknown = [base]; let decisions = 0;
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "decide") { decisions += 1; return "resolved"; } return candidates;
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
+  try {
+    const original = (await client.listHostApprovals("room_1")).approvals[0]!;
+    for (const extra of [{ projectionSha256: "f".repeat(64) }, { expected: base.reference }, { actorId: "renderer" }, { decisionId: "renderer" }, { key: "renderer" }]) {
+      await assert.rejects(client.decideHostApproval({ id: original.id, decision: "allow_once", ...extra }), /Invalid approval/);
+    }
+    const recorded = { decisionId: "durable-decision", actorId: `host-${verifier.challenge()!.keyFingerprint}`,
+      decision: "allow_once" as const, projectionSha256: createHash("sha256").update(JSON.stringify(base.presentation)).digest("hex") };
+    for (const decision of [null, { ...recorded, projectionSha256: null }, { ...recorded, projectionSha256: "b".repeat(64) }, { ...recorded, actorId: "other-host" }]) {
+      candidates = [{ ...base, status: "decision_recorded", recordedDecision: decision }];
+      const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, true);
+      assert.equal(snapshot.approvals[0]!.status, "unavailable"); assert.equal(snapshot.approvals[0]!.retryDecision, null);
+      await assert.rejects(client.decideHostApproval({ id: snapshot.approvals[0]!.id, decision: "allow_once" }), /Refresh/);
+    }
+    for (const invalid of [null, {}, { ...base, extra: "field" }, { ...base, status: "dispatching" },
+      { ...base, recordedDecision: undefined }, { ...base, recordedDecision: { ...recorded, projectionSha256: "bad" } },
+      { ...base, reference: null }, { ...base, reference: { ...base.reference, roomId: "foreign" } },
+      { ...base, reference: { ...base.reference, agentId: "foreign" } },
+      { ...base, reference: { ...base.reference, nativeRequestId: Number.MAX_SAFE_INTEGER + 1 } },
+      { ...base, reference: { ...base.reference, nativeRequestId: true } },
+      { ...base, reference: { ...base.reference, requestVersion: 0 } },
+      { ...base, presentation: { ...base.presentation, details: 1 } },
+      { ...base, presentation: { ...base.presentation, details: "x".repeat(33 * 1024) } },
+      { ...base, presentation: { ...base.presentation, title: "Approve everything" } },
+      { ...base, presentation: { ...base.presentation, title: "Approval unavailable" } },
+      { ...base, status: "uncertain", presentation: { ...base.presentation, title: "Approval unavailable" } },
+      { ...base, status: "uncertain", reference: null, recordedDecision: recorded, presentation: { ...base.presentation, title: "Approval unavailable" } },
+      { ...base, presentation: { ...base.presentation, denyScope: "session_pending" } },
+      { ...base, presentation: { ...base.presentation, provider: "unknown" } }]) {
+      candidates = [base]; const prior = (await client.listHostApprovals("room_1")).approvals[0]!;
+      candidates = [base, invalid];
+      const snapshot = await client.listHostApprovals("room_1"); assert.equal(snapshot.available, false); assert.deepEqual(snapshot.approvals, []);
+      await assert.rejects(client.decideHostApproval({ id: prior.id, decision: "allow_once" }), /Refresh/);
+    }
+    assert.equal(decisions, 0);
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client fences changed daemon challenges and sender revocation after awaits and at socket dispatch", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  let verifier = new HostApprovalVerifier(7, signer.publicKey); const candidate = hostApprovalCandidate();
+  const wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+  wire.hostApprovals.challenge = () => verifier.challenge(); let decisions = 0; const signed: string[] = [];
+  wire.hostApprovals.request = envelope => {
+    const request = verifier.verify(envelope); assert.ok(request);
+    if (request.operation === "decide") { decisions += 1; return "resolved"; } return [candidate];
+  };
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => ({
+    publicKey: signer.publicKey, sign: (...args) => { signed.push(args[1]); return signer.sign(...args); },
+  }) });
+  try {
+    const original = (await client.listHostApprovals("room_1")).approvals[0]!;
+    verifier = new HostApprovalVerifier(8, signer.publicKey);
+    await assert.rejects(client.decideHostApproval({ id: original.id, decision: "allow_once" }), /background service changed/);
+    assert.equal(signed.includes("decide"), false);
+    const fresh = (await client.listHostApprovals("room_1")).approvals[0]!;
+    let trusted = true; let checks = 0;
+    const pending = client.decideHostApproval({ id: fresh.id, decision: "allow_once" }, () => {
+      checks += 1; if (!trusted) throw new Error("caller navigated away");
+    });
+    trusted = false;
+    await assert.rejects(pending, /navigated/); assert.equal(checks, 2); assert.equal(signed.includes("decide"), false);
+    checks = 0;
+    await assert.rejects(client.decideHostApproval({ id: fresh.id, decision: "allow_once" }, () => {
+      if (++checks === 3) throw new Error("caller revoked before socket write");
+    }), /Could not confirm/);
+    assert.equal(checks, 3); assert.equal(signed.filter(operation => operation === "decide").length, 1);
+    assert.equal(decisions, 0, "final connect fence prevents signed bytes reaching the daemon");
+  } finally { await closeServer(wire.server, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval client reports unenrolled or absent daemon without startup or secure-storage side effects", async () => {
+  const env = await fixture(); let loads = 0;
+  const client = new SupervisorDaemonClient({ socketPath: env.socketPath,
+    loadApprovalSigner: async () => { loads += 1; throw new Error("should not load"); },
+    spawnDaemon: () => { assert.fail("approval polling is passive"); } });
+  let wire: Awaited<ReturnType<typeof startWireDaemon>> | null = null;
+  try {
+    assert.equal((await client.listHostApprovals("room_1")).available, false);
+    wire = await startWireDaemon(env.socketPath, SUPERVISOR_DAEMON_PROTOCOL_VERSION, 7);
+    const result = await client.listHostApprovals("room_1"); assert.equal(result.available, false);
+    assert.match(result.error!, /not enrolled.*Unlock.*restart/); assert.equal(loads, 0);
+    assert.deepEqual(wire.requests.map(request => request.method), ["supervisor.host_approval_challenge"]);
+  } finally { await closeServer(wire?.server ?? null, env.socketPath); await env.cleanup(); }
+});
+
+test("host approval identity is OS-sealed, private, exclusive across creators, and stable on reopen", async () => {
+  const env = await fixture(); const path = join(env.root, "approval", "signing-key.sealed"); const storage = approvalStorage();
+  try {
+    const signers = await Promise.all(Array.from({ length: 8 }, () => loadHostApprovalSigner(path, storage)));
+    assert.equal(new Set(signers.map(signer => signer.publicKey)).size, 1);
+    assert.deepEqual(await readdir(dirname(path)), ["signing-key.sealed"]);
+    assert.equal((await stat(path)).mode & 0o777, 0o600);
+    assert.equal((await stat(dirname(path))).mode & 0o777, 0o700);
+    const saved = await readFile(path, "utf8");
+    const plaintext = storage.decryptString(Buffer.from(JSON.parse(saved).sealedKey, "base64"));
+    assert.equal(saved.includes(plaintext), false); assert.doesNotMatch(saved, /PRIVATE KEY/);
+    const reopened = await loadHostApprovalSigner(path, storage);
+    assert.equal(reopened.publicKey, signers[0]!.publicKey);
+    assert.equal(await readFile(path, "utf8"), saved, "reading/signing never rewrites the enrolled identity");
+  } finally { await env.cleanup(); }
+});
+
+test("host approval key corruption, locked storage, unsafe paths, and plaintext backends never regenerate identity", async () => {
+  const env = await fixture(); const path = join(env.root, "signing-key.sealed"); const storage = approvalStorage();
+  try {
+    for (const unavailable of [
+      { ...storage, isEncryptionAvailable: () => false },
+      { ...storage, getSelectedStorageBackend: () => "basic_text" },
+      { ...storage, encryptString: () => { throw new Error("private-native-error"); } },
+      { ...storage, decryptString: () => "wrong-roundtrip" },
+    ]) {
+      await assert.rejects(loadHostApprovalSigner(path, unavailable), error => {
+        assert.doesNotMatch(String(error), /private-native-error/); return true;
+      });
+      await assert.rejects(stat(path), { code: "ENOENT" });
+    }
+    const signer = await loadHostApprovalSigner(path, storage); const saved = await readFile(path, "utf8");
+    await assert.rejects(loadHostApprovalSigner(path, { ...storage, decryptString: () => { throw new Error("locked"); } }), /unavailable/);
+    assert.equal(await readFile(path, "utf8"), saved);
+    await chmod(path, 0o644);
+    await assert.rejects(loadHostApprovalSigner(path, storage), /unavailable/);
+    await chmod(path, 0o600);
+    for (const invalid of ["broken-json", JSON.stringify({ version: 1, sealedKey: "invalid" }),
+      JSON.stringify({ version: 1, sealedKey: storage.encryptString("not-an-ed25519-key").toString("base64") })]) {
+      await writeFile(path, invalid);
+      await assert.rejects(loadHostApprovalSigner(path, storage), /unavailable/);
+      assert.equal(await readFile(path, "utf8"), invalid);
+    }
+    await writeFile(path, saved);
+    assert.equal((await loadHostApprovalSigner(path, storage)).publicKey, signer.publicKey);
+    const symbolic = join(env.root, "symbolic-key"); await symlink(path, symbolic);
+    await assert.rejects(loadHostApprovalSigner(symbolic, storage), /unavailable/);
+    const directoryLink = join(env.root, "symbolic-directory"); await symlink(env.root, directoryLink);
+    await assert.rejects(loadHostApprovalSigner(join(directoryLink, "new-key"), storage), /unavailable/);
+    await assert.rejects(stat(join(env.root, "new-key")), { code: "ENOENT" });
+  } finally { await env.cleanup(); }
+});
+
+test("host approval signatures bind closed operations and exact daemon birth without changing native ID types", async () => {
+  const env = await fixture(); const path = join(env.root, "signing-key.sealed"); const storage = approvalStorage();
+  const { HostApprovalVerifier } = await import(new URL("../../daemon/host-approval-auth.ts", import.meta.url).href);
+  try {
+    const signer = await loadHostApprovalSigner(path, storage); const verifier = new HostApprovalVerifier(7, signer.publicKey);
+    const challenge = verifier.challenge()!; const now = 1_000_000;
+    for (const operation of ["list", "decide"] as const) {
+      for (const requestId of [1, "1"]) {
+        const input = { requestId, agentId: "agent_1", decision: "allow_once" };
+        const envelope = signer.sign(challenge, operation, input, now);
+        assert.deepEqual(verifier.verify(envelope, now), { operation, input });
+        assert.equal(verifier.verify(envelope, now - 1), null, "future requests are not valid yet");
+        assert.equal(verifier.verify(envelope, now + 30_000), null);
+        assert.equal(new HostApprovalVerifier(7, signer.publicKey).verify(envelope, now), null, "same generation, different boot");
+        assert.equal(new HostApprovalVerifier(8, signer.publicKey).verify(envelope, now), null);
+        assert.equal(verifier.verify({ ...envelope, input: { requestId: "replacement" } }, now), null);
+        assert.equal(verifier.verify({ ...envelope, payload: envelope.payload.replace("agent_1", "agent_2") }, now), null);
+        assert.equal(verifier.verify({ ...envelope, signature: Buffer.alloc(64).toString("base64") }, now), null);
+        assert.equal(verifier.verify(JSON.parse(envelope.payload), now), null, "unsigned request is not authority");
+      }
+    }
+    assert.equal(new HostApprovalVerifier(7, null).challenge(), null);
+    assert.equal(new HostApprovalVerifier(7, "malformed-key").challenge(), null);
+    assert.throws(() => signer.sign({ ...challenge, keyFingerprint: "different" }, "list", {}, now), /unavailable/);
+    assert.throws(() => signer.sign(challenge, "execute" as "list", {}, now), /unavailable/);
+    const stored = JSON.parse(await readFile(path, "utf8"));
+    const privateKey = createPrivateKey({ key: Buffer.from(storage.decryptString(Buffer.from(stored.sealedKey, "base64")), "base64"), format: "der", type: "pkcs8" });
+    const base = JSON.parse(signer.sign(challenge, "list", {}, now).payload);
+    for (const mutation of [{ operation: "execute" }, { domain: "another-protocol" }, { version: 2 },
+      { expiresAt: now + 30_001 }, { issuedAt: now + 1 }, { unexpected: "extra" }, { input: undefined }]) {
+      const payload = JSON.stringify({ ...base, ...mutation });
+      assert.equal(verifier.verify({ payload, signature: nativeSign(null, Buffer.from(payload), privateKey).toString("base64") }, now), null);
+    }
+  } finally { await env.cleanup(); }
+});
+
+test("current-schema child privately enrolls host approval verifier before readiness; unavailable signing is nonfatal", async () => {
+  const env = await fixture(); const signer = await loadHostApprovalSigner(join(env.root, "signing-key.sealed"), approvalStorage());
+  const keyModule = new URL("../../daemon/state-recovery-key.ts", import.meta.url).href;
+  const verifierModule = new URL("../../daemon/host-approval-auth.ts", import.meta.url).href;
+  const schemaModule = new URL("../../daemon/daemon-state-database.ts", import.meta.url).href;
+  try {
+    for (const mode of ["available", "locked", "unresponsive"] as const) {
+      const available = mode === "available";
+      const script = `
+        import assert from 'node:assert/strict';
+        import { DatabaseSync } from 'node:sqlite';
+        import { requestHostApprovalVerifier, withProtectedStateUpgrade, reportStateRecoveryReady } from ${JSON.stringify(keyModule)};
+        import { HostApprovalVerifier } from ${JSON.stringify(verifierModule)};
+        import { DaemonStateSchema } from ${JSON.stringify(schemaModule)};
+        const path = ${JSON.stringify(join(env.root, "current.sqlite"))};
+        const database = new DatabaseSync(path); new DaemonStateSchema().createSchema(database); database.close();
+        const publicKey = await requestHostApprovalVerifier();
+        const verifier = new HostApprovalVerifier(9, publicKey);
+        assert.equal(Boolean(verifier.challenge()), ${available});
+        if (${available}) {
+          const response = new Promise(resolve => process.once('message', resolve));
+          process.send({ type: 'host_approval_test_challenge', challenge: verifier.challenge() });
+          assert.deepEqual(verifier.verify(await response), { operation: 'decide', input: { requestId: 1 } });
+        }
+        await withProtectedStateUpgrade(path, async () => {}, {
+          getBackupKey: async () => { throw Error('current schema must not request backup key'); },
+          onPrepared: reportStateRecoveryReady,
+        });
+        assert.equal(process.connected, false);
+      `;
+      const child = spawn(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script], {
+        stdio: ["ignore", "pipe", "pipe", "ipc"],
+      });
+      let output = ""; child.stdout!.on("data", data => { output += data; }); child.stderr!.on("data", data => { output += data; });
+      const exit = new Promise<number | null>(resolve => child.once("exit", resolve));
+      child.on("message", (message: unknown) => {
+        const value = message as { type?: string; challenge?: Parameters<typeof signer.sign>[0] };
+        if (value.type === "host_approval_test_challenge") child.send(signer.sign(value.challenge!, "decide", { requestId: 1 }));
+      });
+      let requests = 0;
+      await prepareSupervisorState(child, () => { throw new Error("unexpected backup request"); }, 30_000, async () => {
+        requests += 1;
+        if (mode === "unresponsive") return new Promise<string>(() => {});
+        if (!available) throw new Error("private-keychain-exception");
+        return signer.publicKey;
+      });
+      assert.equal(await exit, 0, output); assert.equal(requests, 1);
+      assert.equal(output.includes("private-keychain-exception"), false);
+      for (const event of ["error", "disconnect"]) assert.equal(child.listenerCount(event), 0);
+    }
+  } finally { await env.cleanup(); }
+});
 
 test("recovery keys require functioning OS storage and reject plaintext backend", () => {
   const storage = {
@@ -59,7 +406,7 @@ test("recovery keys require functioning OS storage and reject plaintext backend"
   });
 });
 
-test("current-schema startup does not request secure storage; bootstrap listeners are removed", async () => {
+test("readiness without a verifier request does not touch recovery storage; bootstrap listeners are removed", async () => {
   const child = new EventEmitter() as ChildProcess;
   child.send = (() => true) as ChildProcess["send"];
   const prepared = prepareSupervisorState(child, () => { throw new Error("Keychain must not be touched"); });
@@ -472,6 +819,7 @@ async function startWireDaemon(
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
   const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
+  const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
   let handoffPrepared = false;
   const server = createServer((socket) => {
     let buffer = "";
@@ -594,6 +942,11 @@ async function startWireDaemon(
         result = { status: "installed" };
       } else if (request.method === "supervisor.bootstrap_room_ingress") {
         result = { status: "bootstrapped" };
+      } else if (request.method === "supervisor.host_approval_challenge") {
+        result = hostApprovals.challenge();
+      } else if (request.method === "supervisor.host_approval_request") {
+        try { result = hostApprovals.request(request.params); }
+        catch (error) { socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: String(error) })}\n`); return; }
       } else {
         socket.end(`${JSON.stringify({ version, id: request.id, ok: false, error: "unsupported" })}\n`);
         return;
@@ -605,7 +958,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests };
+  return { server, entries, requests, hostApprovals };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {
@@ -1876,7 +2229,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.116");
+    assert.equal(status.implementationVersion, "2.0.117");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

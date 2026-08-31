@@ -363,6 +363,29 @@ const approvalParams = (overrides: Record<string, unknown> = {}) => ({
   command: "npm test", ...overrides,
 });
 
+test("Codex permission dispatch rechecks native authority after the durable broker hook", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!; client.turnStatus = "inProgress";
+  const request = client.askPermission(approvalParams());
+  let syncChecks = 0;
+  await assert.rejects(adapter.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => { harness.setIdentityObservable(false); },
+    assertNativeDispatch: () => { syncChecks++; },
+  }), { outcome: "not_dispatched" });
+  assert.equal(syncChecks, 0); assert.equal(client.permissionResponses.length, 0);
+  harness.setIdentityObservable(true);
+  await assert.rejects(adapter.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => {}, assertNativeDispatch: () => { throw new Error("broker closed"); },
+  }), /broker closed/);
+  assert.equal(client.permissionResponses.length, 0);
+  await adapter.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => {}, assertNativeDispatch: () => { syncChecks++; },
+  });
+  assert.equal(syncChecks, 1); assert.equal(client.permissionResponses.length, 1);
+});
+
 test("Codex permission replies target exact pending requests and report sent, never applied", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });

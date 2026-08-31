@@ -111,6 +111,7 @@ const expectedDirectChannels = [
   "desktop:supervisor:commit-room-move",
   "desktop:supervisor:control-turn",
   "desktop:supervisor:create-agent",
+  "desktop:supervisor:decide-host-approval",
   "desktop:supervisor:get-agent-configuration",
   "desktop:supervisor:get-agent-inspector-detail",
   "desktop:supervisor:get-current-room-move",
@@ -119,6 +120,7 @@ const expectedDirectChannels = [
   "desktop:supervisor:get-room-move",
   "desktop:supervisor:get-status",
   "desktop:supervisor:list-agents",
+  "desktop:supervisor:list-host-approvals",
   "desktop:supervisor:prepare-room-move",
   "desktop:supervisor:purge-agent",
   "desktop:supervisor:read-attempt",
@@ -237,6 +239,43 @@ test("desktop IPC channel prefixes stay in their owning domains", () => {
       );
     }
   }
+});
+
+test("host approval sender accepts only the live trusted main frame", async () => {
+  let destroyed = false;
+  let contentsDestroyed = false;
+  const frame = { url: "http://127.0.0.1:4310/room" };
+  const contents = { mainFrame: frame, isDestroyed: () => contentsDestroyed,
+    setWindowOpenHandler: () => {}, on: () => {}, openDevTools: () => {} };
+  const mocks = [
+    mock.module("electron", { defaultExport: { app: {}, BrowserWindow: class {
+      webContents = contents;
+      isDestroyed() { return destroyed; }
+      async loadURL() {}
+    } } }),
+    mock.module("../main/paths.js", { namedExports: { devServerUrl: "http://127.0.0.1:4310",
+      electronMainDir: "/test", rendererDistPath: "/test/index.html" } }),
+    mock.module("../main/external-url.js", { namedExports: { openExternalWebUrl: async () => {} } }),
+  ];
+  try {
+    const { assertHostApprovalSender, createWindow } = await import("../main/window.js");
+    const event = { sender: contents, senderFrame: frame } as never;
+    assert.throws(() => assertHostApprovalSender(event), /main application window/);
+    createWindow();
+    assert.doesNotThrow(() => assertHostApprovalSender(event));
+    assert.throws(() => assertHostApprovalSender({ sender: {}, senderFrame: frame } as never), /main application window/);
+    assert.throws(() => assertHostApprovalSender({ sender: contents, senderFrame: { ...frame } } as never), /main application window/);
+    assert.throws(() => assertHostApprovalSender({ sender: contents, senderFrame: null } as never), /main application window/);
+    frame.url = "https://attacker.example/room";
+    assert.throws(() => assertHostApprovalSender(event), /trusted application page/);
+    frame.url = "http://127.0.0.1:4311/room";
+    assert.throws(() => assertHostApprovalSender(event), /trusted application page/);
+    frame.url = "http://127.0.0.1:4310/room";
+    contentsDestroyed = true;
+    assert.throws(() => assertHostApprovalSender(event), /main application window/);
+    contentsDestroyed = false; destroyed = true;
+    assert.throws(() => assertHostApprovalSender(event), /main application window/);
+  } finally { for (const stub of mocks.reverse()) stub.restore(); }
 });
 
 test("auth/setup IPC wakes grant recovery only from authorization and reports native storage availability", async () => {

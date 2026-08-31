@@ -1,12 +1,14 @@
 import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
 import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
 import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
+import type { createHostApprovalBridge } from "./host-approval-broker.js";
 
 /**
  * The socket router owns protocol parsing and response shaping. Operations are
  * bound by SupervisorDaemon, which remains the authority owner.
  */
 export interface DaemonControlOperations {
+  hostApprovals: Pick<ReturnType<typeof createHostApprovalBridge>, "challenge" | "verify" | "list" | "decide">;
   activateCustodialPolling(input: PollingActivationRequest): unknown;
   getPollingActivation(input: DeliveryDrainIdentity): unknown;
   cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
@@ -163,6 +165,18 @@ export function createDaemonControlRequestHandler(
       return { accepted: true, generation: context.currentGeneration() };
     }
     if (request.method === "manifest.list") return operations.listManifest();
+    if (request.method === "supervisor.host_approval_challenge") return operations.hostApprovals.challenge();
+    if (request.method === "supervisor.host_approval_request") {
+      const authenticated = operations.hostApprovals.verify(request.params);
+      if (!authenticated) throw new Error("Host approvals are unavailable or this request could not be authenticated.");
+      const input = authenticated.input as Record<string, unknown> | null;
+      if (authenticated.operation === "list") {
+        if (!input || Object.keys(input).length !== 1 || typeof input.roomId !== "string") throw new Error("An exact approval room is required.");
+        return operations.hostApprovals.list(input.roomId);
+      }
+      if (input?.actorId !== `host-${operations.hostApprovals.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
+      return operations.hostApprovals.decide(input);
+    }
     if (request.method === "supervisor.activate_custodial_polling"
       || request.method === "supervisor.get_polling_activation"
       || request.method === "supervisor.cancel_polling_activation") {
