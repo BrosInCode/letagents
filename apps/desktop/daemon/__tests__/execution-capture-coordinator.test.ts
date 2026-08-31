@@ -82,6 +82,73 @@ test("capture replays native facts only after the exact committed turn binding, 
   } finally { f.capture.close(); }
 });
 
+test("committed receipts settle captured attempts independently of capture gaps and late native outcomes", async () => {
+  for (const gap of [false, true]) {
+    const f = fixture();
+    try {
+      f.bindTurn(); f.install(); f.emit(ready); f.emit(active); await flush();
+      if (gap) {
+        for (let index = 0; index < 300; index++) f.emit(ready);
+        await flush(); assert.ok(f.diagnostics.includes("source_gap"));
+      }
+      assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts").get()!.state, "active");
+      f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',
+        outcome=?,acknowledged_at=?,updated_at=?`).run(JSON.stringify({ kind: "no_reply", text: null }), now, now);
+      const operational = f.db.prepare("SELECT * FROM supervised_agent_inbox").all();
+      f.capture.refresh(); await flush();
+      const settled = f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get();
+      assert.deepEqual({ ...settled }, { state: "cleanly_concluded", conclusion: "acknowledged_no_reply", settled_at_ms: Date.parse(now) });
+      assert.equal(f.db.prepare("SELECT state FROM execution_turns").get()!.state, "active", "receipt settlement is not native-turn lifecycle authority");
+      if (!gap) {
+        f.emit(terminal);
+        f.emit({ ...nativeTurn, domain: "execution", kind: "completed", executionId: "late-read", operation: "file_read", outcome: "failed", sideEffects: "none" });
+        await flush(); assert.equal(f.facts().length, 4, "late exact native evidence remains ingestible after logical settlement");
+      }
+      f.capture.refresh(); await flush();
+      assert.deepEqual(f.db.prepare("SELECT state,conclusion,settled_at_ms FROM execution_message_attempts").get(), settled);
+      assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), operational);
+    } finally { f.capture.close(); }
+  }
+});
+
+test("scheduled receipt batches advance past unavailable proof without starving later attempts", async () => {
+  const f = fixture();
+  try {
+    f.install(); f.emit(ready); await flush();
+    const runtime = String(f.db.prepare("SELECT runtime_generation_id FROM execution_runtime_generations").get()!.runtime_generation_id);
+    f.bindTurn("native-late", "late-message");
+    f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id='native-late'`)
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
+    for (let index = 0; index < 40; index++) {
+      const turn = `native-${index}`; const source = `message-${index}`; const attempt = `attempt-${index}`;
+      f.bindTurn(turn, source);
+      f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=? WHERE inbox_item_id=?`)
+        .run(JSON.stringify({ kind: index === 0 ? "unreadable" : "no_reply", text: null }), now, turn);
+      f.db.prepare(`INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+        VALUES(?,'agent','room',?,'active',?)`).run(attempt, source, Date.parse(now));
+      f.db.prepare(`INSERT INTO execution_attempt_generations VALUES(?,'agent','room','generation','workspace',?)`).run(attempt, Date.parse(now));
+      f.db.prepare(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+        provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
+        VALUES(?,?,'agent','room','generation',?,'continuation',?,'terminal','none',?,?)`)
+        .run(turn, attempt, runtime, turn, Date.parse(now), Date.parse(now));
+    }
+    f.capture.refresh(); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 39);
+    assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id='attempt-0'").get()!.state, "active");
+    assert.ok(f.diagnostics.includes("settlement_unavailable"));
+    // A later authoritative correction rechecks earlier receipts rather than
+    // treating the in-memory scan cursor as durable settlement authority.
+    f.db.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id='native-0'").run(JSON.stringify({ kind: "no_reply", text: null }));
+    f.capture.refresh(); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 40);
+    // No new operational mutation: native capture itself must reconsider the
+    // older receipt once its previously missing attempt becomes available.
+    f.emit({ ...active, providerTurnId: "native-late" }); await flush();
+    assert.deepEqual({ ...f.db.prepare("SELECT state,conclusion FROM execution_message_attempts WHERE source_message_id='late-message'").get() },
+      { state: "cleanly_concluded", conclusion: "acknowledged_no_reply" });
+  } finally { f.capture.close(); }
+});
+
 test("detached exit drains before a fresh source and storage-busy retirement retries only on a hint", async () => {
   const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
   const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
@@ -295,16 +362,22 @@ test("synchronous exit cleanup keeps final facts ahead of successor observation 
   const f = fixture();
   try {
     f.handle.appliedConfigurationRevision = 2;
+    f.bindTurn();
+    f.db.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?`)
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
     const detach = f.install(); await Promise.resolve(); await Promise.resolve();
     f.emit(ready);
+    f.emit(active); f.emit(terminal);
     f.emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" });
     f.emit({ ...ready, state: "exited", controlEvidence: "process_exit" });
     f.handles.delete("agent"); detach();
     assert.equal(f.facts().length, 0, "exit cleanup performs no inline SQLite capture");
     await flush();
-    assert.equal(f.facts().length, 3);
+    assert.equal(f.facts().length, 5);
     assert.equal(f.db.prepare("SELECT runtime_state FROM execution_runtime_generations").get()!.runtime_state, "exited");
-    assert.equal(f.position()!.last_source_sequence, 3);
+    assert.equal(f.position()!.last_source_sequence, 5);
+    assert.equal(f.db.prepare("SELECT conclusion FROM execution_message_attempts").get()!.conclusion, "acknowledged_no_reply",
+      "the detached exit tail must settle its late-captured attempt before the lane is removed");
     assert.deepEqual(f.diagnostics, []);
   } finally { f.capture.close(); }
 });

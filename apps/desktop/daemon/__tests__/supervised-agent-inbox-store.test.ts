@@ -9,6 +9,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
+import { settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
 import type { DaemonManifestEntry } from "../types.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
@@ -20,6 +21,51 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
 async function fixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervised-inbox-"));
   return { root, database: join(root, "daemon-state.sqlite"), legacy: join(root, "legacy.json"), cleanup: () => rm(root, { recursive: true, force: true }) };
+}
+
+function captureReceipt(database: DatabaseSync, item: Awaited<ReturnType<SupervisedAgentInboxStore["checkpointTurnStarted"]>>): string {
+  const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(item.inbox_item_id)!;
+  const generation = String(binding.origin_execution_generation_id);
+  const runtime = `captured-runtime:${item.agent_id}:${generation}`;
+  const attempt = `captured-attempt:${item.inbox_item_id}`;
+  const created = Date.parse(item.created_at);
+  database.prepare("INSERT OR IGNORE INTO execution_generations VALUES(?,?,?)").run(generation, item.agent_id, created);
+  database.prepare(`INSERT OR IGNORE INTO execution_runtime_generations
+    (runtime_generation_id,execution_generation_id,agent_id,provider,authority_mode,runtime_state,control_state,continuation_state,config_revision,created_at_ms)
+    VALUES(?,?,?,'codex','typed_shadow','ready','connecting','available',1,?)`).run(runtime, generation, item.agent_id, created);
+  database.prepare(`INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+    VALUES(?,?,?,?,'active',?)`).run(attempt, item.agent_id, item.room_id, item.source_message_id, created);
+  database.prepare("INSERT INTO execution_attempt_generations VALUES(?,?,?,?,?,?)")
+    .run(attempt, item.agent_id, item.room_id, generation, String(binding.work_attempt_id), created);
+  database.prepare(`INSERT INTO execution_turns
+    (turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms)
+    VALUES(?,?,?,?,?,?,?,?,'none','none',?)`).run(`captured-turn:${item.inbox_item_id}`, attempt, item.agent_id, item.room_id,
+    generation, runtime, String(binding.provider_continuation_id), item.provider_turn_id, created);
+  return attempt;
+}
+
+async function completeCapturedReceipt(store: SupervisedAgentInboxStore, database: DatabaseSync, item: Awaited<ReturnType<SupervisedAgentInboxStore["ingestPoll"]>>[number],
+  outcome: "reply" | "no_reply" | "failed" | "interrupted" | "cancelled_by_user" = "no_reply",
+  capture: "before" | "after" = "after"): Promise<string> {
+  await store.transition(item.inbox_item_id, "dispatching");
+  const nativeTurn = `native:${item.source_message_id}`;
+  const started = await store.checkpointTurnStarted(item.inbox_item_id, nativeTurn, TEST_PROVIDER_TURN_AUTHORITY);
+  const attempt = capture === "before" ? captureReceipt(database, started) : undefined;
+  if (outcome === "cancelled_by_user") {
+    await store.cancelInterruptedTurn(item.inbox_item_id);
+    return attempt ?? captureReceipt(database, started);
+  }
+  await store.checkpointNormalizedTerminal({ inbox_item_id: item.inbox_item_id, agent_id: item.agent_id,
+    execution_generation_id: "generation", provider_turn_id: nativeTurn, outcome,
+    text: outcome === "reply" ? "private reply text" : null, evidence: "stream",
+    terminal_evidence: { turnId: nativeTurn, providerContinuationId: "continuation", outcome,
+      text: outcome === "reply" ? "private reply text" : null, evidence: "stream" } });
+  await store.transition(item.inbox_item_id, "awaiting_result");
+  if (outcome === "reply") {
+    await store.transition(item.inbox_item_id, "publishing");
+    await store.checkpointPublication({ inbox_item_id: item.inbox_item_id, room_id: item.room_id, canonical_message_id: `published:${item.source_message_id}` });
+  } else await store.transition(item.inbox_item_id, outcome === "no_reply" ? "acknowledged_no_reply" : "acknowledged_failed");
+  return attempt ?? captureReceipt(database, started);
 }
 
 async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: {
@@ -2337,6 +2383,180 @@ test("effect journal bounds per-turn rows and payload bytes without stranding co
       "ordinary tools cannot exhaust the reserved structured-completion contract");
     await store.close();
   } finally { await env.cleanup(); }
+});
+
+for (const writeFailure of [false, true]) test(`terminal receipt settlement does not require a live observer (write failure: ${writeFailure})`, async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+  let database: DatabaseSync | undefined;
+  try {
+    const outcomes = ["failed", "interrupted", "cancelled_by_user", "no_reply", "reply"] as const;
+    const items = await store.ingestPoll({ agent_id: "captured-no-observer", room_id: "room", last_observed_message_id: "5",
+      messages: outcomes.map((_, index) => ({ source_message_id: String(index + 1), source_message: {}, activation: {} })) });
+    database = new DatabaseSync(env.database);
+    if (writeFailure) database.exec(`CREATE TRIGGER reject_optional_terminal_settlement BEFORE UPDATE ON execution_message_attempts
+      BEGIN SELECT RAISE(ABORT,'optional projection unavailable'); END`);
+    for (const [index, outcome] of outcomes.entries()) {
+      const attempt = await completeCapturedReceipt(store, database, items[index]!, outcome, "before");
+      assert.equal((await store.get(items[index]!.inbox_item_id))?.state,
+        outcome === "reply" ? "acknowledged" : outcome === "no_reply" ? "acknowledged_no_reply" : outcome === "cancelled_by_user" ? "cancelled_by_user" : "acknowledged_failed");
+      assert.equal(database.prepare("SELECT conclusion FROM execution_message_attempts WHERE attempt_id=?").get(attempt)!.conclusion,
+        writeFailure ? null : outcome === "reply" ? "replied" : outcome === "no_reply" ? "acknowledged_no_reply" : outcome === "cancelled_by_user" ? "interrupted" : outcome,
+      "the terminal transaction settles captured history without a scheduled callback");
+    }
+    assert.equal(await store.head("captured-no-observer"), null, "optional write failure cannot hold the operational FIFO");
+    if (writeFailure) database.exec("DROP TRIGGER reject_optional_terminal_settlement");
+  } finally { database?.close(); await store.close(); await env.cleanup(); }
+});
+
+for (const writeFailure of [false, true]) test(`captured attempt settlement precedes receipt pruning without blocking it (write failure: ${writeFailure})`, async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+  let database: DatabaseSync | undefined;
+  try {
+    const items = await store.ingestPoll({ agent_id: "captured-retention", room_id: "room", last_observed_message_id: "201",
+      messages: Array.from({ length: 201 }, (_, index) => ({ source_message_id: String(index + 1), source_message: { text: "private input" }, activation: {} })) });
+    database = new DatabaseSync(env.database);
+    const first = await completeCapturedReceipt(store, database, items[0]!, "reply");
+    assert.equal(database.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id=?").get(first)!.state, "active",
+      "late capture must still exercise the final pre-prune checkpoint");
+    if (writeFailure) {
+      database.exec(`CREATE TRIGGER reject_optional_settlement BEFORE UPDATE ON execution_message_attempts
+        BEGIN SELECT RAISE(ABORT,'optional projection unavailable'); END`);
+      assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-retention"),
+        { lastFifoSequence: null, hasMore: false, unavailable: true });
+    }
+    for (const item of items.slice(1)) await completeCapturedReceipt(store, database, item);
+    assert.equal(await store.get(items[0]!.inbox_item_id), null, "receipt retention still prunes the oldest row");
+    assert.equal((await store.receipts("captured-retention")).length, 200);
+    assert.equal(database.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(items[0]!.inbox_item_id), undefined);
+    assert.equal(database.prepare("SELECT 1 FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(items[0]!.inbox_item_id), undefined);
+    assert.deepEqual({ ...database.prepare("SELECT state,conclusion FROM execution_message_attempts WHERE attempt_id=?").get(first) },
+      writeFailure ? { state: "active", conclusion: null } : { state: "cleanly_concluded", conclusion: "replied" });
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count, 0, "receipt settlement never invents native facts");
+    assert.ok(!JSON.stringify(database.prepare("SELECT * FROM execution_message_attempts").all()).includes("private"));
+    if (writeFailure) database.exec("DROP TRIGGER reject_optional_settlement");
+  } finally { database?.close(); await store.close(); await env.cleanup(); }
+});
+
+test("captured receipt settlement batches advance past invalid proof without crossing exact identities", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+  let database: DatabaseSync | undefined;
+  try {
+    const items = await store.ingestPoll({ agent_id: "captured-batch", room_id: "room", last_observed_message_id: "35",
+      messages: Array.from({ length: 35 }, (_, index) => ({ source_message_id: String(index + 1), source_message: {}, activation: {} })) });
+    database = new DatabaseSync(env.database);
+    const attempts: string[] = [];
+    for (const item of items) attempts.push(await completeCapturedReceipt(store, database, item,
+      item.source_message_id === "5" ? "reply" : item.source_message_id === "6" ? "failed" : "no_reply"));
+    database.prepare("UPDATE execution_attempt_generations SET workspace_id='other-workspace' WHERE attempt_id=?").run(attempts[0]!);
+    database.prepare("UPDATE supervised_agent_provider_turn_bindings SET origin_execution_generation_id='other-generation' WHERE inbox_item_id=?").run(items[1]!.inbox_item_id);
+    database.prepare("UPDATE execution_turns SET provider_continuation_id='other-continuation' WHERE attempt_id=?").run(attempts[2]!);
+    database.prepare("UPDATE supervised_agent_inbox SET terminal_reason='upgrade_authority_unavailable' WHERE inbox_item_id=?").run(items[3]!.inbox_item_id);
+    database.prepare("DELETE FROM supervised_agent_publications WHERE inbox_item_id=?").run(items[4]!.inbox_item_id);
+    database.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json='{}' WHERE inbox_item_id=?").run(items[5]!.inbox_item_id);
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch"), { lastFifoSequence: 32, hasMore: true, unavailable: true });
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.count, 26);
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch", { afterFifoSequence: 32 }),
+      { lastFifoSequence: 35, hasMore: false, unavailable: false });
+    for (const attempt of attempts.slice(0, 6)) assert.equal(database.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id=?").get(attempt)!.state, "active");
+    const before = database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all();
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "wrong-agent", { inboxItemId: items[5]!.inbox_item_id }),
+      { lastFifoSequence: null, hasMore: false, unavailable: false });
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-batch", { afterFifoSequence: 35 }),
+      { lastFifoSequence: null, hasMore: false, unavailable: false });
+    assert.deepEqual(database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all(), before);
+  } finally { database?.close(); await store.close(); await env.cleanup(); }
+});
+
+test("captured attempt conclusions preserve native failures, cancellation, no-reply and caller rollback", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+  let database: DatabaseSync | undefined;
+  try {
+    const outcomes = ["failed", "interrupted", "cancelled_by_user", "no_reply", "reply"] as const;
+    const items = await store.ingestPoll({ agent_id: "captured-outcomes", room_id: "room", last_observed_message_id: "5",
+      messages: outcomes.map((_, index) => ({ source_message_id: String(index + 1), source_message: {}, activation: {} })) });
+    database = new DatabaseSync(env.database);
+    for (const [index, outcome] of outcomes.entries()) await completeCapturedReceipt(store, database, items[index]!, outcome);
+    const receipts = database.prepare("SELECT * FROM supervised_agent_inbox ORDER BY fifo_sequence").all();
+    database.exec(`CREATE TRIGGER reject_second_optional_settlement BEFORE UPDATE ON execution_message_attempts
+      WHEN NEW.source_message_id='2' AND EXISTS (
+        SELECT 1 FROM execution_message_attempts WHERE source_message_id='1' AND conclusion='failed'
+      ) BEGIN SELECT RAISE(ABORT,'second optional write rejected after first settled'); END`);
+    database.exec("BEGIN IMMEDIATE");
+    database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+      .run("caller mutation survives", items[0]!.inbox_item_id);
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
+      { lastFifoSequence: null, hasMore: false, unavailable: true });
+    assert.equal(database.isTransaction, true, "a statement abort must preserve the caller transaction");
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='active'").get()!.count, 5,
+      "the second update's abort must roll back the successful first projection update too");
+    database.exec("COMMIT");
+    assert.equal(database.prepare("SELECT last_error FROM supervised_agent_inbox WHERE inbox_item_id=?").get(items[0]!.inbox_item_id)!.last_error,
+      "caller mutation survives");
+    database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+      .run(receipts[0]!.last_error, items[0]!.inbox_item_id);
+    database.exec("DROP TRIGGER reject_second_optional_settlement");
+
+    database.exec(`CREATE TRIGGER rollback_optional_settlement BEFORE UPDATE ON execution_message_attempts
+      WHEN NEW.source_message_id='2' AND EXISTS (
+        SELECT 1 FROM execution_message_attempts WHERE source_message_id='1' AND conclusion='failed'
+      ) BEGIN SELECT RAISE(ROLLBACK,'optional write destroyed caller transaction'); END`);
+    database.exec("BEGIN IMMEDIATE");
+    database.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+      .run("caller mutation must roll back", items[0]!.inbox_item_id);
+    assert.throws(() => {
+      settleCapturedExecutionAttempts(database!, "captured-outcomes");
+      database!.prepare("UPDATE supervised_agent_inbox SET last_error=? WHERE inbox_item_id=?")
+        .run("must never commit in autocommit mode", items[1]!.inbox_item_id);
+    }, /optional write destroyed caller transaction/);
+    assert.equal(database.isTransaction, false, "SQLite rolled back the entire transaction");
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='active'").get()!.count, 5);
+    assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_inbox ORDER BY fifo_sequence").all(), receipts,
+      "transaction loss must propagate before any subsequent authoritative mutation");
+    database.exec("DROP TRIGGER rollback_optional_settlement");
+
+    database.exec("BEGIN IMMEDIATE");
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
+      { lastFifoSequence: 5, hasMore: false, unavailable: false });
+    assert.equal(database.isTransaction, true, "optional helper cannot commit its caller's transaction");
+    database.exec("ROLLBACK");
+    assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_message_attempts WHERE state='active'").get()!.count, 5);
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
+      { lastFifoSequence: 5, hasMore: false, unavailable: false });
+    assert.deepEqual(database.prepare("SELECT conclusion FROM execution_message_attempts ORDER BY source_message_id").all().map((row) => row.conclusion),
+      ["failed", "interrupted", "interrupted", "acknowledged_no_reply", "replied"]);
+    const settled = database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all();
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-outcomes"),
+      { lastFifoSequence: null, hasMore: false, unavailable: false });
+    assert.deepEqual(database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all(), settled);
+    assert.deepEqual(database.prepare("SELECT * FROM supervised_agent_inbox ORDER BY fifo_sequence").all(), receipts);
+    database.close();
+    database = new DatabaseSync(env.database);
+    assert.deepEqual(database.prepare("SELECT * FROM execution_message_attempts ORDER BY attempt_id").all(), settled);
+  } finally { database?.close(); await store.close(); await env.cleanup(); }
+});
+
+test("captured settlement does not conclude publishing, blocked or compensatable room-move receipts", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+  let database: DatabaseSync | undefined;
+  try {
+    const [item] = await store.ingestPoll({ agent_id: "captured-unsettled", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    await store.transition(item!.inbox_item_id, "dispatching");
+    const started = await store.checkpointTurnStarted(item!.inbox_item_id, "native:1", TEST_PROVIDER_TURN_AUTHORITY);
+    database = new DatabaseSync(env.database);
+    const attempt = captureReceipt(database, started);
+    for (const state of ["publishing", "blocked", "result_recovery", "cancelled_by_room_move"]) {
+      database.prepare("UPDATE supervised_agent_inbox SET state=? WHERE inbox_item_id=?").run(state, item!.inbox_item_id);
+      assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-unsettled", { inboxItemId: item!.inbox_item_id }),
+        { lastFifoSequence: null, hasMore: false, unavailable: false });
+      assert.equal(database.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id=?").get(attempt)!.state, "active");
+    }
+  } finally { database?.close(); await store.close(); await env.cleanup(); }
 });
 
 test("effect retention is globally bounded across terminal turns while unresolved evidence remains durable", async () => {

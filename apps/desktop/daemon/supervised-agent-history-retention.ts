@@ -49,6 +49,104 @@ export function readDurableNativeFailure(database: DatabaseSync, inboxItemId: st
   return outcome.kind;
 }
 
+/** Copy only a committed receipt's conclusion, never provider lifecycle authority.
+ * The savepoint joins an operational prune transaction or owns a scheduled
+ * batch. Ordinary optional write failures are isolated; transaction loss or
+ * unrecoverable savepoint cleanup must stop the authoritative caller. */
+export function settleCapturedExecutionAttempts(database: DatabaseSync, agentId: string, options: {
+  inboxItemId?: string; afterFifoSequence?: number;
+} = {}): { lastFifoSequence: number | null; hasMore: boolean; unavailable: boolean } {
+  const unavailable = { lastFifoSequence: null, hasMore: false, unavailable: true };
+  const after = options.afterFifoSequence ?? 0;
+  if (!agentId || !Number.isSafeInteger(after) || after < 0
+    || (options.inboxItemId !== undefined && !options.inboxItemId)) return unavailable;
+  const callerTransaction = database.isTransaction;
+  let savepoint = false;
+  try {
+    database.exec("SAVEPOINT captured_execution_settlement");
+    savepoint = true;
+    const rows = database.prepare(`SELECT i.inbox_item_id,i.agent_id,i.room_id,i.source_message_id,i.fifo_sequence,
+      i.state,i.provider_turn_id,i.outcome,i.terminal_reason,i.acknowledged_at,i.reply_client_message_id,a.attempt_id,a.created_at_ms
+      FROM supervised_agent_inbox i JOIN execution_message_attempts a
+        ON a.agent_id=i.agent_id AND a.room_id=i.room_id AND a.source_message_id=i.source_message_id
+      WHERE i.agent_id=? AND a.state='active'
+        AND i.state IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_user')
+        AND i.fifo_sequence>? ${options.inboxItemId === undefined ? "" : "AND i.inbox_item_id=?"}
+      ORDER BY i.fifo_sequence LIMIT 33`).all(agentId, after,
+      ...(options.inboxItemId === undefined ? [] : [options.inboxItemId])) as Row[];
+    const result = { lastFifoSequence: null as number | null, hasMore: rows.length > 32, unavailable: false };
+    for (const row of rows.slice(0, 32)) {
+      result.lastFifoSequence = Number(row.fifo_sequence);
+      const conclusion = capturedReceiptConclusion(database, row);
+      const settledAt = typeof row.acknowledged_at === "string" ? Date.parse(row.acknowledged_at) : NaN;
+      if (!conclusion || !Number.isSafeInteger(settledAt) || settledAt < Number(row.created_at_ms)) {
+        result.unavailable = true;
+        continue;
+      }
+      run(database.prepare(`UPDATE execution_message_attempts SET state=?,conclusion=?,settled_at_ms=?
+        WHERE attempt_id=? AND agent_id=? AND room_id=? AND source_message_id=? AND state='active'`),
+      conclusion === "replied" || conclusion === "acknowledged_no_reply" ? "cleanly_concluded" : conclusion,
+      conclusion, settledAt, String(row.attempt_id), agentId, String(row.room_id), String(row.source_message_id));
+    }
+    database.exec("RELEASE captured_execution_settlement");
+    savepoint = false;
+    if (callerTransaction && !database.isTransaction) throw new Error("Captured settlement lost its caller's transaction.");
+    return result;
+  } catch (error) {
+    if (savepoint) {
+      try { database.exec("ROLLBACK TO captured_execution_settlement; RELEASE captured_execution_settlement"); } catch {
+        if (!callerTransaction && database.isTransaction) {
+          try { database.exec("ROLLBACK"); } catch { /* Propagate the original failure below. */ }
+        }
+        throw error;
+      }
+    }
+    if (callerTransaction && !database.isTransaction) throw error;
+    return unavailable;
+  }
+}
+
+function capturedReceiptConclusion(database: DatabaseSync, row: Row): "replied" | "acknowledged_no_reply" | "failed" | "interrupted" | null {
+  if (row.terminal_reason !== null || !row.provider_turn_id) return null;
+  // The independent capture graph must agree with the original operational
+  // turn, including workspace and generation, not merely its source message.
+  const binding = database.prepare(`SELECT b.origin_execution_generation_id,b.provider_continuation_id
+    FROM supervised_agent_provider_turn_bindings b
+    JOIN execution_turns t ON t.attempt_id=? AND t.agent_id=b.agent_id AND t.room_id=b.room_id
+      AND t.execution_generation_id=b.origin_execution_generation_id
+      AND t.provider_continuation_id=b.provider_continuation_id AND t.provider_turn_id=b.provider_turn_id
+    JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
+      AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id AND g.workspace_id=b.work_attempt_id
+    JOIN execution_runtime_generations r ON r.agent_id=t.agent_id AND r.execution_generation_id=t.execution_generation_id
+      AND r.runtime_generation_id=t.runtime_generation_id AND r.authority_mode='typed_shadow'
+    WHERE b.inbox_item_id=? AND b.agent_id=? AND b.room_id=? AND b.provider_turn_id=?`)
+    .get(String(row.attempt_id), String(row.inbox_item_id), String(row.agent_id), String(row.room_id), String(row.provider_turn_id)) as Row | undefined;
+  if (!binding) return null;
+  let nativeFailure: "failed" | "interrupted" | null;
+  try { nativeFailure = readDurableNativeFailure(database, String(row.inbox_item_id)); } catch (error) {
+    if (!database.isTransaction) throw error;
+    return null;
+  }
+  if (row.state === "acknowledged_failed") return nativeFailure;
+  if (nativeFailure) return null;
+  if (row.state === "cancelled_by_user") return "interrupted";
+  let outcome: { kind?: unknown; text?: unknown; evidence?: unknown } | null;
+  try { outcome = row.outcome ? JSON.parse(String(row.outcome)) : null; } catch { return null; }
+  if (!outcome) return null;
+  const terminal = database.prepare(`SELECT agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source
+    FROM supervised_agent_terminal_results WHERE inbox_item_id=?`)
+    .get(String(row.inbox_item_id)) as Row | undefined;
+  if (terminal && (terminal.agent_id !== row.agent_id || terminal.execution_generation_id !== binding.origin_execution_generation_id
+    || terminal.provider_turn_id !== row.provider_turn_id || terminal.outcome !== outcome.kind
+    || terminal.normalized_text !== outcome.text || terminal.evidence_source !== outcome.evidence)) return null;
+  if (row.state === "acknowledged_no_reply") return outcome.kind === "no_reply" && outcome.text === null ? "acknowledged_no_reply" : null;
+  if (outcome.kind !== "reply" || typeof outcome.text !== "string" || !outcome.text.trim()) return null;
+  const publication = database.prepare(`SELECT 1 FROM supervised_agent_publications
+    WHERE inbox_item_id=? AND agent_id=? AND room_id=? AND client_message_id=? AND length(trim(canonical_message_id))>0`)
+    .get(String(row.inbox_item_id), String(row.agent_id), String(row.room_id), String(row.reply_client_message_id));
+  return publication ? "replied" : null;
+}
+
 /**
  * Terminal inbox ownership proves that an ordinary prepared effect never won
  * its execution CAS. It also makes an executing read irrelevant: reads are
@@ -57,9 +155,12 @@ export function readDurableNativeFailure(database: DatabaseSync, inboxItemId: st
  * pins or exhaust the per-agent unresolved-effect budget. Executing mutations
  * remain untouched because their outcome may be externally uncertain. Room
  * moves are excluded: their prepared effect is the durable move journal until
- * reconciliation.
+ * reconciliation. Already-captured attempts separately receive the exact
+ * receipt conclusion; that optional projection neither controls providers nor
+ * supplies native terminal evidence. Ordinary projection failures are isolated;
+ * database or transaction loss still fails closed.
  */
-export function settlePreparedSupervisedEffectsForTerminalItem(
+export function settleSupervisedTerminalItem(
   database: DatabaseSync,
   item: {
     inboxItemId: string;
@@ -79,6 +180,7 @@ export function settlePreparedSupervisedEffectsForTerminalItem(
       AND (state='prepared' OR (state='executing' AND mutation=0))
       AND tool_name<>'join_room'`),
   timestamp, item.agentId, String(binding.origin_execution_generation_id), item.providerTurnId);
+  settleCapturedExecutionAttempts(database, item.agentId, { inboxItemId: item.inboxItemId });
 }
 
 /**
@@ -197,6 +299,7 @@ export function pruneSupervisedAgentHistory(
       run(deleteEffects, agentId, String(row.origin_execution_generation_id), String(row.provider_turn_id));
       run(deleteEffectTombstones, agentId, String(row.origin_execution_generation_id), String(row.provider_turn_id));
     }
+    settleCapturedExecutionAttempts(database, agentId, { inboxItemId: String(row.inbox_item_id) });
     run(deleteInbox, String(row.inbox_item_id));
   }
   const observedStale = database.prepare(`SELECT room_id,source_message_id

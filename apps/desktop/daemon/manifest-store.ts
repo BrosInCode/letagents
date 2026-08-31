@@ -8,7 +8,7 @@ import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
 import {
   pruneSupervisedAgentHistory,
   readDurableNativeFailure,
-  settlePreparedSupervisedEffectsForTerminalItem,
+  settleSupervisedTerminalItem,
 } from "./supervised-agent-history-retention.js";
 
 import {
@@ -1451,7 +1451,7 @@ export class ManifestStore {
         const terminal = database.prepare(`SELECT inbox_item_id,agent_id,provider_turn_id,state
           FROM supervised_agent_inbox WHERE inbox_item_id=?`).get(control.inbox_item_id) as Row | undefined;
         if (terminal && ["acknowledged", "acknowledged_no_reply", "acknowledged_failed", "cancelled_by_room_move", "cancelled_by_user"].includes(String(terminal.state))) {
-          settlePreparedSupervisedEffectsForTerminalItem(database, {
+          settleSupervisedTerminalItem(database, {
             inboxItemId: String(terminal.inbox_item_id),
             agentId: String(terminal.agent_id),
             providerTurnId: nullableString(terminal.provider_turn_id),
