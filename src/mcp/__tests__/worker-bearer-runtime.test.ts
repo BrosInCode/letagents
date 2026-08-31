@@ -681,6 +681,43 @@ test("ordinary worker bearer mode retains wait_for_messages when bounded deliver
   globalThis.fetch = originalFetch;
 });
 
+test("wait_for_messages does not advance past messages omitted by its byte bound", async () => {
+  const originalFetch = globalThis.fetch;
+  try {
+    await withAuthEnv({ bearer: "worker-secret", owner: undefined, boundedTurns: "0" }, async () => {
+      const messages = Array.from({ length: 8 }, (_, index) => ({
+        id: `msg_${index + 1}`,
+        text: "x".repeat(950_000),
+      }));
+      globalThis.fetch = async (url) => {
+        const requestUrl = String(url);
+        if (requestUrl.endsWith("/presence")) return new Response(null, { status: 204 });
+        if (requestUrl.includes("/messages/poll")) {
+          return new Response(JSON.stringify({
+            messages,
+            last_observed_message_id: "msg_8",
+          }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ messages: [] }), { status: 200 });
+      };
+
+      const wait = toolHandler(registerWaitForMessagesTool, "wait_for_messages");
+      const result = JSON.parse((await wait({
+        room_id: "room_bounded_cursor",
+        after_message_id: "msg_0",
+        timeout: 1,
+      })).content[0]!.text);
+
+      assert.deepEqual(result.messages.map((message: { id: string }) => message.id), ["msg_1", "msg_2"]);
+      assert.equal(result.truncated, true);
+      assert.equal(result.omitted_message_count, 6);
+      assert.equal(result.last_observed_message_id, "msg_2");
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("worker bearer startup binds its configured room locally for omitted-room tools", async () => {
   const originalCwd = process.cwd();
   const originalFetch = globalThis.fetch;
