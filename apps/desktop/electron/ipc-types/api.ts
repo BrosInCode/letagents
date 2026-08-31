@@ -90,6 +90,7 @@ import type {
   DesktopRoomThreadPage,
   DesktopRoomThreadReadResult,
   DesktopRoomLiveMetadata,
+  DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
@@ -168,6 +169,11 @@ export interface DesktopApi {
      * preload was reloaded). Callers must skip gracefully when missing.
      */
     getLiveMetadata?: (roomIdentifier: string) => Promise<DesktopRoomLiveMetadata>;
+    /** Optional until the preload carrying retained room-work history reloads. */
+    pollAgentWork?: (
+      roomIdentifier: string,
+      afterCursor?: string | null,
+    ) => Promise<DesktopRoomAgentWorkPollResult>;
     getLatestMessages: (roomIdentifiers: string[]) => Promise<DesktopRoomLatestMessage[]>;
     getMessage: (roomIdentifier: string, messageId: string) => Promise<DesktopRoomMessage | null>;
     getMessageInfo: (roomIdentifier: string, messageId: string) => Promise<DesktopMessageInfo | null>;

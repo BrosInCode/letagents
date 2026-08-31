@@ -19,6 +19,7 @@ test("desktop fails closed before mounting its room shell", () => {
   assert.match(appSource, /onSigningOut: clearDesktopSessionState/);
   assert.match(appSource, /rootRoomSnapshot\.value = null/);
   assert.match(appSource, /selectedSnapshot\.value = null/);
+  assert.match(appSource, /clearSelectedRoomAgentWork\(\)/);
   assert.match(appSource, /syncSelectedRoomStream\(null\)/);
 });
 

@@ -4,12 +4,15 @@ import { computed, ref, type Ref } from "vue";
 
 import type {
   DesktopRoomLiveMetadata,
+  DesktopRoomAgentWork,
+  DesktopRoomAgentWorkPollResult,
   DesktopRoomSnapshot,
   WorkerSnapshot,
 } from "../../electron/ipc-types";
 import { useDesktopRoomLiveSync } from "../src/composables/useDesktopRoomLiveSync";
 
 const ROOM = "room_live";
+const WORK_CURSOR = `rw1.${"a".repeat(64)}.${"b".repeat(64)}`;
 
 describe("useDesktopRoomLiveSync periodic metadata tick", () => {
   it("fetches only poll-only metadata on a tick and preserves event-fed sections", async () => {
@@ -59,15 +62,19 @@ describe("useDesktopRoomLiveSync periodic metadata tick", () => {
     const harness = createHarness();
     harness.selectedSnapshot.value = snapshotWithEventData();
     harness.documentHidden = true;
+    let retainedWorkRequestsAfterStart = 0;
 
     await withDesktopBridge(harness.windowBridge, async () => {
       await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      retainedWorkRequestsAfterStart = harness.pollAgentWorkRequests.length;
       await harness.runInterval();
     });
 
     // Hidden window: no metadata IPC, no workers refresh, snapshot untouched.
     assert.deepEqual(harness.getLiveMetadataRequests, []);
     assert.equal(harness.workersListCalls, 0);
+    assert.equal(harness.pollAgentWorkRequests.length, retainedWorkRequestsAfterStart);
     assert.deepEqual(harness.selectedSnapshot.value?.participants, []);
   });
 
@@ -81,11 +88,13 @@ describe("useDesktopRoomLiveSync periodic metadata tick", () => {
       // Hidden ticks are no-ops…
       await harness.runInterval();
       assert.deepEqual(harness.getLiveMetadataRequests, []);
+      const retainedWorkRequestsWhileHidden = harness.pollAgentWorkRequests.length;
       // …then the window returns to the foreground and App.vue calls the
-      // exposed refresh directly for an immediate metadata-only catch-up.
+      // exposed refresh directly for an immediate bounded catch-up.
       harness.documentHidden = false;
       await harness.sync.refreshSelectedRoomLiveMetadata();
       await harness.settle();
+      assert.ok(harness.pollAgentWorkRequests.length > retainedWorkRequestsWhileHidden);
     });
 
     assert.deepEqual(harness.getLiveMetadataRequests, [ROOM]);
@@ -98,19 +107,22 @@ describe("useDesktopRoomLiveSync periodic metadata tick", () => {
     assert.deepEqual(harness.selectedSnapshot.value?.messages.map((m) => m.id), ["msg_1"]);
   });
 
-  it("does not recreate the interval when synced again for the same room", async () => {
+  it("does not recreate the interval or repoll retained work when synced again for the same room", async () => {
     const harness = createHarness();
 
     await withDesktopBridge(harness.windowBridge, async () => {
       await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
       await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
     });
 
     assert.equal(harness.setIntervalCalls, 1);
     assert.equal(harness.clearIntervalCalls, 0);
+    assert.deepEqual(harness.pollAgentWorkRequests, [{ roomIdentifier: ROOM, cursor: null }]);
   });
 
-  it("skips the tick entirely when the live bridge lacks getLiveMetadata", async () => {
+  it("keeps retained-work refresh independent when the bridge lacks getLiveMetadata", async () => {
     const harness = createHarness();
     harness.selectedSnapshot.value = snapshotWithEventData();
     // Simulate a stale live bridge whose preload predates the metadata binding.
@@ -121,11 +133,13 @@ describe("useDesktopRoomLiveSync periodic metadata tick", () => {
       await harness.runInterval();
     });
 
-    // No metadata call, no full-snapshot fallback, no workers refresh — the
-    // tick is a clean no-op instead of a swallowed throw inside the interval.
+    // No metadata call, no full-snapshot fallback, and no partial workers
+    // refresh. The independently negotiated retained-work resource still runs.
     assert.deepEqual(harness.getLiveMetadataRequests, []);
     assert.deepEqual(harness.getSnapshotRequests, []);
     assert.equal(harness.workersListCalls, 0);
+    assert.ok(harness.pollAgentWorkRequests.length >= 1);
+    assert.equal(harness.sync.roomAgentWorkStatus.value, "ready");
     // Snapshot is untouched.
     assert.deepEqual(harness.selectedSnapshot.value?.participants, []);
     assert.deepEqual(harness.selectedSnapshot.value?.messages.map((m) => m.id), ["msg_1"]);
@@ -141,6 +155,122 @@ describe("useDesktopRoomLiveSync periodic metadata tick", () => {
 
     assert.equal(harness.clearIntervalCalls, 1);
     assert.equal(harness.stopStreamCalls, 1);
+  });
+});
+
+describe("useDesktopRoomLiveSync retained room work", () => {
+  it("replaces changed snapshots and retains them across unchanged cursors", async () => {
+    const harness = createHarness();
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      assert.deepEqual(harness.sync.roomAgentWork.value.map((work) => work.agentKey), ["emmy/garden-point"]);
+      assert.equal(harness.sync.roomAgentWorkStatus.value, "ready");
+
+      harness.nextAgentWork = Promise.resolve(unchangedRoomAgentWork(
+        `rw1.${"c".repeat(64)}.${"d".repeat(64)}`,
+      ));
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+    });
+
+    assert.deepEqual(harness.sync.roomAgentWork.value.map((work) => work.agentKey), ["emmy/garden-point"]);
+    assert.equal(harness.sync.roomAgentWorkStatus.value, "ready");
+    assert.deepEqual(harness.pollAgentWorkRequests, [
+      { roomIdentifier: ROOM, cursor: null },
+      { roomIdentifier: ROOM, cursor: WORK_CURSOR },
+    ]);
+  });
+
+  it("keeps one retained-work request in flight per room context", async () => {
+    const harness = createHarness();
+    const gate = deferred<DesktopRoomAgentWorkPollResult>();
+    harness.nextAgentWork = gate.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      const refreshes = [
+        harness.sync.refreshSelectedRoomLiveMetadata(),
+        harness.sync.refreshSelectedRoomLiveMetadata(),
+      ];
+      await harness.settle();
+      assert.equal(harness.pollAgentWorkRequests.length, 1);
+      gate.resolve(changedRoomAgentWork());
+      await Promise.all(refreshes);
+    });
+
+    assert.equal(harness.sync.roomAgentWorkStatus.value, "ready");
+  });
+
+  it("discards responses after room, account, or session identity changes", async () => {
+    const cases: Array<(harness: ReturnType<typeof createHarness>) => void> = [
+      (harness) => { harness.currentRoomId.value = "room_other"; },
+      (harness) => { harness.accountId.value = "account_2"; },
+      (harness) => { harness.sessionGeneration.value += 1; },
+    ];
+
+    for (const mutate of cases) {
+      const harness = createHarness();
+      const gate = deferred<DesktopRoomAgentWorkPollResult>();
+      harness.nextAgentWork = gate.promise;
+      await withDesktopBridge(harness.windowBridge, async () => {
+        await harness.sync.syncSelectedRoomStream(ROOM);
+        await harness.settle();
+        mutate(harness);
+        gate.resolve(changedRoomAgentWork());
+        await harness.settle();
+      });
+      assert.deepEqual(harness.sync.roomAgentWork.value, []);
+      assert.equal(harness.sync.roomAgentWorkStatus.value, "idle");
+    }
+  });
+
+  it("clears authority or payload failures instead of showing cross-context stale data", async () => {
+    const harness = createHarness();
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      harness.nextAgentWork = Promise.resolve({ status: "access_revoked", response: null });
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+      assert.deepEqual(harness.sync.roomAgentWork.value, []);
+      assert.equal(harness.sync.roomAgentWorkStatus.value, "unavailable");
+
+      harness.nextAgentWork = Promise.resolve({ status: "invalid", response: null });
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+    });
+
+    assert.deepEqual(harness.sync.roomAgentWork.value, []);
+    assert.equal(harness.sync.roomAgentWorkStatus.value, "error");
+  });
+
+  it("preserves the last complete replacement only for transient failures", async () => {
+    const harness = createHarness();
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      harness.nextAgentWork = Promise.reject(new Error("offline"));
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+    });
+
+    assert.deepEqual(harness.sync.roomAgentWork.value.map((work) => work.agentKey), ["emmy/garden-point"]);
+    assert.equal(harness.sync.roomAgentWorkStatus.value, "stale");
+  });
+
+  it("degrades cleanly when a stale preload lacks the optional binding", async () => {
+    const harness = createHarness();
+    delete (harness.windowBridge.letagentsDesktop.room as { pollAgentWork?: unknown }).pollAgentWork;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+    });
+
+    assert.deepEqual(harness.pollAgentWorkRequests, []);
+    assert.deepEqual(harness.sync.roomAgentWork.value, []);
+    assert.equal(harness.sync.roomAgentWorkStatus.value, "unavailable");
   });
 });
 
@@ -275,7 +405,56 @@ function liveMetadata(): DesktopRoomLiveMetadata {
   };
 }
 
+function roomAgentWork(agentKey = "emmy/garden-point"): DesktopRoomAgentWork {
+  return {
+    attemptId: "123e4567-e89b-42d3-a456-426614174000",
+    roomId: ROOM,
+    sourceMessageId: "msg_7",
+    agentKey,
+    revision: 1,
+    summary: {
+      version: 1,
+      recorded_state: "completed",
+      evidence_incomplete: false,
+      elapsed_ms: 1_250,
+      operation_counts: {
+        unresolved: 0,
+        succeeded: 2,
+        failed: 0,
+        denied_before_start: 0,
+        cancelled_before_start: 0,
+        interrupted_after_start: 0,
+        lost_after_start: 0,
+      },
+    },
+    updatedAt: "2026-08-31T21:00:00.000Z",
+  };
+}
+
+function changedRoomAgentWork(
+  work: DesktopRoomAgentWork[] = [roomAgentWork()],
+  cursor = WORK_CURSOR,
+): DesktopRoomAgentWorkPollResult {
+  return {
+    status: "ready",
+    response: {
+      roomId: ROOM,
+      cursor,
+      changed: true,
+      snapshot: { work, truncated: false },
+    },
+  };
+}
+
+function unchangedRoomAgentWork(cursor = WORK_CURSOR): DesktopRoomAgentWorkPollResult {
+  return {
+    status: "ready",
+    response: { roomId: ROOM, cursor, changed: false, snapshot: null },
+  };
+}
+
 function createHarness() {
+  const accountId = ref<string | null>("account_1");
   const currentRoomId = ref<string | null>(null);
   const selectedSnapshot = ref<DesktopRoomSnapshot | null>(null);
   const rootRoomSnapshot = ref<DesktopRoomSnapshot | null>(null);
@@ -284,6 +463,7 @@ function createHarness() {
 
   const getSnapshotRequests: Array<string | null> = [];
   const getLiveMetadataRequests: string[] = [];
+  const pollAgentWorkRequests: Array<{ roomIdentifier: string; cursor: string | null }> = [];
   let workersListCalls = 0;
   let stopStreamCalls = 0;
   let setIntervalCalls = 0;
@@ -294,9 +474,11 @@ function createHarness() {
 
   const state = {
     nextMetadata: Promise.resolve(liveMetadata()) as Promise<DesktopRoomLiveMetadata>,
+    nextAgentWork: Promise.resolve(changedRoomAgentWork()) as Promise<DesktopRoomAgentWorkPollResult>,
   };
 
   const sync = useDesktopRoomLiveSync({
+    accountId: computed(() => accountId.value),
     rootRoomSnapshot,
     selectedRoomIdentifier: computed(() => currentRoomId.value),
     selectedSnapshot,
@@ -321,6 +503,13 @@ function createHarness() {
         getLiveMetadata: async (roomIdentifier: string): Promise<DesktopRoomLiveMetadata> => {
           getLiveMetadataRequests.push(roomIdentifier);
           return state.nextMetadata;
+        },
+        pollAgentWork: async (
+          roomIdentifier: string,
+          cursor: string | null,
+        ): Promise<DesktopRoomAgentWorkPollResult> => {
+          pollAgentWorkRequests.push({ roomIdentifier, cursor });
+          return state.nextAgentWork;
         },
         startStream: async (roomIdentifier: string): Promise<void> => {
           currentRoomId.value = roomIdentifier;
@@ -355,12 +544,15 @@ function createHarness() {
 
   return {
     sync,
+    accountId,
     currentRoomId,
     selectedSnapshot,
     rootRoomSnapshot,
     windowBridge,
     getSnapshotRequests,
     getLiveMetadataRequests,
+    pollAgentWorkRequests,
+    sessionGeneration,
     get stopStreamCalls() {
       return stopStreamCalls;
     },
@@ -375,6 +567,9 @@ function createHarness() {
     },
     set nextMetadata(value: Promise<DesktopRoomLiveMetadata>) {
       state.nextMetadata = value;
+    },
+    set nextAgentWork(value: Promise<DesktopRoomAgentWorkPollResult>) {
+      state.nextAgentWork = value;
     },
     set documentHidden(value: boolean) {
       documentHidden = value;

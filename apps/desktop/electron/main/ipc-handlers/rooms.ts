@@ -20,6 +20,7 @@ import type {
   DesktopRoomInfo,
   DesktopRoomLatestMessage,
   DesktopRoomLiveMetadata,
+  DesktopRoomAgentWorkPollResult,
   DesktopRoomDeliveryRepair,
   DesktopRoomMessage,
   DesktopRoomMessagesPage,
@@ -75,6 +76,7 @@ import {
   getDesktopGitHubEvents,
   getDesktopGitHubIntegrationStatus,
   getDesktopReasoningSession,
+  pollDesktopRoomAgentWork,
   getDesktopRoomArtifacts,
   getDesktopRoomLatestMessages,
   getDesktopRoomMessage,
@@ -152,6 +154,15 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       _event,
       roomIdentifier: string,
     ): Promise<DesktopRoomLiveMetadata> => fetchRoomLiveMetadata(roomIdentifier),
+  );
+  targetIpcMain.handle(
+    "desktop:room:poll-agent-work",
+    async (
+      _event,
+      roomIdentifier: string,
+      afterCursor?: string | null,
+    ): Promise<DesktopRoomAgentWorkPollResult> =>
+      pollDesktopRoomAgentWork(roomIdentifier, afterCursor),
   );
   targetIpcMain.handle(
     "desktop:room:get-latest-messages",

@@ -1,5 +1,5 @@
-import type { ComputedRef, Ref } from "vue";
-import type { DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
+import { ref, watch, type ComputedRef, type Ref } from "vue";
+import type { DesktopRoomAgentWork, DesktopRoomSnapshot, WorkerSnapshot } from "../../../electron/ipc-types";
 import {
   applyRoomLiveMetadata,
   mergeRoomSnapshotMessages,
@@ -11,6 +11,7 @@ import { shouldSkipPollTick } from "../domain/visibility-polling";
 import { desktopIpc } from "../ipc/index.js";
 
 interface DesktopRoomLiveSyncOptions {
+  accountId: ComputedRef<string | null>;
   rootRoomSnapshot: Ref<DesktopRoomSnapshot | null>;
   selectedRoomIdentifier: ComputedRef<string | null>;
   selectedSnapshot: Ref<DesktopRoomSnapshot | null>;
@@ -19,7 +20,7 @@ interface DesktopRoomLiveSyncOptions {
 }
 
 /**
- * Cadence of the periodic poll-only metadata refresh. Presence/participants/
+ * Cadence of the periodic bounded room refresh. Presence/participants/
  * board-settings freshness is not latency-critical (everything actionable is
  * event-fed after PR #823), so a 15s tick is plenty and cuts steady-state room
  * traffic to a handful of light requests instead of a full ~10-request snapshot
@@ -33,6 +34,85 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let liveMetadataRefreshIntervalRoomIdentifier: string | null = null;
   let liveMetadataRefreshSequence = 0;
   let periodicMetadataRefreshInFlight = false;
+  let roomAgentWorkCursor: string | null = null;
+  let roomAgentWorkRefreshSequence = 0;
+  let roomAgentWorkInFlightSequence: number | null = null;
+  const roomAgentWork = ref<DesktopRoomAgentWork[]>([]);
+  const roomAgentWorkStatus = ref<"idle" | "loading" | "ready" | "stale" | "error" | "unavailable">("idle");
+  const roomAgentWorkTruncated = ref(false);
+
+  function clearSelectedRoomAgentWork(
+    status: "idle" | "error" | "unavailable" = "idle",
+  ): void {
+    roomAgentWorkRefreshSequence += 1;
+    roomAgentWorkInFlightSequence = null;
+    roomAgentWorkCursor = null;
+    roomAgentWork.value = [];
+    roomAgentWorkTruncated.value = false;
+    roomAgentWorkStatus.value = status;
+  }
+
+  function roomAgentWorkRequestIsCurrent(
+    refreshSequence: number,
+    roomIdentifier: string,
+    sessionGeneration: number,
+    accountId: string,
+  ): boolean {
+    return refreshSequence === roomAgentWorkRefreshSequence
+      && sessionGeneration === options.sessionGeneration.value
+      && accountId === options.accountId.value
+      && normalizeRoomIdentifier(roomIdentifier) === normalizeRoomIdentifier(options.selectedRoomIdentifier.value);
+  }
+
+  async function refreshSelectedRoomAgentWork(): Promise<void> {
+    const roomIdentifier = options.selectedRoomIdentifier.value;
+    const accountId = options.accountId.value;
+    if (!roomIdentifier || !accountId) {
+      clearSelectedRoomAgentWork();
+      return;
+    }
+    if (!desktopIpc.room.pollAgentWork) {
+      clearSelectedRoomAgentWork("unavailable");
+      return;
+    }
+    if (roomAgentWorkInFlightSequence !== null) return;
+
+    const sessionGeneration = options.sessionGeneration.value;
+    const refreshSequence = ++roomAgentWorkRefreshSequence;
+    roomAgentWorkInFlightSequence = refreshSequence;
+    if (!roomAgentWork.value.length) roomAgentWorkStatus.value = "loading";
+    try {
+      const result = await desktopIpc.room.pollAgentWork(roomIdentifier, roomAgentWorkCursor);
+      if (!roomAgentWorkRequestIsCurrent(refreshSequence, roomIdentifier, sessionGeneration, accountId)) return;
+      if (result.status === "ready") {
+        roomAgentWorkCursor = result.response.cursor;
+        if (result.response.changed) {
+          roomAgentWork.value = result.response.snapshot.work;
+          roomAgentWorkTruncated.value = result.response.snapshot.truncated;
+        }
+        roomAgentWorkStatus.value = "ready";
+        return;
+      }
+      clearSelectedRoomAgentWork(result.status === "invalid" ? "error" : "unavailable");
+    } catch {
+      if (!roomAgentWorkRequestIsCurrent(refreshSequence, roomIdentifier, sessionGeneration, accountId)) return;
+      roomAgentWorkStatus.value = roomAgentWork.value.length ? "stale" : "error";
+    } finally {
+      if (roomAgentWorkInFlightSequence === refreshSequence) {
+        roomAgentWorkInFlightSequence = null;
+      }
+    }
+  }
+
+  watch(
+    () => [
+      normalizeRoomIdentifier(options.selectedRoomIdentifier.value),
+      options.sessionGeneration.value,
+      options.accountId.value,
+    ] as const,
+    () => clearSelectedRoomAgentWork(),
+    { flush: "sync" },
+  );
 
   function isStaleRefresh(
     refreshSequence: number,
@@ -71,9 +151,10 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   }
 
   /**
-   * Periodic poll-only refresh — the interval tick. Fetches ONLY the metadata
+   * Periodic bounded refresh — the interval tick. Fetches the metadata
    * the server pushes no events for (focus rooms, participants, presence,
-   * recent activity, board settings) plus the cheap local `workers.list()`, and
+   * recent activity, board settings), the retained room-work replacement, and
+   * the cheap local `workers.list()`, then
    * applies them onto the current snapshot without touching event-fed sections
    * (messages, tasks, GitHub events, artifacts, reasoning).
    *
@@ -94,13 +175,14 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     const roomIdentifier = options.selectedRoomIdentifier.value;
     if (!roomIdentifier) return;
     if (shouldSkipPollTick({ hidden: Boolean(window.document?.hidden) })) return;
-    // Stale live bridge (preload predates this binding): skip the tick as a
-    // whole, workers.list() included — a partial tick that refreshed workers
-    // but never applied metadata would be misleading, and workers are still
-    // refreshed by every full-refresh pass (stream open, rentals, manual
-    // refresh) until the bridge is reloaded.
-    if (!desktopIpc.room.getLiveMetadata) return;
-    if (periodicMetadataRefreshInFlight) return;
+    const roomAgentWorkRefresh = refreshSelectedRoomAgentWork();
+    // The retained-work poll is independent of the older live-metadata bridge:
+    // a stale preload may omit either optional binding without suppressing the
+    // other resource or causing a full-snapshot fallback.
+    if (!desktopIpc.room.getLiveMetadata || periodicMetadataRefreshInFlight) {
+      await roomAgentWorkRefresh;
+      return;
+    }
     periodicMetadataRefreshInFlight = true;
     const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++liveMetadataRefreshSequence;
@@ -121,6 +203,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     } finally {
       periodicMetadataRefreshInFlight = false;
     }
+    await roomAgentWorkRefresh;
   }
 
   function scheduleLiveMetadataRefresh(delayMs = 800): void {
@@ -173,20 +256,27 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     if (!desktopIpc.room?.startStream) return;
     if (!roomIdentifier) {
       clearLiveMetadataRefreshInterval();
+      clearSelectedRoomAgentWork();
       await desktopIpc.room.stopStream();
       return;
     }
     const latestMessageId = afterMessageId === undefined
       ? options.selectedSnapshot.value?.messages.at(-1)?.id || null
       : afterMessageId;
+    const shouldRefreshRoomAgentWork = roomAgentWorkStatus.value === "idle";
     await desktopIpc.room.startStream(roomIdentifier, latestMessageId);
     startLiveMetadataRefreshInterval(roomIdentifier);
+    if (shouldRefreshRoomAgentWork) void refreshSelectedRoomAgentWork();
   }
 
   return {
     clearLiveMetadataRefreshInterval,
     clearLiveMetadataRefreshTimer,
+    clearSelectedRoomAgentWork,
     refreshSelectedRoomLiveMetadata,
+    roomAgentWork,
+    roomAgentWorkStatus,
+    roomAgentWorkTruncated,
     scheduleLiveMetadataRefresh,
     syncSelectedRoomStream,
   };

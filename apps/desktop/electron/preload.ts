@@ -78,6 +78,8 @@ const api: DesktopApi = {
     getSnapshot: (roomIdentifier?: string | null) => ipcRenderer.invoke("desktop:room:get-snapshot", roomIdentifier ?? null),
     getLiveMetadata: (roomIdentifier: string) =>
       ipcRenderer.invoke("desktop:room:get-live-metadata", roomIdentifier),
+    pollAgentWork: (roomIdentifier: string, afterCursor?: string | null) =>
+      ipcRenderer.invoke("desktop:room:poll-agent-work", roomIdentifier, afterCursor ?? null),
     getLatestMessages: (roomIdentifiers: string[]) =>
       ipcRenderer.invoke("desktop:room:get-latest-messages", roomIdentifiers),
     getMessage: (roomIdentifier: string, messageId: string) =>

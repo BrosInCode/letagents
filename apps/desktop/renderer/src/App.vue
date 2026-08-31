@@ -171,6 +171,9 @@
           :reasoning-sessions="selectedSnapshot?.reasoningSessions || []"
           :recent-activity="selectedSnapshot?.recentActivity || []"
           :room-artifacts="selectedSnapshot?.roomArtifacts || []"
+          :room-agent-work="roomAgentWork"
+          :room-agent-work-status="roomAgentWorkStatus"
+          :room-agent-work-truncated="roomAgentWorkTruncated"
           :board-settings="selectedSnapshot?.boardSettings || null"
           :messages="selectedSnapshot?.messages || []"
           :github-events="selectedSnapshot?.githubEvents || null"
@@ -1276,10 +1279,15 @@ function rememberRoomMessageIds(): void {
 const {
   clearLiveMetadataRefreshInterval,
   clearLiveMetadataRefreshTimer,
+  clearSelectedRoomAgentWork,
   refreshSelectedRoomLiveMetadata,
+  roomAgentWork,
+  roomAgentWorkStatus,
+  roomAgentWorkTruncated,
   scheduleLiveMetadataRefresh,
   syncSelectedRoomStream: syncDesktopRoomStream,
 } = useDesktopRoomLiveSync({
+  accountId: computed(() => authStatus.value?.account?.id || null),
   rootRoomSnapshot,
   selectedRoomIdentifier,
   selectedSnapshot,
@@ -1369,6 +1377,7 @@ function clearDesktopSessionState(): void {
   invalidateSession();
   clearLiveMetadataRefreshTimer();
   clearLiveMetadataRefreshInterval();
+  clearSelectedRoomAgentWork();
   rootRoomSnapshot.value = null;
   selectedSnapshot.value = null;
   workers.value = [];
