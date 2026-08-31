@@ -14,6 +14,7 @@ type CaptureOptions = {
   currentHandle(agentId: string): ProviderActionHandle | undefined;
   daemonGeneration(): number;
   diagnostic(agentId: string, code: CaptureCode): void;
+  changed?(agentId: string): void;
 };
 type Lane = {
   agentId: string; generation: string; handle: ProviderActionHandle;
@@ -138,6 +139,9 @@ export class ExecutionCaptureCoordinator {
           if (receipts.unavailable) this.report(next, "settlement_unavailable");
           if (receipts.hasMore) { receiptsPending = true; this.dirty.add(next); }
         } catch { this.report(next, "settlement_unavailable"); }
+        // Runs after both fact capture and receipt settlement. The consumer
+        // coalesces this hint; no transport work may run in this callback.
+        try { this.options.changed?.(next.agentId); } catch { /* optional observation */ }
       }
       if (retire && !receiptsPending) {
         this.remove(next);

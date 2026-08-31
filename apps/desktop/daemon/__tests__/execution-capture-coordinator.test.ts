@@ -22,7 +22,7 @@ function successor(f: ReturnType<typeof fixture>, birth: string): ProviderAction
   return handle;
 }
 
-function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>) {
+function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>, changed?: (agentId: string) => void) {
   const db = new DatabaseSync(":memory:");
   db.exec("PRAGMA foreign_keys=ON");
   new DaemonStateSchema().createSchema(db);
@@ -43,7 +43,7 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
   const observer = new ProviderExecutionObserver(() => now);
   const diagnostics: string[] = [];
   const capture = new ExecutionCaptureCoordinator(db, { provider: { onExecution: onExecution ?? ((_handle, listener) => observer.subscribe(listener)) },
-    currentHandle: id => handles.get(id), daemonGeneration: () => 1, diagnostic: (_id, code) => diagnostics.push(code) });
+    currentHandle: id => handles.get(id), daemonGeneration: () => 1, diagnostic: (_id, code) => diagnostics.push(code), changed });
   const install = () => capture.install("agent", handle, "generation");
   const emit = (fact: NativeExecutionFact, birth = "birth-secret") => observer.emit(fact, birth);
   const facts = () => db.prepare("SELECT * FROM execution_facts ORDER BY sequence").all();
@@ -109,6 +109,30 @@ test("committed receipts settle captured attempts independently of capture gaps 
       assert.deepEqual(f.db.prepare("SELECT * FROM supervised_agent_inbox").all(), operational);
     } finally { f.capture.close(); }
   }
+});
+
+test("capture change hints follow fact and receipt commits, survive callback failure and never run on close", async () => {
+  const snapshots: Array<{ agentId: string; facts: number; state: unknown; transaction: boolean }> = [];
+  const f = fixture("codex_app_server", undefined, agentId => {
+    snapshots.push({ agentId, facts: f.facts().length,
+      state: f.db.prepare("SELECT state FROM execution_message_attempts").get()?.state, transaction: f.db.isTransaction });
+    throw new Error("optional summary observer unavailable");
+  });
+  try {
+    f.bindTurn();
+    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
+    f.install(); f.emit(ready); f.emit(active); f.emit(terminal); await flush();
+    assert.deepEqual(snapshots.at(-1), { agentId: "agent", facts: 3, state: "cleanly_concluded", transaction: false },
+      "the hint sees both captured evidence and receipt settlement after their transactions");
+    assert.ok(snapshots.every(snapshot => !snapshot.transaction));
+    f.emit({ ...nativeTurn, domain: "execution", kind: "completed", executionId: "late-read", operation: "file_read", outcome: "succeeded", sideEffects: "none" });
+    await flush(); assert.equal(f.facts().length, 4, "a throwing hint cannot suspend subsequent capture");
+    assert.deepEqual(f.diagnostics, []);
+    const calls = snapshots.length;
+    f.emit(ready); f.capture.close(); f.emit(ready); await flush();
+    assert.equal(snapshots.length, calls, "shutdown frontier preservation and queued facts never request publication");
+  } finally { f.capture.close(); }
 });
 
 test("scheduled receipt batches advance past unavailable proof without starving later attempts", async () => {

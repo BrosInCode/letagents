@@ -218,6 +218,49 @@ test("a successful poll exposes received work and observing health in one notifi
   }
 });
 
+test("new-source observation follows commit and excludes replay, synthetic insertion and rolled-back polls", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  let observer: DatabaseSync | undefined;
+  const snapshots: Array<{ ids: string[]; persisted: string[]; cursor: string | null }> = [];
+  let throwHint = false;
+  const onInserted = (ids: readonly string[]) => {
+    snapshots.push({ ids: [...ids],
+      persisted: observer!.prepare("SELECT source_message_id FROM supervised_agent_inbox ORDER BY fifo_sequence").all().map(row => String(row.source_message_id)),
+      cursor: observer!.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id='stone'").get()?.last_observed_message_id as string | null });
+    if (throwHint) throw new Error("optional observer unavailable");
+  };
+  const message = (source_message_id: string) => ({ source_message_id, source_message: {}, activation: {} });
+  const poll = { agent_id: "stone", room_id: "room", execution_generation_id: "generation", onInserted };
+  try {
+    await store.bootstrapCursor({ agent_id: "stone", room_id: "room", last_observed_message_id: null });
+    observer = new DatabaseSync(env.database);
+    await store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "msg_2", messages: [message("msg_1"), message("noncanonical")],
+      observed_messages: [{ ...message("msg_2"), activation_decision: "silent" }] });
+    assert.deepEqual(snapshots, [{ ids: ["msg_1", "noncanonical"], persisted: ["msg_1", "noncanonical"], cursor: "msg_2" }],
+      "a separate connection sees committed rows/cursor; canonical filtering belongs to the publisher, not ingress");
+    await store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "msg_2", messages: [message("msg_1"), message("noncanonical")] });
+    const synthetic = { agent_id: "stone", room_id: "room", ...message("initial"), onInserted };
+    await store.enqueueInitialMessage(synthetic);
+    await store.enqueueCorrection({ ...synthetic, source_message_id: "correction" });
+    assert.equal(snapshots.length, 1, "replay and synthetic routes never reopen attribution");
+
+    throwHint = true;
+    await store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "msg_3", messages: [message("msg_1"), message("msg_3")] });
+    assert.deepEqual(snapshots[1], { ids: ["msg_3"], persisted: ["msg_1", "noncanonical", "initial", "correction", "msg_3"], cursor: "msg_3" });
+    assert.equal((await store.cursor("stone"))?.last_observed_message_id, "msg_3", "observer failure cannot reject committed ingress");
+    await store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "msg_3", messages: [message("msg_2")] });
+    assert.equal(snapshots.length, 2, "an older observed/pruned source is not fresh attribution just because its inbox row was absent");
+    assert.ok(observer.prepare("SELECT 1 FROM supervised_agent_inbox WHERE source_message_id='msg_2'").get(), "observation never changes ingestion behavior");
+    observer.exec(`CREATE TRIGGER reject_second_observed_source BEFORE INSERT ON supervised_agent_inbox
+      WHEN NEW.source_message_id='msg_5' BEGIN SELECT RAISE(ABORT,'rejected second source'); END;`);
+    await assert.rejects(store.ingestSuccessfulPoll({ ...poll, last_observed_message_id: "msg_5", messages: [message("msg_4"), message("msg_5")] }), /rejected second source/);
+    assert.equal(snapshots.length, 2, "even an earlier INSERT in a failed batch cannot publish a hint");
+    assert.equal(observer.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox WHERE source_message_id IN ('msg_4','msg_5')").get()!.n, 0);
+    assert.equal((await store.cursor("stone"))?.last_observed_message_id, "msg_3");
+  } finally { observer?.close(); await store.close(); await env.cleanup(); }
+});
+
 test("an exact never-dispatched provider turn can be atomically reset without consuming an attempt", async () => {
   const env = await fixture(); try {
     const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-02T00:00:00.000Z");
