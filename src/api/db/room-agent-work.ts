@@ -1,19 +1,19 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
-import { parseRoomAgentWorkSummary, type RoomAgentWork, type RoomAgentWorkSnapshot } from "../../shared/room-agent-work.js";
+import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWork, type RoomAgentWorkSnapshot } from "../../shared/room-agent-work.js";
 import { db } from "./client.js";
 import { message_agent_receipts, messages, room_agent_sessions, room_agent_work, supervisor_host_grants } from "./schema.js";
 import { assertSupervisorGrantFenceTx, SupervisorGrantFenceStaleError, type SupervisorGrantFence } from "./auth/supervisor-grants.js";
 import { visibleMessageCondition } from "./messages/visibility.js";
 
 export class RoomAgentWorkError extends Error {
-  constructor(readonly code: "invalid_summary" | "publisher_not_authorized" | "publisher_conflict" | "revision_conflict") {
+  constructor(readonly code: "invalid_summary" | "publisher_not_authorized" | "publisher_conflict" | "revision_conflict" | "payload_cleared" | "evidence_not_clearable") {
     super(`Room work evidence rejected: ${code}.`);
   }
 }
 
 function publicWork(row: typeof room_agent_work.$inferSelect): RoomAgentWork {
-  const summary = parseRoomAgentWorkSummary(row.summary);
+  const summary = isClearedRoomAgentWorkSummary(row.summary) ? row.summary : parseRoomAgentWorkSummary(row.summary);
   if (!summary) throw new RoomAgentWorkError("invalid_summary");
   return {
     attempt_id: row.attempt_id, room_id: row.room_id, source_message_id: `msg_${row.source_message_number}`,
@@ -87,10 +87,12 @@ export async function publishRoomAgentWork(input: {
           eq(room_agent_sessions.session_kind, "worker"), isNull(room_agent_sessions.ended_at))).limit(2);
       if (active.length !== 1 || active[0].id !== publisher.session_id) throw new RoomAgentWorkError("publisher_not_authorized");
     } else if (captured.session_id !== publisher.session_id) throw new RoomAgentWorkError("publisher_not_authorized");
-    if (Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
     const identity = and(eq(room_agent_work.room_id, input.room_id),
       eq(room_agent_work.source_message_number, input.source_message_number), eq(room_agent_work.agent_key, publisher.agent_key));
-    const [existing] = await tx.select().from(room_agent_work).where(identity);
+    // Clear history also takes this lock. A publication cannot restore cleared
+    // evidence or let a stale clear erase a newly published revision.
+    const [existing] = await tx.select().from(room_agent_work).where(identity).for("update");
+    if (Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
     if (existing) {
       if (existing.owner_account_id !== grant.owner_account_id || existing.host_id !== grant.host_id
         || existing.installation_id !== grant.installation_id || existing.agent_instance_id !== publisher.agent_instance_id) {
@@ -100,6 +102,7 @@ export async function publishRoomAgentWork(input: {
         throw new RoomAgentWorkError("revision_conflict");
       }
       if (input.revision === existing.publisher_revision) return { status: "replayed", work: publicWork(existing) };
+      if (isClearedRoomAgentWorkSummary(existing.summary)) throw new RoomAgentWorkError("payload_cleared");
       const [updated] = await tx.update(room_agent_work).set({ publisher_revision: input.revision, summary_digest: digest, summary,
         updated_at: new Date().toISOString() }).where(identity).returning();
       return { status: "updated", work: publicWork(updated) };
@@ -111,6 +114,42 @@ export async function publishRoomAgentWork(input: {
       publisher_revision: input.revision, summary_digest: digest, summary, updated_at: new Date().toISOString(),
     }).returning();
     return { status: "created", work: publicWork(created) };
+  });
+}
+
+/** Clear display evidence, never the custody/replay receipt or the source.
+ * The route requires current human membership; only the report owner may clear.
+ * Retaining the receipt until source deletion prevents UUID/custody resurrection.
+ */
+export async function clearRoomAgentWork(input: {
+  room_id: string; attempt_id: string; owner_account_id: string; revision: number;
+}): Promise<{ status: "cleared" | "already_cleared"; work: RoomAgentWork } | null> {
+  if (!Number.isSafeInteger(input.revision) || input.revision < 1) throw new RoomAgentWorkError("invalid_summary");
+  return db.transaction(async (tx) => {
+    const identity = and(eq(room_agent_work.room_id, input.room_id), eq(room_agent_work.attempt_id, input.attempt_id),
+      eq(room_agent_work.owner_account_id, input.owner_account_id));
+    const [candidate] = await tx.select({ source: room_agent_work.source_message_number }).from(room_agent_work).where(identity);
+    if (!candidate) return null;
+    // Match publication and cascade order: source first, then work. Hold source
+    // visibility stable through the clear; hidden/missing/foreign all return null.
+    const [source] = await tx.select({ number: messages.number }).from(messages)
+      .where(and(eq(messages.room_id, input.room_id), eq(messages.number, candidate.source),
+        visibleMessageCondition(false), isNull(messages.visibility), isNull(messages.rental_session_id))).for("share");
+    if (!source) return null;
+    const [existing] = await tx.select().from(room_agent_work).where(identity).for("update");
+    if (!existing) return null;
+    if (existing.publisher_revision !== input.revision) throw new RoomAgentWorkError("revision_conflict");
+    if (isClearedRoomAgentWorkSummary(existing.summary)) return { status: "already_cleared", work: publicWork(existing) };
+    const summary = parseRoomAgentWorkSummary(existing.summary);
+    if (!summary || !["completed", "completed_no_reply", "failed", "interrupted"].includes(summary.recorded_state)
+      || summary.evidence_incomplete || summary.operation_counts.unresolved || summary.operation_counts.lost_after_start) {
+      throw new RoomAgentWorkError("evidence_not_clearable");
+    }
+    // Preserve publication revision, digest, timestamp and custody verbatim.
+    // Equal-revision retries acknowledge the receipt without restoring payload;
+    // future revisions are terminally rejected, not an invitation to rerun work.
+    const [cleared] = await tx.update(room_agent_work).set({ summary: { version: 1, availability: "cleared" } }).where(identity).returning();
+    return { status: "cleared", work: publicWork(cleared) };
   });
 }
 
