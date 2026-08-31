@@ -65,6 +65,8 @@ function coordinatorHarness(input: {
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
   endStream?: (entryId: string) => void;
+  observeExecution?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
+  startDelivery?: (entryId: string) => Promise<void>;
 } = {}) {
   let manifest = entry();
   const runtimeCustody = new WorkerRuntimeCustody();
@@ -78,6 +80,7 @@ function coordinatorHarness(input: {
   };
   let stopCalls = 0;
   const coordinator = new ProviderStreamCoordinator({
+    observeExecution: input.observeExecution,
     provider: {
       stop: async (current) => {
         stopCalls += 1;
@@ -132,7 +135,7 @@ function coordinatorHarness(input: {
     publishNativeActivity: async () => {},
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: () => {}, end: (entryId) => input.endStream?.(entryId) },
-    delivery: { start: async () => {}, startCutover: async () => {} },
+    delivery: { start: input.startDelivery ?? (async () => {}), startCutover: async () => {} },
     heartbeat: {
       intervalMs: 60_000,
       requiresHostGrant: () => false,
@@ -154,6 +157,33 @@ function coordinatorHarness(input: {
     getManifest: () => manifest,
   };
 }
+
+test("optional execution observation failures cannot block installation, delivery, or replacement cleanup", async () => {
+  const installed: Array<[string, ProviderActionHandle, string]> = [];
+  const disposed: ProviderActionHandle[] = [];
+  const deliveries: string[] = [];
+  const harness = coordinatorHarness({
+    observeExecution: (entryId, current, generation) => {
+      installed.push([entryId, current, generation]);
+      if (current === handle) throw new Error("observation unavailable");
+      return () => { disposed.push(current); throw new Error("optional cleanup unavailable"); };
+    },
+    startDelivery: async (entryId) => { deliveries.push(entryId); },
+  });
+  const second = { ...handle, pid: 43 };
+  const third = { ...handle, pid: 44 };
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.install("agent-1", second, "generation-3");
+  await harness.coordinator.install("agent-1", third, "generation-4");
+  assert.deepEqual(installed, [["agent-1", handle, "generation-2"], ["agent-1", second, "generation-3"], ["agent-1", third, "generation-4"]]);
+  assert.deepEqual(disposed, [second], "replacement disposes only its preceding observer");
+  assert.deepEqual(deliveries, ["agent-1", "agent-1", "agent-1"]);
+  await harness.coordinator.disposeAll();
+  await harness.coordinator.disposeAll();
+  assert.deepEqual(disposed, [second, third], "each installed observer is disposed exactly once");
+  assert.equal(harness.stopCalls(), 0);
+  assert.equal(harness.getManifest().observed_state, "working");
+});
 
 for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
   test(`execution errors do not fence or latch failure on a healthy ${delivery_mode} runtime`, async () => {

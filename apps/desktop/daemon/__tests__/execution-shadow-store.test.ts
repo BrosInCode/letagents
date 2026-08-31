@@ -500,6 +500,43 @@ test("source gaps persist diagnostics, never fabricate terminals, and can be fil
   } finally { db.close(); }
 });
 
+test("source watermarks preserve unaccepted tails without minting facts and remain exact and atomic", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    store.ingest(token.sourceId, token, fact(1));
+    const projection = store.projectRuntime("runtime");
+    const before = db.prepare("SELECT * FROM execution_observers").get();
+    assert.throws(() => store.observeSourcePosition("wrong-source", token, 4), /identity_mismatch/);
+    assert.throws(() => store.observeSourcePosition(token.sourceId, { ...token }, 4), /stale_observer/);
+    assert.throws(() => store.observeSourcePosition(token.sourceId, token, -1), /invalid_fact/);
+    assert.throws(() => store.observeSourcePosition(token.sourceId, token, 0), /source_gap/);
+    assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
+    const exec = db.exec.bind(db);
+    let failCommit = true;
+    t.mock.method(db, "exec", (sql: string) => {
+      if (sql === "COMMIT" && failCommit) { failCommit = false; throw new Error("injected watermark commit failure"); }
+      exec(sql);
+    });
+    assert.throws(() => store.observeSourcePosition(token.sourceId, token, 4), /injected watermark commit failure/);
+    assert.deepEqual(db.prepare("SELECT * FROM execution_observers").get(), before);
+    store.observeSourcePosition(token.sourceId, token, 4);
+    store.observeSourcePosition(token.sourceId, token, 2);
+    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
+    assert.equal(db.prepare("SELECT max_observed_sequence FROM execution_observers").get()?.max_observed_sequence, 4);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 1);
+    assert.deepEqual(store.projectRuntime("runtime"), projection);
+    assert.throws(() => observer(store, { expectedEpoch: 1 }), /source_gap/);
+    const resumed = observer(store, { expectedEpoch: 1, sourceId: token.sourceId });
+    assert.equal(resumed.lastSourceSequence, 1); assert.equal(resumed.maxObservedSequence, 4);
+    assert.throws(() => store.observeSourcePosition(token.sourceId, token, 5), /stale_observer/);
+    store.observeSourcePosition(resumed.sourceId, resumed, 5);
+    assert.equal(db.prepare("SELECT max_observed_sequence FROM execution_observers").get()?.max_observed_sequence, 5);
+    assert.equal(db.prepare("SELECT COUNT(*) n FROM execution_facts").get()?.n, 1);
+    assert.deepEqual(store.projectRuntime("runtime"), projection);
+  } finally { db.close(); }
+});
+
 test("same-source admission survives store replacement and database reopen without replaying the prefix", async () => {
   const root = await mkdtemp(join(tmpdir(), "execution-source-"));
   const path = join(root, "state.sqlite");
