@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile, execFileSync, spawn, type ChildProcess } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { generateKeyPairSync, randomUUID, sign } from "node:crypto";
 import { chmod, mkdir, mkdtemp, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { createServer as createHttpServer } from "node:http";
 import { createConnection, type AddressInfo } from "node:net";
@@ -39,6 +39,7 @@ import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure, rememberCompletedControlAction } from "../reconciler-state.js";
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 import type { NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
+import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
 import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import type { ProviderCheckpointCoordinator } from "../provider-checkpoint-coordinator.js";
 import type { ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
@@ -5215,6 +5216,66 @@ test("prepare_handoff fences a mutation admitted before an asynchronous request 
   } finally {
     releaseMutation();
     await env.cleanup();
+  }
+});
+
+test("host approval socket operations require the enrolled signer and remain fenced across handoff", async () => {
+  const env = await fixture();
+  const paths = { lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl") };
+  const host = generateKeyPairSync("ed25519"); const outsider = generateKeyPairSync("ed25519");
+  let enrollments = 0; let fenceRequests = false; let arrivals = 0;
+  let releaseRequests!: () => void; const gate = new Promise<void>(resolve => { releaseRequests = resolve; });
+  let bothArrived!: () => void; const entered = new Promise<void>(resolve => { bothArrived = resolve; });
+  // No provider port: enrolling host auth or listing an empty room must not launch native work.
+  const daemon = new SupervisorDaemon(paths, "darwin", undefined, false, 15_000, async request => {
+    if (!fenceRequests || request.method !== "supervisor.host_approval_request") return;
+    if (++arrivals === 2) bothArrived();
+    await gate;
+  });
+  try {
+    await daemon.start({ getHostApprovalPublicKey: async () => {
+      enrollments += 1; return host.publicKey.export({ format: "der", type: "spki" }).toString("base64");
+    } });
+    const challengeReply = await daemonRequest(paths.socketPath, "supervisor.host_approval_challenge");
+    assert.equal(challengeReply.ok, true, challengeReply.error);
+    const challenge = challengeReply.result as HostApprovalChallenge;
+    assert.ok(challenge.keyFingerprint, "trusted startup enrollment must expose its challenge");
+    assert.equal(enrollments, 1);
+    const signed = (operation: HostApprovalOperation, input: unknown, key = host.privateKey) => {
+      const issuedAt = Date.now();
+      const payload = JSON.stringify({ domain: "letagents.host-approval", version: 1, ...challenge,
+        operation, input, issuedAt, expiresAt: issuedAt + 30_000 });
+      return { payload, signature: sign(null, Buffer.from(payload), key).toString("base64") };
+    };
+    for (const operation of ["list", "decide"] as const) {
+      const input = operation === "list" ? { roomId: "room_1" } : { actorId: `host-${challenge.keyFingerprint}` };
+      for (const envelope of [{ operation, input }, signed(operation, input, outsider.privateKey)]) {
+        const refused = await daemonRequest(paths.socketPath, "supervisor.host_approval_request", envelope);
+        assert.equal(refused.ok, false); assert.match(refused.error ?? "", /could not be authenticated/);
+      }
+    }
+    const listed = await daemonRequest(paths.socketPath, "supervisor.host_approval_request", signed("list", { roomId: "room_1" }));
+    assert.equal(listed.ok, true, listed.error); assert.deepEqual(listed.result, []);
+    const wrongActor = await daemonRequest(paths.socketPath, "supervisor.host_approval_request", signed("decide", { actorId: "other-host" }));
+    assert.equal(wrongActor.ok, false); assert.match(wrongActor.error ?? "", /actor is not the enrolled host/);
+    assert.deepEqual((await daemonRequest(paths.socketPath, "manifest.list")).result, [], "auth operations leave runtime and permission defaults untouched");
+
+    fenceRequests = true;
+    const pending = [
+      daemonRequest(paths.socketPath, "supervisor.host_approval_request", signed("list", { roomId: "room_1" })),
+      daemonRequest(paths.socketPath, "supervisor.host_approval_request", signed("decide", { actorId: `host-${challenge.keyFingerprint}` })),
+    ];
+    await within(entered, "both signed approval operations admitted before handoff");
+    const handoff = daemon.waitForHandoff();
+    assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
+    releaseRequests();
+    for (const rejected of await Promise.all(pending)) {
+      assert.equal(rejected.ok, false); assert.match(rejected.error ?? "", /handoff has fenced new daemon mutations/i);
+    }
+    await within(handoff, "host approval handoff", 1_000);
+  } finally {
+    releaseRequests(); await daemon.stop().catch(() => undefined); await env.cleanup();
   }
 });
 

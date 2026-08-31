@@ -417,6 +417,7 @@ export class OpenCodeServerClient {
     expectedRequest: OpenCodePermissionRequest,
     reply: "once" | "reject",
     assertCurrentInstance?: () => void,
+    beforeNativeDispatch?: () => Promise<void>,
   ): Promise<{ outcome: "processed"; nativeScope: "request" | "session_pending" }> {
     const expected = structuredClone(permissionRequest(expectedRequest));
     if (!nonEmptyString(sessionId) || expected.sessionID !== sessionId || (reply !== "once" && reply !== "reject")) {
@@ -428,6 +429,7 @@ export class OpenCodeServerClient {
     // The native endpoint has no session or conditional hash parameter. The
     // adapter's synchronous instance fence follows the awaited re-list, with
     // no await between the fence and POST dispatch. A refusal is not uncertain.
+    if (beforeNativeDispatch) await beforeNativeDispatch();
     assertCurrentInstance?.();
     let response: Response;
     try {

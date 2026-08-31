@@ -7,6 +7,7 @@ import * as Vue from "vue";
 import { createRenderer, nextTick, ssrContextKey, type App } from "vue";
 import { createServer, type ViteDevServer } from "vite";
 import { createRoomDeliveryRetryCoordinator } from "../src/domain/room-delivery-retry";
+import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalChoice } from "../../shared/host-approvals";
 
 interface HostNode {
   kind: "element" | "text" | "comment";
@@ -18,6 +19,7 @@ interface HostNode {
   scrollTop: number;
   scrollHeight: number;
   clientHeight: number;
+  style: Record<string, string>;
   classList: { add: (...names: string[]) => void; remove: (...names: string[]) => void };
   focus: (_options?: FocusOptions) => void;
   scrollTo: (_options?: ScrollToOptions) => void;
@@ -28,7 +30,7 @@ interface HostNode {
 
 function hostNode(kind: HostNode["kind"], type?: string, text = ""): HostNode {
   return {
-    kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0,
+    kind, type, text, children: [], parent: null, props: {}, scrollTop: 0, scrollHeight: 0, clientHeight: 0, style: {},
     classList: { add: () => undefined, remove: () => undefined }, focus: () => undefined, scrollTo: () => undefined,
     querySelector: () => null,
     addEventListener: () => undefined, removeEventListener: () => undefined,
@@ -126,6 +128,8 @@ let RoomMessageViewport: object;
 let RoomThreadPanel: object;
 let DesktopLongMessageContent: object;
 let DesktopAttachmentDrafts: object;
+let RoomComposer: object;
+let RoomComposerEventChips: object;
 
 async function attachClientRender(component: object, modulePath: string): Promise<void> {
   const source = await readFile(fileURLToPath(new URL(`../src/${modulePath}`, import.meta.url)), "utf8");
@@ -150,12 +154,14 @@ before(async () => {
     root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent",
     server: { middlewareMode: true },
   });
-  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts] = await Promise.all([
+  [DesktopChatMessage, RoomMessageViewport, RoomThreadPanel, DesktopLongMessageContent, DesktopAttachmentDrafts, RoomComposer, RoomComposerEventChips] = await Promise.all([
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopChatMessage.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomMessageViewport.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomThreadPanel.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopLongMessageContent.vue").then((module) => module.default),
     vite.ssrLoadModule("/renderer/src/components/desktop/content/DesktopAttachmentDrafts.vue").then((module) => module.default),
+    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposer.vue").then((module) => module.default),
+    vite.ssrLoadModule("/renderer/src/components/desktop/content/room-chat/RoomComposerEventChips.vue").then((module) => module.default),
   ]);
   await Promise.all([
     attachClientRender(DesktopChatMessage, "components/desktop/content/DesktopChatMessage.vue"),
@@ -163,10 +169,135 @@ before(async () => {
     attachClientRender(RoomThreadPanel, "components/desktop/content/room-chat/RoomThreadPanel.vue"),
     attachClientRender(DesktopLongMessageContent, "components/desktop/content/DesktopLongMessageContent.vue"),
     attachClientRender(DesktopAttachmentDrafts, "components/desktop/content/DesktopAttachmentDrafts.vue"),
+    attachClientRender(RoomComposer, "components/desktop/content/room-chat/RoomComposer.vue"),
+    attachClientRender(RoomComposerEventChips, "components/desktop/content/room-chat/RoomComposerEventChips.vue"),
   ]);
 });
 
 after(async () => { await vite?.close(); });
+
+function composerProps() {
+  return { attaching: false, attachmentDrafts: [], attachmentError: null, eventPreviews: [], participants: [],
+    pendingAttachmentDrafts: [], permissionApprovals: [], permissionError: null, replyTo: null, resolvingPermissionIds: {},
+    roomIdentifier: "room-a", roomLoading: false, sendError: null, sending: false };
+}
+
+function hostApproval(): DesktopHostApproval {
+  return { id: "presentation-1", presentation: { agentId: "agent-a", displayName: "GardenPoint", provider: "open-model",
+    title: "Run a command", details: '<script>notExecutable()</script>\n{"command":"npm test"}', denyScope: "session_pending" },
+    status: "pending", detail: null, retryDecision: null };
+}
+
+async function flushHostApprovals(): Promise<void> {
+  await new Promise(resolve => setImmediate(resolve));
+  await nextTick();
+}
+
+test("composer presents literal host-only native requests and sends only the selected presentation handle", async () => {
+  const requests: unknown[] = [];
+  const api = { supervisor: {
+    listHostApprovals: async (room: string) => { assert.equal(room, "room-a"); return { available: true, approvals: [hostApproval()], error: null }; },
+    decideHostApproval: async (input: { id: string; decision: HostApprovalChoice }) => { requests.push(input); return "uncertain"; },
+  } };
+  Object.assign(window, { letagentsDesktop: api });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.ok(descendants(root).some(node => node.text.includes('<script>notExecutable()</script>')));
+    assert.equal(descendants(root).some(node => node.type === "script" || node.props.innerHTML), false);
+    assert.ok(descendants(root).some(node => node.text.includes("other currently pending OpenCode permissions")));
+    assert.equal(buttonByText(root, "Allow once").props.type, "button");
+    await (buttonByText(root, "Allow once").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
+    assert.equal(buttons(root).some(node => descendants(node).some(child => child.text === "Allow once")), false);
+    assert.ok(descendants(root).some(node => node.text.includes("will not be sent again automatically")));
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer retries only the recorded choice and disables stale cards during a connection failure", async () => {
+  const approval = hostApproval(); approval.status = "decision_recorded"; approval.retryDecision = "deny";
+  let snapshot: DesktopHostApprovalSnapshot = { available: true, approvals: [approval], error: null };
+  const decisions: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => snapshot,
+    decideHostApproval: async (input: unknown) => { decisions.push(input); throw new Error("transport missing"); },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(root, "Retry recorded denial").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.deepEqual(decisions, [{ id: "presentation-1", decision: "deny" }]);
+    assert.equal(buttonByText(root, "Retry recorded denial").props.disabled, true);
+    snapshot = { available: false, approvals: [], error: "Host approvals are unavailable. Restart the background service." };
+    await (buttonByText(root, "Refresh approvals").props.onClick as () => Promise<void>)();
+    await nextTick();
+    assert.equal(buttonByText(root, "Retry recorded denial").props.disabled, true);
+    assert.ok(descendants(root).some(node => node.text.includes("Restart the background service")));
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer remains unchanged when no approval bridge is enrolled and discards late results after unmount", async () => {
+  let resolve!: (snapshot: DesktopHostApprovalSnapshot) => void;
+  Object.assign(window, { letagentsDesktop: { supervisor: { listHostApprovals: () => new Promise(done => { resolve = done; }) } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  await flushHostApprovals();
+  resolve({ available: false, approvals: [], error: "Host approval key is unavailable." });
+  await flushHostApprovals();
+  assert.equal(descendants(root).some(node => node.text.includes("Host approval key")), false);
+  assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+  app.unmount();
+  const late = mount(RoomComposer, composerProps());
+  await flushHostApprovals();
+  late.app.unmount();
+  resolve({ available: true, approvals: [hostApproval()], error: null });
+  await flushHostApprovals();
+  assert.equal(descendants(late.root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+  delete (window as unknown as Record<string, unknown>).letagentsDesktop;
+});
+
+test("composer rejects stale refreshes and removes retry controls after an uncertain recorded decision", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  let resolveRefresh!: (snapshot: DesktopHostApprovalSnapshot) => void;
+  let reads = 0;
+  const approval = hostApproval(); approval.status = "decision_recorded"; approval.retryDecision = "allow_once";
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: () => ++reads === 1 ? Promise.resolve({ available: true, approvals: [approval], error: null })
+      : new Promise(resolve => { resolveRefresh = resolve; }),
+    decideHostApproval: async () => "uncertain",
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    await (buttonByText(root, "Retry recorded approval").props.onClick as () => Promise<void>)();
+    await nextTick();
+    resolveRefresh({ available: true, approvals: [hostApproval()], error: null });
+    await flushHostApprovals();
+    assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Retry recorded approval)$/.test(child.text))), false);
+    assert.ok(descendants(root).some(node => node.text.includes("Decision could not be confirmed")));
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer disables existing approvals when the bridge becomes unavailable without an error", async (context) => {
+  context.mock.timers.enable({ apis: ["setInterval"] });
+  let available = true;
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available, approvals: available ? [hostApproval()] : [], error: null }),
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, false);
+    available = false;
+    context.mock.timers.tick(3_000);
+    await flushHostApprovals();
+    assert.equal(buttonByText(root, "Allow once").props.disabled, true);
+    assert.ok(descendants(root).some(node => node.text.includes("Host approvals are unavailable")));
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
 
 function mount(component: object, props: Record<string, unknown>): { root: HostNode; app: App } {
   const root = hostNode("element", "root");

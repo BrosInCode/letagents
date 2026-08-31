@@ -11,6 +11,9 @@ import {
 } from "./cloud-http.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
+import { HostApprovalBroker } from "./host-approval-broker.js";
+import { HostApprovalVerifier } from "./host-approval-auth.js";
+import { requestHostApprovalVerifier } from "./state-recovery-key.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { DaemonAuthority } from "./daemon-authority.js";
 import { DaemonReadModel } from "./daemon-read-model.js";
@@ -133,6 +136,8 @@ export class SupervisorDaemon {
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly providerStreams: ProviderStreamCoordinator;
   private executionCapture: ExecutionCaptureCoordinator | null = null;
+  private readonly hostApprovals: HostApprovalBroker;
+  private hostApprovalVerifier: HostApprovalVerifier | null = null;
   private readonly providerCheckpoints: ProviderCheckpointCoordinator;
   private readonly providerExecution: ProviderExecutionCoordinator | null;
   private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
@@ -354,6 +359,7 @@ export class SupervisorDaemon {
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
       observeExecution: (entryId, handle, generation) => this.executionCapture?.install(entryId, handle, generation) ?? (() => {}),
+      observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
         getEntry: (entryId) => this.store.getEntry(entryId),
@@ -774,7 +780,37 @@ export class SupervisorDaemon {
       },
       policy: { structuredRoomTurnCompletion },
     });
+    this.hostApprovals = new HostApprovalBroker({
+      store: this.store, inbox: this.supervisedInbox, provider: this.providerPort,
+      currentHandle: entryId => this.liveHandles.get(entryId),
+      isCurrent: () => !this.handoffScheduled,
+      fenceCommit: commit => this.fenceDaemonCommit(commit),
+      exactAuthority: async (entry, handle, generation) => {
+        const binding = await this.workerBindings.get(entry.id);
+        if (!binding || binding.execution_generation_id !== generation) return false;
+        const bearer = await this.workerBindings.credentialFor(binding);
+        if (!bearer) return false;
+        return this.providerCheckpoints.isExactAuthority({ agentId: entry.id, roomId: binding.room_id,
+          provider: entry.provider, apiUrl: binding.api_url, agentSessionId: binding.agent_session_id, bearer,
+          handle, workAttemptId: handle.workAttemptId, executionGenerationId: generation,
+          providerContinuationId: handle.providerContinuationId, providerConnection: handle.providerConnection ?? null,
+          daemonGeneration: this.singleton.currentGeneration });
+      },
+    });
     const controlOperations = {
+      hostApprovalChallenge: () => this.hostApprovalVerifier?.challenge() ?? null,
+      hostApprovalRequest: async (envelope: unknown) => {
+        const request = this.hostApprovalVerifier?.verify(envelope);
+        if (!request) throw new Error("Host approvals are unavailable or this request could not be authenticated.");
+        if (request.operation === "list") {
+          const input = request.input as Record<string, unknown> | null;
+          if (!input || Object.keys(input).length !== 1 || typeof input.roomId !== "string") throw new Error("An exact approval room is required.");
+          return this.hostApprovals.list(input.roomId);
+        }
+        const input = request.input as Record<string, unknown> | null;
+        if (input?.actorId !== `host-${this.hostApprovalVerifier!.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
+        return this.hostApprovals.decide(input);
+      },
       activateCustodialPolling: (input) => this.deliveryCutoverExecution.activatePolling(input),
       getPollingActivation: (input) => this.deliveryCutoverExecution.getPollingActivation(input),
       cancelPollingActivation: (input) => this.deliveryCutoverExecution.cancelPollingActivation(input),
@@ -844,6 +880,8 @@ export class SupervisorDaemon {
     assertMacOS(this.platform);
     await this.singleton.acquire();
     try {
+      this.hostApprovalVerifier = new HostApprovalVerifier(this.singleton.currentGeneration,
+        await (storage.getHostApprovalPublicKey ?? requestHostApprovalVerifier)());
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
         return (await this.store.load()).generation;
@@ -880,6 +918,7 @@ export class SupervisorDaemon {
     // continuations before awaiting any drain so they cannot retain a socket
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
+    this.hostApprovals.close();
     this.executionCapture?.close();
     this.supervisedDelivery?.fence();
     this.wakeRoomMoveReconciliationWaiters();
@@ -1077,6 +1116,7 @@ export class SupervisorDaemon {
   private async prepareHandoff(): Promise<void> {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
+    this.hostApprovals.close();
     this.executionCapture?.close();
     // Authority revocation and delivery cancellation are one synchronous
     // edge. No claimed FIFO item may observe the public fence before its

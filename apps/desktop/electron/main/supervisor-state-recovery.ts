@@ -1,6 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { createRequire } from "node:module";
 import type { ChildProcess } from "node:child_process";
+import { loadHostApprovalSigner } from "./host-approval-auth.js";
 
 type SecretStorage = {
   isEncryptionAvailable(): boolean;
@@ -37,17 +38,20 @@ export function createStateRecoveryKey(storage: SecretStorage = electronStorage(
 /**
  * Serve the exact child launched by Electron, before its control socket opens.
  * No key in argv, environment, lifecycle logs, renderer IPC, or room events.
- * Existing/up-to-date databases never request a key (or touch the Keychain).
+ * Existing/up-to-date databases never request a recovery key. Host approval
+ * enrollment is independent and receives only the public signing verifier.
  */
 export function prepareSupervisorState(
   child: ChildProcess,
   createKey: () => { key: Buffer; sealedKey: string } = createStateRecoveryKey,
   callerWaitMs = 30_000,
+  getHostApprovalPublicKey: () => Promise<string> = async () => (await loadHostApprovalSigner()).publicKey,
 ): Promise<void> {
   // Injected legacy test/process ports without IPC do not own secure bootstrap.
   if (typeof child.send !== "function") return Promise.resolve();
   return new Promise((resolve, reject) => {
     let requested = false;
+    let verifierRequested = false;
     let settled = false;
     let keyUnavailable = false;
     const finish = (error?: Error) => {
@@ -68,6 +72,17 @@ export function prepareSupervisorState(
       const value = message as Record<string, unknown>;
       if (value.type === "state_recovery_ready") { finish(); return; }
       if (value.type === "state_recovery_failed") { exited(); return; }
+      if (value.type === "host_approval_verifier_request" && !verifierRequested
+        && typeof value.id === "string" && /^[0-9a-f-]{36}$/.test(value.id)) {
+        verifierRequested = true;
+        // Secure-storage unavailability disables approvals, never startup.
+        void Promise.resolve().then(getHostApprovalPublicKey).catch(() => null).then((publicKey) => {
+          if (settled || !child.connected) return;
+          try { child.send!({ type: "host_approval_verifier", id: value.id, publicKey }, () => undefined); }
+          catch { /* detached child stays approval-unavailable */ }
+        });
+        return;
+      }
       if (value.type !== "state_recovery_key_request" || requested
         || typeof value.id !== "string" || !/^[0-9a-f-]{36}$/.test(value.id)) return;
       requested = true;

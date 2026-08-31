@@ -66,6 +66,7 @@ function coordinatorHarness(input: {
   clearInterval?: typeof clearInterval;
   endStream?: (entryId: string) => void;
   observeExecution?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
+  observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
 } = {}) {
   let manifest = entry();
@@ -81,6 +82,7 @@ function coordinatorHarness(input: {
   let stopCalls = 0;
   const coordinator = new ProviderStreamCoordinator({
     observeExecution: input.observeExecution,
+    observePermissions: input.observePermissions,
     provider: {
       stop: async (current) => {
         stopCalls += 1;
@@ -157,6 +159,35 @@ function coordinatorHarness(input: {
     getManifest: () => manifest,
   };
 }
+
+test("installing the approval bridge preserves full-access launch configuration and runtime", async () => {
+  const observed: Array<[string, ProviderActionHandle, string]> = [];
+  let starts = 0;
+  let disposed = 0;
+  const harness = coordinatorHarness({
+    observePermissions: (agentId, native, generation) => {
+      observed.push([agentId, native, generation]);
+      return () => { disposed++; };
+    },
+    startDelivery: async () => { starts++; },
+  });
+  const configured: DaemonManifestEntry = { ...entry(), permission_profile_id: "full_access",
+    config_revision: 7, runtime_configuration_revision: 7,
+    provider_launch_policy: { approvalPolicy: "never", sandboxMode: "danger-full-access" } };
+  harness.setManifest(structuredClone(configured));
+  const beforeHandle = structuredClone(handle);
+  await harness.coordinator.install(configured.id, handle, "generation-2");
+  assert.equal(observed.length, 1);
+  assert.equal(observed[0]![1], handle);
+  assert.equal(observed[0]![2], "generation-2");
+  assert.deepEqual(harness.getManifest(), configured);
+  assert.deepEqual(handle, beforeHandle);
+  assert.equal(harness.stopCalls(), 0);
+  assert.equal(starts, 1);
+  harness.coordinator.remove(configured.id, handle);
+  assert.equal(disposed, 1);
+  assert.deepEqual(harness.getManifest(), configured);
+});
 
 test("optional execution observation failures cannot block installation, delivery, or replacement cleanup", async () => {
   const installed: Array<[string, ProviderActionHandle, string]> = [];

@@ -7,6 +7,8 @@ import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainReque
  * bound by SupervisorDaemon, which remains the authority owner.
  */
 export interface DaemonControlOperations {
+  hostApprovalChallenge(): unknown;
+  hostApprovalRequest(envelope: unknown): unknown;
   activateCustodialPolling(input: PollingActivationRequest): unknown;
   getPollingActivation(input: DeliveryDrainIdentity): unknown;
   cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
@@ -163,6 +165,8 @@ export function createDaemonControlRequestHandler(
       return { accepted: true, generation: context.currentGeneration() };
     }
     if (request.method === "manifest.list") return operations.listManifest();
+    if (request.method === "supervisor.host_approval_challenge") return operations.hostApprovalChallenge();
+    if (request.method === "supervisor.host_approval_request") return operations.hostApprovalRequest(request.params);
     if (request.method === "supervisor.activate_custodial_polling"
       || request.method === "supervisor.get_polling_activation"
       || request.method === "supervisor.cancel_polling_activation") {

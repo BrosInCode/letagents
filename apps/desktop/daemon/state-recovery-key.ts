@@ -4,8 +4,40 @@ import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupSt
 
 export type StateRecoveryBootstrap = {
   getBackupKey?: typeof requestStateRecoveryKey;
+  /** Trusted parent/bootstrap injection, never a socket enrollment operation. */
+  getHostApprovalPublicKey?: typeof requestHostApprovalVerifier;
   onPrepared?: (failed?: boolean) => Promise<void>;
 };
+
+/** Every daemon birth requests its public verifier before readiness disconnects IPC. */
+export function requestHostApprovalVerifier(): Promise<string | null> {
+  if (!process.send || !process.connected) return Promise.resolve(null);
+  const id = randomUUID();
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (publicKey: string | null = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      process.off("message", receive);
+      process.off("disconnect", disconnected);
+      resolve(publicKey);
+    };
+    const disconnected = () => finish();
+    const receive = (message: unknown) => {
+      if (!message || typeof message !== "object") return;
+      const value = message as Record<string, unknown>;
+      if (value.type !== "host_approval_verifier" || value.id !== id) return;
+      finish(typeof value.publicKey === "string" && value.publicKey.length <= 128 ? value.publicKey : null);
+    };
+    // Missing/locked signing custody must not delay ordinary full-access work.
+    const timer = setTimeout(disconnected, 1_000);
+    process.on("message", receive);
+    process.once("disconnect", disconnected);
+    try { process.send!({ type: "host_approval_verifier_request", id }, (error) => { if (error) disconnected(); }); }
+    catch { disconnected(); }
+  });
+}
 
 /** Caller holds the daemon singleton; initialize is the existing schema owner. */
 export async function withProtectedStateUpgrade<T>(
