@@ -590,6 +590,9 @@ export function createDaemonControlRequestHandler(
     }
     if (request.method === "supervisor.authorize_custodial_polling") {
       const params = paramsRecord(request.params);
+      if (params.room_cursor !== undefined && params.room_cursor !== null && typeof params.room_cursor !== "string") {
+        throw new Error("Custodial polling cursor must be a string or null.");
+      }
       return operations.authorizeCustodialPolling({
         entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
         work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
@@ -597,6 +600,14 @@ export function createDaemonControlRequestHandler(
         api_url: String(params.api_url ?? ""), contract: String(params.contract ?? ""),
         phase: String(params.phase ?? ""), tool_name: String(params.tool_name ?? ""),
         expected_configuration_revision: Number(params.expected_configuration_revision ?? NaN),
+        process_incarnation_id: typeof params.process_incarnation_id === "string" ? params.process_incarnation_id : undefined,
+        // JSON-RPC numeric and string request IDs belong to different invocations.
+        mcp_request_id: typeof params.mcp_request_id === "string" || typeof params.mcp_request_id === "number" ? params.mcp_request_id : undefined,
+        room_cursor: params.room_cursor as string | null | undefined,
+        expected_activation_id: typeof params.expected_activation_id === "string" ? params.expected_activation_id : undefined,
+        expected_binding_epoch: typeof params.expected_binding_epoch === "number" ? params.expected_binding_epoch : undefined,
+        input_cursor: typeof params.input_cursor === "string" ? params.input_cursor : undefined,
+        offered_frontier: typeof params.offered_frontier === "string" ? params.offered_frontier : undefined,
       });
     }
     if (request.method === "supervisor.checkpoint_worker_cursor") {

@@ -346,8 +346,8 @@ export type PollingOfferRecord = {
   created_at_ms: number; acknowledged_at_ms: number | null;
 };
 type PollingOfferScope = { operationId: string; agentId: string; processIncarnationId: string };
-export type RecordPollingOffer = PollingOfferScope & { requestId: string | number; inputCursor: string; offeredFrontier: string };
-export type AcknowledgePollingOffer = PollingOfferScope & { roomCursor: string };
+export type RecordPollingOffer = PollingOfferScope & { requestId: string | number; inputCursor: string; offeredFrontier: string; expectedBindingEpoch: number };
+export type AcknowledgePollingOffer = PollingOfferScope & { roomCursor: string | null };
 
 const offers = "custodial_polling_offers";
 const offerIdentity = ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "binding_epoch", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"];
@@ -466,6 +466,13 @@ function currentOfferAuthority(database: DatabaseSync, input: PollingOfferScope,
   const activation = exactActivation(database, input);
   if (activation.phase !== "active") throw new Error("Polling offer requires an active native activation.");
   assertCurrent(database, activation, current);
+  const session = database.prepare(`SELECT s.expires_at FROM supervised_worker_sessions s
+    JOIN worker_session_bindings b ON b.entry_id=s.agent_id AND b.room_id=s.room_id
+      AND b.agent_session_id=s.agent_session_id AND b.execution_generation_id=s.execution_generation_id
+      AND b.credential_ref=s.credential_ref WHERE s.agent_id=?`).get(activation.agent_id);
+  if (typeof session?.expires_at !== "string" || !(Date.parse(session.expires_at) > Date.now())) {
+    throw new Error("Polling offer worker session authority is missing, expired or changed.");
+  }
   return activation;
 }
 
@@ -474,13 +481,16 @@ function currentOfferAuthority(database: DatabaseSync, input: PollingOfferScope,
  * Replay refusal is guaranteed only within the retained window. Beyond it,
  * a pure-read replay may become a fresh offer under the identical authority
  * fences. Neither reoffering nor compaction advances the worker cursor. */
-export function recordPollingOffer(database: DatabaseSync, input: RecordPollingOffer, current: DaemonManifestEntry | undefined): PollingOfferRecord {
+export function recordPollingOffer(database: DatabaseSync, input: RecordPollingOffer, current: DaemonManifestEntry | undefined): PollingOfferRecord | null {
   const activation = currentOfferAuthority(database, input, current);
   if (typeof input.requestId !== "string" && !Number.isSafeInteger(input.requestId)) throw new Error("Polling offer requires an exact SDK request id.");
   const requestId = JSON.stringify(input.requestId); // Numeric 1 and string "1" are different invocations.
   if (offerCursor(input.offeredFrontier) < offerCursor(input.inputCursor)) throw new Error("Polling offer cannot move behind its input cursor.");
   const binding = database.prepare("SELECT room_cursor,binding_epoch FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
   if (!Number.isSafeInteger(binding.binding_epoch) || Number(binding.binding_epoch) < 1) throw new Error("Polling offer worker binding epoch is invalid.");
+  if (!Number.isSafeInteger(input.expectedBindingEpoch) || input.expectedBindingEpoch < 1 || input.expectedBindingEpoch !== binding.binding_epoch) {
+    throw new Error("Polling offer worker binding epoch changed.");
+  }
   const prior = database.prepare(`SELECT * FROM ${offers} WHERE activation_id=? AND process_incarnation_id=? AND mcp_request_id=?`)
     .get(input.operationId, input.processIncarnationId, requestId) as PollingOfferRecord | undefined;
   const tail = getPollingOfferTail(database, input.operationId);
@@ -492,6 +502,9 @@ export function recordPollingOffer(database: DatabaseSync, input: RecordPollingO
     return prior;
   }
   if (binding.room_cursor !== input.inputCursor) throw new Error("Polling offer input is not the durable acknowledged cursor.");
+  // An empty no-progress read supplies no new acknowledgement authority. Keep
+  // the existing tail, but only after checking retained request identity.
+  if (input.offeredFrontier === input.inputCursor) return null;
   const offer: PollingOfferRecord = { offer_id: randomUUID(), activation_id: input.operationId, process_incarnation_id: input.processIncarnationId,
     binding_epoch: Number(binding.binding_epoch),
     mcp_request_id: requestId, input_cursor: input.inputCursor, offered_frontier: input.offeredFrontier, predecessor_offer_id: tail?.offer_id ?? null,
@@ -508,23 +521,25 @@ export function recordPollingOffer(database: DatabaseSync, input: RecordPollingO
 
 /** Both writes share the ManifestStore transaction. A refused cursor never
  * advances anything, including when it names a superseded offer's frontier. */
-export function acknowledgePollingOffer(database: DatabaseSync, input: AcknowledgePollingOffer, current: DaemonManifestEntry | undefined): { acknowledged: boolean; offer: PollingOfferRecord | null; roomCursor: string } {
+export function acknowledgePollingOffer(database: DatabaseSync, input: AcknowledgePollingOffer, current: DaemonManifestEntry | undefined): { acknowledged: boolean; offer: PollingOfferRecord | null; roomCursor: string; bindingEpoch: number } {
   const activation = currentOfferAuthority(database, input, current);
-  offerCursor(input.roomCursor);
+  if (input.roomCursor !== null) offerCursor(input.roomCursor);
   const binding = database.prepare("SELECT room_cursor,binding_epoch FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
+  const bindingEpoch = Number(binding.binding_epoch);
+  if (!Number.isSafeInteger(bindingEpoch) || bindingEpoch < 1) throw new Error("Polling offer worker binding epoch is invalid.");
   const roomCursor = String(binding.room_cursor); offerCursor(roomCursor);
   const offer = getPollingOfferTail(database, input.operationId);
-  if (!offer || offer.process_incarnation_id !== input.processIncarnationId || offer.offered_frontier !== input.roomCursor
+  if (input.roomCursor === null || !offer || offer.process_incarnation_id !== input.processIncarnationId || offer.offered_frontier !== input.roomCursor
     || offer.binding_epoch !== binding.binding_epoch) {
-    return { acknowledged: false, offer, roomCursor };
+    return { acknowledged: false, offer, roomCursor, bindingEpoch };
   }
   if (offer.acknowledged_at_ms !== null) {
     if (roomCursor !== offer.offered_frontier) throw new Error("Polling offer acknowledgement and worker cursor disagree.");
-    return { acknowledged: true, offer, roomCursor };
+    return { acknowledged: true, offer, roomCursor, bindingEpoch };
   }
   if (roomCursor !== offer.input_cursor) throw new Error("Polling offer worker cursor changed before acknowledgement.");
   const at = Math.max(Date.now(), offer.created_at_ms);
   database.prepare(`UPDATE ${offers} SET acknowledged_at_ms=? WHERE offer_id=?`).run(at, offer.offer_id);
   database.prepare("UPDATE worker_session_bindings SET room_cursor=?,updated_at=? WHERE entry_id=?").run(offer.offered_frontier, new Date(at).toISOString(), activation.agent_id);
-  return { acknowledged: true, offer: getPollingOfferTail(database, input.operationId), roomCursor: offer.offered_frontier };
+  return { acknowledged: true, offer: getPollingOfferTail(database, input.operationId), roomCursor: offer.offered_frontier, bindingEpoch };
 }

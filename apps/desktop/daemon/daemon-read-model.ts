@@ -72,6 +72,7 @@ export class DaemonReadModel {
         agent_state_subscription_v1: true,
         agent_activity_stream_v1: true,
         custodialPollingV1: true,
+        custodialPollingOffersV1: true,
       },
       generation: this.ports.currentDaemonGeneration(),
       pid: process.pid,
