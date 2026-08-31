@@ -28,7 +28,7 @@ const { requireGitRoomParticipant } = await import("../rooms/access.js");
 const { hashToken } = await import("../db/utils.js");
 const { registerRoomAgentWorkRoutes } = await import("../routes/rooms/agent-work.js");
 const { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork } = await import("../db/room-agent-work.js");
-const { parseRoomAgentWorkSummary } = await import("../../shared/room-agent-work.js");
+const { parseRoomAgentWorkSummary } = await import("../../../shared/room-agent-work.mjs");
 const { acquireLiveRoomAuthorization } = await import("../rooms/live-authorization.js");
 const { githubRepoAccessInvalidationEvents } = await import("../github/repo-access.js");
 
