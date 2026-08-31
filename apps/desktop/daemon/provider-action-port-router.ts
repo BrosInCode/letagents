@@ -18,7 +18,7 @@ import type {
   ProviderTurnControlResult,
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
-import type { ControlProbeResult, NativeExecutionObservation } from "../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
 
 type NativeHandle = {
   workAttemptId: string;
@@ -29,7 +29,7 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
-  onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): () => void;
+  onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
   probeControl?(handle: NativeHandle): Promise<ControlProbeResult>;
   capabilities(): ProviderActionCapabilities;
   spawn(input: ProviderActionSpawn): Promise<NativeHandle>;
@@ -233,10 +233,11 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     return (await this.adapter(remembered.provider)).onStream(remembered.handle, listener);
   }
 
-  async onExecution(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<() => void> {
+  async onExecution(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription> {
     const remembered = this.required(handle);
     const adapter = await this.adapter(remembered.provider);
-    return adapter.onExecution?.(remembered.handle, listener) ?? (() => {});
+    if (!adapter.onExecution) throw new Error(`Provider '${remembered.provider}' does not expose native execution observations.`);
+    return adapter.onExecution(remembered.handle, listener);
   }
 
   async probeControl(handle: ProviderActionHandle): Promise<ControlProbeResult> {

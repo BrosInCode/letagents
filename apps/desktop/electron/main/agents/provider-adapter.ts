@@ -21,8 +21,8 @@
 // independent of the daemon's three-axis `ObservedState` (separate compilation
 // unit / process): the daemon/reconciler maps this to its own vocabulary at the
 // control-socket boundary. Deliberately no cross-rootDir import into the daemon.
-import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation } from "../../../shared/execution-protocol.js";
-export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation } from "../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
+export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
 
 export type ProviderObservedState =
   | "starting"
@@ -428,7 +428,7 @@ export interface ProviderAdapter {
   capabilities(): ProviderAdapterCapabilities;
 
   /** Explicit native facts, independent from legacy raw-stream classification. */
-  onExecution?(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void;
+  onExecution?(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
   /** A failed/slow probe never interrupts work or restarts a runtime. */
   probeControl?(handle: ProviderHandle): Promise<ControlProbeResult>;
 

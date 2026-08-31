@@ -137,29 +137,41 @@ function nativeHandle(
 test("provider router carries native shadow facts and probes without invoking legacy actions", async () => {
   const calls: string[] = [];
   let listener: ((event: NativeExecutionObservation) => void) | undefined;
+  let latestSequence = 0;
+  const subscription = {
+    sourceId: "opaque-observer-source",
+    position: () => ({ firstRetainedSequence: 1, latestSequence }),
+    dispose: () => { listener = undefined; },
+  };
   const native = fakeAdapter("codex", calls);
   const adapter: NativeProviderAdapter = {
     ...native,
-    onExecution: (_handle, next) => { listener = next; return () => { listener = undefined; }; },
+    onExecution: (_handle, next) => { listener = next; return subscription; },
     probeControl: async () => ({ state: "degraded" }),
   };
   const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
   const request: ProviderActionSpawn = { provider: "codex", workAttemptId: "shadow", roomId: "room", cwd: "/tmp/shadow", launchPolicy: {} };
   const handle = await router.spawn(request);
   const received: NativeExecutionObservation[] = [];
-  const detach = await router.onExecution(handle, (event) => received.push(event));
+  const observed = await router.onExecution(handle, (event) => received.push(event));
+  assert.equal(observed, subscription, "the router forwards the source's subscription without inventing identity or positions");
+  assert.equal(observed.sourceId, "opaque-observer-source");
+  assert.deepEqual(observed.position(), { firstRetainedSequence: 1, latestSequence: 0 });
   const observation: NativeExecutionObservation = {
-    sequence: 1, observedAtMs: 1, nativeProcessIdentity: "codex:101",
+    sourceId: subscription.sourceId, sequence: 1, observedAtMs: 1, nativeProcessIdentity: "codex:101",
     fact: { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
   };
+  latestSequence = 1;
   listener!(observation);
   assert.deepEqual(received, [observation]);
+  assert.deepEqual(observed.position(), { firstRetainedSequence: 1, latestSequence: 1 });
   assert.deepEqual(await router.probeControl(handle), { state: "degraded" });
   assert.deepEqual(calls, ["codex:spawn:shadow"], "no stop, poke, turn, or restart effect from observation/probe");
-  detach();
+  observed.dispose();
   assert.equal(listener, undefined);
   const unprobeable = await router.spawn({ ...request, provider: "claude-code", workAttemptId: "unprobeable" });
   assert.deepEqual(await router.probeControl(unprobeable), { state: "unprobeable" });
+  await assert.rejects(router.onExecution(unprobeable, () => {}), /does not expose native execution observations/);
   const stale = { ...handle, providerContinuationId: "stale" };
   await assert.rejects(router.probeControl(stale), /not owned/);
   await assert.rejects(router.onExecution(stale, () => {}), /not owned/);
