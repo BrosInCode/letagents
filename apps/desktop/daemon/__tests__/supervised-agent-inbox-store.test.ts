@@ -170,14 +170,17 @@ test("an exact never-dispatched provider turn can be atomically reset without co
       provider_continuation_id: "different-continuation",
     }), /durable authority binding/);
 
-    const reset = await store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:prepared-only");
+    const { item: reset, attempt } = await store.recordRetryFailure(item!.inbox_item_id, {
+      domain: "pre_dispatch", error: "wrapper never started", resetUndispatchedTurnId: "cursor:prepared-only",
+    });
+    assert.equal(attempt, 1);
     assert.equal(reset.state, "pending");
     assert.equal(reset.provider_turn_id, null);
     assert.equal(reset.attempt_count, 0);
     assert.equal(await store.providerTurnBinding(item!.inbox_item_id), null, "reset removes the exact recovery authority with the turn id");
     assert.equal((await store.claimHead("cursor-agent"))?.inbox_item_id, item!.inbox_item_id);
     await assert.rejects(
-      store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:different"),
+      store.recordRetryFailure(item!.inbox_item_id, { domain: "pre_dispatch", error: "wrong turn", resetUndispatchedTurnId: "cursor:different" }),
       /does not match the exact in-flight provider turn/,
     );
     const timeline = (await store.receipts("cursor-agent"))[0]!.timeline;
@@ -210,7 +213,7 @@ test("an undispatched reset refuses compact effect evidence without erasing turn
     } finally { evidence.close(); }
 
     await assert.rejects(
-      store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:compacted-effect"),
+      store.recordRetryFailure(item!.inbox_item_id, { domain: "pre_dispatch", error: "effect exists", resetUndispatchedTurnId: "cursor:compacted-effect" }),
       /terminal or effect evidence/,
     );
     const preserved = await store.inboxForProviderTurn("cursor-tombstone", "cursor:compacted-effect");
@@ -249,13 +252,186 @@ test("an undispatched reset ignores compact evidence from an older execution gen
       );
     } finally { evidence.close(); }
 
-    const reset = await store.resetUndispatchedTurn(item!.inbox_item_id, "cursor:reused-turn");
+    const { item: reset } = await store.recordRetryFailure(item!.inbox_item_id, {
+      domain: "pre_dispatch", error: "wrapper never started", resetUndispatchedTurnId: "cursor:reused-turn",
+    });
     assert.equal(reset.state, "pending");
     assert.equal(reset.provider_turn_id, null);
     assert.equal(reset.attempt_count, 0);
     assert.equal(await store.providerTurnBinding(item!.inbox_item_id), null);
     await store.close();
   } finally { await env.cleanup(); }
+});
+
+test("pre-dispatch, exact-result recovery, and publication have independent durable retry budgets", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  try {
+    const [item] = await store.ingestPoll({ agent_id: "domains", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await store.claimHead("domains");
+      await assert.rejects(store.recordRetryFailure(item!.inbox_item_id, { domain: "result_recovery", error: "no native turn" }), /exact provider-turn authority/);
+      await assert.rejects(store.recordRetryFailure(item!.inbox_item_id, { domain: "publication", error: "no saved answer" }), /publishing inbox item with its saved reply/);
+      const failure = await store.recordRetryFailure(item!.inbox_item_id, { domain: "pre_dispatch", error: "setup unavailable" });
+      assert.equal(failure.attempt, attempt);
+      assert.equal(failure.item.state, "retryable");
+      assert.equal(failure.item.attempt_count, 0);
+      await store.transition(item!.inbox_item_id, "pending");
+    }
+    await store.claimHead("domains");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "exact-turn", TEST_PROVIDER_TURN_AUTHORITY);
+    await assert.rejects(store.recordRetryFailure(item!.inbox_item_id, { domain: "pre_dispatch", error: "must not replay" }), /unstarted dispatch/);
+    const binding = await store.providerTurnBinding(item!.inbox_item_id);
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const failure = await store.recordRetryFailure(item!.inbox_item_id, { domain: "result_recovery", error: "read failed" });
+      assert.equal(failure.attempt, attempt, "a recovered exact turn can still be in dispatching state");
+      assert.equal(failure.item.state, "retryable");
+      assert.equal(failure.item.attempt_count, 1);
+      assert.deepEqual(await store.providerTurnBinding(item!.inbox_item_id), binding);
+      await store.transition(item!.inbox_item_id, "pending");
+      await store.claimHead("domains");
+    }
+    await store.checkpointNormalizedTerminal({ inbox_item_id: item!.inbox_item_id, agent_id: "domains",
+      execution_generation_id: TEST_PROVIDER_TURN_AUTHORITY.origin_execution_generation_id,
+      provider_turn_id: "exact-turn", outcome: "reply", text: "Saved answer", evidence: "stream", terminal_evidence: {} });
+    await assert.rejects(store.recordRetryFailure(item!.inbox_item_id, { domain: "result_recovery", error: "cleanup failed" }), /Accepted terminal completion/);
+    const saved = await store.get(item!.inbox_item_id);
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      await store.transition(item!.inbox_item_id, "awaiting_result");
+      await store.transition(item!.inbox_item_id, "publishing");
+      const failure = await store.recordRetryFailure(item!.inbox_item_id, { domain: "publication", error: "network unavailable" });
+      assert.equal(failure.attempt, attempt);
+      assert.equal(failure.item.state, attempt === 3 ? "blocked" : "retryable");
+      assert.equal(failure.item.outcome, saved!.outcome);
+      assert.equal(failure.item.reply_client_message_id, item!.reply_client_message_id);
+      assert.equal(failure.item.attempt_count, 1);
+      if (attempt < 3) {
+        await store.transition(item!.inbox_item_id, "pending");
+        await store.claimHead("domains");
+      }
+    }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+for (const domain of ["pre_dispatch", "result_recovery", "publication"] as const) {
+  test(`${domain} retry retains conservative legacy debt without charging other known domains or bookkeeping`, async () => {
+    const env = await fixture();
+    const store = new SupervisedAgentInboxStore(env.database);
+    try {
+      const [item] = await store.ingestPoll({ agent_id: "legacy", room_id: "room", last_observed_message_id: "1",
+        messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+      await store.claimHead("legacy");
+      if (domain !== "pre_dispatch") {
+        await store.checkpointTurnStarted(item!.inbox_item_id, "exact-turn", TEST_PROVIDER_TURN_AUTHORITY);
+        await store.transition(item!.inbox_item_id, "awaiting_result", domain === "publication"
+          ? { outcome: JSON.stringify({ kind: "reply", text: "Saved legacy reply" }) } : {});
+        await store.transition(item!.inbox_item_id, domain === "publication" ? "publishing" : "result_recovery");
+      }
+      const database = new DatabaseSync(env.database);
+      try {
+        const insert = database.prepare(`INSERT INTO supervised_agent_inbox_events
+          (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail) VALUES (?,?,?,'retry_scheduled',?,?)`);
+        for (const [index, key] of ["retry_scheduled:1", "undispatched_retry:2:old-turn", "result_recovery_retry:3", "room_move_rollback:op:1"].entries()) {
+          insert.run(item!.inbox_item_id, index + 100, key, "2026-08-31T00:00:00.000Z", "Misleading publication prose must not decide the domain.");
+        }
+        database.prepare(`INSERT INTO supervised_agent_inbox_events
+          (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail) VALUES (?,200,'handoff_queued:1','queued',?,NULL)`)
+          .run(item!.inbox_item_id, "2026-08-31T00:00:00.000Z");
+      } finally { database.close(); }
+      const failure = await store.recordRetryFailure(item!.inbox_item_id, { domain, error: "unavailable" });
+      assert.equal(failure.attempt, domain === "publication" ? 2 : 3);
+      assert.equal(failure.item.state, domain === "publication" ? "retryable" : "blocked");
+      assert.equal(failure.item.provider_turn_id, domain === "pre_dispatch" ? null : "exact-turn");
+    } finally { await store.close(); await env.cleanup(); }
+  });
+}
+
+test("retry exhaustion rolls back atomically and retains the exact undispatched binding on the third failure", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  try {
+    const [item] = await store.ingestPoll({ agent_id: "atomic-retry", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      await store.claimHead("atomic-retry");
+      await store.checkpointTurnStarted(item!.inbox_item_id, `wrapper-${attempt}`, TEST_PROVIDER_TURN_AUTHORITY);
+      const failure = await store.recordRetryFailure(item!.inbox_item_id, {
+        domain: "pre_dispatch", error: "not dispatched", resetUndispatchedTurnId: `wrapper-${attempt}`,
+      });
+      assert.equal(failure.attempt, attempt);
+      assert.equal(failure.item.state, "pending");
+      assert.equal(failure.item.attempt_count, 0);
+    }
+    await store.claimHead("atomic-retry");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "wrapper-3", TEST_PROVIDER_TURN_AUTHORITY);
+    const before = await store.get(item!.inbox_item_id);
+    const binding = await store.providerTurnBinding(item!.inbox_item_id);
+    const database = new DatabaseSync(env.database);
+    try {
+      database.exec(`CREATE TRIGGER reject_retry_exhaustion BEFORE INSERT ON supervised_agent_inbox_events
+        WHEN NEW.phase='blocked' BEGIN SELECT RAISE(ABORT, 'injected exhaustion failure'); END`);
+      await assert.rejects(store.recordRetryFailure(item!.inbox_item_id, {
+        domain: "pre_dispatch", error: "not dispatched", resetUndispatchedTurnId: "wrapper-3",
+      }), /injected exhaustion failure/);
+      assert.deepEqual(await store.get(item!.inbox_item_id), before);
+      assert.deepEqual(await store.providerTurnBinding(item!.inbox_item_id), binding);
+      assert.equal((database.prepare(`SELECT COUNT(*) AS count FROM supervised_agent_inbox_events
+        WHERE inbox_item_id=? AND idempotency_key GLOB 'retry_failure:pre_dispatch:*'`).get(item!.inbox_item_id) as { count: number }).count, 2);
+      database.exec("DROP TRIGGER reject_retry_exhaustion");
+    } finally { database.close(); }
+    const exhausted = await store.recordRetryFailure(item!.inbox_item_id, {
+      domain: "pre_dispatch", error: "not dispatched", resetUndispatchedTurnId: "wrapper-3",
+    });
+    assert.equal(exhausted.attempt, 3);
+    assert.equal(exhausted.item.state, "blocked");
+    assert.equal(exhausted.item.provider_turn_id, "wrapper-3");
+    assert.equal(exhausted.item.attempt_count, 1);
+    assert.deepEqual(await store.providerTurnBinding(item!.inbox_item_id), binding);
+    await store.retryBlocked(item!.inbox_item_id);
+    await store.claimHead("atomic-retry");
+    const manualFailure = await store.recordRetryFailure(item!.inbox_item_id, {
+      domain: "pre_dispatch", error: "operator retry also failed", resetUndispatchedTurnId: "wrapper-3",
+    });
+    assert.equal(manualFailure.attempt, 4, "manual retry permits another real attempt without forgetting prior debt");
+    assert.equal(manualFailure.item.state, "blocked");
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("result-recovery debt survives a truncated receipt timeline and database reopen", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database);
+  let reopened: SupervisedAgentInboxStore | null = null;
+  try {
+    const [item] = await store.ingestPoll({ agent_id: "retry-history", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    await store.claimHead("retry-history");
+    await store.checkpointTurnStarted(item!.inbox_item_id, "exact-turn", TEST_PROVIDER_TURN_AUTHORITY);
+    await store.transition(item!.inbox_item_id, "awaiting_result");
+    await store.transition(item!.inbox_item_id, "result_recovery");
+    for (let attempt = 1; attempt <= 2; attempt += 1) {
+      const failure = await store.recordRetryFailure(item!.inbox_item_id, { domain: "result_recovery", error: "read failed" });
+      assert.equal(failure.attempt, attempt);
+      assert.equal(failure.item.state, "result_recovery");
+    }
+    const database = new DatabaseSync(env.database);
+    try {
+      const insert = database.prepare(`INSERT INTO supervised_agent_inbox_events
+        (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail) VALUES (?,?,?,'conversation_restoring',?,NULL)`);
+      for (let index = 0; index < 80; index += 1) {
+        insert.run(item!.inbox_item_id, index + 100, `noise:${index}`, "2026-08-31T00:00:00.000Z");
+      }
+    } finally { database.close(); }
+    assert.equal((await store.receipts("retry-history"))[0]!.timeline.length, 64);
+    assert.equal((await store.receipts("retry-history"))[0]!.timeline.some((event) => event.phase === "retry_scheduled"), false);
+    await store.close();
+    reopened = new SupervisedAgentInboxStore(env.database);
+    const exhausted = await reopened.recordRetryFailure(item!.inbox_item_id, { domain: "result_recovery", error: "read still failed" });
+    assert.equal(exhausted.attempt, 3);
+    assert.equal(exhausted.item.state, "blocked");
+    assert.equal(exhausted.item.provider_turn_id, "exact-turn");
+    assert.equal(exhausted.item.attempt_count, 1);
+  } finally { await reopened?.close(); await store.close(); await env.cleanup(); }
 });
 
 test("a clean pre-native handoff can atomically restore only an evidence-free dispatch intent", async () => {
@@ -2682,27 +2858,41 @@ test("delivery timeline records causal phases durably across a daemon restart", 
   } finally { await env.cleanup(); }
 });
 
-test("v7 repair adds a missing causal-event table without rewriting canonical inbox rows", async () => {
+test("current schema refuses a missing causal-event table without erasing populated inbox retry authority", async () => {
   const env = await fixture(); try {
     const first = new SupervisedAgentInboxStore(env.database);
     const [item] = await first.ingestPoll({ agent_id: "repair", room_id: "room", last_observed_message_id: "1", messages: [{ source_message_id: "msg_1", source_message: { durable: true }, activation: {} }] });
+    await first.claimHead("repair");
+    await first.recordRetryFailure(item!.inbox_item_id, { domain: "pre_dispatch", error: "setup unavailable" });
     await first.close();
-    const partialV7 = new DatabaseSync(env.database);
-    partialV7.exec("DROP TABLE supervised_agent_inbox_events");
-    assert.equal((partialV7.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
-    partialV7.close();
-    const repaired = new SupervisedAgentInboxStore(env.database);
-    const preserved = (await repaired.receipts("repair"))[0]!;
-    assert.equal(preserved.inbox_item_id, item!.inbox_item_id);
-    assert.equal(preserved.source_message_id, "msg_1");
-    assert.deepEqual(preserved.source_message, { durable: true });
-    await repaired.close();
+    const damaged = new DatabaseSync(env.database);
+    const original = damaged.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id);
+    damaged.exec("DROP TABLE supervised_agent_inbox_events");
+    assert.equal((damaged.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
+    damaged.close();
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const reopened = new SupervisedAgentInboxStore(env.database);
+      await assert.rejects(reopened.receipts("repair"), /missing inbox retry history/);
+      await reopened.close();
+    }
     const inspection = new DatabaseSync(env.database);
-    const table = inspection.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox_events'").get() as { sql: string } | undefined;
-    assert.match(table?.sql ?? "", /event_sequence INTEGER NOT NULL CHECK\(event_sequence > 0\)/);
+    assert.equal(inspection.prepare("SELECT 1 FROM sqlite_master WHERE name='supervised_agent_inbox_events'").get(), undefined);
+    assert.deepEqual(inspection.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item!.inbox_item_id), original);
+    assert.equal((inspection.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, DAEMON_STATE_SCHEMA_VERSION);
     inspection.close();
+  } finally { await env.cleanup(); }
+});
+
+test("current schema may repair an empty causal-event table only when no inbox items exist", async () => {
+  const env = await fixture(); try {
+    const first = new SupervisedAgentInboxStore(env.database);
+    await first.head("empty");
+    await first.close();
+    const database = new DatabaseSync(env.database);
+    database.exec("DROP TABLE supervised_agent_inbox_events");
+    database.close();
     const reopened = new SupervisedAgentInboxStore(env.database);
-    assert.equal((await reopened.receipts("repair"))[0]?.inbox_item_id, item!.inbox_item_id, "a second canonical reopen is stable");
+    assert.equal(await reopened.head("empty"), null);
     await reopened.close();
   } finally { await env.cleanup(); }
 });
