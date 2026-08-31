@@ -146,7 +146,8 @@ test("polling offer SQL prevents forks, disconnected successors and rewriting or
         { acknowledged_at_ms: tail.created_at_ms }, { created_at_ms: tail.created_at_ms - 1 },
       ]) {
         const row = { ...tail, offer_id: "invalid", mcp_request_id: "3", predecessor_offer_id: tail.offer_id, ...changed };
-        assert.throws(() => database.prepare(`INSERT INTO custodial_polling_offers(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`).run(...Object.values(row)));
+        assert.throws(() => database.prepare(`INSERT INTO custodial_polling_offers(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`).run(...Object.values(row)),
+          changed.predecessor_offer_id === first.offer_id ? /UNIQUE constraint failed: custodial_polling_offers.predecessor_offer_id/ : undefined);
       }
       assert.throws(() => database.prepare("UPDATE custodial_polling_offers SET acknowledged_at_ms=? WHERE offer_id=?").run(first.created_at_ms, first.offer_id), /immutable/);
       assert.throws(() => database.prepare("DELETE FROM custodial_polling_offers WHERE offer_id=?").run(tail.offer_id), /cannot be removed/);

@@ -350,8 +350,7 @@ const offerSchema = [
       OR NOT EXISTS (SELECT 1 FROM custodial_polling_activations WHERE operation_id=NEW.activation_id AND phase='active')
       OR (NEW.predecessor_offer_id IS NOT NULL AND NOT EXISTS
         (SELECT 1 FROM ${offers} p WHERE p.offer_id=NEW.predecessor_offer_id AND p.activation_id=NEW.activation_id
-          AND p.created_at_ms<=NEW.created_at_ms
-          AND NOT EXISTS (SELECT 1 FROM ${offers} s WHERE s.predecessor_offer_id=p.offer_id)))
+          AND p.created_at_ms<=NEW.created_at_ms))
     BEGIN SELECT RAISE(ABORT,'Polling offers must append to the active chain tail'); END`,
   `CREATE TRIGGER custodial_polling_offer_immutable BEFORE UPDATE ON ${offers}
     WHEN ${offerIdentity.map(column => `NEW.${column} IS NOT OLD.${column}`).join(" OR ")}
