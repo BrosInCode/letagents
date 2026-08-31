@@ -105,8 +105,8 @@ async function pollRoomAgentWork(req: AuthenticatedRequest, res: Response, deps:
       // Shared repository leases may originate from a public-room message
       // stream whose callback skips credential checks. Keep this check outside
       // that lease and after any upstream refresh, even for public rooms.
-      if (closed() || !(await authorization!.check())) return null;
       const epoch = authorizationEpoch;
+      if (closed() || !(await authorization!.check())) return null;
       const fresh = await resolveRequestAuth(req);
       return !closed() && fresh.account?.account_id === accountId && fresh.authKind === req.authKind
         ? epoch : null;

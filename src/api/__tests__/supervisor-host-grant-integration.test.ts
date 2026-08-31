@@ -1530,11 +1530,20 @@ test("room work polling rejects revoked human credentials even with an existing 
 
 test("room work polling rejects credential loss during authorization and repository revocation during a wait", { skip: requiresDatabase }, async () => {
   const f = await setupWorkPoll(); await publishRoomAgentWork(f.input);
-  for (const race of ["credential", "repository"] as const) {
+  for (const race of ["credential", "repository", "lease_settlement"] as const) {
     let checks = 0;
+    let allowed = true;
     f.routeDeps.reauthorizeGitRoomParticipant = async () => {
       if (++checks === 2 && race === "credential") await authDb!.deleteSessionByToken("work_poll_cookie");
-      return true;
+      if (checks === 2 && race === "lease_settlement") {
+        // Invalidate after the lease validates its generation, before its
+        // finally-wrapped check promise resumes the route's continuation.
+        queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => {
+          allowed = false;
+          githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: f.room.id, login: "owner_route" });
+        })));
+      }
+      return allowed;
     };
     const warmLease = acquireLiveRoomAuthorization({ req: f.request as never, roomId: f.room.id, accessRoomName: f.room.id,
       authorize: () => f.routeDeps.reauthorizeGitRoomParticipant() });
@@ -1556,6 +1565,7 @@ test("room work polling rejects credential loss during authorization and reposit
       githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: f.room.id, login: "owner_route" });
       await (identityLock ?? lock).query("COMMIT");
       assert.equal((await pending).statusCode, 403, `${race} loss during the final authorization phase must deny the body`);
+      if (race === "lease_settlement") assert.equal(allowed, false);
     } finally {
       await lock.query("ROLLBACK"); await identityLock?.query("ROLLBACK"); await pending;
       lock.release(); identityLock?.release(); warmLease.release();
