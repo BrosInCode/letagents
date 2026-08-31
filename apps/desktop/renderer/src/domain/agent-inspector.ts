@@ -663,6 +663,7 @@ function recentOutcome(entry: DesktopSupervisorManifestEntry): AgentInspectorPro
   const labels: Record<string, string> = {
     acknowledged: "Published a room response",
     acknowledged_no_reply: "Chose not to reply",
+    acknowledged_failed: "Work did not finish",
     result_recovery: "Result needs recovery",
     blocked: "Delivery needs attention",
     cancelled_by_room_move: "Cancelled after moving rooms",

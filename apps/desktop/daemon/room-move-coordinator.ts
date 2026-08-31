@@ -29,6 +29,7 @@ export type RoomMoveInboxPort = Pick<SupervisedAgentInboxStore,
   | "commitRoomMoveCursor"
   | "commitRoomMoveQueue"
   | "get"
+  | "nativeFailure"
   | "preparedRoomMove"
   | "preparedRoomMoves"
   | "providerTurnBinding"
@@ -114,7 +115,8 @@ export class RoomMoveCoordinator {
     inboxItemId: string;
   }): Promise<void> {
     const item = await this.ports.inbox.get(input.inboxItemId);
-    if (!item?.provider_turn_id || !["acknowledged", "acknowledged_no_reply"].includes(item.state)) return;
+    if (!item?.provider_turn_id || (!["acknowledged", "acknowledged_no_reply"].includes(item.state)
+      && !await this.ports.inbox.nativeFailure(item.inbox_item_id))) return;
     try {
       for (const move of await this.ports.store.pendingRoomMoves(input.agent.agentId)) {
         await this.reconcile(move);
@@ -471,6 +473,12 @@ export class RoomMoveCoordinator {
           return failFence(
             "failed",
             "The activating provider turn was cancelled before destination membership was joined.",
+          );
+        }
+        if (await this.ports.inbox.nativeFailure(item!.inbox_item_id)) {
+          return failFence(
+            "failed",
+            "The activating provider turn ended unsuccessfully before destination membership was joined.",
           );
         }
         if (!["acknowledged", "acknowledged_no_reply"].includes(item!.state)) return move;

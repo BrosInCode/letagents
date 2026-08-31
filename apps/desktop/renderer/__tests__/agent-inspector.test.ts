@@ -867,6 +867,10 @@ test("Assigned work excludes terminal historical assignments while retaining exa
 });
 
 test("stale resources preserve last-good facts but disable state-dependent actions", () => {
+  const settled = projectAgentInspector(entry({ deliveryReceipts: [receipt("message_1", "acknowledged_failed")] }),
+    { roomId: "focus_1", deliveryRetryAvailable: true });
+  assert.equal(settled?.recentOutcome?.label, "Work did not finish");
+  assert.notEqual(settled?.actions.find((action) => action.kind === "retry_delivery")?.available, true);
   const blocked = entry({ deliveryReceipts: [receipt("message_1", "blocked")] });
   const mentionMap = new Map([[blocked.id, "agent:emmymay/gardensignal"]]);
   const fresh = projectAgentInspector(blocked, { roomId: "focus_1", deliveryRetryAvailable: true, mentionInsertTextByEntryId: mentionMap });

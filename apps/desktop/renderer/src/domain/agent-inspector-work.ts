@@ -48,6 +48,7 @@ export function humanizeAgentInspectorReceiptState(state: string, terminalReason
     pending: "Waiting to start", dispatching: "Starting work", awaiting_result: "Working",
     result_recovery: "Recovering the result", publishing: "Publishing reply",
     acknowledged: "Reply published", acknowledged_no_reply: "No reply needed",
+    acknowledged_failed: "Work did not finish",
     retryable: "Ready to retry", blocked: "Needs attention",
     cancelled_by_room_move: "Cancelled after room move",
     cancelled_by_user: "Skipped by you",

@@ -935,6 +935,121 @@ test("operator not-applied never resurrects an ordinary user-cancelled exact tur
   }
 });
 
+test("exact native failure wins every Stop resolution and admits only the new correction", async () => {
+  for (const outcome of ["failed", "interrupted"] as const) {
+    for (const mode of ["native_applied", "operator_applied", "operator_not_applied"] as const) {
+      const env = await fixture();
+      const store = new ManifestStore(env.databasePath);
+      const now = "2026-08-05T10:00:00.000Z";
+      const inbox = new SupervisedAgentInboxStore(env.databasePath, () => now);
+      const actionId = `${outcome}-${mode}`;
+      const controlled: DaemonManifestEntry = {
+        ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined,
+      };
+      try {
+        await store.write(0, [controlled]);
+        const a = await inbox.enqueueCorrection({
+          agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "A",
+          source_message: { text: "A" }, activation: { decision: "activate" },
+        });
+        await inbox.enqueueCorrection({
+          agent_id: controlled.id, room_id: controlled.room_id, source_message_id: "B",
+          source_message: { text: "B" }, activation: { decision: "activate" },
+        });
+        await inbox.claimHead(controlled.id);
+        await inbox.checkpointTurnStarted(a.inbox_item_id, "turn-A", TEST_PROVIDER_TURN_AUTHORITY);
+        const linked = await store.replaceEntry(1, {
+          ...(await store.getEntry(controlled.id))!,
+          turn_control: {
+            action_id: actionId, action_sequence: 1, work_attempt_id: "attempt_1", execution_generation_id: "run_1",
+            target_room_id: controlled.room_id, target_source_message_id: "A", target_provider_continuation_id: "thread_1",
+            inbox_item_id: a.inbox_item_id, provider_turn_id: "turn-A",
+            has_correction: true, correction_text: "new instruction", correction_strategy: "stop_then_resend",
+            status: mode === "native_applied" ? "dispatching" : "uncertain", capability: "native_interrupt",
+            interrupted: null, resumed: null, state: null, stages: [], error: null, recorded_at: now, updated_at: now,
+          },
+          last_turn_control_sequence: 1,
+        });
+        await inbox.checkpointNormalizedTerminal({
+          inbox_item_id: a.inbox_item_id, agent_id: controlled.id, execution_generation_id: "run_1",
+          provider_turn_id: "turn-A", outcome, text: null, evidence: "stream",
+          terminal_evidence: { outcome, text: null, evidence: "stream", turnId: "turn-A", providerContinuationId: "thread_1" },
+        });
+        if (outcome === "interrupted") {
+          await inbox.transition(a.inbox_item_id, "acknowledged_failed");
+        }
+        const commitInput = {
+          agentId: controlled.id, roomId: controlled.room_id, actionId, workAttemptId: "attempt_1",
+          executionGenerationId: "run_1", mode, settleOriginal: mode !== "operator_not_applied",
+          activateCorrection: true, observedAt: now,
+        };
+        const before = await inbox.get(a.inbox_item_id);
+        if (mode === "native_applied" && outcome === "failed") {
+          const corrupt = new DatabaseSync(env.databasePath);
+          const validEvidence = (corrupt.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+            .get(a.inbox_item_id) as { terminal_evidence_json: string }).terminal_evidence_json;
+          try {
+            corrupt.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json=? WHERE inbox_item_id=?")
+              .run(JSON.stringify({ ...JSON.parse(validEvidence), providerContinuationId: "another-continuation" }), a.inbox_item_id);
+            await assert.rejects(() => store.commitTurnControlState(linked.generation, commitInput, (current) => current),
+              /does not match its exact native terminal/);
+            assert.equal((await store.load()).generation, linked.generation);
+            assert.deepEqual(await inbox.get(a.inbox_item_id), before);
+          } finally {
+            corrupt.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json=? WHERE inbox_item_id=?")
+              .run(validEvidence, a.inbox_item_id);
+            corrupt.close();
+          }
+        }
+        await assert.rejects(() => store.commitTurnControlState(linked.generation, commitInput, () => {
+          throw new Error("injected completion failure");
+        }), /injected completion failure/);
+        assert.deepEqual(await inbox.get(a.inbox_item_id), before, "terminalization and correction insertion roll back together");
+        assert.equal((await store.load()).generation, linked.generation);
+        assert.equal((await inbox.receipts(controlled.id)).length, 2);
+
+        const committed = await store.commitTurnControlState(linked.generation, commitInput, (current, result) => {
+          assert.equal(result.original, "terminal_won");
+          return {
+            ...current,
+            turn_control: {
+              ...current.turn_control!, status: "completed", interrupted: false, resumed: true, state: "idle",
+              operator_resolution: mode === "operator_applied" ? "applied" : mode === "operator_not_applied" ? "not_applied" : null,
+              stages: ["applied", "resumed"], updated_at: now,
+            },
+          };
+        });
+        assert.equal(committed.original, "terminal_won");
+        assert.equal((await inbox.get(a.inbox_item_id))?.state, "acknowledged_failed");
+        assert.equal(await inbox.nativeFailure(a.inbox_item_id), outcome);
+        assert.equal((await inbox.get(a.inbox_item_id))?.attempt_count, before?.attempt_count);
+        assert.deepEqual((await inbox.receipts(controlled.id)).map((item) => [item.source_message_id, item.state]), [
+          ["A", "acknowledged_failed"], [`correction:${actionId}`, "pending"], ["B", "pending"],
+        ]);
+        const inspection = new DatabaseSync(env.databasePath);
+        try {
+          assert.equal(inspection.prepare("SELECT 1 FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='user_cancelled'").get(a.inbox_item_id), undefined);
+          assert.equal((inspection.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='turn_finished'")
+            .get(a.inbox_item_id) as { value: number }).value, 1, "Stop preserves the single native terminal timeline event");
+          assert.equal(inspection.prepare("SELECT 1 FROM supervised_agent_publications WHERE inbox_item_id=?").get(a.inbox_item_id), undefined);
+          assert.deepEqual(inspection.prepare("PRAGMA foreign_key_check").all(), []);
+        } finally { inspection.close(); }
+        assert.equal((await inbox.claimHead(controlled.id))?.inbox_item_id, committed.correctionInboxItemId);
+        await store.close();
+        const reopened = new ManifestStore(env.databasePath);
+        try {
+          assert.equal((await reopened.load()).entries[0]?.turn_control?.interrupted, false,
+            "completed control survives reopen without inventing a Stop effect");
+        } finally { await reopened.close(); }
+      } finally {
+        await inbox.close();
+        await store.close();
+        await env.cleanup();
+      }
+    }
+  }
+});
+
 test("turn-control commit atomically cancels A and inserts its correction before queued B", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);

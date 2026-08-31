@@ -139,7 +139,7 @@
             <span v-if="receiptIsAnimated(receipt.state)" class="room-message-delivery-dots">
               <i></i><i></i><i></i>
             </span>
-            <CircleAlert v-else-if="receiptNeedsAttention(receipt.state)" :size="14" />
+            <CircleAlert v-else-if="receiptNeedsAttention(receipt.state) || receipt.state === 'acknowledged_failed'" :size="14" />
             <Check v-else :size="14" />
           </span>
           <strong>{{ receipt.agentName }}</strong>
@@ -367,6 +367,7 @@ const visibleDeliveryReceipts = computed(() => props.deliveryReceipts.filter((re
   "result_recovery",
   "blocked",
   "acknowledged_no_reply",
+  "acknowledged_failed",
   "cancelled_by_room_move",
   "cancelled_by_user",
   "restoring_conversation",
@@ -390,6 +391,7 @@ function receiptStateLabel(receipt: { state: string; terminalReason: string | nu
   if (state === "blocked") return "Needs attention";
   if (state === "queued_behind_blocked") return "Queued behind an issue";
   if (state === "acknowledged_no_reply") return "Read · no reply";
+  if (state === "acknowledged_failed") return "Work did not finish";
   if (state === "cancelled_by_room_move") return "Moved rooms";
   if (state === "cancelled_by_user") return "Skipped";
   return "";
@@ -402,6 +404,7 @@ function receiptLabel(receipt: { agentName: string; state: string; blockedByMess
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
   if (receipt.state === "acknowledged") return `${receipt.agentName} replied`;
   if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
+  if (receipt.state === "acknowledged_failed") return `${receipt.agentName}: Work did not finish`;
   if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
   if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
   if (receipt.state === "restoring_conversation") return `${receipt.agentName} is restoring its private conversation`;

@@ -154,7 +154,8 @@ test("v18 preserves blocked FIFO, all child authority and uncertain cutover byte
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(legacyRows(env.database), before, "reopening cannot synthesize or rewrite a legacy outcome");
     env.database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_failed' WHERE inbox_item_id='tail'").run();
-    new DaemonStateSchema().createSchema(env.database);
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database), /exact native terminal/,
+      "the reserved state alone is not operational failure evidence");
     assert.throws(() => env.database.prepare("UPDATE supervised_agent_inbox SET state='invented' WHERE inbox_item_id='tail'").run(), /CHECK/);
     assert.throws(() => env.database.prepare("UPDATE supervised_agent_inbox SET blocked_by_inbox_item_id='missing' WHERE inbox_item_id='tail'").run(), /FOREIGN KEY/);
     assert.throws(() => env.database.prepare("UPDATE supervised_agent_provider_turn_bindings SET room_id='other' WHERE inbox_item_id='head'").run(), /FOREIGN KEY/);
@@ -208,9 +209,13 @@ test("current predecessor repair preserves native-turn authority and failed term
   const env = await fixture();
   try {
     seedLegacyEvidence(env.database);
-    env.database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_failed' WHERE inbox_item_id='tail'").run();
+    env.database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',provider_turn_id='turn-tail',
+      outcome='{"kind":"failed","text":null,"evidence":"transcript"}' WHERE inbox_item_id='tail'`).run();
+    env.database.prepare(`INSERT INTO supervised_agent_provider_turn_bindings VALUES
+      ('tail','agent','room','attempt','generation','continuation','turn-tail')`).run();
     env.database.prepare(`INSERT INTO supervised_agent_terminal_results VALUES
-      ('tail','agent','generation','turn-tail','failed',NULL,'transcript','{"native":true}',?,?)`).run(now, now);
+      ('tail','agent','generation','turn-tail','failed',NULL,'transcript',?, ?,?)`)
+      .run(JSON.stringify({ turnId: "turn-tail", providerContinuationId: "continuation", outcome: "failed", text: null, evidence: "transcript" }), now, now);
     const before = legacyRows(env.database);
     const schemaVersion = Number((env.database.prepare("PRAGMA schema_version").get() as Row).schema_version);
     env.database.exec("PRAGMA writable_schema=ON");
@@ -395,11 +400,16 @@ for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19]) test(`fresh/legacy v$
     const before = legacyRows(env.database);
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(legacyRows(env.database), before);
+    env.database.exec("DELETE FROM supervised_agent_publications WHERE inbox_item_id='head'");
     const update = env.database.prepare("UPDATE supervised_agent_terminal_results SET outcome=?,normalized_text=?,evidence_source=? WHERE inbox_item_id='head'");
     for (const outcome of ["failed", "interrupted"]) {
       assert.throws(() => update.run(outcome, "not a reply", "stream"), /CHECK/);
       assert.throws(() => update.run(outcome, null, "none"), /CHECK/);
       for (const source of ["transcript", "stream"]) update.run(outcome, null, source);
+      env.database.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id='head'")
+        .run(JSON.stringify({ kind: outcome, text: null, evidence: "stream" }));
+      env.database.prepare("UPDATE supervised_agent_terminal_results SET terminal_evidence_json=? WHERE inbox_item_id='head'")
+        .run(JSON.stringify({ turnId: "turn-head", providerContinuationId: "continuation", outcome, text: null, evidence: "stream" }));
       new DaemonStateSchema().createSchema(env.database);
       assert.equal(env.database.prepare("SELECT outcome FROM supervised_agent_terminal_results WHERE inbox_item_id='head'").get()!.outcome, outcome);
     }
