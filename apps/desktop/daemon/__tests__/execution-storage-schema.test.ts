@@ -97,7 +97,7 @@ test("schema is additive, empty, idempotent, content-free, and does not own vers
     validateExecutionStorageSchema(db);
     assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 17);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'").all() as Array<{ name: string }>;
-    assert.equal(tables.length, 13);
+    assert.equal(tables.length, 14);
     for (const { name } of tables) {
       assert.equal((db.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get() as { count: number }).count, 0);
       const columns = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string }>;
@@ -214,6 +214,26 @@ test("observer bindings fence subject and current observer lifetimes to the same
       assert.throws(() => insert(db, "execution_observers", { ...observer, ...invalid }), /CHECK/);
     }
     insert(db, "execution_observers", observer);
+    assert.equal(db.prepare("SELECT source_id FROM execution_observers").get()!.source_id, null, "unknown legacy source stays unknown");
+    const setSource = db.prepare("UPDATE execution_observers SET source_id=?");
+    for (const source of ["", "a".repeat(513), " bad", "a b", "_bad", "a\n", "a\0hidden", "é", "a?b"]) {
+      assert.throws(() => setSource.run(source), /CHECK/, JSON.stringify(source));
+      assert.throws(() => insert(db, "execution_observer_sources", { agent_id: "agent", source_id: source }), /CHECK/);
+    }
+    for (const source of ["uuid-source", "1a_./:-", "a".repeat(512), null]) setSource.run(source);
+    assert.throws(() => insert(db, "execution_observer_sources", { agent_id: "agent", source_id: null }), /NOT NULL/);
+    insert(db, "execution_observer_sources", { agent_id: "agent", source_id: "first-source" });
+    assert.throws(() => insert(db, "execution_observer_sources", { agent_id: "agent", source_id: "first-source" }), /UNIQUE/);
+    assert.throws(() => insert(db, "execution_observer_sources", { agent_id: "other-agent", source_id: "first-source" }), /FOREIGN KEY/);
+    insert(db, "execution_observers", { ...observer, agent_id: "other-agent", execution_generation_id: "other-generation",
+      runtime_generation_id: "other-runtime", observer_execution_generation_id: "other-generation",
+      observer_runtime_generation_id: "other-runtime", recovery_turn_id: null });
+    insert(db, "execution_observer_sources", { agent_id: "other-agent", source_id: "first-source" });
+    assert.throws(() => db.exec("DELETE FROM execution_observers WHERE agent_id='agent'"), /FOREIGN KEY/);
+    const sourceKeys = db.prepare("PRAGMA foreign_key_list(execution_observer_sources)").all();
+    assert.equal(sourceKeys.length, 1);
+    assert.equal(sourceKeys[0].table, "execution_observers", "source memory must not pin old runtime generations");
+    assert.equal(sourceKeys[0].on_delete, "NO ACTION");
     assert.throws(() => insert(db, "execution_observers", observer), /UNIQUE/);
     assert.throws(() => db.exec("DELETE FROM execution_turns WHERE turn_id='turn'"), /FOREIGN KEY/);
     db.exec("UPDATE execution_observers SET recovery_turn_id=NULL");

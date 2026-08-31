@@ -58,8 +58,16 @@ function restoreV18Fixture(database: DatabaseSync): void {
 }
 
 function restoreV19Fixture(database: DatabaseSync): void {
+  restoreV20Fixture(database);
   restoreV19TerminalFixture(database);
   database.exec("UPDATE manifest_metadata SET schema_version=19 WHERE singleton=1; PRAGMA user_version=19");
+}
+
+function restoreV20Fixture(database: DatabaseSync): void {
+  database.exec(`DROP TABLE execution_observer_sources;
+    ALTER TABLE execution_observers DROP COLUMN source_id;
+    UPDATE manifest_metadata SET schema_version=20 WHERE singleton=1; PRAGMA user_version=20`);
+  validateExecutionStorageSchema(database, 19);
 }
 
 function seedV18Evidence(database: DatabaseSync): void {
@@ -89,12 +97,25 @@ function seedV18Evidence(database: DatabaseSync): void {
 }
 
 function typedRows(database: DatabaseSync): Record<string, unknown> {
-  return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name<>'execution_observers' ORDER BY name").all() as Row[])
+  return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name NOT IN ('execution_observers','execution_observer_sources') ORDER BY name").all() as Row[])
     .map(({ name }) => {
       const columns = (database.prepare(`PRAGMA table_info(${name})`).all() as Row[])
         .map((column) => String(column.name)).filter((column) => !["turn_outcome", "control_evidence", "projection_sha256"].includes(column));
       return [String(name), database.prepare(`SELECT ${columns.join(",")} FROM ${name} ORDER BY rowid`).all()];
     }));
+}
+
+function seedV19Observer(database: DatabaseSync): void {
+  database.exec(`
+    INSERT INTO execution_generations VALUES('observer-generation','agent',200);
+    INSERT INTO execution_runtime_generations
+      (runtime_generation_id,execution_generation_id,agent_id,provider,runtime_state,control_state,continuation_state,config_revision,created_at_ms)
+      VALUES('observer-runtime','observer-generation','agent','codex','ready','responsive','available',1,200);
+    INSERT INTO execution_observers
+      (agent_id,execution_generation_id,runtime_generation_id,observer_execution_generation_id,observer_runtime_generation_id,
+       daemon_generation_id,observer_epoch,last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms)
+      VALUES('agent','generation','runtime','observer-generation','observer-runtime','daemon-generation',7,42,50,'turn',200);
+  `);
 }
 
 function seedLegacyEvidence(database: DatabaseSync): void {
@@ -182,10 +203,10 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
-    (version === 17 ? restoreV17Fixture : restoreV19Fixture)(env.database);
+    (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : restoreV20Fixture)(env.database);
     seedLegacyEvidence(env.database);
     const before = legacyRows(env.database);
     const script = `
@@ -205,9 +226,10 @@ for (const version of [17, 19]) test(`a killed migrator leaves the complete v${v
   } finally { await env.cleanup(); }
 });
 
-test("current predecessor repair preserves native-turn authority and failed terminal evidence", async () => {
+for (const version of [20, 21]) test(`v${version} predecessor repair preserves native-turn authority and failed terminal evidence`, async () => {
   const env = await fixture();
   try {
+    if (version === 20) restoreV20Fixture(env.database);
     seedLegacyEvidence(env.database);
     env.database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',provider_turn_id='turn-tail',
       outcome='{"kind":"failed","text":null,"evidence":"transcript"}' WHERE inbox_item_id='tail'`).run();
@@ -359,7 +381,7 @@ test("malformed v18 and missing current observers fail before WAL or initializer
   } finally { await env.cleanup(); }
 });
 
-test("v20 rebuilds only terminal evidence, preserving old outcomes, identity and rowids", async () => {
+test("v19 upgrade rebuilds only terminal evidence and adds source identity, preserving old outcomes, identity and rowids", async () => {
   const env = await fixture();
   try {
     restoreV19Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database);
@@ -370,30 +392,32 @@ test("v20 rebuilds only terminal evidence, preserving old outcomes, identity and
       INSERT INTO supervised_agent_terminal_results VALUES('unreadable','agent','generation','turn-unreadable','unreadable',NULL,'none','{ "original": "unreadable" }','then','now')`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const retainedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name<>'supervised_agent_terminal_results' ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('supervised_agent_terminal_results','execution_observers','execution_observer_sources') ORDER BY type,name`).all();
     const unrelatedSchema = retainedSchema();
     const rowids = env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
-    assert.deepEqual(retainedSchema(), unrelatedSchema, "no other table, index or trigger is rebuilt");
+    assert.deepEqual(retainedSchema(), unrelatedSchema, "no unrelated table, index or trigger is rebuilt");
     assert.deepEqual(env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all(), rowids);
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
     assert.throws(() => env.database.exec("UPDATE supervised_agent_terminal_results SET provider_turn_id='turn-head' WHERE inbox_item_id='tail'"), /UNIQUE/);
     assert.throws(() => env.database.exec("UPDATE supervised_agent_terminal_results SET inbox_item_id='missing' WHERE inbox_item_id='tail'"), /FOREIGN KEY/);
-    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 20);
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 20);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
   } finally { await env.cleanup(); }
 });
 
-for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19]) test(`fresh/legacy v${version} reaches v20 with constrained native failure slots`, async () => {
+for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
   const env = await fixture();
   try {
     if (version === 17) restoreV17Fixture(env.database);
     else if (version === 18) restoreV18Fixture(env.database);
+    else if (version === 19) restoreV19Fixture(env.database);
+    else if (version === 20) restoreV20Fixture(env.database);
     else if (version) {
-      restoreV19Fixture(env.database);
+      restoreV17Fixture(env.database);
       env.database.exec(`UPDATE manifest_metadata SET schema_version=${version} WHERE singleton=1; PRAGMA user_version=${version}`);
     }
     seedLegacyEvidence(env.database);
@@ -416,7 +440,9 @@ for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19]) test(`fresh/legacy v$
     update.run("unreadable", null, "none");
     assert.throws(() => update.run("invented", null, "stream"), /CHECK/);
     assert.equal(env.database.prepare("SELECT state FROM supervised_agent_inbox WHERE inbox_item_id='head'").get()!.state, "blocked", "storage never settles delivery");
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 20);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    validateExecutionStorageSchema(env.database);
+    assert.ok(env.database.prepare("PRAGMA table_info(execution_observers)").all().some((row) => row.name === "source_id"));
   } finally { await env.cleanup(); }
 });
 
@@ -440,7 +466,83 @@ test("v20 terminal rebuild and paired markers roll back together after validatio
   } finally { await env.cleanup(); }
 });
 
-for (const version of [19, 20]) test(`v${version} refuses missing or weakened terminal authority before WAL or repair writes`, async () => {
+test("v21 adds unknown source provenance without resetting cursors or rebuilding existing tables", async () => {
+  const env = await fixture();
+  try {
+    restoreV20Fixture(env.database);
+    seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedV19Observer(env.database);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
+    const observer = env.database.prepare("SELECT rowid,* FROM execution_observers").get();
+    const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='execution_observers'").get();
+    const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
+      WHERE tbl_name NOT IN ('execution_observers','execution_observer_sources') ORDER BY type,name`).all();
+    const schema = unrelatedSchema();
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
+    assert.deepEqual({ ...env.database.prepare("SELECT rowid,* FROM execution_observers").get() }, { ...observer, source_id: null });
+    assert.deepEqual(env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='execution_observers'").get(), rootpage);
+    assert.deepEqual(unrelatedSchema(), schema);
+    assert.deepEqual(env.database.prepare("SELECT * FROM execution_observer_sources").all(), [], "migration never manufactures admitted sources");
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 21);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 21);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ ...env.database.prepare("SELECT rowid,* FROM execution_observers").get() }, { ...observer, source_id: null });
+    env.database.exec(`UPDATE execution_observers SET source_id='new-source';
+      INSERT INTO execution_observer_sources VALUES('agent','new-source')`);
+    const reopened = await openDaemonStateDatabase(env.path, (database) => new DaemonStateSchema().createSchema(database));
+    try {
+      assert.deepEqual({ ...reopened.prepare("SELECT source_id,last_source_sequence,max_observed_sequence FROM execution_observers").get() },
+        { source_id: "new-source", last_source_sequence: 42, max_observed_sequence: 50 });
+      assert.deepEqual(reopened.prepare("SELECT * FROM execution_observer_sources").all().map((row) => ({ ...row })),
+        [{ agent_id: "agent", source_id: "new-source" }]);
+    } finally { reopened.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("v21 source column and admission memory roll back atomically with the old observer and version pair", async () => {
+  const env = await fixture();
+  try {
+    restoreV20Fixture(env.database);
+    seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedV19Observer(env.database);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), observer: env.database.prepare("SELECT * FROM execution_observers").all(), versions: versionPair(env.database) };
+    const schema = env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all();
+    assert.throws(() => new DaemonStateSchema((database) => {
+      validateExecutionStorageSchema(database);
+      assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 20);
+      assert.equal(database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 20);
+      assert.equal(database.prepare("SELECT source_id FROM execution_observers").get()!.source_id, null);
+      database.exec("INSERT INTO execution_observer_sources VALUES('agent','uncommitted-source')");
+      throw new Error("interrupt v21 before markers");
+    }).createSchema(env.database), /interrupt v21/);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database), observer: env.database.prepare("SELECT * FROM execution_observers").all(), versions: versionPair(env.database) }, before);
+    assert.deepEqual(env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(), schema);
+    validateExecutionStorageSchema(env.database, 19);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual(env.database.prepare("SELECT * FROM execution_observer_sources").all(), []);
+    assert.equal(env.database.prepare("SELECT last_source_sequence FROM execution_observers").get()!.last_source_sequence, 42);
+  } finally { await env.cleanup(); }
+});
+
+for (const version of [20, 21]) test(`v${version} rejects malformed source storage before WAL or initializer writes`, async () => {
+  for (const corruption of version === 20
+    ? ["ALTER TABLE execution_observers ADD COLUMN source_id TEXT", "DROP TABLE execution_observers"]
+    : ["ALTER TABLE execution_observers DROP COLUMN source_id", "DROP TABLE execution_observer_sources"]) {
+    const env = await fixture();
+    try {
+      if (version === 20) restoreV20Fixture(env.database);
+      env.database.exec(`${corruption}; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
+      const before = await readFile(env.path);
+      let initialized = false;
+      await assert.rejects(() => openDaemonStateDatabase(env.path, () => { initialized = true; }), /Execution storage schema mismatch/);
+      assert.equal(initialized, false);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, version);
+    } finally { await env.cleanup(); }
+  }
+});
+
+for (const version of [19, 20, 21]) test(`v${version} refuses missing or weakened terminal authority before WAL or repair writes`, async () => {
   const corruptions = [
     "DROP TABLE supervised_agent_terminal_results",
     "UPDATE sqlite_master SET sql=replace(sql, 'outcome TEXT NOT NULL CHECK(outcome IN (''reply'',''no_reply'',''unreadable''))', 'outcome TEXT NOT NULL') WHERE name='supervised_agent_terminal_results'",
@@ -451,11 +553,12 @@ for (const version of [19, 20]) test(`v${version} refuses missing or weakened te
     "DROP INDEX supervised_agent_terminal_result_turn; CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,provider_turn_id)",
     "CREATE TABLE unexpected_terminal_child(inbox_item_id TEXT REFERENCES supervised_agent_terminal_results(inbox_item_id) ON DELETE CASCADE) STRICT",
   ];
-  if (version === 20) corruptions[1] = "UPDATE sqlite_master SET sql=replace(sql, ',CHECK(outcome NOT IN (''failed'',''interrupted'') OR (normalized_text IS NULL AND evidence_source <> ''none''))', '') WHERE name='supervised_agent_terminal_results'";
+  if (version >= 20) corruptions[1] = "UPDATE sqlite_master SET sql=replace(sql, ',CHECK(outcome NOT IN (''failed'',''interrupted'') OR (normalized_text IS NULL AND evidence_source <> ''none''))', '') WHERE name='supervised_agent_terminal_results'";
   for (const corruption of corruptions) {
     const env = await fixture();
     try {
       if (version === 19) restoreV19Fixture(env.database);
+      if (version === 20) restoreV20Fixture(env.database);
       const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
       env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
         PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);

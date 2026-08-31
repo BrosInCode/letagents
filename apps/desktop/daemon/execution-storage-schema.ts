@@ -328,14 +328,26 @@ const observerTable = `CREATE TABLE execution_observers (
   FOREIGN KEY(recovery_turn_id,agent_id,execution_generation_id,runtime_generation_id)
     REFERENCES execution_turns(turn_id,agent_id,execution_generation_id,runtime_generation_id)
 ) STRICT`;
+// Match executionIdentity without inventing provenance for pre-source observers.
+const observerSourceColumn = "source_id TEXT CHECK(source_id IS NULL OR (length(source_id) BETWEEN 1 AND 512 AND source_id GLOB '[A-Za-z0-9]*' AND source_id NOT GLOB '*[^A-Za-z0-9_.:/-]*' AND instr(source_id,char(0))=0))";
+// Keep admission memory independent of fact retention and native lifetimes.
+const observerSourcesTable = `CREATE TABLE execution_observer_sources (
+  agent_id TEXT NOT NULL,
+  ${observerSourceColumn.replace("TEXT CHECK", "TEXT NOT NULL CHECK")},
+  PRIMARY KEY(agent_id,source_id),
+  FOREIGN KEY(agent_id) REFERENCES execution_observers(agent_id)
+) STRICT`;
 
-function schemaFor(version: 18 | 19): { tables: Record<string, string>; triggers: Record<string, string> } {
+function schemaFor(version: 18 | 19 | 20): { tables: Record<string, string>; triggers: Record<string, string> } {
   if (version === 18) return { tables, triggers };
   return {
     tables: {
       ...Object.fromEntries(Object.entries(tables).map(([name, sql]) => [name, v19Columns[name]
         ? sql.replace("\n    CHECK(", `\n    ${v19Columns[name].join(",\n    ")},\n    CHECK(`) : sql])),
-      execution_observers: observerTable,
+      execution_observers: version === 19 ? observerTable
+        : observerTable.replace("  FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)",
+          `  ${observerSourceColumn},\n  FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)`),
+      ...(version === 20 ? { execution_observer_sources: observerSourcesTable } : {}),
     },
     triggers: {
       ...triggers,
@@ -346,7 +358,7 @@ function schemaFor(version: 18 | 19): { tables: Record<string, string>; triggers
 }
 
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 = 19): void {
+export function applyExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 = 20): void {
   const schema = schemaFor(version);
   for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   for (const statement of Object.values(indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
@@ -362,7 +374,15 @@ export function migrateExecutionStorageV18ToV19(database: DatabaseSync): void {
   database.exec(observerTable);
   database.exec("DROP TRIGGER execution_approval_decision_immutable");
   database.exec(schemaFor(19).triggers.execution_approval_decision_immutable);
-  validateExecutionStorageSchema(database);
+  validateExecutionStorageSchema(database, 19);
+}
+
+/** Source identity is unknown for historical rows; their cursors remain intact. */
+export function migrateExecutionStorageV19ToV20(database: DatabaseSync): void {
+  validateExecutionStorageSchema(database, 19);
+  database.exec(`ALTER TABLE execution_observers ADD COLUMN ${observerSourceColumn}`);
+  database.exec(observerSourcesTable);
+  validateExecutionStorageSchema(database, 20);
 }
 
 function normalizedSchema(sql: string): string {
@@ -372,7 +392,7 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 = 19): void {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 = 20): void {
   const schema = schemaFor(version);
   for (const [name, statement] of Object.entries({ ...schema.tables, ...indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;
