@@ -13,13 +13,161 @@ import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
-import { matchesPollingActivationRuntime, validatePollingActivationSchema } from "../custodial-polling-activation.js";
+import { matchesPollingActivationRuntime, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
   origin_execution_generation_id: "run_1",
   provider_continuation_id: "thread_1",
 } as const;
+
+test("polling offers persist a single successor chain without advancing the cursor until its exact tail is acknowledged", async () => {
+  const env = await fixture(); let store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    await store.preparePollingActivation(activation, async commit => commit());
+    await store.markPollingActivationDispatch(activation, async commit => commit());
+    await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-turn" }, async commit => commit());
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.exec("CREATE TRIGGER reject_offer_manifest_reinsert BEFORE DELETE ON agent_identities BEGIN SELECT RAISE(ABORT,'offer cannot replace manifest graph'); END");
+      const before = await store.load();
+      const scope = { operationId: activation.operationId, agentId: activation.agentId,
+        processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab" };
+      assert.equal((await store.acknowledgePollingOffer({ ...scope, roomCursor: "msg_49" }, async commit => commit())).acknowledged, false);
+      const first = await store.recordPollingOffer({ ...scope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_49" }, async commit => commit());
+      assert.equal(first.mcp_request_id, "1"); assert.equal(first.predecessor_offer_id, null);
+      assert.deepEqual(await store.recordPollingOffer({ ...scope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_49" }, async commit => commit()), first);
+      const second = await store.recordPollingOffer({ ...scope, requestId: "1", inputCursor: "msg_47", offeredFrontier: "msg_50" }, async commit => commit());
+      assert.equal(second.mcp_request_id, '"1"'); assert.equal(second.predecessor_offer_id, first.offer_id);
+      await assert.rejects(store.recordPollingOffer({ ...scope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_49" }, async commit => commit()), /superseded/);
+      assert.equal((await store.acknowledgePollingOffer({ ...scope, roomCursor: "msg_49" }, async commit => commit())).acknowledged, false);
+      assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()?.room_cursor, "msg_47");
+      assert.deepEqual(await store.load(), before, "offering/superseding does not rewrite the manifest or consume work");
+      await store.close(); store = new ManifestStore(env.databasePath);
+      assert.deepEqual(await store.getPollingOfferTail(activation.operationId), second, "outstanding offer survives daemon restart");
+      const replacementScope = { ...scope, processIncarnationId: "fedcba98-7654-4321-8fab-0123456789ab" };
+      const replacement = await store.recordPollingOffer({ ...replacementScope, requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_50" }, async commit => commit());
+      assert.equal(replacement.predecessor_offer_id, second.offer_id);
+      assert.equal((await store.acknowledgePollingOffer({ ...scope, roomCursor: "msg_50" }, async commit => commit())).acknowledged, false,
+        "a previous MCP process cannot acknowledge the replacement process's offer");
+      const repeatedFrontier = await store.recordPollingOffer({ ...replacementScope, requestId: 2, inputCursor: "msg_47", offeredFrontier: "msg_50" }, async commit => commit());
+      const acknowledged = await store.acknowledgePollingOffer({ ...replacementScope, roomCursor: "msg_50" }, async commit => commit());
+      assert.equal(acknowledged.acknowledged, true); assert.equal(acknowledged.offer?.offer_id, repeatedFrontier.offer_id);
+      assert.equal(acknowledged.roomCursor, "msg_50"); assert.ok(acknowledged.offer?.acknowledged_at_ms);
+      assert.deepEqual(await store.acknowledgePollingOffer({ ...replacementScope, roomCursor: "msg_50" }, async commit => commit()), acknowledged);
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers WHERE acknowledged_at_ms IS NOT NULL").get()?.n, 1,
+        "same-frontier acknowledgement marks only the current tail, never its superseded history");
+      const last = await store.recordPollingOffer({ ...replacementScope, requestId: 3, inputCursor: "msg_50", offeredFrontier: "msg_51" }, async commit => commit());
+      await store.completePollingActivation({ ...activation, providerTurnId: "native-turn", outcome: "completed" }, async commit => commit());
+      assert.deepEqual(await store.getPollingOfferTail(activation.operationId), last, "native completion never fabricates a cursor ACK");
+      assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()?.room_cursor, "msg_50");
+      await assert.rejects(store.acknowledgePollingOffer({ ...replacementScope, roomCursor: "msg_51" }, async commit => commit()), /active native activation/);
+      validatePollingOfferSchema(database);
+      database.exec("DROP TRIGGER reject_offer_manifest_reinsert");
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("polling offer and ACK transactions recheck exact authority and roll back the receipt with the worker cursor", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    const input = { operationId: activation.operationId, agentId: activation.agentId,
+      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", requestId: 1, inputCursor: "msg_47", offeredFrontier: "msg_50" };
+    await store.preparePollingActivation(activation, async commit => commit());
+    await assert.rejects(store.recordPollingOffer(input, async commit => commit()), /active native activation/);
+    await store.markPollingActivationDispatch(activation, async commit => commit());
+    await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-turn" }, async commit => commit());
+    await assert.rejects(store.recordPollingOffer(input, undefined as never), /ownership commit fence/);
+    await assert.rejects(store.recordPollingOffer(input, async () => {}), /without committing/);
+    for (const bad of [
+      { ...input, operationId: "missing" }, { ...input, agentId: "other" }, { ...input, processIncarnationId: "4312" },
+      { ...input, requestId: 1.5 }, { ...input, inputCursor: "opaque" },
+      { ...input, offeredFrontier: "msg_46" }, { ...input, inputCursor: "msg_49" },
+    ]) await assert.rejects(store.recordPollingOffer(bad, async commit => commit()));
+    assert.equal(await store.getPollingOfferTail(activation.operationId), null);
+    let offer = await store.recordPollingOffer(input, async commit => commit());
+    const ack = { ...input, roomCursor: "msg_50" };
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      for (const [sql, undo] of [
+        ["UPDATE worker_session_bindings SET agent_session_id='other'", "UPDATE worker_session_bindings SET agent_session_id='session_2'"],
+        ["UPDATE worker_session_bindings SET room_cursor='msg_48'", "UPDATE worker_session_bindings SET room_cursor='msg_47'"],
+        ["UPDATE agent_configurations SET config_revision=3", "UPDATE agent_configurations SET config_revision=2"],
+        ["UPDATE runtime_deployments SET custodial_launch_agent_session_id='other'", "UPDATE runtime_deployments SET custodial_launch_agent_session_id='session_2'"],
+      ]) {
+        database.exec(sql!);
+        await assert.rejects(store.acknowledgePollingOffer(ack, async commit => commit()), /changed/);
+        await assert.rejects(store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit()));
+        assert.deepEqual(await store.getPollingOfferTail(activation.operationId), offer);
+        database.exec(undo!);
+      }
+      const previousBinding = (await bindings.get(input.agentId))!;
+      await bindings.bind({ ...previousBinding, agent_session_token: "test-rebound-token" }, { roomCursor: "msg_47" });
+      assert.equal((await store.acknowledgePollingOffer(ack, async commit => commit())).acknowledged, false,
+        "same-session formal rebinding must invalidate the old offer's delayed ACK");
+      await assert.rejects(store.recordPollingOffer(input, async commit => commit()), /invocation changed/);
+      const replacement = await store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit());
+      assert.equal(replacement.predecessor_offer_id, offer.offer_id);
+      assert.ok(replacement.binding_epoch > offer.binding_epoch);
+      offer = replacement;
+      database.exec("CREATE TRIGGER reject_offer_worker_cursor AFTER UPDATE OF room_cursor ON worker_session_bindings BEGIN SELECT RAISE(ABORT,'test ACK rollback'); END");
+      await assert.rejects(store.acknowledgePollingOffer(ack, async commit => commit()), /test ACK rollback/);
+      assert.deepEqual(await store.getPollingOfferTail(activation.operationId), offer);
+      assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()?.room_cursor, "msg_47");
+      database.exec("DROP TRIGGER reject_offer_worker_cursor");
+      assert.equal((await store.acknowledgePollingOffer(ack, async commit => commit())).acknowledged, true);
+      assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings").get()?.room_cursor, "msg_50");
+      validatePollingOfferSchema(database);
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("polling offer SQL prevents forks, disconnected successors and rewriting or deleting ACK evidence", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    await store.preparePollingActivation(activation, async commit => commit());
+    await store.markPollingActivationDispatch(activation, async commit => commit());
+    await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-turn" }, async commit => commit());
+    const input = { operationId: activation.operationId, agentId: activation.agentId,
+      processIncarnationId: "01234567-89ab-4cde-8fab-0123456789ab", inputCursor: "msg_47", offeredFrontier: "msg_50" };
+    const first = await store.recordPollingOffer({ ...input, requestId: 1 }, async commit => commit());
+    const tail = await store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit());
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.exec("PRAGMA foreign_keys=ON");
+      for (const field of ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "binding_epoch", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"]) {
+        const value = tail[field as keyof typeof tail];
+        assert.throws(() => database.prepare(`UPDATE custodial_polling_offers SET ${field}=? WHERE offer_id=?`)
+          .run(typeof value === "number" ? value + 1 : `${value}-changed`, tail.offer_id), /immutable/);
+      }
+      for (const changed of [
+        { predecessor_offer_id: null }, { predecessor_offer_id: first.offer_id },
+        { predecessor_offer_id: "missing" }, { activation_id: "other" },
+        { acknowledged_at_ms: tail.created_at_ms }, { created_at_ms: tail.created_at_ms - 1 },
+      ]) {
+        const row = { ...tail, offer_id: "invalid", mcp_request_id: "3", predecessor_offer_id: tail.offer_id, ...changed };
+        assert.throws(() => database.prepare(`INSERT INTO custodial_polling_offers(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`).run(...Object.values(row)),
+          changed.predecessor_offer_id === first.offer_id ? /UNIQUE constraint failed: custodial_polling_offers.predecessor_offer_id/ : undefined);
+      }
+      assert.throws(() => database.prepare("UPDATE custodial_polling_offers SET acknowledged_at_ms=? WHERE offer_id=?").run(first.created_at_ms, first.offer_id), /immutable/);
+      assert.throws(() => database.prepare("DELETE FROM custodial_polling_offers WHERE offer_id=?").run(tail.offer_id), /cannot be removed/);
+      const result = await store.acknowledgePollingOffer({ ...input, roomCursor: "msg_50" }, async commit => commit());
+      for (const value of [null, result.offer!.acknowledged_at_ms! + 1]) {
+        assert.throws(() => database.prepare("UPDATE custodial_polling_offers SET acknowledged_at_ms=? WHERE offer_id=?").run(value, tail.offer_id), /immutable/);
+      }
+      validatePollingOfferSchema(database); assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
 
 test("polling activation journals explicit intent, exact started ID, uncertainty and terminal before replay", async () => {
   for (const outcome of ["completed", "failed", "interrupted", "lost"] as const) {

@@ -2,9 +2,9 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, migrateExecutionStorageV20ToV21, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
-import { applyPollingActivationSchema, validatePollingActivationSchema } from "./custodial-polling-activation.js";
+import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 24;
+export const DAEMON_STATE_SCHEMA_VERSION = 25;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -118,6 +118,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
+  if (existingVersion >= 25) validatePollingOfferSchema(database);
   if (existingVersion >= 24) { validatePollingActivationSchema(database); validateCustodialLaunchSession(database); }
   if (existingVersion >= 23) validatePollingContract(database);
   if (existingVersion >= 18) validateExecutionStorageSchema(database,
@@ -240,6 +241,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 23) {
     this.migrateV23ToV24(database);
+    return;
+  }
+  if (existingVersion === 24) {
+    this.migrateV24ToV25(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1114,6 +1119,22 @@ migrateV23ToV24(database: DatabaseSync): void {
   }
 }
 
+/** Offers remain dormant. Old activations acquire no fabricated offer coverage. */
+migrateV24ToV25(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
 /** Every legacy caller advances directly to the current paired version. */
 private applyCurrentConfigurationShape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "agent_configurations").has("polling_contract")) {
@@ -1125,6 +1146,7 @@ private applyCurrentConfigurationShape(database: DatabaseSync): void {
   }
   validateCustodialLaunchSession(database);
   applyPollingActivationSchema(database);
+  applyPollingOfferSchema(database);
 }
 
 private applyV20Shape(database: DatabaseSync): void {
@@ -2446,6 +2468,7 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
 }
 
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion: 19 | 20 | 21 = 21): void {
+  if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 25) validatePollingOfferSchema(database);
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 24) {
     validatePollingActivationSchema(database); validateCustodialLaunchSession(database);
   }
