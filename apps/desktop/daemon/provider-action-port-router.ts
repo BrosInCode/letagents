@@ -1,4 +1,6 @@
 import type {
+  CustodialPollingActivationRequest,
+  CustodialPollingActivationOptions,
   ProviderActionAttachment,
   ProviderActionAttachTerminal,
   ProviderActionCapabilities,
@@ -21,6 +23,7 @@ import { sameProviderActionConnectionIdentity } from "./provider-action-port.js"
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
 
 type NativeHandle = {
+  custodyLaunchAgentSessionId?: string;
   workAttemptId: string;
   pid: number | null;
   providerContinuationId: string | null;
@@ -29,6 +32,8 @@ type NativeHandle = {
 };
 
 export type NativeProviderAdapter = {
+  activateCustodialPolling?(handle: NativeHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
+  inspectCustodialPollingActivation?(handle: NativeHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
   probeControl?(handle: NativeHandle): Promise<ControlProbeResult>;
   capabilities(): ProviderActionCapabilities;
@@ -64,6 +69,7 @@ function publicHandle(handle: NativeHandle, appliedConfigurationRevision?: numbe
     get providerContinuationId() { return handle.providerContinuationId; },
     get providerConnection() { return handle.providerConnection ?? null; },
     ...(appliedConfigurationRevision === undefined ? {} : { appliedConfigurationRevision }),
+    ...(handle.custodyLaunchAgentSessionId === undefined ? {} : { custodyLaunchAgentSessionId: handle.custodyLaunchAgentSessionId }),
     get observedState() { return handle.observedState(); },
   };
 }
@@ -193,6 +199,43 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       && (result.providerContinuationId !== continuation
         || result.nativeProcessIdentity !== expected?.processIdentity))) return { state: "unknown" };
     return result;
+  }
+
+  async activateCustodialPolling(handle: ProviderActionHandle, request: CustodialPollingActivationRequest,
+    options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }> {
+    const remembered = this.required(handle);
+    const connection = structuredClone(handle.providerConnection);
+    const continuation = handle.providerContinuationId;
+    const current = () => this.handles.get(handle.workAttemptId) === remembered
+      && remembered.handle.providerContinuationId === continuation
+      && remembered.handle.pid === handle.pid
+      && sameProviderActionConnectionIdentity(connection, remembered.handle.providerConnection);
+    if (remembered.provider !== "codex" || !current()) throw new Error("Custodial polling activation requires the exact owned Codex runtime.");
+    const adapter = await this.adapter(remembered.provider);
+    if (!current() || !adapter.activateCustodialPolling) throw new Error("Custodial polling activation is unavailable.");
+    return adapter.activateCustodialPolling(remembered.handle, request, {
+      ...options,
+      beforeNativeDispatch: async () => {
+        if (!current()) throw new Error("Custodial polling runtime changed before dispatch.");
+        await options.beforeNativeDispatch();
+        if (!current()) throw new Error("Custodial polling runtime changed before dispatch.");
+      },
+    });
+  }
+
+  async inspectCustodialPollingActivation(handle: ProviderActionHandle, providerTurnId: string):
+    Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }> {
+    const remembered = this.required(handle);
+    const connection = structuredClone(handle.providerConnection);
+    const continuation = handle.providerContinuationId;
+    const current = () => this.handles.get(handle.workAttemptId) === remembered
+      && remembered.handle.providerContinuationId === continuation && remembered.handle.pid === handle.pid
+      && sameProviderActionConnectionIdentity(connection, remembered.handle.providerConnection);
+    if (remembered.provider !== "codex" || !current()) return { state: "unknown" };
+    const adapter = await this.adapter(remembered.provider);
+    if (!current() || !adapter.inspectCustodialPollingActivation) return { state: "unknown" };
+    const result = await adapter.inspectCustodialPollingActivation(remembered.handle, providerTurnId);
+    return current() ? result : { state: "unknown" };
   }
 
   async runRoomTurn(handle: ProviderActionHandle, request: ProviderRoomTurnRequest, options?: { beforeNativeDispatch?: () => Promise<void>; checkpointTurnStarted?: (turnId: string) => Promise<void>; checkpointPreparedTurn?: (state: { providerTurnId: string; providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; checkpointProviderState?: (state: { providerContinuationId: string; providerConnection: NonNullable<ProviderActionHandle["providerConnection"]> }) => Promise<void>; markDurableTurnStarted?: () => void; checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>; markDispatched?: () => Promise<void>; detachSignal?: AbortSignal }): Promise<ProviderRoomTurnResult> {

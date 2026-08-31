@@ -6,6 +6,7 @@ import {
 } from "./cloud-http.js";
 import { redactCredentialText } from "./credential-redaction.js";
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
+import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import {
   retryableWorkerMintFailure,
   schedulerErrorDetail,
@@ -82,6 +83,7 @@ type WorkerAuthorityStore = {
   getEntry(entryId: string): Promise<DaemonManifestEntry | null | undefined>;
   getAgentConfiguration(entryId: string): Promise<Pick<DaemonAgentConfiguration, "polling_contract" | "config_revision" | "runtime_configuration_revision"> | undefined>;
   unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
+  unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
 };
 
 type WorkerAuthorityDurability = {
@@ -217,6 +219,28 @@ export class WorkerAuthorityCoordinator {
     }
   }
 
+  /** Credentials may recover in-place; only a checkpointed explicit activation admits room effects. */
+  private async checkPollingActivationWorker(entry: DaemonManifestEntry, agentSessionId: string, executionGenerationId: string, requireActive = false): Promise<PollingActivationRecord | null> {
+    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
+    if (!activation && !requireActive) return null;
+    const current = await this.options.store.getEntry(entry.id);
+    const handle = this.options.runtime.currentHandle(entry.id);
+    const configuration = await this.options.store.getAgentConfiguration(entry.id);
+    if (!activation || !current || !handle || !matchesPollingActivationRuntime(activation, current, handle)
+      || this.options.runtime.currentHandle(entry.id) !== handle
+      || activation.agent_session_id !== agentSessionId || activation.execution_generation_id !== executionGenerationId
+      || (handle.appliedConfigurationRevision !== undefined && handle.appliedConfigurationRevision !== activation.config_revision)
+      || configuration?.polling_contract !== "custodial_polling_v1"
+      || configuration.config_revision !== activation.config_revision
+      || configuration.runtime_configuration_revision !== activation.config_revision
+      || (requireActive && (activation.phase !== "active" || !activation.provider_turn_id
+        || this.options.authority.isHandoffScheduled()
+        || current.desired_state !== "running" || ["failed", "stopped", "stopping"].includes(handle.observedState)))) {
+      throw new Error("Custodial polling requires its exact active activation and worker authority.");
+    }
+    return activation;
+  }
+
   async requiresHostGrant(entry: DaemonManifestEntry): Promise<boolean> {
     return entry.delivery_mode === "daemon_inbox" || await this.pollingContract(entry) !== null;
   }
@@ -293,6 +317,7 @@ export class WorkerAuthorityCoordinator {
     const daemonGeneration = this.options.authority.currentGeneration();
     const grant = this.currentHostGrant(entry);
     const handle = this.options.runtime.currentHandle(entry.id);
+    const activation = await this.checkPollingActivationWorker(entry, input.agent_session_id, input.execution_generation_id);
     const providerContinuationId = entry.provider_ref.provider_continuation_id;
     const providerConnection = structuredClone(entry.provider_ref.provider_connection ?? null);
     const pid = handle?.pid;
@@ -354,7 +379,8 @@ export class WorkerAuthorityCoordinator {
       executionGenerationId: binding.execution_generation_id,
       updatedAt: binding.updated_at,
     });
-    if (mayPublish() && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
+    if (mayPublish() && (!activation || activation.phase === "active")
+      && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
       await this.options.activity.publishNative(input.entry_id, "native_harness.bound", "working");
     }
     await assertAuthorityCurrent();
@@ -378,6 +404,7 @@ export class WorkerAuthorityCoordinator {
     await this.options.manifest.updateEntry(input.entry_id, (current) => {
       assertEntryCurrent(current);
       const clearsCoordinationLatch = current.desired_state === "running"
+        && (!activation || activation.phase === "active")
         && (current.condition === "coordination_blocked" || current.condition === "auth_blocked");
       const manifestBindingIsCurrent = current.last_worker_binding?.agent_session_id === binding.agent_session_id
         && current.last_worker_binding?.work_attempt_id === binding.work_attempt_id
@@ -690,6 +717,7 @@ export class WorkerAuthorityCoordinator {
     if (!current || !this.hasMintAuthority(current, minted)) return null;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id);
     if (!attempt.execution_generations.some((candidate) => candidate.execution_generation_id === executionGenerationId && !candidate.terminal)) return null;
+    await this.checkPollingActivationWorker(current, minted.agentSessionId, executionGenerationId);
     await this.options.bindings.recordSupervisedWorkerSession({
       agent_id: entry.id,
       room_id: entry.room_id,
@@ -1069,6 +1097,8 @@ export class WorkerAuthorityCoordinator {
         if (entry.desired_state !== "running" || !grant
           || !await this.ownsDaemonGeneration(input.daemon_generation)
           || await this.options.store.unresolvedDeliveryDrain(entry.id)) return { status: "stale" };
+        try { await this.checkPollingActivationWorker(entry, input.agent_session_id, input.execution_generation_id); }
+        catch { return { status: "stale" }; }
       }
       if (entry?.provider === "cursor") {
         try {
@@ -1106,6 +1136,7 @@ export class WorkerAuthorityCoordinator {
       const handle = this.options.runtime.currentHandle(input.entry_id);
       const binding = await this.options.bindings.get(input.entry_id);
       const grant = entry ? this.unexpiredHostGrant(entry) : null;
+      const activation = entry ? await this.checkPollingActivationWorker(entry, input.agent_session_id, input.execution_generation_id, true) : null;
       if (!entry || entry.provider !== "codex" || (entry.delivery_mode ?? "mcp_polling") !== "mcp_polling"
         || entry.desired_state !== "running" || configuration?.polling_contract !== input.contract
         || !Number.isSafeInteger(configuration.config_revision)
@@ -1131,6 +1162,9 @@ export class WorkerAuthorityCoordinator {
         || this.unexpiredHostGrant(entry) !== grant
         || ["failed", "stopped", "stopping"].includes(handle.observedState)) {
         throw new Error("Custodial polling authority changed during admission.");
+      }
+      if ((await this.checkPollingActivationWorker(entry, input.agent_session_id, input.execution_generation_id, true))?.operation_id !== activation?.operation_id) {
+        throw new Error("Custodial polling activation changed during admission.");
       }
       return {
         status: "authorized" as const, contract: "custodial_polling_v1" as const,
@@ -1204,6 +1238,11 @@ export class WorkerAuthorityCoordinator {
         || currentBinding.agent_session_id !== input.agent_session_id
         || currentBinding.execution_generation_id !== input.execution_generation_id) {
         throw new Error("Worker cursor checkpoint does not match the active supervised binding.");
+      }
+      if (await this.pollingContract(entry)) {
+        if (!this.unexpiredHostGrant(entry) || !await this.hasUnexpiredWorkerSession(entry.id)
+          || !await this.ownsDaemonGeneration(this.options.authority.currentGeneration())) throw new Error("Custodial polling cursor authority is unavailable.");
+        await this.checkPollingActivationWorker(entry, input.agent_session_id, input.execution_generation_id, true);
       }
       const checkpoint = await this.options.bindings.checkpointCursorMonotonic(
         input.entry_id,
