@@ -907,6 +907,61 @@ test("a semantically malformed typed frame gaps instead of committing its broker
   }
 });
 
+test("unknown well-formed frames advance without delivery or gap repair", async () => {
+  const router = installFetchRouter();
+  try {
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    initial.pushRoomSync("msg_1", false, "broker_known");
+    await starting;
+    const emittedCount = emitted.length;
+    const managedCount = managedEmitted.length;
+    initial.pushRaw("id: broker_future\nevent: future_room_event\ndata: {\"future_field\":true}\n\n");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(emitted.length, emittedCount, "unsupported events are not renderer events or repair requests");
+    assert.equal(managedEmitted.length, managedCount, "unsupported events cannot wake agents");
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_future");
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
+test("malformed or oversized unknown frames cannot advance the broker cursor", async (t) => {
+  for (const data of ["null", JSON.stringify({ oversized: "x".repeat(1024 * 1024) })]) {
+    await t.test(data === "null" ? "non-object payload" : "complete oversized frame", async () => {
+      const router = installFetchRouter();
+      try {
+        const initial = makeSse();
+        const reconnected = makeSse();
+        router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+        router.enqueueCatchUp([]);
+        const starting = startDesktopRoomStream(ROOM, "msg_1");
+        await waitUntil(() => router.streamCalls.length === 1);
+        initial.pushRoomSync("msg_1", false, "broker_known");
+        await starting;
+        const gapCount = emitted.filter((event) => event.type === "open" && event.gap && event.verified).length;
+        initial.pushRaw(`id: broker_bad_future\nevent: future_room_event\ndata: ${data}\n\n`);
+        await waitUntil(() => emitted.filter((event) => event.type === "open" && event.gap && event.verified).length > gapCount);
+        initial.error();
+        await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+        assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_known");
+        reconnected.close();
+      } finally {
+        await stopDesktopRoomStream();
+        router.restore();
+      }
+    });
+  }
+});
+
 test("message-info invalidations advance without a room repair while malformed payloads gap", async () => {
   const router = installFetchRouter();
   try {
