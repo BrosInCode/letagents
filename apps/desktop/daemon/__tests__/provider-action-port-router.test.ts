@@ -134,6 +134,65 @@ function nativeHandle(
   };
 }
 
+test("provider router preflights only Codex custody without launching or controlling a provider", async () => {
+  const calls: string[] = [];
+  const seen: unknown[] = [];
+  const adapter = { ...fakeAdapter("codex", calls), preflightCustodialPolling: async (input: { devMcpServerEntryPath?: string }) => { seen.push(input); } };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const request = { provider: "codex", devMcpServerEntryPath: "/trusted/dev/dist/mcp/server.js" };
+  const pending = router.preflightCustodialPolling(request);
+  request.devMcpServerEntryPath = "/changed/after-dispatch";
+  await pending;
+  assert.deepEqual(seen, [{ devMcpServerEntryPath: "/trusted/dev/dist/mcp/server.js" }]);
+  await assert.rejects(router.preflightCustodialPolling({ provider: "cursor" }), /only supported by Codex/);
+  await assert.rejects(new ProviderActionPortRouter({ codex: async () => fakeAdapter("codex", calls) }).preflightCustodialPolling({ provider: "codex" }), /does not expose/);
+  adapter.preflightCustodialPolling = async () => { throw new Error("unsupported installed runtime"); };
+  await assert.rejects(router.preflightCustodialPolling({ provider: "codex" }), /unsupported installed runtime/);
+  assert.deepEqual(calls, []);
+});
+
+test("provider router prefers exact Codex stopRef over a remembered protocol terminal with no fallback", async () => {
+  const calls: string[] = [];
+  const seen: ProviderActionRef[] = [];
+  const adapter: NativeProviderAdapter = {
+    ...fakeAdapter("codex", calls),
+    stopRef: async (ref) => {
+      seen.push(ref);
+      return { endedAt: "2026-08-31T00:00:00.000Z", exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: ref.providerContinuationId };
+    },
+  };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "exact-stop", roomId: "room", cwd: "/tmp/exact-stop", launchPolicy: {} });
+  const ref: ProviderActionRef = { provider: "codex", workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: { ...handle.providerConnection! } };
+  const original = structuredClone(ref);
+  const stopped = router.stopRef(ref, { actionId: "stop-exact-birth" });
+  ref.providerContinuationId = "mutated";
+  ref.providerConnection!.pid = 9999;
+  await stopped;
+  assert.deepEqual(seen, [original], "exact reference is snapshotted before loading the adapter");
+  assert.equal((await router.attachAction("stop-exact-birth", original.workAttemptId)).state, "attached");
+  await new ProviderActionPortRouter({ codex: async () => adapter }).stopRef(original);
+  assert.equal(seen.length, 2, "restart recovery does not need a remembered handle");
+  await assert.rejects(router.stopRef({ ...original, provider: "cursor" }), /Conflicting provider identities/);
+  await assert.rejects(router.stopRef({ ...original, providerConnection: { kind: "cursor_cli", pid: 101, processIdentity: "codex:101" } }), /Conflicting provider identities/);
+  adapter.stopRef = async () => { throw new Error("process identity is unknown"); };
+  await assert.rejects(router.stopRef(original), /process identity is unknown/);
+  assert.deepEqual(calls, ["codex:spawn:exact-stop"], "refusal must not fall back to cached ordinary stop");
+});
+
+test("provider router preserves Cursor's remembered-stop path", async () => {
+  const calls: string[] = [];
+  const adapter: NativeProviderAdapter = {
+    ...fakeAdapter("claude-code", calls),
+    spawn: async (input) => ({ ...nativeHandle("claude-code", input.workAttemptId, "cursor-session", 202), providerConnection: { kind: "cursor_cli", pid: 202, processIdentity: "cursor:202" } }),
+    stopRef: async () => { throw new Error("cached Cursor stop must retain its existing behavior"); },
+  };
+  const router = new ProviderActionPortRouter({ cursor: async () => adapter });
+  const handle = await router.spawn({ provider: "cursor", workAttemptId: "cursor-stop", roomId: "room", cwd: "/tmp/cursor", launchPolicy: {} });
+  await router.stopRef({ provider: "cursor", workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection });
+  assert.deepEqual(calls, ["claude-code:stop:cursor-stop"]);
+});
+
 test("provider router carries native shadow facts and probes without invoking legacy actions", async () => {
   const calls: string[] = [];
   let listener: ((event: NativeExecutionObservation) => void) | undefined;

@@ -379,7 +379,7 @@ export class SupervisorDaemon {
       },
       delivery: {
         start: (entryId) => this.startSupervisedDelivery(entryId),
-        startCutover: (entryId) => this.startDeliveryCutover(entryId),
+        startCutover: (entryId) => this.deliveryCutovers.start(entryId),
       },
       heartbeat: {
         intervalMs: this.nativeHeartbeatIntervalMs,
@@ -661,11 +661,11 @@ export class SupervisorDaemon {
       getAttempt: (workAttemptId) => this.durability.getAttempt(workAttemptId),
       updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
       getLiveHandle: (entryId) => this.liveHandles.get(entryId),
-      startDelivery: (entryId) => this.startSupervisedDelivery(entryId),
-      observation: {
-        assert: (signal) => this.deliveryCutovers.assertObservation(signal),
-        observe: (signal, operation) => this.deliveryCutovers.observe(signal, operation),
-        scheduleRetry: (entryId, delayMs) => this.deliveryCutovers.scheduleRetry(entryId, delayMs),
+      startDelivery: (entryId) => this.startSupervisedDelivery(entryId, "wake"),
+      observation: this.deliveryCutovers,
+      drain: {
+        store: this.store, authority: this.authority,
+        entries: this.entryConcurrency, delivery: this.supervisedDelivery,
       },
     });
     this.desiredStates = new DesiredStateCoordinator({
@@ -778,6 +778,9 @@ export class SupervisorDaemon {
       policy: { structuredRoomTurnCompletion },
     });
     const controlOperations = {
+      prepareDeliveryDrain: (input) => this.deliveryCutoverExecution.prepareDrain(input),
+      getDeliveryDrain: (input) => this.deliveryCutoverExecution.getDrain(input),
+      cancelDeliveryDrain: (input) => this.deliveryCutoverExecution.cancelDrain(input),
       acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
       activateLegacyLane: this.activateLegacyLane.bind(this),
       appendActivity: this.appendActivity.bind(this),
@@ -863,6 +866,7 @@ export class SupervisorDaemon {
     await this.socket.start();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
+      if (await this.store.unresolvedDeliveryDrain(entry.id)) void this.deliveryCutovers.start(entry.id).catch(() => undefined);
     }
     if (this.providerPort && this.autoConverge) {
       for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id);
@@ -1062,11 +1066,6 @@ export class SupervisorDaemon {
 
   private async restartSupervisedDeliveryOrConverge(entryId: string): Promise<void> {
     await this.supervisedDeliveryLifecycle.restartOrConverge(entryId);
-  }
-
-  /** Coalesce one durable legacy-polling -> daemon-inbox handoff per agent. */
-  private startDeliveryCutover(entryId: string): Promise<void> {
-    return this.deliveryCutovers.start(entryId);
   }
 
   private status() {

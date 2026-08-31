@@ -22,6 +22,7 @@ import {
 import type {
   ProviderActivityEvent,
   ProviderConnectionRef,
+  ProviderContinuationRef,
   ProviderHandle,
   ProviderSpawnRequest,
   ProviderStreamEvent,
@@ -200,6 +201,7 @@ function createHarness(options: {
   threadReadTimesOut?: boolean;
   threadReadUnmaterialized?: boolean;
   identityUnavailableAtLaunch?: boolean;
+  processIdentity?: string;
   exitOnSignal?: boolean;
 } = {}) {
   const launches: FakeLaunch[] = [];
@@ -220,6 +222,7 @@ function createHarness(options: {
   let nextThread = 1;
   let clock = 0;
   let identityObservable = !(options.identityUnavailableAtLaunch ?? false);
+  const processIdentity = options.processIdentity;
 
   const dependencies: CodexProviderAdapterDependencies = {
     resolveMcpRuntime: (devEntryPath) => ({ entryPath: devEntryPath ?? "/verified/runtime/dist/mcp/server.js", readRoots: ["/verified/runtime"] }),
@@ -237,7 +240,7 @@ function createHarness(options: {
           resolveExit(exit);
         },
       };
-      launch.processIdentity = `fake-process-${launch.pid}-birth-1`;
+      launch.processIdentity = processIdentity ?? `fake-process-${launch.pid}-birth-1`;
       launches.push(launch);
       launchOptions.push({ serverUrl, codexBin, options });
       return launch;
@@ -1075,8 +1078,11 @@ test("Codex custodial polling fails closed on old runtime contracts and incomple
   ]) {
     const harness = createHarness();
     harness.dependencies.readMcpRuntimeContract = async () => report;
-    await assert.rejects(new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request), /does not support custodial_polling_v1/);
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    await assert.rejects(adapter.preflightCustodialPolling({}), /does not support custodial_polling_v1/);
+    await assert.rejects(adapter.spawn(request), /does not support custodial_polling_v1/);
     assert.deepEqual(harness.launches, []);
+    assert.deepEqual(harness.signals, []);
     assert.deepEqual(harness.supervisorBridgeContexts, []);
   }
   for (const patch of [
@@ -1113,15 +1119,22 @@ test("Codex custodial polling reads the selected built executable contract witho
     const { resolveMcpRuntime: _resolve, readMcpRuntimeContract: _read, ...nativeDependencies } = harness.dependencies;
     const adapter = new CodexProviderAdapter({ dependencies: nativeDependencies });
     await writeFile(entry, `process.stdout.write(${JSON.stringify(JSON.stringify({ format: 1, profiles: {} }))});`);
+    await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), /does not support custodial_polling_v1/);
     await assert.rejects(adapter.spawn(request), /does not support custodial_polling_v1/, "a matching package version cannot replace contract proof");
     assert.equal(harness.launches.length, 0);
     await writeFile(entry, "throw new Error('contract-probe-owner-canary');");
+    await assert.rejects(adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry }), (error: unknown) => error instanceof Error
+      && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
     await assert.rejects(adapter.spawn(request), (error: unknown) => error instanceof Error
       && /contract could not be read/.test(error.message) && !error.message.includes("contract-probe-owner-canary"));
     await writeFile(entry, [
       "if (process.argv[2] !== '--letagents-runtime-contract' || process.env.LETAGENTS_TOKEN) process.exit(2);",
       `process.stdout.write(${JSON.stringify(JSON.stringify(custodialRuntimeContract))});`,
     ].join("\n"));
+    await adapter.preflightCustodialPolling({ devMcpServerEntryPath: entry });
+    assert.deepEqual(harness.launches, [], "preflight never launches a provider");
+    assert.deepEqual(harness.signals, []);
+    assert.deepEqual(harness.supervisorBridgeContexts, []);
     const handle = await adapter.spawn(request);
     assert.equal(handle.observedState(), "idle");
     assert.equal(harness.clients[0]!.requests.some((call) => call.method === "turn/start"), false);
@@ -1704,6 +1717,105 @@ test("stop refuses signals without the exact process birth before dispatch or es
         }
       });
     }
+  }
+});
+
+test("Codex exact-reference stop validates the complete recorded owner before signalling", async () => {
+  const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const ref: ProviderContinuationRef = {
+    workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!,
+    providerConnection: { ...handle.providerConnection! },
+  };
+  for (const patch of [
+    { workAttemptId: "" }, { providerContinuationId: "" }, { providerConnection: null },
+    { providerConnection: { kind: "claude_cli", pid: 4100, processIdentity: "fake-process-4100-birth-1" } },
+    { providerConnection: { ...ref.providerConnection, pid: 0 } },
+    { providerConnection: { ...ref.providerConnection, pid: 1.5 } },
+    { providerConnection: { ...ref.providerConnection, processIdentity: " " } },
+    { providerConnection: { ...ref.providerConnection, processIdentity: "unreadable birth" } },
+    { providerConnection: { ...ref.providerConnection, processIdentity: "Mon Aug 99 25:00:00 2026" } },
+    { providerConnection: { ...ref.providerConnection, url: "" } },
+    { workAttemptId: "different-owner" }, { providerContinuationId: "different-thread" },
+    { providerConnection: { ...ref.providerConnection, url: "ws://127.0.0.1:9999" } },
+  ]) {
+    await assert.rejects(adapter.stopRef({ ...ref, ...patch } as ProviderContinuationRef, { graceMs: 0 }), /exact-reference stop/);
+  }
+  assert.deepEqual(harness.signals, []);
+  assert.equal(handle.observedState(), "idle");
+  for (const identity of [undefined, "unreadable birth", "Mon Aug 99 25:00:00 2026", null, "Mon Aug 31 09:00:00 2026"] as const) {
+    const freshAdapter = new CodexProviderAdapter({ dependencies: { ...harness.dependencies, getProcessIdentity: () => identity } });
+    if (identity === undefined || identity === "unreadable birth" || identity === "Mon Aug 99 25:00:00 2026") {
+      assert.equal(harness.launches[0]!.alive, true);
+      await assert.rejects(freshAdapter.stopRef(ref), /birth cannot be verified/, "malformed ps text cannot prove a live process was replaced");
+    }
+    else {
+      const { endedAt, ...terminal } = await freshAdapter.stopRef(ref);
+      assert.ok(endedAt);
+      assert.deepEqual(terminal, { exitCode: null, signal: null, terminalCause: "stopped", providerContinuationId: ref.providerContinuationId });
+    }
+  }
+  assert.deepEqual(harness.signals, [], "no attachment or signal is needed after exact birth absence/replacement");
+  assert.equal(harness.clients.length, 1);
+});
+
+test("Codex exact-reference stop proves OS death even with a cached protocol terminal", async () => {
+  const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
+  const signalProcess = harness.dependencies.signalProcess;
+  harness.dependencies.signalProcess = (pid, signal) => {
+    signalProcess(pid, signal);
+    if (signal === "SIGKILL") harness.launches[0]!.alive = false;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const ref = { workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: { ...handle.providerConnection! } };
+  harness.launches[0]!.resolveExit({ type: "error", error: new Error("protocol error, not OS death") });
+  harness.launches[0]!.alive = true;
+  await flush();
+  assert.equal(handle.observedState(), "failed");
+  const before = harness.clients[0]!.requests.length;
+  const terminal = await adapter.stopRef(ref, { graceMs: 0 });
+  assert.equal(terminal.terminalCause, "stopped");
+  assert.equal(terminal.exitCode, null, "the signal's exit status is not invented");
+  assert.equal(terminal.signal, null);
+  assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }, { pid: 4100, signal: "SIGKILL" }]);
+  assert.equal(harness.clients[0]!.requests.length, before, "stopRef does not depend on a functioning native transport");
+  assert.equal(harness.launches.length, 1);
+});
+
+test("Codex exact-reference stop rechecks birth at escalation and never trusts a signal as death", async () => {
+  for (const evidence of ["unknown", "malformed", "replaced", "absent", "still_alive", "force"] as const) {
+    const harness = createHarness({ processIdentity: "Mon Aug 31 08:00:00 2026" });
+    const signalProcess = harness.dependencies.signalProcess;
+    const getProcessIdentity = harness.dependencies.getProcessIdentity;
+    let signalled = false;
+    let readsAfterSignal = 0;
+    harness.dependencies.getProcessIdentity = (pid) => {
+      if (signalled && ++readsAfterSignal === 2) {
+        if (evidence === "unknown") harness.setIdentityObservable(false);
+        if (evidence === "malformed") harness.launches[0]!.processIdentity = "unreadable birth";
+        if (evidence === "replaced") harness.launches[0]!.processIdentity = "Mon Aug 31 09:00:00 2026";
+      }
+      return getProcessIdentity(pid);
+    };
+    harness.dependencies.signalProcess = (pid, signal) => {
+      signalProcess(pid, signal);
+      signalled = true;
+      if (evidence === "absent" || evidence === "force") harness.launches[0]!.alive = false;
+    };
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const ref = { workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: { ...handle.providerConnection! } };
+    const stoppingAdapter = evidence === "force" ? new CodexProviderAdapter({ dependencies: harness.dependencies }) : adapter;
+    const stopped = stoppingAdapter.stopRef(ref, { graceMs: 0, force: evidence === "force" });
+    if (evidence === "unknown" || evidence === "malformed" || evidence === "still_alive") await assert.rejects(stopped, /cannot be verified|not yet proved/);
+    else assert.equal((await stopped).terminalCause, "stopped");
+    assert.deepEqual(harness.signals, evidence === "still_alive"
+      ? [{ pid: 4100, signal: "SIGTERM" }, { pid: 4100, signal: "SIGKILL" }]
+      : [{ pid: 4100, signal: evidence === "force" ? "SIGKILL" : "SIGTERM" }]);
+    assert.equal(handle.observedState(), evidence === "force" ? "idle" : "stopping", "the reference proof does not mint a native lifecycle event");
+    assert.equal(harness.clients.length, 1, "a fresh adapter stops the saved birth without attaching its native transport");
   }
 });
 

@@ -5,6 +5,7 @@ import {
   type SupervisorGrantHttp,
 } from "./cloud-http.js";
 import { redactCredentialText } from "./credential-redaction.js";
+import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import {
   retryableWorkerMintFailure,
   schedulerErrorDetail,
@@ -80,7 +81,7 @@ type WorkerAuthorityStore = {
   load(): Promise<{ entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | null | undefined>;
   getAgentConfiguration(entryId: string): Promise<Pick<DaemonAgentConfiguration, "polling_contract" | "config_revision" | "runtime_configuration_revision"> | undefined>;
-  unresolvedDeliveryDrain(agentId: string): Promise<unknown>;
+  unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
 };
 
 type WorkerAuthorityDurability = {
@@ -210,6 +211,12 @@ export class WorkerAuthorityCoordinator {
     return configuration.polling_contract ?? null;
   }
 
+  private async assertRuntimeAdmission(entryId: string): Promise<void> {
+    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) {
+      throw new Error("Worker authority is frozen by delivery handoff.");
+    }
+  }
+
   async requiresHostGrant(entry: DaemonManifestEntry): Promise<boolean> {
     return entry.delivery_mode === "daemon_inbox" || await this.pollingContract(entry) !== null;
   }
@@ -269,6 +276,7 @@ export class WorkerAuthorityCoordinator {
     mayPublish: () => boolean = () => true,
     authorization?: MintedWorkerAuthorization,
   ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
+    await this.assertRuntimeAdmission(input.entry_id);
     const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
     if (await this.pollingContract(entry) && !authorization) {
@@ -608,6 +616,7 @@ export class WorkerAuthorityCoordinator {
     signal?: AbortSignal,
     forceFresh = false,
   ): Promise<MintedWorkerAuthorization | null> {
+    await this.assertRuntimeAdmission(entry.id);
     const grant = this.currentHostGrant(entry);
     if (!grant) return null;
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
@@ -828,8 +837,9 @@ export class WorkerAuthorityCoordinator {
         && (currentGrant.grantGeneration > input.grant_generation
           || (currentGrant.grantGeneration === input.grant_generation
             && Date.parse(currentGrant.expiresAt) >= inputExpiry)));
+      const frozen = deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entry.id));
       if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only && !input.recovery_only) {
-        if (entry.desired_state === "running"
+        if (!frozen && entry.desired_state === "running"
           && (entry.delivery_mode !== "daemon_inbox" || await this.options.inbox.cursor(entry.id))) {
           this.options.convergence.request(entry.id);
         }
@@ -852,7 +862,7 @@ export class WorkerAuthorityCoordinator {
         || currentGrant.grantGeneration !== grant.grantGeneration)) {
         this.options.custody.deleteWorkerAuthorization(entry.id);
       }
-      if (input.recovery_only) {
+      if (input.recovery_only || frozen) {
         if (!this.options.custody.hostGrantIsCurrent(entry.id, grant)) this.options.custody.installHostGrant(grant);
         return { status: "installed" };
       }
@@ -916,6 +926,7 @@ export class WorkerAuthorityCoordinator {
     operation: BootstrapOperation,
   ): Promise<{ status: "bootstrapped" | "existing" | "stale"; last_observed_message_id: string | null }> {
     return this.options.serializeEntry(input.entry_id, async () => {
+      await this.assertRuntimeAdmission(input.entry_id);
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale", last_observed_message_id: null };
       const entry = await this.options.store.getEntry(input.entry_id);
       if (!entry || entry.delivery_mode !== "daemon_inbox") return { status: "stale", last_observed_message_id: null };
@@ -1138,6 +1149,7 @@ export class WorkerAuthorityCoordinator {
     daemon_generation: number;
     api_url?: string;
   }): Promise<boolean> {
+    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(input.entry_id))) return false;
     if (!Number.isSafeInteger(input.daemon_generation)
       || input.daemon_generation !== this.options.authority.currentGeneration()) return false;
     const entry = await this.options.store.getEntry(input.entry_id);
@@ -1171,6 +1183,7 @@ export class WorkerAuthorityCoordinator {
     room_cursor: string;
   }): Promise<{ checkpointed: true; entry_id: string; room_cursor: string }> {
     return this.options.serializeEntry(input.entry_id, () => this.options.serializeCursorCheckpoint(input.entry_id, async () => {
+      await this.assertRuntimeAdmission(input.entry_id);
       const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
       if (await this.pollingContract(entry) && await this.options.store.unresolvedDeliveryDrain(entry.id)) {
