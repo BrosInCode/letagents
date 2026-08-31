@@ -20,12 +20,14 @@ import type {
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
+  NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
 import { defaultGetProcessIdentity, sameProcessBirthIdentity, type ProviderProcessExit } from "../main/agents/provider-evidence.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
 // separately compiled source tree into Electron's production rootDir.
 const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
+const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
 // Fake-child harness proving the P2a adapter honors every #765 liveness
 // invariant with no live `claude` binary: birth-identity fencing, control-loss
@@ -1180,3 +1182,101 @@ for (const subtype of ["error_during_execution", "error_max_unknown_limit", "err
     assert.equal(providerStreamLifecycle(stream.at(-1)!), "failed");
   });
 }
+
+test("Claude typed observations correlate native turns and completed tools without inventing execution starts", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const child = harness.children[0]!;
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, () => { throw new Error("shadow persistence unavailable"); });
+  adapter.onExecution(handle, (event) => events.push(event));
+  assert.equal(events.length, 0, "subscription never replays bootstrap as room work");
+  assert.deepEqual(adapter.capabilities().execution, {
+    controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
+  });
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+  const request = { inboxItemId: "typed-inbox", actionId: "typed-action", sourceMessage: {}, activation: {} };
+  const running = adapter.runRoomTurn(handle, request);
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  const session_id = handle.providerContinuationId;
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: "wrong", session_id });
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: "wrong" });
+  child.emit({ type: "assistant", session_id, message: { content: [
+    { type: "tool_use", id: "bootstrap-tail", name: "Bash", input: { command: "late-bootstrap" } },
+  ] } });
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "bootstrap-tail", is_error: false, content: "finished" },
+  ] } });
+  assert.equal(events.length, 0);
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "bootstrap-tail", is_error: false, content: "finished" },
+  ] } });
+  child.emit({ type: "assistant", session_id, message: { content: [
+    { type: "tool_use", id: "shell-1", name: "Bash", input: { command: "secret-command" } },
+  ] } });
+  assert.equal(events.length, 2, "only runtime readiness and native turn start are proved");
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "unmatched", is_error: true, content: "secret-output" },
+    { type: "tool_result", tool_use_id: "shell-1", is_error: true, content: "secret-output" },
+  ] } });
+  child.emit({ type: "user", session_id, message: { content: [
+    { type: "tool_result", tool_use_id: "shell-1", is_error: true },
+  ] } });
+  child.emit({ type: "result", subtype: "error_max_turns", is_error: true, session_id, user_message_uuid: turnId });
+  await assert.rejects(running, /failed/);
+  assert.equal(handle.observedState(), "idle", "typed collection preserves legacy containment");
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" }, "turn failure is not runtime death");
+
+  const next = adapter.runRoomTurn(handle, { ...request, inboxItemId: "typed-next" });
+  await flush();
+  const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: nextId, result: "ready" });
+  assert.equal((await next).text, "ready");
+  let projection = emptyExecutionProjection();
+  for (const event of events) {
+    projection = reduceExecutionFact(projection, {
+      ...event.fact, ...("providerTurnId" in event.fact ? { turnId: event.fact.providerTurnId } : {}),
+      factId: `fact-${event.sequence}`, agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
+      observerEpoch: 1, sourceSequence: event.sequence, observedAtMs: event.observedAtMs,
+    });
+    assert.equal(event.nativeProcessIdentity, birthIdentity(child.pid!));
+    assert.equal(projection.runtime, "ready", "the exact native start proves readiness, which survives turn failure");
+  }
+  assert.equal(projection.turns.get(turnId)?.outcome, "failed");
+  assert.equal(projection.turns.get(nextId)?.outcome, "completed");
+  assert.equal(projection.turns.get(turnId)?.operations.get("shell-1")?.startObserved, false);
+  assert.equal(projection.turns.get(turnId)?.operations.get("shell-1")?.outcome, "failed");
+  assert.equal(events.filter((event) => event.fact.domain === "execution").length, 1);
+  assert.doesNotMatch(JSON.stringify(events), /secret-command|secret-output/);
+  assert.deepEqual(harness.signals, []);
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await flush();
+  assert.deepEqual(await adapter.probeControl(handle), { state: "lost", controlEvidence: "process_exit" });
+  assert.equal(events.at(-1)?.fact.domain, "runtime");
+});
+
+test("Claude shadow native terminal remains observable behind a legacy failed-state latch", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const running = adapter.runRoomTurn(handle, { inboxItemId: "latch", actionId: "latch", sourceMessage: {}, activation: {} });
+  const rejected = assert.rejects(running, /exited/);
+  await flush();
+  const child = harness.children[0]!;
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: handle.providerContinuationId, user_message_uuid: "foreign" });
+  assert.equal(handle.observedState(), "failed");
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId });
+  assert.deepEqual(events.map((event) => event.fact), [{ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: turnId, turnOutcome: "completed" }]);
+  assert.equal(handle.observedState(), "failed", "shadow must not repair or rewrite legacy behavior");
+  assert.deepEqual(harness.signals, []);
+  child.resolveExit({ type: "exit", code: 1, signal: null });
+  await rejected;
+});

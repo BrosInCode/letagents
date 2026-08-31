@@ -28,10 +28,12 @@ import type {
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
+import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
 // separately compiled source tree into Electron's production rootDir.
 const { providerStreamLifecycle } = await import(new URL("../../daemon/provider-stream-policy.ts", import.meta.url).href);
+const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
 type RecordedRequest = { method: string; params: unknown };
 
@@ -362,6 +364,7 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
   }), handle);
 
   assert.deepEqual(adapter.capabilities(), {
+    execution: { controlProbe: "rpc", approvals: { kinds: ["command", "file_change"], recovery: "connection_only", denyScope: "request" } },
     deliveryModes: ["mcp_polling", "daemon_inbox"],
     resume: true,
     midTurnInjection: false,
@@ -1755,4 +1758,111 @@ test("launch policy cannot override adapter-owned thread fields", async () => {
     /reserved field 'cwd'/,
   );
   assert.equal(harness.launches.length, 0);
+});
+
+test("Codex typed shadow separates exact tool and turn failures from the unchanged legacy runtime", async () => {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies, streamSink: (event) => stream.push(event) });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, () => { throw new Error("shadow writer unavailable"); });
+  const unsubscribe = adapter.onExecution(handle, (event) => observations.push(event));
+  const client = harness.clients[0]!;
+  const threadId = handle.providerContinuationId;
+  const emit = (method: string, params: Record<string, unknown>) => client.emit({ method, params: { threadId, turnId: "turn-1", ...params } });
+  emit("turn/started", { turn: { id: "turn-1", status: "inProgress" } });
+  emit("item/started", { item: { id: "command-1", type: "commandExecution", status: "inProgress", processId: "pty-1", command: "SECRET=hidden npm test", cwd: "/private/project" } });
+  emit("item/commandExecution/outputDelta", { itemId: "command-1", delta: "secret output" });
+  emit("item/completed", { item: { id: "command-1", type: "commandExecution", status: "failed", exitCode: 1 } });
+  assert.equal(handle.observedState(), "working");
+  assert.equal(providerStreamLifecycle(stream.at(-1)!), "working");
+  emit("turn/completed", { turn: { id: "turn-1", status: "failed" } });
+  assert.equal(handle.observedState(), "failed", "legacy authority is deliberately unchanged in PR3");
+  emit("turn/started", { turnId: "turn-2", turn: { id: "turn-2", status: "inProgress" } });
+  let projection = emptyExecutionProjection();
+  for (const observation of observations) {
+    projection = reduceExecutionFact(projection, {
+      ...observation.fact, factId: `fact-${observation.sequence}`, agentId: "agent", executionGenerationId: "generation",
+      runtimeGenerationId: "runtime", observerEpoch: 1, sourceSequence: observation.sequence, observedAtMs: observation.observedAtMs,
+      ...("providerTurnId" in observation.fact ? { turnId: `local-${observation.fact.providerTurnId}` } : {}),
+    });
+    assert.equal(observation.nativeProcessIdentity, handle.providerConnection?.processIdentity);
+    assert.equal(projection.runtime, "ready", "the exact native start proves readiness from an empty projection");
+  }
+  assert.equal(projection.runtime, "ready", "native turn failure never says the app-server died");
+  assert.equal(projection.turns.get("local-turn-1").outcome, "failed");
+  assert.equal(projection.turns.get("local-turn-1").operations.get("command-1").exitCode, 1);
+  assert.equal(projection.turns.get("local-turn-2").state, "active");
+  assert.equal(/SECRET|secret output|private\/project/.test(JSON.stringify(observations)), false);
+  assert.deepEqual(harness.signals, []);
+  assert.equal(harness.launches.length, 1);
+  unsubscribe();
+});
+
+test("Codex pending approval is not execution start; unknown identities and statuses mint no typed facts", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const client = harness.clients[0]!;
+  const params = { threadId: handle.providerContinuationId, turnId: "pending-turn" };
+  client.emit({ method: "item/started", params: { ...params, item: { id: "pending", type: "commandExecution", status: "inProgress", processId: null } } });
+  client.emit({ method: "item/started", params: { ...params, item: { id: "patch", type: "fileChange", status: "inProgress" } } });
+  client.emit({ method: "turn/completed", params: { ...params, turn: { id: "pending-turn", status: "futureStatus" } } });
+  client.emit({ method: "item/commandExecution/outputDelta", params: { ...params, threadId: "wrong", itemId: "pending", delta: "data" } });
+  client.emit({ method: "item/completed", params: { threadId: params.threadId, item: { id: "no-turn", type: "commandExecution", status: "failed" } } });
+  client.emit({ method: "item/reasoning/textDelta", params: { ...params, delta: "private reasoning" } });
+  assert.equal(observations.length, 0);
+  client.emit({ method: "item/completed", params: { ...params, item: { id: "pending", type: "commandExecution", status: "declined" } } });
+  assert.equal(observations.length, 1);
+  const fact = observations[0]!.fact;
+  assert.equal(fact.domain, "execution");
+  assert.equal(fact.kind, "completed");
+  assert.equal("outcome" in fact && fact.outcome, "denied_before_start");
+  assert.equal(fact.sideEffects, "none");
+  client.emit({ method: "turn/started", params: { ...params, turn: { id: params.turnId, status: "inProgress" } } });
+  client.emit({ method: "item/started", params: { ...params, item: { id: "orphan", type: "commandExecution", status: "inProgress", processId: "pty" } } });
+  harness.launches[0]!.resolveExit({ type: "exit", code: 1, signal: null });
+  await flush();
+  const orphan = observations.find((entry) => entry.fact.domain === "execution" && entry.fact.kind === "completed" && entry.fact.executionId === "orphan");
+  assert.equal(orphan?.fact.domain === "execution" && orphan.fact.kind === "completed" && orphan.fact.outcome, "lost_after_start");
+  assert.equal(observations.at(-1)?.fact.domain, "runtime");
+  assert.equal(await adapter.probeControl(handle).then((result) => result.state), "lost");
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Codex cheap probes degrade on uncertainty and lose control only on exact process proof", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const probes: unknown[] = [];
+  let response: unknown = { data: [], nextCursor: null };
+  client.request = async <T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T> => {
+    probes.push({ method, params, options });
+    if (response instanceof Error) throw response;
+    return response as T;
+  };
+  assert.deepEqual(await adapter.probeControl(handle), { state: "responsive" });
+  response = new Error("request timed out");
+  for (let i = 0; i < 3; i++) assert.deepEqual(await adapter.probeControl(handle), { state: "degraded" });
+  response = { data: "malformed" };
+  assert.deepEqual(await adapter.probeControl(handle), { state: "degraded" });
+  response = new Error("JSON-RPC -32601: method not found");
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+  assert.equal(handle.observedState(), "idle");
+  assert.deepEqual(probes[0], { method: "thread/loaded/list", params: { limit: 1 }, options: { timeoutMs: 2_000 } });
+  assert.equal(probes.every((probe) => (probe as { method: string }).method === "thread/loaded/list"), true);
+  harness.setIdentityObservable(false);
+  const count = probes.length;
+  assert.deepEqual(await adapter.probeControl(handle), { state: "degraded" });
+  assert.equal(probes.length, count, "unverified process never receives a probe");
+  harness.setIdentityObservable(true);
+  harness.launches[0]!.processIdentity += "-replaced";
+  assert.deepEqual(await adapter.probeControl(handle), { state: "lost", controlEvidence: "process_birth_changed" });
+  assert.equal(probes.length, count);
+  assert.deepEqual(harness.signals, []);
+  assert.equal(harness.launches.length, 1);
 });

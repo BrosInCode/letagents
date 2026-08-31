@@ -18,6 +18,8 @@ import { buildCodexDevMcpEntryOverrides } from "./codex-dev-mcp-entry.js";
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
+import { ProviderExecutionObserver, nativeExecutionId } from "./provider-execution-observer.js";
+import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation } from "../../../shared/execution-protocol.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -89,7 +91,7 @@ function escapeRegExp(value: string): string {
 
 export interface CodexAdapterRpc {
   connect(): Promise<void>;
-  request<T>(method: string, params?: unknown): Promise<T>;
+  request<T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T>;
   close(): void;
   onDisconnect(listener: () => void): () => void;
 }
@@ -131,6 +133,10 @@ export interface CodexProviderAdapterOptions {
 }
 
 const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
+  execution: {
+    controlProbe: "rpc",
+    approvals: { kinds: ["command", "file_change"], recovery: "connection_only", denyScope: "request" },
+  },
   deliveryModes: ["mcp_polling", "daemon_inbox"],
   // P0 task_28 did not prove native mid-turn injection or approval bridging.
   // Resume is populated per app-server after a protocol-level probe.
@@ -330,6 +336,9 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
 };
 
 class CodexProviderHandle implements ProviderHandle {
+  readonly execution: ProviderExecutionObserver;
+  readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
+  readonly nativeActiveOperations = new Map<string, Extract<NativeExecutionFact, { domain: "execution" }>>();
   state: ProviderObservedState = "starting";
   stopRequested = false;
   protocolError = false;
@@ -351,8 +360,11 @@ class CodexProviderHandle implements ProviderHandle {
     readonly providerConnection: ProviderConnectionRef,
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
+    now: () => string,
   ) {
     this.providerContinuationId = providerContinuationId;
+    this.execution = new ProviderExecutionObserver(now);
+    client.onDisconnect(() => this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" }, providerConnection.processIdentity ?? undefined));
   }
 
   replaceContinuation(providerContinuationId: string): void {
@@ -890,6 +902,38 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
+  onExecution(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void {
+    return this.requireHandle(handle).execution.subscribe(listener);
+  }
+
+  async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
+    const handle = this.requireHandle(providerHandle);
+    const proof = (): ControlProbeResult | null => {
+      const expected = handle.providerConnection.processIdentity;
+      if (handle.pid === null || !expected) return { state: "degraded" };
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      if (actual === undefined) return { state: "degraded" };
+      if (actual === null) return { state: "lost", controlEvidence: "process_exit" };
+      if (!sameProcessBirthIdentity(actual, expected)) return { state: "lost", controlEvidence: "process_birth_changed" };
+      return null;
+    };
+    let result = proof();
+    if (!result) {
+      try {
+        // Pinned 0.144.1 has no ping. A single loaded-ID page is a cheap RPC
+        // round trip, unlike thread/read which can serialize a whole history.
+        const response = await handle.client.request<unknown>("thread/loaded/list", { limit: 1 }, { timeoutMs: 2_000 });
+        const data = recordValue(response);
+        result = proof() ?? (Array.isArray(data?.data) && data.data.length <= 1 && data.data.every(nativeExecutionId)
+          ? { state: "responsive" } : { state: "degraded" });
+      } catch (error) {
+        result = proof() ?? { state: isMethodNotFound(error) ? "unprobeable" : "degraded" };
+      }
+    }
+    handle.execution.emit({ domain: "control", kind: "state_changed", sideEffects: "none", ...result }, handle.providerConnection.processIdentity ?? undefined);
+    return result;
+  }
+
   private async start(
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
@@ -1039,6 +1083,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         { kind: "codex_app_server", url: serverUrl, pid: launch.pid, processIdentity },
         client,
         observedLaunch,
+        this.deps.now,
       );
       this.handles.set(req.workAttemptId, handle);
       const exitPromise = observedLaunch.exited.then((exit) => this.observeExit(handle!, exit));
@@ -1190,6 +1235,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         connection,
         client,
         launch,
+        this.deps.now,
       );
       handle.state = continuationMissing ? "idle" : "working";
       this.handles.set(ref.workAttemptId, handle);
@@ -1234,6 +1280,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle: CodexProviderHandle,
     notification: RpcNotification,
   ): void {
+    this.observeNativeExecution(handle, notification);
     handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
@@ -1265,6 +1312,70 @@ export class CodexProviderAdapter implements ProviderAdapter {
     });
     if (/^(turn\/completed|item\/completed)$/.test(notification.method)) {
       void this.emitTranscriptTail(handle);
+    }
+  }
+
+  private observeNativeExecution(handle: CodexProviderHandle, notification: RpcNotification): void {
+    const params = recordValue(notification.params);
+    if (!params || params.threadId !== handle.providerContinuationId || !nativeExecutionId(params.threadId)) return;
+    const turn = recordValue(params.turn);
+    if (params.turnId !== undefined && turn?.id !== undefined && params.turnId !== turn.id) return;
+    const providerTurnId = params.turnId ?? turn?.id;
+    if (!nativeExecutionId(providerTurnId)) return;
+    const identity = { providerContinuationId: params.threadId, providerTurnId };
+    const emit = (fact: NativeExecutionFact) => {
+      if (fact.domain === "execution") {
+        const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId, fact.executionId]);
+        if (fact.kind === "completed") handle.nativeActiveOperations.delete(key);
+        else handle.nativeActiveOperations.set(key, fact);
+      } else if (fact.domain === "turn") {
+        const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId]);
+        if (fact.state === "active") handle.nativeActiveTurns.set(key, identity);
+        else handle.nativeActiveTurns.delete(key);
+      }
+      handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
+    };
+    if (notification.method === "turn/started") {
+      emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
+      emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none" });
+      return;
+    }
+    if (notification.method === "turn/completed") {
+      const outcome = turn?.status;
+      if (outcome === "completed" || outcome === "failed" || outcome === "interrupted") {
+        emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome, sideEffects: "none" });
+      }
+      return;
+    }
+    if (notification.method === "item/commandExecution/outputDelta") {
+      if (nativeExecutionId(params.itemId) && typeof params.delta === "string" && params.delta.length > 0) {
+        emit({ ...identity, domain: "execution", executionId: params.itemId, operation: "command", kind: "output", outputBytes: Buffer.byteLength(params.delta), sideEffects: "possible" });
+      }
+      return;
+    }
+    if (notification.method !== "item/started" && notification.method !== "item/completed") return;
+    const item = recordValue(params.item);
+    if (!item || !nativeExecutionId(item.id)) return;
+    const operation = item.type === "commandExecution" ? "command"
+      : item.type === "fileChange" ? "file_change" : item.type === "mcpToolCall" ? "other" : null;
+    if (!operation) return;
+    const base = { ...identity, domain: "execution" as const, executionId: item.id, operation } as const;
+    if (notification.method === "item/started") {
+      // item/started can precede requestApproval. Only an actual PTY process
+      // proves command start here; other items remain terminal-only evidence.
+      if (operation === "command" && item.status === "inProgress" && nativeExecutionId(item.processId)) {
+        emit({ ...base, kind: "started", sideEffects: "possible" });
+      }
+      return;
+    }
+    if (item.status === "declined" && (operation === "command" || operation === "file_change")) {
+      emit({ ...base, kind: "completed", outcome: "denied_before_start", sideEffects: "none" });
+    } else if (item.status === "completed" || item.status === "failed") {
+      const exitCode = operation === "command" && Number.isInteger(item.exitCode)
+        && Number(item.exitCode) >= -2147483648 && Number(item.exitCode) <= 2147483647 ? Number(item.exitCode) : undefined;
+      emit({ ...base, kind: "completed", outcome: item.status === "failed" || (exitCode !== undefined && exitCode !== 0) ? "failed" : "succeeded",
+        sideEffects: operation === "file_change" && item.status === "completed" ? "observed" : "possible",
+        ...(exitCode !== undefined ? { exitCode } : {}) });
     }
   }
 
@@ -1450,6 +1561,23 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle: CodexProviderHandle,
     exit: CodexAppServerExit,
   ): ProviderTerminalPayload {
+    if (exit.type === "exit") {
+      const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
+      for (const fact of handle.nativeActiveOperations.values()) {
+        emit({ domain: "execution", kind: "completed", executionId: fact.executionId, operation: fact.operation,
+          providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId,
+          outcome: "lost_after_start", sideEffects: fact.sideEffects });
+      }
+      handle.nativeActiveOperations.clear();
+      for (const turn of handle.nativeActiveTurns.values()) {
+        emit({ ...turn, domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none" });
+      }
+      handle.nativeActiveTurns.clear();
+      emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
+      emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
+    } else {
+      handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" }, handle.providerConnection.processIdentity ?? undefined);
+    }
     const terminal = exit.type === "error"
       ? {
         ...synthesizeTerminalPayload({

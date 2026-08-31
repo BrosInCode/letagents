@@ -7,6 +7,7 @@ import test from "node:test";
 
 import {
   OpenModelProviderAdapter,
+  type OpenCodePermissionObservation,
   type OpenModelProviderAdapterDependencies,
 } from "../main/agents/open-model-provider-adapter.js";
 import {
@@ -16,6 +17,13 @@ import {
   type ProviderStreamEvent,
 } from "../main/agents/provider-adapter.js";
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
+import {
+  OpenCodePermissionReplyError,
+  OpenCodeServerClient,
+  parseOpenCodePermissionEvent,
+  type OpenCodePermissionRequest,
+} from "../main/agents/opencode-server-client.js";
 
 type LaunchRecord = {
   binary: string;
@@ -51,6 +59,10 @@ function createHarness() {
   let streamEvents: Array<Record<string, unknown>> = [];
   let observedProcessExit: Promise<ProviderProcessExit>;
   let messageReads = 0;
+  let permissions: unknown = [];
+  const permissionReplies: Array<{ requestId: string; reply: string }> = [];
+  const eventStreams = new Set<{ send(event: Record<string, unknown>): void; close(): void }>();
+  let eventConnections = 0;
 
   const neverExits = new Promise<ProviderProcessExit>(() => {});
   observedProcessExit = neverExits;
@@ -76,21 +88,44 @@ function createHarness() {
       const url = new URL(input);
       const authorization = new Headers(init?.headers).get("authorization");
       assert.match(authorization ?? "", /^Basic /);
-      if (url.pathname === "/global/health") return json({ healthy: true });
+      if (url.pathname === "/global/health") return json({ healthy: true, version: "1.18.9" });
+      if (url.pathname === "/permission") return json(permissions);
+      const permissionMatch = url.pathname.match(/^\/permission\/([^/]+)\/reply$/);
+      if (permissionMatch && init?.method === "POST") {
+        const requestId = decodeURIComponent(permissionMatch[1]!);
+        const { reply } = JSON.parse(String(init.body)) as { reply: string };
+        permissionReplies.push({ requestId, reply });
+        assert.ok(Array.isArray(permissions));
+        const pending = permissions as OpenCodePermissionRequest[];
+        const current = pending.find((request) => request.id === requestId);
+        if (!current) return json({ _tag: "PermissionNotFoundError", requestID: requestId }, 404);
+        permissions = pending.filter((request) => reply === "reject"
+          ? request.sessionID !== current.sessionID
+          : request.id !== current.id);
+        return json(true);
+      }
       if (url.pathname === "/event") {
+        eventConnections += 1;
         const encoder = new TextEncoder();
+        let connection: { send(event: Record<string, unknown>): void; close(): void };
         return new Response(new ReadableStream<Uint8Array>({
           start(controller) {
+            connection = {
+              send(event) { controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`)); },
+              close() { if (eventStreams.delete(connection)) controller.close(); },
+            };
+            eventStreams.add(connection);
             controller.enqueue(encoder.encode(
               'data: {"type":"server.connected","properties":{}}\n\n',
             ));
             for (const event of streamEvents) {
               controller.enqueue(encoder.encode(`data: ${JSON.stringify(event)}\n\n`));
             }
-            init?.signal?.addEventListener("abort", () => controller.close(), {
+            init?.signal?.addEventListener("abort", () => connection.close(), {
               once: true,
             });
           },
+          cancel() { eventStreams.delete(connection); },
         }), {
           status: 200,
           headers: { "content-type": "text/event-stream" },
@@ -159,6 +194,11 @@ function createHarness() {
     promptBodies,
     signals,
     aborts,
+    permissionReplies,
+    get eventConnections() { return eventConnections; },
+    get activeEventStreams() { return eventStreams.size; },
+    sendEvent(event: Record<string, unknown>) { for (const stream of eventStreams) stream.send(event); },
+    closeEvents() { for (const stream of eventStreams) stream.close(); },
     get messageReads() {
       return messageReads;
     },
@@ -181,6 +221,9 @@ function createHarness() {
     },
     setStreamEvents(events: Array<Record<string, unknown>>) {
       streamEvents = events;
+    },
+    setPermissions(value: unknown) {
+      permissions = value;
     },
     completeObservedProcessExit(exit: ProviderProcessExit) {
       observedProcessExit = Promise.resolve(exit);
@@ -1015,4 +1058,467 @@ test("Open Model clears the working projection and active turn id when a non-bou
 
   assert.equal(handle.observedState(), "idle", "a non-bounded failure must not leak a working projection");
   assert.equal((handle as unknown as { activeRoomTurnId: string | null }).activeRoomTurnId, null, "the stale active turn id is cleared");
+});
+
+function permissionFixture(id = "per_a", sessionID = "ses_a"): OpenCodePermissionRequest {
+  return {
+    id, sessionID, permission: "bash", patterns: ["npm test"], metadata: { command: "npm test" }, always: ["npm *"],
+    tool: { messageID: "msg_assistant", callID: "call_a" },
+  };
+}
+
+function nativeClient(fetchImpl: OpenModelProviderAdapterDependencies["fetch"]): OpenCodeServerClient {
+  return new OpenCodeServerClient("http://127.0.0.1:43821", { username: "opencode", password: "client-test" }, fetchImpl);
+}
+
+test("OpenCode client parses permission SSE records strictly without changing unrelated event handling", async () => {
+  const harness = createHarness();
+  const asked = { type: "permission.asked", properties: permissionFixture() };
+  const replied = { type: "permission.replied", properties: { sessionID: "ses_a", requestID: "per_a", reply: "once" } };
+  harness.setStreamEvents([asked, replied]);
+  const controller = new AbortController();
+  const events = nativeClient(harness.dependencies.fetch).events(controller.signal);
+  try {
+    assert.equal(parseOpenCodePermissionEvent((await events.next()).value!), null, "server.connected is not a permission");
+    assert.deepEqual(parseOpenCodePermissionEvent((await events.next()).value!), asked);
+    assert.deepEqual(parseOpenCodePermissionEvent((await events.next()).value!), replied);
+  } finally {
+    controller.abort();
+    await events.return(undefined);
+  }
+  for (const properties of [null, {}, { ...permissionFixture(), patterns: [1] }, { ...permissionFixture(), tool: null },
+    { ...permissionFixture(), metadata: [] }, { ...permissionFixture(), tool: { messageID: "msg_a" } }]) {
+    assert.throws(() => parseOpenCodePermissionEvent({ type: "permission.asked", properties }), /malformed permission request/);
+  }
+  for (const reply of ["always", "reject"]) {
+    assert.equal(parseOpenCodePermissionEvent({ ...replied, properties: { ...replied.properties, reply } })?.type, "permission.replied");
+  }
+  for (const reply of ["allow", ["once"], null]) {
+    assert.throws(() => parseOpenCodePermissionEvent({ ...replied, properties: { ...replied.properties, reply } }), /malformed permission reply/);
+  }
+  const withoutTool = permissionFixture();
+  delete withoutTool.tool;
+  assert.deepEqual(parseOpenCodePermissionEvent({ type: "permission.asked", properties: withoutTool }), { type: "permission.asked", properties: withoutTool });
+});
+
+test("OpenCode client validates the complete permission list and filters the exact session", async () => {
+  const harness = createHarness();
+  const client = nativeClient(harness.dependencies.fetch);
+  harness.setPermissions([permissionFixture(), permissionFixture("per_b", "ses_b")]);
+  assert.deepEqual(await client.listPendingPermissions("ses_a"), [permissionFixture()]);
+  assert.deepEqual(await client.listPendingPermissions("ses_absent"), []);
+  await assert.rejects(client.listPendingPermissions(""), /exact OpenCode session/);
+  for (const value of [null, {}, [permissionFixture(), {}], [permissionFixture(), permissionFixture("per_a", "ses_b")]]) {
+    harness.setPermissions(value);
+    await assert.rejects(client.listPendingPermissions("ses_a"), /malformed|duplicate/);
+  }
+});
+
+test("OpenCode client uses once or native session-wide reject without widening the launch policy", async () => {
+  const harness = createHarness();
+  const client = nativeClient(harness.dependencies.fetch);
+  harness.setPermissions([permissionFixture(), permissionFixture("per_b"), permissionFixture("per_c", "ses_c")]);
+  assert.deepEqual(await client.replyPermission("ses_a", permissionFixture(), "once"), { outcome: "processed", nativeScope: "request" });
+  assert.deepEqual(await client.listPendingPermissions("ses_a"), [permissionFixture("per_b")]);
+  harness.setPermissions([permissionFixture(), permissionFixture("per_b"), permissionFixture("per_c", "ses_c")]);
+  assert.deepEqual(await client.replyPermission("ses_a", permissionFixture(), "reject"), { outcome: "processed", nativeScope: "session_pending" });
+  assert.deepEqual(await client.listPendingPermissions("ses_a"), []);
+  assert.deepEqual(await client.listPendingPermissions("ses_c"), [permissionFixture("per_c", "ses_c")]);
+  assert.deepEqual(harness.permissionReplies, [{ requestId: "per_a", reply: "once" }, { requestId: "per_a", reply: "reject" }]);
+  assert.equal(harness.launches.length, 0);
+  assert.deepEqual(harness.signals, []);
+  assert.deepEqual(harness.aborts, []);
+});
+
+test("OpenCode client refuses foreign, missing, widened, or changed permission requests before POST", async () => {
+  const harness = createHarness();
+  const client = nativeClient(harness.dependencies.fetch);
+  harness.setPermissions([permissionFixture()]);
+  await assert.rejects(client.replyPermission("ses_b", permissionFixture(), "once"), /exact session/);
+  await assert.rejects(client.replyPermission("ses_a", permissionFixture(), "always" as "once"), /once or reject/);
+  harness.setPermissions([permissionFixture("per_a", "ses_b")]);
+  await assert.rejects(client.replyPermission("ses_a", permissionFixture(), "once"), (error: unknown) =>
+    error instanceof OpenCodePermissionReplyError && error.outcome === "not_pending");
+  for (const changed of [
+    { ...permissionFixture(), metadata: { command: "npm publish" } },
+    { ...permissionFixture(), patterns: ["npm publish"] },
+    { ...permissionFixture(), tool: { messageID: "msg_other", callID: "call_a" } },
+  ]) {
+    harness.setPermissions([changed]);
+    await assert.rejects(client.replyPermission("ses_a", permissionFixture(), "once"), (error: unknown) =>
+      error instanceof OpenCodePermissionReplyError && error.outcome === "request_changed");
+  }
+  assert.deepEqual(harness.permissionReplies, []);
+});
+
+test("OpenCode client snapshots expected permission fields before the re-list await", async () => {
+  const expected = permissionFixture();
+  let returnList!: (response: Response) => void;
+  let posts = 0;
+  const client = nativeClient(async (_input, init) => {
+    if (init?.method === "POST") { posts += 1; return json(true); }
+    return await new Promise<Response>((resolve) => { returnList = resolve; });
+  });
+  const reply = client.replyPermission("ses_a", expected, "once");
+  expected.metadata.command = "npm publish";
+  returnList(json([expected]));
+  await assert.rejects(reply, (error: unknown) => error instanceof OpenCodePermissionReplyError && error.outcome === "request_changed");
+  assert.equal(posts, 0, "mutating the caller snapshot cannot authorize newly listed parameters");
+});
+
+test("OpenCode client preserves uncertain permission dispatch and does not retry it", async () => {
+  for (const response of [() => json(false), () => json({ message: "private provider detail" }, 500),
+    () => { throw new Error("private transport detail"); }]) {
+    let posts = 0;
+    const client = nativeClient(async (_input, init) => {
+      if (init?.method !== "POST") return json([permissionFixture()]);
+      posts += 1;
+      return response();
+    });
+    await assert.rejects(client.replyPermission("ses_a", permissionFixture(), "once"), (error: unknown) => {
+      assert.ok(error instanceof OpenCodePermissionReplyError);
+      assert.equal(error.outcome, "uncertain");
+      assert.doesNotMatch(error.message, /private/);
+      return true;
+    });
+    assert.equal(posts, 1);
+  }
+  const missing = nativeClient(async (_input, init) => init?.method === "POST"
+    ? json({ _tag: "PermissionNotFoundError", requestID: "per_a" }, 404)
+    : json([permissionFixture()]));
+  await assert.rejects(missing.replyPermission("ses_a", permissionFixture(), "once"), (error: unknown) =>
+    error instanceof OpenCodePermissionReplyError && error.outcome === "not_pending");
+});
+
+test("OpenCode control probe validates authenticated health and keeps failures degraded, never runtime-lost", async () => {
+  const healthy = nativeClient(async (input, init) => {
+    assert.equal(new URL(input).pathname, "/global/health");
+    assert.equal(new Headers(init?.headers).get("authorization"), `Basic ${Buffer.from("opencode:client-test").toString("base64")}`);
+    assert.ok(init?.signal);
+    return json({ healthy: true, version: "1.18.9" });
+  });
+  assert.deepEqual(await healthy.probeControl(), { state: "responsive", version: "1.18.9" });
+  const cases = [
+    { fetch: async () => json({ healthy: true }), reason: "invalid_response" },
+    { fetch: async () => json({ healthy: false, version: "1.18.9" }), reason: "invalid_response" },
+    { fetch: async () => new Response("not JSON"), reason: "invalid_response" },
+    { fetch: async () => json({}, 401), reason: "authentication_failed" },
+    { fetch: async () => json({}, 503), reason: "http_error" },
+    { fetch: async () => { throw new Error("private", { cause: Object.assign(new Error("private"), { code: "ECONNREFUSED" }) }); }, reason: "transport_refused" },
+    { fetch: async () => { throw new Error("ECONNREFUSED is not structured evidence"); }, reason: "transport_error" },
+  ];
+  for (const fixture of cases) assert.deepEqual(await nativeClient(fixture.fetch).probeControl(), { state: "degraded", reason: fixture.reason });
+  assert.equal(await nativeClient(async () => json({})).health(), true, "legacy startup health keeps its established behavior");
+});
+
+test("OpenCode control probe bounds stalled headers or bodies without stopping work", async () => {
+  const never = () => new Promise<Response>(() => {});
+  const controller = new AbortController();
+  const aborted = nativeClient(never).probeControl(controller.signal);
+  controller.abort();
+  assert.deepEqual(await aborted, { state: "degraded", reason: "aborted" });
+  const keepAlive = setInterval(() => undefined, 50);
+  try {
+    const started = Date.now();
+    const results = await Promise.all([
+      nativeClient(never).probeControl(),
+      nativeClient(async () => new Response(new ReadableStream({ start() {} }))).probeControl(),
+    ]);
+    assert.deepEqual(results, [{ state: "degraded", reason: "timeout" }, { state: "degraded", reason: "timeout" }]);
+    assert.ok(Date.now() - started < 5_000);
+  } finally {
+    clearInterval(keepAlive);
+  }
+});
+
+test("Open Model emits exact structural tool outcomes before display without promoting tool failures to runtime failures", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  const order: string[] = [];
+  adapter.onExecution(handle, (event) => { observations.push(event); order.push(`fact:${event.fact.domain}:${event.fact.kind}`); });
+  adapter.onStream(handle, (event) => { if (event.kind === "tool_lifecycle") order.push("display:tool"); });
+  harness.holdTurnOpenWithTranscript();
+  harness.setTranscriptFactories([
+    (turnId) => [assistantWithTool(turnId, "assistant-tool", 10, { status: "running", input: { command: "secret command" } })],
+    (turnId) => [
+      assistantWithTool(turnId, "assistant-tool", 10, { status: "error", input: { command: "secret command" }, error: "private error or permission denied" }),
+      assistantMessage(turnId, "assistant-final", 20, "Recovered normally."),
+    ],
+  ]);
+  harness.setStreamEvents([{ type: "session.idle", properties: { sessionID: handle.providerContinuationId } }]);
+  const result = await adapter.runRoomTurn(handle, { inboxItemId: "typed-tool", sourceMessage: {}, activation: {}, actionId: "typed-tool" });
+  const facts = observations.map((event) => event.fact);
+  assert.equal(result.outcome, "reply");
+  assert.equal(facts.some((fact) => fact.domain === "execution" && fact.kind === "started"), false, "running can still be waiting for permission");
+  assert.deepEqual(facts.filter((fact) => fact.domain === "execution"), [{
+    domain: "execution", kind: "completed", executionId: "call-1", operation: "command", sideEffects: "possible", outcome: "failed",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: result.turnId,
+  }]);
+  assert.ok(order.indexOf("fact:execution:completed") < order.lastIndexOf("display:tool"));
+  assert.equal(facts.some((fact) => fact.domain === "runtime" && fact.state === "exited"), false);
+  assert.equal(facts.some((fact) => fact.domain === "turn" && fact.turnOutcome === "failed"), false);
+  assert.ok(facts.some((fact) => fact.domain === "turn" && fact.state === "terminal" && fact.turnOutcome === "completed"));
+  assert.doesNotMatch(JSON.stringify(observations), /secret command|private error|permission denied|Recovered normally/);
+  assert.ok(observations.every((event, index) => event.sequence === index + 1 && event.nativeProcessIdentity === "opencode-birth-6101"));
+  const protocolModule = new URL("../../daemon/execution-protocol.ts", import.meta.url).href;
+  const { parseExecutionFact } = await import(protocolModule);
+  observations.forEach((event, index) => parseExecutionFact({ ...event.fact, factId: `fact_${index}`, agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime", observerEpoch: 1, sourceSequence: event.sequence, observedAtMs: event.observedAtMs,
+    ...("providerTurnId" in event.fact ? { turnId: "turn_internal" } : {}),
+  }));
+  assert.equal(harness.launches.length, 1);
+  assert.deepEqual(harness.aborts, []);
+});
+
+test("Open Model typed turns preserve native model errors, next-turn reuse, and unreadable/no-reply outcomes", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => [{ info: { id: "assistant_error", role: "assistant", parentID: turnId, time: { completed: 11 }, error: { name: "APIError", data: { statusCode: 429 } } }, parts: [] }]]);
+  await assert.rejects(adapter.runRoomTurn(handle, { inboxItemId: "model-error", sourceMessage: {}, activation: {}, actionId: "model-error" }));
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.turnOutcome === "failed"));
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant_no_reply", 20, "LETAGENTS_NO_ROOM_REPLY")]]);
+  const noReply = await adapter.runRoomTurn(handle, { inboxItemId: "no-reply", sourceMessage: {}, activation: {}, actionId: "no-reply" });
+  assert.equal(noReply.outcome, "no_reply");
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === noReply.turnId && fact.turnOutcome === "completed"));
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant_empty", 30, null)]]);
+  const unreadable = await adapter.runRoomTurn(handle, { inboxItemId: "empty", sourceMessage: {}, activation: {}, actionId: "empty" });
+  assert.equal(unreadable.outcome, "unreadable");
+  assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === unreadable.turnId && fact.turnOutcome === "unreadable"));
+  assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), false);
+  assert.equal(harness.launches.length, 1);
+});
+
+test("Open Model does not invent a typed terminal from the legacy tool-child session fallback", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => [assistantMessage(turnId, "assistant_tool_only", 10, null, "tool-calls")]]);
+  const result = await adapter.runRoomTurn(handle, { inboxItemId: "tool-only", sourceMessage: {}, activation: {}, actionId: "tool-only" });
+  assert.equal(result.outcome, "unreadable", "legacy delivery behavior is unchanged");
+  assert.equal(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
+});
+
+test("Open Model control probes distinguish degraded transport from exact native process replacement", async () => {
+  const harness = createHarness();
+  let identity: string | null | undefined = "opencode-birth-6101";
+  let refused = false;
+  let replaceWhileResponding = false;
+  const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-control-probe-")), dependencies: {
+    ...harness.dependencies,
+    getProcessIdentity: () => identity,
+    fetch: async (input, init) => {
+      if (new URL(input).pathname === "/global/health" && refused) throw Object.assign(new Error("private network detail"), { code: "ECONNREFUSED" });
+      if (replaceWhileResponding) identity = "different-birth";
+      return harness.dependencies.fetch(input, init);
+    },
+  } });
+  const handle = await adapter.spawn(spawnRequest());
+  assert.deepEqual(await adapter.probeControl(handle), { state: "responsive" });
+  refused = true;
+  assert.deepEqual(await adapter.probeControl(handle), { state: "degraded" });
+  identity = undefined;
+  assert.deepEqual(await adapter.probeControl(handle), { state: "degraded" });
+  identity = "opencode-birth-6101";
+  refused = false;
+  replaceWhileResponding = true;
+  assert.deepEqual(await adapter.probeControl(handle), { state: "lost", controlEvidence: "process_birth_changed" });
+  assert.deepEqual(harness.signals, []);
+  assert.deepEqual(harness.aborts, []);
+  assert.equal(harness.launches.length, 1);
+});
+
+test("Open Model permission observation re-lists after reconnect and never makes decisions or native turns", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const first = permissionFixture("per_first", handle.providerContinuationId!);
+  const second = permissionFixture("per_second", handle.providerContinuationId!);
+  harness.setPermissions([first, permissionFixture("per_other", "other-session")]);
+  const events: OpenCodePermissionObservation[] = [];
+  const controller = new AbortController();
+  let sawFirst!: () => void;
+  const firstSnapshot = new Promise<void>((resolve) => { sawFirst = resolve; });
+  let sawSecond!: () => void;
+  const secondSnapshot = new Promise<void>((resolve) => { sawSecond = resolve; });
+  const observing = adapter.observePermissions(handle, (event) => {
+    events.push(event);
+    if (event.type !== "snapshot") return;
+    if (event.requests[0]?.id === first.id) sawFirst();
+    if (event.requests[0]?.id === second.id) { sawSecond(); controller.abort(); }
+  }, controller.signal);
+  await firstSnapshot;
+  harness.setPermissions([second]);
+  harness.closeEvents();
+  await secondSnapshot;
+  await observing;
+  assert.deepEqual(events.filter((event) => event.type === "snapshot").map((event) => event.requests.map((request) => request.id)), [[first.id], [second.id]]);
+  assert.equal(harness.eventConnections, 2);
+  assert.equal(harness.activeEventStreams, 0);
+  assert.deepEqual(harness.permissionReplies, []);
+  assert.deepEqual(harness.promptBodies, []);
+  assert.deepEqual(harness.aborts, []);
+  assert.deepEqual(harness.signals, []);
+  assert.equal(harness.launches.length, 1);
+});
+
+test("Open Model consumes permission SSE while the initial list is pending and discards the overtaken snapshot", async () => {
+  const harness = createHarness();
+  const first = permissionFixture("per_old", "session-open-model-1");
+  const second = permissionFixture("per_new", "session-open-model-1");
+  let releaseFirst!: (value: Response) => void;
+  let startedFirst!: () => void;
+  const started = new Promise<void>((resolve) => { startedFirst = resolve; });
+  let reads = 0;
+  const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-permission-race-")), dependencies: {
+    ...harness.dependencies,
+    fetch: (input, init) => {
+      if (new URL(input).pathname === "/permission" && ++reads === 1) {
+        startedFirst();
+        return new Promise((resolve) => { releaseFirst = resolve; });
+      }
+      return harness.dependencies.fetch(input, init);
+    },
+  } });
+  const handle = await adapter.spawn(spawnRequest());
+  const controller = new AbortController();
+  const events: OpenCodePermissionObservation[] = [];
+  const observing = adapter.observePermissions(handle, (event) => {
+    events.push(event);
+    if (event.type === "snapshot") controller.abort();
+  }, controller.signal);
+  await started;
+  harness.setPermissions([second]);
+  harness.sendEvent({ type: "permission.asked", properties: second });
+  await new Promise((resolve) => setImmediate(resolve));
+  releaseFirst(json([first]));
+  await observing;
+  assert.deepEqual(events, [{ type: "snapshot", requests: [second] }]);
+  assert.equal(reads, 2);
+  assert.deepEqual(harness.permissionReplies, []);
+});
+
+test("Open Model never resurrects a queued asked event that the authoritative permission list has already removed", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  harness.setStreamEvents([{ type: "permission.asked", properties: permissionFixture("per_stale", handle.providerContinuationId!) }]);
+  harness.setPermissions([]);
+  const controller = new AbortController();
+  const events: OpenCodePermissionObservation[] = [];
+  await adapter.observePermissions(handle, (event) => {
+    events.push(event);
+    if (event.type === "snapshot") controller.abort();
+  }, controller.signal);
+  assert.deepEqual(events, [{ type: "snapshot", requests: [] }]);
+});
+
+test("Open Model disposal invalidates pending permission authority even while a snapshot GET is hung", async () => {
+  const harness = createHarness();
+  let releaseList!: (value: Response) => void;
+  let startedList!: () => void;
+  const started = new Promise<void>((resolve) => { startedList = resolve; });
+  const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-permission-dispose-")), dependencies: {
+    ...harness.dependencies,
+    fetch: (input, init) => {
+      if (new URL(input).pathname === "/permission") {
+        startedList();
+        return new Promise((resolve) => { releaseList = resolve; });
+      }
+      return harness.dependencies.fetch(input, init);
+    },
+  } });
+  const handle = await adapter.spawn(spawnRequest());
+  const events: OpenCodePermissionObservation[] = [];
+  const controller = new AbortController();
+  const observing = adapter.observePermissions(handle, (event) => events.push(event), controller.signal);
+  await started;
+  harness.sendEvent({ type: "server.instance.disposed", properties: {} });
+  await observing;
+  releaseList(json([permissionFixture("per_dead", handle.providerContinuationId!)]));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(events, [{ type: "unavailable", reason: "control_epoch_gone" }]);
+  assert.deepEqual(await adapter.probeControl(handle), { state: "lost", controlEvidence: "control_epoch_gone" }, "same-PID healthy server does not resurrect the disposed instance");
+  assert.equal(harness.eventConnections, 1);
+  assert.equal(harness.activeEventStreams, 0);
+  assert.deepEqual(harness.aborts, []);
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Open Model completed shell tools use native metadata exit codes and never infer a missing command outcome", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => [
+    assistantWithTool(turnId, "assistant_1", 10, { status: "completed", metadata: { exit: 1 } }, "call_failed"),
+    assistantWithTool(turnId, "assistant_2", 20, { status: "completed", metadata: { exit: 0 } }, "call_success"),
+    assistantWithTool(turnId, "assistant_3", 30, { status: "completed", metadata: { exit: null } }, "call_interrupted"),
+    assistantWithTool(turnId, "assistant_4", 40, { status: "completed", metadata: {} }, "call_unknown"),
+    assistantWithTool(turnId, "assistant_5", 50, { status: "completed", metadata: { exit: "1" } }, "call_malformed"),
+    assistantMessage(turnId, "assistant_final", 60, "Done."),
+  ]]);
+  await adapter.runRoomTurn(handle, { inboxItemId: "exits", sourceMessage: {}, activation: {}, actionId: "exits" });
+  assert.deepEqual(observations.flatMap(({ fact }) => fact.domain === "execution" && fact.kind === "completed"
+    ? [{ id: fact.executionId, outcome: fact.outcome, exitCode: fact.exitCode }] : []), [
+    { id: "call_failed", outcome: "failed", exitCode: 1 },
+    { id: "call_success", outcome: "succeeded", exitCode: 0 },
+    { id: "call_interrupted", outcome: "interrupted_after_start", exitCode: undefined },
+  ]);
+  assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), false);
+});
+
+test("Open Model generic process errors are degraded; actual exit or independently proven disappearance is hard evidence", async () => {
+  for (const kind of ["error", "error_with_death", "exit"] as const) {
+    const harness = createHarness();
+    let settleExit!: (exit: ProviderProcessExit) => void;
+    const exited = new Promise<ProviderProcessExit>((resolve) => { settleExit = resolve; });
+    let gone = false;
+    const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-exit-evidence-")), dependencies: {
+      ...harness.dependencies,
+      launch: (input) => ({ ...harness.dependencies.launch(input), exited }),
+      getProcessIdentity: () => gone ? null : "opencode-birth-6101",
+    } });
+    const handle = await adapter.spawn(spawnRequest());
+    const observations: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => observations.push(event));
+    if (kind === "error_with_death") gone = true;
+    settleExit(kind === "exit" ? { type: "exit", code: 1, signal: null } : { type: "error", error: new Error("private transport failure") });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), kind !== "error");
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "lost"), kind !== "error");
+    assert.equal(observations.some(({ fact }) => fact.domain === "control" && fact.state === "degraded"), kind === "error");
+    assert.doesNotMatch(JSON.stringify(observations), /private transport failure/);
+  }
+});
+
+test("Open Model permission snapshots are rejected when the native process is replaced during GET", async () => {
+  const harness = createHarness();
+  let identity = "opencode-birth-6101";
+  const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-permission-birth-")), dependencies: {
+    ...harness.dependencies,
+    getProcessIdentity: () => identity,
+    fetch: async (input, init) => {
+      const response = await harness.dependencies.fetch(input, init);
+      if (new URL(input).pathname === "/permission") identity = "replacement-birth";
+      return response;
+    },
+  } });
+  const handle = await adapter.spawn(spawnRequest());
+  harness.setPermissions([permissionFixture("per_old", handle.providerContinuationId!)]);
+  const events: OpenCodePermissionObservation[] = [];
+  await adapter.observePermissions(handle, (event) => events.push(event), new AbortController().signal);
+  assert.ok(events.length >= 1);
+  assert.ok(events.every((event) => event.type === "unavailable" && event.reason === "process_birth_changed"));
+  assert.equal(harness.eventConnections, 1);
+  assert.deepEqual(harness.permissionReplies, []);
+});
+
+test("Open Model typed facts reject contradictory session evidence even when a legacy transcript row shares the turn ID", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setTranscriptFactories([(turnId) => {
+    const tool = assistantWithTool(turnId, "foreign_tool", 10, { status: "completed", metadata: { exit: 0 } });
+    const final = assistantMessage(turnId, "foreign_final", 20, "Foreign reply.");
+    tool.info.sessionID = "other_session";
+    final.info.sessionID = "other_session";
+    return [tool, final];
+  }]);
+  await adapter.runRoomTurn(handle, { inboxItemId: "foreign-rows", sourceMessage: {}, activation: {}, actionId: "foreign-rows" });
+  assert.equal(observations.some(({ fact }) => fact.domain === "execution" || (fact.domain === "turn" && fact.state === "terminal")), false);
 });

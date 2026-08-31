@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 function getWebSocketCtor(): typeof WebSocket {
   const ctor = globalThis.WebSocket;
   if (!ctor) {
@@ -8,12 +10,31 @@ function getWebSocketCtor(): typeof WebSocket {
 
 const DEFAULT_RPC_REQUEST_TIMEOUT_MS = 30_000;
 
-interface RpcResultEnvelope {
-  id?: number;
-  method?: string;
-  params?: unknown;
-  error?: { message?: string } | unknown;
-  result?: unknown;
+export type RpcRequestId = string | number;
+export interface RpcServerRequest {
+  readonly id: RpcRequestId;
+  readonly method: string;
+  readonly params?: unknown;
+  readonly connectionId: string;
+}
+
+function validId(value: unknown): value is RpcRequestId {
+  return typeof value === "string" || (typeof value === "number" && Number.isSafeInteger(value));
+}
+
+function record(value: unknown): value is Record<string, unknown> {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
+}
+
+function freezeJson(value: unknown): void {
+  const pending = [value];
+  while (pending.length) {
+    const item = pending.pop();
+    if (item !== null && typeof item === "object") {
+      for (const child of Object.values(item)) pending.push(child);
+      Object.freeze(item);
+    }
+  }
 }
 
 export interface RpcNotification {
@@ -58,6 +79,9 @@ export interface ThreadReadResult {
 
 export class CodexRpcClient {
   private ws: WebSocket | null = null;
+  private connectionId = "";
+  private readonly inbound = new Map<RpcRequestId, RpcServerRequest>();
+  private readonly requestListeners = new Set<(request: RpcServerRequest) => void>();
   private intentionalClose = false;
   private disconnectNotified = false;
   private readonly disconnectListeners = new Set<() => void>();
@@ -79,8 +103,17 @@ export class CodexRpcClient {
 
   async connect(): Promise<void> {
     const WS = getWebSocketCtor();
+    const previous = this.ws;
+    this.ws = null;
+    this.invalidateRequests();
+    previous?.close();
+    this.intentionalClose = false;
+    this.disconnectNotified = false;
+    this.connectionId = randomUUID();
+    let connectedSocket: WebSocket;
     await new Promise<void>((resolve, reject) => {
       const ws = new WS(this.serverUrl);
+      connectedSocket = ws;
       this.ws = ws;
       let settled = false;
 
@@ -92,6 +125,7 @@ export class CodexRpcClient {
       };
 
       ws.onopen = () => {
+        if (this.ws !== ws) { rejectConnect(new Error("WebSocket connection replaced")); return; }
         if (!settled) {
           settled = true;
           resolve();
@@ -99,32 +133,43 @@ export class CodexRpcClient {
       };
       ws.onerror = () => {
         rejectConnect(new Error(`WebSocket error connecting to ${this.serverUrl}`));
-        if (settled) this.notifyDisconnect();
+        if (this.ws !== ws) return;
+        this.ws = null;
+        this.invalidateRequests();
+        this.notifyDisconnect();
+        ws.close();
       };
-      ws.onmessage = (event) => this.handleMessage(String(event.data));
+      ws.onmessage = (event) => { if (this.ws === ws) this.handleMessage(String(event.data)); };
       ws.onclose = () => {
         rejectConnect(new Error(`WebSocket closed connecting to ${this.serverUrl}`));
-        for (const pending of this.pending.values()) {
-          clearTimeout(pending.timeout);
-          pending.reject(new Error("WebSocket closed"));
-        }
-        this.pending.clear();
+        if (this.ws !== ws) return;
+        this.ws = null;
+        this.invalidateRequests();
         this.notifyDisconnect();
       };
     });
 
-    await this.request("initialize", {
-      clientInfo: {
-        name: "letagents-desktop-codex-supervisor",
-        title: "LetAgents Desktop Codex Supervisor",
-        version: "0.1.0",
-      },
-      capabilities: { experimentalApi: true },
-    });
-    this.notify("initialized");
+    try {
+      if (this.ws !== connectedSocket!) throw new Error("WebSocket connection replaced");
+      await this.request("initialize", {
+        clientInfo: {
+          name: "letagents-desktop-codex-supervisor",
+          title: "LetAgents Desktop Codex Supervisor",
+          version: "0.1.0",
+        },
+        capabilities: { experimentalApi: true },
+      });
+      if (this.ws !== connectedSocket!) throw new Error("WebSocket connection replaced");
+      this.notify("initialized");
+    } catch (error) {
+      if (this.ws === connectedSocket!) this.close();
+      throw error;
+    }
   }
 
-  async request<T>(method: string, params?: unknown): Promise<T> {
+  async request<T>(method: string, params?: unknown, options?: { timeoutMs?: number }): Promise<T> {
+    const timeoutMs = options?.timeoutMs ?? this.requestTimeoutMs;
+    if (!Number.isSafeInteger(timeoutMs) || timeoutMs <= 0 || timeoutMs > 2_147_483_647) throw new Error("Invalid RPC request timeout");
     const id = this.nextId++;
     const payload: Record<string, unknown> = { id, method };
     if (params !== undefined) {
@@ -135,7 +180,7 @@ export class CodexRpcClient {
       const timeout = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Codex app-server request timed out: ${method}`));
-      }, this.requestTimeoutMs);
+      }, timeoutMs);
       this.pending.set(id, {
         resolve: (value) => {
           clearTimeout(timeout);
@@ -162,9 +207,36 @@ export class CodexRpcClient {
 
   close(): void {
     this.intentionalClose = true;
-    if (this.ws?.readyState === getWebSocketCtor().OPEN) {
-      this.ws.close();
+    const ws = this.ws;
+    this.ws = null;
+    this.invalidateRequests();
+    ws?.close();
+  }
+
+  onRequest(listener: (request: RpcServerRequest) => void): () => void {
+    this.requestListeners.add(listener);
+    return () => this.requestListeners.delete(listener);
+  }
+
+  listPendingRequests(): readonly RpcServerRequest[] { return [...this.inbound.values()]; }
+
+  respond(request: RpcServerRequest, result: unknown): void {
+    if (!request || request.connectionId !== this.connectionId || this.inbound.get(request.id) !== request) {
+      throw new Error("Codex app-server request is no longer pending on this connection.");
     }
+    // Retire before send: a transport exception can leave delivery uncertain,
+    // never permission to repeat an approval response.
+    this.inbound.delete(request.id);
+    this.send({ id: request.id, result });
+  }
+
+  private invalidateRequests(): void {
+    this.inbound.clear();
+    for (const pending of this.pending.values()) {
+      clearTimeout(pending.timeout);
+      pending.reject(new Error("WebSocket closed"));
+    }
+    this.pending.clear();
   }
 
   onDisconnect(listener: () => void): () => void {
@@ -177,34 +249,45 @@ export class CodexRpcClient {
   }
 
   private handleMessage(raw: string): void {
-    let message: RpcResultEnvelope;
+    let message: unknown;
     try {
-      message = JSON.parse(raw) as RpcResultEnvelope;
+      message = JSON.parse(raw);
     } catch {
       return;
     }
 
-    if (message.id === undefined) {
-      if (typeof message.method === "string") {
-        this.onNotification?.({ method: message.method, params: message.params });
+    if (!record(message)) return;
+    const hasId = Object.hasOwn(message, "id");
+    const hasResult = Object.hasOwn(message, "result");
+    const hasError = Object.hasOwn(message, "error");
+    if (Object.hasOwn(message, "method")) {
+      if (typeof message.method !== "string" || !message.method || hasResult || hasError) return;
+      if (hasId) {
+        if (!validId(message.id) || this.inbound.has(message.id)) return;
+        freezeJson(message.params);
+        const request = Object.freeze({ id: message.id, method: message.method, params: message.params, connectionId: this.connectionId });
+        this.inbound.set(request.id, request);
+        for (const listener of this.requestListeners) {
+          try { listener(request); } catch { /* A consumer failure must not disrupt the transport or other observers. */ }
+        }
+        return;
       }
+      if (message.method === "serverRequest/resolved" && record(message.params) && validId(message.params.requestId)) {
+        this.inbound.delete(message.params.requestId);
+      }
+      this.onNotification?.({ method: message.method, params: message.params });
       return;
     }
-
+    if (!hasId || typeof message.id !== "number" || !validId(message.id) || hasResult === hasError) return;
+    if (hasError && (!record(message.error) || typeof message.error.message !== "string")) return;
     const pending = this.pending.get(message.id);
     if (!pending) {
       return;
     }
 
     this.pending.delete(message.id);
-    if (message.error) {
-      pending.reject(
-        new Error(
-          typeof message.error === "object" && message.error && "message" in message.error
-            ? String(message.error.message || JSON.stringify(message.error))
-            : JSON.stringify(message.error),
-        ),
-      );
+    if (hasError) {
+      pending.reject(new Error((message.error as { message: string }).message));
       return;
     }
 
