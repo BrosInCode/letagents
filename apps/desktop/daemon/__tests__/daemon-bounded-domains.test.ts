@@ -37,6 +37,7 @@ const expectedControlMethods = [
   "manifest.update_workplace_liveness",
   "manifest.watch_state",
   "supervisor.acknowledge_room_move_source_revocation",
+  "supervisor.authorize_custodial_polling",
   "supervisor.bind_worker_session",
   "supervisor.bootstrap_room_ingress",
   "supervisor.borrow_worker_credential",

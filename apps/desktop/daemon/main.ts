@@ -621,11 +621,7 @@ export class SupervisorDaemon {
       isLifecycleActive: (entryId) => this.entryConcurrency.isLifecycleActive(entryId),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       delivery: this.supervisedDelivery,
-      manifest: {
-        getEntry: (entryId) => this.store.getEntry(entryId),
-        pendingRoomMoves: (entryId) => this.store.pendingRoomMoves(entryId),
-        getAgentConfiguration: (entryId) => this.store.getAgentConfiguration(entryId),
-      },
+      manifest: this.store,
       roomMoves: {
         reconcile: (move) => this.roomMoves.reconcile(move),
       },
