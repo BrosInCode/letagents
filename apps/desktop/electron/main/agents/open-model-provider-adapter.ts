@@ -56,7 +56,7 @@ import {
 } from "./opencode-launch-contract.js";
 import { resolveOpenCodeBinary } from "./opencode-runtime.js";
 import { nativeExecutionId, ProviderExecutionObserver } from "./provider-execution-observer.js";
-import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, TurnOutcome } from "../../../shared/execution-protocol.js";
+import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
 import {
   assistantsFor,
   eventReferencesSession,
@@ -903,7 +903,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
-  onExecution(rawHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void {
+  onExecution(rawHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription {
     return this.required(rawHandle).execution.subscribe(listener);
   }
 

@@ -6906,6 +6906,11 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   assert.deepEqual(events.map((event) => event.sequence), events.map((_, index) => index + 1));
   assert.doesNotMatch(JSON.stringify(events), /secret-path|secret-content|secret-output/);
   assert.deepEqual(harness.signals, []);
+  const replay: NativeExecutionObservation[] = [];
+  const replaySubscription = adapter.onExecution(handle, event => replay.push(event));
+  assert.deepEqual(replay, events, "late subscribers retain both exact child births and the shared original sequence");
+  assert.ok(replay.every(event => event.sourceId === replaySubscription.sourceId), "successive child births share one observation source");
+  replaySubscription.dispose();
 });
 
 test("Cursor typed child loss differs from an exact user interruption", async () => {

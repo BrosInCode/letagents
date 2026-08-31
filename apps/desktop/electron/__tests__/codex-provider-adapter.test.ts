@@ -28,6 +28,7 @@ import type {
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
+import { ProviderExecutionObserver } from "../main/agents/provider-execution-observer.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
@@ -1797,7 +1798,73 @@ test("Codex typed shadow separates exact tool and turn failures from the unchang
   assert.equal(/SECRET|secret output|private\/project/.test(JSON.stringify(observations)), false);
   assert.deepEqual(harness.signals, []);
   assert.equal(harness.launches.length, 1);
-  unsubscribe();
+  unsubscribe.dispose();
+  const replayed: NativeExecutionObservation[] = [];
+  const stopReplay = adapter.onExecution(handle, (event) => replayed.push(event));
+  assert.deepEqual(replayed, observations, "late installation receives the same structural facts, not a reconstructed transcript");
+  assert.equal(stopReplay.sourceId, unsubscribe.sourceId);
+  assert.ok(replayed.every(event => event.sourceId === stopReplay.sourceId));
+  stopReplay.dispose();
+});
+
+test("execution observation replay stays bounded and preserves source gaps", () => {
+  const observer = new ProviderExecutionObserver(() => "2026-08-31T00:00:00.000Z");
+  const fact = { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } as const;
+  for (let index = 0; index < 300; index++) observer.emit(fact, `birth-${index}`);
+  const replay: NativeExecutionObservation[] = [];
+  const stop = observer.subscribe(event => replay.push(event));
+  assert.equal(replay.length, 256);
+  assert.equal(replay[0]!.sequence, 45);
+  assert.equal(replay.at(-1)!.sequence, 300);
+  assert.equal(replay[0]!.nativeProcessIdentity, "birth-44");
+  assert.equal(replay[0]!.observedAtMs, Date.parse("2026-08-31T00:00:00.000Z"));
+  assert.ok(Object.isFrozen(replay[0]) && Object.isFrozen(replay[0]!.fact));
+  assert.deepEqual(stop.position(), { firstRetainedSequence: 45, latestSequence: 300 });
+  stop.dispose();
+
+  // UTF-8 bytes, not character count, bound even malformed adapter input.
+  for (let index = 0; index < 100; index++) observer.emit({ ...fact, nativeEventId: "😀".repeat(1024) });
+  const bounded: NativeExecutionObservation[] = [];
+  const stopBounded = observer.subscribe(event => bounded.push(event));
+  stopBounded.dispose();
+  assert.ok(bounded.length < 100);
+  assert.equal(bounded.at(-1)!.sequence, 400);
+  assert.ok(bounded.reduce((sum, event) => sum + Buffer.byteLength(JSON.stringify(event)), 0) <= 256 * 1024);
+  observer.emit({ ...fact, nativeEventId: "x".repeat(256 * 1024) });
+  assert.equal(stopBounded.position().latestSequence, 401, "a dropped trailing observation remains visible in the source watermark");
+  observer.emit(fact, "final-birth");
+  const afterGap: NativeExecutionObservation[] = [];
+  observer.subscribe(event => afterGap.push(event)).dispose();
+  assert.deepEqual(afterGap.slice(-2).map(event => event.sequence), [400, 402]);
+  assert.equal(replay.length, 256, "unsubscribed observers receive neither live events nor later replay");
+});
+
+test("execution observation replay and live fan-out preserve reentrant order and listener isolation", () => {
+  const observer = new ProviderExecutionObserver(() => "2026-08-31T00:00:00.000Z");
+  const emit = () => observer.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+  emit(); emit();
+  const first: number[] = [];
+  const second: number[] = [];
+  observer.subscribe(event => {
+    first.push(event.sequence);
+    if (event.sequence === 1 || event.sequence === 4) emit();
+    throw new Error("journal unavailable");
+  });
+  const secondSubscription = observer.subscribe(event => {
+    second.push(event.sequence);
+    if (event.sequence === 4) secondSubscription.dispose();
+  });
+  emit(); emit();
+  assert.deepEqual(first, [1, 2, 3, 4, 5, 6]);
+  assert.deepEqual(second, [1, 2, 3, 4], "unsubscribe during fan-out prevents later facts, including reentrant ones");
+  const replay: number[] = [];
+  observer.subscribe(event => replay.push(event.sequence)).dispose();
+  assert.deepEqual(replay, first);
+  const replacement = new ProviderExecutionObserver(() => "2026-08-31T00:00:00.000Z");
+  const otherSource = replacement.subscribe(() => {});
+  assert.notEqual(otherSource.sourceId, secondSubscription.sourceId, "observer replacement is independent of native process identity");
+  assert.deepEqual(otherSource.position(), { firstRetainedSequence: 1, latestSequence: 0 });
+  otherSource.dispose();
 });
 
 test("Codex pending approval is not execution start; unknown identities and statuses mint no typed facts", async () => {

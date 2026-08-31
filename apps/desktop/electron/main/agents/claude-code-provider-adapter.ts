@@ -29,6 +29,7 @@ import {
   type ProviderStreamEventKind,
   type ProviderTerminalPayload,
   type NativeExecutionObservation,
+  type NativeExecutionSubscription,
   type ControlProbeResult,
 } from "./provider-adapter.js";
 import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
@@ -856,7 +857,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
-  onExecution(providerHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void {
+  onExecution(providerHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription {
     return this.requireHandle(providerHandle).execution.subscribe(listener);
   }
 

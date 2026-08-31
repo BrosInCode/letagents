@@ -33,9 +33,17 @@ type NativeFact<T> = T extends ExecutionFact ? Omit<T, keyof FactEnvelope | "tur
 // fences and supplies those fields before accepting an observation as a fact.
 export type NativeExecutionFact = NativeFact<ExecutionFact>;
 export type NativeExecutionObservation = {
+  /** Opaque observer sequence identity, independent of native process birth. */
+  sourceId: string;
   sequence: number; observedAtMs: number; fact: NativeExecutionFact;
   /** Exact observed OS birth, especially for Cursor's per-turn child. Host-private. */
   nativeProcessIdentity?: string;
+};
+export type NativeExecutionSubscription = {
+  readonly sourceId: string;
+  /** Empty retention reports latestSequence + 1 as firstRetainedSequence. */
+  position(): { firstRetainedSequence: number; latestSequence: number };
+  dispose(): void;
 };
 export type ControlProbeResult =
   | { state: "responsive" | "degraded" | "unprobeable" }
