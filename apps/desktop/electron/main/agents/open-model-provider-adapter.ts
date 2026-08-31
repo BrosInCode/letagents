@@ -9,6 +9,7 @@ import { pathToFileURL } from "node:url";
 import { LETAGENTS_NPX_ARGS } from "../mcp-config.js";
 import {
   ProviderContinuationMissingError,
+  sameProviderConnectionIdentity,
   synthesizeTerminalPayload,
   type ProviderActivityEvent,
   type ProviderAdapter,
@@ -76,6 +77,7 @@ import {
   type OpenCodeMessage,
   type OpenCodePart,
   type OpenCodePermissionRequest,
+  type OpenCodePermissionTurnCorrelation,
   type OpenCodeRuntimeAuth,
 } from "./opencode-server-client.js";
 
@@ -919,6 +921,30 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     if (result.state === "lost") handle.controlLoss = result.controlEvidence;
     this.emitExecution(handle, { domain: "control", kind: "state_changed", sideEffects: "none", ...result });
     return result;
+  }
+
+  /** Read-only native linkage; pending-request and durable admission checks remain separate. */
+  async correlatePermissionTurn(
+    rawHandle: ProviderHandle,
+    expectedRequest: OpenCodePermissionRequest,
+  ): Promise<OpenCodePermissionTurnCorrelation> {
+    try {
+      const handle = this.required(rawHandle);
+      const sessionId = handle.providerContinuationId;
+      const connection = { ...handle.providerConnection };
+      const assertCurrentInstance = (): void => {
+        if (this.required(rawHandle) !== handle || handle.terminal || handle.observedState() === "stopping"
+          || handle.providerContinuationId !== sessionId || handle.pid !== connection.pid
+          || !sameProviderConnectionIdentity(connection, handle.providerConnection) || this.controlProof(handle)) {
+          throw new Error("OpenCode permission correlation instance could not be verified.");
+        }
+      };
+      const result = await handle.client.correlatePermissionTurn(sessionId, expectedRequest, assertCurrentInstance);
+      assertCurrentInstance();
+      return result;
+    } catch {
+      return { outcome: "correlation_unproven" };
+    }
   }
 
   /** Host-only native decision boundary; durable decision/retry policy belongs to the caller. */
