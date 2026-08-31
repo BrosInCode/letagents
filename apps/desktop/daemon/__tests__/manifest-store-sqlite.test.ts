@@ -355,6 +355,227 @@ test("reverse delivery commit atomically transfers the observed cursor and repla
   }
 });
 
+test("custodial forward undoes only pre-activation reverse and atomically transfers the worker ACK once", async () => {
+  for (const cancelledIntent of [false, true]) {
+    const env = await fixture(); let store = new ManifestStore(env.databasePath);
+    const inbox = new SupervisedAgentInboxStore(env.databasePath);
+    const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+    try {
+      const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
+      if (cancelledIntent) {
+        await store.preparePollingActivation(activation, async commit => commit());
+        await store.cancelPollingActivation(activation, async commit => commit());
+      }
+      const input = { ...activation, operationId: "forward", requestId: "forward-request" };
+      await bindings.checkpointCursorMonotonic(input.agentId, "session_2", "run_2", "msg_59");
+      const before = await store.load();
+      const accepted = await store.prepareCustodialForward(input, async commit => commit());
+      assert.equal(accepted.cutover.from_mode, "mcp_polling"); assert.equal(accepted.cutover.to_mode, "daemon_inbox");
+      assert.equal(accepted.cutover.predecessor_operation_id, activation.reverseOperationId);
+      assert.equal(accepted.cutover.native_target_turn_id, null); assert.equal(accepted.cutover.admitted_inbox_item_id, null);
+      assert.deepEqual(await store.prepareCustodialForward(input, async commit => commit()), { ...accepted, created: false });
+      assert.deepEqual(await store.load(), before);
+      assert.deepEqual(await store.deliveryDrainReadiness(input.operationId), { cutover: accepted.cutover, status: "ready", cursor: "msg_59" });
+      await assert.rejects(store.preparePollingActivation({ ...activation, operationId: "late-activation", requestId: "late-activation" }, async commit => commit()), /conflicts/);
+      await store.markDeliveryDrainDispatch(input);
+      await store.markDeliveryDrainUncertain(input);
+      await assert.rejects(store.cancelDeliveryDrain(input), /pre-dispatch/);
+      await store.close(); store = new ManifestStore(env.databasePath);
+      const generation = (await store.load()).generation;
+      const completed = await store.commitDeliveryDrain(generation, input, async commit => commit());
+      assert.equal(completed.generation, generation + 1); assert.equal(completed.cutover.phase, "complete");
+      const configuration = await store.getAgentConfiguration(input.agentId);
+      assert.equal(configuration?.polling_contract, null); assert.equal(configuration?.config_revision, 3);
+      assert.equal(configuration?.runtime_configuration_revision, 2, "stopping does not apply the successor's policy");
+      assert.equal((await store.getEntry(input.agentId))?.delivery_mode, "daemon_inbox");
+      assert.equal((await inbox.cursor(input.agentId))?.last_observed_message_id, "msg_59");
+      assert.equal((await bindings.get(input.agentId))?.room_cursor, "msg_59", "source ACK is not rewritten during handoff");
+      const database = new DatabaseSync(env.databasePath);
+      try {
+        const checkpoints = database.prepare("SELECT room_cursor FROM work_attempt_checkpoints WHERE work_attempt_id='attempt_1' ORDER BY sort_order").all();
+        assert.deepEqual(checkpoints.map(row => row.room_cursor), ["msg_47", "msg_59"]);
+        assert.equal(database.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_generations").get()?.n, 0);
+        assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+        const current = (await store.getEntry(input.agentId))!;
+        await store.replaceEntry((await store.load()).generation, withRuntimeIdentity({ ...current,
+          provider_ref: { ...current.provider_ref!, execution_generation_id: "successor", provider_continuation_id: "successor-thread" } }));
+        const replay = await store.commitDeliveryDrain(generation, input, async () => { throw new Error("must not stop successor"); });
+        assert.deepEqual(replay.cutover, completed.cutover);
+        assert.equal((await store.getEntry(input.agentId))?.provider_ref?.provider_continuation_id, "successor-thread");
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM work_attempt_checkpoints WHERE work_attempt_id='attempt_1'").get()?.n, 2);
+        assert.equal((await store.getAgentConfiguration(input.agentId))?.config_revision, 3);
+      } finally { database.close(); }
+    } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+  }
+});
+
+test("custodial forward refuses every dispatched or unresolved activation even in an older generation", async () => {
+  for (const phase of ["prepared", "dispatching", "active", "uncertain", "completed", "failed", "interrupted", "lost"] as const) {
+    const env = await fixture(); const store = new ManifestStore(env.databasePath);
+    const inbox = new SupervisedAgentInboxStore(env.databasePath);
+    const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+    try {
+      const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
+      await store.preparePollingActivation(activation, async commit => commit());
+      if (phase !== "prepared") await store.markPollingActivationDispatch(activation, async commit => commit());
+      if (["active", "completed", "failed", "interrupted"].includes(phase)) {
+        await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "activation-turn" }, async commit => commit());
+      }
+      if (phase === "uncertain" || phase === "lost") await store.markPollingActivationUncertain(activation, async commit => commit());
+      if (phase === "completed" || phase === "failed" || phase === "interrupted" || phase === "lost") {
+        await store.completePollingActivation({ ...activation, providerTurnId: phase === "lost" ? null : "activation-turn", outcome: phase }, async commit => commit());
+      }
+      const input = { ...activation, operationId: "forward", requestId: "forward-request" };
+      const before = await store.load();
+      await assert.rejects(store.prepareCustodialForward(input, async commit => commit()), /polling activation/);
+      assert.equal(await store.getDeliveryDrain(input.operationId), null); assert.deepEqual(await store.load(), before);
+      if (phase === "completed") {
+        const database = new DatabaseSync(env.databasePath);
+        try {
+          database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='run_2'").run(JSON.stringify(terminal));
+          database.prepare("INSERT INTO work_attempt_executions VALUES('run_3','attempt_1',?,'provider',10,NULL)").run(terminal.ended_at);
+        } finally { database.close(); }
+        const current = (await store.getEntry(input.agentId))!;
+        const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4313", pid: 4313, processIdentity: "codex:4313" };
+        await store.replaceEntry((await store.load()).generation, withRuntimeIdentity({ ...current, provider_ref: { ...current.provider_ref!,
+          execution_generation_id: "run_3", provider_connection: connection, custodial_launch_agent_session_id: "session_3" } }));
+        await bindings.bind({ entry_id: input.agentId, room_id: input.roomId, work_attempt_id: "attempt_1", execution_generation_id: "run_3",
+          agent_session_id: "session_3", agent_session_token: "test-token", api_url: "https://example.test" }, { roomCursor: "msg_47" });
+        await assert.rejects(store.prepareCustodialForward({ ...input, executionGenerationId: "run_3",
+          handle: { ...input.handle, pid: 4313, providerConnection: connection },
+          boundary: { state: "idle", providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4313", latestProviderTurnId: null } }, async commit => commit()), /before polling activation/);
+      }
+    } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+  }
+});
+
+test("custodial forward validates frozen custody and cursor authority and rolls back every transfer write", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const activation = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    const input = { ...activation, operationId: "forward", requestId: "forward-request" };
+    await bindings.checkpointCursorMonotonic(input.agentId, "session_2", "run_2", "msg_59");
+    await assert.rejects(store.prepareCustodialForward(input, undefined as never), /ownership commit fence/);
+    for (const invalid of [
+      { ...input, reverseOperationId: "missing" }, { ...input, roomId: "other" }, { ...input, executionGenerationId: "run_1" },
+      { ...input, handle: { ...input.handle, appliedConfigurationRevision: 1 } },
+      { ...input, handle: { ...input.handle, custodyLaunchAgentSessionId: "other" } },
+      { ...input, boundary: { state: "active" as const, providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4312", providerTurnId: "busy" } },
+    ]) await assert.rejects(store.prepareCustodialForward(invalid, async commit => commit()));
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      await assert.rejects(inbox.enqueueCorrection({ agent_id: input.agentId, room_id: input.roomId,
+        source_message_id: "pending-B", source_message: {}, activation: {} }), /freezes daemon inbox ingress/);
+      // A historical/partially repaired queue must not be silently discarded.
+      database.prepare(`INSERT INTO supervised_agent_inbox
+        (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,created_at,updated_at)
+        VALUES('pending-B',?,?,'pending-B','{}','{}',1,'pending',0,'action-B','reply-B',?,?)`).run(input.agentId, input.roomId, entry.created_at, entry.created_at);
+      await assert.rejects(store.prepareCustodialForward(input, async commit => commit()), /pending inbox/);
+      database.exec("DELETE FROM supervised_agent_inbox WHERE inbox_item_id='pending-B'");
+      database.prepare(`INSERT INTO supervised_agent_effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
+        VALUES('pending-effect',?,?,?,'turn','request','send_message','{}',1,'uncertain',?,?)`).run(input.agentId, input.roomId, "run_2", entry.created_at, entry.created_at);
+      await assert.rejects(store.prepareCustodialForward(input, async commit => commit()), /pending inbox.*effects/);
+      database.exec("DELETE FROM supervised_agent_effects WHERE effect_id='pending-effect'");
+      const before = await store.load();
+      const { cutover } = await store.prepareCustodialForward(input, async commit => commit());
+      for (const changed of [{ ...input, requestId: "different" }, { ...input, operationId: "different" }, { ...input, reverseOperationId: "different" }]) {
+        await assert.rejects(store.prepareCustodialForward(changed, async commit => commit()), /different coordinates/);
+      }
+      await assert.rejects(store.commitDeliveryDrain(before.generation, input, async commit => commit()), /stop intent/);
+      await assert.rejects(store.markDeliveryDrainDispatch({ ...input, boundary: { state: "active", providerContinuationId: "thread_1",
+        nativeProcessIdentity: "codex:4312", providerTurnId: "busy" } }), /native idle/);
+      assert.deepEqual(await store.getDeliveryDrain(input.operationId), cutover);
+      await store.markDeliveryDrainDispatch(input);
+      await store.markDeliveryDrainUncertain(input);
+      const generation = (await store.load()).generation;
+      for (const [change, undo] of [
+        ["UPDATE worker_session_bindings SET agent_session_id='other'", "UPDATE worker_session_bindings SET agent_session_id='session_2'"],
+        ["UPDATE worker_session_bindings SET room_id='other'", "UPDATE worker_session_bindings SET room_id='room_1'"],
+        ["UPDATE worker_session_bindings SET execution_generation_id='other'", "UPDATE worker_session_bindings SET execution_generation_id='run_2'"],
+        ["UPDATE worker_session_bindings SET room_cursor=NULL", "UPDATE worker_session_bindings SET room_cursor='msg_59'"],
+        ["UPDATE worker_session_bindings SET room_cursor='msg_46'", "UPDATE worker_session_bindings SET room_cursor='msg_59'"],
+        ["UPDATE supervised_agent_ingress_cursors SET last_observed_message_id='msg_60'", "UPDATE supervised_agent_ingress_cursors SET last_observed_message_id='msg_47'"],
+        ["UPDATE work_attempt_checkpoints SET room_cursor='msg_60'", "UPDATE work_attempt_checkpoints SET room_cursor='msg_47'"],
+        ["UPDATE runtime_deployments SET custodial_launch_agent_session_id=NULL", "UPDATE runtime_deployments SET custodial_launch_agent_session_id='session_2'"],
+        ["UPDATE runtime_deployments SET provider_ref_present=0", "UPDATE runtime_deployments SET provider_ref_present=1"],
+        ["UPDATE runtime_deployments SET provider_process_identity='reused-pid'", "UPDATE runtime_deployments SET provider_process_identity='codex:4312'"],
+        ["UPDATE agent_configurations SET config_revision=3", "UPDATE agent_configurations SET config_revision=2"],
+      ]) {
+        database.exec(change!); await assert.rejects(store.commitDeliveryDrain(generation, input, async commit => commit())); database.exec(undo!);
+        assert.equal((await store.getDeliveryDrain(input.operationId))?.phase, "uncertain");
+        assert.equal((await store.load()).generation, generation);
+      }
+      const binding = database.prepare("SELECT * FROM worker_session_bindings WHERE entry_id=?").get(input.agentId)!;
+      database.prepare("DELETE FROM worker_session_bindings WHERE entry_id=?").run(input.agentId);
+      await assert.rejects(store.commitDeliveryDrain(generation, input, async commit => commit()), /worker binding authority/);
+      database.prepare(`INSERT INTO worker_session_bindings(${Object.keys(binding).join(",")}) VALUES(${Object.keys(binding).map(() => "?").join(",")})`).run(...Object.values(binding));
+      database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='run_2'").run(JSON.stringify(terminal));
+      database.prepare("INSERT INTO work_attempt_executions VALUES('successor','attempt_1',?,'provider',10,NULL)").run(terminal.ended_at);
+      await assert.rejects(store.commitDeliveryDrain(generation, input, async commit => commit()), /execution authority/);
+      database.exec("DELETE FROM work_attempt_executions WHERE execution_generation_id='successor'");
+      const checkpoints = database.prepare("SELECT * FROM work_attempt_checkpoints").all();
+      database.exec("CREATE TRIGGER refuse_forward_commit BEFORE UPDATE OF phase ON execution_cutover_v2 WHEN NEW.phase='complete' BEGIN SELECT RAISE(ABORT,'test forward rollback'); END");
+      await assert.rejects(store.commitDeliveryDrain(generation, input, async commit => commit()), /test forward rollback/);
+      database.exec("DROP TRIGGER refuse_forward_commit");
+      assert.deepEqual(database.prepare("SELECT * FROM work_attempt_checkpoints").all(), checkpoints);
+      assert.equal((await inbox.cursor(input.agentId))?.last_observed_message_id, "msg_47");
+      assert.equal((await store.getAgentConfiguration(input.agentId))?.polling_contract, "custodial_polling_v1");
+      assert.equal((await store.getAgentConfiguration(input.agentId))?.config_revision, 2);
+      assert.equal((await store.load()).generation, generation);
+      assert.equal((await store.commitDeliveryDrain(generation, input, async commit => commit())).cutover.phase, "complete");
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("custodial forward rejects a stale reverse and an activation that names an older reverse in the current polling era", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const first = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    const forwardA = { ...first, operationId: "forward-A", requestId: "forward-A" };
+    await store.prepareCustodialForward(forwardA, async commit => commit()); await store.markDeliveryDrainDispatch(forwardA);
+    await store.commitDeliveryDrain((await store.load()).generation, forwardA, async commit => commit());
+    async function installSuccessor(runId: string, generation: number, pid: number, revision: number) {
+      const database = new DatabaseSync(env.databasePath);
+      try {
+        database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE terminal_json IS NULL").run(JSON.stringify(terminal));
+        database.prepare("INSERT INTO work_attempt_executions VALUES(?,'attempt_1',?,'provider',?,NULL)").run(runId, terminal.ended_at, generation);
+      } finally { database.close(); }
+      const current = (await store.getEntry(first.agentId))!;
+      const connection = { kind: "codex_app_server" as const, url: `http://127.0.0.1:${pid}`, pid, processIdentity: `codex:${pid}` };
+      await store.replaceEntry((await store.load()).generation, withRuntimeIdentity({ ...current, provider_ref: { ...current.provider_ref!,
+        execution_generation_id: runId, provider_connection: connection, custodial_launch_agent_session_id: `session_${runId}` } }));
+      await store.markRuntimeConfigurationApplied((await store.load()).generation, { agentId: first.agentId, executionGenerationId: runId, appliedRevision: revision });
+      await bindings.bind({ entry_id: first.agentId, room_id: first.roomId, work_attempt_id: "attempt_1", execution_generation_id: runId,
+        agent_session_id: `session_${runId}`, agent_session_token: "test-token", api_url: "https://example.test" }, { roomCursor: "msg_47" });
+      return { ...first, executionGenerationId: runId,
+        handle: { ...first.handle, pid, providerConnection: connection, appliedConfigurationRevision: revision },
+        boundary: { state: "idle" as const, providerContinuationId: "thread_1", nativeProcessIdentity: `codex:${pid}`, latestProviderTurnId: null } };
+    }
+    const daemon = await installSuccessor("run_3", 10, 4313, 3);
+    const reverseB = { ...daemon, operationId: "reverse-B", requestId: "reverse-B" };
+    await store.prepareDeliveryDrain(reverseB); await store.markDeliveryDrainDispatch(reverseB);
+    await store.commitDeliveryDrain((await store.load()).generation, reverseB, async commit => commit());
+    const polling = await installSuccessor("run_4", 11, 4314, 4);
+    const forwardB = { ...polling, reverseOperationId: reverseB.operationId, operationId: "forward-B", requestId: "forward-B" };
+    await assert.rejects(store.prepareCustodialForward({ ...forwardB, reverseOperationId: first.reverseOperationId }, async commit => commit()), /current reverse predecessor/);
+    // The existing activation contract permits naming an earlier completed
+    // predecessor. Forward safety must inspect the actual execution era too.
+    const activation = { ...polling, operationId: "activation-old-predecessor", requestId: "activation-old-predecessor" };
+    await store.preparePollingActivation(activation, async commit => commit());
+    await store.markPollingActivationDispatch(activation, async commit => commit());
+    await store.checkpointPollingActivationTurn({ ...activation, providerTurnId: "native-run-4" }, async commit => commit());
+    await store.completePollingActivation({ ...activation, providerTurnId: "native-run-4", outcome: "completed" }, async commit => commit());
+    await assert.rejects(store.prepareCustodialForward(forwardB, async commit => commit()), /before polling activation/);
+    assert.equal(await store.getDeliveryDrain(forwardB.operationId), null);
+    assert.equal((await store.getAgentConfiguration(first.agentId))?.polling_contract, "custodial_polling_v1");
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
 test("reverse delivery stop intent refuses absent cursors, active boundaries, queued work, and configuration edits", async () => {
   const env = await fixture(); const store = new ManifestStore(env.databasePath);
   const inbox = new SupervisedAgentInboxStore(env.databasePath); const { agent, input } = deliveryDrainCoordinates();

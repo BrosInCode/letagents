@@ -1,6 +1,6 @@
 import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
 import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
-import type { DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
+import type { CustodialForwardRequest, DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
 
 /**
  * The socket router owns protocol parsing and response shaping. Operations are
@@ -10,7 +10,7 @@ export interface DaemonControlOperations {
   activateCustodialPolling(input: PollingActivationRequest): unknown;
   getPollingActivation(input: DeliveryDrainIdentity): unknown;
   cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
-  prepareDeliveryDrain(input: DeliveryDrainRequest): unknown;
+  prepareDeliveryDrain(input: DeliveryDrainRequest | CustodialForwardRequest): unknown;
   getDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   status(): unknown;
@@ -183,6 +183,7 @@ export function createDaemonControlRequestHandler(
       });
     }
     if (request.method === "supervisor.prepare_delivery_drain"
+      || request.method === "supervisor.prepare_custodial_forward"
       || request.method === "supervisor.get_delivery_drain"
       || request.method === "supervisor.cancel_delivery_drain") {
       const params = paramsRecord(request.params);
@@ -194,11 +195,14 @@ export function createDaemonControlRequestHandler(
       };
       if (request.method === "supervisor.get_delivery_drain") return operations.getDeliveryDrain(identity);
       if (request.method === "supervisor.cancel_delivery_drain") return operations.cancelDeliveryDrain(identity);
-      return operations.prepareDeliveryDrain({ ...identity,
+      const coordinates = { ...identity,
         requestId: requiredStringParam(params, "request_id", error),
         roomId: requiredStringParam(params, "room_id", error),
         executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
-      });
+      };
+      return request.method === "supervisor.prepare_custodial_forward"
+        ? operations.prepareDeliveryDrain({ ...coordinates, reverseOperationId: requiredStringParam(params, "reverse_operation_id", error) })
+        : operations.prepareDeliveryDrain(coordinates);
     }
     if (request.method === "manifest.watch_state") {
       const params = paramsRecord(request.params);

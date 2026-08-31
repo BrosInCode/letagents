@@ -11,8 +11,8 @@ import {
 } from "./custodial-polling-activation.js";
 import {
   assertNoDeliveryDrain, cancelDeliveryDrain, commitDeliveryDrain, deliveryDrainReadiness,
-  markDeliveryDrainDispatch, markDeliveryDrainUncertain, prepareDeliveryDrain, readDeliveryDrain, unresolvedDeliveryDrain,
-  type DeliveryDrainReadiness, type DeliveryDrainRecord, type DispatchDeliveryDrain, type PrepareDeliveryDrain,
+  markDeliveryDrainDispatch, markDeliveryDrainUncertain, prepareCustodialForward, prepareDeliveryDrain, readDeliveryDrain, unresolvedDeliveryDrain,
+  type DeliveryDrainReadiness, type DeliveryDrainRecord, type DispatchDeliveryDrain, type PrepareCustodialForward, type PrepareDeliveryDrain,
 } from "./delivery-drain.js";
 import { MAX_PROJECTED_COMPLETED_ACTION_IDS } from "./reconciler-state.js";
 import {
@@ -238,6 +238,14 @@ export class ManifestStore {
       this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
   }
 
+  /** Explicit pre-activation undo only; never infer general idle polling safety. */
+  async prepareCustodialForward(input: PrepareCustodialForward, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; cutover: DeliveryDrainRecord }> {
+    if (typeof commitFence !== "function") throw new Error("Custodial forward requires a native ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(database => prepareCustodialForward(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
   async getDeliveryDrain(operationId: string): Promise<DeliveryDrainRecord | null> {
     return readDeliveryDrain(await this.getDatabase(), operationId);
   }
@@ -274,7 +282,10 @@ export class ManifestStore {
     const snapshot = { ...input };
     const prior = await this.getDeliveryDrain(snapshot.operationId);
     if (prior?.phase === "complete" && prior.agent_id === snapshot.agentId && prior.authority_version === 1
-      && prior.from_mode === "daemon_inbox" && prior.to_mode === "mcp_polling" && prior.strategy === "drain") {
+      && prior.strategy === "drain"
+      && ((prior.from_mode === "daemon_inbox" && prior.to_mode === "mcp_polling" && prior.predecessor_operation_id === null)
+        || (prior.from_mode === "mcp_polling" && prior.to_mode === "daemon_inbox" && prior.predecessor_operation_id !== null
+          && prior.native_target_turn_id === null && prior.admitted_inbox_item_id === null))) {
       // A lost response may be retried after a successor is running. Return the
       // immutable receipt without another cursor transfer, stop, or revision.
       return { generation: (await this.load()).generation, cutover: prior };

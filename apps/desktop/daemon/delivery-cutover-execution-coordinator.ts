@@ -42,7 +42,7 @@ export type DeliveryCutoverExecutionCoordinatorOptions = {
   startDelivery: (entryId: string) => Promise<void>;
   observation: Pick<DeliveryCutoverCoordinator, "assertObservation" | "observe" | "scheduleRetry">;
   drain?: {
-    store: Pick<ManifestStore, "prepareDeliveryDrain" | "getDeliveryDrain" | "unresolvedDeliveryDrain" | "cancelDeliveryDrain"
+    store: Pick<ManifestStore, "prepareDeliveryDrain" | "prepareCustodialForward" | "getDeliveryDrain" | "unresolvedDeliveryDrain" | "cancelDeliveryDrain"
       | "deliveryDrainReadiness" | "markDeliveryDrainDispatch" | "markDeliveryDrainUncertain" | "commitDeliveryDrain" | "getAgentConfiguration"
       | "preparePollingActivation" | "getPollingActivation" | "unresolvedPollingActivation" | "markPollingActivationDispatch"
       | "checkpointPollingActivationTurn" | "markPollingActivationUncertain" | "cancelPollingActivation" | "completePollingActivation">;
@@ -60,6 +60,7 @@ export type DeliveryCutoverExecutionCoordinatorOptions = {
 export type DeliveryDrainIdentity = { entryId: string; operationId: string };
 export type DeliveryDrainRequest = DeliveryDrainIdentity & { requestId: string; roomId: string; executionGenerationId: string };
 export type PollingActivationRequest = DeliveryDrainRequest & { reverseOperationId: string };
+export type CustodialForwardRequest = DeliveryDrainRequest & { reverseOperationId: string };
 
 /**
  * Executes durable delivery cutovers and explicit custodial polling activation.
@@ -214,9 +215,21 @@ export class DeliveryCutoverExecutionCoordinator {
         providerConnection: structuredClone(entry.provider_ref.provider_connection!) } };
   }
 
-  /** Explicit reverse operation: selecting the contract does not start a polling turn. */
-  async prepareDrain(input: DeliveryDrainRequest): Promise<DeliveryDrainRecord> {
+  /** Explicit control route; a predecessor identifies the pre-activation undo.
+   * Selecting the reverse contract never starts a polling turn. */
+  async prepareDrain(input: DeliveryDrainRequest | CustodialForwardRequest): Promise<DeliveryDrainRecord> {
+    return "reverseOperationId" in input ? this.prepareCustodialForward(input) : this.prepareCutover(input);
+  }
+
+  /** Undo a reverse before any polling activation. A completed native turn
+   * does not prove its direct tools or message batches have settled. */
+  async prepareCustodialForward(input: CustodialForwardRequest): Promise<DeliveryDrainRecord> {
+    return this.prepareCutover(input, input.reverseOperationId);
+  }
+
+  private async prepareCutover(input: DeliveryDrainRequest, reverseOperationId?: string): Promise<DeliveryDrainRecord> {
     const drain = this.requireDrain();
+    const forward = reverseOperationId !== undefined;
     const release = drain.entries.beginLifecycle(input.entryId);
     drain.entries.bumpControlEpoch(input.entryId);
     try {
@@ -226,13 +239,16 @@ export class DeliveryCutoverExecutionCoordinator {
         const existing = await drain.store.getDeliveryDrain(input.operationId);
         if (existing) {
           if (existing.agent_id !== input.entryId || existing.request_id !== input.requestId || existing.room_id !== input.roomId
-            || existing.execution_generation_id !== input.executionGenerationId) throw new Error("Delivery drain request identity changed.");
+            || existing.execution_generation_id !== input.executionGenerationId || existing.authority_version !== 1
+            || existing.strategy !== "drain" || existing.from_mode !== (forward ? "mcp_polling" : "daemon_inbox")
+            || existing.to_mode !== (forward ? "daemon_inbox" : "mcp_polling")
+            || existing.predecessor_operation_id !== (reverseOperationId ?? null)) throw new Error("Delivery drain request identity changed.");
           if (!["complete", "cancelled", "failed"].includes(existing.phase)) this.observation.scheduleRetry(input.entryId, 0);
           return existing;
         }
         const entry = await this.getEntry(input.entryId);
         const handle = this.getLiveHandle(input.entryId);
-        if (!entry || entry.provider !== "codex" || entry.delivery_mode !== "daemon_inbox"
+        if (!entry || entry.provider !== "codex" || (entry.delivery_mode ?? "mcp_polling") !== (forward ? "mcp_polling" : "daemon_inbox")
           || entry.room_id !== input.roomId || entry.provider_ref?.execution_generation_id !== input.executionGenerationId
           || !handle || handle.workAttemptId !== entry.work_attempt_id
           || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id
@@ -241,11 +257,16 @@ export class DeliveryCutoverExecutionCoordinator {
         }
         // Prove the actual resolved MCP runtime, not a version promised by the
         // controller, before installing a gate or stopping any provider.
-        await this.preflightPolling();
+        if (forward) {
+          if (!this.provider?.inspectTurnBoundary || !this.provider.stopRef) throw new Error("Custodial forward transition is unavailable.");
+        } else await this.preflightPolling();
         const boundary = await this.provider!.inspectTurnBoundary!(handle);
         this.assertAttached();
-        const result = await drain.store.prepareDeliveryDrain({ ...input, agentId: input.entryId, handle, boundary },
-          (commit) => drain.authority.fenceDaemonCommit(commit));
+        const coordinates = { ...input, agentId: input.entryId, handle, boundary };
+        const fence = (commit: () => Promise<void>) => drain.authority.fenceDaemonCommit(commit);
+        const result = forward
+          ? await drain.store.prepareCustodialForward({ ...coordinates, reverseOperationId }, fence)
+          : await drain.store.prepareDeliveryDrain(coordinates, fence);
         this.observation.scheduleRetry(input.entryId, 0);
         return result.cutover;
       });
@@ -317,7 +338,7 @@ export class DeliveryCutoverExecutionCoordinator {
         const readiness = await drain.store.deliveryDrainReadiness(cutover.operation_id);
         if (readiness.status === "waiting") { this.observation.scheduleRetry(cutover.agent_id, 1_000); return; }
         if (readiness.status === "queued") { await this.cancelDrain({ entryId: cutover.agent_id, operationId: cutover.operation_id }); return; }
-        await this.observation.observe(signal, this.preflightPolling());
+        if (cutover.to_mode === "mcp_polling") await this.observation.observe(signal, this.preflightPolling());
       }
       release = drain.entries.beginLifecycle(cutover.agent_id);
       drain.entries.bumpControlEpoch(cutover.agent_id);
@@ -380,7 +401,8 @@ export class DeliveryCutoverExecutionCoordinator {
       throw error;
     } finally {
       release?.();
-      if (deliveryStopped && !deliveryDrainBlocksRuntime(cutover) && cutover.phase !== "complete" && !this.isHandoffScheduled()) {
+      if (deliveryStopped && !deliveryDrainBlocksRuntime(cutover)
+        && (cutover.phase !== "complete" || cutover.to_mode === "daemon_inbox") && !this.isHandoffScheduled()) {
         this.deferDeliveryStart(cutover.agent_id);
       }
     }
@@ -452,12 +474,12 @@ export class DeliveryCutoverExecutionCoordinator {
    */
   async drive(entryId: string, detachSignal: AbortSignal): Promise<void> {
     if (this.isHandoffScheduled()) return;
-    const reverse = await this.drain?.store.unresolvedDeliveryDrain(entryId);
-    if (reverse) { await this.driveDrain(reverse, detachSignal); return; }
+    const drain = await this.drain?.store.unresolvedDeliveryDrain(entryId);
+    if (drain) { await this.driveDrain(drain, detachSignal); return; }
     const activation = await this.drain?.store.unresolvedPollingActivation(entryId);
     if (activation) { await this.observePollingActivation(activation, detachSignal); return; }
-    // Custodial workers need a separate future cutover witness. They must
-    // never enter the legacy wait_for_messages interrupt protocol below.
+    // Custodial workers switch only through an explicit native-idle journal
+    // above, never through the legacy wait_for_messages interrupt protocol.
     if ((await this.drain?.store.getAgentConfiguration(entryId))?.polling_contract) return;
     const provider = this.provider;
     if (this.isHandoffScheduled() || !provider?.controlExactTurn) return;
