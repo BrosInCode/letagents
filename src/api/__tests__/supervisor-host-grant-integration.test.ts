@@ -1310,6 +1310,17 @@ test("room work survives in-place renewal and same-instance successor but refuse
   assert.notEqual(successor.body.session_id, f.session.session_id);
   const recovered = { ...f.input, session_id: successor.body.session_id, revision: 3 };
   assert.equal((await publishRoomAgentWork(recovered)).work.attempt_id, first.work.attempt_id);
+  await seedOwner("foreign_owner");
+  const foreign = await authDb!.createRoomAgentSession({
+    room_id: f.room.id, session_kind: "worker", runtime: "legacy", actor_label: "Foreign worker",
+    agent_key: f.agent.canonical_key, display_name: "Foreign worker", owner_account_id: "foreign_owner",
+    owner_label: "Foreign", ide_label: "Agent", agent_instance_id: "foreign_instance",
+  });
+  // A foreign owner's live same-key session is still an ambiguity, not a
+  // candidate to silently discard when counting possible successors.
+  await assert.rejects(publishRoomAgentWork({ ...recovered, revision: 4 }), { code: "publisher_not_authorized" });
+  await assert.rejects(publishRoomAgentWork({ ...recovered, session_id: foreign.session_id, revision: 4 }), { code: "publisher_not_authorized" });
+  await authDb!.endRoomAgentSession({ session_id: foreign.session_id });
   const other = recorder(); await f.mint({ ...f.reqBase, body: { ...f.mintBody, agent_instance_id: "different_instance", display_name: "Other Agent" } }, other);
   assert.equal(other.statusCode, 201);
   await assert.rejects(publishRoomAgentWork({ ...recovered, revision: 4 }), { code: "publisher_not_authorized" });
