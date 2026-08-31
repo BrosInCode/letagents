@@ -8,6 +8,8 @@ import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
   getPollingActivation, markPollingActivationDispatch, markPollingActivationUncertain, preparePollingActivation, unresolvedPollingActivation,
   type CompletePollingActivation, type DispatchPollingActivation, type PollingActivationRecord, type PreparePollingActivation,
+  acknowledgePollingOffer, getPollingOfferTail, recordPollingOffer,
+  type AcknowledgePollingOffer, type PollingOfferRecord, type RecordPollingOffer,
 } from "./custodial-polling-activation.js";
 import {
   assertNoDeliveryDrain, cancelDeliveryDrain, commitDeliveryDrain, deliveryDrainReadiness,
@@ -350,6 +352,22 @@ export class ManifestStore {
 
   private requirePollingActivationFence(fence: unknown): void {
     if (typeof fence !== "function") throw new Error("Polling activation requires a native ownership commit fence.");
+  }
+
+  async getPollingOfferTail(activationId: string): Promise<PollingOfferRecord | null> {
+    return getPollingOfferTail(await this.getDatabase(), activationId);
+  }
+
+  async recordPollingOffer(input: RecordPollingOffer, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingOfferRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => recordPollingOffer(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async acknowledgePollingOffer(input: AcknowledgePollingOffer, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ReturnType<typeof acknowledgePollingOffer>> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => acknowledgePollingOffer(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
   }
 
   async prepareRoomMove(

@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase, openDaemonStateObservationDatabase } from "../daemon-state-database.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
-import { validatePollingActivationSchema } from "../custodial-polling-activation.js";
+import { validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 
 type Row = Record<string, unknown>;
 const now = "2026-08-30T00:00:00.000Z";
@@ -96,7 +96,12 @@ function restoreV22Fixture(database: DatabaseSync): void {
 }
 
 function restoreV23Fixture(database: DatabaseSync): void {
+  restoreV24Fixture(database);
   database.exec("DROP TABLE custodial_polling_activations; ALTER TABLE runtime_deployments DROP COLUMN custodial_launch_agent_session_id; UPDATE manifest_metadata SET schema_version=23 WHERE singleton=1; PRAGMA user_version=23");
+}
+
+function restoreV24Fixture(database: DatabaseSync): void {
+  database.exec("DROP TABLE custodial_polling_offers; UPDATE manifest_metadata SET schema_version=24 WHERE singleton=1; PRAGMA user_version=24");
 }
 
 function seedV18Evidence(database: DatabaseSync): void {
@@ -189,7 +194,7 @@ function seedLegacyEvidence(database: DatabaseSync): void {
 function legacyRows(database: DatabaseSync): Record<string, unknown> {
   return Object.fromEntries((database.prepare(`SELECT name FROM sqlite_master
     WHERE type='table' AND name NOT GLOB 'sqlite_*' AND name NOT GLOB 'execution_*'
-      AND name NOT IN ('manifest_metadata','custodial_polling_activations') ORDER BY name`).all() as Row[])
+      AND name NOT IN ('manifest_metadata','custodial_polling_activations','custodial_polling_offers') ORDER BY name`).all() as Row[])
     .map((row) => {
       // Compare predecessor fields exactly; the new nullable custody column
       // has separate migration assertions and must never become a backfill.
@@ -248,10 +253,10 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21, 22, 24]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
-    (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture : version === 21 ? restoreV21Fixture : restoreV22Fixture)(env.database);
+    (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture : restoreV24Fixture)(env.database);
     seedLegacyEvidence(env.database);
     if (version === 21) { seedV18Evidence(env.database); seedDormantCutovers(env.database); }
     const before = legacyRows(env.database);
@@ -554,7 +559,7 @@ test("v19 upgrade preserves old outcomes, identity and rowids while advancing te
       INSERT INTO supervised_agent_terminal_results VALUES('unreadable','agent','generation','turn-unreadable','unreadable',NULL,'none','{ "original": "unreadable" }','then','now')`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const retainedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','supervised_agent_terminal_results','execution_observers','execution_observer_sources','execution_cutover_v2','custodial_polling_activations') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','supervised_agent_terminal_results','execution_observers','execution_observer_sources','execution_cutover_v2','custodial_polling_activations','custodial_polling_offers') ORDER BY type,name`).all();
     const unrelatedSchema = retainedSchema();
     const rowids = env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all();
     new DaemonStateSchema().createSchema(env.database);
@@ -571,7 +576,7 @@ test("v19 upgrade preserves old outcomes, identity and rowids while advancing te
   } finally { await env.cleanup(); }
 });
 
-for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
+for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
   const env = await fixture();
   try {
     if (version === 17) restoreV17Fixture(env.database);
@@ -581,6 +586,7 @@ for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]) test(
     else if (version === 21) restoreV21Fixture(env.database);
     else if (version === 22) restoreV22Fixture(env.database);
     else if (version === 23) restoreV23Fixture(env.database);
+    else if (version === 24) restoreV24Fixture(env.database);
     else if (version) {
       restoreV17Fixture(env.database);
       env.database.exec(`UPDATE manifest_metadata SET schema_version=${version} WHERE singleton=1; PRAGMA user_version=${version}`);
@@ -592,6 +598,8 @@ for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23]) test(
     assert.ok(env.database.prepare("SELECT polling_contract FROM agent_configurations").all().every((row) => row.polling_contract === null));
     validatePollingActivationSchema(env.database);
     assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_activations").get()!.n, 0, "upgrades cannot manufacture operator activation intent");
+    validatePollingOfferSchema(env.database);
+    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_offers").get()!.n, 0, "upgrades cannot manufacture released polling coverage");
     env.database.exec("DELETE FROM supervised_agent_publications WHERE inbox_item_id='head'");
     const update = env.database.prepare("UPDATE supervised_agent_terminal_results SET outcome=?,normalized_text=?,evidence_source=? WHERE inbox_item_id='head'");
     for (const outcome of ["failed", "interrupted"]) {
@@ -643,7 +651,7 @@ test("v21 adds unknown source provenance without resetting cursors or rebuilding
     const observer = env.database.prepare("SELECT rowid,* FROM execution_observers").get();
     const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='execution_observers'").get();
     const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_observers','execution_observer_sources','execution_cutover_v2','custodial_polling_activations') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_observers','execution_observer_sources','execution_cutover_v2','custodial_polling_activations','custodial_polling_offers') ORDER BY type,name`).all();
     const schema = unrelatedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
@@ -701,7 +709,7 @@ test("v22 preserves dormant cutover rows, rowids and legacy uncertainty without 
     const rows = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
     const oldColumns = Object.keys(rows[0]!);
     const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_cutover_v2','custodial_polling_activations') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_cutover_v2','custodial_polling_activations','custodial_polling_offers') ORDER BY type,name`).all();
     const schema = unrelatedSchema();
     new DaemonStateSchema().createSchema(env.database);
     const migrated = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
@@ -757,7 +765,7 @@ test("v23 adds nullable polling custody without reinterpreting modes, cutovers o
     restoreV22Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedDormantCutovers(env.database);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const configurations = env.database.prepare("SELECT rowid,* FROM agent_configurations ORDER BY rowid").all();
-    const unrelatedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','custodial_polling_activations') ORDER BY type,name").all();
+    const unrelatedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','custodial_polling_activations','custodial_polling_offers') ORDER BY type,name").all();
     const schema = unrelatedSchema();
     const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='agent_configurations'").get();
     new DaemonStateSchema().createSchema(env.database);
@@ -834,7 +842,7 @@ test("v24 creates an empty activation journal and nullable launch receipt withou
       (agent_id,observed_state,workspace_path_present,work_attempt_id_present,provider_ref_present,provider_process_identity_present,
        workplace_liveness_present,native_liveness_present,activity_present) VALUES('agent','stopped',0,0,0,0,0,0,0)`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('custodial_polling_activations','runtime_deployments') ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('custodial_polling_activations','custodial_polling_offers','runtime_deployments') ORDER BY type,name").all();
     const schema = retainedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
@@ -907,6 +915,104 @@ test("v24 refuses a missing or weakened native launch receipt before WAL and nev
       assert.equal(initialized, false); assert.deepEqual(await readFile(env.path), before);
       assert.throws(() => new DaemonStateSchema().createSchema(env.database), /launch receipt/);
       assert.deepEqual(await readFile(env.path), before);
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("v25 adds empty offer storage without manufacturing coverage for old activations", async () => {
+  const env = await fixture();
+  try {
+    restoreV24Fixture(env.database); seedLegacyEvidence(env.database);
+    env.database.exec(`INSERT INTO execution_cutover_v2
+      (operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms,
+       authority_version,room_id,work_attempt_id,provider,native_continuation_id,native_connection_kind,native_connection_sha256,native_pid,native_process_identity)
+      VALUES('reverse','reverse-request','agent','reverse-generation','daemon_inbox','mcp_polling','drain','complete',100,110,
+       1,'room','attempt','codex','continuation','codex_app_server','${"a".repeat(64)}',123,'birth:123')`);
+    const insert = env.database.prepare(`INSERT INTO custodial_polling_activations
+      (operation_id,request_id,agent_id,room_id,work_attempt_id,execution_generation_id,reverse_operation_id,native_continuation_id,
+       native_connection_kind,native_connection_sha256,native_pid,native_process_identity,config_revision,agent_session_id,room_cursor,
+       phase,provider_turn_id,terminal_outcome,created_at_ms,updated_at_ms)
+      VALUES(?,?,'agent','room','attempt','polling-generation','reverse','continuation','codex_app_server',?,123,'birth:123',2,'session','msg_47',
+       'prepared',NULL,NULL,120,120)`);
+    for (const phase of ["complete", "uncertain"]) {
+      insert.run(phase, `request-${phase}`, "b".repeat(64));
+      env.database.prepare("UPDATE custodial_polling_activations SET phase='dispatching' WHERE operation_id=?").run(phase);
+      env.database.prepare("UPDATE custodial_polling_activations SET phase='active',provider_turn_id=? WHERE operation_id=?").run(`native-${phase}`, phase);
+      env.database.prepare("UPDATE custodial_polling_activations SET phase=?,terminal_outcome=? WHERE operation_id=?")
+        .run(phase, phase === "complete" ? "completed" : null, phase);
+    }
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database),
+      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all() };
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name<>'custodial_polling_offers' ORDER BY type,name").all();
+    const schema = retainedSchema();
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database),
+      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all() }, before);
+    assert.deepEqual(retainedSchema(), schema, "offer DDL does not rebuild any existing journal or table");
+    assert.deepEqual(env.database.prepare("SELECT * FROM custodial_polling_offers").all(), [], "old activations have no inferred offer or ACK evidence");
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.deepEqual({ ...env.database.prepare("SELECT generation,schema_version FROM manifest_metadata").get() },
+      { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION });
+    validatePollingOfferSchema(env.database); validatePollingActivationSchema(env.database); validateExecutionStorageSchema(env.database, 21);
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    const columns = env.database.prepare("PRAGMA table_info(custodial_polling_offers)").all().map(row => String(row.name));
+    assert.ok(columns.every(column => !/token|bearer|secret|output|prompt/.test(column)));
+    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
+    try {
+      validatePollingOfferSchema(reopened);
+      assert.deepEqual(reopened.prepare("SELECT * FROM custodial_polling_offers").all(), []);
+      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(), before.activations);
+      assert.deepEqual(legacyRows(reopened), before.legacy);
+    } finally { reopened.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("v25 offer DDL and paired markers roll back together before commit", async () => {
+  const env = await fixture();
+  try {
+    restoreV24Fixture(env.database); seedLegacyEvidence(env.database);
+    const before = { versions: versionPair(env.database), legacy: legacyRows(env.database), typed: typedRows(env.database),
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() };
+    assert.throws(() => new DaemonStateSchema(database => {
+      validatePollingOfferSchema(database);
+      assert.deepEqual(versionPair(database), before.versions);
+      throw new Error("interrupt offer migration");
+    }).createSchema(env.database), /interrupt offer migration/);
+    assert.deepEqual({ versions: versionPair(env.database), legacy: legacyRows(env.database), typed: typedRows(env.database),
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() }, before);
+    assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='custodial_polling_offers'").get(), undefined);
+    new DaemonStateSchema().createSchema(env.database);
+    validatePollingOfferSchema(env.database);
+    assert.deepEqual(env.database.prepare("SELECT * FROM custodial_polling_offers").all(), []);
+  } finally { await env.cleanup(); }
+});
+
+test("v25 refuses lost or weakened offer authority before WAL or initializer writes", async () => {
+  for (const corruption of [
+    "DROP TABLE custodial_polling_offers",
+    "DROP INDEX custodial_polling_offer_one_root",
+    "DROP TRIGGER custodial_polling_offer_append",
+    "DROP TRIGGER custodial_polling_offer_immutable",
+    "DROP TRIGGER custodial_polling_offer_no_delete",
+    "ALTER TABLE custodial_polling_offers ADD COLUMN unrelated TEXT",
+    "UPDATE sqlite_master SET sql=replace(sql, 'CHECK(length(process_incarnation_id)=36)', '') WHERE name='custodial_polling_offers'",
+    "UPDATE sqlite_master SET sql=replace(sql, 'ON DELETE RESTRICT', 'ON DELETE CASCADE') WHERE name='custodial_polling_offers'",
+  ]) {
+    const env = await fixture();
+    try {
+      const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
+      env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
+        PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
+      const before = await readFile(env.path); let initialized = false;
+      const versions = versionPair(env.database);
+      const schema = env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all();
+      await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /offer journal/);
+      assert.equal(initialized, false);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.throws(() => new DaemonStateSchema().createSchema(env.database), /offer journal/);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.deepEqual(versionPair(env.database), versions);
+      assert.deepEqual(env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(), schema);
     } finally { await env.cleanup(); }
   }
 });
