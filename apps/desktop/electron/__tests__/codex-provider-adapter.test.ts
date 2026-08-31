@@ -1542,6 +1542,40 @@ test("stop orders SIGTERM before observed terminal and escalates to SIGKILL afte
   assert.equal((await forceStop).terminalCause, "killed");
 });
 
+test("stop refuses signals without the exact process birth before dispatch or escalation", async (t) => {
+  for (const evidence of ["reused", "absent", "unknown"] as const) {
+    for (const stage of ["graceful", "force", "escalation"] as const) {
+      await t.test(`${stage}: ${evidence}`, async () => {
+        const harness = createHarness();
+        const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+        const handle = await adapter.spawn(spawnRequest());
+        const initialState = handle.observedState();
+        const terminals: ProviderTerminalPayload[] = [];
+        adapter.onExit(handle, (terminal) => terminals.push(terminal));
+        const invalidate = () => {
+          if (evidence === "reused") harness.launches[0]!.processIdentity += "-reused";
+          else if (evidence === "absent") harness.launches[0]!.alive = false;
+          else harness.setIdentityObservable(false);
+        };
+        if (stage !== "escalation") invalidate();
+        const stopped = adapter.stop(handle, { force: stage === "force", graceMs: 0 });
+        if (stage === "escalation") invalidate();
+        // Keep the event loop alive for the adapter's existing unref'd grace timer.
+        const keepAlive = setTimeout(() => {}, 1_000);
+        try {
+          await assert.rejects(stopped, /exact process birth cannot be verified/);
+          assert.deepEqual(harness.signals, stage === "escalation" ? [{ pid: 4100, signal: "SIGTERM" }] : []);
+          assert.equal(handle.observedState(), stage === "escalation" ? "stopping" : initialState);
+          assert.equal(terminals.length, 0, "a refused signal must not manufacture a terminal payload");
+        } finally {
+          clearTimeout(keepAlive);
+          harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+        }
+      });
+    }
+  }
+});
+
 test("native notifications and transcript tail become activity evidence", async () => {
   const harness = createHarness();
   const sink: ProviderActivityEvent[] = [];
