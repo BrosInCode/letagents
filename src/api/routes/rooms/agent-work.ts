@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import type { Express, Response } from "express";
 import { isSupervisorHostGrantFeatureEnabled } from "../../../shared/agent-session-bearer.js";
-import type { RoomAgentWorkPollResponse } from "../../../shared/room-agent-work.js";
+import type { RoomAgentWorkPollResponse } from "../../../../shared/room-agent-work.mjs";
 import { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork, RoomAgentWorkError } from "../../db/room-agent-work.js";
 import { parsePollTimeout, respondWithInternalError, type AuthenticatedRequest } from "../../http/helpers.js";
 import { resolveRequestAuth } from "../../request/auth.js";

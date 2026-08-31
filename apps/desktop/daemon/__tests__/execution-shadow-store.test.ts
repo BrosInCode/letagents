@@ -9,6 +9,7 @@ import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../
 import { ExecutionProtocolError, parseExecutionFact, type ExecutionFact } from "../execution-protocol.js";
 import { emptyExecutionProjection, publicApprovalState, reduceDeliveryEvidence, reduceExecutionFact, waitingForApproval, type DeliveryEvidence } from "../execution-reducer.js";
 import { ExecutionShadowStore, type ShadowObserver } from "../execution-shadow-store.js";
+import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../../shared/room-agent-work.mjs";
 
 function fixture(path = ":memory:") {
   const db = new DatabaseSync(path);
@@ -86,14 +87,22 @@ function operationFact(sequence: number, values: Record<string, unknown> = {}): 
   const { state: _state, ...base } = fact(sequence) as Extract<ExecutionFact, { domain: "runtime" }>;
   return parseExecutionFact({ ...base, ...native, domain: "execution", kind: "started", executionId: "command", operation: "command", ...values });
 }
+function roomSummary(store: ExecutionShadowStore): RoomAgentWorkSummary {
+  const result = store.roomWorkSummary("agent", "room", "message");
+  if (result.availability !== "available") assert.fail(JSON.stringify(result));
+  assert.deepEqual(parseRoomAgentWorkSummary(result.summary), result.summary);
+  return result.summary;
+}
 
 test("retained message execution exposes only exact recorded structural facts", () => {
   const { db, store } = fixture();
   try {
     seed(store); const token = observer(store);
     assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "not_captured" });
+    assert.deepEqual(store.roomWorkSummary("agent", "room", "message"), { availability: "not_captured" });
     store.ingest("source", token, fact(1));
     assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "not_captured" }, "runtime evidence is not turn evidence");
+    assert.deepEqual(store.roomWorkSummary("agent", "room", "message"), { availability: "not_captured" });
     store.ingest("source", token, turnFact(2));
     store.ingest("source", token, operationFact(3));
     store.ingest("source", token, operationFact(4, { kind: "output", outputBytes: 12 }));
@@ -104,10 +113,14 @@ test("retained message execution exposes only exact recorded structural facts", 
     }] });
     for (const coordinates of [["other", "room", "message"], ["agent", "other", "message"], ["agent", "room", "other"]]) {
       assert.deepEqual(store.retainedMessageExecution(...coordinates as [string, string, string]), { availability: "not_captured" });
+      assert.deepEqual(store.roomWorkSummary(...coordinates as [string, string, string]), { availability: "not_captured" });
     }
+    assert.equal(roomSummary(store).operation_counts.unresolved, 1);
+    assert.equal(roomSummary(store).evidence_incomplete, false);
     store.observeSourcePosition("source", token, 6);
     const gap = store.retainedMessageExecution("agent", "room", "message");
     assert.equal(gap.availability === "available" && gap.evidenceIncomplete, true);
+    assert.equal(roomSummary(store).evidence_incomplete, true);
     assert.equal(db.isTransaction, false);
   } finally { db.close(); }
 });
@@ -121,8 +134,11 @@ test("retained message execution bounds operations and isolates optional read fa
     assert.equal(detail.availability, "available");
     if (detail.availability !== "available") assert.fail();
     assert.equal(detail.truncated, true); assert.equal(detail.turns[0]!.operations.length, 128);
+    assert.equal(roomSummary(store).operation_counts.unresolved, 129, "room counts are not limited by the Inspector");
+    assert.equal(roomSummary(store).evidence_incomplete, false);
     db.exec("DROP TABLE execution_observer_sources; DROP TABLE execution_observers");
     assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "unavailable" });
+    assert.deepEqual(store.roomWorkSummary("agent", "room", "message"), { availability: "unavailable" });
     assert.equal(db.isTransaction, false);
     assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_turns").get()!.n, 1);
   } finally { db.close(); }
@@ -143,15 +159,18 @@ test("retained message execution bounds candidate scans before joining uncapture
     let queryPlan = "";
     t.mock.method(db, "prepare", (sql: string) => {
       if (sql.includes("WITH captured AS MATERIALIZED")) {
-        queryPlan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all("agent", "room", "message").map((row) => row.detail).join("\n");
+        const args = sql.includes("AS message_attempt_id") ? ["agent"] : ["agent", "room", "message"];
+        queryPlan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all(...args).map((row) => row.detail).join("\n");
       }
       return prepare(sql);
     });
     assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "not_captured" });
+    assert.deepEqual(store.roomWorkSummary("agent", "room", "message"), { availability: "not_captured" });
     store.ingest("source", token, turnFact(1));
     const detail = store.retainedMessageExecution("agent", "room", "message");
     assert.equal(detail.availability, "available");
     assert.equal(detail.availability === "available" && detail.turns.length, 1);
+    assert.equal(store.roomWorkSummary("agent", "room", "message").availability, "available");
     assert.match(queryPlan, /MATERIALIZE captured/);
     assert.match(queryPlan, /execution_facts_agent_sequence \(agent_id=\?\)/);
     assert.match(queryPlan, /SEARCH t USING INDEX \S+ \(turn_id=\?(?: AND |\))/);
@@ -159,6 +178,7 @@ test("retained message execution bounds candidate scans before joining uncapture
     retainFacts(db, 2, 10001);
     assert.deepEqual(store.retainedMessageExecution("agent", "room", "absent"), { availability: "unavailable" },
       "an oversized journal cannot claim that a turn beyond its bounded prefix was never captured");
+    assert.deepEqual(store.roomWorkSummary("agent", "room", "message"), { availability: "unavailable" });
   } finally { db.close(); }
 });
 
@@ -177,6 +197,8 @@ test("retained message execution follows historical generations and bounds turns
           daemonGenerationId: "daemon", expectedEpoch: index, sourceId: `source-${index}`, boundAtMs: 100 + index });
         store.ingest(`source-${index}`, token, turnFact(1, { ...turn, factId: `terminal-${index}`, executionGenerationId: generation,
           runtimeGenerationId: runtime, observerEpoch: token.epoch, state: "terminal", turnOutcome: "completed" }));
+        store.ingest(`source-${index}`, token, operationFact(2, { ...turn, factId: `operation-${index}`, executionGenerationId: generation,
+          runtimeGenerationId: runtime, observerEpoch: token.epoch, kind: "completed", outcome: "succeeded" }));
       }
       const detail = store.retainedMessageExecution("agent", "room", "message");
       if (detail.availability !== "available") assert.fail(JSON.stringify(detail));
@@ -185,10 +207,16 @@ test("retained message execution follows historical generations and bounds turns
       assert.equal(detail.turns[1]!.turnId, multipleRuntimes ? "turn-7" : "turn-31", "current observer runtime must not hide historical turns");
       assert.equal(detail.turns.every(turn => turn.state === "terminal" && turn.outcome === "completed"), true);
       assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_message_attempts").get()!.n, 1);
+      const summary = roomSummary(store);
+      assert.equal(summary.recorded_state, "active", "native completion alone is not a delivery receipt");
+      assert.equal(summary.operation_counts.succeeded, multipleRuntimes ? 9 : 33);
+      assert.equal(summary.evidence_incomplete, false);
       db.exec("DROP TRIGGER execution_facts_immutable; UPDATE execution_facts SET turn_outcome=NULL");
       const legacy = store.retainedMessageExecution("agent", "room", "message");
       assert.equal(legacy.availability === "available" && legacy.evidenceIncomplete, true);
-      assert.equal(legacy.availability === "available" && legacy.turns.length, 0, "unverified terminals do not invent outcomes");
+      assert.equal(legacy.availability === "available" && legacy.turns.every(turn => turn.outcome === null), true,
+        "unverified turn terminals do not invent outcomes even when operations were observed");
+      assert.equal(roomSummary(store).evidence_incomplete, true);
     } finally { db.close(); }
   }
 });
@@ -215,6 +243,85 @@ test("retained message execution keeps selection and projection in one WAL snaps
     const second = store.retainedMessageExecution("agent", "room", "message");
     assert.equal(first.availability === "available" && first.turns[0]!.state, "active");
     assert.equal(second.availability === "available" && second.turns[0]!.outcome, "completed");
+  } finally { peer.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("room summary preserves exact message identity, operation outcomes and durable receipt conclusions across reopen", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "room-work-summary-"));
+  const file = join(directory, "state.sqlite");
+  const { db, store } = fixture(file);
+  let serialized = "";
+  let closed = false;
+  try {
+    const { attemptId } = seed(store); const token = observer(store);
+    store.ingest("source", token, turnFact(1));
+    let sequence = 2;
+    for (const outcome of ["succeeded", "failed", "denied_before_start", "cancelled_before_start", "interrupted_after_start", "lost_after_start"]) {
+      store.ingest("source", token, operationFact(sequence++, { executionId: outcome, kind: "completed", outcome }));
+    }
+    // Output can be the first retained witness. Re-observation of that native
+    // event must not create another operation or attempt.
+    for (let repeat = 0; repeat < 2; repeat++) store.ingest("source", token, operationFact(sequence++, {
+      executionId: "output-only", kind: "output", outputBytes: 42, nativeEventId: "native-output",
+    }));
+    store.ingest("source", token, turnFact(sequence++, { state: "terminal", turnOutcome: "completed" }));
+    assert.equal(roomSummary(store).recorded_state, "active", "a native completion does not prove reply publication");
+    for (const [roomId, sourceMessageId] of [["room", "other-message"], ["other-room", "message"]]) {
+      const other = { turnId: `turn-${roomId}-${sourceMessageId}`, providerContinuationId: "conversation", providerTurnId: `native-${roomId}-${sourceMessageId}` };
+      const otherAttempt = store.trackMessage({ agentId: "agent", roomId, sourceMessageId, executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
+      store.trackNativeTurn({ agentId: "agent", roomId, executionGenerationId: "generation", runtimeGenerationId: "runtime", attemptId: otherAttempt, ...other, createdAtMs: 100 });
+      store.ingest("source", token, operationFact(sequence++, { ...other, executionId: "foreign", kind: "completed", outcome: "failed" }));
+      store.ingest("source", token, turnFact(sequence++, { ...other, state: "terminal", turnOutcome: "completed" }));
+    }
+    const peer = seed(store, "-peer");
+    const peerObserver = observer(store, { agentId: "agent-peer", subjectRuntimeGenerationId: "runtime-peer", observerRuntimeGenerationId: "runtime-peer" });
+    store.ingest("source", peerObserver, operationFact(1, { agentId: "agent-peer", executionGenerationId: "generation-peer",
+      runtimeGenerationId: "runtime-peer", ...peer.turn, factId: "peer-op", kind: "completed", outcome: "failed" }));
+    const before = db.prepare("SELECT total_changes() AS n").get()!.n;
+    const summary = roomSummary(store);
+    assert.deepEqual(summary, { version: 1, recorded_state: "active", evidence_incomplete: false, elapsed_ms: null,
+      operation_counts: { unresolved: 1, succeeded: 1, failed: 1, denied_before_start: 1, cancelled_before_start: 1, interrupted_after_start: 1, lost_after_start: 1 } });
+    assert.equal(db.prepare("SELECT total_changes() AS n").get()!.n, before, "projection never writes lifecycle or delivery state");
+    assert.doesNotMatch(JSON.stringify(summary), /turnId|executionId|runtime|workspace|conversation|native-output|outputBytes|sideEffects/);
+    for (const [state, conclusion, expected] of [
+      ["cleanly_concluded", "replied", "completed"], ["cleanly_concluded", "acknowledged_no_reply", "completed_no_reply"],
+      ["failed", "failed", "failed"], ["interrupted", "interrupted", "interrupted"], ["lost", "lost", "lost"],
+    ]) {
+      db.prepare("UPDATE execution_message_attempts SET state=?,conclusion=?,settled_at_ms=1000 WHERE attempt_id=?").run(state, conclusion, attemptId);
+      assert.equal(roomSummary(store).recorded_state, expected);
+      assert.equal(roomSummary(store).elapsed_ms, null, "publication timestamps are not execution duration");
+    }
+    serialized = JSON.stringify(store.roomWorkSummary("agent", "room", "message"));
+    db.close(); closed = true;
+    const reopened = fixture(file);
+    try { assert.equal(JSON.stringify(reopened.store.roomWorkSummary("agent", "room", "message")), serialized); }
+    finally { reopened.db.close(); }
+  } finally { if (!closed) db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
+test("room summary reads receipt, watermark and operations in one WAL snapshot", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "room-work-snapshot-"));
+  const { db, store } = fixture(join(directory, "state.sqlite")); db.exec("PRAGMA journal_mode=WAL");
+  const peer = new DatabaseSync(join(directory, "state.sqlite"));
+  try {
+    seed(store); const token = observer(store); store.ingest("source", token, turnFact(1));
+    const prepare = db.prepare.bind(db);
+    let wrote = false;
+    t.mock.method(db, "prepare", (sql: string) => {
+      if (!wrote && sql.includes("AS message_attempt_id")) {
+        wrote = true;
+        peer.exec(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+          source_sequence,domain,kind,side_effects,observed_at_ms,turn_id,execution_id,operation,outcome)
+          VALUES('terminal','agent','generation','runtime',1,2,'execution','completed','none',102,'turn','op','command','failed');
+          UPDATE execution_message_attempts SET state='failed',conclusion='failed',settled_at_ms=200;
+          UPDATE execution_observers SET last_source_sequence=2,max_observed_sequence=3 WHERE agent_id='agent'`);
+      }
+      return prepare(sql);
+    });
+    const first = roomSummary(store); const second = roomSummary(store);
+    assert.equal(first.recorded_state, "active"); assert.equal(first.evidence_incomplete, false); assert.equal(first.operation_counts.failed, 0);
+    assert.equal(second.recorded_state, "failed"); assert.equal(second.evidence_incomplete, true); assert.equal(second.operation_counts.failed, 1);
+    assert.equal(db.isTransaction, false);
   } finally { peer.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
 });
 
