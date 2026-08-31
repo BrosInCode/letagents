@@ -34,7 +34,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { SupervisedDeliveryHttp, SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
-import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
+import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure, rememberCompletedControlAction } from "../reconciler-state.js";
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
@@ -3752,17 +3752,17 @@ test("direct provider convergence quarantines persisted crash loops without anot
   }
 });
 
-test("reconciler policy uses the addressed-message watchdog rather than turn duration", () => {
+test("reconciler policy may poke stalled addressed work but silence never proves runtime loss", () => {
   const base = {
     desiredState: "running" as const, observedState: "working" as const, condition: "none" as const,
     capabilities: { resume: true, midTurnInjection: true }, nowMs: 10_000, lastPollAtMs: 0,
     addressedMessagesWaiting: 0, pokeIgnored: false, activeLease: false, fencedRebindProven: false, exitsInWindow: 0,
   };
-  assert.equal(watchdogShouldEscalate({ ...base, addressedMessagesWaiting: 0, pokeIgnored: true }, 1_000), false, "long work with an empty inbox is never touched");
-  assert.equal(watchdogShouldEscalate({ ...base, lastPollAtMs: 9_999, addressedMessagesWaiting: 1, pokeIgnored: true }, 1_000), false, "quiet but polling is never touched");
+  assert.equal(decideReconciliation({ ...base, addressedMessagesWaiting: 0, pokeIgnored: true }, 1_000).action, "wait", "long work with an empty inbox is never touched");
+  assert.equal(decideReconciliation({ ...base, lastPollAtMs: 9_999, addressedMessagesWaiting: 1, pokeIgnored: true }, 1_000).action, "wait", "quiet but polling is never touched");
   assert.equal(decideReconciliation({ ...base, addressedMessagesWaiting: 1 }, 1_000).action, "poke");
-  assert.equal(watchdogShouldEscalate({ ...base, addressedMessagesWaiting: 1, pokeIgnored: true }, 1_000), true);
-  assert.equal(decideReconciliation({ ...base, addressedMessagesWaiting: 1, pokeIgnored: true }, 1_000).action, "restart_with_resume");
+  assert.equal(decideReconciliation({ ...base, addressedMessagesWaiting: 1, pokeIgnored: true }, 1_000).action, "wait",
+    "an ignored poke is not hard evidence that the provider died");
 });
 
 test("reconciler policy fences recovery, gates resume, quarantines crash loops, and backs off", () => {
