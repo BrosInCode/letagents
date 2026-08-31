@@ -1155,6 +1155,36 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.equal(mapped.uncertain_effects[0]?.effect_id, "effect_1");
   assert.equal(mapped.timeline[0]?.sequence, 1);
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
+  assert.equal(mapped.recorded_execution, undefined, "older supervisors remain compatible");
+  const operation = { executionId: "command-1", operation: "command", outcome: "failed", startObserved: true, outputBytes: 50, sideEffects: "possible", exitCode: 1, signalNumber: null };
+  const turn = { turnId: "retained-turn-1", state: "terminal", outcome: "completed", operations: [operation] };
+  const execution = { availability: "available", truncated: false, evidenceIncomplete: true, turns: [turn] };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, recorded_execution: execution }, input).recorded_execution, execution);
+  const unverified = { ...execution, turns: [] };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, recorded_execution: unverified }, input).recorded_execution, unverified);
+  for (const availability of ["not_captured", "unavailable"]) {
+    assert.deepEqual(mapAgentInspectorDetail({ ...wire, recorded_execution: { availability } }, input).recorded_execution, { availability });
+  }
+  for (const invalid of [
+    null, { ...execution, rawOutput: "never display" }, { ...execution, evidenceIncomplete: false, turns: [] },
+    { ...execution, evidenceIncomplete: "false" }, { ...execution, turns: [turn, turn] },
+    { ...execution, turns: Array.from({ length: 33 }, (_, i) => ({ ...turn, turnId: `turn-${i}` })) },
+    { ...execution, turns: [{ ...turn, operations: Array.from({ length: 129 }, (_, i) => ({ ...operation, executionId: `op-${i}` })) }] },
+    { ...execution, turns: Array.from({ length: 2 }, (_, i) => ({ ...turn, turnId: `turn-${i}`, operations: Array.from({ length: 65 }, (_, j) => ({ ...operation, executionId: `op-${j}` })) })) },
+    { ...execution, turns: [{ ...turn, state: "active" }] },
+    { ...execution, turns: [{ ...turn, operations: [operation, operation] }] },
+    ...[
+      { ...operation, command: "not part of this projection" }, { ...operation, operation: "invented" },
+      { ...operation, executionId: "bad\nidentity" }, { ...operation, outputBytes: -1 },
+      { ...operation, outputBytes: Number.MAX_SAFE_INTEGER + 1 }, { ...operation, exitCode: 1.1 },
+      { ...operation, signalNumber: 0 }, { ...operation, outcome: null },
+      { ...operation, outcome: "denied_before_start" },
+    ].map((row) => ({ ...execution, turns: [{ ...turn, operations: [row] }] })),
+  ]) {
+    const result = mapAgentInspectorDetail({ ...wire, recorded_execution: invalid }, input);
+    assert.deepEqual(result.recorded_execution, { availability: "unavailable" });
+    assert.deepEqual(result.receipt, mapped.receipt, "optional evidence cannot take delivery receipts down");
+  }
   for (const kind of ["failed", "interrupted"]) {
     const settled = mapAgentInspectorDetail({ ...wire,
       receipt: { ...wire.receipt, state: "acknowledged_failed", outcome: { kind } },
@@ -1172,6 +1202,7 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.throws(() => mapAgentInspectorDetail({ ...wire, source_message: { ...wire.source_message, id: "msg_other" } }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail(wire, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }), /invalid or unfenced/);
   assert.doesNotThrow(() => mapAgentInspectorDetail({ ...wire, availability: "not_loaded", requested_source_message_id: null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [] }, { entryId: "agent_1", roomId: "room_1", sourceMessageId: null }));
+  assert.equal(mapAgentInspectorDetail({ ...wire, availability: "pruned", inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, timeline: [], recorded_execution: execution }, input).recorded_execution, undefined, "a missing exact source never displays nested execution evidence");
   assert.throws(() => mapAgentInspectorDetail({ ...wire, items: [{ ...wire.items[0], state: "invented" }] }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: Array.from({ length: 101 }, () => wire.timeline[0]) }, input), /invalid or unfenced/);
   assert.throws(() => mapAgentInspectorDetail({ ...wire, timeline: [{ ...wire.timeline[0], event_sequence: 0 }] }, input), /invalid or unfenced/);
@@ -2229,7 +2260,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.118");
+    assert.equal(status.implementationVersion, "2.0.119");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

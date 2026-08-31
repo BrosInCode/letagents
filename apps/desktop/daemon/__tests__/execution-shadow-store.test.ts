@@ -87,6 +87,137 @@ function operationFact(sequence: number, values: Record<string, unknown> = {}): 
   return parseExecutionFact({ ...base, ...native, domain: "execution", kind: "started", executionId: "command", operation: "command", ...values });
 }
 
+test("retained message execution exposes only exact recorded structural facts", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "not_captured" });
+    store.ingest("source", token, fact(1));
+    assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "not_captured" }, "runtime evidence is not turn evidence");
+    store.ingest("source", token, turnFact(2));
+    store.ingest("source", token, operationFact(3));
+    store.ingest("source", token, operationFact(4, { kind: "output", outputBytes: 12 }));
+    const detail = store.retainedMessageExecution("agent", "room", "message");
+    assert.deepEqual(detail, { availability: "available", truncated: false, evidenceIncomplete: false, turns: [{
+      turnId: "turn", state: "active", outcome: null, operations: [{ executionId: "command", operation: "command",
+        outcome: null, startObserved: true, outputBytes: 12, sideEffects: "none", exitCode: null, signalNumber: null }],
+    }] });
+    for (const coordinates of [["other", "room", "message"], ["agent", "other", "message"], ["agent", "room", "other"]]) {
+      assert.deepEqual(store.retainedMessageExecution(...coordinates as [string, string, string]), { availability: "not_captured" });
+    }
+    store.observeSourcePosition("source", token, 6);
+    const gap = store.retainedMessageExecution("agent", "room", "message");
+    assert.equal(gap.availability === "available" && gap.evidenceIncomplete, true);
+    assert.equal(db.isTransaction, false);
+  } finally { db.close(); }
+});
+
+test("retained message execution bounds operations and isolates optional read failures", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store); store.ingest("source", token, turnFact(1));
+    for (let index = 0; index < 129; index++) store.ingest("source", token, operationFact(index + 2, { executionId: `operation-${index}` }));
+    const detail = store.retainedMessageExecution("agent", "room", "message");
+    assert.equal(detail.availability, "available");
+    if (detail.availability !== "available") assert.fail();
+    assert.equal(detail.truncated, true); assert.equal(detail.turns[0]!.operations.length, 128);
+    db.exec("DROP TABLE execution_observer_sources; DROP TABLE execution_observers");
+    assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "unavailable" });
+    assert.equal(db.isTransaction, false);
+    assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_turns").get()!.n, 1);
+  } finally { db.close(); }
+});
+
+test("retained message execution bounds candidate scans before joining uncaptured identities", (t) => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    for (let index = 0; index < 1000; index++) {
+      db.prepare(`INSERT INTO execution_turns(turn_id,agent_id,execution_generation_id,runtime_generation_id,attempt_id,
+        room_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
+        SELECT ?,agent_id,execution_generation_id,runtime_generation_id,attempt_id,room_id,
+          provider_continuation_id,?,'terminal','none',?,? FROM execution_turns WHERE turn_id='turn'`)
+        .run(`uncaptured-${index}`, `uncaptured-native-${index}`, 1000 + index, 1000 + index);
+    }
+    const prepare = db.prepare.bind(db);
+    let queryPlan = "";
+    t.mock.method(db, "prepare", (sql: string) => {
+      if (sql.includes("WITH captured AS MATERIALIZED")) {
+        queryPlan = prepare(`EXPLAIN QUERY PLAN ${sql}`).all("agent", "room", "message").map((row) => row.detail).join("\n");
+      }
+      return prepare(sql);
+    });
+    assert.deepEqual(store.retainedMessageExecution("agent", "room", "message"), { availability: "not_captured" });
+    store.ingest("source", token, turnFact(1));
+    const detail = store.retainedMessageExecution("agent", "room", "message");
+    assert.equal(detail.availability, "available");
+    assert.equal(detail.availability === "available" && detail.turns.length, 1);
+    assert.match(queryPlan, /MATERIALIZE captured/);
+    assert.match(queryPlan, /execution_facts_agent_sequence \(agent_id=\?\)/);
+    assert.match(queryPlan, /SEARCH t USING INDEX \S+ \(turn_id=\?(?: AND |\))/);
+    assert.doesNotMatch(queryPlan, /SCAN t\b|SEARCH t .*\(agent_id=/);
+    retainFacts(db, 2, 10001);
+    assert.deepEqual(store.retainedMessageExecution("agent", "room", "absent"), { availability: "unavailable" },
+      "an oversized journal cannot claim that a turn beyond its bounded prefix was never captured");
+  } finally { db.close(); }
+});
+
+test("retained message execution follows historical generations and bounds turns and runtimes", () => {
+  for (const multipleRuntimes of [false, true]) {
+    const { db, store } = fixture();
+    try {
+      for (let index = 0; index < (multipleRuntimes ? 9 : 33); index++) {
+        const runtime = multipleRuntimes ? `runtime-${index}` : "runtime";
+        const generation = multipleRuntimes ? `generation-${index}` : "generation";
+        store.registerRuntime({ agentId: "agent", executionGenerationId: generation, runtimeGenerationId: runtime, provider: "codex", configRevision: 1, createdAtMs: 100 });
+        const attemptId = store.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message", executionGenerationId: generation, workspaceId: "workspace", createdAtMs: 100 });
+        const turn = { turnId: `turn-${index}`, providerContinuationId: "conversation", providerTurnId: `native-${index}` };
+        store.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: generation, runtimeGenerationId: runtime, attemptId, ...turn, createdAtMs: 100 + index });
+        const token = store.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: runtime, observerRuntimeGenerationId: runtime,
+          daemonGenerationId: "daemon", expectedEpoch: index, sourceId: `source-${index}`, boundAtMs: 100 + index });
+        store.ingest(`source-${index}`, token, turnFact(1, { ...turn, factId: `terminal-${index}`, executionGenerationId: generation,
+          runtimeGenerationId: runtime, observerEpoch: token.epoch, state: "terminal", turnOutcome: "completed" }));
+      }
+      const detail = store.retainedMessageExecution("agent", "room", "message");
+      if (detail.availability !== "available") assert.fail(JSON.stringify(detail));
+      assert.equal(detail.truncated, true); assert.equal(detail.turns.length, multipleRuntimes ? 8 : 32);
+      assert.equal(detail.turns[0]!.turnId, multipleRuntimes ? "turn-8" : "turn-32", "newest retained evidence is presented first");
+      assert.equal(detail.turns[1]!.turnId, multipleRuntimes ? "turn-7" : "turn-31", "current observer runtime must not hide historical turns");
+      assert.equal(detail.turns.every(turn => turn.state === "terminal" && turn.outcome === "completed"), true);
+      assert.equal(db.prepare("SELECT COUNT(*) AS n FROM execution_message_attempts").get()!.n, 1);
+      db.exec("DROP TRIGGER execution_facts_immutable; UPDATE execution_facts SET turn_outcome=NULL");
+      const legacy = store.retainedMessageExecution("agent", "room", "message");
+      assert.equal(legacy.availability === "available" && legacy.evidenceIncomplete, true);
+      assert.equal(legacy.availability === "available" && legacy.turns.length, 0, "unverified terminals do not invent outcomes");
+    } finally { db.close(); }
+  }
+});
+
+test("retained message execution keeps selection and projection in one WAL snapshot", async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), "retained-execution-snapshot-"));
+  const { db, store } = fixture(join(directory, "state.sqlite")); db.exec("PRAGMA journal_mode=WAL");
+  const peer = new DatabaseSync(join(directory, "state.sqlite"));
+  try {
+    seed(store); const token = observer(store); store.ingest("source", token, turnFact(1));
+    const project = store.projectRuntime.bind(store);
+    let wrote = false;
+    t.mock.method(store, "projectRuntime", (runtime: string) => {
+      if (!wrote) {
+        wrote = true;
+        peer.exec(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,
+          source_sequence,domain,kind,state,side_effects,observed_at_ms,turn_id,turn_outcome)
+          VALUES('terminal','agent','generation','runtime',1,2,'turn','state_changed','terminal','none',102,'turn','completed');
+          UPDATE execution_observers SET last_source_sequence=2,max_observed_sequence=2 WHERE agent_id='agent'`);
+      }
+      return project(runtime);
+    });
+    const first = store.retainedMessageExecution("agent", "room", "message");
+    const second = store.retainedMessageExecution("agent", "room", "message");
+    assert.equal(first.availability === "available" && first.turns[0]!.state, "active");
+    assert.equal(second.availability === "available" && second.turns[0]!.outcome, "completed");
+  } finally { peer.close(); db.close(); await rm(directory, { recursive: true, force: true }); }
+});
+
 test("strict facts cannot smuggle content or infer loss from work duration", () => {
   for (const extra of [{ output: "secret" }, { command: "rm file" }, { path: "/Users/private" }, { reason: "trust me" }, { sideEffects: "possible" }]) {
     assert.throws(() => fact(1, extra), ExecutionProtocolError);
