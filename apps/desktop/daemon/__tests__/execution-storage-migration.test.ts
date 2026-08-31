@@ -64,10 +64,26 @@ function restoreV19Fixture(database: DatabaseSync): void {
 }
 
 function restoreV20Fixture(database: DatabaseSync): void {
+  restoreV21Fixture(database);
   database.exec(`DROP TABLE execution_observer_sources;
     ALTER TABLE execution_observers DROP COLUMN source_id;
     UPDATE manifest_metadata SET schema_version=20 WHERE singleton=1; PRAGMA user_version=20`);
   validateExecutionStorageSchema(database, 19);
+}
+
+function restoreV21Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_cutover_v2").get()!.count, 0);
+  const previous = new DatabaseSync(":memory:");
+  try {
+    applyExecutionStorageSchema(previous, 20);
+    const definitions = previous.prepare(`SELECT sql FROM sqlite_master
+      WHERE tbl_name='execution_cutover_v2' AND sql IS NOT NULL
+      ORDER BY CASE type WHEN 'table' THEN 0 ELSE 1 END,name`).all();
+    database.exec("DROP TABLE execution_cutover_v2");
+    for (const row of definitions) database.exec(String(row.sql));
+  } finally { previous.close(); }
+  database.exec("UPDATE manifest_metadata SET schema_version=21 WHERE singleton=1; PRAGMA user_version=21");
+  validateExecutionStorageSchema(database, 20);
 }
 
 function seedV18Evidence(database: DatabaseSync): void {
@@ -116,6 +132,16 @@ function seedV19Observer(database: DatabaseSync): void {
        daemon_generation_id,observer_epoch,last_source_sequence,max_observed_sequence,recovery_turn_id,bound_at_ms)
       VALUES('agent','generation','runtime','observer-generation','observer-runtime','daemon-generation',7,42,50,'turn',200);
   `);
+}
+
+function seedDormantCutovers(database: DatabaseSync): void {
+  database.exec(`INSERT INTO execution_generations VALUES('dispatch-generation','dispatching-agent',100);
+    INSERT INTO execution_cutover_v2
+      (rowid,operation_id,request_id,agent_id,execution_generation_id,target_turn_id,predecessor_operation_id,
+       from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms) VALUES
+      (71,'old-complete','request-complete','agent','generation','turn',NULL,'mcp_polling','daemon_inbox','force','complete',100,101),
+      (88,'old-uncertain','request-uncertain','agent','generation','turn','old-complete','daemon_inbox','mcp_polling','force','uncertain',102,103),
+      (95,'old-dispatching','request-dispatching','dispatching-agent','dispatch-generation',NULL,NULL,'mcp_polling','daemon_inbox','drain','dispatching',100,104)`);
 }
 
 function seedLegacyEvidence(database: DatabaseSync): void {
@@ -203,12 +229,14 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
-    (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : restoreV20Fixture)(env.database);
+    (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture : restoreV21Fixture)(env.database);
     seedLegacyEvidence(env.database);
+    if (version === 21) { seedV18Evidence(env.database); seedDormantCutovers(env.database); }
     const before = legacyRows(env.database);
+    const cutovers = version === 21 ? env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all() : undefined;
     const script = `
       import { DatabaseSync } from 'node:sqlite';
       import { DaemonStateSchema } from ${JSON.stringify(new URL("../daemon-state-database.ts", import.meta.url).href)};
@@ -219,6 +247,7 @@ for (const version of [17, 19, 20]) test(`a killed migrator leaves the complete 
     const child = spawnSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", script, env.path], { encoding: "utf8", timeout: 10_000 });
     assert.equal(child.signal, "SIGKILL", child.stderr);
     assert.deepEqual(legacyRows(env.database), before);
+    if (cutovers) assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all(), cutovers);
     assert.equal((env.database.prepare("PRAGMA user_version").get() as Row).user_version, version);
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
     new DaemonStateSchema().createSchema(env.database);
@@ -226,10 +255,11 @@ for (const version of [17, 19, 20]) test(`a killed migrator leaves the complete 
   } finally { await env.cleanup(); }
 });
 
-for (const version of [20, 21]) test(`v${version} predecessor repair preserves native-turn authority and failed terminal evidence`, async () => {
+for (const version of [20, 21, 22]) test(`v${version} predecessor repair preserves native-turn authority and failed terminal evidence`, async () => {
   const env = await fixture();
   try {
     if (version === 20) restoreV20Fixture(env.database);
+    if (version === 21) restoreV21Fixture(env.database);
     seedLegacyEvidence(env.database);
     env.database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',provider_turn_id='turn-tail',
       outcome='{"kind":"failed","text":null,"evidence":"transcript"}' WHERE inbox_item_id='tail'`).run();
@@ -388,12 +418,13 @@ test("observation opener escapes URI metacharacters in existing local paths", as
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
-for (const invalid of ["older17", "older20", "newer", "non_wal", "typed_journal_missing", "legacy_journal_missing"] as const) {
+for (const invalid of ["older17", "older20", "older21", "newer", "non_wal", "typed_journal_missing", "legacy_journal_missing"] as const) {
   test(`observation opener rejects ${invalid} without migration, repair or WAL conversion`, async () => {
     const env = await fixture();
     try {
       if (invalid === "older17") restoreV17Fixture(env.database);
       if (invalid === "older20") restoreV20Fixture(env.database);
+      if (invalid === "older21") restoreV21Fixture(env.database);
       if (invalid === "newer") env.database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION + 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION + 1}`);
       if (invalid === "typed_journal_missing") env.database.exec("DROP TABLE execution_observer_sources");
       if (invalid === "legacy_journal_missing") env.database.exec("DROP TABLE supervised_agent_inbox_events");
@@ -493,7 +524,7 @@ test("malformed v18 and missing current observers fail before WAL or initializer
   } finally { await env.cleanup(); }
 });
 
-test("v19 upgrade rebuilds only terminal evidence and adds source identity, preserving old outcomes, identity and rowids", async () => {
+test("v19 upgrade preserves old outcomes, identity and rowids while advancing terminal, source and cutover storage", async () => {
   const env = await fixture();
   try {
     restoreV19Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database);
@@ -504,7 +535,7 @@ test("v19 upgrade rebuilds only terminal evidence and adds source identity, pres
       INSERT INTO supervised_agent_terminal_results VALUES('unreadable','agent','generation','turn-unreadable','unreadable',NULL,'none','{ "original": "unreadable" }','then','now')`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const retainedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('supervised_agent_terminal_results','execution_observers','execution_observer_sources') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('supervised_agent_terminal_results','execution_observers','execution_observer_sources','execution_cutover_v2') ORDER BY type,name`).all();
     const unrelatedSchema = retainedSchema();
     const rowids = env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all();
     new DaemonStateSchema().createSchema(env.database);
@@ -521,13 +552,14 @@ test("v19 upgrade rebuilds only terminal evidence and adds source identity, pres
   } finally { await env.cleanup(); }
 });
 
-for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
+for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
   const env = await fixture();
   try {
     if (version === 17) restoreV17Fixture(env.database);
     else if (version === 18) restoreV18Fixture(env.database);
     else if (version === 19) restoreV19Fixture(env.database);
     else if (version === 20) restoreV20Fixture(env.database);
+    else if (version === 21) restoreV21Fixture(env.database);
     else if (version) {
       restoreV17Fixture(env.database);
       env.database.exec(`UPDATE manifest_metadata SET schema_version=${version} WHERE singleton=1; PRAGMA user_version=${version}`);
@@ -587,7 +619,7 @@ test("v21 adds unknown source provenance without resetting cursors or rebuilding
     const observer = env.database.prepare("SELECT rowid,* FROM execution_observers").get();
     const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='execution_observers'").get();
     const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('execution_observers','execution_observer_sources') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('execution_observers','execution_observer_sources','execution_cutover_v2') ORDER BY type,name`).all();
     const schema = unrelatedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
@@ -596,8 +628,8 @@ test("v21 adds unknown source provenance without resetting cursors or rebuilding
     assert.deepEqual(unrelatedSchema(), schema);
     assert.deepEqual(env.database.prepare("SELECT * FROM execution_observer_sources").all(), [], "migration never manufactures admitted sources");
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
-    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 21);
-    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 21);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, DAEMON_STATE_SCHEMA_VERSION);
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ ...env.database.prepare("SELECT rowid,* FROM execution_observers").get() }, { ...observer, source_id: null });
     env.database.exec(`UPDATE execution_observers SET source_id='new-source';
@@ -636,13 +668,70 @@ test("v21 source column and admission memory roll back atomically with the old o
   } finally { await env.cleanup(); }
 });
 
-for (const version of [20, 21]) test(`v${version} rejects malformed source storage before WAL or initializer writes`, async () => {
-  for (const corruption of version === 20
-    ? ["ALTER TABLE execution_observers ADD COLUMN source_id TEXT", "DROP TABLE execution_observers"]
-    : ["ALTER TABLE execution_observers DROP COLUMN source_id", "DROP TABLE execution_observer_sources"]) {
+test("v22 preserves dormant cutover rows, rowids and legacy uncertainty without manufacturing native authority", async () => {
+  const env = await fixture();
+  try {
+    restoreV21Fixture(env.database);
+    seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedDormantCutovers(env.database);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
+    const rows = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
+    const oldColumns = Object.keys(rows[0]!);
+    const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
+      WHERE tbl_name<>'execution_cutover_v2' ORDER BY type,name`).all();
+    const schema = unrelatedSchema();
+    new DaemonStateSchema().createSchema(env.database);
+    const migrated = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
+    assert.deepEqual(migrated.map(row => Object.fromEntries(oldColumns.map(column => [column, row[column]]))), rows.map(row => ({ ...row })));
+    const addedColumns = Object.keys(migrated[0]!).filter(column => !oldColumns.includes(column));
+    assert.deepEqual([...addedColumns].sort(), ["authority_version", "room_id", "work_attempt_id", "provider", "native_continuation_id",
+      "native_connection_kind", "native_connection_sha256", "native_pid", "native_process_identity", "native_target_turn_id",
+      "admitted_inbox_item_id", "admitted_source_message_id", "admitted_action_id"].sort());
+    for (const row of migrated) for (const column of addedColumns) assert.equal(row[column], null, column);
+    assert.deepEqual(legacyRows(env.database), before.legacy);
+    const typed = typedRows(env.database);
+    for (const [table, original] of Object.entries(before.typed)) if (table !== "execution_cutover_v2") assert.deepEqual(typed[table], original, table);
+    assert.deepEqual(unrelatedSchema(), schema, "only the cutover table and its own indexes or triggers may change");
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 22);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 22);
+    assert.throws(() => validateExecutionStorageSchema(env.database, 20), /Execution storage schema mismatch/);
+    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
+    try {
+      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all(), migrated);
+      assert.deepEqual(legacyRows(reopened), before.legacy);
+    } finally { reopened.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("v22 cutover rebuild and both markers roll back together after validation", async () => {
+  const env = await fixture();
+  try {
+    restoreV21Fixture(env.database);
+    seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedDormantCutovers(env.database);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
+      cutovers: env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all() };
+    const schema = env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all();
+    assert.throws(() => new DaemonStateSchema(database => {
+      validateExecutionStorageSchema(database);
+      assert.equal(database.prepare("PRAGMA user_version").get()!.user_version, 21);
+      assert.equal(database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 21);
+      throw new Error("interrupt v22 before markers");
+    }).createSchema(env.database), /interrupt v22/);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
+      cutovers: env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all() }, before);
+    assert.deepEqual(env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(), schema);
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    validateExecutionStorageSchema(env.database, 20);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual(legacyRows(env.database), before.legacy);
+  } finally { await env.cleanup(); }
+});
+
+for (const version of [21, 22]) test(`v${version} refuses missing or weakened cutover authority before WAL or initializer writes`, async () => {
+  for (const corruption of ["DROP TABLE execution_cutover_v2", "DROP INDEX execution_cutover_one_unresolved"]) {
     const env = await fixture();
     try {
-      if (version === 20) restoreV20Fixture(env.database);
+      if (version === 21) restoreV21Fixture(env.database);
       env.database.exec(`${corruption}; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
       const before = await readFile(env.path);
       let initialized = false;
@@ -654,7 +743,26 @@ for (const version of [20, 21]) test(`v${version} rejects malformed source stora
   }
 });
 
-for (const version of [19, 20, 21]) test(`v${version} refuses missing or weakened terminal authority before WAL or repair writes`, async () => {
+for (const version of [20, 21, 22]) test(`v${version} rejects malformed source storage before WAL or initializer writes`, async () => {
+  for (const corruption of version === 20
+    ? ["ALTER TABLE execution_observers ADD COLUMN source_id TEXT", "DROP TABLE execution_observers"]
+    : ["ALTER TABLE execution_observers DROP COLUMN source_id", "DROP TABLE execution_observer_sources"]) {
+    const env = await fixture();
+    try {
+      if (version === 20) restoreV20Fixture(env.database);
+      if (version === 21) restoreV21Fixture(env.database);
+      env.database.exec(`${corruption}; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
+      const before = await readFile(env.path);
+      let initialized = false;
+      await assert.rejects(() => openDaemonStateDatabase(env.path, () => { initialized = true; }), /Execution storage schema mismatch/);
+      assert.equal(initialized, false);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, version);
+    } finally { await env.cleanup(); }
+  }
+});
+
+for (const version of [19, 20, 21, 22]) test(`v${version} refuses missing or weakened terminal authority before WAL or repair writes`, async () => {
   const corruptions = [
     "DROP TABLE supervised_agent_terminal_results",
     "UPDATE sqlite_master SET sql=replace(sql, 'outcome TEXT NOT NULL CHECK(outcome IN (''reply'',''no_reply'',''unreadable''))', 'outcome TEXT NOT NULL') WHERE name='supervised_agent_terminal_results'",
@@ -671,6 +779,7 @@ for (const version of [19, 20, 21]) test(`v${version} refuses missing or weakene
     try {
       if (version === 19) restoreV19Fixture(env.database);
       if (version === 20) restoreV20Fixture(env.database);
+      if (version === 21) restoreV21Fixture(env.database);
       const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
       env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
         PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
