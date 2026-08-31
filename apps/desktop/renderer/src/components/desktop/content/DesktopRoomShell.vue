@@ -225,6 +225,9 @@
         :room-git-room="room.gitRoom"
         :room-identifier="room.identifier"
         :room-artifacts="roomArtifacts"
+        :room-agent-work="roomAgentWork"
+        :room-agent-work-status="roomAgentWorkStatus"
+        :room-agent-work-truncated="roomAgentWorkTruncated"
         :activity-history-request="activityHistoryRequest"
         :artifact-task-filter-id="artifactTimelineTaskFilterId"
         :tasks="tasks"
@@ -236,6 +239,7 @@
         @open-add-agent="openAddAgentModal"
         @open-agent-detail="openAgentDetailRequest"
         @refresh-room="emit('refresh-room')"
+        @reveal-message="revealRecordedWorkMessage"
         @clear-artifact-task-filter="artifactTimelineTaskFilterId = null"
       />
 
@@ -338,6 +342,7 @@ import type {
   DesktopManagedAgentSession,
   DesktopParticipantSummary,
   DesktopRoomInfo,
+  DesktopRoomAgentWork,
   DesktopRoomSharedArtifact,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
@@ -490,6 +495,9 @@ const props = defineProps<{
   reasoningSessions: DesktopReasoningSession[];
   recentActivity: DesktopActivityEntry[];
   roomArtifacts: DesktopRoomSharedArtifact[];
+  roomAgentWork: DesktopRoomAgentWork[];
+  roomAgentWorkStatus: "idle" | "loading" | "ready" | "stale" | "error" | "unavailable";
+  roomAgentWorkTruncated: boolean;
   boardSettings: DesktopBoardSettingsSummary | null;
   messages: DesktopRoomMessage[];
   githubEvents: DesktopGitHubEventsPage | null;
@@ -1529,6 +1537,12 @@ async function revealRoomMessage(messageId: string): Promise<void> {
   revealedMessageId.value = null;
   await nextTick();
   revealedMessageId.value = messageId;
+}
+
+async function revealRecordedWorkMessage(messageId: string): Promise<void> {
+  if (!messageId.trim()) return;
+  activeTab.value = "chat";
+  await revealRoomMessage(messageId);
 }
 
 const supervisorGenerationChangedMessage =

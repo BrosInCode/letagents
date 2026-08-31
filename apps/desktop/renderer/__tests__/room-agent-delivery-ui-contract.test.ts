@@ -170,6 +170,33 @@ describe("durable room delivery UI contracts", () => {
     assert.match(sharedSurfaceStyles, /\.state-pill\[data-state="responding"\]/);
   });
 
+  it("presents retained structural work only as room History and reveals its source message", async () => {
+    const [activity, shell] = await Promise.all([
+      source("src/components/desktop/content/RoomActivityTabView.vue"),
+      source("src/components/desktop/content/DesktopRoomShell.vue"),
+    ]);
+    assert.match(activity, /Retained structural outcomes — not live status\./);
+    assert.match(activity, /data-testid="desktop-recorded-room-work"/);
+    assert.match(activity, /recordedWorkEvidenceIncomplete\(work\)/);
+    assert.match(activity, /Public structural history was cleared by its owner\./);
+    assert.match(activity, /emit\('reveal-message', work\.sourceMessageId\)/);
+    for (const [field, label] of [
+      ["unresolved", "unresolved"],
+      ["succeeded", "succeeded"],
+      ["failed", "failed"],
+      ["denied_before_start", "denied before start"],
+      ["cancelled_before_start", "cancelled before start"],
+      ["interrupted_after_start", "interrupted after start"],
+      ["lost_after_start", "lost after start"],
+    ]) {
+      assert.match(activity, new RegExp(`counts\\.${field}`));
+      assert.match(activity, new RegExp(label));
+    }
+    const liveActivityProjection = activity.match(/const hasLiveActivity = computed\(\(\) => Boolean\(([\s\S]*?)\n\)\);/)?.[1] || "";
+    assert.doesNotMatch(liveActivityProjection, /roomAgentWork/);
+    assert.match(shell, /async function revealRecordedWorkMessage[\s\S]*?activeTab\.value = "chat";[\s\S]*?revealRoomMessage\(messageId\)/);
+  });
+
   it("routes loaded main and thread links directly, then requests bounded history for an unloaded target", () => {
     assert.deepEqual(
       roomMessageRevealDestination("main", [{ id: "main" }], []),
