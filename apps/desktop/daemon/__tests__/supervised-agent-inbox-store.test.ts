@@ -9,6 +9,7 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { ManifestStore } from "../manifest-store.js";
+import { ExecutionShadowStore } from "../execution-shadow-store.js";
 import { settleCapturedExecutionAttempts } from "../supervised-agent-history-retention.js";
 import type { DaemonManifestEntry } from "../types.js";
 
@@ -2017,6 +2018,37 @@ test("receipt projections retain only the newest timeline events for a noisy inb
     assert.equal(receipt?.timeline.at(-1)?.detail, "event-79");
     await store.close();
   } finally { await env.cleanup(); }
+});
+
+test("inspector detail isolates unavailable optional execution capture from operational evidence", async () => {
+  const env = await fixture(); const store = new SupervisedAgentInboxStore(env.database);
+  try {
+    const [item] = await store.ingestPoll({ agent_id: "detail", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: { id: "1", text: "retained message" }, activation: {} }] });
+    const before = await store.detail("detail", "room", "1");
+    assert.deepEqual(before.recorded_execution, { availability: "not_captured" });
+    assert.equal((await store.detail("detail", "room", "missing")).recorded_execution, undefined);
+    const database = new DatabaseSync(env.database);
+    try {
+      database.exec("PRAGMA foreign_keys=ON");
+      await store.transition(item!.inbox_item_id, "dispatching");
+      const started = await store.checkpointTurnStarted(item!.inbox_item_id, "native-turn", TEST_PROVIDER_TURN_AUTHORITY);
+      captureReceipt(database, started);
+      const capture = new ExecutionShadowStore(database);
+      const runtime = "captured-runtime:detail:generation";
+      const observer = capture.bindObserver({ agentId: "detail", subjectRuntimeGenerationId: runtime, observerRuntimeGenerationId: runtime,
+        daemonGenerationId: "daemon", sourceId: "source", expectedEpoch: 0, boundAtMs: 100 });
+      capture.ingest("source", observer, { factId: "start", agentId: "detail", executionGenerationId: "generation", runtimeGenerationId: runtime,
+        observerEpoch: 1, sourceSequence: 1, observedAtMs: 101, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+        turnId: `captured-turn:${item!.inbox_item_id}`, providerContinuationId: "continuation", providerTurnId: "native-turn" });
+      const captured = await store.detail("detail", "room", "1");
+      assert.deepEqual(captured.recorded_execution, { availability: "available", truncated: false, evidenceIncomplete: false,
+        turns: [{ turnId: `captured-turn:${item!.inbox_item_id}`, state: "active", outcome: null, operations: [] }] });
+      database.exec("DROP TABLE execution_facts");
+      const after = await store.detail("detail", "room", "1");
+      assert.deepEqual(after, { ...captured, recorded_execution: { availability: "unavailable" } });
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
 });
 
 test("inspector detail checkpoints canonical publication and records a monotonic prune boundary", async () => {

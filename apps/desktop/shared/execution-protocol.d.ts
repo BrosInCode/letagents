@@ -28,6 +28,15 @@ export type ExecutionFact =
   | Operation & { kind: "output"; outputBytes: number }
   | Operation & { kind: "completed"; outcome: ExecutionOutcome; exitCode?: number; signalNumber?: number };
 export type ExecutionOperationFact = Extract<ExecutionFact, { domain: "execution" }>;
+/** Host-local recorded evidence only; no field claims current provider liveness. */
+export type RetainedExecutionDetail =
+  | { availability: "not_captured" | "unavailable" }
+  | { availability: "available"; truncated: boolean; evidenceIncomplete: boolean; turns: Array<{
+    turnId: string; state: TurnState; outcome: TurnOutcome | null;
+    operations: Array<{ executionId: string; operation: ExecutionOperationFact["operation"];
+      outcome: ExecutionOutcome | null; startObserved: boolean; outputBytes: number; sideEffects: SideEffectState;
+      exitCode: number | null; signalNumber: number | null }>;
+  }> };
 type NativeFact<T> = T extends ExecutionFact ? Omit<T, keyof FactEnvelope | "turnId"> & { nativeEventId?: string } : never;
 // Adapters never invent the daemon's agent/generation/turn identity. The daemon
 // fences and supplies those fields before accepting an observation as a fact.

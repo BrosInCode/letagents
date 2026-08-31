@@ -32,12 +32,13 @@ import { prepareSupervisorState } from "./supervisor-state-recovery.js";
 import { loadHostApprovalSigner, type HostApprovalSigner } from "./host-approval-auth.js";
 import type { HostApprovalChallenge } from "../../shared/host-approval-auth.js";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCandidate, HostApprovalChoice, HostApprovalStatus } from "../../shared/host-approvals.js";
+import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
 
 export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.118";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.119";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Retirement can queue behind one already-admitted worker mint (3 x 10s) so
@@ -1814,6 +1815,36 @@ function mapRoomMove(value: Record<string, unknown>, entryId: string, operationI
 function booleanField(value: unknown, key: string): boolean {
   return value !== null && typeof value === "object" && !Array.isArray(value) && Reflect.get(value, key) === true;
 }
+
+// Host-private, structural evidence only. Reject malformed optional evidence
+// independently so delivery receipts remain usable when capture is unavailable.
+const recordedIdentity = z.string().min(1).max(512).regex(/^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/);
+const recordedOperation = z.strictObject({
+  executionId: recordedIdentity,
+  operation: z.enum(["command", "file_read", "file_change", "network", "question", "other"]),
+  outcome: z.enum(["succeeded", "failed", "denied_before_start", "cancelled_before_start", "interrupted_after_start", "lost_after_start"]).nullable(),
+  startObserved: z.boolean(), outputBytes: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER),
+  sideEffects: z.enum(["none", "possible", "observed"]),
+  exitCode: z.number().int().min(-2147483648).max(2147483647).nullable(),
+  signalNumber: z.number().int().min(1).max(Number.MAX_SAFE_INTEGER).nullable(),
+}).refine((row) => row.outcome !== null || row.exitCode === null && row.signalNumber === null)
+  .refine((row) => !["denied_before_start", "cancelled_before_start"].includes(row.outcome ?? "")
+    || !row.startObserved && row.outputBytes === 0 && row.sideEffects === "none" && row.exitCode === null && row.signalNumber === null);
+const recordedExecutionSchema: z.ZodType<RetainedExecutionDetail> = z.union([
+  z.strictObject({ availability: z.enum(["not_captured", "unavailable"]) }),
+  z.strictObject({
+    availability: z.literal("available"), truncated: z.boolean(), evidenceIncomplete: z.boolean(),
+    turns: z.array(z.strictObject({
+      turnId: recordedIdentity, state: z.enum(["none", "active", "terminal", "lost"]),
+      outcome: z.enum(["completed", "failed", "interrupted", "unreadable"]).nullable(),
+      operations: z.array(recordedOperation).max(128),
+    }).refine((turn) => (turn.state === "terminal") === (turn.outcome !== null))
+      .refine((turn) => new Set(turn.operations.map((row) => row.executionId)).size === turn.operations.length)).max(32),
+  }).refine((value) => value.turns.reduce((count, turn) => count + turn.operations.length, 0) <= 128)
+    .refine((value) => new Set(value.turns.map((turn) => turn.turnId)).size === value.turns.length)
+    .refine((value) => value.turns.length > 0 || value.evidenceIncomplete),
+]);
+
 export function mapAgentInspectorDetail(value: Record<string, unknown>, input: import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetailInput): import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail {
   type Detail = import("../ipc-types/agents.js").DesktopSupervisorAgentInspectorDetail;
   const fail = (): never => { throw new Error("Supervisor returned an invalid or unfenced agent inspector detail response."); };
@@ -1864,7 +1895,10 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   if (availability === "available" && (!requestedSourceId || !inboxItemId || !source || source.id !== requestedSourceId || !receipt)) fail();
   if (availability !== "available" && (inboxItemId || source || receipt || terminal || publication || repair || timeline.length)) fail();
   if (requestedSourceId === null && availability !== "not_loaded") fail();
-  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary } as Detail;
+  const recorded = availability === "available" && value.recorded_execution !== undefined
+    ? recordedExecutionSchema.safeParse(value.recorded_execution) : null;
+  return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary,
+    ...(recorded ? { recorded_execution: recorded.success ? recorded.data : { availability: "unavailable" } } : {}) } as Detail;
 }
 
 /**
