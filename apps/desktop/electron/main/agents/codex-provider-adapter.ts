@@ -19,7 +19,7 @@ import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-con
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import { ProviderExecutionObserver, nativeExecutionId } from "./provider-execution-observer.js";
-import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation } from "../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -902,7 +902,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
-  onExecution(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void {
+  onExecution(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription {
     return this.requireHandle(handle).execution.subscribe(listener);
   }
 

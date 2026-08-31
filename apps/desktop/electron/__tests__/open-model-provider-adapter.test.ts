@@ -867,8 +867,14 @@ test("Open Model aborts and fences a bounded turn that exceeds its assistant-ste
 });
 
 test("Open Model repairs a continuation on the same verified process", async () => {
-  const { adapter, handle } = await spawnAdapter();
+  const { adapter, handle, harness } = await spawnAdapter();
   const checkpointed: string[] = [];
+  const originalEvents: NativeExecutionObservation[] = [];
+  const originalSource = adapter.onExecution(handle, (event) => originalEvents.push(event));
+  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 0 });
+  await adapter.probeControl(handle);
+  assert.equal(originalEvents[0]?.sourceId, originalSource.sourceId);
+  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 1 });
 
   const rematerialized = await adapter.repairContinuation(handle, {
     workAttemptId: handle.workAttemptId,
@@ -882,6 +888,9 @@ test("Open Model repairs a continuation on the same verified process", async () 
   assert.equal(rematerialized.handle.pid, handle.pid);
   assert.equal(rematerialized.replacementProviderContinuationId, "session-open-model-1");
   assert.equal(checkpointed.length, 0);
+  const rematerializedSource = adapter.onExecution(rematerialized.handle, () => {});
+  assert.equal(rematerializedSource.sourceId, originalSource.sourceId, "reusing the same observer preserves source identity");
+  rematerializedSource.dispose();
 
   const replaced = await adapter.repairContinuation(handle, {
     workAttemptId: handle.workAttemptId,
@@ -896,6 +905,21 @@ test("Open Model repairs a continuation on the same verified process", async () 
   assert.equal(replaced.handle.pid, handle.pid);
   assert.equal(replaced.replacementProviderContinuationId, "session-open-model-2");
   assert.deepEqual(checkpointed, ["session-open-model-2"]);
+  const replacementEvents: NativeExecutionObservation[] = [];
+  const replacementSource = adapter.onExecution(replaced.handle, (event) => replacementEvents.push(event));
+  assert.notEqual(replacementSource.sourceId, originalSource.sourceId, "withContinuation creates a new observation source, not a continuation of the old sequence");
+  assert.deepEqual(replacementSource.position(), { firstRetainedSequence: 1, latestSequence: 0 });
+  await adapter.probeControl(replaced.handle);
+  assert.equal(replacementEvents[0]?.sourceId, replacementSource.sourceId);
+  assert.equal(replacementEvents[0]?.sequence, 1);
+  assert.equal(replacementEvents[0]?.nativeProcessIdentity, "opencode-birth-6101");
+  assert.equal(replacementEvents[0]?.nativeProcessIdentity, originalEvents[0]?.nativeProcessIdentity,
+    "observation source lifetime is independent of the unchanged native process birth");
+  assert.equal(originalEvents.length, 1, "replacement observations never enter the old source subscription");
+  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 1 });
+  assert.equal(harness.launches.length, 1);
+  originalSource.dispose();
+  replacementSource.dispose();
 });
 
 test("Open Model stop escalates the exact process from TERM to KILL", async () => {
