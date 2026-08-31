@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
+import { applyExecutionStorageSchema, migrateExecutionStorageV20ToV21, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Values = Record<string, string | number | null>;
 const digest = "a".repeat(64);
@@ -357,10 +357,77 @@ test("cutover-v2 cannot overlap an unresolved operation; reverse is a distinct o
     cutover(db, { operation_id: "reverse", request_id: "reverse-request", predecessor_operation_id: "cutover", from_mode: "daemon_inbox", to_mode: "mcp_polling" });
     db.exec("UPDATE execution_cutover_v2 SET phase='cancelled' WHERE operation_id='reverse'");
     assert.throws(() => cutover(db, { operation_id: "no-target", request_id: "no-target-request", strategy: "force", phase: "dispatching" }), /CHECK/);
-    assert.throws(() => cutover(db, { operation_id: "wrong-target", request_id: "wrong-target-request", target_turn_id: "other-turn" }), /FOREIGN KEY/);
+    assert.throws(() => cutover(db, { operation_id: "wrong-predecessor", request_id: "wrong-predecessor-request", predecessor_operation_id: "missing-operation" }), /FOREIGN KEY/);
     assert.throws(() => cutover(db, { operation_id: "no-change", request_id: "no-change-request", from_mode: "daemon_inbox" }), /CHECK/);
     validateExecutionStorageSchema(db);
   } finally { db.close(); }
+});
+
+test("native cutover identity is complete, immutable, and independent of optional activity rows", () => {
+  const db = fixture(); try {
+    const authority = {
+      authority_version: 1, room_id: "room", work_attempt_id: "work-attempt", provider: "codex",
+      native_continuation_id: "native-thread", native_connection_kind: "codex_app_server",
+      native_connection_sha256: digest, native_pid: 123, native_process_identity: "process-birth",
+    };
+    for (const key of Object.keys(authority)) {
+      assert.throws(() => cutover(db, { ...authority, [key]: null }), /CHECK/, `missing ${key}`);
+    }
+    for (const invalid of [
+      { authority_version: 2 }, { target_turn_id: "shadow-turn" },
+      { native_pid: 0 }, { native_connection_sha256: "short" }, { native_connection_sha256: "G".repeat(64) },
+      { provider: "claude-code" }, { native_connection_kind: "invented" },
+      { room_id: "" }, { work_attempt_id: " " }, { native_continuation_id: "" }, { native_process_identity: " " },
+      { native_target_turn_id: " " }, { admitted_inbox_item_id: "inbox" },
+    ]) assert.throws(() => cutover(db, { ...authority, ...invalid }), /CHECK/, JSON.stringify(invalid));
+    assert.throws(() => cutover(db, { native_target_turn_id: "native-turn" }), /CHECK/, "history cannot acquire native authority");
+    assert.throws(() => cutover(db, { ...authority, strategy: "force", phase: "dispatching" }), /CHECK/);
+    cutover(db, authority);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_generations").get()!.count, 0);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_turns").get()!.count, 0);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_list(execution_cutover_v2)").all().map((key) => key.table),
+      ["execution_cutover_v2", "execution_cutover_v2"], "only same-agent predecessor ownership remains");
+    for (const key of [...Object.keys(authority), "agent_id", "execution_generation_id", "request_id", "target_turn_id", "from_mode", "strategy", "admitted_action_id"]) {
+      assert.throws(() => db.exec(`UPDATE execution_cutover_v2 SET ${key}=${key}`), /new operation/, key);
+    }
+    db.exec("UPDATE execution_cutover_v2 SET phase='draining',native_target_turn_id='native-turn'");
+    db.exec("UPDATE execution_cutover_v2 SET native_target_turn_id='native-turn'");
+    assert.throws(() => db.exec("UPDATE execution_cutover_v2 SET native_target_turn_id='replacement'"), /cannot be replaced/);
+    assert.throws(() => db.exec("UPDATE execution_cutover_v2 SET native_target_turn_id=NULL"), /cannot be replaced/);
+    db.exec("UPDATE execution_cutover_v2 SET phase='complete'");
+    const admission = { admitted_inbox_item_id: "inbox-A", admitted_source_message_id: "message-A", admitted_action_id: "claim-A" };
+    for (const key of Object.keys(admission)) {
+      assert.throws(() => cutover(db, { ...authority, ...admission, [key]: null,
+        operation_id: "reverse", request_id: "reverse", from_mode: "daemon_inbox", to_mode: "mcp_polling" }), /CHECK/);
+    }
+    assert.throws(() => cutover(db, { ...authority, ...admission, operation_id: "wrong-lane", request_id: "wrong-lane" }), /CHECK/);
+    assert.throws(() => cutover(db, { ...authority, operation_id: "wrong-owner", request_id: "wrong-owner",
+      agent_id: "other-agent", predecessor_operation_id: "cutover" }), /FOREIGN KEY/);
+    cutover(db, { ...authority, ...admission, operation_id: "reverse", request_id: "reverse",
+      predecessor_operation_id: "cutover", from_mode: "daemon_inbox", to_mode: "mcp_polling",
+      strategy: "force", phase: "dispatching", native_target_turn_id: "native-turn" });
+    assert.throws(() => db.exec("UPDATE execution_cutover_v2 SET admitted_inbox_item_id='inbox-B' WHERE operation_id='reverse'"), /new operation/);
+    validateExecutionStorageSchema(db);
+  } finally { db.close(); }
+});
+
+test("cutover migration refuses unknown dependencies and requires an outer transaction", () => {
+  for (const extension of ["index", "trigger", "foreign-key"]) {
+    const db = new DatabaseSync(":memory:"); try {
+      db.exec("PRAGMA foreign_keys=ON");
+      applyExecutionStorageSchema(db, 20);
+      assert.throws(() => migrateExecutionStorageV20ToV21(db), /requires a transaction/);
+      if (extension === "index") db.exec("CREATE INDEX extra_cutover_index ON execution_cutover_v2(request_id)");
+      if (extension === "trigger") db.exec("CREATE TRIGGER extra_cutover_trigger AFTER INSERT ON execution_cutover_v2 BEGIN SELECT 1; END");
+      if (extension === "foreign-key") db.exec("CREATE TABLE extra_cutover_owner(operation_id TEXT REFERENCES execution_cutover_v2(operation_id))");
+      const before = db.prepare("SELECT name,sql FROM sqlite_master ORDER BY name").all();
+      db.exec("BEGIN IMMEDIATE");
+      assert.throws(() => migrateExecutionStorageV20ToV21(db), /Unexpected cutover storage dependency/, extension);
+      db.exec("ROLLBACK");
+      assert.deepEqual(db.prepare("SELECT name,sql FROM sqlite_master ORDER BY name").all(), before);
+      validateExecutionStorageSchema(db, 20);
+    } finally { db.close(); }
+  }
 });
 
 test("retention pins preserve owned evidence and compaction watermarks cannot regress", () => {

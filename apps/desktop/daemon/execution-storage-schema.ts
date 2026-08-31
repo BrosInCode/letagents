@@ -338,7 +338,63 @@ const observerSourcesTable = `CREATE TABLE execution_observer_sources (
   FOREIGN KEY(agent_id) REFERENCES execution_observers(agent_id)
 ) STRICT`;
 
-function schemaFor(version: 18 | 19 | 20): { tables: Record<string, string>; triggers: Record<string, string> } {
+// Cutover authority must not depend on optional activity capture. Historical
+// generation/target values remain untouched, but are not native authority.
+// The connection digest binds the complete private connection reference without
+// copying URLs, auth paths, or credentials into this structural journal.
+const cutoverAuthorityColumns = {
+  authority_version: "INTEGER CHECK(authority_version IS NULL OR authority_version=1)",
+  room_id: "TEXT",
+  work_attempt_id: "TEXT",
+  provider: "TEXT CHECK(provider IN ('codex','claude-code','cursor','open-model'))",
+  native_continuation_id: "TEXT",
+  native_connection_kind: "TEXT CHECK(native_connection_kind IN ('codex_app_server','claude_cli','cursor_cli','opencode_server'))",
+  native_connection_sha256: "TEXT CHECK(length(native_connection_sha256)=64 AND native_connection_sha256 NOT GLOB '*[^0-9a-f]*')",
+  native_pid: "INTEGER CHECK(native_pid > 0)",
+  native_process_identity: "TEXT",
+  native_target_turn_id: "TEXT",
+  admitted_inbox_item_id: "TEXT",
+  admitted_source_message_id: "TEXT",
+  admitted_action_id: "TEXT",
+};
+const cutoverAuthorityRequired = Object.keys(cutoverAuthorityColumns).filter((name) =>
+  name !== "authority_version" && name !== "native_target_turn_id" && !name.startsWith("admitted_"));
+const cutoverNativeTable = tables.execution_cutover_v2
+  .replace("    CHECK(from_mode", `    ${Object.entries(cutoverAuthorityColumns).map(([name, type]) => `${name} ${type}`).join(",\n    ")},
+    CHECK((authority_version IS NULL AND ${Object.keys(cutoverAuthorityColumns).slice(1).map((name) => `${name} IS NULL`).join(" AND ")})
+      OR (authority_version IS 1 AND target_turn_id IS NULL
+        AND ${cutoverAuthorityRequired.map((name) => `${name} IS NOT NULL`).join(" AND ")})),
+    CHECK(authority_version IS NULL OR (
+      length(trim(room_id)) > 0 AND length(trim(work_attempt_id)) > 0
+      AND length(trim(native_continuation_id)) > 0 AND length(trim(native_process_identity)) > 0
+      AND ((provider='codex' AND native_connection_kind='codex_app_server')
+        OR (provider='claude-code' AND native_connection_kind='claude_cli')
+        OR (provider='cursor' AND native_connection_kind='cursor_cli')
+        OR (provider='open-model' AND native_connection_kind='opencode_server')))),
+    CHECK(native_target_turn_id IS NULL OR length(trim(native_target_turn_id)) > 0),
+    CHECK((admitted_inbox_item_id IS NULL AND admitted_source_message_id IS NULL AND admitted_action_id IS NULL)
+      OR (authority_version IS 1 AND from_mode='daemon_inbox'
+        AND admitted_inbox_item_id IS NOT NULL AND length(trim(admitted_inbox_item_id)) > 0
+        AND admitted_source_message_id IS NOT NULL AND length(trim(admitted_source_message_id)) > 0
+        AND admitted_action_id IS NOT NULL AND length(trim(admitted_action_id)) > 0)),
+    CHECK(from_mode`)
+  .replace("OR target_turn_id IS NOT NULL)", "OR (authority_version IS NULL AND target_turn_id IS NOT NULL) OR (authority_version IS 1 AND native_target_turn_id IS NOT NULL))")
+  .replace("    FOREIGN KEY(agent_id,execution_generation_id) REFERENCES execution_generations(agent_id,execution_generation_id),\n", "")
+  .replace("    FOREIGN KEY(target_turn_id,agent_id,execution_generation_id) REFERENCES execution_turns(turn_id,agent_id,execution_generation_id),\n", "");
+const cutoverNativeTriggers = {
+  execution_cutover_identity_immutable: `CREATE TRIGGER execution_cutover_identity_immutable
+    BEFORE UPDATE OF operation_id,request_id,agent_id,execution_generation_id,target_turn_id,predecessor_operation_id,from_mode,to_mode,strategy,created_at_ms,
+      ${Object.keys(cutoverAuthorityColumns).filter((name) => name !== "native_target_turn_id").join(",")}
+    ON execution_cutover_v2
+    BEGIN SELECT RAISE(ABORT,'Cutover identity requires a new operation.'); END`,
+  execution_cutover_native_target_immutable: `CREATE TRIGGER execution_cutover_native_target_immutable
+    BEFORE UPDATE OF native_target_turn_id ON execution_cutover_v2
+    WHEN NEW.native_target_turn_id IS NOT OLD.native_target_turn_id
+      AND (OLD.native_target_turn_id IS NOT NULL OR OLD.phase NOT IN ('prepared','draining'))
+    BEGIN SELECT RAISE(ABORT,'Cutover native target cannot be replaced.'); END`,
+};
+
+function schemaFor(version: 18 | 19 | 20 | 21): { tables: Record<string, string>; triggers: Record<string, string> } {
   if (version === 18) return { tables, triggers };
   return {
     tables: {
@@ -347,18 +403,20 @@ function schemaFor(version: 18 | 19 | 20): { tables: Record<string, string>; tri
       execution_observers: version === 19 ? observerTable
         : observerTable.replace("  FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)",
           `  ${observerSourceColumn},\n  FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)`),
-      ...(version === 20 ? { execution_observer_sources: observerSourcesTable } : {}),
+      ...(version >= 20 ? { execution_observer_sources: observerSourcesTable } : {}),
+      ...(version >= 21 ? { execution_cutover_v2: cutoverNativeTable } : {}),
     },
     triggers: {
       ...triggers,
       execution_approval_decision_immutable: triggers.execution_approval_decision_immutable
         .replace("request_sha256,decision", "request_sha256,projection_sha256,decision"),
+      ...(version >= 21 ? cutoverNativeTriggers : {}),
     },
   };
 }
 
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 = 20): void {
+export function applyExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 | 21 = 21): void {
   const schema = schemaFor(version);
   for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   for (const statement of Object.values(indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
@@ -385,6 +443,32 @@ export function migrateExecutionStorageV19ToV20(database: DatabaseSync): void {
   validateExecutionStorageSchema(database, 20);
 }
 
+/** Caller owns the transaction and encrypted recovery snapshot. No authority is backfilled. */
+export function migrateExecutionStorageV20ToV21(database: DatabaseSync): void {
+  if (!database.isTransaction) throw new Error("Cutover storage migration requires a transaction.");
+  validateExecutionStorageSchema(database, 20);
+  // Refuse extensions we cannot preserve, rather than silently dropping their
+  // constraints while replacing only this table. The self-reference is retained.
+  const extra = database.prepare("SELECT name FROM sqlite_master WHERE tbl_name='execution_cutover_v2' AND type IN ('index','trigger') AND sql IS NOT NULL AND name <> 'execution_cutover_one_unresolved'").get();
+  if (extra) throw new Error("Unexpected cutover storage dependency.");
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name <> 'execution_cutover_v2'").all()) {
+    const name = String(row.name).replaceAll('"', '""');
+    if (database.prepare(`PRAGMA foreign_key_list("${name}")`).all().some((key) => key.table === "execution_cutover_v2")) {
+      throw new Error("Unexpected cutover storage dependency.");
+    }
+  }
+  const columns = (database.prepare("PRAGMA table_info(execution_cutover_v2)").all()).map((column) => String(column.name)).join(",");
+  database.exec("PRAGMA defer_foreign_keys=ON");
+  database.exec("CREATE TEMP TABLE execution_cutover_migration AS SELECT rowid AS original_rowid,* FROM execution_cutover_v2");
+  database.exec("DROP TABLE execution_cutover_v2");
+  database.exec(cutoverNativeTable);
+  database.exec(`INSERT INTO execution_cutover_v2(rowid,${columns}) SELECT original_rowid,${columns} FROM execution_cutover_migration`);
+  database.exec("DROP TABLE execution_cutover_migration");
+  database.exec(indexes.execution_cutover_one_unresolved);
+  for (const statement of Object.values(cutoverNativeTriggers)) database.exec(statement);
+  validateExecutionStorageSchema(database, 21);
+}
+
 function normalizedSchema(sql: string): string {
   // SQL keywords/spacing are insensitive, but quoted CHECK values are not.
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map((part) => part.startsWith("'") ? part
@@ -392,7 +476,7 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 = 20): void {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 | 21 = 21): void {
   const schema = schemaFor(version);
   for (const [name, statement] of Object.entries({ ...schema.tables, ...indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;
