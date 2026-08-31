@@ -2,10 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { createSSRApp } from "vue";
+import { renderToString } from "@vue/server-renderer";
+import { createServer } from "vite";
+import type { RetainedExecutionDetail } from "../../shared/execution-protocol";
 import {
   agentInspectorWorkArtifacts,
   defaultAgentInspectorWorkSource,
   describeAgentInspectorUncertainEffect,
+  describeRecordedOperation,
+  humanizeRecordedTurn,
   humanizeAgentInspectorReceiptState,
   humanizeAgentInspectorTimeline,
   isCurrentAgentInspectorWorkResponse,
@@ -14,6 +20,46 @@ import {
 test("work detail source selection uses exact active source before bounded recency", () => {
   assert.equal(defaultAgentInspectorWorkSource({ roomAgentState: { turn: { sourceMessageId: "active" } } } as any, { items: [{ source_message_id: "newest" }] }), "active");
   assert.equal(defaultAgentInspectorWorkSource({ roomAgentState: { turn: { sourceMessageId: null } } } as any, { items: [{ source_message_id: "newest" }] }), "newest");
+});
+
+test("recorded execution renders partial evidence without changing the work receipt or implying live status", async () => {
+  const vite = await createServer({ root: fileURLToPath(new URL("../..", import.meta.url)), appType: "custom", logLevel: "silent", server: { middlewareMode: true } });
+  try {
+    const component = (await vite.ssrLoadModule("/renderer/src/components/desktop/content/agent-inspector/AgentInspectorWork.vue")).default;
+    const operation = { executionId: "op-1", operation: "command" as const, outcome: "failed" as const, startObserved: true, outputBytes: 120, sideEffects: "possible" as const, exitCode: 1, signalNumber: null };
+    const execution: RetainedExecutionDetail = { availability: "available", evidenceIncomplete: true, truncated: true, turns: [
+      { turnId: "turn-1", state: "terminal", outcome: "completed", operations: [operation, { ...operation, executionId: "op-2", outcome: null, startObserved: false, exitCode: null }] },
+    ] };
+    const render = (recorded_execution?: RetainedExecutionDetail) => renderToString(createSSRApp(component, {
+      resource: { status: "ready", error: null, sourceMessageId: "msg-1", detail: { availability: "available", items: [], uncertain_effects: [], timeline: [], source_message: { sender: "Owner", text: "Check the project" }, receipt: { state: "acknowledged" }, recorded_execution } },
+      selectedSourceMessageId: "msg-1", tasks: [], artifacts: [],
+    }));
+    const html = await render(execution);
+    assert.match(html, /Reply published/);
+    assert.match(html, /Saved observations, not live status/);
+    assert.match(html, /not a complete account/);
+    assert.match(html, /bounded selection/);
+    assert.match(html, /<details[^>]*open/);
+    assert.match(html, /Provider turn completed/);
+    assert.match(html, /Command · Failed/);
+    assert.match(html, /Exit code 1 · 120 bytes of output recorded · Side effects possible/);
+    assert.match(html, /Command · No finish recorded/);
+    assert.match(html, /Start was not recorded/);
+    assert.doesNotMatch(html, /spinner|Running a command/);
+    assert.match(await render({ availability: "not_captured" }), /does not mean the agent did no work/);
+    assert.match(await render({ availability: "unavailable" }), /Delivery receipts are still available/);
+    assert.match(await render(), /supervisor does not provide recorded execution/);
+    assert.match(await render({ ...execution, turns: [] }), /No individual turns could be verified/);
+    const bounded = await render({ ...execution, truncated: true, turns: [execution.turns[0]!, { ...execution.turns[0]!, turnId: "omitted-operations", operations: [] }] });
+    assert.match(bounded, /0 operations shown/);
+    assert.match(bounded, /No individual operations are included/);
+    assert.doesNotMatch(bounded, /No individual operations were recorded/);
+    for (const [outcome, label] of [["denied_before_start", "Denied before starting"], ["cancelled_before_start", "Cancelled before starting"], ["interrupted_after_start", "Interrupted after starting"], ["lost_after_start", "Outcome lost after starting"]] as const) {
+      assert.match(describeRecordedOperation({ ...operation, outcome }).title, new RegExp(label));
+    }
+    assert.equal(humanizeRecordedTurn({ ...execution.turns[0]!, state: "active", outcome: null }), "No turn finish recorded");
+    assert.equal(humanizeRecordedTurn({ ...execution.turns[0]!, state: "lost", outcome: null }), "Provider turn lost");
+  } finally { await vite.close(); }
 });
 
 test("work response and artifact joins are exact durable identifiers", () => {

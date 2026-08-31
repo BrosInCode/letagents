@@ -53,6 +53,31 @@
                 ? 'The saved Codex conversation is unavailable. No model turn was started.'
                 : detail.receipt?.last_error || 'No terminal outcome is retained.' }}</p>
             </section>
+            <section class="agent-inspector-work-section">
+              <p class="agent-inspector-work-eyebrow">Recorded execution</p>
+              <template v-if="execution?.availability === 'available'">
+                <p>Saved observations, not live status. The receipt above describes the overall work outcome.</p>
+                <p v-if="execution.evidenceIncomplete" role="status">Some execution evidence is missing or could not be verified. This is not a complete account of the work.</p>
+                <p v-if="execution.truncated" role="status">Showing a bounded selection of recorded turns and operations.</p>
+                <p v-if="!recordedTurns.length">No individual turns could be verified from the retained evidence.</p>
+                <details v-for="(turn, index) in recordedTurns" :key="turn.turnId" :open="index === 0" class="agent-inspector-work-execution">
+                  <summary>{{ humanizeRecordedTurn(turn) }} · {{ turn.operations.length }} {{ turn.operations.length === 1 ? 'operation' : 'operations' }} shown</summary>
+                  <ol v-if="turn.operations.length" class="agent-inspector-work-timeline">
+                    <li v-for="operation in turn.operations" :key="operation.executionId">
+                      <strong>{{ operation.presentation.title }}</strong>
+                      <span v-if="operation.presentation.detail">{{ operation.presentation.detail }}</span>
+                    </li>
+                  </ol>
+                  <p v-else class="agent-inspector-work-empty">No individual operations are included for this turn.</p>
+                </details>
+              </template>
+              <template v-else-if="execution?.availability === 'unavailable'">
+                <p>Recorded execution could not be loaded. Delivery receipts are still available above.</p>
+                <button type="button" @click="emit('retry')">Retry</button>
+              </template>
+              <p v-else-if="execution?.availability === 'not_captured'">No execution evidence was captured for this message. This does not mean the agent did no work.</p>
+              <p v-else>This supervisor does not provide recorded execution detail.</p>
+            </section>
             <section v-if="detail.publication" class="agent-inspector-work-section">
               <p class="agent-inspector-work-eyebrow">Published reply</p>
               <p>{{ detail.publication.canonical_message_id ? 'A room reply was published.' : 'Publication was recorded, but no canonical room message is available.' }}</p>
@@ -83,9 +108,13 @@ import { computed } from "vue";
 import type { DesktopTaskSummary } from "../../../../../../electron/ipc-types";
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import { formatFullTimestamp, formatRelativeTime } from "../../../../domain/time";
-import { describeAgentInspectorUncertainEffect, humanizeAgentInspectorReceiptState, humanizeAgentInspectorTimeline, type AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
+import { describeAgentInspectorUncertainEffect, describeRecordedOperation, humanizeRecordedTurn, humanizeAgentInspectorReceiptState, humanizeAgentInspectorTimeline, type AgentInspectorWorkResource } from "../../../../domain/agent-inspector-work";
 
 const props = defineProps<{ resource: AgentInspectorWorkResource; selectedSourceMessageId: string | null; tasks: readonly Pick<DesktopTaskSummary, 'id' | 'title' | 'status'>[]; artifacts: readonly RoomArtifactTimelineItem[] }>();
 const emit = defineEmits<{ retry: []; 'select-source': [sourceMessageId: string]; reveal: [canonicalMessageId: string] }>();
 const detail = computed(() => props.resource.detail);
+const execution = computed(() => detail.value?.recorded_execution);
+const recordedTurns = computed(() => execution.value?.availability === "available"
+  ? execution.value.turns.map((turn) => ({ ...turn, operations: turn.operations.map((row) => ({ ...row, presentation: describeRecordedOperation(row) })) }))
+  : []);
 </script>

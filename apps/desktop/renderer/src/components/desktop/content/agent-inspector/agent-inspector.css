@@ -215,6 +215,9 @@
 .agent-inspector-work-section > p:not(.agent-inspector-work-eyebrow), .agent-inspector-work-note p { margin: 7px 0 0; color: var(--text-secondary, #a1a1aa); font-size: .75rem; line-height: 1.45; }.agent-inspector-work-section small { display:block; margin-top: 7px; color: var(--text-secondary, #a1a1aa); font-size: .69rem; }
 .agent-inspector-work-section button, .agent-inspector-work-note button { min-height: 44px; margin-top: 10px; padding: 0 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.07); color: var(--text,#fafafa); font: inherit; font-size: .72rem; font-weight: 660; cursor: pointer; }
 .agent-inspector-work-timeline { display: grid; gap: 9px; margin: 10px 0 0; padding: 0; list-style: none; }.agent-inspector-work-timeline li { display:grid; gap:2px; padding-left: 11px; border-left: 1px solid rgba(96,165,250,.38); }.agent-inspector-work-timeline span { color:var(--text-secondary,#a1a1aa); font-size:.71rem; line-height:1.35; }
+.agent-inspector-work-execution { margin-top: 10px; }
+.agent-inspector-work-execution summary { min-height: 44px; align-content: center; font-size: .75rem; font-weight: 660; cursor: pointer; }
+.agent-inspector-work-execution summary:focus-visible { outline: 2px solid var(--accent, #60a5fa); outline-offset: 3px; border-radius: 4px; }
 .agent-inspector-work-empty, .agent-inspector-work-refresh { margin: 0; color: var(--text-secondary, #a1a1aa); font-size: .73rem; line-height: 1.4; }
 .agent-inspector-overview { display: grid; gap: 12px; }
 .agent-inspector-now,

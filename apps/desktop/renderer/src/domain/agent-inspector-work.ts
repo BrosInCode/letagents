@@ -6,6 +6,30 @@ import type {
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
 import { roomArtifactTimelineItems, type RoomArtifactTimelineItem } from "./room-artifacts";
+import type { RetainedExecutionDetail } from "../../../shared/execution-protocol";
+
+type RecordedTurn = Extract<RetainedExecutionDetail, { availability: "available" }>["turns"][number];
+
+/** Recorded native evidence is not a current running-state or delivery claim. */
+export function humanizeRecordedTurn(turn: RecordedTurn): string {
+  if (turn.outcome === "completed") return "Provider turn completed";
+  if (turn.outcome === "failed") return "Provider turn failed";
+  if (turn.outcome === "interrupted") return "Provider turn interrupted";
+  if (turn.outcome === "unreadable") return "Provider result unreadable";
+  return turn.state === "lost" ? "Provider turn lost" : "No turn finish recorded";
+}
+
+export function describeRecordedOperation(row: RecordedTurn["operations"][number]): { title: string; detail: string } {
+  const operations = { command: "Command", file_read: "File read", file_change: "File edit", network: "Network request", question: "Question", other: "Operation" };
+  const outcomes = { succeeded: "Completed", failed: "Failed", denied_before_start: "Denied before starting", cancelled_before_start: "Cancelled before starting", interrupted_after_start: "Interrupted after starting", lost_after_start: "Outcome lost after starting" };
+  const notes: string[] = [];
+  if (row.exitCode !== null) notes.push(`Exit code ${row.exitCode}`);
+  if (row.signalNumber !== null) notes.push(`Signal ${row.signalNumber}`);
+  if (row.outputBytes > 0) notes.push(`${row.outputBytes.toLocaleString()} bytes of output recorded`);
+  if (row.sideEffects !== "none") notes.push(row.sideEffects === "observed" ? "Side effects observed" : "Side effects possible");
+  if (!row.startObserved && row.outcome !== "denied_before_start" && row.outcome !== "cancelled_before_start") notes.push("Start was not recorded");
+  return { title: `${operations[row.operation]} · ${row.outcome === null ? "No finish recorded" : outcomes[row.outcome]}`, detail: notes.join(" · ") };
+}
 
 export type AgentInspectorWorkResource = {
   status: "idle" | "loading" | "refreshing" | "ready" | "unavailable" | "error";

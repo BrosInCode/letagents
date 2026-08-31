@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { z } from "zod";
+import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
@@ -511,6 +512,65 @@ export class ExecutionShadowStore {
       this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
+  }
+
+  /** A bounded, coherent view of retained evidence, never provider authority. */
+  retainedMessageExecution(agentId: string, roomId: string, sourceMessageId: string): RetainedExecutionDetail {
+    let ownsSnapshot = false;
+    try {
+      validated(id, agentId); validated(id, roomId); validated(id, sourceMessageId);
+      if (!this.database.isTransaction) { this.database.exec("BEGIN"); ownsSnapshot = true; }
+      this.clearProjections();
+      if (exceededBudget(this.retainedBudget(agentId))) throw new ExecutionProtocolError("retention_limit");
+      // Bound the driving relation before filtering. Approval-only identities
+      // are not capped; starting from turns would make LIMIT 33 an output-only bound.
+      const rows = this.database.prepare(`WITH captured AS MATERIALIZED (
+          SELECT agent_id,turn_id,runtime_generation_id,domain FROM execution_facts
+          INDEXED BY execution_facts_agent_sequence WHERE agent_id=? ORDER BY sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}
+        ) SELECT DISTINCT t.turn_id,t.runtime_generation_id,t.created_at_ms FROM captured f
+        CROSS JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id AND t.runtime_generation_id=f.runtime_generation_id
+        CROSS JOIN execution_message_attempts a ON a.attempt_id=t.attempt_id AND a.agent_id=t.agent_id AND a.room_id=t.room_id
+        CROSS JOIN execution_attempt_generations g ON g.attempt_id=a.attempt_id AND g.execution_generation_id=t.execution_generation_id
+          AND g.agent_id=a.agent_id AND g.room_id=a.room_id
+        WHERE f.domain IN ('turn','execution') AND a.room_id=? AND a.source_message_id=?
+        ORDER BY t.created_at_ms DESC,t.turn_id DESC LIMIT 33`).all(agentId, roomId, sourceMessageId) as Row[];
+      let result: RetainedExecutionDetail = { availability: "not_captured" };
+      if (rows.length) {
+        const turns: Extract<RetainedExecutionDetail, { availability: "available" }>["turns"] = [];
+        const runtimes = new Map<string, RuntimeProjection>();
+        const observer = this.row("SELECT last_source_sequence,max_observed_sequence,source_id FROM execution_observers WHERE agent_id=?", agentId);
+        let evidenceIncomplete = !observer || observer.source_id === null
+          || Number(observer.max_observed_sequence) > Number(observer.last_source_sequence);
+        let truncated = rows.length > 32;
+        let operationsLeft = 128;
+        for (const row of rows.slice(0, 32)) {
+          const runtimeId = String(row.runtime_generation_id);
+          let runtime = runtimes.get(runtimeId);
+          if (!runtime) {
+            if (runtimes.size >= 8) { truncated = true; break; }
+            runtime = this.projectRuntime(runtimeId); runtimes.set(runtimeId, runtime);
+          }
+          evidenceIncomplete ||= runtime.unverifiedFacts > 0;
+          const turn = runtime.projection.turns.get(String(row.turn_id));
+          if (!turn) { evidenceIncomplete = true; continue; }
+          const operations = [...turn.operations.entries()].slice(0, operationsLeft).map(([executionId, operation]) => ({
+            executionId, operation: operation.operation, outcome: operation.outcome, startObserved: operation.startObserved,
+            outputBytes: operation.outputBytes, sideEffects: operation.sideEffects, exitCode: operation.exitCode, signalNumber: operation.signalNumber,
+          }));
+          if (operations.length < turn.operations.size) truncated = true;
+          operationsLeft -= operations.length;
+          turns.push({ turnId: turn.turnId, state: turn.state, outcome: turn.outcome, operations });
+        }
+        result = { availability: "available", truncated, evidenceIncomplete, turns };
+      }
+      if (ownsSnapshot) { this.database.exec("COMMIT"); ownsSnapshot = false; }
+      return result;
+    } catch {
+      if (ownsSnapshot) { try { this.database.exec("ROLLBACK"); } catch { /* Preserve optional-read isolation. */ } }
+      return { availability: "unavailable" };
+    } finally {
+      this.clearProjections();
+    }
   }
 
   /** History from v18 without typed terminal proof stays explicitly unverified. */
