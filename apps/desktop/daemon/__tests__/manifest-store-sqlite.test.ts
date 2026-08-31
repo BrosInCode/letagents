@@ -13,7 +13,7 @@ import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
-import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
+import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
@@ -239,6 +239,14 @@ test("polling offer compaction bounds repeated unACKed reads while preserving ta
       ]) assert.throws(() => database.exec(sql), /immutable|cannot be removed|exact deletion cascade/);
       validatePollingActivationSchema(database); validatePollingOfferSchema(database);
       assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+      const finalRows = rows(); const finalWatermark = watermark();
+      database.exec("PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE");
+      assert.throws(() => validatePollingActivationSchema(database), /foreign key enforcement/);
+      assert.throws(() => validatePollingOfferSchema(database), /foreign key enforcement/);
+      assert.throws(() => new DaemonStateSchema().createSchema(database), /foreign key enforcement/);
+      assert.throws(() => recordPollingOffer(database, { ...input, requestId: "disabled-fk" }, undefined), /foreign key enforcement/);
+      assert.deepEqual(rows(), finalRows); assert.equal(watermark(), finalWatermark);
+      database.exec("ROLLBACK; PRAGMA foreign_keys=ON");
     } finally { database.close(); }
   } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
 });

@@ -1214,6 +1214,9 @@ test("v20 refuses populated orphan or fabricated terminal evidence without chang
     const env = await fixture();
     try {
       seedLegacyEvidence(env.database); env.database.exec(corruption);
+      // Restore connection enforcement without repairing the orphan. This
+      // case must still reach the persisted terminal-evidence validator.
+      env.database.exec("PRAGMA foreign_keys=ON");
       const before = legacyRows(env.database);
       assert.throws(() => new DaemonStateSchema().createSchema(env.database), /terminal-result authority contains invalid evidence/);
       assert.deepEqual(legacyRows(env.database), before);

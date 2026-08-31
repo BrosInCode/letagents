@@ -102,6 +102,7 @@ export function applyPollingActivationSchema(database: DatabaseSync, version: 24
 }
 
 export function validatePollingActivationSchema(database: DatabaseSync, version: 24 | 26 = 26): void {
+  if (version === 26) requireForeignKeys(database);
   const actual = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL ORDER BY type,name").all(table)
     .map(row => normalizedSql(String(row.sql))).sort();
   const expected = activationSchema(version).map(normalizedSql).sort();
@@ -129,6 +130,13 @@ export function assertNoPollingActivation(database: DatabaseSync, agentId: strin
 
 function requireTransaction(database: DatabaseSync): void {
   if (!database.isTransaction) throw new Error("Polling activation requires an ownership-fenced transaction.");
+  requireForeignKeys(database);
+}
+
+function requireForeignKeys(database: DatabaseSync): void {
+  if (database.prepare("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
+    throw new Error("Polling authority requires foreign key enforcement.");
+  }
 }
 
 function exactActivation(database: DatabaseSync, input: { operationId: string; agentId: string }): PollingActivationRecord {
@@ -404,6 +412,7 @@ export function applyPollingOfferSchema(database: DatabaseSync, version: 25 | 26
 }
 
 export function validatePollingOfferSchema(database: DatabaseSync, version: 25 | 26 = 26): void {
+  if (version === 26) requireForeignKeys(database);
   const actual = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL").all(offers)
     .map(row => normalizedSql(String(row.sql))).sort();
   const expected = offerSchema(version).map(normalizedSql).sort();

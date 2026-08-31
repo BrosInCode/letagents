@@ -3879,6 +3879,9 @@ validateV2Shape(database: DatabaseSync): void {
 
 function configureDaemonStateConnection(database: DatabaseSync): void {
   database.exec("PRAGMA foreign_keys = ON");
+  if (database.prepare("PRAGMA foreign_keys").get()?.foreign_keys !== 1) {
+    throw new Error("Daemon state requires foreign key enforcement.");
+  }
   database.exec("PRAGMA synchronous = FULL");
   // Temporary row snapshots must not spill a second plaintext copy to disk.
   database.exec("PRAGMA temp_store = MEMORY");
