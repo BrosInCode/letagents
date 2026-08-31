@@ -1293,13 +1293,22 @@ test("reverse drain socket and daemon restart preserve stop intent without a suc
   } finally { await successor?.stop(); await env.cleanup(); }
 });
 
-test("custodial polling socket activation is generation-fenced and restart never dispatches prepared or uncertain work", async () => {
+for (const scenario of ["activation", "pre_activation_forward"] as const) test(scenario === "activation"
+  ? "custodial polling socket activation is generation-fenced and restart never dispatches prepared or uncertain work"
+  : "custodial forward socket switches only before activation and restart preserves the completed receipt", async () => {
   const oldProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
   await new Promise<void>((resolve, reject) => { oldProcess.once("spawn", resolve); oldProcess.once("error", reject); });
   const oldPid = oldProcess.pid!;
   const birth = (pid: number) => execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
   const oldConnection = { kind: "codex_app_server" as const, pid: oldPid, processIdentity: birth(oldPid), url: "ws://127.0.0.1:7123" };
-  const currentConnection = { ...oldConnection, pid: process.pid, processIdentity: birth(process.pid) };
+  const pollingProcess = scenario === "pre_activation_forward"
+    ? spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" }) : null;
+  if (pollingProcess) await new Promise<void>((resolve, reject) => {
+    pollingProcess.once("spawn", resolve);
+    pollingProcess.once("error", error => { oldProcess.kill("SIGTERM"); reject(error); });
+  });
+  const pollingPid = pollingProcess?.pid ?? process.pid;
+  const currentConnection = { ...oldConnection, pid: pollingPid, processIdentity: birth(pollingPid) };
   let nativeStarts = 0;
   let behavior: "success" | "before_dispatch_failure" | "lost_ack" = "success";
   let terminal = false;
@@ -1309,9 +1318,11 @@ test("custodial polling socket activation is generation-fenced and restart never
     inspectTurnBoundary: async handle => ({ state: "idle", providerContinuationId: handle.providerContinuationId!,
       nativeProcessIdentity: handle.providerConnection!.processIdentity!, latestProviderTurnId: null }),
     stopRef: async ref => {
-      assert.deepEqual(ref.providerConnection, oldConnection);
-      const exited = new Promise<void>(resolve => oldProcess.once("exit", () => resolve()));
-      oldProcess.kill("SIGTERM"); await exited;
+      const target = ref.providerConnection?.pid === oldPid ? oldProcess : pollingProcess;
+      assert.ok(target, "only this test's exact child process can be stopped");
+      assert.deepEqual(ref.providerConnection, target === oldProcess ? oldConnection : currentConnection);
+      const exited = new Promise<void>(resolve => target.once("exit", () => resolve()));
+      target.kill("SIGTERM"); await exited;
       return { endedAt: new Date().toISOString(), exitCode: null, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: ref.providerContinuationId };
     },
     activateCustodialPolling: async (handle, request, callbacks) => {
@@ -1330,7 +1341,7 @@ test("custodial polling socket activation is generation-fenced and restart never
       assert.equal(turnId, "exact-polling-turn");
       return terminal ? { state: "terminal", outcome: "completed" } : { state: "active" };
     },
-  }, oldConnection).catch(error => { oldProcess.kill("SIGTERM"); throw error; });
+  }, oldConnection).catch(error => { oldProcess.kill("SIGTERM"); pollingProcess?.kill("SIGTERM"); throw error; });
   let daemon = env.daemon;
   type Internals = typeof env.internals & {
     authority: { generation: number; fenceDaemonCommit<T>(commit: () => Promise<T>): Promise<T> };
@@ -1368,7 +1379,7 @@ test("custodial polling socket activation is generation-fenced and restart never
     const config = (await internals.store.getAgentConfiguration(env.id))!;
     // Only the native adapter is represented by a fixture handle: its receipt
     // names the actual launch session, while both process births came from ps.
-    currentHandle = { ...env.handle, pid: process.pid, providerConnection: currentConnection, observedState: "idle",
+    currentHandle = { ...env.handle, pid: pollingPid, providerConnection: currentConnection, observedState: "idle",
       custodyLaunchAgentSessionId: "polling-worker", appliedConfigurationRevision: config.config_revision };
     await internals.updateManifestEntry(env.id, current => ({ ...current,
       run_id: execution.execution_generation_id, deployment_id: serializeDaemonDeploymentId(env.id, execution.execution_generation_id),
@@ -1391,6 +1402,32 @@ test("custodial polling socket activation is generation-fenced and restart never
     const params = { entry_id: env.id, operation_id: "socket-activation", request_id: "socket-activation-request",
       room_id: entry.room_id, execution_generation_id: execution.execution_generation_id, reverse_operation_id: "socket-reverse",
       daemon_generation: await generation() };
+    if (scenario === "pre_activation_forward") {
+      const forward = { ...params, operation_id: "socket-forward", request_id: "socket-forward-request" };
+      assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.prepare_custodial_forward",
+        { ...forward, daemon_generation: forward.daemon_generation + 1 })).ok, false);
+      assert.equal(await internals.store.getDeliveryDrain(forward.operation_id), null);
+      const prepared = await daemonRequest(env.paths.socketPath, "supervisor.prepare_custodial_forward", forward);
+      assert.equal(prepared.ok, true, prepared.error);
+      await internals.deliveryCutovers.start(env.id);
+      const receipt = await internals.store.getDeliveryDrain(forward.operation_id);
+      assert.equal(receipt?.phase, "complete");
+      assert.equal(receipt?.predecessor_operation_id, "socket-reverse");
+      assert.equal(pollingProcess!.signalCode, "SIGTERM", "forward also requires real native birth death");
+      assert.equal((await internals.store.getEntry(env.id))?.delivery_mode, "daemon_inbox");
+      assert.equal((await internals.store.getAgentConfiguration(env.id))?.polling_contract, null);
+      assert.equal(nativeStarts, 0, "undoing the mode choice cannot activate polling work");
+      await daemon.stop();
+      daemon = new SupervisorDaemon(env.paths, "darwin", env.port, false);
+      internals = daemon as unknown as Internals;
+      await daemon.start(); await internals.deliveryCutovers.start(env.id);
+      const duplicate = await daemonRequest(env.paths.socketPath, "supervisor.prepare_custodial_forward",
+        { ...forward, daemon_generation: await generation() });
+      assert.equal(duplicate.ok, true, duplicate.error);
+      assert.deepEqual(duplicate.result, { ...receipt }, "restart returns the same completed journal without a second stop or cursor transfer");
+      assert.equal(nativeStarts, 0);
+      return;
+    }
     assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", { ...params, daemon_generation: params.daemon_generation + 1 })).ok, false);
     assert.equal(await internals.store.getPollingActivation(params.operation_id), null); assert.equal(nativeStarts, 0);
     const activated = await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", params);
@@ -1400,8 +1437,11 @@ test("custodial polling socket activation is generation-fenced and restart never
     assert.equal(record.execution_generation_id, execution.execution_generation_id);
     assert.equal(record.native_process_identity, currentConnection.processIdentity);
     assert.equal(record.agent_session_id, "polling-worker"); assert.equal(nativeStarts, 1);
-    terminal = true; await internals.deliveryCutovers.start(env.id);
-    assert.equal((await internals.store.getPollingActivation(params.operation_id))?.phase, "complete");
+    terminal = true;
+    await eventually(async () => {
+      await internals.deliveryCutovers.start(env.id);
+      return (await internals.store.getPollingActivation(params.operation_id))?.phase === "complete";
+    }, "exact polling terminal observation settles after any earlier coalesced active observation");
     const duplicate = await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", params);
     assert.equal(duplicate.ok, true, duplicate.error);
     assert.equal((duplicate.result as { phase: string }).phase, "complete"); assert.equal(nativeStarts, 1);
@@ -1436,6 +1476,7 @@ test("custodial polling socket activation is generation-fenced and restart never
   } finally {
     await daemon.stop(); await env.cleanup();
     if (oldProcess.exitCode === null && oldProcess.signalCode === null) oldProcess.kill("SIGTERM");
+    if (pollingProcess && pollingProcess.exitCode === null && pollingProcess.signalCode === null) pollingProcess.kill("SIGTERM");
   }
 });
 
