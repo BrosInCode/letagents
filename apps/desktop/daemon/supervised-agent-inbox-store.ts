@@ -28,7 +28,11 @@ type PollIngestionInput = {
   messages: readonly IngressMessage[];
   observed_messages?: readonly ObservedIngressMessage[];
 };
-type SuccessfulPollIngestionInput = PollIngestionInput & { execution_generation_id: string };
+type SuccessfulPollIngestionInput = PollIngestionInput & {
+  execution_generation_id: string;
+  /** Optional observation after COMMIT, never part of ingress authority. */
+  onInserted?: (sourceMessageIds: readonly string[]) => void;
+};
 type IngressHealthUpdate = {
   agent_id: string;
   room_id: string;
@@ -231,13 +235,15 @@ export class SupervisedAgentInboxStore {
    */
   async ingestSuccessfulPoll(input: SuccessfulPollIngestionInput): Promise<SupervisedInboxItem[]> {
     this.require(input.execution_generation_id, "execution_generation_id");
-    return this.commitPollIngestion(input, input.execution_generation_id);
+    return this.commitPollIngestion(input, input.execution_generation_id, input.onInserted);
   }
 
   /** One transaction: idempotently insert activated messages, persist the cursor, and optionally restore observing health. */
-  private async commitPollIngestion(input: PollIngestionInput, observingExecutionGenerationId?: string): Promise<SupervisedInboxItem[]> {
+  private async commitPollIngestion(input: PollIngestionInput, observingExecutionGenerationId?: string,
+    onInserted?: (sourceMessageIds: readonly string[]) => void): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
-    return this.exclusive(async (database) => this.transaction(database, () => {
+    const inserted: string[] = [];
+    const result = await this.exclusive(async (database) => this.transaction(database, () => {
       assertDeliveryDrainIngressAllowed(database, input.agent_id);
       const cursor = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
       if (cursor && String(cursor.room_id) !== input.room_id) throw new Error("Supervised inbox ingress room changed for the exact agent identity.");
@@ -270,6 +276,11 @@ export class SupervisedAgentInboxStore {
           inboxItemId, input.agent_id, input.room_id, message.source_message_id, JSON.stringify(message.source_message), JSON.stringify(message.activation), sequence, actionId, replyId, timestamp, timestamp);
         this.recordEvent(database, inboxItemId, "received:0", "received", timestamp, null);
         this.recordEvent(database, inboxItemId, "queued:0", "queued", timestamp, null);
+        // An inbox row can be re-created after receipt pruning. Only sources
+        // beyond the committed poll cursor get a new attribution opportunity;
+        // this observation fence does not alter operational ingestion.
+        try { if (isNewerCursor(message.source_message_id, currentCursor)) inserted.push(message.source_message_id); }
+        catch { /* A nonnumeric source cannot establish new room provenance. */ }
         created.push(rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row));
       }
       const timestamp = this.now();
@@ -288,6 +299,10 @@ export class SupervisedAgentInboxStore {
       this.pruneAgentHistory(database, input.agent_id);
       return created;
     }));
+    // Replays deliberately do not receive a fresh attribution opportunity.
+    // Missing observation stays local; it must never roll back received work.
+    try { if (inserted.length) onInserted?.(inserted); } catch { /* optional observation */ }
+    return result;
   }
 
   /**

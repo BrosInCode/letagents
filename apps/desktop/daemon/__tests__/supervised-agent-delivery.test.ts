@@ -205,6 +205,56 @@ test("ingress keeps observing and queues routed work without a provider handle",
   }
 });
 
+test("new-source custody is selected before the asynchronous poll and never refreshed for a replay", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-source-custody-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const entered = deferred<void>(); const release = deferred<void>();
+  let custody = "original-grant"; let selections = 0;
+  const observed: Array<{ custody: string; origin: string; session: string; ids: string[] }> = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })), {
+    poll: async () => { assert.ok(selections > 0, "custody must be frozen before HTTP starts"); entered.resolve(); await release.promise;
+      return { messages: [{ id: "msg_1", activation: { for_current_agent: { decision: "activate" } } }] }; },
+    publish: async () => { throw new Error("ingress-only observation must not publish"); },
+  }, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, candidate => {
+    selections++;
+    const snapshot = { custody, origin: candidate.apiUrl, session: candidate.agentSessionId };
+    return ids => observed.push({ ...snapshot, ids: [...ids] });
+  });
+  try {
+    await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: null });
+    const ingress = { ...agent, handle: null, providerConnection: null };
+    const pending = delivery.poll(ingress); await entered.promise;
+    custody = "replacement-grant"; release.resolve(); await pending;
+    assert.deepEqual(observed, [{ custody: "original-grant", origin: agent.apiUrl, session: agent.agentSessionId, ids: ["msg_1"] }]);
+    await delivery.poll(ingress);
+    assert.equal(selections, 2); assert.equal(observed.length, 1, "a later current grant cannot reattribute existing work");
+  } finally { release.resolve(); await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test("throwing source observation hooks cannot block native delivery", async () => {
+  for (const failure of ["selection", "notification"] as const) {
+    const root = await mkdtemp(join(tmpdir(), "letagents-delivery-source-hint-failure-"));
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    let selections = 0; let notifications = 0; let turns = 0;
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+      turns++; await options?.beforeNativeDispatch?.(); await options?.checkpointTurnStarted?.("native-turn");
+      return { turnId: "native-turn", outcome: "no_reply", text: null, evidence: "stream" };
+    }), {
+      poll: async () => ({ messages: [{ id: "msg_1", activation: { for_current_agent: { decision: "activate" } } }] }),
+      publish: async () => { throw new Error("no-reply delivery must not publish"); },
+    }, currentAuthority, 0, undefined, undefined, undefined, undefined, undefined, undefined, undefined, () => {
+      selections++; if (failure === "selection") throw new Error("optional source snapshot unavailable");
+      return () => { notifications++; throw new Error("optional publication receipt unavailable"); };
+    });
+    try {
+      await store.bootstrapCursor({ agent_id: agent.agentId, room_id: agent.roomId, last_observed_message_id: null });
+      await delivery.poll(agent);
+      assert.equal(selections, 1); assert.equal(notifications, failure === "notification" ? 1 : 0);
+      assert.equal(turns, 1); assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+    } finally { await delivery.fenceAndDrain(); await store.close(); await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 async function waitFor(check: () => boolean, timeoutMs = 1_000): Promise<void> {
   const deadline = Date.now() + timeoutMs;
   while (!check()) {
