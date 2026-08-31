@@ -91,7 +91,7 @@ test("polling offer and ACK transactions recheck exact authority and roll back t
       { ...input, offeredFrontier: "msg_46" }, { ...input, inputCursor: "msg_49" },
     ]) await assert.rejects(store.recordPollingOffer(bad, async commit => commit()));
     assert.equal(await store.getPollingOfferTail(activation.operationId), null);
-    const offer = await store.recordPollingOffer(input, async commit => commit());
+    let offer = await store.recordPollingOffer(input, async commit => commit());
     const ack = { ...input, roomCursor: "msg_50" };
     const database = new DatabaseSync(env.databasePath);
     try {
@@ -107,6 +107,15 @@ test("polling offer and ACK transactions recheck exact authority and roll back t
         assert.deepEqual(await store.getPollingOfferTail(activation.operationId), offer);
         database.exec(undo!);
       }
+      const previousBinding = (await bindings.get(input.agentId))!;
+      await bindings.bind({ ...previousBinding, agent_session_token: "test-rebound-token" }, { roomCursor: "msg_47" });
+      assert.equal((await store.acknowledgePollingOffer(ack, async commit => commit())).acknowledged, false,
+        "same-session formal rebinding must invalidate the old offer's delayed ACK");
+      await assert.rejects(store.recordPollingOffer(input, async commit => commit()), /invocation changed/);
+      const replacement = await store.recordPollingOffer({ ...input, requestId: 2 }, async commit => commit());
+      assert.equal(replacement.predecessor_offer_id, offer.offer_id);
+      assert.ok(replacement.binding_epoch > offer.binding_epoch);
+      offer = replacement;
       database.exec("CREATE TRIGGER reject_offer_worker_cursor AFTER UPDATE OF room_cursor ON worker_session_bindings BEGIN SELECT RAISE(ABORT,'test ACK rollback'); END");
       await assert.rejects(store.acknowledgePollingOffer(ack, async commit => commit()), /test ACK rollback/);
       assert.deepEqual(await store.getPollingOfferTail(activation.operationId), offer);
@@ -135,7 +144,7 @@ test("polling offer SQL prevents forks, disconnected successors and rewriting or
     const database = new DatabaseSync(env.databasePath);
     try {
       database.exec("PRAGMA foreign_keys=ON");
-      for (const field of ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"]) {
+      for (const field of ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "binding_epoch", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"]) {
         const value = tail[field as keyof typeof tail];
         assert.throws(() => database.prepare(`UPDATE custodial_polling_offers SET ${field}=? WHERE offer_id=?`)
           .run(typeof value === "number" ? value + 1 : `${value}-changed`, tail.offer_id), /immutable/);

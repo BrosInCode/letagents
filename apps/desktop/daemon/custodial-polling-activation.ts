@@ -319,6 +319,7 @@ export function completePollingActivation(database: DatabaseSync, input: Complet
  * An unacknowledged interior row is superseded; only an unacknowledged tail is outstanding. */
 export type PollingOfferRecord = {
   offer_id: string; activation_id: string; process_incarnation_id: string; mcp_request_id: string;
+  binding_epoch: number;
   input_cursor: string; offered_frontier: string; predecessor_offer_id: string | null;
   created_at_ms: number; acknowledged_at_ms: number | null;
 };
@@ -327,13 +328,14 @@ export type RecordPollingOffer = PollingOfferScope & { requestId: string | numbe
 export type AcknowledgePollingOffer = PollingOfferScope & { roomCursor: string };
 
 const offers = "custodial_polling_offers";
-const offerIdentity = ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"];
+const offerIdentity = ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "binding_epoch", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"];
 const offerSchema = [
   `CREATE TABLE ${offers} (
     offer_id TEXT PRIMARY KEY CHECK(length(trim(offer_id))>0),
     activation_id TEXT NOT NULL REFERENCES custodial_polling_activations(operation_id) ON DELETE RESTRICT,
     process_incarnation_id TEXT NOT NULL CHECK(length(process_incarnation_id)=36),
     mcp_request_id TEXT NOT NULL CHECK(json_valid(mcp_request_id) AND json_type(mcp_request_id) IN ('text','integer')),
+    binding_epoch INTEGER NOT NULL CHECK(binding_epoch>=1),
     input_cursor TEXT NOT NULL CHECK((length(input_cursor)>0 AND input_cursor NOT GLOB '*[^0-9]*')
       OR (substr(input_cursor,1,4)='msg_' AND length(input_cursor)>4 AND substr(input_cursor,5) NOT GLOB '*[^0-9]*')),
     offered_frontier TEXT NOT NULL CHECK((length(offered_frontier)>0 AND offered_frontier NOT GLOB '*[^0-9]*')
@@ -410,18 +412,21 @@ export function recordPollingOffer(database: DatabaseSync, input: RecordPollingO
   if (typeof input.requestId !== "string" && !Number.isSafeInteger(input.requestId)) throw new Error("Polling offer requires an exact SDK request id.");
   const requestId = JSON.stringify(input.requestId); // Numeric 1 and string "1" are different invocations.
   if (offerCursor(input.offeredFrontier) < offerCursor(input.inputCursor)) throw new Error("Polling offer cannot move behind its input cursor.");
+  const binding = database.prepare("SELECT room_cursor,binding_epoch FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
+  if (!Number.isSafeInteger(binding.binding_epoch) || Number(binding.binding_epoch) < 1) throw new Error("Polling offer worker binding epoch is invalid.");
   const prior = database.prepare(`SELECT * FROM ${offers} WHERE activation_id=? AND process_incarnation_id=? AND mcp_request_id=?`)
     .get(input.operationId, input.processIncarnationId, requestId) as PollingOfferRecord | undefined;
   const tail = getPollingOfferTail(database, input.operationId);
   if (prior) {
-    if (prior.input_cursor !== input.inputCursor || prior.offered_frontier !== input.offeredFrontier || prior.offer_id !== tail?.offer_id) {
+    if (prior.input_cursor !== input.inputCursor || prior.offered_frontier !== input.offeredFrontier || prior.offer_id !== tail?.offer_id
+      || prior.binding_epoch !== binding.binding_epoch) {
       throw new Error("Polling offer invocation changed or was superseded.");
     }
     return prior;
   }
-  const binding = database.prepare("SELECT room_cursor FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
   if (binding.room_cursor !== input.inputCursor) throw new Error("Polling offer input is not the durable acknowledged cursor.");
   const offer: PollingOfferRecord = { offer_id: randomUUID(), activation_id: input.operationId, process_incarnation_id: input.processIncarnationId,
+    binding_epoch: Number(binding.binding_epoch),
     mcp_request_id: requestId, input_cursor: input.inputCursor, offered_frontier: input.offeredFrontier, predecessor_offer_id: tail?.offer_id ?? null,
     created_at_ms: Math.max(Date.now(), tail?.created_at_ms ?? 0), acknowledged_at_ms: null };
   database.prepare(`INSERT INTO ${offers}(${Object.keys(offer).join(",")}) VALUES(${Object.keys(offer).map(() => "?").join(",")})`).run(...Object.values(offer));
@@ -433,10 +438,11 @@ export function recordPollingOffer(database: DatabaseSync, input: RecordPollingO
 export function acknowledgePollingOffer(database: DatabaseSync, input: AcknowledgePollingOffer, current: DaemonManifestEntry | undefined): { acknowledged: boolean; offer: PollingOfferRecord | null; roomCursor: string } {
   const activation = currentOfferAuthority(database, input, current);
   offerCursor(input.roomCursor);
-  const binding = database.prepare("SELECT room_cursor FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
+  const binding = database.prepare("SELECT room_cursor,binding_epoch FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
   const roomCursor = String(binding.room_cursor); offerCursor(roomCursor);
   const offer = getPollingOfferTail(database, input.operationId);
-  if (!offer || offer.process_incarnation_id !== input.processIncarnationId || offer.offered_frontier !== input.roomCursor) {
+  if (!offer || offer.process_incarnation_id !== input.processIncarnationId || offer.offered_frontier !== input.roomCursor
+    || offer.binding_epoch !== binding.binding_epoch) {
     return { acknowledged: false, offer, roomCursor };
   }
   if (offer.acknowledged_at_ms !== null) {
