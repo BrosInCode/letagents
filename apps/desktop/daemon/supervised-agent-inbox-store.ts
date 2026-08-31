@@ -7,7 +7,7 @@ import {
   readDurableNativeFailure,
   RETAINED_UNCERTAIN_EFFECTS_PER_AGENT,
   RETAINED_TERMINAL_RECEIPTS_PER_AGENT,
-  settlePreparedSupervisedEffectsForTerminalItem,
+  settleSupervisedTerminalItem,
 } from "./supervised-agent-history-retention.js";
 
 export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "cancelled_by_room_move" | "cancelled_by_user";
@@ -374,7 +374,7 @@ export class SupervisedAgentInboxStore {
           VALUES (?,?,?,?,?,?) ON CONFLICT(inbox_item_id) DO NOTHING`), item.inbox_item_id, item.agent_id, item.room_id, item.reply_client_message_id, input.canonical_message_id, timestamp);
         run(database.prepare("UPDATE supervised_agent_inbox SET state='acknowledged',updated_at=?,acknowledged_at=? WHERE inbox_item_id=?"), timestamp, timestamp, item.inbox_item_id);
         this.recordEvent(database, item.inbox_item_id, `published:${item.attempt_count}`, "published", timestamp, input.canonical_message_id);
-        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.settleTerminalItem(database, item, timestamp);
       }
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(item.inbox_item_id) as Row);
@@ -464,7 +464,7 @@ export class SupervisedAgentInboxStore {
         this.recordEvent(database, inboxItemId, `${event}:${ordinal}`, event, timestamp, updated.last_error);
       }
       if (finalStates.has(next)) {
-        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.settleTerminalItem(database, item, timestamp);
         this.pruneAgentHistory(database, item.agent_id);
       }
       return updated;
@@ -1172,7 +1172,7 @@ export class SupervisedAgentInboxStore {
         const item = rowToItem(row);
         run(database.prepare(`UPDATE supervised_agent_inbox SET state='cancelled_by_room_move',last_error=?,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`),
           "Cancelled because the agent moved to another room.", timestamp, timestamp, item.inbox_item_id);
-        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.settleTerminalItem(database, item, timestamp);
         this.recordEvent(database, item.inbox_item_id, `room_move_cancelled:${input.operation_id}:${item.fifo_sequence}`, "room_move_cancelled", timestamp, "Agent moved rooms after completing an earlier message.");
       }
       run(database.prepare("DELETE FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?"), input.agent_id, input.old_room_id);
@@ -1517,7 +1517,7 @@ export class SupervisedAgentInboxStore {
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='cancelled_by_user',last_error=NULL,failure_code=NULL,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
-      this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+      this.settleTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, "user_cancelled", "user_cancelled", timestamp, "Skipped by the user before any provider turn started.");
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
@@ -1566,14 +1566,14 @@ export class SupervisedAgentInboxStore {
       if (readDurableNativeFailure(database, inboxItemId)) {
         run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',
           last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
-        this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+        this.settleTerminalItem(database, item, timestamp);
         this.pruneAgentHistory(database, item.agent_id);
         return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
       }
       run(database.prepare(`UPDATE supervised_agent_inbox
         SET state='cancelled_by_user',last_error=?,failure_code=NULL,updated_at=?,acknowledged_at=?
         WHERE inbox_item_id=?`), detail, timestamp, timestamp, inboxItemId);
-      this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+      this.settleTerminalItem(database, item, timestamp);
       this.recordEvent(database, inboxItemId, `user_cancelled:${item.fifo_sequence}`, "user_cancelled", timestamp, detail);
       this.pruneAgentHistory(database, item.agent_id);
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
@@ -1671,7 +1671,7 @@ export class SupervisedAgentInboxStore {
         const phase = phaseForTransition(next);
         if (phase) this.recordEvent(database, updated.inbox_item_id, `recovery:${phase}:${updated.attempt_count}`, phase, timestamp, error);
         if (finalStates.has(next)) {
-          this.settlePreparedEffectsForTerminalItem(database, item, timestamp);
+          this.settleTerminalItem(database, item, timestamp);
           this.pruneAgentHistory(database, item.agent_id);
         }
         recovered.push(updated);
@@ -1834,9 +1834,10 @@ export class SupervisedAgentInboxStore {
   /** Terminal ownership proves a prepared ordinary effect never crossed its
    * execution CAS. Settle it in the same transaction as every terminal path
    * so handoff/Stop races cannot leave immortal purge blockers. Room moves are
-   * intentionally prepared until the acknowledged reply is reconciled. */
-  private settlePreparedEffectsForTerminalItem(database: DatabaseSync, item: SupervisedInboxItem, timestamp: string): void {
-    settlePreparedSupervisedEffectsForTerminalItem(database, {
+   * intentionally prepared until the acknowledged reply is reconciled. Already
+   * captured attempts may copy this receipt through an isolated savepoint. */
+  private settleTerminalItem(database: DatabaseSync, item: SupervisedInboxItem, timestamp: string): void {
+    settleSupervisedTerminalItem(database, {
       inboxItemId: item.inbox_item_id,
       agentId: item.agent_id,
       providerTurnId: item.provider_turn_id,
