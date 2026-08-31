@@ -48,7 +48,7 @@ type SupervisorGrantAccessPolicy =
   | { kind: "sessions"; session_ids: string[] }
   | { kind: "none" };
 
-type RoomResolverDeps = {
+export type RoomResolverDeps = {
   resolveCanonicalRoomRequestId(roomId: string): Promise<string>;
   resolveRoomOrReply(roomId: string, res: Response): Promise<{ id: string } | null>;
   requireParticipant(
@@ -257,7 +257,7 @@ function requestedGeneration(req: AuthenticatedRequest): number | null {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : null;
 }
 
-async function requireCurrentSupervisorGrant(
+export async function requireCurrentSupervisorGrant(
   req: AuthenticatedRequest,
   res: Response,
   deps: RoomResolverDeps,
