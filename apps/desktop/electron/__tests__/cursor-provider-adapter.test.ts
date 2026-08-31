@@ -24,6 +24,7 @@ import type {
   ProviderSpawnRequest,
   ProviderStreamEvent,
   ProviderTerminalPayload,
+  NativeExecutionObservation,
 } from "../main/agents/provider-adapter.js";
 import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
 import {
@@ -32,6 +33,7 @@ import {
   type CursorManagedProfile,
 } from "../main/agents/cursor-managed-profile.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
+const { emptyExecutionProjection, reduceExecutionFact } = await import(new URL("../../daemon/execution-reducer.ts", import.meta.url).href);
 
 const previousNonDarwinOverride = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON;
 if (process.platform !== "darwin") process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
@@ -6834,4 +6836,145 @@ test("documented Cursor stream-json shapes project to namespaced response and to
   assert.deepEqual(cursorLiveDisplayProjections({
     type: "user", message: { role: "user", content: [{ type: "text", text: "prompt echo" }] },
   }, "turn-exact", "event-4"), [], "the user event is never misrendered as a tool");
+});
+
+test("Cursor typed observations fence each native child and exclude synthetic display completion", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, () => { throw new Error("observer unavailable"); });
+  adapter.onExecution(handle, (event) => events.push(event));
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+  assert.deepEqual(adapter.capabilities().execution, {
+    controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
+  });
+  assert.equal(events.length, 0, "an idle lane neither replays nor invents a process");
+  const first = adapter.runRoomTurn(handle, roomTurnRequest());
+  await flush();
+  const child = harness.children[0]!;
+  const session_id = "sess-cursor-1";
+  const started = { type: "tool_call", subtype: "started", call_id: "same-call", session_id,
+    tool_call: { readToolCall: { args: { path: "secret-path" } } } };
+  child.emit(started);
+  child.emit(started);
+  child.emit({ ...started, call_id: "missing-session", session_id: undefined });
+  child.emit({ type: "tool_call", subtype: "completed", call_id: "same-call", session_id,
+    tool_call: { readToolCall: { result: { failure: { errorMessage: "secret-output" } } } } });
+  child.emit({ type: "tool_call", subtype: "started", call_id: "unclosed-write", session_id,
+    tool_call: { writeToolCall: { args: { path: "secret-path", fileText: "secret-content" } } } });
+  assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" }, "live output does not imply a responsive control channel");
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
+  assert.equal(events.filter((event) => event.fact.domain === "execution"
+    && event.fact.executionId === "unclosed-write" && event.fact.kind === "completed").length, 0,
+  "a display-only interrupted card cannot become native interruption evidence");
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await first).text, "done");
+  await flush();
+  assert.equal(handle.observedState(), "idle");
+  const second = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }));
+  await flush();
+  const nextChild = harness.children[1]!;
+  nextChild.emit(started);
+  nextChild.emit({ type: "tool_call", subtype: "completed", call_id: "same-call", session_id,
+    tool_call: { readToolCall: { result: { success: { content: "secret-output" } } } } });
+  nextChild.emit({ type: "result", subtype: "success", is_error: false, result: "next", session_id });
+  nextChild.resolveExit({ type: "exit", code: 0, signal: null });
+  assert.equal((await second).text, "next");
+  await flush();
+  const runtimes = new Map<string, ReturnType<typeof emptyExecutionProjection>>();
+  for (const event of events) {
+    assert.ok(event.nativeProcessIdentity);
+    const runtimeId = event.nativeProcessIdentity!;
+    runtimes.set(runtimeId, reduceExecutionFact(runtimes.get(runtimeId) ?? emptyExecutionProjection(), {
+      ...event.fact, ...("providerTurnId" in event.fact ? { turnId: event.fact.providerTurnId } : {}),
+      factId: `fact-${event.sequence}`, agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: runtimeId,
+      observerEpoch: 1, sourceSequence: event.sequence, observedAtMs: event.observedAtMs,
+    }));
+  }
+  assert.equal(runtimes.size, 2, "sequential child births cannot share runtime authority");
+  const firstTurn = [...runtimes.get(birthIdentity(child.pid!))!.turns.values()][0]!;
+  const nextTurn = [...runtimes.get(birthIdentity(nextChild.pid!))!.turns.values()][0]!;
+  assert.equal(firstTurn.operations.get("same-call")?.outcome, "failed");
+  assert.equal(firstTurn.operations.get("same-call")?.startObserved, false);
+  assert.equal(firstTurn.operations.has("unclosed-write"), false, "a tool request without a native result has no proven execution");
+  assert.equal(nextTurn.operations.get("same-call")?.outcome, "succeeded");
+  assert.notEqual(firstTurn.providerTurnId, nextTurn.providerTurnId);
+  assert.deepEqual(events.map((event) => event.sequence), events.map((_, index) => index + 1));
+  assert.doesNotMatch(JSON.stringify(events), /secret-path|secret-content|secret-output/);
+  assert.deepEqual(harness.signals, []);
+});
+
+test("Cursor typed child loss differs from an exact user interruption", async () => {
+  for (const interrupted of [false, true]) {
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const handle = await spawnDaemonLane(adapter, harness);
+    const events: NativeExecutionObservation[] = [];
+    adapter.onExecution(handle, (event) => events.push(event));
+    const running = adapter.runRoomTurn(handle, roomTurnRequest());
+    const rejected = assert.rejects(running);
+    await flush();
+    const child = harness.children[0]!;
+    child.emit({ type: "tool_call", subtype: "started", call_id: "shell", session_id: "sess-cursor-1",
+      tool_call: { shellToolCall: { args: { command: "slow-command" } } } });
+    if (interrupted) await adapter.controlTurn(handle);
+    else child.resolveExit({ type: "exit", code: 1, signal: null });
+    await rejected;
+    await flush();
+    assert.equal(events.filter((event) => event.fact.domain === "execution").length, 0,
+      "a pending tool request cannot become lost_after_start or interrupted_after_start without start proof");
+    const terminal = events.find((event) => event.fact.domain === "turn" && event.fact.state !== "active")?.fact;
+    assert.ok(terminal && "state" in terminal);
+    assert.equal(terminal.state, interrupted ? "terminal" : "lost");
+    if (!interrupted) assert.deepEqual(harness.signals, []);
+  }
+});
+
+test("Cursor typed shell completion preserves native exit codes and does not complete a background handoff", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const running = adapter.runRoomTurn(handle, roomTurnRequest());
+  await flush();
+  const child = harness.children[0]!;
+  const session_id = "sess-cursor-1";
+  for (const [call_id, result] of [
+    ["zero", { success: { exitCode: 0, stdout: "secret-output" } }],
+    ["nonzero", { failure: { exitCode: 2, stderr: "secret-output" } }],
+    ["nonzero-success-envelope", { success: { exitCode: 1 } }],
+    ["rejected", { rejected: { reason: "secret-reason" } }],
+    ["permission-denied", { permissionDenied: { error: "secret-error" } }],
+    ["spawn-failed", { spawnError: { error: "secret-error" } }],
+    ["malformed", { success: { exitCode: "0" } }],
+    ["background", { success: { exitCode: 0, shellId: 7 }, isBackground: true }],
+  ] as const) {
+    child.emit({ type: "tool_call", subtype: "started", call_id, session_id,
+      tool_call: { shellToolCall: { args: { command: "secret-command" } } } });
+    child.emit({ type: "tool_call", subtype: "completed", call_id, session_id,
+      tool_call: { shellToolCall: { result } } });
+  }
+  const completions = events.map(({ fact }) => fact).filter((fact) => fact.domain === "execution" && fact.kind === "completed");
+  assert.deepEqual(completions.map((fact) => ({ id: fact.executionId, outcome: fact.outcome, exitCode: fact.exitCode })), [
+    { id: "zero", outcome: "succeeded", exitCode: 0 },
+    { id: "nonzero", outcome: "failed", exitCode: 2 },
+    { id: "nonzero-success-envelope", outcome: "failed", exitCode: 1 },
+    { id: "rejected", outcome: "denied_before_start", exitCode: undefined },
+    { id: "permission-denied", outcome: "denied_before_start", exitCode: undefined },
+    { id: "spawn-failed", outcome: "failed", exitCode: undefined },
+  ]);
+  for (const fact of completions.filter((fact) => ["rejected", "permission-denied", "spawn-failed"].includes(fact.executionId))) {
+    assert.equal(fact.sideEffects, "none");
+  }
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await running;
+  await flush();
+  assert.equal(events.filter(({ fact }) => fact.domain === "execution" && fact.kind === "completed" && fact.executionId === "zero").length, 1,
+    "an observed successful command must not later become lost at child exit");
+  assert.equal(events.filter(({ fact }) => fact.domain === "execution" && ["malformed", "background"].includes(fact.executionId)).length, 0);
+  assert.doesNotMatch(JSON.stringify(events), /secret-command|secret-output|secret-reason|secret-error/);
+  assert.deepEqual(harness.signals, [], "a nonzero shell exit cannot signal the provider");
 });

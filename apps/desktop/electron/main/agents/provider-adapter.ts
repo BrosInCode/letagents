@@ -21,6 +21,9 @@
 // independent of the daemon's three-axis `ObservedState` (separate compilation
 // unit / process): the daemon/reconciler maps this to its own vocabulary at the
 // control-socket boundary. Deliberately no cross-rootDir import into the daemon.
+import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation } from "../../../shared/execution-protocol.js";
+export type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation } from "../../../shared/execution-protocol.js";
+
 export type ProviderObservedState =
   | "starting"
   | "working"
@@ -33,6 +36,8 @@ export type ProviderAdapterId = "codex" | "claude-code" | "cursor" | "open-model
 
 // Negotiated per adapter; each `true` requires a proven spike cell (v10 §4.8).
 export interface ProviderAdapterCapabilities {
+  /** Observation/native plumbing only; never enables a permission profile. */
+  execution?: NativeExecutionCapabilities;
   /**
    * Room-ingress modes this adapter can safely run. Daemon inbox support
    * requires bounded run/recover semantics, not merely a long-lived process.
@@ -419,6 +424,11 @@ export interface ProviderAdapter {
 
   /** The negotiated capability set (each `true` backed by a P0 spike cell). */
   capabilities(): ProviderAdapterCapabilities;
+
+  /** Explicit native facts, independent from legacy raw-stream classification. */
+  onExecution?(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void;
+  /** A failed/slow probe never interrupts work or restarts a runtime. */
+  probeControl?(handle: ProviderHandle): Promise<ControlProbeResult>;
 
   /** Launch a fresh child under the provider's native harness. */
   spawn(req: ProviderSpawnRequest): Promise<ProviderHandle>;

@@ -4360,6 +4360,115 @@ test("CodexRpcClient initializes app-server using the documented wire shape", as
   assert.equal(sentMessages[2]?.jsonrpc, undefined);
 });
 
+test("CodexRpcClient fences server requests, malformed replies and reconnects independently of outbound RPC", async () => {
+  const originalWebSocket = globalThis.WebSocket;
+  const sockets: FakeWebSocket[] = [];
+  class FakeWebSocket {
+    static readonly OPEN = 1;
+    readyState = 1;
+    onopen: (() => void) | null = null;
+    onerror: (() => void) | null = null;
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    sent: Array<Record<string, unknown>> = [];
+    failResponse = false;
+    constructor(readonly url: string) { sockets.push(this); queueMicrotask(() => this.onopen?.()); }
+    emit(value: unknown): void { this.onmessage?.({ data: JSON.stringify(value) }); }
+    send(raw: string): void {
+      const message = JSON.parse(raw) as Record<string, unknown>;
+      this.sent.push(message);
+      if (this.failResponse && Object.hasOwn(message, "result")) throw new Error("uncertain send");
+      if (message.method === "initialize") queueMicrotask(() => this.emit({ id: message.id, result: {} }));
+    }
+    close(): void { this.readyState = 3; this.onclose?.(); }
+  }
+  (globalThis as unknown as { WebSocket: typeof WebSocket }).WebSocket = FakeWebSocket as unknown as typeof WebSocket;
+  const client = new CodexRpcClient("ws://127.0.0.1:4500");
+  try {
+    await client.connect();
+    const socket = sockets[0]!;
+    let received = 0;
+    const unsubscribeThrower = client.onRequest(() => { throw new Error("consumer failure"); });
+    const unsubscribe = client.onRequest(() => { received += 1; });
+    let resolved = false;
+    const pending = client.request("thread/read", {}).then((value) => { resolved = true; return value; });
+    const id = socket.sent.at(-1)!.id;
+    socket.emit({ id, method: "item/commandExecution/requestApproval", params: { command: "echo hi" } });
+    const request = client.listPendingRequests()[0]!;
+    assert.equal(request.id, id);
+    assert.equal(received, 1);
+    assert.equal(Object.isFrozen(request), true);
+    assert.equal(Object.isFrozen(request.params), true);
+    for (const malformed of [null, [], 4, { id }, { id, error: null }, { id, result: {}, error: {} }, { id, method: null, result: {} }, { id: String(id), result: {} }]) socket.emit(malformed);
+    await Promise.resolve();
+    assert.equal(resolved, false);
+    assert.throws(() => client.respond({ ...request }, { decision: "accept" }), /no longer pending/);
+    client.respond(request, { decision: "decline" });
+    assert.deepEqual(socket.sent.at(-1), { id, result: { decision: "decline" } });
+    assert.throws(() => client.respond(request, { decision: "accept" }), /no longer pending/);
+    socket.emit({ id, result: { thread: "good" } });
+    assert.deepEqual(await pending, { thread: "good" });
+    socket.emit({ id, method: "item/commandExecution/requestApproval" });
+    assert.equal(received, 2);
+    const reused = client.listPendingRequests()[0]!;
+    assert.notEqual(reused, request);
+    assert.throws(() => client.respond(request, {}), /no longer pending/);
+    client.respond(reused, { decision: "decline" });
+    unsubscribe();
+    unsubscribeThrower();
+
+    socket.emit({ id: "request-string", method: "approval", params: {} });
+    const stringRequest = client.listPendingRequests()[0]!;
+    socket.emit({ method: "serverRequest/resolved", params: { requestId: "request-string" } });
+    assert.throws(() => client.respond(stringRequest, {}), /no longer pending/);
+    socket.emit({ id: "reply-string", method: "approval" });
+    client.respond(client.listPendingRequests()[0]!, { decision: "decline" });
+    assert.deepEqual(socket.sent.at(-1), { id: "reply-string", result: { decision: "decline" } });
+    socket.emit({ id: "uncertain", method: "approval" });
+    const uncertain = client.listPendingRequests()[0]!;
+    socket.failResponse = true;
+    assert.throws(() => client.respond(uncertain, { decision: "decline" }), /uncertain send/);
+    const sends = socket.sent.length;
+    assert.throws(() => client.respond(uncertain, { decision: "decline" }), /no longer pending/);
+    assert.equal(socket.sent.length, sends);
+    socket.failResponse = false;
+
+    let disconnects = 0;
+    client.onDisconnect(() => { disconnects += 1; });
+    await assert.rejects(client.request("thread/loaded/list", {}, { timeoutMs: 5 }), /request timed out/);
+    assert.equal(disconnects, 0);
+    assert.equal(socket.readyState, 1);
+    socket.emit({ id: "stale", method: "approval" });
+    const stale = client.listPendingRequests()[0]!;
+    const interrupted = client.request("thread/read", {});
+    const interruption = assert.rejects(interrupted, /WebSocket closed/);
+    socket.close();
+    await interruption;
+    assert.equal(client.listPendingRequests().length, 0);
+    assert.throws(() => client.respond(stale, {}), /no longer pending/);
+    await client.connect();
+    const replacement = sockets[1]!;
+    const healthy = client.request("thread/read", {});
+    const healthyId = replacement.sent.at(-1)!.id;
+    socket.onclose?.();
+    socket.emit({ id: healthyId, result: "stale" });
+    replacement.emit({ id: healthyId, result: "current" });
+    assert.equal(await healthy, "current");
+    assert.equal(disconnects, 1);
+
+    // A has opened, but its async initialize continuation has not run when B
+    // replaces it. A must neither initialize nor close B.
+    const connectA = client.connect();
+    sockets[2]!.onopen?.();
+    const rejectedA = assert.rejects(connectA, /connection replaced/);
+    const connectB = client.connect();
+    await Promise.all([rejectedA, connectB]);
+    assert.equal(sockets[2]!.sent.length, 0);
+    assert.equal(sockets[3]!.sent.filter(message => message.method === "initialize").length, 1);
+    assert.equal(sockets[3]!.readyState, 1);
+  } finally { client.close(); globalThis.WebSocket = originalWebSocket; }
+});
+
 test("CodexRpcClient request timeout does not report a live socket as disconnected", async () => {
   const originalWebSocket = globalThis.WebSocket;
   let disconnected = 0;

@@ -1,4 +1,9 @@
 import { z } from "zod";
+import type { ExecutionFact, NativeTurnIdentity, SideEffectState } from "../shared/execution-protocol.js";
+export type {
+  RuntimeState, ControlState, ContinuationState, TurnState, TurnOutcome, SideEffectState,
+  ExecutionOutcome, ExecutionFact, ExecutionOperationFact, NativeTurnIdentity,
+} from "../shared/execution-protocol.js";
 
 // This is a structural, host-private protocol. There is deliberately no field
 // for command text, output, paths, reasons, credentials, or provider payloads.
@@ -16,13 +21,6 @@ export const executionOutcomes = z.enum([
 export const hardControlEvidence = z.enum([
   "process_exit", "process_birth_changed", "transport_refused", "control_epoch_gone", "native_session_terminated",
 ]);
-export type RuntimeState = z.infer<typeof runtimeStates>;
-export type ControlState = z.infer<typeof controlStates>;
-export type ContinuationState = z.infer<typeof continuationStates>;
-export type TurnState = z.infer<typeof turnStates>;
-export type TurnOutcome = z.infer<typeof turnOutcomes>;
-export type SideEffectState = z.infer<typeof sideEffectStates>;
-export type ExecutionOutcome = z.infer<typeof executionOutcomes>;
 
 const envelope = {
   factId: executionIdentity,
@@ -47,7 +45,7 @@ const operation = {
   operation: z.enum(["command", "file_read", "file_change", "network", "question", "other"]),
   sideEffects: sideEffectStates,
 };
-const factSchema = z.union([
+const factSchema: z.ZodType<ExecutionFact> = z.union([
   z.strictObject({ ...stateChange, domain: z.literal("runtime"), state: runtimeStates, controlEvidence: hardControlEvidence.optional() })
     .refine((v) => (v.state === "exited") === (v.controlEvidence !== undefined)),
   z.strictObject({ ...stateChange, domain: z.literal("control"), state: controlStates, controlEvidence: hardControlEvidence.optional() })
@@ -64,9 +62,6 @@ const factSchema = z.union([
     || (v.sideEffects === "none" && v.exitCode === undefined && v.signalNumber === undefined)),
 ]);
 
-export type ExecutionFact = z.infer<typeof factSchema>;
-export type ExecutionOperationFact = Extract<ExecutionFact, { domain: "execution" }>;
-export type NativeTurnIdentity = z.infer<typeof nativeTurnIdentity>;
 export const nativeTurnIdentity = z.strictObject(nativeTurn);
 
 export class ExecutionProtocolError extends Error {

@@ -55,21 +55,26 @@ import {
   supervisedOpenCodeMcpEnvironment,
 } from "./opencode-launch-contract.js";
 import { resolveOpenCodeBinary } from "./opencode-runtime.js";
+import { nativeExecutionId, ProviderExecutionObserver } from "./provider-execution-observer.js";
+import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, TurnOutcome } from "../../../shared/execution-protocol.js";
 import {
   assistantsFor,
   eventReferencesSession,
   finalAssistantFor,
   messageCompleted,
   messageError,
+  messageFinishReason,
   messageText,
   mintNativeUserMessageId,
   nativelyOrderedMessageId,
   OpenCodeServerClient,
+  parseOpenCodePermissionEvent,
   record,
   type JsonRecord,
   type OpenCodeEvent,
   type OpenCodeMessage,
   type OpenCodePart,
+  type OpenCodePermissionRequest,
   type OpenCodeRuntimeAuth,
 } from "./opencode-server-client.js";
 
@@ -122,7 +127,17 @@ const CAPABILITIES: ProviderAdapterCapabilities = {
   survivesRestart: true,
   turnControl: "native_interrupt",
   continuationRepair: "same_process",
+  execution: {
+    controlProbe: "http",
+    approvals: { kinds: ["command", "file_change"], recovery: "native_instance_only", denyScope: "session" },
+  },
 };
+
+/** Native request data is host-ephemeral; it is never an execution fact or room projection. */
+export type OpenCodePermissionObservation =
+  | { type: "snapshot"; requests: OpenCodePermissionRequest[] }
+  | { type: "degraded" }
+  | { type: "unavailable"; reason: HardControlEvidence | "handle_replaced" };
 
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
@@ -359,6 +374,9 @@ class OpenModelHandle implements ProviderHandle {
   activeRoomTurnId: string | null = null;
   /** True once every user message in the session is known to use OpenCode's ascending ID scheme. */
   nativeOrderingVerified = false;
+  readonly execution: ProviderExecutionObserver;
+  controlLoss: HardControlEvidence | null = null;
+  observedTurn: { id: string; terminal: TurnOutcome | "lost" | null } | null = null;
 
   constructor(
     readonly workAttemptId: string,
@@ -368,8 +386,10 @@ class OpenModelHandle implements ProviderHandle {
     readonly client: OpenCodeServerClient,
     readonly configuredModel: string,
     initialState: ProviderObservedState,
+    now: () => string,
   ) {
     this.observed = initialState;
+    this.execution = new ProviderExecutionObserver(now);
   }
 
   observedState(): ProviderObservedState { return this.observed; }
@@ -514,6 +534,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       client,
       credential.model,
       "idle",
+      this.deps.now,
     );
     handle.nativeOrderingVerified = true;
     this.handles.set(req.workAttemptId, handle);
@@ -561,6 +582,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       client,
       configuredModel,
       "idle",
+      this.deps.now,
     );
     this.handles.set(ref.workAttemptId, handle);
     this.observeTerminal(handle, this.deps.observeProcessExit(connection.pid, connection.processIdentity));
@@ -677,6 +699,10 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       throw error;
     });
     handle.activeRoomTurnId = turnId;
+    handle.observedTurn = { id: turnId, terminal: null };
+    this.emitExecution(handle, { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
+    this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+      providerContinuationId: handle.providerContinuationId, providerTurnId: turnId });
     await options.checkpointTurnStarted?.(turnId);
     try {
       const result = await this.awaitExactTurn(handle, turnId, options.detachSignal);
@@ -704,6 +730,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.required(rawHandle);
     handle.activeRoomTurnId = request.providerTurnId;
+    if (handle.observedTurn?.id !== request.providerTurnId) handle.observedTurn = { id: request.providerTurnId, terminal: null };
     try {
       const result = await this.awaitExactTurn(handle, request.providerTurnId, options.detachSignal, true);
       await options.checkpointTerminalResult?.(result);
@@ -782,6 +809,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.activeRoomTurnId = null;
     }
     handle.setState("idle");
+    this.emitTurnTerminal(handle, activeTurnId, "interrupted");
     return { capability: "native_interrupt", interrupted: true, resumed: false, state: "idle" };
   }
 
@@ -852,7 +880,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
     const exit = await this.deps.observeProcessExit(handle.pid, handle.providerConnection.processIdentity!);
     const terminal = terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), true);
-    this.finish(handle, terminal);
+    this.finish(handle, terminal, exit.type === "exit");
     return terminal;
   }
 
@@ -875,6 +903,127 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     return () => handle.streamListeners.delete(listener);
   }
 
+  onExecution(rawHandle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): () => void {
+    return this.required(rawHandle).execution.subscribe(listener);
+  }
+
+  async probeControl(rawHandle: ProviderHandle): Promise<ControlProbeResult> {
+    const handle = this.required(rawHandle);
+    let result = this.controlProof(handle);
+    if (!result) {
+      const response = await handle.client.probeControl();
+      // A refused HTTP request alone is not proof that the native instance died.
+      result = this.controlProof(handle) ?? { state: response.state };
+    }
+    if (result.state === "lost") handle.controlLoss = result.controlEvidence;
+    this.emitExecution(handle, { domain: "control", kind: "state_changed", sideEffects: "none", ...result });
+    return result;
+  }
+
+  async observePermissions(
+    rawHandle: ProviderHandle,
+    listener: (event: OpenCodePermissionObservation) => void,
+    signal: AbortSignal,
+  ): Promise<void> {
+    const handle = this.required(rawHandle);
+    const notify = (event: OpenCodePermissionObservation): void => {
+      if (!signal.aborted) { try { listener(event); } catch { /* Observation never controls native work. */ } }
+    };
+    const available = (): boolean => {
+      if (this.handles.get(handle.workAttemptId) !== handle) {
+        notify({ type: "unavailable", reason: "handle_replaced" });
+        return false;
+      }
+      const proof = this.controlProof(handle);
+      if (!proof) return true;
+      if (proof.state === "lost") {
+        handle.controlLoss = proof.controlEvidence;
+        notify({ type: "unavailable", reason: proof.controlEvidence });
+      } else notify({ type: "degraded" });
+      return false;
+    };
+    while (!signal.aborted && available()) {
+      const controller = new AbortController();
+      const abort = (): void => controller.abort();
+      signal.addEventListener("abort", abort, { once: true });
+      if (signal.aborted) controller.abort();
+      let revision = 0;
+      let pending = false;
+      let listing = false;
+      const refresh = (): void => {
+        revision += 1;
+        pending = true;
+        if (listing) return;
+        listing = true;
+        void (async () => {
+          try {
+            while (pending && !controller.signal.aborted) {
+              pending = false;
+              const observedRevision = revision;
+              const requests = await handle.client.listPendingPermissions(handle.providerContinuationId, controller.signal);
+              if (controller.signal.aborted) return;
+              if (!available()) { controller.abort(); return; }
+              // SSE is consumed while the GET runs. Never publish a snapshot
+              // overtaken by an ask/reply, nor resurrect a queued stale ask.
+              if (observedRevision === revision) notify({ type: "snapshot", requests });
+            }
+          } catch {
+            if (!controller.signal.aborted) { notify({ type: "degraded" }); controller.abort(); }
+          } finally { listing = false; }
+        })();
+      };
+      try {
+        for await (const event of handle.client.events(controller.signal)) {
+          if (controller.signal.aborted || !available()) break;
+          if (event.type === "server.instance.disposed") {
+            handle.controlLoss = "control_epoch_gone";
+            this.emitExecution(handle, { domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "control_epoch_gone" });
+            notify({ type: "unavailable", reason: "control_epoch_gone" });
+            return;
+          }
+          if (event.type === "server.connected") refresh();
+          const permission = parseOpenCodePermissionEvent(event);
+          if (permission?.properties.sessionID === handle.providerContinuationId) refresh();
+        }
+      } catch {
+        if (!signal.aborted) notify({ type: "degraded" });
+      } finally {
+        controller.abort();
+        signal.removeEventListener("abort", abort);
+      }
+      if (signal.aborted || !available()) return;
+      notify({ type: "degraded" });
+      // Reconnect the observation channel only. No prompt replay or native abort.
+      await new Promise<void>((resolve) => {
+        const finish = (): void => { clearTimeout(timer); signal.removeEventListener("abort", finish); resolve(); };
+        const timer = setTimeout(finish, 250);
+        signal.addEventListener("abort", finish, { once: true });
+        if (signal.aborted) finish();
+      });
+    }
+  }
+
+  private controlProof(handle: OpenModelHandle): ControlProbeResult | null {
+    if (handle.controlLoss) return { state: "lost", controlEvidence: handle.controlLoss };
+    const identity = this.deps.getProcessIdentity(handle.pid);
+    if (identity === undefined) return { state: "degraded" };
+    if (identity === null) return { state: "lost", controlEvidence: "process_exit" };
+    return sameProcessBirthIdentity(identity, handle.providerConnection.processIdentity!)
+      ? null : { state: "lost", controlEvidence: "process_birth_changed" };
+  }
+
+  private emitExecution(handle: OpenModelHandle, fact: NativeExecutionFact): void {
+    handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
+  }
+
+  private emitTurnTerminal(handle: OpenModelHandle, turnId: string, outcome: TurnOutcome): void {
+    if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)
+      || (handle.observedTurn?.id === turnId && handle.observedTurn.terminal)) return;
+    handle.observedTurn = { id: turnId, terminal: outcome };
+    this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
+      sideEffects: "none", providerContinuationId: handle.providerContinuationId, providerTurnId: turnId });
+  }
+
   private required(handle: ProviderHandle): OpenModelHandle {
     const current = this.handles.get(handle.workAttemptId);
     if (!current || current !== handle) throw new Error("Open Model handle is stale or foreign.");
@@ -890,8 +1039,10 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.client,
       handle.configuredModel,
       "idle",
+      this.deps.now,
     );
     this.handles.set(handle.workAttemptId, replacement);
+    this.observeTerminal(replacement, this.deps.observeProcessExit(handle.pid, handle.providerConnection.processIdentity!));
     return replacement;
   }
 
@@ -936,6 +1087,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     // snapshot() re-emits history on reconnect, so dedup by (callID, status).
     const toolStatuses = new Map<string, string>();
     const assistantIds = new Set<string>();
+    const typedAssistantIds = new Set<string>();
     const controller = new AbortController();
     const detach = (): void => controller.abort();
     signal?.addEventListener("abort", detach, { once: true });
@@ -944,6 +1096,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const snapshot = async (): Promise<{
       assistantCount: number;
       result: ProviderRoomTurnResult | null;
+      terminalOutcome: TurnOutcome | null;
     }> => {
       const messages = await handle.client.messages(
         handle.providerContinuationId,
@@ -953,7 +1106,10 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       for (const assistant of assistants) {
         const info = record(assistant.info);
         if (typeof info?.id === "string") assistantIds.add(info.id);
-        this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses);
+        const exactSession = info?.sessionID === undefined || info.sessionID === handle.providerContinuationId;
+        if (exactSession && typeof info?.id === "string") typedAssistantIds.add(info.id);
+        this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses,
+          exactSession ? turnId : undefined);
       }
       if (assistants.length > this.maxAssistantSteps) {
         throw new OpenCodeBoundedTurnError(
@@ -961,19 +1117,29 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         );
       }
       const finalAssistant = finalAssistantFor(messages, turnId);
+      const finalInfo = record(finalAssistant?.info);
+      const exactSession = finalInfo?.sessionID === undefined || finalInfo.sessionID === handle.providerContinuationId;
       const terminalError = safeProviderErrorMessage(finalAssistant);
-      if (terminalError) throw new OpenCodeTerminalTurnError(terminalError);
+      if (terminalError) {
+        if (exactSession) this.emitTurnTerminal(handle, turnId, "failed");
+        throw new OpenCodeTerminalTurnError(terminalError);
+      }
+      const result = finalAssistant && messageCompleted(finalAssistant) ? classifyTurn(turnId, messageText(finalAssistant)) : null;
       return {
         assistantCount: assistants.length,
-        result: finalAssistant && messageCompleted(finalAssistant)
-          ? classifyTurn(turnId, messageText(finalAssistant))
-          : null,
+        result,
+        terminalOutcome: exactSession && result && messageFinishReason(finalAssistant) !== "tool-calls"
+          ? result.outcome === "unreadable" ? "unreadable" : "completed" : null,
       };
     };
     const resultAtSessionBoundary = (
       observed: Awaited<ReturnType<typeof snapshot>>,
-    ): ProviderRoomTurnResult => observed.result
-      ?? { turnId, outcome: "unreadable", text: null, evidence: "none" };
+    ): ProviderRoomTurnResult => {
+      // Legacy session-status fallbacks remain unchanged, but typed authority
+      // must not invent a native terminal from a missing/busy status entry.
+      if (observed.terminalOutcome) this.emitTurnTerminal(handle, turnId, observed.terminalOutcome);
+      return observed.result ?? { turnId, outcome: "unreadable", text: null, evidence: "none" };
+    };
 
     try {
       // Opening the SSE stream before the snapshot closes the completion race:
@@ -1005,6 +1171,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         if (info?.role === "assistant" && info.parentID === turnId
           && typeof info.id === "string") {
           assistantIds.add(info.id);
+          if (info.sessionID === handle.providerContinuationId) typedAssistantIds.add(info.id);
           if (assistantIds.size > this.maxAssistantSteps) {
             throw new OpenCodeBoundedTurnError(
               `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
@@ -1022,6 +1189,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
               { parts: [part] as OpenCodeMessage["parts"] },
               emittedLengths,
               toolStatuses,
+              typedAssistantIds.has(part.messageID) ? turnId : undefined,
             );
           }
         }
@@ -1081,6 +1249,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     }
     if (handle.activeRoomTurnId === turnId) handle.activeRoomTurnId = null;
     handle.setState("idle");
+    this.emitTurnTerminal(handle, turnId, "interrupted");
     throw reason;
   }
 
@@ -1108,10 +1277,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     message: OpenCodeMessage | null,
     emittedLengths: Map<string, number>,
     toolStatuses?: Map<string, string>,
+    turnId?: string,
   ): void {
     for (const part of message?.parts ?? []) {
       if (part.type === "tool") {
-        if (toolStatuses) this.emitToolCall(handle, part, toolStatuses);
+        if (toolStatuses) this.emitToolCall(handle, part, toolStatuses, turnId);
         continue;
       }
       const id = typeof part.id === "string" ? part.id : `${part.type ?? "part"}`;
@@ -1135,6 +1305,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     handle: OpenModelHandle,
     part: OpenCodePart,
     toolStatuses: Map<string, string>,
+    turnId?: string,
   ): void {
     const state = record(part.state);
     const tool = typeof part.tool === "string" ? part.tool : "tool";
@@ -1143,6 +1314,33 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const status = typeof state?.status === "string" ? state.status : "pending";
     if (toolStatuses.get(callId) === status) return;
     toolStatuses.set(callId, status);
+    if (turnId && (nativeExecutionId(part.callID) || nativeExecutionId(part.id)) && nativeExecutionId(callId) && nativeExecutionId(turnId)
+      && nativeExecutionId(handle.providerContinuationId)
+      && (part.sessionID === undefined || part.sessionID === handle.providerContinuationId)
+      && (status === "completed" || status === "error")) {
+      const operation = tool === "bash" ? "command"
+        : ["read", "glob", "grep", "list"].includes(tool) ? "file_read"
+          : ["edit", "write", "patch", "apply_patch"].includes(tool) ? "file_change"
+            : ["webfetch", "websearch"].includes(tool) ? "network"
+              : tool === "question" ? "question" : "other";
+      // OpenCode sets running before permission evaluation. Only a terminal
+      // tool result is execution evidence here; error text cannot prove a
+      // before-start denial or distinguish it from partial side effects.
+      const exit = record(state?.metadata)?.exit;
+      const exitCode = typeof exit === "number" && Number.isSafeInteger(exit) && exit >= -2_147_483_648 && exit <= 2_147_483_647 ? exit : undefined;
+      // Pinned ShellTool metadata.exit is the actual child code, or null after
+      // native timeout/abort. Tool-call success alone says nothing about exit.
+      if (operation !== "command" || status === "error" || exit === null || exitCode !== undefined) {
+        this.emitExecution(handle, { domain: "execution", kind: "completed", executionId: callId, operation,
+          providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+          sideEffects: operation === "file_read" || operation === "question" ? "none" : "possible",
+          outcome: status === "error" ? "failed" : operation === "command"
+            ? exit === null ? "interrupted_after_start" : exitCode === 0 ? "succeeded" : "failed"
+            : "succeeded",
+          ...(operation === "command" && exitCode !== undefined ? { exitCode } : {}),
+        });
+      }
+    }
     const title = typeof state?.title === "string" ? state.title : "";
     this.emitStream(handle, {
       kind: "tool_lifecycle",
@@ -1239,12 +1437,27 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
 
   private observeTerminal(handle: OpenModelHandle, exited: Promise<ProviderProcessExit>): void {
     void exited.then((exit) => {
-      this.finish(handle, terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), false));
+      this.finish(handle, terminalFromExit(exit, handle.providerContinuationId, this.deps.now(), false), exit.type === "exit");
     });
   }
 
-  private finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload): void {
+  private finish(handle: OpenModelHandle, terminal: ProviderTerminalPayload, processExited: boolean): void {
     if (handle.terminal) return;
+    if (this.handles.get(handle.workAttemptId) === handle) {
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      const evidence = processExited || actual === null ? "process_exit"
+        : typeof actual === "string" && !sameProcessBirthIdentity(actual, handle.providerConnection.processIdentity!) ? "process_birth_changed" : null;
+      if (evidence && handle.observedTurn && !handle.observedTurn.terminal) {
+        handle.observedTurn.terminal = "lost";
+        this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none",
+          providerContinuationId: handle.providerContinuationId, providerTurnId: handle.observedTurn.id });
+      }
+      if (evidence) {
+        handle.controlLoss = evidence;
+        this.emitExecution(handle, { domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: evidence });
+        this.emitExecution(handle, { domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: evidence });
+      } else this.emitExecution(handle, { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" });
+    }
     handle.terminal = terminal;
     handle.setState("stopped");
     if (this.handles.get(handle.workAttemptId) === handle) this.handles.delete(handle.workAttemptId);

@@ -3,7 +3,9 @@
  * control-socket bridge; keeping this structural port here keeps reconciliation
  * outside Electron's failure domain.
  */
+import type { ControlProbeResult, NativeExecutionCapabilities, NativeExecutionObservation } from "../shared/execution-protocol.js";
 export type ProviderActionCapabilities = {
+  execution?: NativeExecutionCapabilities;
   /** Explicit adapter admission for durable room-ingress ownership. */
   deliveryModes?: ReadonlyArray<"mcp_polling" | "desktop_events" | "daemon_inbox">;
   resume: boolean;
@@ -157,6 +159,8 @@ export class ProviderActionFailure extends Error {
 }
 
 export interface ProviderActionPort {
+  onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<() => void>;
+  probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
