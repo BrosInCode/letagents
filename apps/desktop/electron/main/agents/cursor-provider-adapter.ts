@@ -1480,9 +1480,19 @@ export class CursorProviderAdapter implements ProviderAdapter {
   }
 
   async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
-    this.requireHandle(providerHandle);
+    const handle = this.requireHandle(providerHandle);
     // The wrapper IPC is not Cursor's control loop; an idle lane has no child.
-    return { state: "unprobeable" };
+    const result: ControlProbeResult = { state: "unprobeable" };
+    const processIdentity = handle.providerConnection.processIdentity;
+    // Capture is runtime-birth keyed. An idle Cursor lane is not a runtime and
+    // must not publish a processless fact that would fence later child facts.
+    if (processIdentity) {
+      handle.execution.emit(
+        { domain: "control", kind: "state_changed", sideEffects: "none", ...result },
+        processIdentity,
+      );
+    }
+    return result;
   }
 
   private async start(

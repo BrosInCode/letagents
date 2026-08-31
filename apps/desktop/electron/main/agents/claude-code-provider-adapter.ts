@@ -864,9 +864,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
     const handle = this.requireHandle(providerHandle);
     // A live PID or quiet stdout cannot prove the native control loop responds.
-    return handle.executionExitObserved
+    const result: ControlProbeResult = handle.executionExitObserved
       ? { state: "lost", controlEvidence: "process_exit" }
       : { state: "unprobeable" };
+    handle.execution.emit(
+      { domain: "control", kind: "state_changed", sideEffects: "none", ...result },
+      handle.providerConnection.kind === "claude_cli"
+        ? handle.providerConnection.processIdentity ?? undefined
+        : undefined,
+    );
+    return result;
   }
 
   private async start(
