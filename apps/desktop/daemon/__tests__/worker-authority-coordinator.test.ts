@@ -380,7 +380,7 @@ test("custodial effects and cursor writes require exact active activation while 
     native_process_identity: connection.processIdentity, native_connection_sha256: createHash("sha256").update(JSON.stringify([
       connection.kind, connection.url, connection.pid, connection.processIdentity,
     ])).digest("hex"), config_revision: 1, agent_session_id: "session-1", room_cursor: "12", phase: "uncertain",
-    provider_turn_id: null, terminal_outcome: null, created_at_ms: 1, updated_at_ms: 1,
+    provider_turn_id: null, terminal_outcome: null, created_at_ms: 1, updated_at_ms: 1, compacted_through_offer_id: null,
   };
   let configurationRevision = 1;
   let runtimeConfigurationRevision = 1;

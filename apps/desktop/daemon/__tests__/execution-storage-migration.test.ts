@@ -8,7 +8,7 @@ import test from "node:test";
 
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase, openDaemonStateObservationDatabase } from "../daemon-state-database.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
-import { validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
+import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 
 type Row = Record<string, unknown>;
 const now = "2026-08-30T00:00:00.000Z";
@@ -101,7 +101,38 @@ function restoreV23Fixture(database: DatabaseSync): void {
 }
 
 function restoreV24Fixture(database: DatabaseSync): void {
+  restoreV25Fixture(database);
   database.exec("DROP TABLE custodial_polling_offers; UPDATE manifest_metadata SET schema_version=24 WHERE singleton=1; PRAGMA user_version=24");
+}
+
+function restoreV25Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM custodial_polling_activations").get()!.count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM custodial_polling_offers").get()!.count, 0);
+  database.exec("DROP TABLE custodial_polling_offers; DROP TABLE custodial_polling_activations");
+  applyPollingActivationSchema(database, 24);
+  applyPollingOfferSchema(database, 25);
+  database.exec("UPDATE manifest_metadata SET schema_version=25 WHERE singleton=1; PRAGMA user_version=25");
+}
+
+function seedPollingActivations(database: DatabaseSync, phases: readonly ("complete" | "uncertain" | "active")[] = ["complete", "uncertain"]): void {
+  database.exec(`INSERT INTO execution_cutover_v2
+    (operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms,
+     authority_version,room_id,work_attempt_id,provider,native_continuation_id,native_connection_kind,native_connection_sha256,native_pid,native_process_identity)
+    VALUES('reverse','reverse-request','agent','reverse-generation','daemon_inbox','mcp_polling','drain','complete',100,110,
+     1,'room','attempt','codex','continuation','codex_app_server','${"a".repeat(64)}',123,'birth:123')`);
+  const insert = database.prepare(`INSERT INTO custodial_polling_activations
+    (operation_id,request_id,agent_id,room_id,work_attempt_id,execution_generation_id,reverse_operation_id,native_continuation_id,
+     native_connection_kind,native_connection_sha256,native_pid,native_process_identity,config_revision,agent_session_id,room_cursor,
+     phase,provider_turn_id,terminal_outcome,created_at_ms,updated_at_ms)
+    VALUES(?,?,'agent','room','attempt','polling-generation','reverse','continuation','codex_app_server',?,123,'birth:123',2,'session','msg_47',
+     'prepared',NULL,NULL,120,120)`);
+  for (const phase of phases) {
+    insert.run(phase, `request-${phase}`, "b".repeat(64));
+    database.prepare("UPDATE custodial_polling_activations SET phase='dispatching' WHERE operation_id=?").run(phase);
+    database.prepare("UPDATE custodial_polling_activations SET phase='active',provider_turn_id=? WHERE operation_id=?").run(`native-${phase}`, phase);
+    if (phase !== "active") database.prepare("UPDATE custodial_polling_activations SET phase=?,terminal_outcome=? WHERE operation_id=?")
+      .run(phase, phase === "complete" ? "completed" : null, phase);
+  }
 }
 
 function seedV18Evidence(database: DatabaseSync): void {
@@ -253,10 +284,10 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22, 24]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21, 22, 24, 25]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
-    (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture : restoreV24Fixture)(env.database);
+    (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture : version === 24 ? restoreV24Fixture : restoreV25Fixture)(env.database);
     seedLegacyEvidence(env.database);
     if (version === 21) { seedV18Evidence(env.database); seedDormantCutovers(env.database); }
     const before = legacyRows(env.database);
@@ -576,7 +607,7 @@ test("v19 upgrade preserves old outcomes, identity and rowids while advancing te
   } finally { await env.cleanup(); }
 });
 
-for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
+for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25]) test(`fresh/legacy v${version} reaches current schema with constrained native failure slots and source identity`, async () => {
   const env = await fixture();
   try {
     if (version === 17) restoreV17Fixture(env.database);
@@ -587,6 +618,7 @@ for (const version of [0, 12, 13, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24]) t
     else if (version === 22) restoreV22Fixture(env.database);
     else if (version === 23) restoreV23Fixture(env.database);
     else if (version === 24) restoreV24Fixture(env.database);
+    else if (version === 25) restoreV25Fixture(env.database);
     else if (version) {
       restoreV17Fixture(env.database);
       env.database.exec(`UPDATE manifest_metadata SET schema_version=${version} WHERE singleton=1; PRAGMA user_version=${version}`);
@@ -923,32 +955,16 @@ test("v25 adds empty offer storage without manufacturing coverage for old activa
   const env = await fixture();
   try {
     restoreV24Fixture(env.database); seedLegacyEvidence(env.database);
-    env.database.exec(`INSERT INTO execution_cutover_v2
-      (operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms,
-       authority_version,room_id,work_attempt_id,provider,native_continuation_id,native_connection_kind,native_connection_sha256,native_pid,native_process_identity)
-      VALUES('reverse','reverse-request','agent','reverse-generation','daemon_inbox','mcp_polling','drain','complete',100,110,
-       1,'room','attempt','codex','continuation','codex_app_server','${"a".repeat(64)}',123,'birth:123')`);
-    const insert = env.database.prepare(`INSERT INTO custodial_polling_activations
-      (operation_id,request_id,agent_id,room_id,work_attempt_id,execution_generation_id,reverse_operation_id,native_continuation_id,
-       native_connection_kind,native_connection_sha256,native_pid,native_process_identity,config_revision,agent_session_id,room_cursor,
-       phase,provider_turn_id,terminal_outcome,created_at_ms,updated_at_ms)
-      VALUES(?,?,'agent','room','attempt','polling-generation','reverse','continuation','codex_app_server',?,123,'birth:123',2,'session','msg_47',
-       'prepared',NULL,NULL,120,120)`);
-    for (const phase of ["complete", "uncertain"]) {
-      insert.run(phase, `request-${phase}`, "b".repeat(64));
-      env.database.prepare("UPDATE custodial_polling_activations SET phase='dispatching' WHERE operation_id=?").run(phase);
-      env.database.prepare("UPDATE custodial_polling_activations SET phase='active',provider_turn_id=? WHERE operation_id=?").run(`native-${phase}`, phase);
-      env.database.prepare("UPDATE custodial_polling_activations SET phase=?,terminal_outcome=? WHERE operation_id=?")
-        .run(phase, phase === "complete" ? "completed" : null, phase);
-    }
+    seedPollingActivations(env.database);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database),
       activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all() };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name<>'custodial_polling_offers' ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('custodial_polling_offers','custodial_polling_activations') ORDER BY type,name").all();
     const schema = retainedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database),
-      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all() }, before);
-    assert.deepEqual(retainedSchema(), schema, "offer DDL does not rebuild any existing journal or table");
+      activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })) },
+      { ...before, activations: before.activations.map(row => ({ ...row, compacted_through_offer_id: null })) });
+    assert.deepEqual(retainedSchema(), schema, "only offers and the later activation compaction column may change");
     assert.deepEqual(env.database.prepare("SELECT * FROM custodial_polling_offers").all(), [], "old activations have no inferred offer or ACK evidence");
     assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.deepEqual({ ...env.database.prepare("SELECT generation,schema_version FROM manifest_metadata").get() },
@@ -961,7 +977,8 @@ test("v25 adds empty offer storage without manufacturing coverage for old activa
     try {
       validatePollingOfferSchema(reopened);
       assert.deepEqual(reopened.prepare("SELECT * FROM custodial_polling_offers").all(), []);
-      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(), before.activations);
+      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })),
+        before.activations.map(row => ({ ...row, compacted_through_offer_id: null })));
       assert.deepEqual(legacyRows(reopened), before.legacy);
     } finally { reopened.close(); }
   } finally { await env.cleanup(); }
@@ -987,7 +1004,7 @@ test("v25 offer DDL and paired markers roll back together before commit", async 
   } finally { await env.cleanup(); }
 });
 
-test("v25 refuses lost or weakened offer authority before WAL or initializer writes", async () => {
+for (const version of [25, 26]) test(`v${version} refuses lost or weakened offer authority before WAL or initializer writes`, async () => {
   for (const corruption of [
     "DROP TABLE custodial_polling_offers",
     "DROP INDEX custodial_polling_offer_one_root",
@@ -1000,6 +1017,7 @@ test("v25 refuses lost or weakened offer authority before WAL or initializer wri
   ]) {
     const env = await fixture();
     try {
+      if (version === 25) restoreV25Fixture(env.database);
       const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
       env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
         PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
@@ -1013,6 +1031,95 @@ test("v25 refuses lost or weakened offer authority before WAL or initializer wri
       assert.deepEqual(await readFile(env.path), before);
       assert.deepEqual(versionPair(env.database), versions);
       assert.deepEqual(env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(), schema);
+    } finally { await env.cleanup(); }
+  }
+});
+
+for (const interrupted of [false, true]) test(`v26 preserves every v25 offer, ACK and row identity${interrupted ? " after rollback" : " without migration compaction"}`, async () => {
+  const env = await fixture();
+  try {
+    restoreV25Fixture(env.database); seedLegacyEvidence(env.database); seedPollingActivations(env.database, ["complete", "active"]);
+    const insert = env.database.prepare(`INSERT INTO custodial_polling_offers
+      (rowid,offer_id,activation_id,process_incarnation_id,mcp_request_id,binding_epoch,input_cursor,offered_frontier,predecessor_offer_id,created_at_ms,acknowledged_at_ms)
+      VALUES(?,?,'active','11111111-1111-4111-8111-111111111111',?,?,?,?,?,?,NULL)`);
+    let cursor = "msg_47";
+    env.database.exec("BEGIN IMMEDIATE");
+    try {
+      for (let index = 0; index < 260; index++) {
+        const id = `offer-${index}`; const frontier = `msg_${48 + index}`;
+        insert.run(71 + index * 3, id, JSON.stringify(index % 2 === 0 ? index : `request-${index}`), 1, cursor, frontier,
+          index === 0 ? null : `offer-${index - 1}`, 1000 + index);
+        if (index % 2 === 0) {
+          env.database.prepare("UPDATE custodial_polling_offers SET acknowledged_at_ms=? WHERE offer_id=?").run(2000 + index, id);
+          cursor = frontier;
+        }
+      }
+      env.database.exec("COMMIT");
+    } catch (error) { env.database.exec("ROLLBACK"); throw error; }
+    validatePollingActivationSchema(env.database, 24); validatePollingOfferSchema(env.database, 25);
+    const offers = env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all();
+    const activations = env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all();
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() };
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('custodial_polling_offers','custodial_polling_activations') ORDER BY type,name").all();
+    const schema = retainedSchema();
+    const activationRoot = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='custodial_polling_activations'").get();
+    if (interrupted) {
+      assert.throws(() => new DaemonStateSchema(database => {
+        validatePollingActivationSchema(database); validatePollingOfferSchema(database);
+        assert.deepEqual(versionPair(database), before.versions);
+        assert.deepEqual(database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers);
+        throw new Error("interrupt offer retention migration");
+      }).createSchema(env.database), /interrupt offer retention migration/);
+      assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
+        schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() }, before);
+      assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers);
+      assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(), activations);
+      assert.deepEqual(env.database.prepare("SELECT name FROM temp.sqlite_master WHERE name='polling_offer_migration'").all(), []);
+      validatePollingActivationSchema(env.database, 24); validatePollingOfferSchema(env.database, 25);
+    }
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, { legacy: before.legacy, typed: before.typed });
+    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers, "migration keeps all 260 offers, including superseded unACKed rows and the tail");
+    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })),
+      activations.map(row => ({ ...row, compacted_through_offer_id: null })), "migration does not invent a compaction watermark");
+    assert.deepEqual(retainedSchema(), schema);
+    assert.deepEqual(env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='custodial_polling_activations'").get(), activationRoot);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, DAEMON_STATE_SCHEMA_VERSION);
+    validatePollingActivationSchema(env.database); validatePollingOfferSchema(env.database);
+    assert.throws(() => validatePollingActivationSchema(env.database, 24), /activation journal/);
+    assert.throws(() => validatePollingOfferSchema(env.database, 25), /offer journal/);
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
+    try {
+      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(), offers, "ordinary reopen also cannot prune history");
+      assert.deepEqual(reopened.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all().map(row => ({ ...row })),
+        activations.map(row => ({ ...row, compacted_through_offer_id: null })));
+    } finally { reopened.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("v26 refuses missing or weakened compaction authority before WAL or repair writes", async () => {
+  for (const corruption of [
+    "DROP TRIGGER custodial_polling_compaction_forward",
+    "UPDATE sqlite_master SET sql=replace(sql, 'CHECK(compacted_through_offer_id IS NULL OR length(trim(compacted_through_offer_id))>0)', '') WHERE name='custodial_polling_activations'",
+    "UPDATE sqlite_master SET sql=replace(sql, 'FOREIGN KEY(predecessor_offer_id) REFERENCES custodial_polling_offers(offer_id) ON DELETE SET NULL', 'FOREIGN KEY(predecessor_offer_id) REFERENCES custodial_polling_offers(offer_id) ON DELETE RESTRICT') WHERE name='custodial_polling_offers'",
+    "DROP TRIGGER custodial_polling_offer_no_delete; CREATE TRIGGER custodial_polling_offer_no_delete BEFORE DELETE ON custodial_polling_offers BEGIN SELECT 1; END",
+  ]) {
+    const env = await fixture();
+    try {
+      const schemaVersion = Number(env.database.prepare("PRAGMA schema_version").get()!.schema_version);
+      env.database.exec(`PRAGMA writable_schema=ON; ${corruption}; PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
+        PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
+      const before = await readFile(env.path); const versions = versionPair(env.database);
+      let initialized = false;
+      await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /activation journal|offer journal/);
+      assert.equal(initialized, false);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.throws(() => new DaemonStateSchema().createSchema(env.database), /activation journal|offer journal/);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.deepEqual(versionPair(env.database), versions);
     } finally { await env.cleanup(); }
   }
 });
@@ -1107,6 +1214,9 @@ test("v20 refuses populated orphan or fabricated terminal evidence without chang
     const env = await fixture();
     try {
       seedLegacyEvidence(env.database); env.database.exec(corruption);
+      // Restore connection enforcement without repairing the orphan. This
+      // case must still reach the persisted terminal-evidence validator.
+      env.database.exec("PRAGMA foreign_keys=ON");
       const before = legacyRows(env.database);
       assert.throws(() => new DaemonStateSchema().createSchema(env.database), /terminal-result authority contains invalid evidence/);
       assert.deepEqual(legacyRows(env.database), before);
