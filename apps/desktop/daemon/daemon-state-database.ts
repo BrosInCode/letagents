@@ -1,7 +1,7 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
-import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "./execution-storage-schema.js";
+import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 18;
+export const DAEMON_STATE_SCHEMA_VERSION = 19;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -28,6 +28,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
+  if (existingVersion === 18 || existingVersion === 19) validateExecutionStorageSchema(database, existingVersion);
   return existingVersion;
 }
 
@@ -113,11 +114,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV17ToV18(database);
     return;
   }
+  if (existingVersion === 18) {
+    this.migrateV18ToV19(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV18Shape(database);
+    this.repairAndValidateV19Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -836,6 +841,23 @@ migrateV17ToV18(database: DatabaseSync): void {
   try {
     this.validateV17Shape(database);
     this.applyV18Shape(database);
+    this.validateV18Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+/** V19 adds observer fencing and proof slots, never historical outcomes. */
+migrateV18ToV19(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV18Shape(database, 18);
+    migrateExecutionStorageV18ToV19(database);
     this.validateV18Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -2123,13 +2145,13 @@ private applyV18Shape(database: DatabaseSync): void {
   applyExecutionStorageSchema(database);
 }
 
-private validateV18Shape(database: DatabaseSync): void {
+private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 19 = 19): void {
   this.validateV17Shape(database);
   const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
   if (INBOX_STATE_CONSTRAINT.exec(String(definition?.sql))?.[1]?.replace(/\s/g, "") !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
     throw new Error("Daemon state v18 inbox is missing its reserved failed-delivery terminal state.");
   }
-  validateExecutionStorageSchema(database);
+  validateExecutionStorageSchema(database, executionStorageVersion);
   const expectedKeys: Record<string, string[]> = {
     supervised_agent_inbox: ["blocked_by_inbox_item_id:inbox_item_id:NO ACTION"],
     supervised_agent_inbox_events: ["inbox_item_id:inbox_item_id:CASCADE"],
@@ -2156,7 +2178,7 @@ private validateV18Shape(database: DatabaseSync): void {
   if (database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v18 failed foreign-key validation.");
 }
 
-repairAndValidateV18Shape(database: DatabaseSync): void {
+repairAndValidateV19Shape(database: DatabaseSync): void {
   // Missing typed journals are lost authority, not permission to recreate an
   // empty history. Check them before any predecessor's additive repair path.
   validateExecutionStorageSchema(database);

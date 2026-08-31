@@ -298,11 +298,71 @@ const triggers: Record<string, string> = {
     BEGIN SELECT RAISE(ABORT,'Approval decisions are immutable.'); END`,
 };
 
+// Nullable evidence preserves v18 history. Ingestion, not migration, requires
+// these fields on new terminal/control facts and projection-bound decisions.
+const v19Columns: Record<string, string[]> = {
+  execution_facts: [
+    "turn_outcome TEXT CHECK(turn_outcome IS NULL OR (turn_outcome IN ('completed','failed','interrupted','unreadable') AND domain='turn' AND state='terminal'))",
+    "control_evidence TEXT CHECK(control_evidence IS NULL OR (control_evidence IN ('process_exit','process_birth_changed','transport_refused','control_epoch_gone','native_session_terminated') AND ((domain='control' AND state='lost') OR (domain='runtime' AND state='exited'))))",
+  ],
+  execution_approval_decisions: [
+    "projection_sha256 TEXT CHECK(length(projection_sha256)=64 AND projection_sha256 NOT GLOB '*[^0-9a-f]*')",
+  ],
+};
+const observerTable = `CREATE TABLE execution_observers (
+  agent_id TEXT PRIMARY KEY,
+  execution_generation_id TEXT NOT NULL,
+  runtime_generation_id TEXT NOT NULL,
+  observer_execution_generation_id TEXT NOT NULL,
+  observer_runtime_generation_id TEXT NOT NULL,
+  daemon_generation_id TEXT NOT NULL,
+  observer_epoch INTEGER NOT NULL CHECK(observer_epoch >= 1),
+  last_source_sequence INTEGER NOT NULL CHECK(last_source_sequence >= 0),
+  max_observed_sequence INTEGER NOT NULL CHECK(max_observed_sequence >= last_source_sequence),
+  recovery_turn_id TEXT,
+  bound_at_ms INTEGER NOT NULL CHECK(bound_at_ms >= 0),
+  FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)
+    REFERENCES execution_runtime_generations(agent_id,execution_generation_id,runtime_generation_id),
+  FOREIGN KEY(agent_id,observer_execution_generation_id,observer_runtime_generation_id)
+    REFERENCES execution_runtime_generations(agent_id,execution_generation_id,runtime_generation_id),
+  FOREIGN KEY(recovery_turn_id,agent_id,execution_generation_id,runtime_generation_id)
+    REFERENCES execution_turns(turn_id,agent_id,execution_generation_id,runtime_generation_id)
+) STRICT`;
+
+function schemaFor(version: 18 | 19): { tables: Record<string, string>; triggers: Record<string, string> } {
+  if (version === 18) return { tables, triggers };
+  return {
+    tables: {
+      ...Object.fromEntries(Object.entries(tables).map(([name, sql]) => [name, v19Columns[name]
+        ? sql.replace("\n    CHECK(", `\n    ${v19Columns[name].join(",\n    ")},\n    CHECK(`) : sql])),
+      execution_observers: observerTable,
+    },
+    triggers: {
+      ...triggers,
+      execution_approval_decision_immutable: triggers.execution_approval_decision_immutable
+        .replace("request_sha256,decision", "request_sha256,projection_sha256,decision"),
+    },
+  };
+}
+
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync): void {
-  for (const statement of Object.values(tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
+export function applyExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 = 19): void {
+  const schema = schemaFor(version);
+  for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   for (const statement of Object.values(indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
-  for (const statement of Object.values(triggers)) database.exec(statement.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS "));
+  for (const statement of Object.values(schema.triggers)) database.exec(statement.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS "));
+}
+
+/** Add evidence slots without rewriting facts, decisions, or their ownership. */
+export function migrateExecutionStorageV18ToV19(database: DatabaseSync): void {
+  validateExecutionStorageSchema(database, 18);
+  for (const [table, columns] of Object.entries(v19Columns)) {
+    for (const column of columns) database.exec(`ALTER TABLE ${table} ADD COLUMN ${column}`);
+  }
+  database.exec(observerTable);
+  database.exec("DROP TRIGGER execution_approval_decision_immutable");
+  database.exec(schemaFor(19).triggers.execution_approval_decision_immutable);
+  validateExecutionStorageSchema(database);
 }
 
 function normalizedSchema(sql: string): string {
@@ -312,12 +372,13 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync): void {
-  for (const [name, statement] of Object.entries({ ...tables, ...indexes, ...triggers })) {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 = 19): void {
+  const schema = schemaFor(version);
+  for (const [name, statement] of Object.entries({ ...schema.tables, ...indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;
     if (!row || normalizedSchema(row.sql) !== normalizedSchema(statement)) throw new Error(`Execution storage schema mismatch: ${name}.`);
   }
-  for (const name of Object.keys(tables)) {
+  for (const name of Object.keys(schema.tables)) {
     if (database.prepare(`PRAGMA foreign_key_check(${name})`).get()) throw new Error(`Execution storage ownership mismatch: ${name}.`);
   }
 }
