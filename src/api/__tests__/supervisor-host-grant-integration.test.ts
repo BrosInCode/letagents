@@ -24,6 +24,9 @@ const { clearSupervisorAccessRevalidationCache, registerSupervisorHostGrantRoute
 const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
 const { requireGitRoomParticipant } = await import("../rooms/access.js");
 const { hashToken } = await import("../db/utils.js");
+const { registerRoomAgentWorkRoutes } = await import("../routes/rooms/agent-work.js");
+const { publishRoomAgentWork, readRoomAgentWork } = await import("../db/room-agent-work.js");
+const { parseRoomAgentWorkSummary } = await import("../../shared/room-agent-work.js");
 
 async function reset() {
   if (!client) throw new Error("DB-backed supervisor tests require TEST_DB_URL");
@@ -46,7 +49,7 @@ async function seedOwner(id: string): Promise<void> {
 }
 
 function recorder() {
-  return { statusCode: 200, body: null as any, status(code: number) { this.statusCode = code; return this; }, json(value: unknown) { this.body = value; return this; } };
+  return { statusCode: 200, body: null as any, headers: {} as Record<string, string>, setHeader(key: string, value: string) { this.headers[key] = value; }, status(code: number) { this.statusCode = code; return this; }, json(value: unknown) { this.body = value; return this; } };
 }
 
 async function setupLifecycle() {
@@ -57,11 +60,15 @@ async function setupLifecycle() {
   const grantResult = await authDb!.createSupervisorHostGrant({ owner_account_id: "owner_route", host_id: "host_route", installation_id: "install_route", allowed_room_ids: [room.id], allowed_agent_keys: [agent.canonical_key], expires_at: new Date(Date.now() + 60_000).toISOString() });
   const handlers = new Map<string, any>();
   let participantAllowed = true;
+  let readerAllowed = true;
   const accessOptions: Array<{ freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean }> = [];
-  registerSupervisorHostGrantRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, delete(path: string, handler: any) { handlers.set(`DELETE ${path}`, handler); } } as never, {
-    resolveCanonicalRoomRequestId: async (id: string) => id,
+  const routeDeps = {
+    resolveCanonicalRoomRequestId: async (id: string) => id === "room_alias" ? room.id : id,
     resolveRoomOrReply: async () => room,
-    requireParticipant: async () => true,
+    requireParticipant: async (_req: unknown, res: any) => {
+      if (!readerAllowed) res.status(403).json({ error: "Not a room participant." });
+      return readerAllowed;
+    },
     getProjectById: async () => room,
     resolveProjectRepoAccessTarget: async () => ({
       roomName: room.id,
@@ -79,12 +86,15 @@ async function setupLifecycle() {
       account_id: "owner_route", provider_access_token: "github-token",
       provider: "github", login: "owner_route",
     }),
-  });
+  };
+  registerSupervisorHostGrantRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, delete(path: string, handler: any) { handlers.set(`DELETE ${path}`, handler); } } as never, routeDeps as never);
+  registerRoomAgentWorkRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, get(_path: RegExp, handler: any) { handlers.set("GET agent-work", handler); } } as never, routeDeps as never, routeDeps as never);
   const principal = grantResult.grant;
   const reqBase = { authKind: "supervisor_grant", supervisorGrant: principal, headers: {}, body: { generation: principal.current_generation }, params: { grantId: principal.grant_id } };
   return {
     room, agent, grantResult, handlers, reqBase, accessOptions,
     setParticipantAllowed(value: boolean) { participantAllowed = value; },
+    setReaderAllowed(value: boolean) { readerAllowed = value; },
   };
 }
 
@@ -94,6 +104,9 @@ test("supervisor registry is exact default-deny", () => {
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/leases/tl_1/rebind"), true);
   assert.equal(isSupervisorGrantRouteAllowed("POST", "/rooms/room_1/messages"), false);
   assert.equal(isSupervisorGrantRouteAllowed("DELETE", "/supervisor-host-grants/grant_1"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/worker-sessions/session_1/agent-work"), true);
+  assert.equal(isSupervisorGrantRouteAllowed("GET", "/supervisor-host-grants/grant_1/worker-sessions/session_1/agent-work"), false);
+  assert.equal(isSupervisorGrantRouteAllowed("POST", "/supervisor-host-grants/grant_1/worker-sessions/session_1/agent-work/other"), false);
 });
 
 test("middleware attaches the supervisor principal and rejects non-registry routes", async () => {
@@ -1175,4 +1188,217 @@ test("revoking a parent grant immediately invalidates its worker bearer", { skip
   });
   await authDb!.revokeSupervisorHostGrant({ grant_id: created.grant.grant_id, owner_account_id: "owner_4" });
   assert.equal((await resolveRequestAuth({ headers: { authorization: `Bearer ${session.worker_bearer}` } } as never)).authKind, null);
+});
+
+const workSummary = {
+  version: 1, recorded_state: "active", evidence_incomplete: false, elapsed_ms: null,
+  operation_counts: { unresolved: 1, succeeded: 0, failed: 0, denied_before_start: 0, cancelled_before_start: 0, interrupted_after_start: 0, lost_after_start: 0 },
+};
+
+async function setupWork() {
+  const lifecycle = await setupLifecycle();
+  const mint = lifecycle.handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions");
+  const mintBody = { generation: 1, room_id: lifecycle.room.id, agent_key: lifecycle.agent.canonical_key, agent_instance_id: "work_instance" };
+  const minted = recorder();
+  await mint({ ...lifecycle.reqBase, body: mintBody }, minted);
+  assert.equal(minted.statusCode, 201);
+  const session = minted.body;
+  const now = new Date().toISOString();
+  await client!.db.insert(schema!.messages).values({ room_id: lifecycle.room.id, number: 1, sender: "Owner", text: "Assess this project", timestamp: now });
+  await client!.db.insert(schema!.message_agent_receipts).values({
+    id: randomUUID(), room_id: lifecycle.room.id, message_room_id: lifecycle.room.id, message_number: 1,
+    agent_session_id: session.session_id, agent_key: lifecycle.agent.canonical_key, actor_label: "Work Agent",
+    activation_reason: "explicit_mention", receipt_state: "responding", created_at: now, updated_at: now,
+  });
+  const input = {
+    fence: { grant_id: lifecycle.grantResult.grant.grant_id, generation: 1, token_version: 1 },
+    room_id: lifecycle.room.id, session_id: session.session_id, source_message_number: 1, revision: 1, summary: workSummary,
+  };
+  const publish = lifecycle.handlers.get("POST /supervisor-host-grants/:grantId/worker-sessions/:sessionId/agent-work");
+  const publishRequest = { ...lifecycle.reqBase, params: { ...lifecycle.reqBase.params, sessionId: session.session_id },
+    body: { generation: 1, room_id: lifecycle.room.id, source_message_id: "msg_1", revision: 1, summary: workSummary } };
+  return { ...lifecycle, session, input, mint, mintBody, publish, publishRequest };
+}
+
+test("room work summary is a canonical, bounded allowlist without private fields", () => {
+  assert.deepEqual(parseRoomAgentWorkSummary(workSummary), workSummary);
+  assert.deepEqual(parseRoomAgentWorkSummary({ ...workSummary, operation_counts: Object.fromEntries(Object.entries(workSummary.operation_counts).reverse()) }), workSummary);
+  for (const summary of [
+    { ...workSummary, command: "SECRET=private npm test" },
+    { ...workSummary, recorded_state: "\u202Ecompleted" },
+    { ...workSummary, version: 2 }, { ...workSummary, elapsed_ms: -1 },
+    { ...workSummary, elapsed_ms: "100" },
+    { ...workSummary, operation_counts: { ...workSummary.operation_counts, path: "/Users/private" } },
+    { ...workSummary, operation_counts: { ...workSummary.operation_counts, unresolved: 10_001 } },
+    { ...workSummary, operation_counts: { ...workSummary.operation_counts, succeeded: -1 } },
+  ]) assert.equal(parseRoomAgentWorkSummary(summary), null);
+  const paths: string[] = [];
+  const before = process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED;
+  try {
+    process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "false";
+    registerRoomAgentWorkRoutes({ get() { paths.push("GET"); }, post() { paths.push("POST"); } } as never, {} as never, {} as never);
+    assert.deepEqual(paths, ["GET"]);
+  } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = before; }
+});
+
+test("room work HTTP writes require the exact supervisor and reads require current human membership", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  for (const authKind of ["session", "owner_token", "agent_session", null]) {
+    const denied = recorder();
+    await f.publish({ ...f.publishRequest, authKind }, denied);
+    assert.equal(denied.statusCode, 403);
+  }
+  const wrongPath = recorder();
+  await f.publish({ ...f.publishRequest, params: { ...f.publishRequest.params, grantId: "foreign_grant" } }, wrongPath);
+  assert.equal(wrongPath.statusCode, 403);
+  const invalid = recorder();
+  await f.publish({ ...f.publishRequest, body: { ...f.publishRequest.body, summary: { ...workSummary, stdout: "private" } } }, invalid);
+  assert.equal(invalid.statusCode, 400);
+  assert.doesNotMatch(JSON.stringify(invalid.body), /private|stdout/);
+  const created = recorder();
+  await f.publish({ ...f.publishRequest, body: { ...f.publishRequest.body, room_id: "room_alias" } }, created);
+  assert.equal(created.statusCode, 201);
+  const reader = f.handlers.get("GET agent-work");
+  const readRequest = { authKind: "session", sessionAccount: { account_id: "owner_route" }, params: { 0: "room_alias", 1: created.body.work.attempt_id } };
+  const result = recorder();
+  await reader(readRequest, result);
+  assert.equal(result.statusCode, 200);
+  assert.equal(result.body.room_id, f.room.id);
+  assert.equal(result.headers["Cache-Control"], "no-store");
+  assert.deepEqual(Object.keys(result.body).sort(), ["agent_key", "attempt_id", "revision", "room_id", "source_message_id", "summary", "updated_at"]);
+  assert.doesNotMatch(JSON.stringify(result.body), /work_instance|host_route|install_route|supervisor_grant|session_id/);
+  f.setReaderAllowed(false);
+  const denied = recorder(); await reader(readRequest, denied); assert.equal(denied.statusCode, 403);
+  const worker = recorder(); await reader({ ...readRequest, authKind: "agent_session" }, worker); assert.equal(worker.statusCode, 401);
+  f.setReaderAllowed(true);
+  const unknown = recorder(); await reader({ ...readRequest, params: { 0: f.room.id, 1: randomUUID() } }, unknown);
+  await client!.db.update(schema!.messages).set({ agent_prompt_kind: "auto", text: "" });
+  const concealed = recorder(); await reader(readRequest, concealed);
+  assert.equal(concealed.statusCode, 404); assert.deepEqual(concealed.body, unknown.body);
+  assert.deepEqual(await readRoomAgentWork({ room_id: f.room.id }), { work: [], truncated: false });
+});
+
+test("room work revisions are idempotent and conflicts never overwrite or change identity", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  const first = await publishRoomAgentWork(f.input);
+  const replay = await publishRoomAgentWork(f.input);
+  assert.equal(first.status, "created"); assert.equal(replay.status, "replayed"); assert.deepEqual(replay.work, first.work);
+  const newer = await publishRoomAgentWork({ ...f.input, revision: 2 });
+  assert.equal(newer.work.attempt_id, first.work.attempt_id);
+  await assert.rejects(publishRoomAgentWork(f.input), { code: "revision_conflict" });
+  await assert.rejects(publishRoomAgentWork({ ...f.input, revision: 2, summary: { ...workSummary, recorded_state: "failed" } }), { code: "revision_conflict" });
+  const concurrent = await Promise.allSettled([
+    publishRoomAgentWork({ ...f.input, revision: 3, summary: { ...workSummary, recorded_state: "failed" } }),
+    publishRoomAgentWork({ ...f.input, revision: 3, summary: { ...workSummary, recorded_state: "completed" } }),
+  ]);
+  assert.equal(concurrent.filter((result) => result.status === "fulfilled").length, 1);
+  assert.equal((concurrent.find((result) => result.status === "rejected") as PromiseRejectedResult).reason.code, "revision_conflict");
+  const rows = await client!.db.select().from(schema!.room_agent_work);
+  assert.equal(rows.length, 1); assert.equal(rows[0].publisher_revision, 3);
+});
+
+test("room work survives in-place renewal and same-instance successor but refuses takeover and shutdown tail uploads", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  const first = await publishRoomAgentWork(f.input);
+  const reminted = recorder(); await f.mint({ ...f.reqBase, body: f.mintBody }, reminted);
+  assert.equal(reminted.body.session_id, f.session.session_id);
+  assert.equal((await publishRoomAgentWork({ ...f.input, revision: 2 })).work.attempt_id, first.work.attempt_id);
+  await authDb!.endRoomAgentSession({ session_id: f.session.session_id });
+  await assert.rejects(publishRoomAgentWork({ ...f.input, revision: 3 }), { code: "publisher_not_authorized" });
+  assert.equal((await readRoomAgentWork({ room_id: f.room.id })).work.length, 1);
+  const successor = recorder(); await f.mint({ ...f.reqBase, body: f.mintBody }, successor);
+  assert.notEqual(successor.body.session_id, f.session.session_id);
+  const recovered = { ...f.input, session_id: successor.body.session_id, revision: 3 };
+  assert.equal((await publishRoomAgentWork(recovered)).work.attempt_id, first.work.attempt_id);
+  await seedOwner("foreign_owner");
+  const foreign = await authDb!.createRoomAgentSession({
+    room_id: f.room.id, session_kind: "worker", runtime: "legacy", actor_label: "Foreign worker",
+    agent_key: f.agent.canonical_key, display_name: "Foreign worker", owner_account_id: "foreign_owner",
+    owner_label: "Foreign", ide_label: "Agent", agent_instance_id: "foreign_instance",
+  });
+  // A foreign owner's live same-key session is still an ambiguity, not a
+  // candidate to silently discard when counting possible successors.
+  await assert.rejects(publishRoomAgentWork({ ...recovered, revision: 4 }), { code: "publisher_not_authorized" });
+  await assert.rejects(publishRoomAgentWork({ ...recovered, session_id: foreign.session_id, revision: 4 }), { code: "publisher_not_authorized" });
+  await authDb!.endRoomAgentSession({ session_id: foreign.session_id });
+  const other = recorder(); await f.mint({ ...f.reqBase, body: { ...f.mintBody, agent_instance_id: "different_instance", display_name: "Other Agent" } }, other);
+  assert.equal(other.statusCode, 201);
+  await assert.rejects(publishRoomAgentWork({ ...recovered, revision: 4 }), { code: "publisher_not_authorized" });
+  await authDb!.endRoomAgentSession({ session_id: successor.body.session_id });
+  await assert.rejects(publishRoomAgentWork({ ...recovered, session_id: other.body.session_id, revision: 4 }), { code: "publisher_conflict" });
+  await authDb!.endRoomAgentSession({ session_id: other.body.session_id });
+  const otherHost = await authDb!.createSupervisorHostGrant({ owner_account_id: "owner_route", host_id: "other_host", installation_id: "other_installation",
+    allowed_room_ids: [f.room.id], allowed_agent_keys: [f.agent.canonical_key], expires_at: new Date(Date.now() + 60_000).toISOString() });
+  const moved = recorder(); await f.mint({ ...f.reqBase, supervisorGrant: otherHost.grant, params: { grantId: otherHost.grant.grant_id }, body: f.mintBody }, moved);
+  assert.equal(moved.statusCode, 201);
+  await assert.rejects(publishRoomAgentWork({ ...recovered, session_id: moved.body.session_id, revision: 4,
+    fence: { grant_id: otherHost.grant.grant_id, generation: 1, token_version: 1 } }), { code: "publisher_conflict" });
+});
+
+test("room work grant handoff fences stale generation without duplicating the public attempt", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  const first = await publishRoomAgentWork(f.input);
+  const next = await authDb!.advanceSupervisorHostGrantGeneration({ grant_id: f.input.fence.grant_id, expected_generation: 1, expected_token_version: 1 });
+  assert.ok(next);
+  await assert.rejects(publishRoomAgentWork({ ...f.input, revision: 2 }), { code: "supervisor_grant_fence_stale" });
+  const updated = await publishRoomAgentWork({ ...f.input, revision: 2, fence: { grant_id: next.grant.grant_id, generation: 2, token_version: next.grant.token_version } });
+  assert.equal(updated.work.attempt_id, first.work.attempt_id);
+});
+
+test("room work rejects unrouted, foreign, ended, and rental-scoped publishers", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  await assert.rejects(publishRoomAgentWork({ ...f.input, source_message_number: 999 }), { code: "publisher_not_authorized" });
+  await assert.rejects(publishRoomAgentWork({ ...f.input, session_id: "foreign_session" }), { code: "publisher_not_authorized" });
+  await client!.db.update(schema!.supervisor_host_grants).set({ scope_key: "rental:session", rental_session_id: "rental" });
+  await assert.rejects(publishRoomAgentWork(f.input), { code: "publisher_not_authorized" });
+  await client!.db.update(schema!.supervisor_host_grants).set({ scope_key: "owner", rental_session_id: null });
+  await client!.db.update(schema!.messages).set({ visibility: "internal" });
+  await assert.rejects(publishRoomAgentWork(f.input), { code: "publisher_not_authorized" });
+  assert.equal((await client!.db.select().from(schema!.room_agent_work)).length, 0);
+});
+
+test("room work follows source visibility and deletion without leaking list truncation", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  await publishRoomAgentWork(f.input);
+  const [template] = await client!.db.select().from(schema!.room_agent_work);
+  for (let number = 2; number <= 53; number++) {
+    await client!.db.insert(schema!.messages).values({ room_id: f.room.id, number, sender: "Owner", text: "", agent_prompt_kind: "auto", timestamp: new Date().toISOString() });
+    await client!.db.insert(schema!.room_agent_work).values({ ...template, attempt_id: randomUUID(), source_message_number: number });
+  }
+  const visible = await readRoomAgentWork({ room_id: f.room.id });
+  assert.equal(visible.work.length, 1); assert.equal(visible.truncated, false);
+  await client!.db.update(schema!.messages).set({ text: "Visible" });
+  const full = await readRoomAgentWork({ room_id: f.room.id });
+  assert.equal(full.work.length, 50); assert.equal(full.truncated, true);
+  await client!.db.delete(schema!.messages);
+  assert.deepEqual(await readRoomAgentWork({ room_id: f.room.id }), { work: [], truncated: false });
+  assert.equal((await client!.db.select().from(schema!.room_agent_work)).length, 0);
+});
+
+test("room work rechecks grant-row rotation and source deletion after lock waits", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  const lock = await client!.pool.connect();
+  async function waitForBlockedPublisher() {
+    for (let i = 0; i < 200; i++) {
+      const result = await client!.pool.query("SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%select%' LIMIT 1");
+      if (result.rowCount) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error("Publisher did not reach the expected row-lock barrier.");
+  }
+  try {
+    await lock.query("BEGIN");
+    await lock.query("SELECT grant_id FROM supervisor_host_grants WHERE grant_id = $1 FOR UPDATE", [f.input.fence.grant_id]);
+    const publishing = publishRoomAgentWork(f.input).then(() => null, (error) => error);
+    await waitForBlockedPublisher();
+    await lock.query("UPDATE supervisor_host_grants SET token_version = 2 WHERE grant_id = $1", [f.input.fence.grant_id]);
+    await lock.query("COMMIT"); assert.equal((await publishing)?.code, "supervisor_grant_fence_stale");
+    await lock.query("BEGIN");
+    await lock.query("SELECT number FROM messages WHERE room_id = $1 AND number = 1 FOR UPDATE", [f.room.id]);
+    const deleting = publishRoomAgentWork({ ...f.input, fence: { ...f.input.fence, token_version: 2 } }).then(() => null, (error) => error);
+    await waitForBlockedPublisher();
+    await lock.query("DELETE FROM messages WHERE room_id = $1 AND number = 1", [f.room.id]);
+    await lock.query("COMMIT"); assert.equal((await deleting)?.code, "publisher_not_authorized");
+    assert.equal((await client!.db.select().from(schema!.room_agent_work)).length, 0);
+  } finally { await lock.query("ROLLBACK"); lock.release(); }
 });
