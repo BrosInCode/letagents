@@ -24,6 +24,14 @@ export type RoomAgentWork = {
   summary: RoomAgentWorkSummary;
   updated_at: string;
 };
+export type RoomAgentWorkSnapshot = { work: RoomAgentWork[]; truncated: boolean };
+/** Synchronizes the latest-50 view, not intermediate events or complete history.
+ * A changed snapshot replaces the client's bounded cache; it must not be merged.
+ * The server-issued cursor is a comparison hint, never authorization. */
+export type RoomAgentWorkPollResponse = { room_id: string; cursor: string } & (
+  | { changed: true; snapshot: RoomAgentWorkSnapshot }
+  | { changed: false; snapshot: null }
+);
 
 function exactKeys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
   return !!value && typeof value === "object" && !Array.isArray(value)

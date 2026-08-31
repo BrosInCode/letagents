@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
-import { parseRoomAgentWorkSummary, type RoomAgentWork } from "../../shared/room-agent-work.js";
+import { parseRoomAgentWorkSummary, type RoomAgentWork, type RoomAgentWorkSnapshot } from "../../shared/room-agent-work.js";
 import { db } from "./client.js";
 import { message_agent_receipts, messages, room_agent_sessions, room_agent_work, supervisor_host_grants } from "./schema.js";
 import { assertSupervisorGrantFenceTx, SupervisorGrantFenceStaleError, type SupervisorGrantFence } from "./auth/supervisor-grants.js";
@@ -115,7 +115,7 @@ export async function publishRoomAgentWork(input: {
 }
 
 /** Authorized human room readers only; the route performs current membership checks. */
-export async function readRoomAgentWork(input: { room_id: string; attempt_id?: string }): Promise<{ work: RoomAgentWork[]; truncated: boolean }> {
+export async function readRoomAgentWork(input: { room_id: string; attempt_id?: string }): Promise<RoomAgentWorkSnapshot> {
   const rows = await db.select({ work: room_agent_work }).from(room_agent_work)
     .innerJoin(messages, and(eq(messages.room_id, room_agent_work.room_id), eq(messages.number, room_agent_work.source_message_number)))
     .where(and(eq(room_agent_work.room_id, input.room_id),

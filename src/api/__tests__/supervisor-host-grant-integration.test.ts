@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
+import { EventEmitter } from "node:events";
+import { setTimeout as delay } from "node:timers/promises";
 import path from "node:path";
 import test from "node:test";
 
@@ -27,6 +29,8 @@ const { hashToken } = await import("../db/utils.js");
 const { registerRoomAgentWorkRoutes } = await import("../routes/rooms/agent-work.js");
 const { publishRoomAgentWork, readRoomAgentWork } = await import("../db/room-agent-work.js");
 const { parseRoomAgentWorkSummary } = await import("../../shared/room-agent-work.js");
+const { acquireLiveRoomAuthorization } = await import("../rooms/live-authorization.js");
+const { githubRepoAccessInvalidationEvents } = await import("../github/repo-access.js");
 
 async function reset() {
   if (!client) throw new Error("DB-backed supervisor tests require TEST_DB_URL");
@@ -69,6 +73,8 @@ async function setupLifecycle() {
       if (!readerAllowed) res.status(403).json({ error: "Not a room participant." });
       return readerAllowed;
     },
+    resolveRequestProjectRepoAccessRoomName: async () => room.id,
+    reauthorizeGitRoomParticipant: async () => readerAllowed,
     getProjectById: async () => room,
     resolveProjectRepoAccessTarget: async () => ({
       roomName: room.id,
@@ -88,11 +94,11 @@ async function setupLifecycle() {
     }),
   };
   registerSupervisorHostGrantRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, delete(path: string, handler: any) { handlers.set(`DELETE ${path}`, handler); } } as never, routeDeps as never);
-  registerRoomAgentWorkRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, get(_path: RegExp, handler: any) { handlers.set("GET agent-work", handler); } } as never, routeDeps as never, routeDeps as never);
+  registerRoomAgentWorkRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, get(path: RegExp, handler: any) { handlers.set(path.source.includes("poll") ? "GET agent-work poll" : "GET agent-work", handler); } } as never, routeDeps as never, routeDeps as never);
   const principal = grantResult.grant;
   const reqBase = { authKind: "supervisor_grant", supervisorGrant: principal, headers: {}, body: { generation: principal.current_generation }, params: { grantId: principal.grant_id } };
   return {
-    room, agent, grantResult, handlers, reqBase, accessOptions,
+    room, agent, grantResult, handlers, reqBase, accessOptions, routeDeps,
     setParticipantAllowed(value: boolean) { participantAllowed = value; },
     setReaderAllowed(value: boolean) { readerAllowed = value; },
   };
@@ -1237,7 +1243,7 @@ test("room work summary is a canonical, bounded allowlist without private fields
   try {
     process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "false";
     registerRoomAgentWorkRoutes({ get() { paths.push("GET"); }, post() { paths.push("POST"); } } as never, {} as never, {} as never);
-    assert.deepEqual(paths, ["GET"]);
+    assert.deepEqual(paths, ["GET", "GET"]);
   } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = before; }
 });
 
@@ -1375,30 +1381,242 @@ test("room work follows source visibility and deletion without leaking list trun
   assert.equal((await client!.db.select().from(schema!.room_agent_work)).length, 0);
 });
 
+async function waitForBlockedSelect(pattern: string) {
+  for (let i = 0; i < 200; i++) {
+    const result = await client!.pool.query("SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE $1 LIMIT 1", [pattern]);
+    if (result.rowCount) return;
+    await delay(10);
+  }
+  throw new Error("Query did not reach the expected lock barrier.");
+}
+
 test("room work rechecks grant-row rotation and source deletion after lock waits", { skip: requiresDatabase }, async () => {
   const f = await setupWork();
   const lock = await client!.pool.connect();
-  async function waitForBlockedPublisher() {
-    for (let i = 0; i < 200; i++) {
-      const result = await client!.pool.query("SELECT 1 FROM pg_stat_activity WHERE datname = current_database() AND pid <> pg_backend_pid() AND wait_event_type = 'Lock' AND query LIKE '%select%' LIMIT 1");
-      if (result.rowCount) return;
-      await new Promise((resolve) => setTimeout(resolve, 10));
-    }
-    throw new Error("Publisher did not reach the expected row-lock barrier.");
-  }
   try {
     await lock.query("BEGIN");
     await lock.query("SELECT grant_id FROM supervisor_host_grants WHERE grant_id = $1 FOR UPDATE", [f.input.fence.grant_id]);
     const publishing = publishRoomAgentWork(f.input).then(() => null, (error) => error);
-    await waitForBlockedPublisher();
+    await waitForBlockedSelect("%select%");
     await lock.query("UPDATE supervisor_host_grants SET token_version = 2 WHERE grant_id = $1", [f.input.fence.grant_id]);
     await lock.query("COMMIT"); assert.equal((await publishing)?.code, "supervisor_grant_fence_stale");
     await lock.query("BEGIN");
     await lock.query("SELECT number FROM messages WHERE room_id = $1 AND number = 1 FOR UPDATE", [f.room.id]);
     const deleting = publishRoomAgentWork({ ...f.input, fence: { ...f.input.fence, token_version: 2 } }).then(() => null, (error) => error);
-    await waitForBlockedPublisher();
+    await waitForBlockedSelect("%select%");
     await lock.query("DELETE FROM messages WHERE room_id = $1 AND number = 1", [f.room.id]);
     await lock.query("COMMIT"); assert.equal((await deleting)?.code, "publisher_not_authorized");
     assert.equal((await client!.db.select().from(schema!.room_agent_work)).length, 0);
   } finally { await lock.query("ROLLBACK"); lock.release(); }
+});
+
+async function setupWorkPoll() {
+  const fixture = await setupWork();
+  await authDb!.createSession("owner_route", "work_poll_cookie", new Date(Date.now() + 60_000).toISOString());
+  const request = {
+    authKind: "session", sessionAccount: { account_id: "owner_route", login: "owner_route" },
+    headers: { cookie: "letagents_session=work_poll_cookie" }, params: { 0: fixture.room.id }, query: {},
+  };
+  const handler = fixture.handlers.get("GET agent-work poll");
+  const response = () => Object.assign(new EventEmitter(), recorder());
+  const poll = async (query: Record<string, unknown> = {}, overrides: Record<string, unknown> = {}) => {
+    const res = response(); await handler({ ...request, query: { timeout: "0", ...query }, ...overrides }, res);
+    assert.equal(res.listenerCount("close"), 0, "every completed poll removes its disconnect listener");
+    return res;
+  };
+  return { ...fixture, request, handler, response, poll };
+}
+
+test("room work polling binds opaque cursors to the human and canonical room and repairs old digests", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  await publishRoomAgentWork(f.input);
+  const initial = await f.poll();
+  assert.equal(initial.statusCode, 200);
+  assert.equal(initial.body.changed, true);
+  assert.deepEqual(initial.body.snapshot, await readRoomAgentWork({ room_id: f.room.id }));
+  assert.match(initial.body.cursor, /^rw1\.[a-f0-9]{64}\.[a-f0-9]{64}$/);
+  assert.equal(initial.headers["Cache-Control"], "no-store");
+  const unchanged = await f.poll({ after: initial.body.cursor }, { params: { 0: "room_alias" } });
+  assert.deepEqual(unchanged.body, { room_id: f.room.id, cursor: initial.body.cursor, changed: false, snapshot: null });
+  for (const after of ["", [], [initial.body.cursor], initial.body.cursor.replace("rw1.", "rw2."), `rw1.${"0".repeat(64)}.${"1".repeat(64)}`]) {
+    const invalid = await f.poll({ after }); assert.equal(invalid.statusCode, 409); assert.equal(invalid.body.code, "invalid_cursor");
+  }
+  const unknown = initial.body.cursor.slice(0, -64) + "0".repeat(64);
+  assert.deepEqual((await f.poll({ after: unknown })).body, initial.body, "well-formed stale digest requests a replacement, not an error");
+  await seedOwner("second_reader");
+  await authDb!.createSession("second_reader", "other_poll_cookie", new Date(Date.now() + 60_000).toISOString());
+  const other = await f.poll({ after: initial.body.cursor }, {
+    sessionAccount: { account_id: "second_reader" }, headers: { cookie: "letagents_session=other_poll_cookie" },
+  });
+  assert.equal(other.statusCode, 409);
+  const worker = await f.poll({}, { authKind: "agent_session" }); assert.equal(worker.statusCode, 401);
+  f.setReaderAllowed(false);
+  assert.equal((await f.poll()).statusCode, 403);
+});
+
+test("room work polling replaces deleted or concealed snapshots and never responds early to hidden activity", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  await publishRoomAgentWork(f.input);
+  const initial = await f.poll();
+  await client!.db.update(schema!.messages).set({ agent_prompt_kind: "auto", text: "" });
+  const concealed = await f.poll({ after: initial.body.cursor });
+  assert.equal(concealed.body.changed, true);
+  assert.deepEqual(concealed.body.snapshot, { work: [], truncated: false });
+  const res = f.response(); let completed = false;
+  const started = performance.now();
+  const waiting = f.handler({ ...f.request, query: { after: concealed.body.cursor, timeout: "180" } }, res).then(() => { completed = true; });
+  await delay(25);
+  await publishRoomAgentWork({ ...f.input, revision: 2, summary: { ...workSummary, recorded_state: "failed" } });
+  await delay(25);
+  assert.equal(completed, false, "a hidden write must not wake an unchanged response");
+  await waiting;
+  assert.ok(performance.now() - started >= 175, "unchanged polls keep the original deadline");
+  assert.equal(res.body.cursor, concealed.body.cursor); assert.equal(res.body.changed, false); assert.equal(res.body.snapshot, null);
+  await client!.db.update(schema!.messages).set({ text: "Visible" });
+  const visible = await f.poll({ after: concealed.body.cursor }); assert.equal(visible.body.snapshot.work[0].revision, 2);
+  await client!.db.delete(schema!.messages);
+  const deleted = await f.poll({ after: visible.body.cursor });
+  assert.deepEqual(deleted.body.snapshot, { work: [], truncated: false });
+  assert.equal(deleted.body.cursor, concealed.body.cursor, "equal visible state has equal revision regardless of hidden history");
+});
+
+test("room work polling observes visible updates during a wait without broker delivery", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  await publishRoomAgentWork(f.input);
+  const initial = await f.poll(); const res = f.response();
+  const waiting = f.handler({ ...f.request, query: { after: initial.body.cursor, timeout: "1500" } }, res);
+  await delay(30);
+  await publishRoomAgentWork({ ...f.input, revision: 2, summary: { ...workSummary, recorded_state: "completed" } });
+  await waiting;
+  assert.equal(res.statusCode, 200); assert.equal(res.body.changed, true);
+  assert.equal(res.body.snapshot.work[0].revision, 2); assert.equal(res.body.snapshot.work[0].summary.recorded_state, "completed");
+  assert.equal(res.listenerCount("close"), 0);
+});
+
+test("room work poll digest includes truncation but only the visible bounded snapshot", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll(); await publishRoomAgentWork(f.input);
+  const [template] = await client!.db.select().from(schema!.room_agent_work);
+  for (let number = 2; number <= 51; number++) {
+    await client!.db.insert(schema!.messages).values({ room_id: f.room.id, number, sender: "Owner", text: "Visible", timestamp: new Date().toISOString() });
+    await client!.db.insert(schema!.room_agent_work).values({ ...template, attempt_id: randomUUID(), source_message_number: number });
+  }
+  const first = await f.poll(); assert.equal(first.body.snapshot.truncated, true);
+  const visibleIds = new Set(first.body.snapshot.work.map((work: any) => work.attempt_id));
+  const outside = (await client!.db.select().from(schema!.room_agent_work)).find((row) => !visibleIds.has(row.attempt_id))!;
+  await client!.db.delete(schema!.messages).where(eq(schema!.messages.number, outside.source_message_number));
+  const next = await f.poll({ after: first.body.cursor });
+  assert.equal(next.body.changed, true); assert.equal(next.body.snapshot.truncated, false);
+  assert.deepEqual(next.body.snapshot.work, first.body.snapshot.work, "only truncation changed");
+});
+
+test("room work polling rejects revoked human credentials even with an existing permissive public-room lease", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll(); await publishRoomAgentWork(f.input);
+  const weakLease = acquireLiveRoomAuthorization({ req: f.request as never, roomId: f.room.id, accessRoomName: f.room.id, authorize: async () => true });
+  try {
+    assert.equal(await weakLease.check(), true);
+    const initial = await f.poll(); const res = f.response();
+    const waiting = f.handler({ ...f.request, query: { after: initial.body.cursor, timeout: "180" } }, res);
+    await delay(30); await authDb!.deleteSessionByToken("work_poll_cookie");
+    await waiting;
+    assert.equal(await weakLease.check(), true, "the shared repository lease is deliberately still permissive");
+    assert.equal(res.statusCode, 403); assert.equal(res.body.snapshot, undefined);
+    assert.equal(res.listenerCount("close"), 0);
+  } finally { weakLease.release(); }
+  let checks = 0;
+  const freshLease = acquireLiveRoomAuthorization({ req: f.request as never, roomId: f.room.id, accessRoomName: f.room.id, authorize: async () => { checks++; return true; } });
+  try { await freshLease.check(); assert.equal(checks, 1, "polls released their shared lease references"); }
+  finally { freshLease.release(); }
+});
+
+test("room work polling rejects credential loss during authorization and repository revocation during a wait", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll(); await publishRoomAgentWork(f.input);
+  for (const race of ["credential", "repository", "lease_settlement"] as const) {
+    let checks = 0;
+    let allowed = true;
+    f.routeDeps.reauthorizeGitRoomParticipant = async () => {
+      if (++checks === 2 && race === "credential") await authDb!.deleteSessionByToken("work_poll_cookie");
+      if (checks === 2 && race === "lease_settlement") {
+        // Invalidate after the lease validates its generation, before its
+        // finally-wrapped check promise resumes the route's continuation.
+        queueMicrotask(() => queueMicrotask(() => queueMicrotask(() => {
+          allowed = false;
+          githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: f.room.id, login: "owner_route" });
+        })));
+      }
+      return allowed;
+    };
+    const warmLease = acquireLiveRoomAuthorization({ req: f.request as never, roomId: f.room.id, accessRoomName: f.room.id,
+      authorize: () => f.routeDeps.reauthorizeGitRoomParticipant() });
+    await warmLease.check();
+    const lock = await client!.pool.connect();
+    const identityLock = race === "repository" ? await client!.pool.connect() : null;
+    let pending: ReturnType<typeof f.poll> | undefined;
+    try {
+      await lock.query("BEGIN");
+      await lock.query("LOCK TABLE room_agent_work IN ACCESS EXCLUSIVE MODE");
+      pending = f.poll();
+      await waitForBlockedSelect("%select%from%room_agent_work%");
+      if (identityLock) {
+        await identityLock.query("BEGIN");
+        await identityLock.query("LOCK TABLE auth_sessions IN ACCESS EXCLUSIVE MODE");
+        await lock.query("COMMIT");
+        await waitForBlockedSelect("%select%from%auth_sessions%");
+      }
+      githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: f.room.id, login: "owner_route" });
+      await (identityLock ?? lock).query("COMMIT");
+      assert.equal((await pending).statusCode, 403, `${race} loss during the final authorization phase must deny the body`);
+      if (race === "lease_settlement") assert.equal(allowed, false);
+    } finally {
+      await lock.query("ROLLBACK"); await identityLock?.query("ROLLBACK"); await pending;
+      lock.release(); identityLock?.release(); warmLease.release();
+    }
+    if (race === "credential") await authDb!.createSession("owner_route", "work_poll_cookie", new Date(Date.now() + 60_000).toISOString());
+  }
+  f.routeDeps.reauthorizeGitRoomParticipant = async () => { await authDb!.deleteSessionByToken("work_poll_cookie"); return true; };
+  assert.equal((await f.poll()).statusCode, 403, "the pre-response credential recheck catches loss after the first check");
+  await authDb!.createSession("owner_route", "work_poll_cookie", new Date(Date.now() + 60_000).toISOString());
+  let allowed = true; f.routeDeps.reauthorizeGitRoomParticipant = async () => allowed;
+  const initial = await f.poll(); const res = f.response();
+  const waiting = f.handler({ ...f.request, query: { after: initial.body.cursor, timeout: "180" } }, res);
+  await delay(30); allowed = false;
+  githubRepoAccessInvalidationEvents.emit("invalidate", { roomName: f.room.id, login: "owner_route" });
+  await waiting; assert.equal(res.statusCode, 403); assert.equal(res.body.snapshot, undefined);
+});
+
+test("room work polling cleans up disconnects during authorization and during the wait", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  let entered!: () => void; let release!: () => void;
+  const started = new Promise<void>((resolve) => { entered = resolve; });
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  f.routeDeps.reauthorizeGitRoomParticipant = async () => { entered(); await gate; return true; };
+  const res = f.response(); const reading = f.handler(f.request, res);
+  await started; res.emit("close"); release(); await reading;
+  assert.equal(res.body, null); assert.equal(res.listenerCount("close"), 0);
+  f.routeDeps.reauthorizeGitRoomParticipant = async () => true;
+  const initial = await f.poll(); const waitingRes = f.response();
+  const waiting = f.handler({ ...f.request, query: { after: initial.body.cursor, timeout: "30000" } }, waitingRes);
+  await delay(30); waitingRes.emit("close"); await waiting;
+  assert.equal(waitingRes.body, null); assert.equal(waitingRes.listenerCount("close"), 0);
+});
+
+test("room work poll HTTP route wins over the detail route and retains human-only admission", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll(); await publishRoomAgentWork(f.input);
+  const app = express(); registerHttpMiddleware(app, { resolveRequestAuth });
+  registerRoomAgentWorkRoutes(app, f.routeDeps as never, f.routeDeps as never);
+  const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
+  });
+  try {
+    const address = server.address(); assert.ok(address && typeof address === "object");
+    const url = `http://127.0.0.1:${address.port}/rooms/room_alias/agent-work/poll?timeout=0`;
+    const response = await fetch(url, { headers: f.request.headers });
+    assert.equal(response.status, 200); assert.equal((await response.json()).changed, true);
+    assert.equal((await fetch(url)).status, 401);
+    await authDb!.createOwnerToken({ accountId: "owner_route", githubUserId: "owner_route", token: "work_poll_owner" });
+    const owner = await fetch(url, { headers: { authorization: "Bearer work_poll_owner" } });
+    assert.equal(owner.status, 200);
+    const workerHeaders = { authorization: `Bearer ${f.session.worker_bearer}` };
+    assert.equal((await resolveRequestAuth({ headers: workerHeaders } as never)).authKind, "agent_session");
+    assert.equal((await fetch(url, { headers: workerHeaders })).status, 403);
+  } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });
