@@ -61,6 +61,39 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
 
 type FakeProvider = "codex" | "claude-code" | "open-model";
 
+test("custodial activation router forwards exact Codex callbacks and refuses unsupported or forged handles", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("codex", calls);
+  adapter.activateCustodialPolling = async (_handle, _request, options) => {
+    await options.beforeNativeDispatch();
+    calls.push("native:start");
+    await options.checkpointTurnStarted("native-exact");
+    return { providerTurnId: "native-exact" };
+  };
+  const router = new ProviderActionPortRouter({ codex: async () => adapter, "claude-code": async () => fakeAdapter("claude-code", calls) });
+  const spawn = { workAttemptId: "activation", roomId: "room", cwd: "/repo", launchPolicy: {}, provider: "codex" };
+  const handle = await router.spawn(spawn);
+  const request = { operationId: "operation", roomId: "room", cwd: "/repo", agentDisplayName: "Garden",
+    workerSession: { agentSessionId: "session", roomCursor: "msg_4" },
+    launchReceipt: { contract: "custodial_polling_v1" as const, agentSessionId: "session", configurationRevision: 1,
+      workAttemptId: handle.workAttemptId, providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! } };
+  const options = { beforeNativeDispatch: async () => { calls.push("intent"); }, checkpointTurnStarted: async (id: string) => { calls.push(`checkpoint:${id}`); } };
+  assert.deepEqual(await router.activateCustodialPolling(handle, request, options), { providerTurnId: "native-exact" });
+  assert.deepEqual(calls.slice(-3), ["intent", "native:start", "checkpoint:native-exact"]);
+  await assert.rejects(router.activateCustodialPolling({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "forged" } }, request, options));
+  delete adapter.activateCustodialPolling;
+  await assert.rejects(router.activateCustodialPolling(handle, request, options), /unavailable/);
+  const other = await router.spawn({ ...spawn, workAttemptId: "other", provider: "claude-code" });
+  await assert.rejects(router.activateCustodialPolling(other, request, options), /exact owned Codex/);
+  assert.equal(calls.filter(value => value === "native:start").length, 1);
+  assert.deepEqual(await router.inspectCustodialPollingActivation(other, "native-exact"), { state: "unknown" });
+  assert.deepEqual(await router.inspectCustodialPollingActivation(handle, "native-exact"), { state: "unknown" });
+  adapter.inspectCustodialPollingActivation = async (_handle, id) => {
+    assert.equal(id, "native-exact"); return { state: "terminal", outcome: "failed" };
+  };
+  assert.deepEqual(await router.inspectCustodialPollingActivation(handle, "native-exact"), { state: "terminal", outcome: "failed" });
+});
+
 function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAdapter {
   const handles = new Map<string, ReturnType<typeof nativeHandle>>();
   let nextPid = provider === "codex" ? 100 : provider === "claude-code" ? 200 : 300;

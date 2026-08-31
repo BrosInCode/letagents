@@ -1,12 +1,15 @@
 import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
 import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
-import type { DeliveryDrainIdentity, DeliveryDrainRequest } from "./delivery-cutover-execution-coordinator.js";
+import type { DeliveryDrainIdentity, DeliveryDrainRequest, PollingActivationRequest } from "./delivery-cutover-execution-coordinator.js";
 
 /**
  * The socket router owns protocol parsing and response shaping. Operations are
  * bound by SupervisorDaemon, which remains the authority owner.
  */
 export interface DaemonControlOperations {
+  activateCustodialPolling(input: PollingActivationRequest): unknown;
+  getPollingActivation(input: DeliveryDrainIdentity): unknown;
+  cancelPollingActivation(input: DeliveryDrainIdentity): unknown;
   prepareDeliveryDrain(input: DeliveryDrainRequest): unknown;
   getDeliveryDrain(input: DeliveryDrainIdentity): unknown;
   cancelDeliveryDrain(input: DeliveryDrainIdentity): unknown;
@@ -160,6 +163,25 @@ export function createDaemonControlRequestHandler(
       return { accepted: true, generation: context.currentGeneration() };
     }
     if (request.method === "manifest.list") return operations.listManifest();
+    if (request.method === "supervisor.activate_custodial_polling"
+      || request.method === "supervisor.get_polling_activation"
+      || request.method === "supervisor.cancel_polling_activation") {
+      const params = paramsRecord(request.params);
+      const error = "Polling activation requires exact typed coordinates and the current daemon generation.";
+      if (positiveIntegerParam(params, "daemon_generation", error) !== context.currentGeneration()) throw new Error(error);
+      const identity = {
+        entryId: requiredStringParam(params, "entry_id", error),
+        operationId: requiredStringParam(params, "operation_id", error),
+      };
+      if (request.method === "supervisor.get_polling_activation") return operations.getPollingActivation(identity);
+      if (request.method === "supervisor.cancel_polling_activation") return operations.cancelPollingActivation(identity);
+      return operations.activateCustodialPolling({ ...identity,
+        requestId: requiredStringParam(params, "request_id", error),
+        roomId: requiredStringParam(params, "room_id", error),
+        executionGenerationId: requiredStringParam(params, "execution_generation_id", error),
+        reverseOperationId: requiredStringParam(params, "reverse_operation_id", error),
+      });
+    }
     if (request.method === "supervisor.prepare_delivery_drain"
       || request.method === "supervisor.get_delivery_drain"
       || request.method === "supervisor.cancel_delivery_drain") {

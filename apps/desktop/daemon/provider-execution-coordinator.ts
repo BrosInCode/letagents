@@ -43,6 +43,7 @@ import type {
 } from "./worker-runtime-custody.js";
 
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
+import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
@@ -58,6 +59,7 @@ export type ProviderExecutionConfiguration = {
 
 export type ProviderExecutionStore = {
   unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
+  unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null>;
   load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
@@ -543,6 +545,7 @@ export class ProviderExecutionCoordinator {
         provider_continuation_id: handle.providerContinuationId!,
         provider_connection: handle.providerConnection ?? null,
         execution_generation_id: executionGenerationId,
+        ...(handle.custodyLaunchAgentSessionId ? { custodial_launch_agent_session_id: handle.custodyLaunchAgentSessionId } : {}),
       },
     }));
   }
@@ -622,6 +625,7 @@ export class ProviderExecutionCoordinator {
           provider_continuation_id: handle.providerContinuationId,
           provider_connection: handle.providerConnection ?? null,
           execution_generation_id: executionGenerationId,
+          ...(handle.custodyLaunchAgentSessionId ? { custodial_launch_agent_session_id: handle.custodyLaunchAgentSessionId } : {}),
         },
       };
       try {
@@ -657,6 +661,8 @@ export class ProviderExecutionCoordinator {
     mayStartDelivery: () => boolean = () => true,
   ): Promise<ProviderActionHandle | null> {
     if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entry.id))) return null;
+    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
+    if (activation && !matchesPollingActivationRuntime(activation, entry)) return null;
     const ref = entry.provider_ref;
     if (!ref) return null;
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
@@ -693,6 +699,9 @@ export class ProviderExecutionCoordinator {
       return null;
     }
     const handle = attachment;
+    if (activation && !matchesPollingActivationRuntime(activation, entry, handle)) {
+      throw new Error("Attached provider does not match the unresolved polling activation.");
+    }
     let authoritativeEntry = entry;
     if (handle.providerConnection && ref.provider_connection
       && !sameProviderActionConnectionIdentity(
@@ -730,6 +739,7 @@ export class ProviderExecutionCoordinator {
     );
     const binding = await this.options.bindings.get(authoritativeEntry.id);
     if ((authoritativeEntry.delivery_mode ?? "mcp_polling") === "mcp_polling"
+      && !await this.options.host.requiresGrant(authoritativeEntry)
       && binding && binding.execution_generation_id !== ref.execution_generation_id) {
       try {
         await this.options.streams.stageWorkerBindingAfterResume(
@@ -790,6 +800,8 @@ export class ProviderExecutionCoordinator {
     initialControlEpoch: number,
   ): Promise<void> {
     let entry = initialEntry;
+    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
+    if (activation && !matchesPollingActivationRuntime(activation, entry, this.options.streams.get(entry.id))) return;
     let launchControlEpoch = initialControlEpoch;
     if (entry.condition === "quarantined") return;
     if (entry.id.startsWith("supervised_rental_")) {
@@ -880,6 +892,8 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
   ): Promise<void> {
     let entry = initialEntry;
+    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
+    if (activation && !matchesPollingActivationRuntime(activation, entry, handle)) return;
     const grant = this.options.host.currentGrant(entry);
     const daemonGeneration = this.options.authority.currentDaemonGeneration();
     const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
@@ -1008,8 +1022,9 @@ export class ProviderExecutionCoordinator {
     initialEntry: DaemonManifestEntry,
     initialControlEpoch: number,
   ): Promise<void> {
-    // A drain may recover the exact old handle, never create a successor.
-    if (await this.options.store.unresolvedDeliveryDrain(initialEntry.id)) return;
+    // Unresolved native dispatch may recover its exact handle, never replay in a successor.
+    if (await this.options.store.unresolvedDeliveryDrain(initialEntry.id)
+      || await this.options.store.unresolvedPollingActivation(initialEntry.id)) return;
     let entry = initialEntry;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);
@@ -1489,10 +1504,15 @@ export class ProviderExecutionCoordinator {
 
   private async convergeStopped(entry: DaemonManifestEntry): Promise<void> {
     let handle = this.options.streams.get(entry.id) ?? null;
+    const activation = await this.options.store.unresolvedPollingActivation(entry.id);
+    if (activation && !matchesPollingActivationRuntime(activation, entry, handle ?? undefined)) return;
+    if (activation && !this.options.provider.stopRef) throw new Error("Polling activation requires exact-reference provider stop.");
+    const exactActivationRef = activation ? entry.provider_ref : null;
     const exactCursorRef = entry.provider_ref?.provider_connection?.kind === "cursor_cli"
       ? entry.provider_ref
       : null;
-    if (!handle && exactCursorRef && this.options.provider.stopRef) {
+    const exactStopRef = exactActivationRef ?? (!handle ? exactCursorRef : null);
+    if (exactStopRef && this.options.provider.stopRef) {
       await this.options.transition(
         entry.id,
         "stopping",
@@ -1503,20 +1523,20 @@ export class ProviderExecutionCoordinator {
       const terminal = await this.options.provider.stopRef(this.providerRef(entry), {
         actionId: `manifest:${entry.id}:${entry.desired_state}:${this.options.nowMs()}`,
       });
-      const attempt = await this.options.durability.getAttempt(exactCursorRef.work_attempt_id);
+      const attempt = await this.options.durability.getAttempt(exactStopRef.work_attempt_id);
       const execution = attempt.execution_generations.find(
         (candidate) => candidate.execution_generation_id
-          === exactCursorRef.execution_generation_id,
+          === exactStopRef.execution_generation_id,
       );
       if (!execution) {
         throw new Error(
-          "Cursor exact-reference stop has no matching durable execution generation.",
+          "Provider exact-reference stop has no matching durable execution generation.",
         );
       }
       if (!execution.terminal) {
         await this.options.durability.recordTerminal(
-          exactCursorRef.work_attempt_id,
-          exactCursorRef.execution_generation_id,
+          exactStopRef.work_attempt_id,
+          exactStopRef.execution_generation_id,
           {
             ...this.options.terminalPayload(terminal, execution.actor),
             actor: execution.actor,
@@ -1525,8 +1545,8 @@ export class ProviderExecutionCoordinator {
         );
         if (entry.desired_state === "stopped") {
           await this.options.durability.releaseTerminalExecutionFence(
-            exactCursorRef.work_attempt_id,
-            exactCursorRef.execution_generation_id,
+            exactStopRef.work_attempt_id,
+            exactStopRef.execution_generation_id,
           );
         }
       }
@@ -1534,7 +1554,8 @@ export class ProviderExecutionCoordinator {
         entry.id,
         terminal,
         "daemon-provider",
-        exactCursorRef.execution_generation_id,
+        exactStopRef.execution_generation_id,
+        handle ?? undefined,
       );
       return;
     }

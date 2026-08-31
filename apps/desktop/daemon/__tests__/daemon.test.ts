@@ -1293,6 +1293,152 @@ test("reverse drain socket and daemon restart preserve stop intent without a suc
   } finally { await successor?.stop(); await env.cleanup(); }
 });
 
+test("custodial polling socket activation is generation-fenced and restart never dispatches prepared or uncertain work", async () => {
+  const oldProcess = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });
+  await new Promise<void>((resolve, reject) => { oldProcess.once("spawn", resolve); oldProcess.once("error", reject); });
+  const oldPid = oldProcess.pid!;
+  const birth = (pid: number) => execFileSync("/bin/ps", ["-p", String(pid), "-o", "lstart="], { encoding: "utf8" }).trim();
+  const oldConnection = { kind: "codex_app_server" as const, pid: oldPid, processIdentity: birth(oldPid), url: "ws://127.0.0.1:7123" };
+  const currentConnection = { ...oldConnection, pid: process.pid, processIdentity: birth(process.pid) };
+  let nativeStarts = 0;
+  let behavior: "success" | "before_dispatch_failure" | "lost_ack" = "success";
+  let terminal = false;
+  let currentHandle: ProviderActionHandle | undefined;
+  const env = await observationDaemonFixture(async () => ({ mode: "typed_shadow", dispose() {} }), "codex", {
+    preflightCustodialPolling: async () => {},
+    inspectTurnBoundary: async handle => ({ state: "idle", providerContinuationId: handle.providerContinuationId!,
+      nativeProcessIdentity: handle.providerConnection!.processIdentity!, latestProviderTurnId: null }),
+    stopRef: async ref => {
+      assert.deepEqual(ref.providerConnection, oldConnection);
+      const exited = new Promise<void>(resolve => oldProcess.once("exit", () => resolve()));
+      oldProcess.kill("SIGTERM"); await exited;
+      return { endedAt: new Date().toISOString(), exitCode: null, signal: "SIGTERM", terminalCause: "stopped", providerContinuationId: ref.providerContinuationId };
+    },
+    activateCustodialPolling: async (handle, request, callbacks) => {
+      assert.equal(handle, currentHandle);
+      assert.equal(request.launchReceipt.agentSessionId, "polling-worker");
+      assert.deepEqual(request.launchReceipt.providerConnection, currentConnection);
+      assert.equal(request.workerSession.roomCursor, "100");
+      if (behavior === "before_dispatch_failure") throw new Error("test transport unavailable before dispatch");
+      await callbacks.beforeNativeDispatch(); nativeStarts += 1;
+      if (behavior === "lost_ack") throw new Error("test native acknowledgement lost");
+      await callbacks.checkpointTurnStarted("exact-polling-turn");
+      return { providerTurnId: "exact-polling-turn" };
+    },
+    inspectCustodialPollingActivation: async (handle, turnId) => {
+      assert.deepEqual(handle.providerConnection, currentConnection);
+      assert.equal(turnId, "exact-polling-turn");
+      return terminal ? { state: "terminal", outcome: "completed" } : { state: "active" };
+    },
+  }, oldConnection).catch(error => { oldProcess.kill("SIGTERM"); throw error; });
+  let daemon = env.daemon;
+  type Internals = typeof env.internals & {
+    authority: { generation: number; fenceDaemonCommit<T>(commit: () => Promise<T>): Promise<T> };
+    updateManifestEntry(id: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry): Promise<DaemonManifestEntry>;
+    deliveryCutovers: { start(id: string): Promise<void> };
+  };
+  let internals = daemon as unknown as Internals;
+  const generation = async () => ((await daemonRequest(env.paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+  const grant = async () => {
+    const response = await daemonRequest(env.paths.socketPath, "supervisor.install_host_grant", {
+      entry_id: env.id, room_id: entry.room_id, agent_key: "owner/agent", grant_id: "polling-grant", supervisor_grant: "test-parent",
+      grant_generation: 1, api_url: "https://example.test", daemon_generation: await generation(),
+      host_id: "host", installation_id: "installation", grant_expires_at: "2099-01-01T00:00:00.000Z", recovery_only: true,
+    });
+    assert.equal(response.ok, true, response.error);
+    assert.equal((response.result as { status: string }).status, "installed");
+  };
+  try {
+    assert.equal((await stat(env.paths.socketPath)).mode & 0o777, 0o600, "activation uses the owner-only control endpoint");
+    internals.liveHandles.set(env.id, env.handle);
+    await internals.supervisedInbox.bootstrapCursor({ agent_id: env.id, room_id: entry.room_id, last_observed_message_id: "100" });
+    const reverse = await daemonRequest(env.paths.socketPath, "supervisor.prepare_delivery_drain", {
+      entry_id: env.id, operation_id: "socket-reverse", request_id: "socket-reverse-request", room_id: entry.room_id,
+      execution_generation_id: env.generation, daemon_generation: await generation(),
+    });
+    assert.equal(reverse.ok, true, reverse.error);
+    await internals.deliveryCutovers.start(env.id);
+    assert.equal((await internals.store.getDeliveryDrain("socket-reverse"))?.phase, "complete");
+    assert.equal(oldProcess.signalCode, "SIGTERM", "real OS death, not protocol terminal data, authorized the predecessor");
+    await internals.durability.recordTerminal(env.handle.workAttemptId, env.generation, {
+      ended_at: new Date().toISOString(), exit_code: null, signal: "SIGTERM", stdio_archive_ref: null, stdio_tail: "",
+      terminal_cause: "stopped", actor: "daemon-provider", generation: 1, provider_continuation_id: env.handle.providerContinuationId,
+    });
+    const execution = await internals.durability.startGeneration(env.handle.workAttemptId, "daemon-provider", 2);
+    const config = (await internals.store.getAgentConfiguration(env.id))!;
+    // Only the native adapter is represented by a fixture handle: its receipt
+    // names the actual launch session, while both process births came from ps.
+    currentHandle = { ...env.handle, pid: process.pid, providerConnection: currentConnection, observedState: "idle",
+      custodyLaunchAgentSessionId: "polling-worker", appliedConfigurationRevision: config.config_revision };
+    await internals.updateManifestEntry(env.id, current => ({ ...current,
+      run_id: execution.execution_generation_id, deployment_id: serializeDaemonDeploymentId(env.id, execution.execution_generation_id),
+      provider_ref: { work_attempt_id: env.handle.workAttemptId, execution_generation_id: execution.execution_generation_id,
+        provider_continuation_id: currentHandle!.providerContinuationId!, provider_connection: currentConnection,
+        custodial_launch_agent_session_id: currentHandle!.custodyLaunchAgentSessionId! },
+    }));
+    const applied = await internals.store.markRuntimeConfigurationApplied(internals.authority.generation, {
+      agentId: env.id, executionGenerationId: execution.execution_generation_id, appliedRevision: config.config_revision,
+    }, commit => internals.authority.fenceDaemonCommit(commit));
+    internals.authority.generation = applied.generation;
+    const binding = await internals.workerBindings.bind({ entry_id: env.id, room_id: entry.room_id,
+      work_attempt_id: env.handle.workAttemptId, execution_generation_id: execution.execution_generation_id,
+      agent_session_id: "polling-worker", agent_session_token: "test-worker", api_url: "https://example.test" });
+    await internals.workerBindings.checkpointCursor(env.id, binding.agent_session_id, execution.execution_generation_id, "100");
+    await internals.workerBindings.recordSupervisedWorkerSession({ agent_id: env.id, room_id: entry.room_id,
+      execution_generation_id: execution.execution_generation_id, agent_session_id: binding.agent_session_id,
+      credential_ref: binding.credential_ref, expires_at: "2099-01-01T00:00:00.000Z" });
+    internals.liveHandles.set(env.id, currentHandle); await grant();
+    const params = { entry_id: env.id, operation_id: "socket-activation", request_id: "socket-activation-request",
+      room_id: entry.room_id, execution_generation_id: execution.execution_generation_id, reverse_operation_id: "socket-reverse",
+      daemon_generation: await generation() };
+    assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", { ...params, daemon_generation: params.daemon_generation + 1 })).ok, false);
+    assert.equal(await internals.store.getPollingActivation(params.operation_id), null); assert.equal(nativeStarts, 0);
+    const activated = await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", params);
+    assert.equal(activated.ok, true, activated.error);
+    const record = (await internals.store.getPollingActivation(params.operation_id))!;
+    assert.equal(record.phase, "active"); assert.equal(record.provider_turn_id, "exact-polling-turn");
+    assert.equal(record.execution_generation_id, execution.execution_generation_id);
+    assert.equal(record.native_process_identity, currentConnection.processIdentity);
+    assert.equal(record.agent_session_id, "polling-worker"); assert.equal(nativeStarts, 1);
+    terminal = true; await internals.deliveryCutovers.start(env.id);
+    assert.equal((await internals.store.getPollingActivation(params.operation_id))?.phase, "complete");
+    const duplicate = await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", params);
+    assert.equal(duplicate.ok, true, duplicate.error);
+    assert.equal((duplicate.result as { phase: string }).phase, "complete"); assert.equal(nativeStarts, 1);
+
+    const recovery = { ...params, operation_id: "socket-recovery", request_id: "socket-recovery-request" };
+    behavior = "before_dispatch_failure";
+    const prepared = await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", recovery);
+    assert.equal(prepared.ok, false); assert.match(prepared.error ?? "", /before dispatch/);
+    assert.equal((await internals.store.getPollingActivation(recovery.operation_id))?.phase, "prepared");
+    for (const phase of ["prepared", "uncertain"] as const) {
+      const startsBeforeRestart = nativeStarts;
+      await daemon.stop();
+      // Startup's unresolved-journal observer is live even with provider
+      // auto-convergence disabled, exactly as in observationDaemonFixture.
+      daemon = new SupervisorDaemon(env.paths, "darwin", env.port, false);
+      internals = daemon as unknown as Internals;
+      await daemon.start(); await internals.deliveryCutovers.start(env.id);
+      assert.equal(nativeStarts, startsBeforeRestart, `${phase} startup must never start a native turn`);
+      assert.equal((await internals.store.getPollingActivation(recovery.operation_id))?.phase, phase);
+      assert.equal((await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", recovery)).ok, false, "retired daemon generation cannot dispatch");
+      recovery.daemon_generation = await generation();
+      internals.liveHandles.set(env.id, currentHandle); await grant();
+      await internals.workerBindings.installCredential({ entry_id: env.id, agent_session_id: binding.agent_session_id,
+        execution_generation_id: execution.execution_generation_id, agent_session_token: "test-worker" });
+      behavior = "lost_ack";
+      const retry = await daemonRequest(env.paths.socketPath, "supervisor.activate_custodial_polling", recovery);
+      assert.equal(retry.ok, true, retry.error);
+      assert.equal((retry.result as { phase: string }).phase, "uncertain");
+      assert.equal(nativeStarts, phase === "prepared" ? startsBeforeRestart + 1 : startsBeforeRestart);
+      assert.equal((await internals.store.getPollingActivation(recovery.operation_id))?.provider_turn_id, null);
+    }
+  } finally {
+    await daemon.stop(); await env.cleanup();
+    if (oldProcess.exitCode === null && oldProcess.signalCode === null) oldProcess.kill("SIGTERM");
+  }
+});
+
 for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only committed native-turn identity and fences live observation on ${shutdown}`, async () => {
   let listener: ((event: NativeExecutionObservation) => void) | undefined;
   let disposed = 0;
@@ -6786,7 +6932,6 @@ test(`two Codex room agents keep independent provider executions across stop, re
   const resumeRequests: Array<[entryId: string, workAttemptId: string, continuation: string]> = [];
   const stopRequests: string[] = [];
   const deliveredTurns: Array<{ workAttemptId: string; turnId: string }> = [];
-  const custodialBeforeRequests: Array<Record<string, unknown>> = [];
   let nextPid = 6100;
   const nativeHandle = (runtime: Runtime) => ({
     workAttemptId: runtime.workAttemptId,
@@ -6961,8 +7106,8 @@ test(`two Codex room agents keep independent provider executions across stop, re
           daemon_generation: daemonGeneration, api_url: "http://127.0.0.1:9", contract: "custodial_polling_v1",
           phase: "before", tool_name: "read_messages",
         });
-        assert.equal(admitted.ok, true, admitted.error);
-        assert.equal((admitted.result as { room_cursor: string }).room_cursor, "msg_47");
+        assert.equal(admitted.ok, false, "grant recovery cannot activate a dormant custodial runtime");
+        assert.match(admitted.error ?? "", /activation/);
         continue;
       }
       await eventually(async () => polls.some((poll) => poll.bearer === credential && poll.afterMessageId === "msg_41"),
@@ -7027,7 +7172,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
       finally { db.close(); }
       const durability = (daemon as unknown as { durability: WorkDurabilityStore }).durability;
       for (const current of beforeRestart) await durability.checkpoint(current.work_attempt_id!, {
-        room_cursor: "msg_41", provider_continuation_id: current.provider_ref!.provider_continuation_id,
+        room_cursor: "msg_47", provider_continuation_id: current.provider_ref!.provider_continuation_id,
       });
       await installGrants();
       const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
@@ -7039,46 +7184,17 @@ test(`two Codex room agents keep independent provider executions across stop, re
           phase: "before", tool_name: "wait_for_messages",
         };
         const admitted = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params);
-        assert.equal(admitted.ok, true, admitted.error);
-        assert.equal((admitted.result as { room_cursor: string }).room_cursor, "msg_41");
-        const revision = (admitted.result as { configuration_revision: number }).configuration_revision;
-        custodialBeforeRequests.push({ ...params, phase: "release", expected_configuration_revision: revision });
-        for (const wrong of [{ agent_session_id: "unowned-worker" }, { room_id: "other-room" },
-          { execution_generation_id: "other-generation" }, { daemon_generation: generation + 1 }]) {
-          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", { ...params, ...wrong })).ok, false);
-        }
-        const stale = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
-          ...params, phase: "release", expected_configuration_revision: revision + 1,
-        });
-        assert.equal(stale.ok, false);
-        const pendingDb = new DatabaseSync(paths.manifestPath);
-        try {
-          pendingDb.prepare("UPDATE agent_configurations SET config_revision=config_revision+1 WHERE agent_id=?").run(current.id);
-          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params)).ok, false,
-            "unapplied configuration cannot authorize an old runtime");
-          pendingDb.prepare("UPDATE agent_configurations SET config_revision=config_revision-1 WHERE agent_id=?").run(current.id);
-          pendingDb.prepare("UPDATE supervised_worker_sessions SET expires_at='2000-01-01T00:00:00.000Z' WHERE agent_id=?").run(current.id);
-          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params)).ok, false,
-            "an in-memory credential is not authority after its worker expiry");
-          assert.equal(((await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", params)).result as { status: string }).status, "stale");
-          pendingDb.prepare("UPDATE supervised_worker_sessions SET expires_at='2099-01-01T00:00:00.000Z' WHERE agent_id=?").run(current.id);
-        } finally { pendingDb.close(); }
-        const custody = (daemon as unknown as { workerRuntimeCustody: WorkerRuntimeCustody }).workerRuntimeCustody;
-        const grant = custody.currentHostGrant({ entryId: current.id, roomId: current.room_id }, generation, false)!;
-        assert.ok(grant);
-        const freshExpiry = grant.expiresAt;
-        try {
-          grant.expiresAt = "2000-01-01T00:00:00.000Z";
-          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params)).ok, false,
-            "expired host grant refuses admission despite still-live provider and bearer");
-          assert.equal(((await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", params)).result as { status: string }).status, "stale");
-        } finally { grant.expiresAt = freshExpiry; }
+        assert.equal(admitted.ok, false, "changing the contract does not authorize native work");
+        assert.match(admitted.error ?? "", /activation/);
+        // Active expiry/revision/identity tests now live beside the explicit
+        // activation gate in worker-authority-coordinator.test.ts. This older
+        // fixture proves only dormant grant/worker recovery, not activation.
         assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
-          ...params, phase: "release", expected_configuration_revision: revision,
-        })).ok, true);
+          ...params, phase: "release", expected_configuration_revision: 1,
+        })).ok, false);
         assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
-          ...params, room_cursor: "msg_47",
-        })).ok, true);
+          ...params, room_cursor: "msg_48",
+        })).ok, false, "dormant processes cannot advance the acknowledged cursor");
       }
     }
     await assertOwnedBindings(beforeRestart);
@@ -7137,10 +7253,6 @@ test(`two Codex room agents keep independent provider executions across stop, re
       ].sort(([left], [right]) => left.localeCompare(right)),
     );
     const afterRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-    if (custodial) for (const staleRelease of custodialBeforeRequests) {
-      assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", staleRelease)).ok, false,
-        "successor daemon must not authorize an old response release");
-    }
     await assertOwnedBindings(afterRestart);
     for (const prior of beforeRestart) {
       const reattached = afterRestart.find((candidate) => candidate.id === prior.id)!;

@@ -1,5 +1,5 @@
 export const DAEMON_PROTOCOL_VERSION = 2;
-export const DAEMON_IMPLEMENTATION_VERSION = "2.0.111";
+export const DAEMON_IMPLEMENTATION_VERSION = "2.0.112";
 
 export type DesiredState = "running" | "paused" | "stopped";
 export type ObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
@@ -197,6 +197,8 @@ export type DaemonProviderConnection =
   | { kind: "opencode_server"; url: string; pid: number | null; processIdentity?: string | null; serverAuthPath: string };
 
 export type DaemonProviderRuntimeReference = {
+  /** Non-secret worker identity actually installed in this native runtime's MCP environment. */
+  custodial_launch_agent_session_id?: string | null;
   work_attempt_id: string;
   provider_continuation_id: string;
   provider_connection: DaemonProviderConnection | null;

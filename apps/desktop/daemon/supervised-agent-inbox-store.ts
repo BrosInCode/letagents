@@ -3,6 +3,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
+import { assertNoPollingActivation } from "./custodial-polling-activation.js";
 import {
   pruneSupervisedAgentHistory,
   readDurableNativeFailure,
@@ -1100,6 +1101,7 @@ export class SupervisedAgentInboxStore {
           WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id);
         if (unresolvedControl) throw new Error("Room move is blocked by unresolved turn control.");
         assertNoDeliveryDrain(database, input.agent_id);
+        assertNoPollingActivation(database, input.agent_id);
         const timestamp = this.now();
         const sourceCursor = database.prepare("SELECT last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=? AND room_id=?")
           .get(input.agent_id, input.room_id) as Row | undefined;
@@ -1317,6 +1319,7 @@ export class SupervisedAgentInboxStore {
   }): Promise<ProviderContinuationRepair> {
     return this.exclusive(async (database) => this.transaction(database, () => {
       assertNoDeliveryDrain(database, input.agent_id);
+      assertNoPollingActivation(database, input.agent_id);
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inbox_item_id) as Row | undefined;
       if (!row) throw new Error("The blocked room message no longer exists.");
       const item = rowToItem(row);

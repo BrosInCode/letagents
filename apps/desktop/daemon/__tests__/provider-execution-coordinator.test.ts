@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import {
@@ -13,6 +14,7 @@ import type {
 import type { DaemonManifestEntry, ExecutionTerminalPayload } from "../types.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-runtime-custody.js";
+import type { PollingActivationRecord } from "../custodial-polling-activation.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -106,6 +108,7 @@ function harness(input: {
     provider: port,
     store: {
       unresolvedDeliveryDrain: async () => null,
+      unresolvedPollingActivation: async () => null,
       load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,
       getAgentConfiguration: async () => ({
@@ -299,7 +302,7 @@ test("handoff during native dispatch journals the exact returned provider withou
   const port = provider({
     spawn: async () => {
       runtime.setHandoff(true);
-      return returnedHandle;
+      return { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" };
     },
   });
   runtime = harness({ provider: port });
@@ -308,6 +311,7 @@ test("handoff during native dispatch journals the exact returned provider withou
 
   assert.equal(runtime.entry().provider_ref?.provider_continuation_id, "continuation-1");
   assert.equal(runtime.entry().provider_ref?.execution_generation_id, "generation-1");
+  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, "launched-worker");
   assert.deepEqual(
     runtime.checkpoints,
     [],
@@ -315,6 +319,14 @@ test("handoff during native dispatch journals the exact returned provider withou
   );
   assert.equal(runtime.installed.length, 0, "retiring daemon never owns returned-handle callbacks");
   await runtime.coordinator.drainDispatches();
+});
+
+test("ordinary persistence keeps only the worker identity receipted by the native launch", async () => {
+  const runtime = harness();
+  await runtime.coordinator.persistProviderHandle("agent-1", { ...returnedHandle, custodyLaunchAgentSessionId: "launched-worker" }, "generation-1");
+  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, "launched-worker");
+  await runtime.coordinator.persistProviderHandle("agent-1", returnedHandle, "generation-2");
+  assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, undefined, "a successor cannot inherit an unreceipted worker identity");
 });
 
 test("legacy resume stages wait authority from the persisted successor rather than the predecessor snapshot", async () => {
@@ -444,6 +456,52 @@ test("daemon-owned reattach binds the current generation despite a still-present
   assert.equal(runtime.deliveryStarts, 1);
   assert.equal(runtime.waitStages, 0);
   assert.deepEqual(runtime.failures, []);
+});
+
+test("unresolved polling activation permits exact recovery and explicit stop but never a successor", async () => {
+  for (const phase of ["prepared", "dispatching", "uncertain", "active"] as const) {
+    const runtime = ownedRecoveryHarness();
+    runtime.setEntry({ ...runtime.entry(), delivery_mode: "mcp_polling", provider_ref: {
+      ...runtime.entry().provider_ref!, custodial_launch_agent_session_id: "session-1",
+    } });
+    runtime.options.store.getAgentConfiguration = async () => ({ provider: "codex", model: null, reasoning_effort: null,
+      permission_profile_id: "full_access", provider_launch_policy: {}, config_revision: 1, polling_contract: "custodial_polling_v1" });
+    const activation: PollingActivationRecord = {
+      operation_id: "activation-1", request_id: "activate-1", reverse_operation_id: "reverse-1",
+      agent_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "generation-2",
+      native_continuation_id: "continuation-1", native_connection_kind: "codex_app_server", native_pid: 4242,
+      native_process_identity: "birth-4242", native_connection_sha256: createHash("sha256").update(JSON.stringify([
+        "codex_app_server", "http://127.0.0.1:4242", 4242, "birth-4242",
+      ])).digest("hex"), config_revision: 1, agent_session_id: "session-1", room_cursor: "7", phase,
+      provider_turn_id: phase === "active" ? "native-turn" : null, terminal_outcome: null, created_at_ms: 1, updated_at_ms: 1,
+    };
+    runtime.options.store.unresolvedPollingActivation = async () => activation;
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(runtime.installed.length, 1, phase);
+    assert.equal(runtime.mintCalls, 1, "the exact runtime can recover its worker without polling evidence");
+    assert.equal(runtime.waitStages, 0);
+    assert.equal(runtime.deliveryStarts, 0);
+    assert.equal(runtime.executionGenerations.length, 1);
+
+    runtime.executionGenerations[0]!.terminal = runtime.options.terminalPayload(terminal(returnedHandle), "test");
+    runtime.liveHandles.clear();
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(runtime.executionGenerations.length, 1, "a terminal runtime cannot replay an unresolved activation in a successor");
+    let stops = 0;
+    runtime.options.provider.stopRef = async (ref) => {
+      stops++;
+      assert.equal(ref.providerConnection?.processIdentity, activation.native_process_identity);
+      return terminal(returnedHandle);
+    };
+    runtime.options.provider.stop = async () => { throw new Error("cached stop cannot prove activation writer death"); };
+    runtime.setEntry({ ...runtime.entry(), desired_state: phase === "active" ? "stopped" : "paused" });
+    if (phase !== "uncertain") runtime.liveHandles.set("agent-1", returnedHandle);
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(stops, 1, "Pause/Stop is available both attached and after transport loss");
+    runtime.setEntry({ ...runtime.entry(), provider_ref: { ...runtime.entry().provider_ref!, provider_continuation_id: "successor" } });
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(stops, 1, "the old activation never stops a replacement runtime");
+  }
 });
 
 test("draining preserves exact old-provider recovery while dispatching refuses attach", async () => {

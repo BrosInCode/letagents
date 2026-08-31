@@ -5,6 +5,11 @@ import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
+  assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
+  getPollingActivation, markPollingActivationDispatch, markPollingActivationUncertain, preparePollingActivation, unresolvedPollingActivation,
+  type CompletePollingActivation, type DispatchPollingActivation, type PollingActivationRecord, type PreparePollingActivation,
+} from "./custodial-polling-activation.js";
+import {
   assertNoDeliveryDrain, cancelDeliveryDrain, commitDeliveryDrain, deliveryDrainReadiness,
   markDeliveryDrainDispatch, markDeliveryDrainUncertain, prepareDeliveryDrain, readDeliveryDrain, unresolvedDeliveryDrain,
   type DeliveryDrainReadiness, type DeliveryDrainRecord, type DispatchDeliveryDrain, type PrepareDeliveryDrain,
@@ -160,7 +165,7 @@ export class ManifestStore {
         d.provider_connection_kind, d.provider_connection_url, d.provider_server_auth_path,
         d.provider_connection_pid,
         d.provider_process_identity_present,
-        d.provider_process_identity, d.provider_execution_generation_id,
+        d.provider_process_identity, d.provider_execution_generation_id, d.custodial_launch_agent_session_id,
         d.workplace_liveness_present, d.workplace_liveness_state,
         d.workplace_liveness_observed_at, d.workplace_liveness_detail,
         d.native_liveness_present, d.native_liveness_state,
@@ -229,7 +234,7 @@ export class ManifestStore {
   /** Internal drain admission only. This does not switch modes or interrupt a provider. */
   async prepareDeliveryDrain(input: PrepareDeliveryDrain, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; cutover: DeliveryDrainRecord }> {
     const snapshot = structuredClone(input);
-    return this.writeDeliveryDrain((database) => prepareDeliveryDrain(database, snapshot,
+    return this.writeOperationalJournal((database) => prepareDeliveryDrain(database, snapshot,
       this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
   }
 
@@ -243,22 +248,22 @@ export class ManifestStore {
 
   async cancelDeliveryDrain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
     const snapshot = { ...input };
-    return this.writeDeliveryDrain((database) => cancelDeliveryDrain(database, snapshot), commitFence);
+    return this.writeOperationalJournal((database) => cancelDeliveryDrain(database, snapshot), commitFence);
   }
 
   async deliveryDrainReadiness(operationId: string): Promise<DeliveryDrainReadiness> {
-    return this.writeDeliveryDrain((database) => deliveryDrainReadiness(database, operationId));
+    return this.writeOperationalJournal((database) => deliveryDrainReadiness(database, operationId));
   }
 
   async markDeliveryDrainDispatch(input: DispatchDeliveryDrain, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
     const snapshot = structuredClone(input);
-    return this.writeDeliveryDrain((database) => markDeliveryDrainDispatch(database, snapshot,
+    return this.writeOperationalJournal((database) => markDeliveryDrainDispatch(database, snapshot,
       this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
   }
 
   async markDeliveryDrainUncertain(input: { operationId: string; agentId: string }, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<DeliveryDrainRecord> {
     const snapshot = { ...input };
-    return this.writeDeliveryDrain((database) => markDeliveryDrainUncertain(database, snapshot), commitFence);
+    return this.writeOperationalJournal((database) => markDeliveryDrainUncertain(database, snapshot), commitFence);
   }
 
   /** The internal caller must prove the saved native birth is gone in this fence.
@@ -286,6 +291,56 @@ export class ManifestStore {
     return { provider: String(row.provider), model: nullableString(row.model), reasoning_effort: nullableString(row.reasoning_effort) as DaemonAgentConfiguration["reasoning_effort"], charter: String(row.charter), permission_profile_id: nullableString(row.permission_profile_id), provider_launch_policy: bool(row.provider_launch_policy_present) && !bool(row.provider_launch_policy_undefined) ? parseJson(row.provider_launch_policy_json) : {}, config_revision: Number(row.config_revision), runtime_configuration_revision: Number(row.runtime_configuration_revision), polling_contract: nullableString(row.polling_contract) as DaemonAgentConfiguration["polling_contract"] };
   }
 
+  /** Explicit operator request only; startup and credential recovery never create this journal. */
+  async preparePollingActivation(input: PreparePollingActivation, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; activation: PollingActivationRecord }> {
+    this.requirePollingActivationFence(commitFence); const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(database => preparePollingActivation(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async getPollingActivation(operationId: string): Promise<PollingActivationRecord | null> {
+    return getPollingActivation(await this.getDatabase(), operationId);
+  }
+
+  async unresolvedPollingActivation(agentId: string): Promise<PollingActivationRecord | null> {
+    return unresolvedPollingActivation(await this.getDatabase(), agentId);
+  }
+
+  async markPollingActivationDispatch(input: DispatchPollingActivation, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(database => markPollingActivationDispatch(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  /** First IDs require the same live RPC invocation; known-ID reconciliation must remain exact. */
+  async checkpointPollingActivationTurn(input: { operationId: string; agentId: string; providerTurnId: string },
+    commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => checkpointPollingActivationTurn(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  async markPollingActivationUncertain(input: { operationId: string; agentId: string }, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => markPollingActivationUncertain(database, snapshot), commitFence);
+  }
+
+  async cancelPollingActivation(input: { operationId: string; agentId: string }, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => cancelPollingActivation(database, snapshot), commitFence);
+  }
+
+  /** Fence authenticates the exact native terminal, or hard loss of the saved native birth. */
+  async completePollingActivation(input: CompletePollingActivation, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<PollingActivationRecord> {
+    this.requirePollingActivationFence(commitFence); const snapshot = { ...input };
+    return this.writeOperationalJournal(database => completePollingActivation(database, snapshot,
+      this.readEntryFromDatabase(database, snapshot.agentId)), commitFence);
+  }
+
+  private requirePollingActivationFence(fence: unknown): void {
+    if (typeof fence !== "function") throw new Error("Polling activation requires a native ownership commit fence.");
+  }
+
   async prepareRoomMove(
     input: Omit<DaemonRoomMoveRecord, "phase" | "remote_room_id" | "destination_cursor" | "source_credentials_revoked" | "source_cursor_present" | "source_cursor" | "error" | "created_at" | "updated_at"> & { phase: "prepared" | "waiting_for_current_turn" },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
@@ -307,6 +362,7 @@ export class ManifestStore {
             result = { created: false, move };
           } else {
             assertNoDeliveryDrain(database, input.agent_id);
+            assertNoPollingActivation(database, input.agent_id);
             const unresolvedControl = database.prepare(`SELECT action_id FROM turn_control_journals
               WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')`).get(input.agent_id) as Row | undefined;
             if (unresolvedControl) {
@@ -743,6 +799,7 @@ export class ManifestStore {
       const commit = async () => {
         database.exec("BEGIN IMMEDIATE"); transactionOpen = true;
         assertNoDeliveryDrain(database, input.agentId);
+        assertNoPollingActivation(database, input.agentId);
         const advanced = database.prepare("UPDATE manifest_metadata SET generation=generation+1 WHERE singleton=1 AND generation=?").run(expectedGeneration);
         if (Number(advanced.changes) !== 1) throw new ManifestConflictError("Manifest generation changed during configuration update.");
         const changed = database.prepare(`UPDATE agent_configurations SET model=?,reasoning_effort=?,charter=?,permission_profile_id=?,provider_launch_policy_present=1,provider_launch_policy_undefined=0,provider_launch_policy_json=?,config_revision=config_revision+1 WHERE agent_id=? AND config_revision=?`).run(input.model, input.reasoningEffort ?? null, input.charter, input.permissionProfileId, json(input.providerLaunchPolicy), input.agentId, input.expectedRevision);
@@ -774,7 +831,7 @@ export class ManifestStore {
         d.provider_ref_present, d.provider_work_attempt_id, d.provider_continuation_id,
         d.provider_connection_kind, d.provider_connection_url, d.provider_server_auth_path,
         d.provider_connection_pid,
-        d.provider_process_identity_present, d.provider_process_identity, d.provider_execution_generation_id,
+        d.provider_process_identity_present, d.provider_process_identity, d.provider_execution_generation_id, d.custodial_launch_agent_session_id,
         d.workplace_liveness_present, d.workplace_liveness_state,
         d.workplace_liveness_observed_at, d.workplace_liveness_detail,
         d.native_liveness_present, d.native_liveness_state,
@@ -877,6 +934,7 @@ export class ManifestStore {
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const current = this.readEntryFromDatabase(database, input.agentId);
       assertNoDeliveryDrain(database, input.agentId);
+      assertNoPollingActivation(database, input.agentId);
       if (!current
         || current.room_id !== input.roomId
         || current.desired_state !== "running"
@@ -2122,7 +2180,10 @@ export class ManifestStore {
     const { identity, profile, membership, configuration, launch_intent: launch, runtime_deployment: runtime, lifecycle, readiness, turn_control_journal: turnJournal, retained_worker_binding: bindingRecord, reconciliation: reconciliationRecord } = projection;
     // Legacy cutover preparation commits through all projection replacement
     // paths; a preflight check alone would race native drain acceptance.
-    if (configuration.delivery_cutover) assertNoDeliveryDrain(database, identity.agent_id);
+    if (configuration.delivery_cutover) {
+      assertNoDeliveryDrain(database, identity.agent_id);
+      assertNoPollingActivation(database, identity.agent_id);
+    }
     run(database.prepare("INSERT INTO agent_identities VALUES (?, ?, ?, ?)"), identity.agent_id, identity.created_by, identity.created_at, sortOrder);
     run(database.prepare("INSERT INTO agent_profiles VALUES (?, ?)"), identity.agent_id, profile.display_name);
     run(database.prepare("INSERT INTO agent_room_memberships VALUES (?, ?)"), identity.agent_id, membership.room_id);
@@ -2153,11 +2214,11 @@ export class ManifestStore {
         provider_ref_present, provider_work_attempt_id, provider_continuation_id,
         provider_connection_kind, provider_connection_url, provider_server_auth_path,
         provider_connection_pid,
-        provider_process_identity_present, provider_process_identity, provider_execution_generation_id,
+        provider_process_identity_present, provider_process_identity, provider_execution_generation_id, custodial_launch_agent_session_id,
         workplace_liveness_present, workplace_liveness_state, workplace_liveness_observed_at, workplace_liveness_detail,
         native_liveness_present, native_liveness_state, native_liveness_observed_at, native_liveness_detail,
         activity_present
-      ) VALUES (${Array.from({ length: 27 }, () => "?").join(", ")})
+      ) VALUES (${Array.from({ length: 28 }, () => "?").join(", ")})
     `),
       identity.agent_id, runtime.deployment_id, runtime.run_id, runtime.observed_state,
       Number(workspacePresent), workspacePresent ? runtime.workspace_path ?? null : null,
@@ -2170,6 +2231,7 @@ export class ManifestStore {
       connection?.kind === "opencode_server" ? connection.serverAuthPath : null,
       connection?.pid ?? null, Number(processIdentityPresent), connection?.processIdentity ?? null,
       providerRef?.execution_generation_id ?? null,
+      providerRef?.custodial_launch_agent_session_id ?? null,
       Number(workplacePresent), runtime.workplace_liveness?.state ?? null,
       runtime.workplace_liveness?.observed_at ?? null, runtime.workplace_liveness?.detail ?? null,
       Number(nativePresent), runtime.native_liveness?.state ?? null,
@@ -2292,6 +2354,8 @@ export class ManifestStore {
           provider_continuation_id: String(row.provider_continuation_id),
           provider_connection: providerConnection,
           execution_generation_id: String(row.provider_execution_generation_id),
+          ...(row.custodial_launch_agent_session_id != null
+            ? { custodial_launch_agent_session_id: String(row.custodial_launch_agent_session_id) } : {}),
         };
       }
     }
@@ -2511,8 +2575,8 @@ export class ManifestStore {
     owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
   }
 
-  /** Cutover journals do not mutate the flat manifest or its generation. */
-  private writeDeliveryDrain<T>(mutation: (database: DatabaseSync) => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
+  /** Operational journals do not mutate the flat manifest or its generation. */
+  private writeOperationalJournal<T>(mutation: (database: DatabaseSync) => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
     return this.serialize(async () => {
       const database = await this.getDatabase();
       let open = false;
@@ -2520,7 +2584,7 @@ export class ManifestStore {
       let value!: T;
       try {
         const commit = async () => {
-          if (committed) throw new Error("Delivery drain transaction was already committed.");
+          if (committed) throw new Error("Operational journal transaction was already committed.");
           database.exec("BEGIN IMMEDIATE");
           open = true;
           value = mutation(database);
@@ -2530,7 +2594,7 @@ export class ManifestStore {
         };
         if (commitFence) await commitFence(commit);
         else await commit();
-        if (!committed) throw new Error("Delivery drain fence returned without committing the transaction.");
+        if (!committed) throw new Error("Operational journal fence returned without committing the transaction.");
         return value;
       } catch (error) {
         if (open) { try { database.exec("ROLLBACK"); } catch { /* Preserve the original failure. */ } }

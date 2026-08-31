@@ -30,6 +30,7 @@ import { extractThreadStatus, extractTurnStatus, isActiveCodexTurnStatus } from 
 import { CodexTurnResultAccumulator } from "./codex-turn-result.js";
 import {
   buildCodexStartPrompt,
+  buildCustodialPollingPrompt,
   DEFAULT_CODEX_STOP_PHRASE,
   looksLikeInviteCode,
   makeCodexStopToken,
@@ -44,6 +45,8 @@ import {
   type ProviderConnectionRef,
   type ProviderContinuationRef,
   type ProviderHandle,
+  type CustodialPollingActivationRequest,
+  type CustodialPollingActivationOptions,
   type ProviderObservedState,
   type ProviderSpawnRequest,
   type ProviderStopOptions,
@@ -379,6 +382,7 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
 };
 
 class CodexProviderHandle implements ProviderHandle {
+  custodyLaunchAgentSessionId?: string;
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
   readonly nativeActiveOperations = new Map<string, Extract<NativeExecutionFact, { domain: "execution" }>>();
@@ -432,6 +436,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
   private readonly activitySink?: (event: ProviderActivityEvent) => void;
   private readonly streamSink?: (event: ProviderStreamEvent) => void;
   private readonly handles = new Map<string, CodexProviderHandle>();
+  private readonly pollingLaunches = new WeakMap<CodexProviderHandle, { roomId: string; cwd: string; configurationRevision: number | undefined; agentSessionId: string }>();
+  private readonly pollingDispatches = new WeakSet<CodexProviderHandle>();
+  private readonly nonPollingLaunches = new WeakSet<CodexProviderHandle>();
   private readonly pendingAttaches = new Map<string, {
     ref: ProviderContinuationRef;
     promise: Promise<CodexProviderHandle | ProviderAttachTerminal | null>;
@@ -671,6 +678,85 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // Timeouts and unavailable snapshots are uncertainty, not runtime failure.
       return { state: "unknown" };
     }
+  }
+
+  async inspectCustodialPollingActivation(providerHandle: ProviderHandle, providerTurnId: string):
+    Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }> {
+    const handle = this.requireHandle(providerHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = structuredClone(handle.providerConnection);
+    const current = () => {
+      const actual = handle.pid === null ? undefined : this.deps.getProcessIdentity(handle.pid);
+      return !handle.terminal && this.handles.get(handle.workAttemptId) === handle
+        && handle.providerContinuationId === continuation && sameProviderConnectionIdentity(connection, handle.providerConnection)
+        && handle.pid === connection.pid && typeof actual === "string" && Boolean(connection.processIdentity)
+        && sameProcessBirthIdentity(actual, connection.processIdentity!);
+    };
+    try {
+      if (!nativeExecutionId(providerTurnId) || !current()) return { state: "unknown" };
+      const read = await handle.client.request<ThreadReadResult>("thread/read", { threadId: continuation, includeTurns: true });
+      if (!current() || read?.thread?.id !== continuation || !Array.isArray(read.thread.turns)) return { state: "unknown" };
+      const matches = read.thread.turns.filter(turn => turn?.id === providerTurnId);
+      if (matches.length !== 1) return { state: "unknown" };
+      const status = extractTurnStatus(matches[0])?.toLowerCase();
+      if (isActiveCodexTurnStatus(status)) return { state: "active" };
+      if (status === "completed" || status === "failed") return { state: "terminal", outcome: status };
+      if (status === "interrupted" || status === "cancelled" || status === "stopped") return { state: "terminal", outcome: "interrupted" };
+      return { state: "unknown" };
+    } catch { return { state: "unknown" }; }
+  }
+
+  async activateCustodialPolling(providerHandle: ProviderHandle, request: CustodialPollingActivationRequest,
+    options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }> {
+    const handle = this.requireHandle(providerHandle);
+    const input = structuredClone(request);
+    const receipt = input.launchReceipt;
+    const launch = this.pollingLaunches.get(handle);
+    const continuation = handle.providerContinuationId;
+    const connection = structuredClone(handle.providerConnection);
+    const bounded = (value: unknown, limit = 512): value is string => typeof value === "string"
+      && value.trim().length > 0 && value.length <= limit && !/[\u0000-\u001f\u007f]/.test(value);
+    if (![input.operationId, input.roomId, input.agentDisplayName, input.workerSession?.agentSessionId].every(value => bounded(value))
+      || !bounded(input.cwd, 4096) || !/^(?:msg_)?\d+$/.test(input.workerSession?.roomCursor ?? "")
+      || input.workerSession.roomCursor.length > 512 || !receipt || receipt.contract !== "custodial_polling_v1"
+      || !Number.isSafeInteger(receipt.configurationRevision) || receipt.configurationRevision < 1
+      || receipt.workAttemptId !== handle.workAttemptId || receipt.providerContinuationId !== continuation
+      || receipt.agentSessionId !== input.workerSession.agentSessionId
+      || !sameProviderConnectionIdentity(receipt.providerConnection, connection)
+      || (launch && (launch.roomId !== input.roomId || launch.cwd !== input.cwd || launch.agentSessionId !== input.workerSession.agentSessionId
+        || launch.configurationRevision !== receipt.configurationRevision))
+      || typeof options.beforeNativeDispatch !== "function" || typeof options.checkpointTurnStarted !== "function") {
+      throw new Error("Custodial polling activation requires exact applied launch authority.");
+    }
+    // A recovered handle cannot rediscover launch env from thread/read. The
+    // privileged daemon supplies the durable receipt, revalidated in its
+    // beforeNativeDispatch transaction. A known noncustodial launch is rejected.
+    if (this.nonPollingLaunches.has(handle)) throw new Error("This runtime was not launched for custodial polling.");
+    const assertCurrent = () => {
+      const actual = handle.pid === null ? undefined : this.deps.getProcessIdentity(handle.pid);
+      if (options.detachSignal?.aborted || handle.terminal || this.handles.get(handle.workAttemptId) !== handle
+        || handle.providerContinuationId !== continuation || !sameProviderConnectionIdentity(handle.providerConnection, connection)
+        || handle.pid !== connection.pid || !connection.processIdentity || typeof actual !== "string"
+        || !sameProcessBirthIdentity(actual, connection.processIdentity)) throw new Error("Custodial polling activation lost its exact native runtime.");
+    };
+    assertCurrent();
+    if (this.pollingDispatches.has(handle)) throw new Error("Custodial polling activation is already in progress.");
+    this.pollingDispatches.add(handle);
+    try {
+      const boundary = await this.inspectTurnBoundary(handle);
+      assertCurrent();
+      if (boundary.state !== "idle") throw new Error("Custodial polling activation requires native idle evidence.");
+      await options.beforeNativeDispatch();
+      assertCurrent();
+      const result = await handle.client.request<TurnStartResult>("turn/start", {
+        threadId: continuation, cwd: input.cwd,
+        input: [{ type: "text", text: buildCustodialPollingPrompt(input) }],
+      });
+      const id = result?.turn?.id;
+      if (!nativeExecutionId(id)) throw new Error("Custodial polling activation returned no exact native turn ID.");
+      await options.checkpointTurnStarted(id);
+      return { providerTurnId: id };
+    } finally { this.pollingDispatches.delete(handle); }
   }
 
   /**
@@ -1292,6 +1378,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.deps.now,
       );
       this.handles.set(req.workAttemptId, handle);
+      if (custodialPolling) {
+        handle.custodyLaunchAgentSessionId = req.supervisorWorkerSession!.agentSessionId;
+        this.pollingLaunches.set(handle, { roomId: req.roomId, cwd: req.cwd, configurationRevision: req.configurationRevision,
+          agentSessionId: req.supervisorWorkerSession!.agentSessionId });
+      }
+      else this.nonPollingLaunches.add(handle);
       const exitPromise = observedLaunch.exited.then((exit) => this.observeExit(handle!, exit));
       this.exitPromises.set(handle, exitPromise);
       for (const notification of pendingNotifications.splice(0)) {

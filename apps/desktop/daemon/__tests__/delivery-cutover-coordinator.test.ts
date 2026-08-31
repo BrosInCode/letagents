@@ -4,14 +4,17 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
-import { DeliveryCutoverExecutionCoordinator } from "../delivery-cutover-execution-coordinator.js";
+import { DeliveryCutoverExecutionCoordinator, type DeliveryCutoverExecutionCoordinatorOptions } from "../delivery-cutover-execution-coordinator.js";
+import { WorkerBindingStore } from "../worker-binding-store.js";
+import type { InstalledHostGrant } from "../worker-runtime-custody.js";
 import { DaemonAuthority } from "../daemon-authority.js";
 import { EntryConcurrencyGate } from "../entry-concurrency-gate.js";
 import { ManifestStore } from "../manifest-store.js";
+import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import { processBirthState, sameProcessBirthIdentity } from "../process-identity.js";
 import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
-import type { DaemonManifestEntry } from "../types.js";
+import type { DaemonManifestEntry, TaskWorkAttempt } from "../types.js";
 
 import {
   DeliveryCutoverCoordinator,
@@ -308,6 +311,164 @@ test("process death proof rejects malformed and unreadable births, and accepts o
   assert.equal(processBirthState(42, BIRTH, { ...identity, readBirthIdentity: () => "Mon Aug 31 09:00:00 2026" }), "gone");
 });
 
+test("polling activation checkpoints one exact native turn before releasing worker admission; duplicates never dispatch", async () => {
+  const env = await activationFixture();
+  try {
+    const gate = deferred<void>();
+    const dispatched = deferred<void>();
+    let worker!: Promise<void>;
+    env.provider.activateCustodialPolling = async (_handle, request, options) => {
+      assert.equal(request.launchReceipt.agentSessionId, "worker");
+      assert.equal(request.workerSession.roomCursor, "100");
+      await options.beforeNativeDispatch(); env.starts += 1; dispatched.resolve();
+      assert.equal((await env.base.store.getPollingActivation("activation"))?.phase, "dispatching");
+      worker = env.base.entries.run("agent", async () => {
+        assert.equal((await env.base.store.getPollingActivation("activation"))?.provider_turn_id, "polling-turn");
+        env.workerAdmitted = true;
+      });
+      await gate.promise;
+      await options.checkpointTurnStarted("polling-turn");
+      return { providerTurnId: "polling-turn" };
+    };
+    const starting = env.driver().activatePolling(env.request);
+    await Promise.race([dispatched.promise, starting]);
+    assert.equal(env.workerAdmitted, false);
+    await assert.rejects(env.driver().activatePolling(env.request), /in-flight lifecycle/);
+    gate.resolve();
+    assert.equal((await starting).phase, "active"); await worker;
+    assert.equal((await env.driver().activatePolling(env.request)).provider_turn_id, "polling-turn");
+    assert.equal(env.starts, 1); assert.equal(env.workerAdmitted, true);
+    await assert.rejects(env.driver().activatePolling({ ...env.request, requestId: "other" }), /identity changed/);
+    await assert.rejects(env.driver().cancelPollingActivation(env.request), /undispatched/);
+  } finally { await env.close(); }
+});
+
+test("prepared activation survives restart without dispatch; explicit retry or cancellation is required", async () => {
+  const env = await activationFixture();
+  try {
+    await env.prepare(); await env.base.reopen();
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal(env.starts, 0);
+    assert.equal((await env.driver().getPollingActivation(env.request)).phase, "prepared");
+    assert.equal((await env.driver().cancelPollingActivation(env.request)).phase, "cancelled");
+    assert.equal(env.starts, 0);
+  } finally { await env.close(); }
+});
+
+test("lost activation ACK stays uncertain across restart and never adopts another native turn", async () => {
+  const env = await activationFixture();
+  try {
+    env.provider.activateCustodialPolling = async (_handle, _request, options) => {
+      await options.beforeNativeDispatch(); env.starts += 1; throw new Error("ACK connection lost");
+    };
+    assert.equal((await env.driver().activatePolling(env.request)).phase, "uncertain");
+    await env.base.reopen();
+    for (const birth of ["same", "unknown", "malformed"]) {
+      env.base.state.birth = birth;
+      await env.driver().drive("agent", env.base.signal);
+      assert.equal((await env.driver().activatePolling(env.request)).phase, "uncertain");
+      assert.equal(env.inspections, 0, "without the ACK there is no safe native turn to inspect");
+    }
+    assert.equal(env.starts, 1);
+    env.base.state.birth = "gone";
+    await env.driver().drive("agent", env.base.signal);
+    const terminal = await env.driver().getPollingActivation(env.request);
+    assert.equal(terminal.phase, "complete"); assert.equal(terminal.terminal_outcome, "lost");
+    assert.equal(terminal.provider_turn_id, null);
+  } finally { await env.close(); }
+});
+
+test("known activation reconciles only its exact turn, preserves failures, and never replays after handoff", async () => {
+  const env = await activationFixture();
+  try {
+    await env.driver().activatePolling(env.request);
+    await env.base.reopen();
+    env.observation = { state: "unknown" };
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal((await env.driver().getPollingActivation(env.request)).phase, "uncertain");
+    env.observation = { state: "active" };
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal((await env.driver().getPollingActivation(env.request)).phase, "active");
+    env.observation = { state: "terminal", outcome: "failed" };
+    env.base.state.handoff = true;
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal((await env.base.store.getPollingActivation("activation"))?.phase, "active");
+    env.base.state.handoff = false;
+    await env.driver().drive("agent", env.base.signal);
+    assert.equal((await env.driver().getPollingActivation(env.request)).terminal_outcome, "failed");
+    assert.equal(env.starts, 1);
+  } finally { await env.close(); }
+});
+
+test("activation refuses a stale launch session before preparing or starting native work", async () => {
+  const env = await activationFixture();
+  try {
+    const manifest = await env.base.store.load();
+    await env.base.store.write(manifest.generation, manifest.entries.map(entry => ({ ...entry,
+      provider_ref: { ...entry.provider_ref!, custodial_launch_agent_session_id: "old-worker" },
+    })));
+    await assert.rejects(env.driver().activatePolling(env.request), /bound worker authority/);
+    assert.equal(await env.base.store.getPollingActivation("activation"), null);
+    assert.equal(env.starts, 0);
+  } finally { await env.close(); }
+});
+
+async function activationFixture() {
+  const base = await reverseFixture();
+  await base.driver().prepareDrain(base.request);
+  await base.driver().drive("agent", base.signal);
+  assert.equal((await base.store.getDeliveryDrain("operation"))?.phase, "complete");
+  const seed = new DatabaseSync(base.path);
+  seed.exec(`UPDATE work_attempt_executions SET terminal_json='{}';
+    INSERT INTO work_attempt_executions(execution_generation_id,work_attempt_id,started_at,actor,generation,terminal_json)
+    VALUES('polling-run','work','2026-08-31T08:01:00Z','provider',2,NULL);`);
+  seed.close();
+  const manifest = await base.store.load();
+  await base.store.write(manifest.generation, manifest.entries.map(entry => ({ ...entry,
+    run_id: "polling-run", deployment_id: serializeDaemonDeploymentId("agent", "polling-run"),
+    provider_ref: { work_attempt_id: "work", execution_generation_id: "polling-run", provider_continuation_id: "thread",
+      provider_connection: base.handle.providerConnection!, custodial_launch_agent_session_id: "worker" },
+  })));
+  const config = (await base.store.getAgentConfiguration("agent"))!;
+  await base.store.markRuntimeConfigurationApplied((await base.store.load()).generation,
+    { agentId: "agent", executionGenerationId: "polling-run", appliedRevision: config.config_revision });
+  base.authority.generation = (await base.store.load()).generation;
+  const ready = (await base.store.getEntry("agent"))!;
+  assert.equal(ready.delivery_mode ?? "mcp_polling", "mcp_polling");
+  assert.equal(ready.desired_state, "running");
+  assert.equal(ready.condition, "none");
+  assert.deepEqual(ready.provider_ref?.provider_connection, base.handle.providerConnection);
+  base.state.birth = "same";
+  const bindings = new WorkerBindingStore(join(base.root, "bindings.json"), undefined, base.path);
+  const bound = await bindings.bind({ entry_id: "agent", room_id: "room", work_attempt_id: "work", execution_generation_id: "polling-run",
+    agent_session_id: "worker", agent_session_token: "test-worker-bearer", api_url: "https://example.test" });
+  await bindings.checkpointCursor("agent", "worker", "polling-run", "100");
+  await bindings.recordSupervisedWorkerSession({ agent_id: "agent", room_id: "room", agent_session_id: "worker",
+    execution_generation_id: "polling-run", credential_ref: bound.credential_ref,
+    expires_at: new Date(Date.now() + 60_000).toISOString() });
+  const grant: InstalledHostGrant = { entryId: "agent", roomId: "room", agentKey: "owner/agent", grantId: "grant", supervisorGrant: "test-grant",
+    grantGeneration: 1, apiUrl: "https://example.test", daemonGeneration: 1, hostId: "host", installationId: "install", expiresAt: new Date(Date.now() + 60_000).toISOString() };
+  const env = { base, provider: { ...base.provider }, starts: 0, inspections: 0, workerAdmitted: false,
+    observation: { state: "active" } as Awaited<ReturnType<NonNullable<ProviderActionPort["inspectCustodialPollingActivation"]>>>,
+    request: { entryId: "agent", operationId: "activation", requestId: "activate-request", roomId: "room", executionGenerationId: "polling-run", reverseOperationId: "operation" },
+    driver: () => base.driver({ provider: env.provider,
+      getAttempt: async () => ({ workspace_path: "/workspace" }) as TaskWorkAttempt,
+      polling: { bindings, currentHostGrant: () => grant },
+    }),
+    prepare: () => base.store.preparePollingActivation({ ...env.request, agentId: "agent", handle: base.handle,
+      boundary: { state: "idle", providerContinuationId: "thread", nativeProcessIdentity: BIRTH, latestProviderTurnId: null } }, async commit => commit()),
+    close: async () => { await bindings.close(); await base.close(); },
+  };
+  env.provider.activateCustodialPolling = async (_handle, _request, options) => {
+    await options.beforeNativeDispatch(); env.starts += 1;
+    await options.checkpointTurnStarted("polling-turn"); return { providerTurnId: "polling-turn" };
+  };
+  env.provider.inspectCustodialPollingActivation = async (_handle, turnId) => {
+    assert.equal(turnId, "polling-turn"); env.inspections += 1; return env.observation;
+  };
+  return env;
+}
+
 const BIRTH = "Mon Aug 31 08:00:00 2026";
 async function reverseFixture() {
   const root = await mkdtemp(join(tmpdir(), "letagents-reverse-drain-"));
@@ -350,9 +511,9 @@ async function reverseFixture() {
     },
   };
   return {
-    get store() { return store; }, get inbox() { return inbox; }, events, state, entries, controller, signal: controller.signal,
+    get store() { return store; }, get inbox() { return inbox; }, root, path, handle, provider, authority, events, state, entries, controller, signal: controller.signal,
     request: { entryId: "agent", roomId: "room", operationId: "operation", requestId: "request", executionGenerationId: "run" },
-    driver: () => new DeliveryCutoverExecutionCoordinator({ isHandoffScheduled: () => state.handoff, provider,
+    driver: (overrides: Partial<DeliveryCutoverExecutionCoordinatorOptions> = {}) => new DeliveryCutoverExecutionCoordinator({ isHandoffScheduled: () => state.handoff, provider,
       getEntry: (id) => store.getEntry(id), getAttempt: async () => { throw new Error("legacy attempt path"); },
       updateEntry: async () => { throw new Error("legacy manifest path"); }, getLiveHandle: () => handle,
       startDelivery: async () => { events.push("start"); },
@@ -361,7 +522,7 @@ async function reverseFixture() {
         probe: () => { if (state.birth === "gone") throw Object.assign(new Error(), { code: "ESRCH" }); },
         readBirthIdentity: () => { if (state.birth === "unknown") throw new Error("unreadable"); return state.birth === "malformed" ? "ps diagnostic" : BIRTH; },
         sameBirthIdentity: sameProcessBirthIdentity,
-      } },
+      } }, ...overrides,
     }),
     checkpoint: () => { const db = new DatabaseSync(path); try { return (db.prepare("SELECT room_cursor FROM work_attempt_checkpoints ORDER BY sort_order DESC LIMIT 1").get() as { room_cursor: string } | undefined)?.room_cursor ?? null; } finally { db.close(); } },
     setTerminal: () => { const db = new DatabaseSync(path); try { db.exec("UPDATE work_attempt_executions SET terminal_json='{}'"); } finally { db.close(); } },

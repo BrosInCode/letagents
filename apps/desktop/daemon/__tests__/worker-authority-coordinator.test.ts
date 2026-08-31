@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 
 import { SupervisorGrantRequestError } from "../cloud-http.js";
@@ -12,6 +13,7 @@ import type { ProviderActionHandle } from "../provider-action-port.js";
 import type { DaemonManifestEntry, ExecutionGeneration, WorkAttemptCheckpoint } from "../types.js";
 import type { SupervisedWorkerSession, WorkerSessionBinding } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody, type InstalledHostGrant } from "../worker-runtime-custody.js";
+import type { PollingActivationRecord } from "../custodial-polling-activation.js";
 
 const now = Date.parse("2026-08-26T12:00:00.000Z");
 
@@ -112,6 +114,8 @@ function hostGrant(overrides: Partial<InstalledHostGrant> = {}): InstalledHostGr
 }
 
 type HarnessOptions = {
+  activation?: PollingActivationRecord | null;
+  getAgentConfiguration?: WorkerAuthorityCoordinatorOptions["store"]["getAgentConfiguration"];
   drainPhase?: "draining" | "dispatching" | "uncertain";
   entry?: DaemonManifestEntry;
   generation?: number;
@@ -170,7 +174,7 @@ function fixture(options: HarnessOptions = {}) {
 
   const bindings: WorkerAuthorityCoordinatorOptions["bindings"] = {
     get: async () => binding,
-    bind: async (input) => {
+    bind: async (input, bindOptions) => {
       events.push("binding:bind");
       credential = input.agent_session_token;
       binding = workerBinding({
@@ -181,6 +185,7 @@ function fixture(options: HarnessOptions = {}) {
         agent_session_id: input.agent_session_id,
         credential_ref: input.credential_ref ?? "generated-ref",
         api_url: new URL(input.api_url).origin,
+        ...(bindOptions ? { room_cursor: bindOptions.roomCursor ?? null } : {}),
       });
       return binding;
     },
@@ -235,8 +240,9 @@ function fixture(options: HarnessOptions = {}) {
 
   const subject = new WorkerAuthorityCoordinator({
     store: {
-      getAgentConfiguration: async () => ({ polling_contract: null, config_revision: 1, runtime_configuration_revision: 1 }),
+      getAgentConfiguration: options.getAgentConfiguration ?? (async () => ({ polling_contract: null, config_revision: 1, runtime_configuration_revision: 1 })),
       unresolvedDeliveryDrain: async () => options.drainPhase ? ({ phase: options.drainPhase } as never) : null,
+      unresolvedPollingActivation: async () => options.activation ?? null,
       load: async () => ({ entries: [entry] }),
       getEntry: async (entryId) => entry.id === entryId ? entry : null,
     },
@@ -364,6 +370,106 @@ function fixture(options: HarnessOptions = {}) {
     bindings,
   };
 }
+
+test("custodial effects and cursor writes require exact active activation while same-worker credentials recover", async () => {
+  const connection = { kind: "codex_app_server" as const, url: "ws://127.0.0.1:42", pid: 42, processIdentity: "Mon Aug 31 08:00:00 2026" };
+  const activation: PollingActivationRecord = {
+    operation_id: "activation-1", request_id: "activate-1", reverse_operation_id: "reverse-1",
+    agent_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    native_continuation_id: "continuation-1", native_connection_kind: connection.kind, native_pid: 42,
+    native_process_identity: connection.processIdentity, native_connection_sha256: createHash("sha256").update(JSON.stringify([
+      connection.kind, connection.url, connection.pid, connection.processIdentity,
+    ])).digest("hex"), config_revision: 1, agent_session_id: "session-1", room_cursor: "12", phase: "uncertain",
+    provider_turn_id: null, terminal_outcome: null, created_at_ms: 1, updated_at_ms: 1,
+  };
+  let configurationRevision = 1;
+  let runtimeConfigurationRevision = 1;
+  let mintedSessionId = "session-1";
+  const handle = providerHandle({ providerConnection: connection, appliedConfigurationRevision: 1 });
+  const options: HarnessOptions = {
+    activation, handle, binding: workerBinding({ room_cursor: "12" }),
+    entry: manifestEntry({ delivery_mode: "mcp_polling", provider_ref: {
+      work_attempt_id: "attempt-1", execution_generation_id: "execution-1", provider_continuation_id: "continuation-1",
+      provider_connection: connection, custodial_launch_agent_session_id: "session-1",
+    } }),
+    getAgentConfiguration: async () => ({ polling_contract: "custodial_polling_v1", config_revision: configurationRevision, runtime_configuration_revision: runtimeConfigurationRevision }),
+    createWorkerSession: async () => ({ sessionId: mintedSessionId, bearer: "rotated-secret", bearerId: "rotated-id", expiresAt: new Date(now + 60_000).toISOString() }),
+  };
+  const harness = fixture(options);
+  harness.custody.installHostGrant(hostGrant());
+  const request = { entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-1", daemon_generation: 7, api_url: "https://letagents.test", contract: "custodial_polling_v1", phase: "before", tool_name: "send_message" };
+  const cursor = { entry_id: "agent-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1", agent_session_id: "session-1", room_cursor: "47" };
+  for (const phase of [null, "prepared", "dispatching", "uncertain"] as const) {
+    options.activation = phase ? { ...activation, phase } : null;
+    await assert.rejects(harness.subject.authorizeCustodialPolling(request), /activation/);
+    await assert.rejects(harness.subject.checkpointWorkerCursor(cursor), /activation/);
+    assert.equal(harness.binding?.room_cursor, "12");
+  }
+  options.activation = activation;
+  const minted = await harness.subject.mintHostWorkerSession(harness.entry, "execution-1", true);
+  assert.ok(minted);
+  await harness.subject.bindMintedHostWorkerSession("agent-1", minted);
+  assert.equal(harness.binding?.agent_session_id, "session-1");
+  assert.equal(harness.binding?.room_cursor, "12");
+  assert.equal(harness.entry.condition, "coordination_blocked", "a credential refresh cannot resolve uncertain native dispatch");
+  assert.equal(harness.entry.last_error, "old");
+  assert.equal(harness.deliveryStarts, 0);
+  assert.equal(harness.events.includes("activity:publish"), false);
+  assert.deepEqual(await harness.subject.borrowWorkerCredential({ ...request, provider_turn_id: "" }), { status: "available", credential: "rotated-secret" });
+  await assert.rejects(harness.subject.authorizeCustodialPolling(request), /activation/);
+
+  options.activation = { ...activation, phase: "active", provider_turn_id: "native-turn" };
+  assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+  assert.equal((await harness.subject.authorizeCustodialPolling({ ...request, phase: "release", expected_configuration_revision: 1 })).status, "authorized");
+  await harness.subject.checkpointWorkerCursor(cursor);
+  assert.equal(harness.binding?.room_cursor, "47");
+  for (const wrong of [
+    { phase: "release", expected_configuration_revision: 2 }, { daemon_generation: 8 },
+    { room_id: "other-room" }, { agent_session_id: "unowned-worker" }, { execution_generation_id: "other-generation" },
+  ]) {
+    assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+    await assert.rejects(harness.subject.authorizeCustodialPolling({ ...request, ...wrong }), /stale|not authorized/);
+    assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+  }
+  const currentSession = harness.bindings.supervisedWorkerSession;
+  const validSession = await currentSession("agent-1");
+  assert.ok(validSession);
+  const grant = harness.subject.currentHostGrant(harness.entry)!;
+  const freshExpiry = grant.expiresAt;
+  for (const expired of ["worker", "host"] as const) {
+    assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+    if (expired === "worker") harness.bindings.supervisedWorkerSession = async () => ({ ...validSession, expires_at: new Date(now - 1).toISOString() });
+    else grant.expiresAt = new Date(now - 1).toISOString();
+    await assert.rejects(harness.subject.authorizeCustodialPolling(request), /authority changed|not authorized/);
+    assert.deepEqual(await harness.subject.borrowWorkerCredential({ ...request, provider_turn_id: "" }), { status: "stale" });
+    await assert.rejects(harness.subject.checkpointWorkerCursor({ ...cursor, room_cursor: "48" }), /authority is unavailable/);
+    assert.equal(harness.binding?.room_cursor, "47");
+    harness.bindings.supervisedWorkerSession = currentSession; grant.expiresAt = freshExpiry;
+    assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+    assert.deepEqual(await harness.subject.borrowWorkerCredential({ ...request, provider_turn_id: "" }), { status: "available", credential: "rotated-secret" });
+  }
+  for (const change of ["configuration", "runtime_revision", "native_revision", "native_birth", "worker", "execution", "launch_receipt"] as const) {
+    assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+    const entry = harness.entry;
+    if (change === "configuration") configurationRevision = 2;
+    if (change === "runtime_revision") runtimeConfigurationRevision = 2;
+    if (change === "native_revision") harness.setHandle({ ...handle, appliedConfigurationRevision: 2 });
+    if (change === "native_birth") harness.setHandle({ ...handle, providerConnection: { ...connection, processIdentity: "Mon Aug 31 09:00:00 2026" } });
+    if (change === "worker") options.activation = { ...options.activation!, agent_session_id: "another-worker" };
+    if (change === "execution") options.activation = { ...options.activation!, execution_generation_id: "another-generation" };
+    if (change === "launch_receipt") harness.setEntry({ ...entry, provider_ref: { ...entry.provider_ref!, custodial_launch_agent_session_id: "another-worker" } });
+    await assert.rejects(harness.subject.authorizeCustodialPolling(request), /activation|worker binding/);
+    await assert.rejects(harness.subject.checkpointWorkerCursor({ ...cursor, room_cursor: "48" }), /activation/);
+    assert.equal(harness.binding?.room_cursor, "47");
+    configurationRevision = 1; runtimeConfigurationRevision = 1; harness.setHandle(handle); harness.setEntry(entry);
+    options.activation = { ...activation, phase: "active", provider_turn_id: "native-turn" };
+    assert.equal((await harness.subject.authorizeCustodialPolling(request)).status, "authorized");
+  }
+  mintedSessionId = "new-worker-same-process";
+  await assert.rejects(harness.subject.mintHostWorkerSession(harness.entry, "execution-1", true), /activation/);
+  assert.equal(harness.binding?.agent_session_id, "session-1", "a new session cannot replace the worker embedded in the live native MCP environment");
+});
 
 test("dispatching and uncertain handoff deny worker mutation before effects", async () => {
   for (const drainPhase of ["dispatching", "uncertain"] as const) {

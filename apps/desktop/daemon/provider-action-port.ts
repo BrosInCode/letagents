@@ -86,9 +86,23 @@ export function sameProviderActionConnectionSnapshot(
 
 export type ProviderActionRef = { workAttemptId: string; providerContinuationId: string; provider?: string; providerConnection?: ProviderActionConnectionRef | null };
 export type ProviderActionSpawn = { workAttemptId: string; roomId: string; cwd: string; launchPolicy: unknown; provider?: string; model?: string | null; reasoningEffort?: "low" | "medium" | "high" | "xhigh" | "max" | null; permissionProfileId?: string | null; configurationRevision?: number; agentDisplayName?: string; deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox"; pollingContract?: "custodial_polling_v1"; resumeFrom?: ProviderActionRef | null; actionId?: string; supervisorEntryId?: string; supervisorSocketPath?: string; supervisorExecutionGenerationId?: string; supervisorWorkerSession?: { agentSessionId: string; roomCursor: string | null; apiUrl?: string }; devMcpServerEntryPath?: string; providerCredential?: { apiKey: string | null; baseUrl: string; model: string } };
-export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
+export type ProviderActionHandle = { workAttemptId: string; pid: number | null; providerContinuationId: string | null; providerConnection?: ProviderActionConnectionRef | null; appliedConfigurationRevision?: number; custodyLaunchAgentSessionId?: string; observedState: "starting" | "working" | "idle" | "stopping" | "stopped" | "failed" };
 export type ProviderActionTerminal = { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "exited" | "killed" | "stopped" | "crashed" | "protocol_error" | "provider_quota"; providerContinuationId: string | null };
 export type ProviderActionAttachTerminal = { state: "terminal"; terminal: ProviderActionTerminal };
+export type CustodialPollingActivationRequest = {
+  operationId: string; roomId: string; cwd: string; agentDisplayName: string;
+  workerSession: { agentSessionId: string; roomCursor: string };
+  /** Internal daemon attestation from the persisted applied launch, never controller input. */
+  launchReceipt: {
+    contract: "custodial_polling_v1"; configurationRevision: number; workAttemptId: string; agentSessionId: string;
+    providerContinuationId: string; providerConnection: ProviderActionConnectionRef;
+  };
+};
+export type CustodialPollingActivationOptions = {
+  beforeNativeDispatch: () => Promise<void>;
+  checkpointTurnStarted: (id: string) => Promise<void>;
+  detachSignal?: AbortSignal;
+};
 export type ProviderActionAttachment = { state: "attached"; handle: ProviderActionHandle } | { state: "absent" } | { state: "ambiguous"; reason: string };
 export type ProviderActionStreamEvent = {
   workAttemptId: string;
@@ -166,6 +180,8 @@ export interface ProviderActionPort {
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
   /** Verify the selected polling runtime before an existing writer is stopped. */
   preflightCustodialPolling?(input: { provider: string; devMcpServerEntryPath?: string }): Promise<void>;
+  activateCustodialPolling?(handle: ProviderActionHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
+  inspectCustodialPollingActivation?(handle: ProviderActionHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
   /** Recover an intent journaled before dispatch, never by spawning a second child. */

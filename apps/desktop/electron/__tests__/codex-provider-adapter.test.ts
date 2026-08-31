@@ -1019,6 +1019,80 @@ test("Codex resumed bounded launch supplies only the exact non-secret worker rou
   assert.doesNotMatch(JSON.stringify(harness.launchOptions), /session-secret|authorization|bearer/i);
 });
 
+test("explicit custodial activation dispatches once after intent and checkpoints its exact native ID", async () => {
+  for (const scenario of ["success", "recovered", "recovered_session_mismatch", "changed_session", "wrong_receipt", "active", "unknown", "lost_ack", "bad_id", "checkpoint_failure", "detached", "legacy"] as const) {
+    const harness = createHarness();
+    let adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest({ configurationRevision: 4,
+      pollingContract: scenario === "legacy" ? undefined : "custodial_polling_v1", deliveryMode: scenario === "legacy" ? "daemon_inbox" : "mcp_polling",
+      supervisorEntryId: "manifest_exact", supervisorSocketPath: "/tmp/daemon.sock", supervisorExecutionGenerationId: "execution_exact",
+      supervisorWorkerSession: { agentSessionId: "agent_session_exact", roomCursor: "msg_41", apiUrl: "https://letagents.chat" },
+    });
+    let handle = await adapter.spawn(request);
+    assert.equal(handle.custodyLaunchAgentSessionId, scenario === "legacy" ? undefined : "agent_session_exact");
+    if (scenario === "recovered" || scenario === "recovered_session_mismatch") {
+      adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+      const attached = await adapter.attach({ workAttemptId: handle.workAttemptId,
+        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! });
+      assertProviderHandle(attached);
+      handle = attached;
+    }
+    const client = harness.clients.at(-1)!;
+    const original = client.request.bind(client);
+    const events: string[] = [];
+    let starts = 0;
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+      if (method === "thread/read") return { thread: { id: handle.providerContinuationId, status: "idle", turns:
+        scenario === "unknown" ? undefined : scenario === "active" ? [{ id: "active", status: "inProgress" }] : [] } } as T;
+      if (method === "turn/start") {
+        starts++;
+        events.push("rpc");
+        const prompt = JSON.stringify(params);
+        assert.match(prompt, /agent_session_exact/);
+        assert.match(prompt, /msg_41/);
+        assert.match(prompt, /before processing/);
+        assert.doesNotMatch(prompt, /LOCAL_CODEX_ROOM_|join_code|Hard stop deadline/);
+        if (scenario === "lost_ack") throw new Error("lost acknowledgement");
+        return { turn: { id: scenario === "bad_id" ? "" : "native-activation" } } as T;
+      }
+      return original<T>(method, params);
+    };
+    const controller = new AbortController();
+    const activate = adapter.activateCustodialPolling(handle, {
+      operationId: "activation-1", roomId: request.roomId, cwd: request.cwd, agentDisplayName: "GardenPoint",
+      workerSession: { agentSessionId: scenario === "changed_session" ? "session_rotated" : "agent_session_exact", roomCursor: "msg_41" },
+      launchReceipt: { contract: "custodial_polling_v1", agentSessionId: scenario === "changed_session" || scenario === "recovered_session_mismatch" ? "session_rotated" : "agent_session_exact", configurationRevision: scenario === "wrong_receipt" ? 5 : 4, workAttemptId: handle.workAttemptId,
+        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! },
+    }, { detachSignal: controller.signal,
+      beforeNativeDispatch: async () => { events.push("intent"); if (scenario === "detached") controller.abort(); },
+      checkpointTurnStarted: async id => { assert.equal(id, "native-activation"); events.push("checkpoint"); if (scenario === "checkpoint_failure") throw new Error("checkpoint failed"); },
+    });
+    if (scenario === "success" || scenario === "recovered") {
+      assert.deepEqual(await activate, { providerTurnId: "native-activation" });
+      assert.deepEqual(events, ["intent", "rpc", "checkpoint"]);
+    } else await assert.rejects(activate);
+    assert.equal(starts, ["success", "recovered", "lost_ack", "bad_id", "checkpoint_failure"].includes(scenario) ? 1 : 0, scenario);
+    if (scenario === "success") {
+      for (const status of ["inProgress", "completed", "failed", "interrupted", "cancelled", "future"] as const) {
+        client.request = async <T>(method: string): Promise<T> => {
+          assert.equal(method, "thread/read", "inspection never starts, resumes, or interrupts");
+          return { thread: { id: handle.providerContinuationId, turns: [
+            { id: "native-activation", status }, { id: "latest-unrelated", status: "completed" },
+          ] } } as T;
+        };
+        assert.deepEqual(await adapter.inspectCustodialPollingActivation(handle, "native-activation"),
+          status === "inProgress" ? { state: "active" } : status === "future" ? { state: "unknown" }
+            : { state: "terminal", outcome: status === "cancelled" ? "interrupted" : status });
+        assert.deepEqual(await adapter.inspectCustodialPollingActivation(handle, "missing-exact"), { state: "unknown" });
+      }
+      client.request = async () => { throw new Error("connection lost"); };
+      assert.deepEqual(await adapter.inspectCustodialPollingActivation(handle, "native-activation"), { state: "unknown" });
+    }
+    harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+    await flush();
+  }
+});
+
 test("Codex custodial polling verifies its exact MCP runtime and leaves fresh and resumed threads idle", async () => {
   const harness = createHarness();
   const request = spawnRequest({

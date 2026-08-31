@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { assertNoPollingActivation } from "./custodial-polling-activation.js";
 import type { DatabaseSync } from "node:sqlite";
 import type { NativeTurnBoundary } from "../shared/execution-protocol.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionHandle } from "./provider-action-port.js";
@@ -125,6 +126,7 @@ export function prepareDeliveryDrain(database: DatabaseSync, input: PrepareDeliv
     throw new Error("Delivery drain requires the current applied provider configuration.");
   }
   assertNoDeliveryDrain(database, input.agentId);
+  assertNoPollingActivation(database, input.agentId);
   if (current.delivery_cutover
     || database.prepare("SELECT 1 FROM turn_control_journals WHERE agent_id=? AND turn_control_present=1 AND status IN ('prepared','dispatching','retryable','uncertain')").get(input.agentId)
     || database.prepare("SELECT 1 FROM agent_room_moves WHERE agent_id=? AND phase NOT IN ('active','failed')").get(input.agentId)

@@ -268,7 +268,24 @@ export interface ProviderSpawnRequest {
   };
 }
 
+export type CustodialPollingActivationRequest = {
+  operationId: string; roomId: string; cwd: string; agentDisplayName: string;
+  workerSession: { agentSessionId: string; roomCursor: string };
+  /** Internal daemon attestation from the persisted applied launch, never controller input. */
+  launchReceipt: {
+    contract: "custodial_polling_v1"; configurationRevision: number; workAttemptId: string; agentSessionId: string;
+    providerContinuationId: string; providerConnection: ProviderConnectionRef;
+  };
+};
+export type CustodialPollingActivationOptions = {
+  beforeNativeDispatch: () => Promise<void>;
+  checkpointTurnStarted: (id: string) => Promise<void>;
+  detachSignal?: AbortSignal;
+};
+
 export interface ProviderHandle {
+  /** Session actually configured in the native custodial MCP launch environment. */
+  readonly custodyLaunchAgentSessionId?: string;
   readonly workAttemptId: string;
   /** OS pid of the supervised process, or null for an in-process/attached shape. */
   readonly pid: number | null;
@@ -433,6 +450,8 @@ export interface ProviderAdapter {
 
   /** Verify the selected polling runtime without launching or controlling a provider. */
   preflightCustodialPolling?(input: { devMcpServerEntryPath?: string }): Promise<void>;
+  activateCustodialPolling?(handle: ProviderHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
+  inspectCustodialPollingActivation?(handle: ProviderHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
 
   /** Explicit native facts, independent from legacy raw-stream classification. */
   onExecution?(handle: ProviderHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
