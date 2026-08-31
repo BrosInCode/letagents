@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type SQLInputValue } from "node:sqlite";
 import { z } from "zod";
 import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
+import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
@@ -33,6 +34,9 @@ export type ShadowIngestion =
   | { status: "gap"; expectedSourceSequence: number; observedSourceSequence: number }
   | { status: "retention_limit"; limit: "facts" | "bytes"; expectedSourceSequence: number; observedSourceSequence: number };
 type RuntimeProjection = { projection: ExecutionProjection; unverifiedFacts: number; lastJournalSequence: number };
+export type CapturedRoomWorkSummary =
+  | { availability: "not_captured" | "unavailable" }
+  | { availability: "available"; attemptId: string; summary: RoomAgentWorkSummary };
 type RetainedBudget = { facts: number; bytes: number };
 // Count nested entries, not just runtimes: one long-lived runtime can have many
 // turns and operations. Every retained identity is protocol-bounded to 512 chars.
@@ -573,6 +577,76 @@ export class ExecutionShadowStore {
     }
   }
 
+  /**
+   * Room-safe recorded evidence, not liveness or permission to publish it.
+   * Aggregate the retained journal, not the Inspector's truncated display.
+   * The caller must separately establish cloud receipt/publisher custody.
+   */
+  roomWorkSummary(agentId: string, roomId: string, sourceMessageId: string): CapturedRoomWorkSummary {
+    let ownsSnapshot = false;
+    try {
+      validated(id, agentId); validated(id, roomId); validated(id, sourceMessageId);
+      if (!this.database.isTransaction) { this.database.exec("BEGIN"); ownsSnapshot = true; }
+      this.clearProjections();
+      if (exceededBudget(this.retainedBudget(agentId))) throw new ExecutionProtocolError("retention_limit");
+      const attempt = this.row("SELECT attempt_id,state,conclusion FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?",
+        agentId, roomId, sourceMessageId);
+      let result: CapturedRoomWorkSummary = { availability: "not_captured" };
+      if (attempt) {
+        const observer = this.row("SELECT source_id,last_source_sequence,max_observed_sequence FROM execution_observers WHERE agent_id=?", agentId);
+        let incomplete = !observer || observer.source_id === null || Number(observer.max_observed_sequence) > Number(observer.last_source_sequence);
+        const counts = Object.fromEntries(ROOM_WORK_OPERATION_OUTCOMES.map(outcome => [outcome, 0])) as RoomAgentWorkSummary["operation_counts"];
+        let captured = false;
+        let runtimeRows: Row[] = [];
+        const summarizeRuntime = () => {
+          const selected = new Set(runtimeRows.filter(row => row.message_attempt_id === attempt.attempt_id
+            && (row.domain === "turn" || row.domain === "execution")).map(row => String(row.turn_id)));
+          if (!selected.size) return;
+          captured = true;
+          const runtime = this.replayRows(runtimeRows);
+          incomplete ||= runtime.unverifiedFacts > 0;
+          for (const turnId of selected) {
+            const turn = runtime.projection.turns.get(turnId);
+            if (!turn) { incomplete = true; continue; }
+            for (const operation of turn.operations.values()) counts[operation.outcome ?? "unresolved"]++;
+          }
+        };
+        // Bound facts before joins. Approval-only turn identities have no fact
+        // cap and must never become the driving relation. Grouping once avoids
+        // an N+1 full runtime replay for messages spanning many generations.
+        const rows = this.database.prepare(`WITH captured AS MATERIALIZED (
+            SELECT * FROM execution_facts INDEXED BY execution_facts_agent_sequence
+            WHERE agent_id=? ORDER BY sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}
+          ) SELECT f.*,t.provider_continuation_id,t.provider_turn_id,t.attempt_id AS message_attempt_id
+          FROM captured f LEFT JOIN execution_turns t ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
+            AND t.execution_generation_id=f.execution_generation_id AND t.runtime_generation_id=f.runtime_generation_id
+          ORDER BY f.runtime_generation_id,f.sequence`).iterate(agentId) as Iterable<Row>;
+        for (const row of rows) {
+          if (runtimeRows.length && runtimeRows[0]!.runtime_generation_id !== row.runtime_generation_id) {
+            summarizeRuntime(); runtimeRows = [];
+          }
+          runtimeRows.push(row);
+        }
+        summarizeRuntime();
+        if (captured) {
+          const state = attempt.state === "cleanly_concluded"
+            ? attempt.conclusion === "replied" ? "completed" : "completed_no_reply" : attempt.state;
+          const summary = parseRoomAgentWorkSummary({ version: 1, recorded_state: state, evidence_incomplete: incomplete,
+            // Neither message creation nor reply-publication time is an exact
+            // execution duration. Do not manufacture revisions from a clock.
+            elapsed_ms: null, operation_counts: counts });
+          if (!summary) throw new ExecutionProtocolError("invalid_fact");
+          result = { availability: "available", attemptId: String(attempt.attempt_id), summary };
+        }
+      }
+      if (ownsSnapshot) { this.database.exec("COMMIT"); ownsSnapshot = false; }
+      return result;
+    } catch {
+      if (ownsSnapshot) { try { this.database.exec("ROLLBACK"); } catch { /* Optional read isolation. */ } }
+      return { availability: "unavailable" };
+    } finally { this.clearProjections(); }
+  }
+
   /** History from v18 without typed terminal proof stays explicitly unverified. */
   projectRuntime(runtimeGenerationId: string): RuntimeProjection {
     validated(id, runtimeGenerationId);
@@ -603,6 +677,11 @@ export class ExecutionShadowStore {
     const facts = this.database.prepare(`SELECT f.*,t.provider_continuation_id,t.provider_turn_id FROM execution_facts f
       LEFT JOIN execution_turns t ON t.turn_id=f.turn_id WHERE f.runtime_generation_id=? ORDER BY f.sequence LIMIT ${MAX_RETAINED_FACTS_PER_AGENT + 1}`)
       .iterate(runtimeGenerationId) as Iterable<Row>;
+    return this.replayRows(facts);
+  }
+
+  /** Both host detail and room counts use the same typed replay and deduplication. */
+  private replayRows(facts: Iterable<Row>): RuntimeProjection {
     let projection = emptyExecutionProjection();
     let unverifiedFacts = 0;
     let lastJournalSequence = 0;

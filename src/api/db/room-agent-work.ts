@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 import { and, asc, desc, eq, inArray, isNull } from "drizzle-orm";
-import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWork, type RoomAgentWorkSnapshot } from "../../shared/room-agent-work.js";
+import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWork, type RoomAgentWorkSnapshot } from "../../../shared/room-agent-work.mjs";
 import { db } from "./client.js";
 import { message_agent_receipts, messages, room_agent_sessions, room_agent_work, supervisor_host_grants } from "./schema.js";
 import { assertSupervisorGrantFenceTx, SupervisorGrantFenceStaleError, type SupervisorGrantFence } from "./auth/supervisor-grants.js";

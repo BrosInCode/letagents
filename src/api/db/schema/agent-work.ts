@@ -1,6 +1,6 @@
 import { sql } from "drizzle-orm";
 import { bigint, check, foreignKey, index, integer, jsonb, pgTable, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
-import type { RoomAgentWork } from "../../../shared/room-agent-work.js";
+import type { RoomAgentWork } from "../../../../shared/room-agent-work.mjs";
 import { accounts } from "./core.js";
 import { messages } from "./messages.js";
 
