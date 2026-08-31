@@ -87,12 +87,12 @@ export async function publishRoomAgentWork(input: {
           eq(room_agent_sessions.session_kind, "worker"), isNull(room_agent_sessions.ended_at))).limit(2);
       if (active.length !== 1 || active[0].id !== publisher.session_id) throw new RoomAgentWorkError("publisher_not_authorized");
     } else if (captured.session_id !== publisher.session_id) throw new RoomAgentWorkError("publisher_not_authorized");
-    if (Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
     const identity = and(eq(room_agent_work.room_id, input.room_id),
       eq(room_agent_work.source_message_number, input.source_message_number), eq(room_agent_work.agent_key, publisher.agent_key));
     // Clear history also takes this lock. A publication cannot restore cleared
     // evidence or let a stale clear erase a newly published revision.
     const [existing] = await tx.select().from(room_agent_work).where(identity).for("update");
+    if (Date.parse(grant.expires_at) <= Date.now()) throw new SupervisorGrantFenceStaleError();
     if (existing) {
       if (existing.owner_account_id !== grant.owner_account_id || existing.host_id !== grant.host_id
         || existing.installation_id !== grant.installation_id || existing.agent_instance_id !== publisher.agent_instance_id) {

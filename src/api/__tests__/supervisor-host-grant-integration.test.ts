@@ -1391,10 +1391,23 @@ async function waitForBlockedSelect(pattern: string) {
   throw new Error("Query did not reach the expected lock barrier.");
 }
 
-test("room work rechecks grant-row rotation and source deletion after lock waits", { skip: requiresDatabase }, async () => {
+test("room work rechecks grant expiry, rotation and source deletion after lock waits", { skip: requiresDatabase }, async (t) => {
   const f = await setupWork();
+  const first = await publishRoomAgentWork(f.input);
   const lock = await client!.pool.connect();
   try {
+    await lock.query("BEGIN");
+    await lock.query("SELECT attempt_id FROM room_agent_work WHERE attempt_id = $1 FOR UPDATE", [first.work.attempt_id]);
+    const afterWorkLock = publishRoomAgentWork({ ...f.input, revision: 2 }).then(() => null, (error) => error);
+    await waitForBlockedSelect("%where%agent_key%for update");
+    // Advance only after publication has passed its earlier grant checks and
+    // reached the work lock. Credential expiry is not a work-duration timeout.
+    const now = t.mock.method(Date, "now", () => Date.parse(f.grantResult.grant.expires_at) + 1);
+    try {
+      await lock.query("COMMIT");
+      assert.equal((await afterWorkLock)?.code, "supervisor_grant_fence_stale");
+    } finally { now.mock.restore(); }
+    assert.equal((await readRoomAgentWork({ room_id: f.room.id })).work[0].revision, 1);
     await lock.query("BEGIN");
     await lock.query("SELECT grant_id FROM supervisor_host_grants WHERE grant_id = $1 FOR UPDATE", [f.input.fence.grant_id]);
     const publishing = publishRoomAgentWork(f.input).then(() => null, (error) => error);
