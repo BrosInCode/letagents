@@ -4,7 +4,7 @@ import test from "node:test";
 import { DaemonStateSchema } from "../daemon-state-database.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
-import type { NativeExecutionFact, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
+import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
 
 const now = "2026-08-31T00:00:00.000Z";
@@ -80,6 +80,51 @@ test("capture replays native facts only after the exact committed turn binding, 
     f.install(); await flush();
     assert.equal(f.facts().length, 4, "same-source reconnect skips the committed replay prefix");
   } finally { f.capture.close(); }
+});
+
+test("steady control probes coalesce while real control transitions remain durable", async () => {
+  const f = fixture();
+  try {
+    f.install();
+    f.emit(ready);
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" });
+    f.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+    await flush();
+    assert.deepEqual(f.facts().map(row => [row.domain, row.state]), [
+      ["runtime", "ready"], ["control", "responsive"], ["control", "degraded"], ["control", "responsive"],
+    ]);
+    assert.equal(f.db.prepare("SELECT control_state FROM execution_runtime_generations").get()!.control_state, "responsive");
+    assert.deepEqual({ ...f.position() }, { last_source_sequence: 4, max_observed_sequence: 4 });
+  } finally { f.capture.close(); }
+});
+
+test("control coalescing preserves changed evidence, native events, process identity, and bounded replay", () => {
+  const observer = new ProviderExecutionObserver(() => now);
+  const seen: NativeExecutionObservation[] = [];
+  observer.subscribe(event => seen.push(event));
+  const responsive: NativeExecutionFact = { domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" };
+  observer.emit(responsive, "birth-one");
+  observer.emit(responsive, "birth-one");
+  observer.emit(responsive, "birth-two");
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_exit" }, "birth-two");
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_exit" }, "birth-two");
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_birth_changed" }, "birth-two");
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_birth_changed", nativeEventId: "native-one" }, "birth-two");
+  observer.emit({ ...responsive, state: "lost", controlEvidence: "process_birth_changed", nativeEventId: "native-two" }, "birth-two");
+  assert.deepEqual(seen.map(event => ({ sequence: event.sequence, identity: event.nativeProcessIdentity,
+    state: event.fact.domain === "control" ? event.fact.state : null,
+    evidence: event.fact.domain === "control" && "controlEvidence" in event.fact ? event.fact.controlEvidence : undefined,
+    nativeEventId: event.fact.nativeEventId })), [
+    { sequence: 1, identity: "birth-one", state: "responsive", evidence: undefined, nativeEventId: undefined },
+    { sequence: 2, identity: "birth-two", state: "responsive", evidence: undefined, nativeEventId: undefined },
+    { sequence: 3, identity: "birth-two", state: "lost", evidence: "process_exit", nativeEventId: undefined },
+    { sequence: 4, identity: "birth-two", state: "lost", evidence: "process_birth_changed", nativeEventId: undefined },
+    { sequence: 5, identity: "birth-two", state: "lost", evidence: "process_birth_changed", nativeEventId: "native-one" },
+    { sequence: 6, identity: "birth-two", state: "lost", evidence: "process_birth_changed", nativeEventId: "native-two" },
+  ]);
 });
 
 test("committed receipts settle captured attempts independently of capture gaps and late native outcomes", async () => {

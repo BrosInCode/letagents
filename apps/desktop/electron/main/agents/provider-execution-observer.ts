@@ -13,6 +13,13 @@ type Subscription = {
 export class ProviderExecutionObserver {
   private readonly sourceId = randomUUID();
   private sequence = 0;
+  private lastControl: {
+    sequence: number;
+    state: string;
+    controlEvidence: string | null;
+    nativeEventId: string | null;
+    nativeProcessIdentity: string | null;
+  } | null = null;
   private readonly listeners = new Set<Subscription>();
   private readonly history = new Map<number, { event: NativeExecutionObservation; bytes: number }>();
   private retainedBytes = 0;
@@ -31,6 +38,20 @@ export class ProviderExecutionObserver {
   }
 
   emit(fact: NativeExecutionFact, nativeProcessIdentity?: string): void {
+    const control = fact.domain === "control" && fact.kind === "state_changed"
+      ? {
+          state: fact.state,
+          controlEvidence: "controlEvidence" in fact ? fact.controlEvidence ?? null : null,
+          nativeEventId: fact.nativeEventId ?? null,
+          nativeProcessIdentity: nativeProcessIdentity ?? null,
+        }
+      : null;
+    if (control && this.lastControl
+      && this.history.has(this.lastControl.sequence)
+      && this.lastControl.state === control.state
+      && this.lastControl.controlEvidence === control.controlEvidence
+      && this.lastControl.nativeEventId === control.nativeEventId
+      && this.lastControl.nativeProcessIdentity === control.nativeProcessIdentity) return;
     const event = Object.freeze({ sourceId: this.sourceId, sequence: ++this.sequence, observedAtMs: Date.parse(this.now()), fact: Object.freeze({ ...fact }),
       ...(nativeProcessIdentity ? { nativeProcessIdentity } : {}) });
     const bytes = Buffer.byteLength(JSON.stringify(event));
@@ -38,6 +59,7 @@ export class ProviderExecutionObserver {
     // also consume their original position. position() exposes a dropped tail;
     // the next retained observation exposes any interior gap.
     if (bytes > MAX_RETAINED_BYTES) return;
+    this.lastControl = control ? { sequence: event.sequence, ...control } : this.lastControl;
     this.history.set(event.sequence, { event, bytes });
     this.retainedBytes += bytes;
     while (this.history.size > MAX_RETAINED_OBSERVATIONS || this.retainedBytes > MAX_RETAINED_BYTES) {

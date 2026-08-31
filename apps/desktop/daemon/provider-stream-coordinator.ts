@@ -74,7 +74,7 @@ export type ProviderStreamTransition = (
 export type ProviderStreamCoordinatorOptions = {
   /** Optional compatibility map shared with the temporarily-thin daemon facade. */
   liveHandles?: Map<string, ProviderActionHandle>;
-  provider?: Pick<ProviderActionPort, "stop" | "onExit" | "onStream">;
+  provider?: Pick<ProviderActionPort, "stop" | "onExit" | "onStream" | "probeControl">;
   /** Optional non-authoritative capture; never awaited by provider delivery. */
   observeExecution?(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): () => void;
   /** Operational approvals have their own lifetime, independent of optional capture. */
@@ -242,6 +242,15 @@ export class ProviderStreamCoordinator {
         if (!["working", "idle"].includes(manifestEntry.observed_state)
           && !retriesCredentialHandoff) return;
         if (!["working", "idle"].includes(current.observedState)) return;
+        if (manifestEntry.delivery_mode === "daemon_inbox"
+          && ["working", "idle"].includes(manifestEntry.observed_state)
+          && provider.probeControl) {
+          try { await provider.probeControl(current); }
+          catch { /* Shadow probes cannot interrupt operational heartbeats. */ }
+          if (this.liveHandles.get(entryId) !== current
+            || this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
+              !== manifestEntry.provider_ref?.execution_generation_id) return;
+        }
         const hostGrant = await this.options.heartbeat.requiresHostGrant(manifestEntry)
           ? this.options.heartbeat.currentHostGrant(manifestEntry)
           : null;

@@ -1196,6 +1196,9 @@ test("Claude typed observations correlate native turns and completed tools witho
     controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
   });
   assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
+  assert.deepEqual(events.map(({ fact }) => fact), [
+    { domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" },
+  ], "the unsupported probe state is still published to typed-shadow history");
   const request = { inboxItemId: "typed-inbox", actionId: "typed-action", sourceMessage: {}, activation: {} };
   const running = adapter.runRoomTurn(handle, request);
   await flush();
@@ -1209,7 +1212,7 @@ test("Claude typed observations correlate native turns and completed tools witho
   child.emit({ type: "user", session_id, message: { content: [
     { type: "tool_result", tool_use_id: "bootstrap-tail", is_error: false, content: "finished" },
   ] } });
-  assert.equal(events.length, 0);
+  assert.equal(events.length, 1);
   child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
   child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
   child.emit({ type: "user", session_id, message: { content: [
@@ -1218,7 +1221,7 @@ test("Claude typed observations correlate native turns and completed tools witho
   child.emit({ type: "assistant", session_id, message: { content: [
     { type: "tool_use", id: "shell-1", name: "Bash", input: { command: "secret-command" } },
   ] } });
-  assert.equal(events.length, 2, "only runtime readiness and native turn start are proved");
+  assert.equal(events.length, 3, "the control state, runtime readiness, and native turn start are proved");
   child.emit({ type: "user", session_id, message: { content: [
     { type: "tool_result", tool_use_id: "unmatched", is_error: true, content: "secret-output" },
     { type: "tool_result", tool_use_id: "shell-1", is_error: true, content: "secret-output" },
@@ -1237,6 +1240,7 @@ test("Claude typed observations correlate native turns and completed tools witho
   child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: nextId, result: "ready" });
   assert.equal((await next).text, "ready");
   let projection = emptyExecutionProjection();
+  let runtimeReadyObserved = false;
   for (const event of events) {
     projection = reduceExecutionFact(projection, {
       ...event.fact, ...("providerTurnId" in event.fact ? { turnId: event.fact.providerTurnId } : {}),
@@ -1244,7 +1248,10 @@ test("Claude typed observations correlate native turns and completed tools witho
       observerEpoch: 1, sourceSequence: event.sequence, observedAtMs: event.observedAtMs,
     });
     assert.equal(event.nativeProcessIdentity, birthIdentity(child.pid!));
-    assert.equal(projection.runtime, "ready", "the exact native start proves readiness, which survives turn failure");
+    if (event.fact.domain === "runtime" && event.fact.state === "ready") runtimeReadyObserved = true;
+    if (runtimeReadyObserved) {
+      assert.equal(projection.runtime, "ready", "the exact native start proves readiness, which survives turn failure");
+    }
   }
   assert.equal(projection.turns.get(turnId)?.outcome, "failed");
   assert.equal(projection.turns.get(nextId)?.outcome, "completed");

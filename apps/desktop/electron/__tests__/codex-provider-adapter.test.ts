@@ -2580,7 +2580,11 @@ test("execution observation replay stays bounded and preserves source gaps", () 
 
 test("execution observation replay and live fan-out preserve reentrant order and listener isolation", () => {
   const observer = new ProviderExecutionObserver(() => "2026-08-31T00:00:00.000Z");
-  const emit = () => observer.emit({ domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+  let emitted = 0;
+  // Alternate real transitions so this ordering test remains independent of
+  // steady-state control-observation coalescing.
+  const emit = () => observer.emit({ domain: "control", kind: "state_changed",
+    state: emitted++ % 2 === 0 ? "responsive" : "degraded", sideEffects: "none" });
   emit(); emit();
   const first: number[] = [];
   const second: number[] = [];

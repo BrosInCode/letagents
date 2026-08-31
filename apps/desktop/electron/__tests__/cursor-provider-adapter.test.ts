@@ -6852,7 +6852,7 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   assert.deepEqual(adapter.capabilities().execution, {
     controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
   });
-  assert.equal(events.length, 0, "an idle lane neither replays nor invents a process");
+  assert.equal(events.length, 0, "an idle lane has no runtime birth and cannot poison capture with a processless fact");
   const first = adapter.runRoomTurn(handle, roomTurnRequest());
   await flush();
   const child = harness.children[0]!;
@@ -6866,7 +6866,15 @@ test("Cursor typed observations fence each native child and exclude synthetic di
     tool_call: { readToolCall: { result: { failure: { errorMessage: "secret-output" } } } } });
   child.emit({ type: "tool_call", subtype: "started", call_id: "unclosed-write", session_id,
     tool_call: { writeToolCall: { args: { path: "secret-path", fileText: "secret-content" } } } });
+  assert.equal(handle.providerConnection?.processIdentity, birthIdentity(child.pid!), "the active child has an exact runtime birth");
   assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" }, "live output does not imply a responsive control channel");
+  const controlObservations = events.filter(event => event.fact.domain === "control");
+  assert.equal(controlObservations.length, 1, "the steady probe coalesces with the native child control observation");
+  const probeObservation = controlObservations[0]!;
+  assert.equal(probeObservation.nativeProcessIdentity, birthIdentity(child.pid!));
+  assert.deepEqual(probeObservation.fact,
+    { domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" },
+    "an active child publishes the probe result with its exact runtime birth");
   child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
   assert.equal(events.filter((event) => event.fact.domain === "execution"
     && event.fact.executionId === "unclosed-write" && event.fact.kind === "completed").length, 0,
@@ -6887,7 +6895,7 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   await flush();
   const runtimes = new Map<string, ReturnType<typeof emptyExecutionProjection>>();
   for (const event of events) {
-    assert.ok(event.nativeProcessIdentity);
+    assert.ok(event.nativeProcessIdentity, "every Cursor observation is safe for runtime-birth keyed capture");
     const runtimeId = event.nativeProcessIdentity!;
     runtimes.set(runtimeId, reduceExecutionFact(runtimes.get(runtimeId) ?? emptyExecutionProjection(), {
       ...event.fact, ...("providerTurnId" in event.fact ? { turnId: event.fact.providerTurnId } : {}),
