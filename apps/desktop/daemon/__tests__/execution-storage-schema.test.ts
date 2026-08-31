@@ -97,7 +97,7 @@ test("schema is additive, empty, idempotent, content-free, and does not own vers
     validateExecutionStorageSchema(db);
     assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 17);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'").all() as Array<{ name: string }>;
-    assert.equal(tables.length, 12);
+    assert.equal(tables.length, 13);
     for (const { name } of tables) {
       assert.equal((db.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get() as { count: number }).count, 0);
       const columns = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string }>;
@@ -188,6 +188,64 @@ test("native lifetimes and observer ordering remain distinct from execution and 
       { sequence: 2, observer_epoch: 2, source_sequence: 1 },
       { sequence: 3, observer_epoch: 1, source_sequence: 1 },
     ]);
+    validateExecutionStorageSchema(db);
+  } finally { db.close(); }
+});
+
+test("observer bindings fence subject and current observer lifetimes to the same agent", () => {
+  const db = fixture(); try {
+    seed(db);
+    runtime(db, { execution_generation_id: "observer-generation", runtime_generation_id: "observer-runtime" });
+    runtime(db, { agent_id: "other-agent", execution_generation_id: "other-generation", runtime_generation_id: "other-runtime" });
+    const observer = {
+      agent_id: "agent", execution_generation_id: "generation", runtime_generation_id: "runtime",
+      observer_execution_generation_id: "observer-generation", observer_runtime_generation_id: "observer-runtime",
+      daemon_generation_id: "daemon-generation", observer_epoch: 2, last_source_sequence: 1,
+      max_observed_sequence: 2, recovery_turn_id: "turn", bound_at_ms: 100,
+    };
+    for (const invalid of [
+      { runtime_generation_id: "observer-runtime" },
+      { observer_runtime_generation_id: "runtime" },
+      { observer_execution_generation_id: "other-generation", observer_runtime_generation_id: "other-runtime" },
+      { execution_generation_id: "observer-generation", runtime_generation_id: "observer-runtime" },
+      { recovery_turn_id: "missing-turn" },
+    ]) assert.throws(() => insert(db, "execution_observers", { ...observer, ...invalid }), /FOREIGN KEY/);
+    for (const invalid of [{ observer_epoch: 0 }, { last_source_sequence: -1 }, { max_observed_sequence: 0 }, { bound_at_ms: -1 }]) {
+      assert.throws(() => insert(db, "execution_observers", { ...observer, ...invalid }), /CHECK/);
+    }
+    insert(db, "execution_observers", observer);
+    assert.throws(() => insert(db, "execution_observers", observer), /UNIQUE/);
+    assert.throws(() => db.exec("DELETE FROM execution_turns WHERE turn_id='turn'"), /FOREIGN KEY/);
+    db.exec("UPDATE execution_observers SET recovery_turn_id=NULL");
+    validateExecutionStorageSchema(db);
+  } finally { db.close(); }
+});
+
+test("v19 evidence fields are nullable for history and constrained to their fact domains", () => {
+  const db = fixture(); try {
+    seed(db);
+    const stateFact = { execution_id: null, kind: "state_changed", operation: null, outcome: null };
+    fact(db, { ...stateFact, domain: "turn", state: "terminal", fact_id: "historical-terminal" });
+    for (const turn_outcome of ["completed", "failed", "interrupted", "unreadable"]) {
+      fact(db, { ...stateFact, domain: "turn", state: "terminal", fact_id: turn_outcome, turn_outcome });
+    }
+    assert.throws(() => fact(db, { turn_outcome: "completed" }), /CHECK/);
+    assert.throws(() => fact(db, { ...stateFact, domain: "turn", state: "active", turn_outcome: "completed" }), /CHECK/);
+    assert.throws(() => fact(db, { ...stateFact, domain: "turn", state: "terminal", turn_outcome: "invented" }), /CHECK/);
+    for (const control_evidence of ["process_exit", "process_birth_changed", "transport_refused", "control_epoch_gone", "native_session_terminated"]) {
+      fact(db, { ...stateFact, domain: "control", state: "lost", fact_id: control_evidence, control_evidence });
+    }
+    fact(db, { ...stateFact, domain: "runtime", state: "exited", fact_id: "exited", control_evidence: "process_exit" });
+    assert.throws(() => fact(db, { control_evidence: "process_exit" }), /CHECK/);
+    assert.throws(() => fact(db, { ...stateFact, domain: "control", state: "degraded", control_evidence: "transport_refused" }), /CHECK/);
+    assert.throws(() => fact(db, { ...stateFact, domain: "control", state: "lost", control_evidence: "silence" }), /CHECK/);
+    request(db);
+    for (const projection_sha256 of ["short", "g".repeat(64), "A".repeat(64)]) {
+      assert.throws(() => decision(db, { projection_sha256 }), /CHECK/);
+    }
+    decision(db, { projection_sha256: digest });
+    assert.throws(() => db.exec("UPDATE execution_approval_decisions SET projection_sha256=NULL"), /immutable/);
+    assert.throws(() => db.exec("UPDATE execution_facts SET turn_outcome='failed' WHERE fact_id='historical-terminal'"), /immutable/);
     validateExecutionStorageSchema(db);
   } finally { db.close(); }
 });

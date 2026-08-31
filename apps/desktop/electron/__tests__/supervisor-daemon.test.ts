@@ -220,7 +220,7 @@ test("real supervisor upgrades v17 through encrypted private bootstrap before so
     assert.equal(await exited, 0, output);
     assert.equal(keyRequests, 1);
     const current = new DatabaseSync(statePath, { readOnly: true });
-    try { assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, 18); }
+    try { assert.equal(current.prepare("PRAGMA user_version").get()!.user_version, schemaModule.DAEMON_STATE_SCHEMA_VERSION); }
     finally { current.close(); }
     const restored = await backupModule.decryptStateRecoveryBackup(`${statePath}.recovery.enc`, Buffer.alloc(32, 17));
     try { assert.equal(restored.prepare("PRAGMA user_version").get()!.user_version, 17); }
@@ -1852,7 +1852,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.107");
+    assert.equal(status.implementationVersion, "2.0.108");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

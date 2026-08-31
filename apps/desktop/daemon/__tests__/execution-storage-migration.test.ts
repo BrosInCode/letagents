@@ -7,7 +7,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
-import { validateExecutionStorageSchema } from "../execution-storage-schema.js";
+import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Row = Record<string, unknown>;
 const now = "2026-08-30T00:00:00.000Z";
@@ -34,6 +34,50 @@ function restoreV17Fixture(database: DatabaseSync): void {
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1};
     UPDATE manifest_metadata SET schema_version=17, generation=42 WHERE singleton=1;
     PRAGMA user_version=17; PRAGMA foreign_keys=ON`);
+}
+
+function restoreV18Fixture(database: DatabaseSync): void {
+  database.exec("PRAGMA foreign_keys=OFF");
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*'").all() as Row[]) {
+    database.exec(`DROP TABLE "${String(row.name).replaceAll('"', '""')}"`);
+  }
+  applyExecutionStorageSchema(database, 18);
+  database.exec("UPDATE manifest_metadata SET schema_version=18 WHERE singleton=1; PRAGMA user_version=18; PRAGMA foreign_keys=ON");
+}
+
+function seedV18Evidence(database: DatabaseSync): void {
+  database.exec(`
+    INSERT INTO execution_generations VALUES('generation','agent',100);
+    INSERT INTO execution_runtime_generations
+      (runtime_generation_id,execution_generation_id,agent_id,provider,runtime_state,control_state,continuation_state,config_revision,created_at_ms)
+      VALUES('runtime','generation','agent','codex','ready','responsive','available',1,100);
+    INSERT INTO execution_message_attempts
+      (attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+      VALUES('attempt','agent','room','source','active',100);
+    INSERT INTO execution_attempt_generations VALUES('attempt','agent','room','generation','workspace',100);
+    INSERT INTO execution_turns
+      (turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms,ended_at_ms)
+      VALUES('turn','attempt','agent','room','generation','runtime','continuation','native-turn','terminal','possible',100,120);
+    INSERT INTO execution_facts
+      (fact_id,agent_id,execution_generation_id,runtime_generation_id,observer_epoch,source_sequence,turn_id,domain,kind,state,side_effects,observed_at_ms)
+      VALUES('terminal','agent','generation','runtime',1,1,'turn','turn','state_changed','terminal','possible',120),
+      ('control-lost','agent','generation','runtime',1,2,NULL,'control','state_changed','lost','none',121);
+    INSERT INTO execution_approval_requests
+      (request_id,request_version,agent_id,room_id,execution_generation_id,runtime_generation_id,turn_id,provider_continuation_id,provider_turn_id,connection_id,native_request_id_type,native_request_id,kind,risk,delegatable,request_sha256,state,recovery_boundary,created_at_ms,expires_at_ms)
+      VALUES('request',1,'agent','room','generation','runtime','turn','continuation','native-turn','connection','string','native-request','command','high',0,'${"a".repeat(64)}','dispatching','connection',100,200);
+    INSERT INTO execution_approval_decisions
+      (decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256,decision,source,actor_id,dispatch_state,dispatch_id,decided_at_ms,dispatch_started_at_ms)
+      VALUES('decision','request',1,'agent','room','generation','turn',0,'${"a".repeat(64)}','deny','host','owner','uncertain','dispatch',110,111);
+  `);
+}
+
+function typedRows(database: DatabaseSync): Record<string, unknown> {
+  return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name<>'execution_observers' ORDER BY name").all() as Row[])
+    .map(({ name }) => {
+      const columns = (database.prepare(`PRAGMA table_info(${name})`).all() as Row[])
+        .map((column) => String(column.name)).filter((column) => !["turn_outcome", "control_evidence", "projection_sha256"].includes(column));
+      return [String(name), database.prepare(`SELECT ${columns.join(",")} FROM ${name} ORDER BY rowid`).all()];
+    }));
 }
 
 function seedLegacyEvidence(database: DatabaseSync): void {
@@ -227,4 +271,66 @@ test("migration temporary row snapshots cannot spill plaintext to disk", async (
     });
     database.close();
   } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("v19 adds observer and proof slots without rewriting v18 evidence or rebuilding the inbox", async () => {
+  const env = await fixture();
+  try {
+    restoreV18Fixture(env.database);
+    seedLegacyEvidence(env.database); seedV18Evidence(env.database);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
+    const inboxSchema = env.database.prepare("SELECT rootpage,sql FROM sqlite_master WHERE name='supervised_agent_inbox'").get();
+    const sequence = env.database.prepare("SELECT seq FROM sqlite_sequence WHERE name='execution_facts'").get();
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
+    assert.deepEqual(env.database.prepare("SELECT rootpage,sql FROM sqlite_master WHERE name='supervised_agent_inbox'").get(), inboxSchema);
+    assert.deepEqual(env.database.prepare("SELECT seq FROM sqlite_sequence WHERE name='execution_facts'").get(), sequence);
+    assert.deepEqual(env.database.prepare("SELECT turn_outcome,control_evidence FROM execution_facts").all().map((row) => ({ ...row })), [
+      { turn_outcome: null, control_evidence: null }, { turn_outcome: null, control_evidence: null },
+    ]);
+    assert.equal(env.database.prepare("SELECT projection_sha256 FROM execution_approval_decisions").get()!.projection_sha256, null);
+    assert.equal(env.database.prepare("SELECT COUNT(*) AS count FROM execution_observers").get()!.count, 0);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 19);
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    assert.throws(() => env.database.exec(`UPDATE execution_approval_decisions SET projection_sha256='${"a".repeat(64)}'`), /immutable/);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
+  } finally { await env.cleanup(); }
+});
+
+test("v19 rolls its additive schema and immutable trigger back with the paired markers", async () => {
+  const env = await fixture();
+  try {
+    restoreV18Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database);
+    const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database) };
+    const schema = env.database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all();
+    assert.throws(() => new DaemonStateSchema((database) => {
+      validateExecutionStorageSchema(database);
+      throw new Error("interrupt v19 before markers");
+    }).createSchema(env.database), /interrupt v19/);
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database) }, before);
+    assert.deepEqual(env.database.prepare("SELECT type,name,tbl_name,sql FROM sqlite_master ORDER BY type,name").all(), schema);
+    validateExecutionStorageSchema(env.database, 18);
+    new DaemonStateSchema().createSchema(env.database);
+    validateExecutionStorageSchema(env.database);
+  } finally { await env.cleanup(); }
+});
+
+test("malformed v18 and missing current observers fail before WAL or initializer writes", async () => {
+  const env = await fixture();
+  try {
+    restoreV18Fixture(env.database); seedV18Evidence(env.database);
+    env.database.exec("DROP INDEX execution_facts_agent_sequence; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE");
+    const before = await readFile(env.path);
+    let initialized = false;
+    await assert.rejects(() => openDaemonStateDatabase(env.path, () => { initialized = true; }), /Execution storage schema mismatch/);
+    assert.equal(initialized, false);
+    assert.deepEqual(await readFile(env.path), before);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 18);
+    env.database.exec("CREATE INDEX execution_facts_agent_sequence ON execution_facts(agent_id,sequence)");
+    new DaemonStateSchema().createSchema(env.database);
+    env.database.exec("DROP TABLE execution_observers");
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database), /execution_observers/);
+    assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='execution_observers'").get(), undefined);
+  } finally { await env.cleanup(); }
 });

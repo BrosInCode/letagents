@@ -9,7 +9,7 @@ import {
   cleanupStateRecoveryBackup, decryptStateRecoveryBackup, markStateRecoveryBackupValidated,
   prepareStateRecoveryBackup, StateRecoveryError, type StateRecoveryBackup,
 } from "../state-recovery-backup.js";
-import { DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
+import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
 import { requestStateRecoveryKey, withProtectedStateUpgrade } from "../state-recovery-key.js";
 import { DaemonLifecycleLog, daemonLifecycleErrorDetail } from "../lifecycle-log.js";
 
@@ -351,17 +351,17 @@ async function realStateFixture(t: test.TestContext) {
 
 test("real startup keeps valid retention unchanged and remains healthy after ciphertext/header damage", async (t) => {
   const env = await realStateFixture(t);
-  assert.equal(await env.start(), 18);
+  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
   const receiptSql = "SELECT checksum,imported_at FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'";
   const originalReceipt = env.inspect(receiptSql);
   assert.equal(originalReceipt.length, 1);
-  assert.equal(await env.start(), 18);
+  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
   assert.deepEqual(env.inspect(receiptSql), originalReceipt, "current startup does not reset a verified receipt's clock");
   assert.equal(env.keyRequests(), 1);
   const original = await readFile(env.backup);
   const damaged = Buffer.from(original); damaged[damaged.length - 1] ^= 1;
   await writeFile(env.backup, damaged);
-  assert.equal(await env.start(), 18, "backup damage does not disable healthy current state");
+  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION, "backup damage does not disable healthy current state");
   assert.deepEqual(env.inspect(receiptSql), originalReceipt, "changed ciphertext is never re-blessed");
   assert.deepEqual(env.inspect("SELECT reason,quarantined_path FROM migration_failures WHERE migration_key='encrypted-state-recovery-backup'"), [
     { reason: "recovery_snapshot_changed", quarantined_path: "" },
@@ -369,7 +369,7 @@ test("real startup keeps valid retention unchanged and remains healthy after cip
   assert.deepEqual(await readFile(env.backup), damaged);
   const malformed = Buffer.from(original); malformed[0] = 0;
   await writeFile(env.backup, malformed);
-  assert.equal(await env.start(), 18, "malformed retained metadata remains a recovery warning only");
+  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION, "malformed retained metadata remains a recovery warning only");
   assert.deepEqual(env.inspect(receiptSql), originalReceipt);
   assert.deepEqual(env.inspect("SELECT reason,quarantined_path FROM migration_failures WHERE migration_key='encrypted-state-recovery-backup'"), [
     { reason: "recovery_snapshot_unreadable", quarantined_path: "" },
@@ -380,10 +380,10 @@ test("real startup keeps valid retention unchanged and remains healthy after cip
 
 test("post-commit/pre-receipt crash retains one unverified snapshot without fake expiry authority", async (t) => {
   const env = await realStateFixture(t);
-  await prepareStateRecoveryBackup(env.path, 18, env.getBackupKey, { now: OLD });
+  await prepareStateRecoveryBackup(env.path, DAEMON_STATE_SCHEMA_VERSION, env.getBackupKey, { now: OLD });
   await env.initialize(); // Simulated crash: migration committed, fresh in-process proof was lost.
   const original = await readFile(env.backup);
-  assert.equal(await env.start(), 18);
+  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
   assert.deepEqual(env.inspect("SELECT checksum FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'"), []);
   assert.deepEqual(env.inspect("SELECT reason,quarantined_path FROM migration_failures WHERE migration_key='encrypted-state-recovery-backup'"), [
     { reason: "recovery_snapshot_receipt_missing", quarantined_path: "" },
@@ -392,12 +392,12 @@ test("post-commit/pre-receipt crash retains one unverified snapshot without fake
   try {
     assert.equal(await cleanupStateRecoveryBackup(env.path, db, { now: new Date("2030-01-01") }), false);
   } finally { db.close(); }
-  assert.equal(await env.start(), 18);
+  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
   assert.deepEqual(await readFile(env.backup), original);
   assert.deepEqual((await readdir(env.directory)).filter((name) => name.includes("recovery")), ["daemon.sqlite.recovery.enc"]);
   assert.equal(env.keyRequests(), 1);
   const current = new DatabaseSync(env.path);
   try { assert.equal(await cleanupStateRecoveryBackup(env.path, current, { clear: true }), true); } finally { current.close(); }
-  assert.equal(await env.start(), 18);
+  assert.equal(await env.start(), DAEMON_STATE_SCHEMA_VERSION);
   assert.equal(env.keyRequests(), 1);
 });
