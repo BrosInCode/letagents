@@ -54,6 +54,7 @@ class FakeRpc implements CodexAdapterRpc {
   connected = false;
   closed = false;
   turnStatus = "completed";
+  permissionChanges = [{ path: "/repo/file.ts", kind: { type: "add" as const }, diff: "+file" }];
   private threadStartCount = 0;
   private readonly missingThreadReads = new Map<string, number>();
   private readonly missingThreadResumes = new Map<string, number>();
@@ -84,6 +85,8 @@ class FakeRpc implements CodexAdapterRpc {
 
   async request<T>(method: string, params?: unknown): Promise<T> {
     this.requests.push({ method, params });
+    if (method === "thread/turns/list") return { data: [{ id: `turn-${this.threadId}`, status: this.turnStatus, itemsView: "full",
+      items: [{ id: "item-1", type: "fileChange", status: "inProgress", changes: this.permissionChanges }] }], nextCursor: null, backwardsCursor: null } as T;
     if (method === "mcpServerStatus/list") {
       if (this.options.workplaceProbeTimesOut) {
         throw new Error("Codex app-server request timed out: mcpServerStatus/list");
@@ -363,6 +366,94 @@ const approvalParams = (overrides: Record<string, unknown> = {}) => ({
   command: "npm test", ...overrides,
 });
 
+test("Codex file approval inspection requires exact full pending native edits", async () => {
+  const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!; client.turnStatus = "inProgress";
+  const request = client.askPermission(approvalParams(), 3, "item/fileChange/requestApproval");
+  const changes = [
+    { path: "/repo/empty", kind: { type: "add" }, diff: "" },
+    { path: "/repo/deleted", kind: { type: "delete" }, diff: "-old" },
+    { path: "/repo/update", kind: { type: "update", move_path: null }, diff: "-old\n+new" },
+    { path: "/repo/renamed", kind: { type: "update", move_path: "/repo/new" }, diff: "" },
+  ];
+  const valid = { data: [{ id: "turn-thread-1", status: "inProgress", itemsView: "full",
+    items: [{ id: "item-1", type: "fileChange", status: "inProgress", changes }] }] };
+  let response: unknown = valid;
+  const original = client.request.bind(client);
+  client.request = async (method, params) => {
+    if (method !== "thread/turns/list") return original(method, params);
+    assert.deepEqual(params, { threadId: "thread-1", limit: 1, sortDirection: "desc", itemsView: "full" });
+    return response as never;
+  };
+  assert.deepEqual(await adapter.inspectPermissionFileChanges(handle, request), changes);
+  for (const invalid of [null, { data: [] }, { data: [...valid.data, ...valid.data] },
+    ...[{ id: "foreign" }, { status: "completed" }, { itemsView: "none" }, { items: [] },
+      { items: [...valid.data[0]!.items, ...valid.data[0]!.items] },
+      ...[{ status: "completed" }, { type: "commandExecution" }, { changes: [] },
+        { changes: [{ ...changes[0], kind: { type: "unknown" } }] },
+        { changes: [{ ...changes[0], path: "" }] },
+        { changes: [{ ...changes[0], diff: "x".repeat(25 * 1024) }] }]
+        .map(item => ({ items: [{ ...valid.data[0]!.items[0], ...item }] }))]
+      .map(turn => ({ data: [{ ...valid.data[0], ...turn }] }))]) {
+    response = invalid;
+    assert.equal(await adapter.inspectPermissionFileChanges(handle, request), null);
+  }
+  response = valid;
+  assert.equal(await adapter.inspectPermissionFileChanges(handle, { ...request }), null);
+  client.pendingPermissions.delete(request.id);
+  assert.equal(await adapter.inspectPermissionFileChanges(handle, request), null);
+  assert.equal(client.permissionResponses.length, 0);
+});
+
+test("Codex file approval rechecks proposed edits after the broker hook and never sends changed edits", async () => {
+  for (const changed of [false, true]) {
+    const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!; client.turnStatus = "inProgress";
+    const request = client.askPermission(approvalParams(), 1, "item/fileChange/requestApproval");
+    const expected = structuredClone(client.permissionChanges);
+    const original = client.request.bind(client);
+    client.request = async (method, params) => {
+      assert.notEqual(method, "thread/read", "live pending edits cannot require materialized historical items");
+      return original(method, params) as never;
+    };
+    let fences = 0;
+    const operation = adapter.replyPermission(handle, request, "once", {
+      expectedFileChanges: expected,
+      beforeNativeDispatch: async () => { if (changed) client.permissionChanges[0]!.diff = "+changed"; expected[0]!.diff = "+caller-mutated"; },
+      assertNativeDispatch: () => { fences++; },
+    });
+    if (changed) await assert.rejects(operation, { outcome: "not_dispatched" });
+    else assert.deepEqual(await operation, { outcome: "sent", scope: "request" });
+    assert.equal(fences, changed ? 0 : 1);
+    assert.equal(client.permissionResponses.length, changed ? 0 : 1);
+  }
+});
+
+test("Codex file approval refuses authority loss or unsupported inspection across native reads", async () => {
+  for (const race of ["birth", "connection", "resolved", "replacement", "unsupported"]) {
+    const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!; client.turnStatus = "inProgress";
+    const request = client.askPermission(approvalParams(), 1, "item/fileChange/requestApproval");
+    const original = client.request.bind(client);
+    client.request = async (method, params) => {
+      const result = await original(method, params);
+      if (method === "thread/turns/list") {
+        if (race === "birth") harness.setIdentityObservable(false);
+        if (race === "connection") client.disconnect();
+        if (race === "resolved") client.pendingPermissions.delete(request.id);
+        if (race === "replacement") client.askPermission(approvalParams(), request.id, request.method);
+        if (race === "unsupported") throw new Error("method not found");
+      }
+      return result as never;
+    };
+    assert.equal(await adapter.inspectPermissionFileChanges(handle, request), null, race);
+    assert.equal(client.permissionResponses.length, 0);
+  }
+});
+
 test("Codex permission dispatch rechecks native authority after the durable broker hook", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -398,16 +489,17 @@ test("Codex permission replies target exact pending requests and report sent, ne
     // Same native item, distinct typed RPC IDs: neither callback can authorize the other.
     const once = client.askPermission(approvalParams({ approvalId: "callback-1", availableDecisions: ["accept", "decline"] }), 1, method);
     const reject = client.askPermission(approvalParams({ approvalId: "callback-2", grantRoot: "/host/private" }), "1", method);
-    assert.deepEqual(await adapter.replyPermission(handle, once, "once"), { outcome: "sent", scope: "request" });
+    const options = method.includes("fileChange") ? { beforeNativeDispatch: async () => {}, expectedFileChanges: client.permissionChanges } : undefined;
+    assert.deepEqual(await adapter.replyPermission(handle, once, "once", options), { outcome: "sent", scope: "request" });
     assert.equal(client.listPendingRequests()[0], reject);
-    assert.deepEqual(await adapter.replyPermission(handle, reject, "reject"), { outcome: "sent", scope: "request" });
+    assert.deepEqual(await adapter.replyPermission(handle, reject, "reject", options), { outcome: "sent", scope: "request" });
     assert.deepEqual(client.permissionResponses.slice(-2), [
       { request: once, result: { decision: "accept" } }, { request: reject, result: { decision: "decline" } },
     ]);
     await assert.rejects(adapter.replyPermission(handle, once, "once"), { outcome: "not_dispatched" });
   }
   assert.equal(client.permissionResponses.length, 4);
-  assert.equal(client.requests.filter(request => request.method === "thread/read").length, 4);
+  assert.equal(client.requests.filter(request => request.method === "thread/read").length, 2, "only command approvals use the historical boundary");
   assert.deepEqual(facts, [], "approval payloads and decisions never enter execution evidence");
   assert.deepEqual(harness.signals, []);
   assert.equal(client.requests.some(request => request.method === "turn/start"), false);

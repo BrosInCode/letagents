@@ -260,8 +260,19 @@ test("host approval retains an unsent chosen decision for exact recovery without
   } finally { await f.close(); }
 });
 
-test("host approval reaches the real Codex adapter and RPC response through an offline native server", { timeout: 10_000 }, async () => {
+for (const scenario of ["command", "file_change", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
+  test(`host approval reaches the real Codex adapter through an offline native server: ${scenario}`, { timeout: 10_000 }, () => verifyNativeApproval(scenario));
+}
+
+async function verifyNativeApproval(scenario: "command" | "file_change" | "changed_file" | "changed_presentation" | "oversized_presentation") {
   const f = await fixture(); f.broker.close();
+  const isFileChange = scenario !== "command";
+  const changes = [{ path: "/workspace/old.txt", kind: { type: "update", move_path: "/workspace/new.txt" }, diff: `@@ -1 +1 @@\n-old\n+${secret}` }];
+  if (scenario === "oversized_presentation") {
+    // The edits alone fit the adapter's bound; the complete host presentation,
+    // including its native request, must also fit without truncation.
+    changes[0]!.diff += "x".repeat(24 * 1024 - 50 - Buffer.byteLength(JSON.stringify(changes)));
+  }
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   const frames: Record<string, unknown>[] = []; const order: string[] = [];
   const streams: ProviderActionStreamEvent[] = []; const facts: NativeExecutionObservation[] = [];
@@ -274,9 +285,13 @@ test("host approval reaches the real Codex adapter and RPC response through an o
     const frame = JSON.parse(String(raw)) as Record<string, unknown>; frames.push(frame);
     if (!frame.method) { receivedResponse(frame); return; }
     if (!Object.hasOwn(frame, "id")) return;
+    if (frame.method === "thread/turns/list") assert.deepEqual(frame.params,
+      { threadId: "continuation", limit: 1, sortDirection: "desc", itemsView: "full" });
     const result = frame.method === "mcpServerStatus/list" ? { data: [{ name: "letagents" }] }
       : frame.method === "thread/read" ? { thread: { id: "continuation", status: { type: "active" },
-        turns: [{ id: "native-turn", status: "inProgress", items: [] }] } } : {};
+        turns: isFileChange ? [] : [{ id: "native-turn", status: "inProgress", items: [] }] } }
+      : frame.method === "thread/turns/list" ? { data: [{ id: "native-turn", status: "inProgress", itemsView: "full",
+        items: [{ type: "fileChange", id: "item-1", status: "inProgress", changes }] }], nextCursor: null, backwardsCursor: null } : {};
     socket.send(JSON.stringify({ id: frame.id, result }));
   }));
   try {
@@ -294,10 +309,17 @@ test("host approval reaches the real Codex adapter and RPC response through an o
         rpc = new CodexRpcClient(url, notify, 1_000);
         const request = rpc.request.bind(rpc); const respond = rpc.respond.bind(rpc);
         rpc.request = async (method, params, options) => {
-          if (selected && method === "thread/read") {
-            const row = f.db.prepare("SELECT dispatch_state, projection_sha256 FROM execution_approval_decisions").get()!;
-            assert.equal(row.dispatch_state, "not_dispatched"); assert.equal(row.projection_sha256, selected.projectionSha256);
-            order.push("decision_committed");
+          if (selected && (method === "thread/read" || method === "thread/turns/list")) {
+            const row = f.db.prepare("SELECT dispatch_state, projection_sha256 FROM execution_approval_decisions").get();
+            if (row) {
+              assert.equal(row.projection_sha256, selected.projectionSha256);
+              if (row.dispatch_state === "not_dispatched") order.push("decision_committed");
+              else {
+                assert.equal(row.dispatch_state, "dispatching");
+                order.push("post_intent_inspection");
+                if (scenario === "changed_file") changes[0]!.diff += "\n+changed after the host's decision";
+              }
+            }
           }
           return request(method, params, options);
         };
@@ -320,20 +342,45 @@ test("host approval reaches the real Codex adapter and RPC response through an o
     const pending = new Promise<void>(resolve => {
       const unsubscribe = rpc.onPendingRequestsChanged(() => { if (rpc.listPendingRequests().length) { unsubscribe(); resolve(); } });
     });
-    server.clients.values().next().value!.send(JSON.stringify({ id: 71, method: "item/commandExecution/requestApproval",
-      params: { threadId: "continuation", turnId: "native-turn", itemId: "command-1", startedAtMs: now,
-        command: `printf '${secret}'`, reason: "failed systemError is untrusted permission text" } }));
+    server.clients.values().next().value!.send(JSON.stringify({ id: 71,
+      method: isFileChange ? "item/fileChange/requestApproval" : "item/commandExecution/requestApproval",
+      params: { threadId: "continuation", turnId: "native-turn", itemId: "item-1", startedAtMs: now,
+        ...(isFileChange ? {} : { command: `printf '${secret}'` }), reason: "failed systemError is untrusted permission text" } }));
     await pending;
-    const [candidate] = await broker.list("room"); assert.ok(candidate?.reference, "native approval must match the operational checkpoint");
+    const [candidate] = await broker.list("room");
+    if (scenario === "oversized_presentation") {
+      assert.equal(candidate!.status, "unavailable"); assert.equal(candidate!.reference, null);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 0);
+      assert.equal(frames.some(frame => frame.id === 71 && !frame.method), false);
+      return;
+    }
+    assert.ok(candidate?.reference, "native approval must match the operational checkpoint");
     assert.equal(candidate.reference.nativeRequestId, 71); assert.equal(candidate.reference.providerTurnId, "native-turn");
     assert.equal(candidate.reference.connectionId, rpc.currentConnectionId()); assert.equal(candidate.status, "pending");
+    if (isFileChange) {
+      assert.equal(candidate.presentation.title, "Change files");
+      assert.deepEqual(JSON.parse(candidate.presentation.details).changes, changes);
+      assert.equal(candidate.reference.requestSha256, hash({ request: rpc.listPendingRequests()[0], changes }));
+    }
     selected = decision(candidate);
-    assert.equal(await broker.decide(selected), "decision_sent");
-    assert.deepEqual(await responseFrame, { id: 71, result: { decision: "accept" } });
-    assert.deepEqual(order, ["decision_committed", "intent_committed", "native_write"]);
+    if (scenario === "changed_presentation") {
+      changes[0]!.diff += "\n+different before the host chooses";
+      await assert.rejects(broker.decide(selected), /displayed approval request has changed/);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
+      assert.equal(frames.some(frame => frame.id === 71 && !frame.method), false);
+      return;
+    }
+    if (scenario === "changed_file") {
+      assert.equal(await broker.decide(selected), "uncertain");
+      assert.deepEqual(order, ["decision_committed", "post_intent_inspection"]);
+    } else {
+      assert.equal(await broker.decide(selected), "decision_sent");
+      assert.deepEqual(await responseFrame, { id: 71, result: { decision: "accept" } });
+      assert.deepEqual(order, ["decision_committed", ...(isFileChange ? ["post_intent_inspection"] : []), "intent_committed", "native_write"]);
+    }
     assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain");
     assert.equal(await broker.decide(selected), "uncertain");
-    assert.equal(frames.filter(frame => frame.id === 71 && !frame.method).length, 1);
+    assert.equal(frames.filter(frame => frame.id === 71 && !frame.method).length, scenario === "changed_file" ? 0 : 1);
     assert.equal(frames.some(frame => ["thread/start", "turn/start", "turn/interrupt"].includes(String(frame.method))), false);
     assert.equal(handle.observedState, "working"); assert.deepEqual(facts, []);
     assert.equal(streams.some(event => event.method.includes("requestApproval") || providerStreamLifecycle(event) === "failed"), false,
@@ -345,4 +392,4 @@ test("host approval reaches the real Codex adapter and RPC response through an o
     await new Promise<void>(resolve => server.close(() => resolve()));
     await f.close();
   }
-});
+}

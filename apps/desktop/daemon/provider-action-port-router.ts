@@ -22,7 +22,7 @@ import type {
 } from "./provider-action-port.js";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
 import type { ControlProbeResult, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../shared/execution-protocol.js";
-import type { CodexNativePermissionRequest, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
+import type { CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeNativePermissionRequest, ProviderPermissionRequest, ProviderPermissionObservation, ProviderPermissionCorrelation, ProviderPermissionDispatchOptions, ProviderPermissionReply } from "../shared/provider-permissions.js";
 
 type NativeHandle = {
   custodyLaunchAgentSessionId?: string;
@@ -37,6 +37,7 @@ export type NativeProviderAdapter = {
   observePermissions?(handle: NativeHandle, listener: (event: { type: "snapshot"; requests: readonly (CodexNativePermissionRequest | OpenCodeNativePermissionRequest)[] } | { type: "degraded" | "unavailable" }) => void, signal: AbortSignal): Promise<void>;
   replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
   correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
+  inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
   activateCustodialPolling?(handle: NativeHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
   inspectCustodialPollingActivation?(handle: NativeHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
@@ -249,6 +250,13 @@ export class ProviderActionPortRouter implements ProviderActionPort {
           || typeof params.turnId !== "string" || !params.turnId.trim() || params.turnId.length > 512
           || typeof params.itemId !== "string" || !params.itemId.trim() || params.itemId.length > 512
           || !Number.isSafeInteger(params.startedAtMs) || (params.startedAtMs as number) < 0) return { outcome: "correlation_unproven" };
+        if (kind === "file_change") {
+          const adapter = await this.adapter(remembered.provider);
+          if (!current() || !adapter.inspectPermissionFileChanges) return { outcome: "correlation_unproven" };
+          const fileChanges = await adapter.inspectPermissionFileChanges(remembered.handle, request.native);
+          if (!current() || !fileChanges?.length) return { outcome: "correlation_unproven" };
+          return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: params.turnId, kind, fileChanges };
+        }
         return { outcome: "correlated", providerContinuationId: continuation!, providerTurnId: params.turnId, kind };
       }
       const expected = structuredClone(request.native);
@@ -274,6 +282,7 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     if (!adapter.replyPermission || typeof options?.beforeNativeDispatch !== "function") throw Object.assign(new Error("Permission dispatch is unsupported."), { outcome: "not_dispatched" });
     let admitted = false;
     const result = await adapter.replyPermission(remembered.handle, native, reply, {
+      expectedFileChanges: options.expectedFileChanges,
       beforeNativeDispatch: async () => { assertCurrent(); await options.beforeNativeDispatch(); assertCurrent(); },
       assertNativeDispatch: () => { assertCurrent(); options.assertNativeDispatch?.(); admitted = true; },
     }).catch(error => {
