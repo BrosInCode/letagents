@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
 import type { NativeTurnBoundary } from "../shared/execution-protocol.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionHandle } from "./provider-action-port.js";
@@ -313,4 +313,140 @@ export function completePollingActivation(database: DatabaseSync, input: Complet
   database.prepare(`UPDATE ${table} SET phase='complete',terminal_outcome=?,updated_at_ms=? WHERE operation_id=?`)
     .run(input.outcome, Math.max(Date.now(), activation.updated_at_ms), input.operationId);
   return getPollingActivation(database, input.operationId)!;
+}
+
+/** Cursor acknowledgement, never evidence that a worker consumed or completed work.
+ * An unacknowledged interior row is superseded; only an unacknowledged tail is outstanding. */
+export type PollingOfferRecord = {
+  offer_id: string; activation_id: string; process_incarnation_id: string; mcp_request_id: string;
+  input_cursor: string; offered_frontier: string; predecessor_offer_id: string | null;
+  created_at_ms: number; acknowledged_at_ms: number | null;
+};
+type PollingOfferScope = { operationId: string; agentId: string; processIncarnationId: string };
+export type RecordPollingOffer = PollingOfferScope & { requestId: string | number; inputCursor: string; offeredFrontier: string };
+export type AcknowledgePollingOffer = PollingOfferScope & { roomCursor: string };
+
+const offers = "custodial_polling_offers";
+const offerIdentity = ["offer_id", "activation_id", "process_incarnation_id", "mcp_request_id", "input_cursor", "offered_frontier", "predecessor_offer_id", "created_at_ms"];
+const offerSchema = [
+  `CREATE TABLE ${offers} (
+    offer_id TEXT PRIMARY KEY CHECK(length(trim(offer_id))>0),
+    activation_id TEXT NOT NULL REFERENCES custodial_polling_activations(operation_id) ON DELETE RESTRICT,
+    process_incarnation_id TEXT NOT NULL CHECK(length(process_incarnation_id)=36),
+    mcp_request_id TEXT NOT NULL CHECK(json_valid(mcp_request_id) AND json_type(mcp_request_id) IN ('text','integer')),
+    input_cursor TEXT NOT NULL CHECK((length(input_cursor)>0 AND input_cursor NOT GLOB '*[^0-9]*')
+      OR (substr(input_cursor,1,4)='msg_' AND length(input_cursor)>4 AND substr(input_cursor,5) NOT GLOB '*[^0-9]*')),
+    offered_frontier TEXT NOT NULL CHECK((length(offered_frontier)>0 AND offered_frontier NOT GLOB '*[^0-9]*')
+      OR (substr(offered_frontier,1,4)='msg_' AND length(offered_frontier)>4 AND substr(offered_frontier,5) NOT GLOB '*[^0-9]*')),
+    predecessor_offer_id TEXT UNIQUE,
+    created_at_ms INTEGER NOT NULL CHECK(created_at_ms>=0),
+    acknowledged_at_ms INTEGER CHECK(acknowledged_at_ms>=created_at_ms),
+    UNIQUE(activation_id,process_incarnation_id,mcp_request_id), UNIQUE(offer_id,activation_id),
+    FOREIGN KEY(predecessor_offer_id,activation_id) REFERENCES ${offers}(offer_id,activation_id) ON DELETE RESTRICT
+  ) STRICT`,
+  `CREATE UNIQUE INDEX custodial_polling_offer_one_root ON ${offers}(activation_id) WHERE predecessor_offer_id IS NULL`,
+  `CREATE TRIGGER custodial_polling_offer_append BEFORE INSERT ON ${offers}
+    WHEN NEW.acknowledged_at_ms IS NOT NULL
+      OR NOT EXISTS (SELECT 1 FROM custodial_polling_activations WHERE operation_id=NEW.activation_id AND phase='active')
+      OR (NEW.predecessor_offer_id IS NOT NULL AND NOT EXISTS
+        (SELECT 1 FROM ${offers} p WHERE p.offer_id=NEW.predecessor_offer_id AND p.activation_id=NEW.activation_id
+          AND p.created_at_ms<=NEW.created_at_ms
+          AND NOT EXISTS (SELECT 1 FROM ${offers} s WHERE s.predecessor_offer_id=p.offer_id)))
+    BEGIN SELECT RAISE(ABORT,'Polling offers must append to the active chain tail'); END`,
+  `CREATE TRIGGER custodial_polling_offer_immutable BEFORE UPDATE ON ${offers}
+    WHEN ${offerIdentity.map(column => `NEW.${column} IS NOT OLD.${column}`).join(" OR ")}
+      OR (NEW.acknowledged_at_ms IS NOT OLD.acknowledged_at_ms AND
+        (OLD.acknowledged_at_ms IS NOT NULL OR NEW.acknowledged_at_ms IS NULL
+          OR EXISTS (SELECT 1 FROM ${offers} s WHERE s.predecessor_offer_id=OLD.offer_id)))
+    BEGIN SELECT RAISE(ABORT,'Polling offer identity and interior acknowledgements are immutable'); END`,
+  `CREATE TRIGGER custodial_polling_offer_no_delete BEFORE DELETE ON ${offers}
+    BEGIN SELECT RAISE(ABORT,'Polling offer history cannot be removed'); END`,
+];
+
+export function applyPollingOfferSchema(database: DatabaseSync): void {
+  if (!database.prepare("SELECT 1 FROM sqlite_master WHERE name=?").get(offers)) {
+    for (const definition of offerSchema) database.exec(definition);
+  }
+  validatePollingOfferSchema(database);
+}
+
+export function validatePollingOfferSchema(database: DatabaseSync): void {
+  const actual = database.prepare("SELECT sql FROM sqlite_master WHERE tbl_name=? AND sql IS NOT NULL").all(offers)
+    .map(row => normalizedSql(String(row.sql))).sort();
+  const expected = offerSchema.map(normalizedSql).sort();
+  if (actual.length !== expected.length || actual.some((definition, index) => definition !== expected[index])) {
+    throw new Error("Polling offer journal has invalid or missing schema.");
+  }
+  const integrity = database.prepare(`PRAGMA integrity_check(${offers})`).all();
+  if (integrity.length !== 1 || integrity[0]?.integrity_check !== "ok" || database.prepare(`PRAGMA foreign_key_check(${offers})`).get()) {
+    throw new Error("Polling offer journal contains invalid authority.");
+  }
+}
+
+export function getPollingOfferTail(database: DatabaseSync, activationId: string): PollingOfferRecord | null {
+  return database.prepare(`SELECT p.* FROM ${offers} p WHERE p.activation_id=?
+    AND NOT EXISTS (SELECT 1 FROM ${offers} s WHERE s.predecessor_offer_id=p.offer_id)`).get(activationId) as PollingOfferRecord | undefined ?? null;
+}
+
+function offerCursor(value: unknown): bigint {
+  if (typeof value !== "string" || !/^(?:msg_)?\d+$/.test(value)) throw new Error("Polling offer requires a numeric room cursor.");
+  return BigInt(value.replace(/^msg_/, ""));
+}
+
+function currentOfferAuthority(database: DatabaseSync, input: PollingOfferScope, current: DaemonManifestEntry | undefined): PollingActivationRecord {
+  requireTransaction(database);
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(input.processIncarnationId)) {
+    throw new Error("Polling offer requires its MCP process incarnation UUID.");
+  }
+  const activation = exactActivation(database, input);
+  if (activation.phase !== "active") throw new Error("Polling offer requires an active native activation.");
+  assertCurrent(database, activation, current);
+  return activation;
+}
+
+/** Publish a bounded reply frontier before releasing it. Supersession is the
+ * successor edge itself, never a state transition that can empty the chain. */
+export function recordPollingOffer(database: DatabaseSync, input: RecordPollingOffer, current: DaemonManifestEntry | undefined): PollingOfferRecord {
+  const activation = currentOfferAuthority(database, input, current);
+  if (typeof input.requestId !== "string" && !Number.isSafeInteger(input.requestId)) throw new Error("Polling offer requires an exact SDK request id.");
+  const requestId = JSON.stringify(input.requestId); // Numeric 1 and string "1" are different invocations.
+  if (offerCursor(input.offeredFrontier) < offerCursor(input.inputCursor)) throw new Error("Polling offer cannot move behind its input cursor.");
+  const prior = database.prepare(`SELECT * FROM ${offers} WHERE activation_id=? AND process_incarnation_id=? AND mcp_request_id=?`)
+    .get(input.operationId, input.processIncarnationId, requestId) as PollingOfferRecord | undefined;
+  const tail = getPollingOfferTail(database, input.operationId);
+  if (prior) {
+    if (prior.input_cursor !== input.inputCursor || prior.offered_frontier !== input.offeredFrontier || prior.offer_id !== tail?.offer_id) {
+      throw new Error("Polling offer invocation changed or was superseded.");
+    }
+    return prior;
+  }
+  const binding = database.prepare("SELECT room_cursor FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
+  if (binding.room_cursor !== input.inputCursor) throw new Error("Polling offer input is not the durable acknowledged cursor.");
+  const offer: PollingOfferRecord = { offer_id: randomUUID(), activation_id: input.operationId, process_incarnation_id: input.processIncarnationId,
+    mcp_request_id: requestId, input_cursor: input.inputCursor, offered_frontier: input.offeredFrontier, predecessor_offer_id: tail?.offer_id ?? null,
+    created_at_ms: Math.max(Date.now(), tail?.created_at_ms ?? 0), acknowledged_at_ms: null };
+  database.prepare(`INSERT INTO ${offers}(${Object.keys(offer).join(",")}) VALUES(${Object.keys(offer).map(() => "?").join(",")})`).run(...Object.values(offer));
+  return getPollingOfferTail(database, input.operationId)!;
+}
+
+/** Both writes share the ManifestStore transaction. A refused cursor never
+ * advances anything, including when it names a superseded offer's frontier. */
+export function acknowledgePollingOffer(database: DatabaseSync, input: AcknowledgePollingOffer, current: DaemonManifestEntry | undefined): { acknowledged: boolean; offer: PollingOfferRecord | null; roomCursor: string } {
+  const activation = currentOfferAuthority(database, input, current);
+  offerCursor(input.roomCursor);
+  const binding = database.prepare("SELECT room_cursor FROM worker_session_bindings WHERE entry_id=?").get(activation.agent_id)!;
+  const roomCursor = String(binding.room_cursor); offerCursor(roomCursor);
+  const offer = getPollingOfferTail(database, input.operationId);
+  if (!offer || offer.process_incarnation_id !== input.processIncarnationId || offer.offered_frontier !== input.roomCursor) {
+    return { acknowledged: false, offer, roomCursor };
+  }
+  if (offer.acknowledged_at_ms !== null) {
+    if (roomCursor !== offer.offered_frontier) throw new Error("Polling offer acknowledgement and worker cursor disagree.");
+    return { acknowledged: true, offer, roomCursor };
+  }
+  if (roomCursor !== offer.input_cursor) throw new Error("Polling offer worker cursor changed before acknowledgement.");
+  const at = Math.max(Date.now(), offer.created_at_ms);
+  database.prepare(`UPDATE ${offers} SET acknowledged_at_ms=? WHERE offer_id=?`).run(at, offer.offer_id);
+  database.prepare("UPDATE worker_session_bindings SET room_cursor=?,updated_at=? WHERE entry_id=?").run(offer.offered_frontier, new Date(at).toISOString(), activation.agent_id);
+  return { acknowledged: true, offer: getPollingOfferTail(database, input.operationId), roomCursor: offer.offered_frontier };
 }
