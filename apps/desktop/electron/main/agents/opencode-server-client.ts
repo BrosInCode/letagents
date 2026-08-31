@@ -46,8 +46,10 @@ export type OpenCodeControlProbeResult =
   | { state: "degraded"; reason: "timeout" | "aborted" | "authentication_failed" | "http_error" | "invalid_response" | "transport_refused" | "transport_error" };
 
 export class OpenCodePermissionReplyError extends Error {
-  constructor(readonly outcome: "not_pending" | "request_changed" | "uncertain") {
-    super(outcome === "not_pending"
+  constructor(readonly outcome: "not_dispatched" | "not_pending" | "request_changed" | "uncertain") {
+    super(outcome === "not_dispatched"
+      ? "The OpenCode permission decision was not sent because its provider instance could not be verified."
+      : outcome === "not_pending"
       ? "The OpenCode permission request is no longer pending."
       : outcome === "request_changed"
         ? "The OpenCode permission request changed before the decision was sent."
@@ -358,6 +360,7 @@ export class OpenCodeServerClient {
     sessionId: string,
     expectedRequest: OpenCodePermissionRequest,
     reply: "once" | "reject",
+    assertCurrentInstance?: () => void,
   ): Promise<{ outcome: "processed"; nativeScope: "request" | "session_pending" }> {
     const expected = structuredClone(permissionRequest(expectedRequest));
     if (!nonEmptyString(sessionId) || expected.sessionID !== sessionId || (reply !== "once" && reply !== "reject")) {
@@ -366,8 +369,10 @@ export class OpenCodeServerClient {
     const current = (await this.listPendingPermissions(sessionId)).find((request) => request.id === expected.id);
     if (!current) throw new OpenCodePermissionReplyError("not_pending");
     if (!isDeepStrictEqual(current, expected)) throw new OpenCodePermissionReplyError("request_changed");
-    // The native endpoint has no session or conditional hash parameter. Re-list
-    // immediately before dispatch; the adapter additionally fences its instance.
+    // The native endpoint has no session or conditional hash parameter. The
+    // adapter's synchronous instance fence follows the awaited re-list, with
+    // no await between the fence and POST dispatch. A refusal is not uncertain.
+    assertCurrentInstance?.();
     let response: Response;
     try {
       response = await this.fetchImpl(`${this.url}/permission/${encodeURIComponent(expected.id)}/reply`, this.authInit({

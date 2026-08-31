@@ -1214,6 +1214,169 @@ test("OpenCode client preserves uncertain permission dispatch and does not retry
     error instanceof OpenCodePermissionReplyError && error.outcome === "not_pending");
 });
 
+test("Open Model decisions use the exact live handle and retain native once/reject scope without other actions", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const first = permissionFixture("per_first", handle.providerContinuationId!);
+  const second = permissionFixture("per_second", handle.providerContinuationId!);
+  const foreign = permissionFixture("per_foreign", "another-session");
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setPermissions([first, second, foreign]);
+  await assert.rejects(adapter.replyPermission(handle, foreign, "once"), /exact session/);
+  await assert.rejects(adapter.replyPermission(handle, first, "always" as "once"), /once or reject/);
+  assert.deepEqual(await adapter.replyPermission(handle, first, "once"), { outcome: "processed", nativeScope: "request" });
+  await assert.rejects(adapter.replyPermission(handle, first, "once"), (error: unknown) =>
+    error instanceof OpenCodePermissionReplyError && error.outcome === "not_pending");
+  assert.deepEqual(await adapter.replyPermission(handle, second, "reject"), { outcome: "processed", nativeScope: "session_pending" });
+  assert.deepEqual(await nativeClient(harness.dependencies.fetch).listPendingPermissions(foreign.sessionID), [foreign]);
+  assert.deepEqual(harness.permissionReplies, [{ requestId: first.id, reply: "once" }, { requestId: second.id, reply: "reject" }]);
+  assert.deepEqual(observations, [], "native approval data never enters execution facts");
+  assert.deepEqual(harness.promptBodies, []);
+  assert.deepEqual(harness.aborts, []);
+  assert.deepEqual(harness.signals, []);
+  assert.equal(harness.launches.length, 1);
+  assert.equal(adapter.capabilities().permissionPromptBridging, false);
+});
+
+test("Open Model fences permission decisions before lookup and again after its awaited result", async (t) => {
+  for (const phase of ["before", "during_get"] as const) {
+    for (const loss of ["process_replaced", "process_unverifiable", "process_exited", "continuation_repaired", "instance_disposed"] as const) {
+      await t.test(`${loss} ${phase}`, async () => {
+        const harness = createHarness();
+        let identity: string | null | undefined = "opencode-birth-6101";
+        let holdList = false;
+        let reads = 0;
+        let releaseList!: (response: Response) => void;
+        let startedList!: () => void;
+        const started = new Promise<void>((resolve) => { startedList = resolve; });
+        const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-permission-fence-")), dependencies: {
+          ...harness.dependencies,
+          getProcessIdentity: () => identity,
+          fetch: (input, init) => {
+            if (new URL(input).pathname === "/permission") {
+              reads += 1;
+              if (holdList) { startedList(); return new Promise((resolve) => { releaseList = resolve; }); }
+            }
+            return harness.dependencies.fetch(input, init);
+          },
+        } });
+        const handle = await adapter.spawn(spawnRequest());
+        const expected = permissionFixture("per_old", handle.providerContinuationId!);
+        harness.setPermissions([expected]);
+        const observer = new AbortController();
+        let observing: Promise<void> | undefined;
+        if (loss === "instance_disposed") {
+          let snapshot!: () => void;
+          const ready = new Promise<void>((resolve) => { snapshot = resolve; });
+          observing = adapter.observePermissions(handle, (event) => { if (event.type === "snapshot") snapshot(); }, observer.signal);
+          await ready;
+        }
+        const invalidate = async () => {
+          if (loss === "process_replaced") identity = "different-process-birth";
+          else if (loss === "process_unverifiable") identity = undefined;
+          else if (loss === "process_exited") identity = null;
+          else if (loss === "continuation_repaired") {
+            await adapter.repairContinuation(handle, { ...spawnRequest(), expectedProviderContinuationId: handle.providerContinuationId!, forceReplacement: true }, { checkpointReplacement: async () => {} });
+          } else {
+            harness.sendEvent({ type: "server.instance.disposed", properties: {} });
+            await observing;
+          }
+        };
+        try {
+          const baselineReads = reads;
+          if (phase === "before") await invalidate();
+          holdList = phase === "during_get";
+          const rejected = assert.rejects(adapter.replyPermission(handle, expected, "once"), (error: unknown) =>
+            error instanceof OpenCodePermissionReplyError && error.outcome === "not_dispatched");
+          if (phase === "during_get") {
+            await started;
+            await invalidate();
+            releaseList(json([expected]));
+          }
+          await rejected;
+          assert.equal(reads - baselineReads, phase === "before" ? 0 : 1);
+          assert.deepEqual(harness.permissionReplies, []);
+          assert.deepEqual(harness.promptBodies, []);
+          assert.deepEqual(harness.signals, []);
+          assert.deepEqual(harness.aborts, []);
+          assert.equal(harness.launches.length, 1);
+        } finally { observer.abort(); await observing; }
+      });
+    }
+  }
+});
+
+test("Open Model cannot approve a stopping or already stopped provider", async () => {
+  const harness = createHarness();
+  let finishExit!: (exit: ProviderProcessExit) => void;
+  const exited = new Promise<ProviderProcessExit>((resolve) => { finishExit = resolve; });
+  const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-permission-stop-")), dependencies: {
+    ...harness.dependencies, observeProcessExit: () => exited,
+  } });
+  const handle = await adapter.spawn(spawnRequest());
+  const expected = permissionFixture("per_old", handle.providerContinuationId!);
+  harness.setPermissions([expected]);
+  const stopped = adapter.stop(handle, { force: true });
+  assert.equal(handle.observedState(), "stopping");
+  const refuses = () => assert.rejects(adapter.replyPermission(handle, expected, "once"), (error: unknown) =>
+    error instanceof OpenCodePermissionReplyError && error.outcome === "not_dispatched");
+  await refuses();
+  finishExit({ type: "exit", code: null, signal: "SIGKILL" });
+  await stopped;
+  await refuses();
+  assert.deepEqual(harness.permissionReplies, []);
+});
+
+test("Open Model preserves uncertainty when provider identity changes after permission POST", async (t) => {
+  for (const outcome of ["processed", "missing", "response_lost", "body_replaced", "unverifiable", "single_unverifiable_probe", "continuation_repaired"] as const) {
+    await t.test(outcome, async () => {
+      const harness = createHarness();
+      let identity: string | undefined = "opencode-birth-6101";
+      let missNextProof = false;
+      let afterPost!: () => Promise<void>;
+      const adapter = new OpenModelProviderAdapter({ runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-permission-uncertain-")), dependencies: {
+        ...harness.dependencies,
+        getProcessIdentity: () => {
+          if (missNextProof) { missNextProof = false; return undefined; }
+          return identity;
+        },
+        fetch: async (input, init) => {
+          const response = await harness.dependencies.fetch(input, init);
+          if (!new URL(input).pathname.endsWith("/reply")) return response;
+          if (outcome === "body_replaced") {
+            return new Response(new ReadableStream({ start(controller) {
+              queueMicrotask(() => { identity = "new-birth"; controller.enqueue(new TextEncoder().encode("true")); controller.close(); });
+            } }));
+          }
+          await afterPost();
+          if (outcome === "response_lost") throw new Error("private transport detail");
+          return outcome === "missing" ? json({}, 404) : response;
+        },
+      } });
+      const handle = await adapter.spawn(spawnRequest());
+      const expected = permissionFixture("per_old", handle.providerContinuationId!);
+      harness.setPermissions([expected]);
+      afterPost = async () => {
+        if (outcome === "continuation_repaired") {
+          await adapter.repairContinuation(handle, { ...spawnRequest(), expectedProviderContinuationId: handle.providerContinuationId!, forceReplacement: true }, { checkpointReplacement: async () => {} });
+        } else if (outcome === "single_unverifiable_probe") missNextProof = true;
+        else identity = outcome === "unverifiable" ? undefined : "new-birth";
+      };
+      await assert.rejects(adapter.replyPermission(handle, expected, "once"), (error: unknown) => {
+        assert.ok(error instanceof OpenCodePermissionReplyError);
+        assert.equal(error.outcome, "uncertain");
+        assert.doesNotMatch(error.message, /private/);
+        return true;
+      });
+      assert.equal(harness.permissionReplies.length, 1, "never replay an ambiguous decision");
+      assert.deepEqual(harness.promptBodies, []);
+      assert.deepEqual(harness.signals, []);
+      assert.deepEqual(harness.aborts, []);
+      assert.equal(harness.launches.length, 1);
+    });
+  }
+});
+
 test("OpenCode control probe validates authenticated health and keeps failures degraded, never runtime-lost", async () => {
   const healthy = nativeClient(async (input, init) => {
     assert.equal(new URL(input).pathname, "/global/health");
