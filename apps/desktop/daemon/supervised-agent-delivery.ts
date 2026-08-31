@@ -1561,6 +1561,16 @@ export class SupervisedAgentDelivery {
         await this.sleep(Math.min(2_000, this.retryDelayMs * (2 ** (retryCount - 1))));
         return;
       }
+      if (providerCallEntered && !current.provider_turn_id && !current.outcome && agent.provider !== "cursor") {
+        // A lost native acknowledgement or failed turn-id checkpoint leaves
+        // no exact recovery key, not proof that the prompt was never sent.
+        // Cursor alone checkpoints its paused wrapper before native release;
+        // its settled, evidence-free invocation remains safe to retry below.
+        await this.inbox.transition(item.inbox_item_id, "blocked", {
+          last_error: `The provider may have started this work, but its exact turn could not be saved. Automatic retry was stopped to avoid running it twice: ${message}`,
+        });
+        return;
+      }
       const receipt = (await this.inbox.receipts(agent.agentId)).find((candidate) => candidate.inbox_item_id === item.inbox_item_id);
       const retryCount = receipt?.timeline.filter((event) => event.phase === "retry_scheduled").length ?? 0;
       if (current.attempt_count >= 3 || retryCount >= 2) {
