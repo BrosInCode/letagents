@@ -19,12 +19,12 @@ import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-con
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
 import { ProviderExecutionObserver, nativeExecutionId } from "./provider-execution-observer.js";
-import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
+import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
 } from "./codex-runtime-reasoning.js";
-import { isActiveCodexTurnStatus } from "./codex-session-status.js";
+import { extractThreadStatus, extractTurnStatus, isActiveCodexTurnStatus } from "./codex-session-status.js";
 import { CodexTurnResultAccumulator } from "./codex-turn-result.js";
 import {
   buildCodexStartPrompt,
@@ -570,6 +570,54 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (!turn || !status) return "unknown";
     if (isActiveCodexTurnStatus(status)) return "active";
     return /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(String(status)) ? "terminal" : "unknown";
+  }
+
+  /** Discovery only: MCP waiting is still an active turn, never an idle boundary. */
+  async inspectTurnBoundary(providerHandle: ProviderHandle): Promise<NativeTurnBoundary> {
+    const handle = this.requireHandle(providerHandle);
+    const continuation = handle.providerContinuationId;
+    const connection = { ...handle.providerConnection };
+    const identity = connection.processIdentity;
+    const current = () => {
+      if (handle.terminal || this.handles.get(handle.workAttemptId) !== handle
+        || handle.providerContinuationId !== continuation
+        || !sameProviderConnectionIdentity(connection, handle.providerConnection)
+        || handle.pid === null || handle.pid !== connection.pid || !identity) return false;
+      const actual = this.deps.getProcessIdentity(handle.pid);
+      return typeof actual === "string" && sameProcessBirthIdentity(actual, identity);
+    };
+    try {
+      if (!nativeExecutionId(continuation) || !identity || !current()) return { state: "unknown" };
+      // This may read a large history: it is explicit reconciliation, not a heartbeat.
+      const read = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: continuation, includeTurns: true,
+      });
+      if (!current() || read?.thread?.id !== continuation || !Array.isArray(read.thread.turns)) return { state: "unknown" };
+      let active: string | null = null;
+      let latest: string | null = null;
+      const seen = new Set<string>();
+      for (const turn of read.thread.turns) {
+        const id = turn?.id;
+        const status = extractTurnStatus(turn);
+        if (!nativeExecutionId(id) || seen.has(id)) return { state: "unknown" };
+        seen.add(id);
+        latest = id;
+        if (isActiveCodexTurnStatus(status)) {
+          if (active) return { state: "unknown" };
+          active = id;
+        } else if (!/^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(status ?? "")) {
+          return { state: "unknown" };
+        }
+      }
+      if (active) return { state: "active", providerContinuationId: continuation, nativeProcessIdentity: identity, providerTurnId: active };
+      // A cached handle state or an active thread with no visible turn cannot
+      // certify idle. Even a valid empty list requires native idle as well.
+      if (extractThreadStatus(read.thread) !== "idle") return { state: "unknown" };
+      return { state: "idle", providerContinuationId: continuation, nativeProcessIdentity: identity, latestProviderTurnId: latest };
+    } catch {
+      // Timeouts and unavailable snapshots are uncertainty, not runtime failure.
+      return { state: "unknown" };
+    }
   }
 
   /**

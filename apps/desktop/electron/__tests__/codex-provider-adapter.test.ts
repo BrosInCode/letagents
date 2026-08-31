@@ -29,7 +29,7 @@ import type {
 } from "../main/agents/provider-adapter.js";
 import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
 import { ProviderExecutionObserver } from "../main/agents/provider-execution-observer.js";
-import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
+import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
 
 // Cross-layer assertions load the daemon at test runtime without pulling its
 // separately compiled source tree into Electron's production rootDir.
@@ -1933,3 +1933,126 @@ test("Codex cheap probes degrade on uncertainty and lose control only on exact p
   assert.deepEqual(harness.signals, []);
   assert.equal(harness.launches.length, 1);
 });
+
+test("Codex turn-boundary inspection validates the complete native snapshot without changing execution", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const identity = { providerContinuationId: "thread-1", nativeProcessIdentity: harness.launches[0]!.processIdentity };
+  const idle = (latestProviderTurnId: string | null): NativeTurnBoundary => ({ state: "idle", ...identity, latestProviderTurnId });
+  const active: NativeTurnBoundary = { state: "active", ...identity, providerTurnId: "waiting-turn" };
+  const unknown: NativeTurnBoundary = { state: "unknown" };
+  const snapshot = (turns: unknown, status: unknown = { type: "idle" }, id: unknown = "thread-1") => ({ thread: { id, status, turns } });
+  const terminal = { id: "last-turn", status: "completed" };
+  const waiting = { id: "waiting-turn", status: "inProgress", items: [{ type: "mcpToolCall", server: "letagents", tool: "wait_for_messages", status: "inProgress" }] };
+  const cases: Array<[string, unknown, NativeTurnBoundary]> = [
+    ["empty idle", snapshot([]), idle(null)],
+    ["all terminal", snapshot(["completed", "interrupted", "failed", "cancelled", "stopped"].map(status => ({ id: status, status })), "idle"), idle("stopped")],
+    ["nested turn status", snapshot([{ id: "nested", status: { status: "completed" } }]), idle("nested")],
+    ["MCP waiting before latest terminal", snapshot([waiting, terminal], { type: "active" }), active],
+    ["MCP waiting after terminal", snapshot([terminal, waiting], { type: "active" }), active],
+    ["missing response", undefined, unknown], ["missing thread", {}, unknown],
+    ["missing turns", snapshot(undefined), unknown], ["null turns", snapshot(null), unknown],
+    ["object turns", snapshot({}), unknown], ["malformed turn", snapshot([null, terminal]), unknown],
+    ["missing turn status", snapshot([{ id: "missing" }, terminal]), unknown],
+    ["malformed turn status", snapshot([{ id: "malformed", status: { status: 1 } }]), unknown],
+    ["unknown turn status", snapshot([{ id: "unknown", status: "futureStatus" }, terminal]), unknown],
+    ["missing turn id", snapshot([{ status: "completed" }]), unknown],
+    ["malformed turn id", snapshot([{ id: 1, status: "completed" }]), unknown],
+    ["unsafe turn id", snapshot([{ id: "turn\nspoof", status: "completed" }]), unknown],
+    ["oversized turn id", snapshot([{ id: "x".repeat(513), status: "completed" }]), unknown],
+    ["wrong continuation", snapshot([], "idle", "different-thread"), unknown],
+    ["duplicate turn", snapshot([terminal, terminal]), unknown],
+    ["multiple active", snapshot([waiting, { ...waiting, id: "other-active" }]), unknown],
+    ["active thread but terminal turns", snapshot([terminal], { type: "active" }), unknown],
+    ["active thread but no turns", snapshot([], { type: "active" }), unknown],
+    ["missing thread status", { thread: { id: "thread-1", turns: [] } }, unknown],
+    ["malformed thread status", snapshot([], { type: 1 }), unknown],
+    ["timeout", new Error("Codex app-server request timed out: thread/read"), unknown],
+    ["unsupported", new Error("JSON-RPC -32601: method not found"), unknown],
+    ["unmaterialized", new Error("thread is not materialized yet; includeTurns is unavailable before first user message"), unknown],
+  ];
+  const observations: NativeExecutionObservation[] = [];
+  const subscription = adapter.onExecution(handle, event => observations.push(event));
+  const reads: RecordedRequest[] = [];
+  let response: unknown;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    reads.push({ method, params });
+    client.requests.push({ method, params });
+    if (response instanceof Error) throw response;
+    return response as T;
+  };
+  for (const [name, value, expected] of cases) {
+    response = value;
+    assert.deepEqual(await adapter.inspectTurnBoundary(handle), expected, name);
+    assert.equal(handle.observedState(), "idle", `${name}: native inspection must not mutate the handle`);
+  }
+  assert.equal(observations.length, 0, "native snapshot inspection emits no lifecycle facts");
+  assert.equal(reads.length, cases.length);
+  assert.ok(reads.every(read => read.method === "thread/read"));
+  assert.deepEqual(reads[0]!.params, { threadId: "thread-1", includeTurns: true });
+  harness.setIdentityObservable(false);
+  assert.deepEqual(await adapter.inspectTurnBoundary(handle), unknown);
+  assert.equal(reads.length, cases.length, "unverifiable process receives no native read");
+  harness.setIdentityObservable(true);
+  client.emit({ method: "turn/started", params: { threadId: "thread-1", turn: { id: "live-turn", status: "inProgress" } } });
+  assert.deepEqual(observations.map(event => event.fact.domain), ["runtime", "turn"], "ordinary native capture still receives real observations");
+  assert.equal(handle.observedState(), "working");
+  response = snapshot([]);
+  assert.deepEqual(await adapter.inspectTurnBoundary(handle), idle(null));
+  assert.equal(handle.observedState(), "working", "native idle discovery must not rewrite legacy lifecycle state");
+  assert.equal(observations.length, 2);
+  assert.deepEqual(harness.signals, []);
+  assert.equal(harness.launches.length, 1);
+  assert.equal(client.requests.some(request => request.method === "turn/start" || request.method === "turn/interrupt"), false);
+  subscription.dispose();
+});
+
+for (const race of ["process_birth", "continuation", "owned_handle"] as const) {
+  test(`Codex turn-boundary inspection rejects ${race} changes during its native read`, async () => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const request = spawnRequest({ deliveryMode: "daemon_inbox" });
+    const handle = await adapter.spawn(request);
+    const client = harness.clients[0]!;
+    const originalRequest = client.request.bind(client);
+    let release!: () => void;
+    let markReading!: () => void;
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const reading = new Promise<void>(resolve => { markReading = resolve; });
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+      if (method !== "thread/read") return originalRequest<T>(method, params);
+      client.requests.push({ method, params });
+      markReading();
+      await waiting;
+      return { thread: { id: "thread-1", status: { type: "idle" }, turns: [] } } as T;
+    };
+    const observations: NativeExecutionObservation[] = [];
+    const subscription = adapter.onExecution(handle, event => observations.push(event));
+    const pending = adapter.inspectTurnBoundary(handle);
+    await reading;
+    if (race === "process_birth") harness.launches[0]!.processIdentity += "-replaced";
+    else if (race === "continuation") {
+      await adapter.repairContinuation(handle, {
+        workAttemptId: handle.workAttemptId, expectedProviderContinuationId: "thread-1",
+        checkpointedReplacementProviderContinuationId: "thread-repaired", cwd: request.cwd, launchPolicy: request.launchPolicy,
+      }, { checkpointReplacement: async () => {} });
+      assert.equal(handle.providerContinuationId, "thread-repaired");
+    } else {
+      harness.launches[0]!.resolveExit({ type: "exit", code: 0, signal: null });
+      await flush();
+      const replacement = await adapter.spawn(request);
+      assert.notEqual(replacement, handle);
+    }
+    const factsBeforeReadCompletes = observations.length;
+    const stateBeforeReadCompletes = handle.observedState();
+    release();
+    assert.deepEqual(await pending, { state: "unknown" });
+    assert.equal(observations.length, factsBeforeReadCompletes);
+    assert.equal(handle.observedState(), stateBeforeReadCompletes);
+    assert.deepEqual(harness.signals, [], "inspection never kills or interrupts a raced provider");
+    assert.equal(harness.launches.length, race === "owned_handle" ? 2 : 1, "only the test's explicit replacement may launch");
+    subscription.dispose();
+  });
+}
