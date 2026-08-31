@@ -27,7 +27,7 @@ const { SupervisorGrantFenceStaleError } = await import("../db/auth.js");
 const { requireGitRoomParticipant } = await import("../rooms/access.js");
 const { hashToken } = await import("../db/utils.js");
 const { registerRoomAgentWorkRoutes } = await import("../routes/rooms/agent-work.js");
-const { publishRoomAgentWork, readRoomAgentWork } = await import("../db/room-agent-work.js");
+const { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork } = await import("../db/room-agent-work.js");
 const { parseRoomAgentWorkSummary } = await import("../../shared/room-agent-work.js");
 const { acquireLiveRoomAuthorization } = await import("../rooms/live-authorization.js");
 const { githubRepoAccessInvalidationEvents } = await import("../github/repo-access.js");
@@ -94,7 +94,7 @@ async function setupLifecycle() {
     }),
   };
   registerSupervisorHostGrantRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, delete(path: string, handler: any) { handlers.set(`DELETE ${path}`, handler); } } as never, routeDeps as never);
-  registerRoomAgentWorkRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, get(path: RegExp, handler: any) { handlers.set(path.source.includes("poll") ? "GET agent-work poll" : "GET agent-work", handler); } } as never, routeDeps as never, routeDeps as never);
+  registerRoomAgentWorkRoutes({ post(path: string, handler: any) { handlers.set(`POST ${path}`, handler); }, delete(_path: RegExp, handler: any) { handlers.set("DELETE agent-work", handler); }, get(path: RegExp, handler: any) { handlers.set(path.source.includes("poll") ? "GET agent-work poll" : "GET agent-work", handler); } } as never, routeDeps as never, routeDeps as never);
   const principal = grantResult.grant;
   const reqBase = { authKind: "supervisor_grant", supervisorGrant: principal, headers: {}, body: { generation: principal.current_generation }, params: { grantId: principal.grant_id } };
   return {
@@ -1230,6 +1230,7 @@ test("room work summary is a canonical, bounded allowlist without private fields
   assert.deepEqual(parseRoomAgentWorkSummary(workSummary), workSummary);
   assert.deepEqual(parseRoomAgentWorkSummary({ ...workSummary, operation_counts: Object.fromEntries(Object.entries(workSummary.operation_counts).reverse()) }), workSummary);
   for (const summary of [
+    { version: 1, availability: "cleared" },
     { ...workSummary, command: "SECRET=private npm test" },
     { ...workSummary, recorded_state: "\u202Ecompleted" },
     { ...workSummary, version: 2 }, { ...workSummary, elapsed_ms: -1 },
@@ -1242,8 +1243,8 @@ test("room work summary is a canonical, bounded allowlist without private fields
   const before = process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED;
   try {
     process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "false";
-    registerRoomAgentWorkRoutes({ get() { paths.push("GET"); }, post() { paths.push("POST"); } } as never, {} as never, {} as never);
-    assert.deepEqual(paths, ["GET", "GET"]);
+    registerRoomAgentWorkRoutes({ get() { paths.push("GET"); }, delete() { paths.push("DELETE"); }, post() { paths.push("POST"); } } as never, {} as never, {} as never);
+    assert.deepEqual(paths, ["GET", "GET", "DELETE"]);
   } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = before; }
 });
 
@@ -1597,6 +1598,136 @@ test("room work polling cleans up disconnects during authorization and during th
   const waiting = f.handler({ ...f.request, query: { after: initial.body.cursor, timeout: "30000" } }, waitingRes);
   await delay(30); waitingRes.emit("close"); await waiting;
   assert.equal(waitingRes.body, null); assert.equal(waitingRes.listenerCount("close"), 0);
+});
+
+const completedWorkSummary = {
+  ...workSummary, recorded_state: "completed", elapsed_ms: 123,
+  operation_counts: { ...workSummary.operation_counts, unresolved: 0, succeeded: 1 },
+};
+
+test("room work clear removes only payload and retains replay identity until source deletion", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  const input = { ...f.input, revision: 2, summary: completedWorkSummary };
+  const first = await publishRoomAgentWork(input);
+  const [before] = await client!.db.select().from(schema!.room_agent_work);
+  const initial = await f.poll();
+  const clear = { room_id: f.room.id, attempt_id: first.work.attempt_id, owner_account_id: "owner_route", revision: 2 };
+  const cleared = await clearRoomAgentWork(clear);
+  assert.equal(cleared?.status, "cleared");
+  assert.deepEqual(cleared.work, { ...first.work, summary: { version: 1, availability: "cleared" } });
+  const [after] = await client!.db.select().from(schema!.room_agent_work);
+  assert.deepEqual(after, { ...before, summary: cleared.work.summary }, "all custody and replay fields remain unchanged");
+  assert.equal((await clearRoomAgentWork(clear))?.status, "already_cleared");
+  assert.deepEqual(await publishRoomAgentWork(input), { status: "replayed", work: cleared.work });
+  await assert.rejects(publishRoomAgentWork({ ...input, revision: 1 }), { code: "revision_conflict" });
+  await assert.rejects(publishRoomAgentWork({ ...input, summary: { ...completedWorkSummary, elapsed_ms: 999 } }), { code: "revision_conflict" });
+  await assert.rejects(publishRoomAgentWork({ ...input, revision: 3 }), { code: "payload_cleared" });
+  const forged = recorder(); await f.publish({ ...f.publishRequest, body: { ...f.publishRequest.body, summary: cleared.work.summary } }, forged);
+  assert.equal(forged.statusCode, 400);
+  const changed = await f.poll({ after: initial.body.cursor });
+  assert.equal(changed.body.changed, true); assert.notEqual(changed.body.cursor, initial.body.cursor);
+  assert.deepEqual(changed.body.snapshot.work, [cleared.work]);
+  assert.equal((await f.poll({ after: changed.body.cursor })).body.changed, false);
+  await authDb!.endRoomAgentSession({ session_id: f.session.session_id });
+  const other = recorder(); await f.mint({ ...f.reqBase, body: { ...f.mintBody, agent_instance_id: "other_instance" } }, other);
+  assert.equal(other.statusCode, 201);
+  await assert.rejects(publishRoomAgentWork({ ...input, session_id: other.body.session_id }), { code: "publisher_conflict" });
+  await client!.db.delete(schema!.messages);
+  assert.equal((await client!.db.select().from(schema!.room_agent_work)).length, 0);
+  assert.equal(await clearRoomAgentWork(clear), null);
+  await assert.rejects(publishRoomAgentWork({ ...input, session_id: other.body.session_id }), { code: "publisher_not_authorized" });
+});
+
+test("room work clear refuses stale, incomplete and unsettled evidence and admits explicit terminal outcomes", { skip: requiresDatabase }, async () => {
+  const f = await setupWork();
+  const first = await publishRoomAgentWork(f.input);
+  const clear = { room_id: f.room.id, attempt_id: first.work.attempt_id, owner_account_id: "owner_route", revision: 1 };
+  const pinned = [workSummary, ...["lost", "unknown"].map((recorded_state) => ({ ...completedWorkSummary, recorded_state })),
+    { ...completedWorkSummary, evidence_incomplete: true },
+    { ...completedWorkSummary, operation_counts: { ...completedWorkSummary.operation_counts, unresolved: 1 } },
+    { ...completedWorkSummary, operation_counts: { ...completedWorkSummary.operation_counts, lost_after_start: 1 } }];
+  for (const summary of pinned) {
+    const published = await publishRoomAgentWork({ ...f.input, revision: ++clear.revision, summary });
+    await assert.rejects(clearRoomAgentWork(clear), { code: "evidence_not_clearable" });
+    assert.deepEqual((await readRoomAgentWork({ room_id: f.room.id })).work[0], published.work);
+  }
+  await assert.rejects(clearRoomAgentWork({ ...clear, revision: clear.revision - 1 }), { code: "revision_conflict" });
+  const [template] = await client!.db.select().from(schema!.room_agent_work);
+  for (const [index, recorded_state] of ["completed", "completed_no_reply", "failed", "interrupted"].entries()) {
+    const number = index + 2; const attempt_id = randomUUID();
+    await client!.db.insert(schema!.messages).values({ room_id: f.room.id, number, sender: "Owner", text: "Visible", timestamp: new Date().toISOString() });
+    await client!.db.insert(schema!.room_agent_work).values({ ...template, attempt_id, source_message_number: number,
+      summary: parseRoomAgentWorkSummary({ ...completedWorkSummary, recorded_state })! });
+    assert.equal((await clearRoomAgentWork({ ...clear, attempt_id }))?.status, "cleared");
+  }
+});
+
+for (const first of ["clear", "publish"] as const) {
+  test(`room work clear and publication serialize when ${first} reaches the row first`, { skip: requiresDatabase }, async () => {
+    const f = await setupWork();
+    const input = { ...f.input, summary: completedWorkSummary };
+    const published = await publishRoomAgentWork(input);
+    const clear = () => clearRoomAgentWork({ room_id: f.room.id, attempt_id: published.work.attempt_id, owner_account_id: "owner_route", revision: 1 });
+    const publish = () => publishRoomAgentWork({ ...input, revision: 2 });
+    const lock = await client!.pool.connect();
+    const settle = (call: () => Promise<unknown>) => call().then((value) => ({ value, code: null }), (error) => ({ value: null, code: error.code }));
+    let one: ReturnType<typeof settle> | undefined; let two: ReturnType<typeof settle> | undefined;
+    try {
+      await lock.query("BEGIN");
+      await lock.query("SELECT attempt_id FROM room_agent_work WHERE attempt_id = $1 FOR UPDATE", [published.work.attempt_id]);
+      one = settle(first === "clear" ? clear : publish);
+      await waitForBlockedSelect(first === "clear" ? "%where%owner_account_id%for update" : "%where%agent_key%for update");
+      two = settle(first === "clear" ? publish : clear);
+      await waitForBlockedSelect(first === "clear" ? "%where%agent_key%for update" : "%where%owner_account_id%for update");
+      await lock.query("COMMIT");
+      assert.equal((await one).code, null);
+      assert.equal((await two).code, first === "clear" ? "payload_cleared" : "revision_conflict");
+      const work = (await readRoomAgentWork({ room_id: f.room.id })).work[0];
+      assert.equal(work.revision, first === "clear" ? 1 : 2);
+      assert.deepEqual(work.summary, first === "clear" ? { version: 1, availability: "cleared" } : completedWorkSummary);
+    } finally { await lock.query("ROLLBACK"); lock.release(); await Promise.all([one, two]); }
+  });
+}
+
+test("room work clear HTTP requires the human report owner, current membership, visibility and exact revision", { skip: requiresDatabase }, async () => {
+  const f = await setupWorkPoll();
+  const created = await publishRoomAgentWork({ ...f.input, summary: completedWorkSummary });
+  await authDb!.createOwnerToken({ accountId: "owner_route", githubUserId: "owner_route", token: "work_clear_owner" });
+  await seedOwner("other_human");
+  await authDb!.assignProjectAdmin(f.room.id, "other_human");
+  assert.equal(await authDb!.isProjectAdmin(f.room.id, "owner_route"), false);
+  assert.equal(await authDb!.isProjectAdmin(f.room.id, "other_human"), true);
+  await authDb!.createSession("other_human", "other_clear_cookie", new Date(Date.now() + 60_000).toISOString());
+  const app = express(); registerHttpMiddleware(app, { resolveRequestAuth });
+  registerRoomAgentWorkRoutes(app, f.routeDeps as never, f.routeDeps as never);
+  const server = await new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const listening = app.listen(0, "127.0.0.1", () => resolve(listening));
+  });
+  try {
+    const address = server.address(); assert.ok(address && typeof address === "object");
+    const url = `http://127.0.0.1:${address.port}/rooms/room_alias/agent-work/${created.work.attempt_id}`;
+    const clear = (headers: Record<string, string> = f.request.headers, body: unknown = { revision: 1 }, target = url) =>
+      fetch(target, { method: "DELETE", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+    assert.equal((await clear({})).status, 401);
+    assert.equal((await clear({ authorization: `Bearer ${f.session.worker_bearer}` })).status, 403);
+    assert.equal((await clear({ authorization: `Bearer ${f.grantResult.token}` })).status, 403);
+    const missing = await clear(f.request.headers, { revision: 1 }, url.replace(created.work.attempt_id, randomUUID()));
+    const unavailable = await missing.json(); assert.equal(missing.status, 404);
+    const foreign = await clear({ cookie: "letagents_session=other_clear_cookie" });
+    assert.equal(foreign.status, 404); assert.deepEqual(await foreign.json(), unavailable);
+    for (const body of [null, [], {}, { revision: 0 }, { revision: "1" }, { revision: 1, owner_account_id: "owner_route" }]) {
+      assert.equal((await clear(f.request.headers, body)).status, 400);
+    }
+    assert.equal((await clear(f.request.headers, { revision: 2 })).status, 409);
+    f.setReaderAllowed(false); assert.equal((await clear()).status, 403); f.setReaderAllowed(true);
+    await client!.db.update(schema!.messages).set({ agent_prompt_kind: "auto", text: "" });
+    const hidden = await clear(); assert.equal(hidden.status, 404); assert.deepEqual(await hidden.json(), unavailable);
+    await client!.db.update(schema!.messages).set({ text: "Visible" });
+    const owner = await clear({ authorization: "Bearer work_clear_owner" });
+    assert.equal(owner.status, 200); assert.equal(owner.headers.get("cache-control"), "no-store");
+    assert.equal((await owner.json()).status, "cleared");
+    const replay = await clear(); assert.equal(replay.status, 200); assert.equal((await replay.json()).status, "already_cleared");
+  } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });
 
 test("room work poll HTTP route wins over the detail route and retains human-only admission", { skip: requiresDatabase }, async () => {
