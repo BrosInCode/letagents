@@ -3,6 +3,12 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { chmod, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import {
+  admitExecutionApproval, beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
+  recordExecutionApprovalOutcome, selectHostApproval,
+  type AdmitExecutionApproval, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
+  type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
+} from "./execution-approval-journal.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -231,6 +237,42 @@ export class ManifestStore {
   async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
     return this.readEntryFromDatabase(database, agentId);
+  }
+
+  /** Inert, host-only journal boundary; no provider call or shadow-capture dependency. */
+  async admitExecutionApproval(input: AdmitExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; approval: ExecutionApprovalRecord }> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => admitExecutionApproval(db, snapshot), commitFence);
+  }
+
+  async getExecutionApproval(input: ApprovalReference): Promise<ExecutionApprovalRecord | null> {
+    const snapshot = structuredClone(input);
+    return getExecutionApproval(await this.getDatabase(), snapshot);
+  }
+
+  async selectHostApproval(input: SelectHostApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => selectHostApproval(db, snapshot), commitFence);
+  }
+
+  async beginExecutionApprovalDispatch(input: DispatchExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ dispatch: boolean; approval: ExecutionApprovalRecord }> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => beginExecutionApprovalDispatch(db, snapshot), commitFence);
+  }
+
+  async recordExecutionApprovalOutcome(input: RecordExecutionApprovalOutcome, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => recordExecutionApprovalOutcome(db, snapshot), commitFence);
+  }
+
+  async loseExecutionApproval(input: LoseExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord> {
+    if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(db => loseExecutionApproval(db, snapshot), commitFence);
   }
 
   /** Internal drain admission only. This does not switch modes or interrupt a provider. */
