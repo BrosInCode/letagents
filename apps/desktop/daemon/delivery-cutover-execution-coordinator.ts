@@ -8,6 +8,9 @@ import type { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
 import type { ManifestStore } from "./manifest-store.js";
 import { processBirthState, type ProcessIdentity } from "./process-identity.js";
 import type { SupervisedAgentDelivery } from "./supervised-agent-delivery.js";
+import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
+import type { WorkerBindingStore } from "./worker-binding-store.js";
+import type { InstalledHostGrant } from "./worker-runtime-custody.js";
 import {
   sameProviderActionConnectionSnapshot,
   type ProviderActionHandle,
@@ -40,19 +43,26 @@ export type DeliveryCutoverExecutionCoordinatorOptions = {
   observation: Pick<DeliveryCutoverCoordinator, "assertObservation" | "observe" | "scheduleRetry">;
   drain?: {
     store: Pick<ManifestStore, "prepareDeliveryDrain" | "getDeliveryDrain" | "unresolvedDeliveryDrain" | "cancelDeliveryDrain"
-      | "deliveryDrainReadiness" | "markDeliveryDrainDispatch" | "markDeliveryDrainUncertain" | "commitDeliveryDrain" | "getAgentConfiguration">;
+      | "deliveryDrainReadiness" | "markDeliveryDrainDispatch" | "markDeliveryDrainUncertain" | "commitDeliveryDrain" | "getAgentConfiguration"
+      | "preparePollingActivation" | "getPollingActivation" | "unresolvedPollingActivation" | "markPollingActivationDispatch"
+      | "checkpointPollingActivationTurn" | "markPollingActivationUncertain" | "cancelPollingActivation" | "completePollingActivation">;
     authority: Pick<DaemonAuthority, "generation" | "serializeManifestMutation" | "fenceDaemonCommit">;
     entries: Pick<EntryConcurrencyGate, "run" | "beginLifecycle" | "bumpControlEpoch" | "waitForActiveRoomMove">;
     delivery: Pick<SupervisedAgentDelivery, "stop"> | null;
     processIdentity?: ProcessIdentity;
   };
+  polling?: {
+    bindings: Pick<WorkerBindingStore, "get" | "credentialFor" | "supervisedWorkerSession">;
+    currentHostGrant: (entry: DaemonManifestEntry) => InstalledHostGrant | null;
+  };
 };
 
 export type DeliveryDrainIdentity = { entryId: string; operationId: string };
 export type DeliveryDrainRequest = DeliveryDrainIdentity & { requestId: string; roomId: string; executionGenerationId: string };
+export type PollingActivationRequest = DeliveryDrainRequest & { reverseOperationId: string };
 
 /**
- * Executes the durable legacy-polling -> daemon-inbox cutover saga.
+ * Executes durable delivery cutovers and explicit custodial polling activation.
  *
  * Process-local admission, retry timers, and handoff draining remain owned by
  * DeliveryCutoverCoordinator. This coordinator owns only durable saga phases
@@ -68,6 +78,7 @@ export class DeliveryCutoverExecutionCoordinator {
   private readonly startDelivery: DeliveryCutoverExecutionCoordinatorOptions["startDelivery"];
   private readonly observation: DeliveryCutoverExecutionCoordinatorOptions["observation"];
   private readonly drain: DeliveryCutoverExecutionCoordinatorOptions["drain"];
+  private readonly polling: DeliveryCutoverExecutionCoordinatorOptions["polling"];
 
   constructor(options: DeliveryCutoverExecutionCoordinatorOptions) {
     this.isHandoffScheduled = options.isHandoffScheduled;
@@ -79,6 +90,128 @@ export class DeliveryCutoverExecutionCoordinator {
     this.startDelivery = options.startDelivery;
     this.observation = options.observation;
     this.drain = options.drain;
+    this.polling = options.polling;
+  }
+
+  /** Only this explicit operator action may dispatch a polling activation.
+   * Mode commits, grant installation, and startup reconciliation never call it. */
+  async activatePolling(input: PollingActivationRequest): Promise<PollingActivationRecord> {
+    const drain = this.requireDrain();
+    if (!this.polling || !this.provider?.activateCustodialPolling || !this.provider.inspectTurnBoundary) {
+      throw new Error("Custodial polling activation is unavailable.");
+    }
+    const release = drain.entries.beginLifecycle(input.entryId);
+    drain.entries.bumpControlEpoch(input.entryId);
+    const identity = { operationId: input.operationId, agentId: input.entryId };
+    try {
+      await drain.entries.waitForActiveRoomMove(input.entryId);
+      // turn/start acknowledges admission, not work completion. Keep worker
+      // tool admission behind this lock until the exact ID is checkpointed.
+      return await drain.entries.run(input.entryId, async () => {
+        this.assertAttached();
+        let activation = await drain.store.getPollingActivation(input.operationId);
+        if (activation && (activation.agent_id !== input.entryId || activation.request_id !== input.requestId
+          || activation.room_id !== input.roomId || activation.execution_generation_id !== input.executionGenerationId
+          || activation.reverse_operation_id !== input.reverseOperationId)) throw new Error("Polling activation request identity changed.");
+        if (activation && activation.phase !== "prepared") {
+          if (activation.phase !== "complete" && activation.phase !== "cancelled") this.observation.scheduleRetry(input.entryId, 0);
+          return activation;
+        }
+        const entry = await this.getEntry(input.entryId);
+        const handle = this.getLiveHandle(input.entryId);
+        const request = await this.pollingLaunchRequest(entry, handle, input.operationId);
+        if (entry!.room_id !== input.roomId || entry!.provider_ref!.execution_generation_id !== input.executionGenerationId) {
+          throw new Error("Polling activation no longer owns the requested execution.");
+        }
+        const boundary = await this.provider!.inspectTurnBoundary!(handle!);
+        this.assertAttached();
+        if (!activation) activation = (await drain.store.preparePollingActivation({ ...input, agentId: input.entryId,
+          handle: handle!, boundary }, (commit) => drain.authority.fenceDaemonCommit(commit))).activation;
+        try {
+          await this.provider!.activateCustodialPolling!(handle!, request, {
+            beforeNativeDispatch: async () => {
+              this.assertAttached();
+              const currentRequest = await this.pollingLaunchRequest(await this.getEntry(input.entryId), handle, input.operationId);
+              if (JSON.stringify(currentRequest) !== JSON.stringify(request)) throw new Error("Polling activation authority changed before dispatch.");
+              const latestBoundary = await this.provider!.inspectTurnBoundary!(handle!);
+              this.assertAttached();
+              activation = await drain.store.markPollingActivationDispatch({ ...identity, handle: handle!, boundary: latestBoundary },
+                (commit) => drain.authority.fenceDaemonCommit(commit));
+            },
+            checkpointTurnStarted: async (providerTurnId) => {
+              this.assertAttached();
+              // Only the initiating RPC acknowledgement supplies this identity;
+              // observers may never discover/adopt a latest turn for this row.
+              activation = await drain.store.checkpointPollingActivationTurn({ ...identity, providerTurnId },
+                (commit) => drain.authority.fenceDaemonCommit(commit));
+            },
+          });
+        } catch (error) {
+          this.assertAttached();
+          activation = await drain.store.getPollingActivation(input.operationId);
+          if (activation?.phase === "dispatching" || activation?.phase === "active") {
+            activation = await drain.store.markPollingActivationUncertain(identity, (commit) => drain.authority.fenceDaemonCommit(commit));
+          } else if (activation?.phase === "prepared") {
+            throw error; // Proven pre-dispatch: only an explicit retry may start it.
+          }
+        }
+        this.assertAttached();
+        this.observation.scheduleRetry(input.entryId, 0);
+        return (await drain.store.getPollingActivation(input.operationId))!;
+      });
+    } finally { release(); }
+  }
+
+  async getPollingActivation(input: DeliveryDrainIdentity): Promise<PollingActivationRecord> {
+    const activation = await this.requireDrain().store.getPollingActivation(input.operationId);
+    if (!activation || activation.agent_id !== input.entryId) throw new Error("Unknown polling activation for this agent.");
+    return activation;
+  }
+
+  async cancelPollingActivation(input: DeliveryDrainIdentity): Promise<PollingActivationRecord> {
+    const drain = this.requireDrain();
+    return drain.entries.run(input.entryId, async () => {
+      this.assertAttached();
+      return drain.store.cancelPollingActivation({ operationId: input.operationId, agentId: input.entryId },
+        (commit) => drain.authority.fenceDaemonCommit(commit));
+    });
+  }
+
+  private async pollingLaunchRequest(entry: DaemonManifestEntry | undefined, handle: ProviderActionHandle | undefined, operationId: string) {
+    const drain = this.requireDrain();
+    if (!this.polling || !entry || !handle || this.getLiveHandle(entry.id) !== handle
+      || entry.provider !== "codex" || (entry.delivery_mode ?? "mcp_polling") !== "mcp_polling" || entry.desired_state !== "running"
+      || entry.condition !== "none" || !entry.work_attempt_id || !entry.provider_ref
+      || handle.workAttemptId !== entry.work_attempt_id || handle.providerContinuationId !== entry.provider_ref.provider_continuation_id
+      || !sameProviderActionConnectionSnapshot(handle.providerConnection, entry.provider_ref.provider_connection)) {
+      throw new Error("Polling activation requires the exact owned custodial runtime.");
+    }
+    const configuration = await drain.store.getAgentConfiguration(entry.id);
+    const binding = await this.polling.bindings.get(entry.id);
+    const session = await this.polling.bindings.supervisedWorkerSession(entry.id);
+    const grant = this.polling.currentHostGrant(entry);
+    const attempt = await this.getAttempt(entry.work_attempt_id);
+    if (!configuration || configuration.polling_contract !== "custodial_polling_v1"
+      || configuration.config_revision !== configuration.runtime_configuration_revision
+      || (handle.appliedConfigurationRevision !== undefined && handle.appliedConfigurationRevision !== configuration.config_revision)
+      || !binding?.room_cursor || binding.room_id !== entry.room_id || binding.work_attempt_id !== entry.work_attempt_id
+      || binding.execution_generation_id !== entry.provider_ref.execution_generation_id
+      || entry.provider_ref.custodial_launch_agent_session_id !== binding.agent_session_id
+      || !session || session.agent_session_id !== binding.agent_session_id || session.room_id !== binding.room_id
+      || session.execution_generation_id !== binding.execution_generation_id || session.credential_ref !== binding.credential_ref
+      || !session.expires_at || !(Date.parse(session.expires_at) > Date.now())
+      || !grant || !(Date.parse(grant.expiresAt) > Date.now()) || !await this.polling.bindings.credentialFor(binding)
+      || !attempt.workspace_path || this.polling.currentHostGrant(entry) !== grant
+      || this.getLiveHandle(entry.id) !== handle || ["failed", "stopped", "stopping"].includes(handle.observedState)) {
+      throw new Error("Polling activation requires current applied configuration and bound worker authority.");
+    }
+    this.assertAttached();
+    return { operationId, roomId: entry.room_id, cwd: attempt.workspace_path, agentDisplayName: entry.display_name,
+      workerSession: { agentSessionId: binding.agent_session_id, roomCursor: binding.room_cursor },
+      launchReceipt: { contract: "custodial_polling_v1" as const, configurationRevision: configuration.config_revision,
+        agentSessionId: entry.provider_ref.custodial_launch_agent_session_id!,
+        workAttemptId: entry.work_attempt_id, providerContinuationId: entry.provider_ref.provider_continuation_id,
+        providerConnection: structuredClone(entry.provider_ref.provider_connection!) } };
   }
 
   /** Explicit reverse operation: selecting the contract does not start a polling turn. */
@@ -253,6 +386,64 @@ export class DeliveryCutoverExecutionCoordinator {
     }
   }
 
+  /** Restart recovery only observes an already dispatched invocation. A
+   * prepared row never causes native work, and an unknown ACK never adopts latest. */
+  private async observePollingActivation(initial: PollingActivationRecord, signal: AbortSignal): Promise<void> {
+    if (initial.phase === "prepared") return;
+    const drain = this.requireDrain();
+    const identity = { operationId: initial.operation_id, agentId: initial.agent_id };
+    await drain.entries.run(initial.agent_id, async () => {
+      this.observation.assertObservation(signal);
+      let activation = await drain.store.getPollingActivation(initial.operation_id);
+      if (!activation || activation.phase === "complete" || activation.phase === "cancelled" || activation.phase === "prepared") return;
+      try {
+        const gone = () => processBirthState(activation!.native_pid, activation!.native_process_identity, drain.processIdentity) === "gone";
+        if (gone()) {
+          await drain.store.completePollingActivation({ ...identity, providerTurnId: activation.provider_turn_id, outcome: "lost" },
+            (commit) => drain.authority.fenceDaemonCommit(async () => {
+              this.observation.assertObservation(signal);
+              if (!gone()) throw new Error("Polling activation native death proof changed.");
+              await commit();
+            }));
+          return;
+        }
+        if (!activation.provider_turn_id || !this.provider?.inspectCustodialPollingActivation) {
+          throw new Error("Polling activation has no exact turn acknowledgement to reconcile.");
+        }
+        const entry = await this.getEntry(initial.agent_id);
+        if (!entry || !matchesPollingActivationRuntime(activation, entry)) throw new Error("Polling activation runtime changed.");
+        const ref = entry.provider_ref!;
+        const handle = this.getLiveHandle(initial.agent_id) ?? await this.observation.observe(signal, this.provider.attach({
+          provider: "codex", workAttemptId: ref.work_attempt_id, providerContinuationId: ref.provider_continuation_id,
+          providerConnection: ref.provider_connection,
+        }));
+        if (!handle || "state" in handle || !matchesPollingActivationRuntime(activation, entry, handle)) throw new Error("Polling activation native runtime is unavailable.");
+        const observed = await this.observation.observe(signal,
+          this.provider.inspectCustodialPollingActivation(handle, activation.provider_turn_id));
+        this.observation.assertObservation(signal);
+        const current = await this.getEntry(initial.agent_id);
+        if (!current || !matchesPollingActivationRuntime(activation, current, handle)) {
+          throw new Error("Polling activation lost its observed runtime.");
+        }
+        if (observed.state === "terminal") {
+          await drain.store.completePollingActivation({ ...identity, providerTurnId: activation.provider_turn_id, outcome: observed.outcome },
+            (commit) => drain.authority.fenceDaemonCommit(commit));
+          return;
+        }
+        if (observed.state !== "active") throw new Error("Polling activation exact native turn is unknown.");
+        // This ID was checkpointed by the original RPC. Observation can only
+        // confirm it; it cannot supply a first ID after an ambiguous dispatch.
+        activation = await drain.store.checkpointPollingActivationTurn({ ...identity, providerTurnId: activation.provider_turn_id },
+          (commit) => drain.authority.fenceDaemonCommit(commit));
+      } catch (error) {
+        if (error instanceof DeliveryCutoverObservationDetached) return;
+        this.observation.assertObservation(signal);
+        await drain.store.markPollingActivationUncertain(identity, (commit) => drain.authority.fenceDaemonCommit(commit));
+      }
+      this.observation.scheduleRetry(initial.agent_id, 1_000);
+    });
+  }
+
   /**
    * Fence the exact legacy polling turn before enabling daemon ingress. The
    * manifest is the effect journal: once a target is recorded no later run may
@@ -263,6 +454,8 @@ export class DeliveryCutoverExecutionCoordinator {
     if (this.isHandoffScheduled()) return;
     const reverse = await this.drain?.store.unresolvedDeliveryDrain(entryId);
     if (reverse) { await this.driveDrain(reverse, detachSignal); return; }
+    const activation = await this.drain?.store.unresolvedPollingActivation(entryId);
+    if (activation) { await this.observePollingActivation(activation, detachSignal); return; }
     // Custodial workers need a separate future cutover witness. They must
     // never enter the legacy wait_for_messages interrupt protocol below.
     if ((await this.drain?.store.getAgentConfiguration(entryId))?.polling_contract) return;

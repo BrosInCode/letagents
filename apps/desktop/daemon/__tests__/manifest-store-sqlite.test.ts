@@ -13,12 +13,211 @@ import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
+import { matchesPollingActivationRuntime, validatePollingActivationSchema } from "../custodial-polling-activation.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
   origin_execution_generation_id: "run_1",
   provider_continuation_id: "thread_1",
 } as const;
+
+test("polling activation journals explicit intent, exact started ID, uncertainty and terminal before replay", async () => {
+  for (const outcome of ["completed", "failed", "interrupted", "lost"] as const) {
+    const env = await fixture(); let store = new ManifestStore(env.databasePath);
+    const inbox = new SupervisedAgentInboxStore(env.databasePath);
+    const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+    try {
+      const input = await seedPollingActivationRuntime(env, store, inbox, bindings);
+      const graphGuard = new DatabaseSync(env.databasePath);
+      graphGuard.exec("CREATE TRIGGER reject_activation_manifest_reinsert BEFORE DELETE ON agent_identities BEGIN SELECT RAISE(ABORT,'activation cannot replace manifest graph'); END");
+      graphGuard.close();
+      assert.equal(await store.unresolvedPollingActivation(input.agentId), null);
+      const before = await store.load();
+      const { activation } = await store.preparePollingActivation(input, async commit => commit());
+      assert.equal(activation.phase, "prepared"); assert.equal(activation.provider_turn_id, null);
+      assert.equal(activation.room_cursor, "msg_47"); assert.equal(activation.agent_session_id, "session_2");
+      assert.equal(activation.config_revision, 2); assert.equal(activation.execution_generation_id, "run_2");
+      assert.deepEqual(await store.preparePollingActivation(input, async commit => commit()), { created: false, activation });
+      assert.deepEqual(await store.load(), before, "journal acceptance cannot alter runtime, configuration, or mode");
+      const dispatch = await store.markPollingActivationDispatch(input, async commit => commit());
+      assert.equal(dispatch.phase, "dispatching");
+      assert.deepEqual(await store.markPollingActivationDispatch(input, async commit => commit()), dispatch);
+      await assert.rejects(store.cancelPollingActivation(input, async commit => commit()), /undispatched/);
+      await assert.rejects(store.completePollingActivation({ ...input, providerTurnId: "unbound", outcome: "completed" }, async commit => commit()), /exact native turn/);
+      await store.markPollingActivationUncertain(input, async commit => commit());
+      await store.close(); store = new ManifestStore(env.databasePath);
+      assert.equal((await store.unresolvedPollingActivation(input.agentId))?.phase, "uncertain");
+      assert.equal((await store.getEntry(input.agentId))?.provider_ref?.custodial_launch_agent_session_id, "session_2",
+        "the exact launch receipt survives a process restart without consulting current credentials");
+      const providerTurnId = outcome === "lost" ? null : "activation-turn";
+      if (providerTurnId) {
+        // This fence represents the authenticated ACK of the original live
+        // invocation, never an inferred latest turn after restart.
+        const active = await store.checkpointPollingActivationTurn({ ...input, providerTurnId }, async commit => commit());
+        assert.equal(active.phase, "active"); assert.equal(active.provider_turn_id, providerTurnId);
+        await assert.rejects(store.checkpointPollingActivationTurn({ ...input, providerTurnId: "other" }, async commit => commit()), /already bound/);
+        await store.markPollingActivationUncertain(input, async commit => commit());
+        assert.equal((await store.checkpointPollingActivationTurn({ ...input, providerTurnId }, async commit => commit())).phase, "active",
+          "exact known-ID reconciliation can resolve uncertainty without adopting a new ID");
+      }
+      const removeGraphGuard = new DatabaseSync(env.databasePath);
+      removeGraphGuard.exec("DROP TRIGGER reject_activation_manifest_reinsert"); removeGraphGuard.close();
+      const current = (await store.getEntry(input.agentId))!;
+      await store.replaceEntry((await store.load()).generation, { ...current, provider_ref: null });
+      const completed = await store.completePollingActivation({ ...input, providerTurnId, outcome }, async commit => commit());
+      assert.equal(completed.phase, "complete"); assert.equal(completed.terminal_outcome, outcome);
+      assert.equal(await store.unresolvedPollingActivation(input.agentId), null);
+      assert.deepEqual(await store.completePollingActivation({ ...input, providerTurnId, outcome }, async commit => commit()), completed);
+      await assert.rejects(store.completePollingActivation({ ...input, providerTurnId, outcome: outcome === "failed" ? "lost" : "failed" }, async commit => commit()), /immutable|exact native turn/);
+      assert.equal((await store.getEntry(input.agentId))?.provider_ref, null);
+      const database = new DatabaseSync(env.databasePath);
+      try {
+        validatePollingActivationSchema(database);
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_generations").get()?.n, 0);
+        assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings WHERE entry_id=?").get(input.agentId)?.room_cursor, "msg_47");
+        assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally { database.close(); }
+    } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+  }
+});
+
+test("polling activation SQL preserves immutable identity, predecessor and terminal authority while runtime matching is exact", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const input = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    const { activation } = await store.preparePollingActivation(input, async commit => commit());
+    const current = (await store.getEntry(input.agentId))!;
+    assert.equal(matchesPollingActivationRuntime(activation, current, input.handle), true);
+    assert.equal(matchesPollingActivationRuntime(activation, { ...current, desired_state: "paused" },
+      { ...input.handle, appliedConfigurationRevision: undefined }), true);
+    for (const changed of [
+      { ...current, room_id: "other" }, { ...current, delivery_mode: "daemon_inbox" as const },
+      { ...current, provider_ref: null },
+      ...[
+        { work_attempt_id: "other" }, { execution_generation_id: "other" }, { provider_continuation_id: "other" },
+        { custodial_launch_agent_session_id: null }, { custodial_launch_agent_session_id: "other" },
+        { provider_connection: { ...input.handle.providerConnection!, pid: 9999 } },
+        { provider_connection: { ...input.handle.providerConnection!, processIdentity: "reused-pid" } },
+        { provider_connection: { kind: "codex_app_server" as const, url: "http://127.0.0.1:9999", pid: 4312, processIdentity: "codex:4312" } },
+      ].map(ref => ({ ...current, provider_ref: { ...current.provider_ref!, ...ref } })),
+    ]) assert.equal(matchesPollingActivationRuntime(activation, changed), false);
+    assert.equal(matchesPollingActivationRuntime(activation, current, { ...input.handle, custodyLaunchAgentSessionId: "other" }), false);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      for (const field of ["operation_id", "request_id", "agent_id", "room_id", "work_attempt_id", "execution_generation_id", "reverse_operation_id",
+        "native_continuation_id", "native_connection_kind", "native_connection_sha256", "native_pid", "native_process_identity", "config_revision", "agent_session_id", "room_cursor", "created_at_ms"]) {
+        const value = activation[field as keyof typeof activation];
+        assert.throws(() => database.prepare(`UPDATE custodial_polling_activations SET ${field}=?`).run(typeof value === "number" ? value + 1 : `${value}-changed`));
+      }
+      for (const sql of ["provider_turn_id='premature'", "phase='active',provider_turn_id='premature'", "phase='complete',terminal_outcome='lost'"]) {
+        assert.throws(() => database.exec(`UPDATE custodial_polling_activations SET ${sql}`));
+      }
+      assert.deepEqual(await store.getPollingActivation(input.operationId), activation);
+      await store.markPollingActivationDispatch(input, async commit => commit());
+      await store.checkpointPollingActivationTurn({ ...input, providerTurnId: "native-turn" }, async commit => commit());
+      for (const sql of ["provider_turn_id='replacement'", "provider_turn_id=NULL", "phase='prepared'", "terminal_outcome='failed'"]) {
+        assert.throws(() => database.exec(`UPDATE custodial_polling_activations SET ${sql}`));
+      }
+      const complete = await store.completePollingActivation({ ...input, providerTurnId: "native-turn", outcome: "failed" }, async commit => commit());
+      for (const sql of ["terminal_outcome='completed'", "updated_at_ms=updated_at_ms+1", "phase='uncertain',terminal_outcome=NULL"]) {
+        assert.throws(() => database.exec(`UPDATE custodial_polling_activations SET ${sql}`));
+      }
+      assert.deepEqual(await store.getPollingActivation(input.operationId), complete);
+      for (const invalid of [{ reverse_operation_id: "missing" }, { phase: "active", provider_turn_id: "invented" }]) {
+        const row = { ...activation, operation_id: "other", request_id: "other", ...invalid };
+        assert.throws(() => database.prepare(`INSERT INTO custodial_polling_activations(${Object.keys(row).join(",")}) VALUES(${Object.keys(row).map(() => "?").join(",")})`)
+          .run(...Object.values(row)), /completed reverse predecessor/);
+      }
+      validatePollingActivationSchema(database);
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("polling activation requires exact post-reverse custody and idempotent request identity", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const input = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    for (const bad of [
+      { ...input, reverseOperationId: "missing" }, { ...input, executionGenerationId: "run_1" }, { ...input, roomId: "other" },
+      { ...input, boundary: { state: "unknown" as const } },
+      { ...input, boundary: { state: "active" as const, providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4312", providerTurnId: "busy" } },
+      { ...input, handle: { ...input.handle, appliedConfigurationRevision: 1 } },
+      { ...input, handle: { ...input.handle, pid: 9999 } },
+    ]) await assert.rejects(store.preparePollingActivation(bad, async commit => commit()));
+    await assert.rejects(store.preparePollingActivation(input, undefined as never), /ownership commit fence/);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      for (const [sql, undo] of [
+        ["UPDATE worker_session_bindings SET room_cursor=NULL", "UPDATE worker_session_bindings SET room_cursor='msg_47'"],
+        ["UPDATE runtime_deployments SET custodial_launch_agent_session_id=NULL", "UPDATE runtime_deployments SET custodial_launch_agent_session_id='session_2'"],
+        ["UPDATE runtime_deployments SET custodial_launch_agent_session_id='other'", "UPDATE runtime_deployments SET custodial_launch_agent_session_id='session_2'"],
+        ["UPDATE agent_configurations SET runtime_configuration_revision=1", "UPDATE agent_configurations SET runtime_configuration_revision=2"],
+        ["UPDATE agent_configurations SET polling_contract=NULL", "UPDATE agent_configurations SET polling_contract='custodial_polling_v1'"],
+        ["UPDATE execution_cutover_v2 SET phase='draining'", "UPDATE execution_cutover_v2 SET phase='complete'"],
+      ]) {
+        database.exec(sql!); await assert.rejects(store.preparePollingActivation(input, async commit => commit())); database.exec(undo!);
+      }
+      const original = structuredClone(input);
+      const preparing = store.preparePollingActivation(input, async commit => commit());
+      input.handle.providerContinuationId = "caller-mutated"; input.roomId = "caller-mutated";
+      const { activation } = await preparing;
+      assert.equal(activation.native_continuation_id, "thread_1"); assert.equal(activation.room_id, "room_1");
+      for (const changed of [
+        { ...original, requestId: "another-request" }, { ...original, operationId: "another-operation" },
+        { ...original, executionGenerationId: "other-generation" }, { ...original, reverseOperationId: "another-reverse" },
+      ]) await assert.rejects(store.preparePollingActivation(changed, async commit => commit()), /different coordinates/);
+      await assert.rejects(store.preparePollingActivation({ ...original, operationId: "second", requestId: "second" }, async commit => commit()), /unresolved polling activation/);
+      await assert.rejects(store.checkpointPollingActivationTurn({ ...original, providerTurnId: "too-early" }, async commit => commit()), /no dispatched/);
+      const cancelled = await store.cancelPollingActivation(original, async commit => commit());
+      assert.equal(cancelled.phase, "cancelled"); assert.deepEqual(await store.cancelPollingActivation(original, async commit => commit()), cancelled);
+      assert.equal(await store.unresolvedPollingActivation(original.agentId), null);
+      await assert.rejects(store.markPollingActivationDispatch(original, async commit => commit()), /cannot dispatch/);
+      const next = await store.preparePollingActivation({ ...original, operationId: "second", requestId: "second" }, async commit => commit());
+      assert.equal(next.created, true);
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("polling activation phase writes roll back and fail closed on changed current authority or successor generation", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  try {
+    const input = await seedPollingActivationRuntime(env, store, inbox, bindings);
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.exec("CREATE TRIGGER reject_activation_insert AFTER INSERT ON custodial_polling_activations BEGIN SELECT RAISE(ABORT,'test activation rollback'); END");
+      await assert.rejects(store.preparePollingActivation(input, async commit => commit()), /test activation rollback/);
+      assert.equal(await store.getPollingActivation(input.operationId), null);
+      database.exec("DROP TRIGGER reject_activation_insert");
+      const { activation } = await store.preparePollingActivation(input, async commit => commit());
+      await assert.rejects(store.markPollingActivationDispatch(input, async () => {}), /without committing/);
+      assert.deepEqual(await store.getPollingActivation(input.operationId), activation);
+      for (const [sql, undo] of [
+        ["UPDATE worker_session_bindings SET agent_session_id='other'", "UPDATE worker_session_bindings SET agent_session_id='session_2'"],
+        ["UPDATE worker_session_bindings SET room_cursor='msg_48'", "UPDATE worker_session_bindings SET room_cursor='msg_47'"],
+        ["UPDATE agent_configurations SET config_revision=3", "UPDATE agent_configurations SET config_revision=2"],
+      ]) {
+        database.exec(sql!); await assert.rejects(store.markPollingActivationDispatch(input, async commit => commit()), /changed/); database.exec(undo!);
+      }
+      await store.markPollingActivationDispatch(input, async commit => commit());
+      database.exec("CREATE TRIGGER reject_activation_checkpoint AFTER UPDATE OF provider_turn_id ON custodial_polling_activations BEGIN SELECT RAISE(ABORT,'test checkpoint rollback'); END");
+      await assert.rejects(store.checkpointPollingActivationTurn({ ...input, providerTurnId: "activation-turn" }, async commit => commit()), /checkpoint rollback/);
+      assert.equal((await store.getPollingActivation(input.operationId))?.provider_turn_id, null);
+      database.exec("DROP TRIGGER reject_activation_checkpoint");
+      await store.checkpointPollingActivationTurn({ ...input, providerTurnId: "activation-turn" }, async commit => commit());
+      database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='run_2'").run(JSON.stringify(terminal));
+      database.prepare("INSERT INTO work_attempt_executions VALUES('run_3','attempt_1',?,'provider',10,?)").run(terminal.ended_at, JSON.stringify(terminal));
+      await assert.rejects(store.checkpointPollingActivationTurn({ ...input, providerTurnId: "activation-turn" }, async commit => commit()), /generation changed/);
+      await assert.rejects(store.completePollingActivation({ ...input, providerTurnId: "activation-turn", outcome: "lost" }, async commit => commit()), /generation changed/);
+      assert.equal((await store.getPollingActivation(input.operationId))?.phase, "active");
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
 
 test("delivery drain and FIFO claim atomically select A without admitting successor B", async () => {
   for (const claimFirst of [false, true]) {
@@ -3375,6 +3574,32 @@ function seedActiveDrainExecution(databasePath: string): void {
   const database = new DatabaseSync(databasePath);
   try { database.exec("UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='run_1'"); }
   finally { database.close(); }
+}
+
+async function seedPollingActivationRuntime(env: Awaited<ReturnType<typeof fixture>>, store: ManifestStore,
+  inbox: SupervisedAgentInboxStore, bindings: WorkerBindingStore): Promise<Parameters<ManifestStore["preparePollingActivation"]>[0]> {
+  const { agent, input } = deliveryDrainCoordinates();
+  await store.write(0, [agent]); seedActiveDrainExecution(env.databasePath);
+  await inbox.ingestPoll({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: "msg_47", messages: [] });
+  await store.prepareDeliveryDrain(input); await store.markDeliveryDrainDispatch(input);
+  await store.commitDeliveryDrain((await store.load()).generation, input, async commit => commit());
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='run_1'").run(JSON.stringify(terminal));
+    database.prepare("INSERT INTO work_attempt_executions VALUES('run_2','attempt_1',?,'provider',9,NULL)").run(terminal.ended_at);
+  } finally { database.close(); }
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4312", pid: 4312, processIdentity: "codex:4312" };
+  const next = withRuntimeIdentity({ ...(await store.getEntry(agent.id))!,
+    provider_ref: { work_attempt_id: "attempt_1", execution_generation_id: "run_2", provider_continuation_id: "thread_1", provider_connection: connection,
+      custodial_launch_agent_session_id: "session_2" } });
+  await store.replaceEntry((await store.load()).generation, next);
+  await store.markRuntimeConfigurationApplied((await store.load()).generation, { agentId: agent.id, executionGenerationId: "run_2", appliedRevision: 2 });
+  await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1", execution_generation_id: "run_2",
+    agent_session_id: "session_2", agent_session_token: "test-token", api_url: "https://example.test" }, { roomCursor: "msg_47" });
+  return { operationId: "activation", requestId: "activation-request", agentId: agent.id, roomId: agent.room_id,
+    executionGenerationId: "run_2", reverseOperationId: input.operationId,
+    handle: { workAttemptId: "attempt_1", pid: 4312, providerConnection: connection, providerContinuationId: "thread_1", observedState: "idle", appliedConfigurationRevision: 2 },
+    boundary: { state: "idle", providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4312", latestProviderTurnId: null } };
 }
 
 function seedTerminalExecution(databasePath: string, workAttemptId: string, executionGenerationId: string): void {

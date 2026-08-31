@@ -663,10 +663,8 @@ export class SupervisorDaemon {
       getLiveHandle: (entryId) => this.liveHandles.get(entryId),
       startDelivery: (entryId) => this.startSupervisedDelivery(entryId, "wake"),
       observation: this.deliveryCutovers,
-      drain: {
-        store: this.store, authority: this.authority,
-        entries: this.entryConcurrency, delivery: this.supervisedDelivery,
-      },
+      drain: { store: this.store, authority: this.authority, entries: this.entryConcurrency, delivery: this.supervisedDelivery },
+      polling: { bindings: this.workerBindings, currentHostGrant: (entry) => this.workerAuthority.currentHostGrant(entry) },
     });
     this.desiredStates = new DesiredStateCoordinator({
       store: this.store,
@@ -778,6 +776,9 @@ export class SupervisorDaemon {
       policy: { structuredRoomTurnCompletion },
     });
     const controlOperations = {
+      activateCustodialPolling: (input) => this.deliveryCutoverExecution.activatePolling(input),
+      getPollingActivation: (input) => this.deliveryCutoverExecution.getPollingActivation(input),
+      cancelPollingActivation: (input) => this.deliveryCutoverExecution.cancelPollingActivation(input),
       prepareDeliveryDrain: (input) => this.deliveryCutoverExecution.prepareDrain(input),
       getDeliveryDrain: (input) => this.deliveryCutoverExecution.getDrain(input),
       cancelDeliveryDrain: (input) => this.deliveryCutoverExecution.cancelDrain(input),
@@ -866,7 +867,9 @@ export class SupervisorDaemon {
     await this.socket.start();
     for (const entry of (await this.store.load()).entries) {
       void this.startSupervisedDelivery(entry.id).catch(() => undefined);
-      if (await this.store.unresolvedDeliveryDrain(entry.id)) void this.deliveryCutovers.start(entry.id).catch(() => undefined);
+      if (await this.store.unresolvedDeliveryDrain(entry.id) || await this.store.unresolvedPollingActivation(entry.id)) {
+        void this.deliveryCutovers.start(entry.id).catch(() => undefined);
+      }
     }
     if (this.providerPort && this.autoConverge) {
       for (const entry of (await this.store.load()).entries) this.requestConvergence(entry.id);

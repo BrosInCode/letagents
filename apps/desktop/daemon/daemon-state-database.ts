@@ -2,8 +2,9 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, migrateExecutionStorageV20ToV21, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
+import { applyPollingActivationSchema, validatePollingActivationSchema } from "./custodial-polling-activation.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 23;
+export const DAEMON_STATE_SCHEMA_VERSION = 24;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -14,6 +15,7 @@ function quoteIdentifier(value: string): string { return `"${value.replaceAll('"
 
 const TERMINAL_RESULTS_TABLE = "supervised_agent_terminal_results";
 const POLLING_CONTRACT_COLUMN = "polling_contract TEXT CHECK(polling_contract IS NULL OR (polling_contract='custodial_polling_v1' AND delivery_mode='mcp_polling'))";
+const CUSTODIAL_LAUNCH_SESSION_COLUMN = "custodial_launch_agent_session_id TEXT CHECK(custodial_launch_agent_session_id IS NULL OR length(trim(custodial_launch_agent_session_id))>0)";
 const TERMINAL_RESULTS_INDEX = "CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id)";
 function terminalResultsSql(version: 19 | 20, table = TERMINAL_RESULTS_TABLE): string {
   return `CREATE TABLE ${table} (
@@ -48,6 +50,24 @@ function validatePollingContract(database: DatabaseSync): void {
   if (database.prepare(`SELECT 1 FROM agent_configurations WHERE polling_contract IS NOT NULL
     AND (polling_contract <> 'custodial_polling_v1' OR delivery_mode IS NOT 'mcp_polling') LIMIT 1`).get()) {
     throw new Error("Daemon polling custody contains invalid configuration.");
+  }
+}
+
+/** The immutable native launch environment cannot be reconstructed from a
+ * reminted worker binding. Existing runtimes deliberately retain NULL. */
+function validateCustodialLaunchSession(database: DatabaseSync): void {
+  const column = (database.prepare("PRAGMA table_xinfo(runtime_deployments)").all() as Row[])
+    .find(entry => entry.name === "custodial_launch_agent_session_id");
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='runtime_deployments'").get() as Row | undefined;
+  const sql = normalizedTerminalSql(String(definition?.sql ?? ""));
+  const declaration = `,${normalizedTerminalSql(CUSTODIAL_LAUNCH_SESSION_COLUMN)}`;
+  if (!column || column.type !== "TEXT" || Number(column.notnull) !== 0 || column.dflt_value !== null
+    || Number(column.hidden) !== 0 || Number(column.pk) !== 0
+    || !(sql.includes(`${declaration},`) || sql.endsWith(`${declaration})strict`))) {
+    throw new Error("Daemon custodial launch receipt has an invalid or missing column definition.");
+  }
+  if (database.prepare("SELECT 1 FROM runtime_deployments WHERE custodial_launch_agent_session_id IS NOT NULL AND length(trim(custodial_launch_agent_session_id))=0 LIMIT 1").get()) {
+    throw new Error("Daemon custodial launch receipt contains invalid authority.");
   }
 }
 
@@ -98,6 +118,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
+  if (existingVersion >= 24) { validatePollingActivationSchema(database); validateCustodialLaunchSession(database); }
   if (existingVersion >= 23) validatePollingContract(database);
   if (existingVersion >= 18) validateExecutionStorageSchema(database,
     existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : existingVersion === 21 ? 20 : 21);
@@ -215,6 +236,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 22) {
     this.migrateV22ToV23(database);
+    return;
+  }
+  if (existingVersion === 23) {
+    this.migrateV23ToV24(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -499,7 +524,6 @@ createSchema(database: DatabaseSync): void {
       sort_order INTEGER NOT NULL UNIQUE
     ) STRICT;
     `);
-    this.applyV23Shape(database);
     this.schemaInitializationHook?.(database);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
@@ -514,6 +538,7 @@ createSchema(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
+    this.applyCurrentConfigurationShape(database);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
@@ -538,7 +563,7 @@ migrateV1ToV2(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -564,7 +589,7 @@ migrateV2ToV3(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -590,7 +615,7 @@ migrateV3ToV4(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -655,7 +680,7 @@ migrateV4ToV5(database: DatabaseSync): void {
     // either version marker.
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -707,7 +732,7 @@ migrateV5ToV6(database: DatabaseSync): void {
     const requiresScrub = this.migrateWorkerShapeToV6(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     if (requiresScrub) this.markV6SecretScrubPending(database);
@@ -731,7 +756,7 @@ migrateV6ToV7(database: DatabaseSync): void {
     this.validateV6Shape(database);
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -751,7 +776,7 @@ migrateV7ToV8(database: DatabaseSync): void {
   try {
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -769,7 +794,7 @@ migrateV8ToV9(database: DatabaseSync): void {
   try {
     this.advanceDeliveryToCurrent(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -786,7 +811,7 @@ migrateV9ToV10(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -803,7 +828,7 @@ migrateV10ToV11(database: DatabaseSync): void {
   try {
     if (this.tableColumns(database, "agent_purge_operations").size) this.rebuildPurgeOperationsV11(database);
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -820,7 +845,7 @@ migrateV11ToV12(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     this.applyCurrentSchemaTail(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -849,7 +874,7 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -876,7 +901,7 @@ migrateV13ToV14(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -901,7 +926,7 @@ migrateV14ToV15(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -924,7 +949,7 @@ migrateV15ToV16(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -945,7 +970,7 @@ migrateV16ToV17(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -964,7 +989,7 @@ migrateV17ToV18(database: DatabaseSync): void {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -985,7 +1010,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1005,7 +1030,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1026,7 +1051,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1046,7 +1071,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     migrateExecutionStorageV20ToV21(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1062,7 +1087,7 @@ migrateV22ToV23(database: DatabaseSync): void {
   this.repairAndValidateCurrentShape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
-    this.applyV23Shape(database);
+    this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1073,11 +1098,33 @@ migrateV22ToV23(database: DatabaseSync): void {
   }
 }
 
-private applyV23Shape(database: DatabaseSync): void {
+/** Add only a dormant journal. No historical mode, cursor, or cutover starts work. */
+migrateV23ToV24(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.applyCurrentConfigurationShape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Every legacy caller advances directly to the current paired version. */
+private applyCurrentConfigurationShape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "agent_configurations").has("polling_contract")) {
     database.exec(`ALTER TABLE agent_configurations ADD COLUMN ${POLLING_CONTRACT_COLUMN}`);
   }
   validatePollingContract(database);
+  if (!this.tableColumns(database, "runtime_deployments").has("custodial_launch_agent_session_id")) {
+    database.exec(`ALTER TABLE runtime_deployments ADD COLUMN ${CUSTODIAL_LAUNCH_SESSION_COLUMN}`);
+  }
+  validateCustodialLaunchSession(database);
+  applyPollingActivationSchema(database);
 }
 
 private applyV20Shape(database: DatabaseSync): void {
@@ -2399,6 +2446,9 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
 }
 
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion: 19 | 20 | 21 = 21): void {
+  if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 24) {
+    validatePollingActivationSchema(database); validateCustodialLaunchSession(database);
+  }
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 23) validatePollingContract(database);
   if (!this.tableColumns(database, "supervised_agent_inbox_events").size
     && database.prepare("SELECT 1 FROM supervised_agent_inbox LIMIT 1").get()) {
