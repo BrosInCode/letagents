@@ -32,6 +32,7 @@ export type NativeProviderAdapter = {
   onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
   probeControl?(handle: NativeHandle): Promise<ControlProbeResult>;
   capabilities(): ProviderActionCapabilities;
+  preflightCustodialPolling?(input: { devMcpServerEntryPath?: string }): Promise<void>;
   spawn(input: ProviderActionSpawn): Promise<NativeHandle>;
   attach(input: ProviderActionRef): Promise<NativeHandle | ProviderActionAttachTerminal | null>;
   resume(ref: ProviderActionRef, input: ProviderActionSpawn): Promise<NativeHandle>;
@@ -89,6 +90,15 @@ export class ProviderActionPortRouter implements ProviderActionPort {
     const handle = await (await this.adapter(provider)).spawn(request);
     this.remember(provider, request, handle);
     return publicHandle(handle, request.configurationRevision);
+  }
+
+  async preflightCustodialPolling(input: { provider: string; devMcpServerEntryPath?: string }): Promise<void> {
+    const provider = this.requiredProvider(input.provider);
+    const devMcpServerEntryPath = input.devMcpServerEntryPath;
+    if (provider !== "codex") throw new Error("Custodial polling is only supported by Codex.");
+    const adapter = await this.adapter(provider);
+    if (!adapter.preflightCustodialPolling) throw new Error("Codex does not expose custodial polling preflight.");
+    await adapter.preflightCustodialPolling({ devMcpServerEntryPath });
   }
 
   async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null> {
@@ -223,20 +233,29 @@ export class ProviderActionPortRouter implements ProviderActionPort {
   }
 
   async stopRef(ref: ProviderActionRef, options?: { force?: boolean; graceMs?: number; actionId?: string }): Promise<ProviderActionTerminal> {
+    ref = { ...ref, providerConnection: ref.providerConnection && { ...ref.providerConnection } };
+    options = options && { ...options };
     const remembered = this.handles.get(ref.workAttemptId);
     const provider = this.resolveProvider(
       remembered?.provider,
       ref.provider,
       providerFromConnection(ref.providerConnection),
     );
-    if (remembered
-      && remembered.handle.providerContinuationId === ref.providerContinuationId
-      && sameProviderActionConnectionIdentity(remembered.handle.providerConnection, ref.providerConnection)) {
-      const terminal = await (await this.adapter(provider)).stop(remembered.handle, options);
+    const adapter = await this.adapter(provider);
+    // Codex protocol terminals can precede OS death. Its exact-reference path
+    // must prove the frozen birth is gone even when a cached handle exists.
+    if (provider === "codex" && adapter.stopRef) {
+      const terminal = await adapter.stopRef(ref, options);
       if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
       return terminal;
     }
-    const adapter = await this.adapter(provider);
+    if (remembered
+      && remembered.handle.providerContinuationId === ref.providerContinuationId
+      && sameProviderActionConnectionIdentity(remembered.handle.providerConnection, ref.providerConnection)) {
+      const terminal = await adapter.stop(remembered.handle, options);
+      if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);
+      return terminal;
+    }
     if (!adapter.stopRef) throw new Error(`Provider '${provider}' cannot stop an unattached durable process reference.`);
     const terminal = await adapter.stopRef(ref, options);
     if (options?.actionId) this.actions.set(options.actionId, ref.workAttemptId);

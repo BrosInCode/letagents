@@ -42,6 +42,8 @@ import type {
   MintedWorkerAuthorization,
 } from "./worker-runtime-custody.js";
 
+import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
+
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type ProviderExecutionConfiguration = {
@@ -55,6 +57,7 @@ export type ProviderExecutionConfiguration = {
 };
 
 export type ProviderExecutionStore = {
+  unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
   load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
@@ -342,6 +345,7 @@ export class ProviderExecutionCoordinator {
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch) return null;
     const current = await this.options.store.getEntry(entryId);
+    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return null;
     if (this.options.authority.isHandoffScheduled()
       || this.options.concurrency.currentControlEpoch(entryId) !== expectedEpoch
       || current?.desired_state !== "running") return null;
@@ -652,6 +656,7 @@ export class ProviderExecutionCoordinator {
     entry: DaemonManifestEntry,
     mayStartDelivery: () => boolean = () => true,
   ): Promise<ProviderActionHandle | null> {
+    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entry.id))) return null;
     const ref = entry.provider_ref;
     if (!ref) return null;
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
@@ -755,6 +760,7 @@ export class ProviderExecutionCoordinator {
 
   async converge(entryId: string): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) return;
+    if (deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entryId))) return;
     let entry = await this.options.store.getEntry(entryId);
     if (!entry) return;
     let launchControlEpoch = this.options.concurrency.currentControlEpoch(entryId);
@@ -812,7 +818,9 @@ export class ProviderExecutionCoordinator {
       if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return;
     }
     if (await this.options.host.requiresGrant(entry) && !await this.options.host.ensureGrantFresh(entry)) return;
-    entry = await this.launchEntryIfCurrent(entry.id, launchControlEpoch) ?? entry;
+    const currentAfterGrant = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+    if (!currentAfterGrant) return;
+    entry = currentAfterGrant;
     if (entry.desired_state !== "running"
       || this.options.concurrency.currentControlEpoch(entry.id) !== launchControlEpoch
       || this.options.authority.isHandoffScheduled()) return;
@@ -1000,6 +1008,8 @@ export class ProviderExecutionCoordinator {
     initialEntry: DaemonManifestEntry,
     initialControlEpoch: number,
   ): Promise<void> {
+    // A drain may recover the exact old handle, never create a successor.
+    if (await this.options.store.unresolvedDeliveryDrain(initialEntry.id)) return;
     let entry = initialEntry;
     let launchControlEpoch = initialControlEpoch;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id!);

@@ -164,6 +164,8 @@ export interface ProviderActionPort {
   onExecution?(handle: ProviderActionHandle, listener: (event: NativeExecutionObservation) => void): Promise<NativeExecutionSubscription>;
   probeControl?(handle: ProviderActionHandle): Promise<ControlProbeResult>;
   capabilities(workAttemptId: string, provider?: string): Promise<ProviderActionCapabilities>;
+  /** Verify the selected polling runtime before an existing writer is stopped. */
+  preflightCustodialPolling?(input: { provider: string; devMcpServerEntryPath?: string }): Promise<void>;
   spawn(request: ProviderActionSpawn): Promise<ProviderActionHandle>;
   attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null>;
   /** Recover an intent journaled before dispatch, never by spawning a second child. */

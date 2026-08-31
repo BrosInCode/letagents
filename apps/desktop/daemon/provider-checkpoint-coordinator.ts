@@ -1,4 +1,5 @@
 import type { WorkDurabilityStore } from "./durability-store.js";
+import { deliveryDrainBlocksRuntime } from "./delivery-drain.js";
 import type { ManifestStore } from "./manifest-store.js";
 import {
   sameProviderActionConnectionSnapshot,
@@ -394,6 +395,7 @@ export class ProviderCheckpointCoordinator {
     scope: SupervisedAuthorityScope = "settled_provider_state",
   ): Promise<boolean> {
     if (this.authority.isHandoffScheduled()) return false;
+    if (deliveryDrainBlocksRuntime(await this.store.unresolvedDeliveryDrain(authority.agentId))) return false;
     try {
       await this.authority.assertCurrent();
     } catch {

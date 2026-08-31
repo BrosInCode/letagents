@@ -86,10 +86,12 @@ test("delivery drain permits admitted pre-native invocation but not a fresh pre-
     await inbox.claimHead(agent.id);
     const { cutover } = await store.prepareDeliveryDrain(input);
     assert.equal(cutover.admitted_inbox_item_id, a.inbox_item_id);
+    assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "waiting");
     assert.equal(cutover.native_target_turn_id, null);
     assert.equal((await inbox.checkpointDispatchIntent(a.inbox_item_id)).state, "dispatching");
     await inbox.recordRetryFailure(a.inbox_item_id, { domain: "pre_dispatch", error: "proven not sent" });
     await inbox.transition(a.inbox_item_id, "pending");
+    assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "queued");
     assert.equal(await inbox.claimHead(agent.id), null, "the original A identity is not permission to replay its invocation");
     await assert.rejects(() => inbox.transition(a.inbox_item_id, "dispatching"), /delivery drain/i,
       "the generic transition API must not bypass the admission barrier");
@@ -97,6 +99,186 @@ test("delivery drain permits admitted pre-native invocation but not a fresh pre-
     await store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id });
     assert.equal((await inbox.claimHead(agent.id))?.inbox_item_id, a.inbox_item_id);
   } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("reverse delivery commit atomically transfers the observed cursor and replays without changing a successor", async () => {
+  for (const detach of [false, true]) {
+    const env = await fixture(); let store = new ManifestStore(env.databasePath);
+    const inbox = new SupervisedAgentInboxStore(env.databasePath);
+    const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+    const { agent, input } = deliveryDrainCoordinates();
+    try {
+      await store.write(0, [agent]); seedActiveDrainExecution(env.databasePath);
+      await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1",
+        execution_generation_id: "run_1", agent_session_id: "session_1", agent_session_token: "test-token", api_url: "https://example.test" });
+      await bindings.checkpointCursor(agent.id, "session_1", "run_1", "9");
+      await inbox.ingestPoll({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: "msg_47", messages: [] });
+      await store.prepareDeliveryDrain(input);
+      assert.deepEqual((await store.deliveryDrainReadiness(input.operationId)).cursor, "msg_47");
+      const dispatched = await store.markDeliveryDrainDispatch(input);
+      assert.equal(dispatched.phase, "dispatching");
+      assert.deepEqual(await store.markDeliveryDrainDispatch(input), dispatched);
+      const uncertain = await store.markDeliveryDrainUncertain(input);
+      assert.equal(uncertain.phase, "uncertain");
+      assert.deepEqual(await store.markDeliveryDrainUncertain(input), uncertain);
+      await assert.rejects(store.cancelDeliveryDrain(input), /pre-dispatch authority/);
+      if (detach) await store.replaceEntry((await store.load()).generation, { ...agent, provider_ref: null });
+      await store.close(); store = new ManifestStore(env.databasePath);
+      const generation = (await store.load()).generation;
+      let fenceCalls = 0;
+      const completed = await store.commitDeliveryDrain(generation, input, async (commit) => { fenceCalls += 1; await commit(); });
+      assert.equal(completed.generation, generation + 1);
+      assert.equal(completed.cutover.phase, "complete");
+      assert.equal(await store.unresolvedDeliveryDrain(agent.id), null);
+      assert.equal((await store.getEntry(agent.id))?.delivery_mode ?? "mcp_polling", "mcp_polling");
+      const config = await store.getAgentConfiguration(agent.id);
+      assert.equal(config?.polling_contract, "custodial_polling_v1");
+      assert.equal(config?.config_revision, 2);
+      assert.equal(config?.runtime_configuration_revision, 1, "the stopped runtime never applied the new policy");
+      const database = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings WHERE entry_id=?").get(agent.id)?.room_cursor, "msg_47");
+        const checkpoints = database.prepare("SELECT room_cursor,provider_continuation_id FROM work_attempt_checkpoints WHERE work_attempt_id='attempt_1'").all();
+        assert.deepEqual(checkpoints.map((row) => ({ ...row })), [{ room_cursor: "msg_47", provider_continuation_id: "thread_1" }]);
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_generations").get()?.n, 0);
+        assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+      } finally { database.close(); }
+      const saved = (await store.getEntry(agent.id))!;
+      const successor = await store.replaceEntry(completed.generation, withRuntimeIdentity({ ...saved,
+        provider_ref: { ...agent.provider_ref!, execution_generation_id: "successor", provider_continuation_id: "next-thread" } }));
+      const replay = await store.commitDeliveryDrain(generation, input, async () => { throw new Error("must not stop successor"); });
+      assert.equal(replay.generation, successor.generation);
+      assert.deepEqual(replay.cutover, completed.cutover);
+      assert.equal(fenceCalls, 1);
+      assert.equal((await store.getAgentConfiguration(agent.id))?.config_revision, 2);
+      assert.equal((await inbox.cursor(agent.id))?.last_observed_message_id, "msg_47");
+    } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+  }
+});
+
+test("reverse delivery stop intent refuses absent cursors, active boundaries, queued work, and configuration edits", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath); const { agent, input } = deliveryDrainCoordinates();
+  try {
+    await store.write(0, [agent]); seedActiveDrainExecution(env.databasePath);
+    await store.prepareDeliveryDrain(input);
+    assert.equal((await store.deliveryDrainReadiness(input.operationId)).cursor, null);
+    await assert.rejects(store.markDeliveryDrainDispatch(input), /numeric ingress cursor/);
+    await inbox.bootstrapCursor({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: null });
+    await assert.rejects(store.markDeliveryDrainDispatch(input), /numeric ingress cursor/);
+    await inbox.ingestPoll({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: "47", messages: [] });
+    await assert.rejects(store.markDeliveryDrainDispatch({ ...input,
+      boundary: { state: "active", providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", providerTurnId: "unowned" } }), /native idle/);
+    const config = (await store.getAgentConfiguration(agent.id))!;
+    const generation = (await store.load()).generation;
+    await assert.rejects(store.updateAgentConfiguration(generation, { agentId: agent.id, expectedRevision: config.config_revision,
+      model: config.model, reasoningEffort: config.reasoning_effort, charter: "changed", permissionProfileId: config.permission_profile_id,
+      providerLaunchPolicy: config.provider_launch_policy }), /unresolved delivery drain/);
+    assert.equal((await store.load()).generation, generation);
+    assert.deepEqual(await store.getAgentConfiguration(agent.id), config);
+    // Poll completion wins the SQLite boundary before stop intent. B is kept,
+    // so refusal cannot skip a message by transferring the newer cursor.
+    await assert.rejects(store.markDeliveryDrainDispatch(input, async (commit) => {
+      await inbox.ingestPoll({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: "48",
+        messages: [{ source_message_id: "48", source_message: { text: "B" }, activation: {} }] });
+      await commit();
+    }), /unsettled inbox/);
+    assert.equal((await store.getDeliveryDrain(input.operationId))?.phase, "draining");
+    assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "queued");
+    assert.equal((await inbox.cursor(agent.id))?.last_observed_message_id, "48");
+    assert.equal((await inbox.head(agent.id))?.source_message_id, "48");
+    assert.equal(await inbox.claimHead(agent.id), null);
+    await store.cancelDeliveryDrain(input);
+    assert.equal((await inbox.claimHead(agent.id))?.source_message_id, "48");
+  } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("reverse delivery commit rolls back all authority and cursor writes and rejects stale bindings or successor executions", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const bindings = new WorkerBindingStore(join(env.root, "bindings.json"), undefined, env.databasePath);
+  const { agent, input } = deliveryDrainCoordinates();
+  try {
+    await store.write(0, [agent]); seedActiveDrainExecution(env.databasePath);
+    await bindings.bind({ entry_id: agent.id, room_id: agent.room_id, work_attempt_id: "attempt_1",
+      execution_generation_id: "run_1", agent_session_id: "session_1", agent_session_token: "test-token", api_url: "https://example.test" });
+    await bindings.checkpointCursor(agent.id, "session_1", "run_1", "3");
+    await inbox.ingestPoll({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: "47", messages: [] });
+    await store.prepareDeliveryDrain(input); await store.markDeliveryDrainDispatch(input);
+    const generation = (await store.load()).generation;
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      const commit = () => store.commitDeliveryDrain(generation, input, async (mutate) => mutate());
+      await assert.rejects(store.commitDeliveryDrain(generation, input, undefined as never), /native-death commit fence/);
+      await assert.rejects(store.commitDeliveryDrain(generation, input, async () => {}), /without committing/);
+      database.exec("CREATE TRIGGER reject_reverse_complete AFTER UPDATE OF phase ON execution_cutover_v2 WHEN NEW.phase='complete' BEGIN SELECT RAISE(ABORT,'reverse commit rollback'); END");
+      await assert.rejects(commit(), /reverse commit rollback/);
+      assert.equal((await store.load()).generation, generation);
+      assert.equal((await store.getAgentConfiguration(agent.id))?.polling_contract, null);
+      assert.equal(database.prepare("SELECT room_cursor FROM worker_session_bindings WHERE entry_id=?").get(agent.id)?.room_cursor, "3");
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM work_attempt_checkpoints").get()?.n, 0);
+      assert.equal((await store.getDeliveryDrain(input.operationId))?.phase, "dispatching");
+      database.exec("DROP TRIGGER reject_reverse_complete");
+      database.exec("UPDATE worker_session_bindings SET execution_generation_id='stale'");
+      await assert.rejects(commit(), /worker binding changed/);
+      database.exec("UPDATE worker_session_bindings SET execution_generation_id='run_1'");
+      database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='run_1'").run(JSON.stringify(terminal));
+      database.prepare("INSERT INTO work_attempt_executions VALUES('successor','attempt_1',?,'provider',9,?)").run(terminal.ended_at, JSON.stringify(terminal));
+      await assert.rejects(commit(), /exact execution authority/);
+      assert.equal((await store.load()).generation, generation);
+      assert.equal((await store.getDeliveryDrain(input.operationId))?.phase, "dispatching");
+    } finally { database.close(); }
+  } finally { await bindings.close(); await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("reverse delivery readiness accepts only exact settled A receipts and blocks full or compacted uncertain effects", async () => {
+  for (const outcome of ["reply", "no_reply", "failed", "interrupted", "cancelled_by_user"] as const) {
+    const env = await fixture(); const store = new ManifestStore(env.databasePath);
+    const inbox = new SupervisedAgentInboxStore(env.databasePath); const { agent, input } = deliveryDrainCoordinates();
+    try {
+      await store.write(0, [agent]); seedActiveDrainExecution(env.databasePath);
+      const [a] = await inbox.ingestPoll({ agent_id: agent.id, room_id: agent.room_id, last_observed_message_id: "47",
+        messages: [{ source_message_id: "47", source_message: {}, activation: {} }] });
+      await inbox.claimHead(agent.id); await inbox.checkpointTurnStarted(a!.inbox_item_id, "native-A", TEST_PROVIDER_TURN_AUTHORITY);
+      await store.prepareDeliveryDrain({ ...input, boundary: { state: "active", providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", providerTurnId: "native-A" } });
+      assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "waiting");
+      await assert.rejects(store.markDeliveryDrainDispatch(input), /unsettled inbox/);
+      if (outcome === "cancelled_by_user") await inbox.cancelInterruptedTurn(a!.inbox_item_id);
+      else {
+        const text = outcome === "reply" ? "A completed" : null;
+        await inbox.checkpointNormalizedTerminal({ inbox_item_id: a!.inbox_item_id, agent_id: agent.id,
+          execution_generation_id: "run_1", provider_turn_id: "native-A", outcome, text, evidence: "stream",
+          terminal_evidence: { turnId: "native-A", providerContinuationId: "thread_1", outcome, text, evidence: "stream" } });
+        await inbox.transition(a!.inbox_item_id, "awaiting_result");
+        if (outcome === "reply") {
+          await inbox.transition(a!.inbox_item_id, "publishing");
+          assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "waiting");
+          await inbox.checkpointPublication({ inbox_item_id: a!.inbox_item_id, room_id: agent.room_id, canonical_message_id: "published-A" });
+        } else await inbox.transition(a!.inbox_item_id, outcome === "no_reply" ? "acknowledged_no_reply" : "acknowledged_failed");
+      }
+      assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "ready");
+      const database = new DatabaseSync(env.databasePath);
+      try {
+        database.prepare(`INSERT INTO supervised_agent_effects(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_json,mutation,state,created_at,updated_at)
+          VALUES('uncertain',?,?,?,'native-A','request','write_file','{}',1,'uncertain',?,?)`).run(agent.id, agent.room_id, "run_1", agent.created_at, agent.created_at);
+        assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "waiting");
+        await assert.rejects(store.markDeliveryDrainDispatch(input), /unsettled inbox/);
+        database.prepare(`INSERT INTO supervised_agent_effect_tombstones(effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,request_sha256,request_bytes,mutation,state,created_at,updated_at)
+          SELECT effect_id,agent_id,room_id,execution_generation_id,provider_turn_id,mcp_request_id,tool_name,?,2,mutation,state,created_at,updated_at FROM supervised_agent_effects WHERE effect_id='uncertain'`).run("a".repeat(64));
+        database.exec("DELETE FROM supervised_agent_effects WHERE effect_id='uncertain'");
+        assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "waiting");
+        database.exec("UPDATE supervised_agent_effect_tombstones SET state='completed' WHERE effect_id='uncertain'");
+        assert.equal((await store.deliveryDrainReadiness(input.operationId)).status, "ready");
+        if (outcome === "reply") {
+          database.prepare("DELETE FROM supervised_agent_publications WHERE inbox_item_id=?").run(a!.inbox_item_id);
+          await assert.rejects(store.markDeliveryDrainDispatch(input), /terminal receipt/);
+        } else {
+          database.prepare("UPDATE supervised_agent_provider_turn_bindings SET provider_continuation_id='other' WHERE inbox_item_id=?").run(a!.inbox_item_id);
+          await assert.rejects(store.markDeliveryDrainDispatch(input), /terminal receipt/);
+        }
+      } finally { database.close(); }
+    } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+  }
 });
 
 test("delivery drain snapshots exact witness before await and replays it after runtime changes and reopen", async () => {

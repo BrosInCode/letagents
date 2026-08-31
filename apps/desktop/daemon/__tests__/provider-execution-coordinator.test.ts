@@ -105,6 +105,7 @@ function harness(input: {
   const options: ProviderExecutionCoordinatorOptions = {
     provider: port,
     store: {
+      unresolvedDeliveryDrain: async () => null,
       load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,
       getAgentConfiguration: async () => ({
@@ -282,6 +283,17 @@ function harness(input: {
   };
 }
 
+test("delivery handoff freezes convergence and draining never creates a successor", async () => {
+  for (const phase of ["draining", "dispatching", "uncertain"] as const) {
+    let launches = 0;
+    const runtime = harness({ provider: provider({ spawn: async () => { launches++; return returnedHandle; }, resume: async () => { launches++; return returnedHandle; } }) });
+    runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase } as never);
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(launches, 0, phase);
+    assert.equal(runtime.executionGenerations.length, 0, phase);
+  }
+});
+
 test("handoff during native dispatch journals the exact returned provider without installing listeners", async () => {
   let runtime!: ReturnType<typeof harness>;
   const port = provider({
@@ -432,6 +444,20 @@ test("daemon-owned reattach binds the current generation despite a still-present
   assert.equal(runtime.deliveryStarts, 1);
   assert.equal(runtime.waitStages, 0);
   assert.deepEqual(runtime.failures, []);
+});
+
+test("draining preserves exact old-provider recovery while dispatching refuses attach", async () => {
+  const runtime = ownedRecoveryHarness();
+  runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase: "draining" } as never);
+  await runtime.coordinator.converge("agent-1");
+  assert.equal(runtime.mintCalls, 1);
+  assert.equal(runtime.deliveryStarts, 1);
+  assert.equal(runtime.waitStages, 0);
+  runtime.options.store.unresolvedDeliveryDrain = async () => ({ phase: "dispatching" } as never);
+  assert.equal(await runtime.coordinator.attachLiveProvider(runtime.entry()), null);
+  await runtime.coordinator.converge("agent-1");
+  assert.equal(runtime.mintCalls, 1);
+  assert.equal(runtime.deliveryStarts, 1);
 });
 
 test("a resolved mint/bind call without exact read-back never makes an owned provider ready", async () => {

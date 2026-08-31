@@ -41,6 +41,7 @@ const expectedControlMethods = [
   "supervisor.bind_worker_session",
   "supervisor.bootstrap_room_ingress",
   "supervisor.borrow_worker_credential",
+  "supervisor.cancel_delivery_drain",
   "supervisor.checkpoint_worker_cursor",
   "supervisor.commit_room_move",
   "supervisor.complete_bounded_effect",
@@ -48,11 +49,13 @@ const expectedControlMethods = [
   "supervisor.get_agent_configuration",
   "supervisor.get_agent_inspector_detail",
   "supervisor.get_current_room_move",
+  "supervisor.get_delivery_drain",
   "supervisor.get_room_move",
   "supervisor.install_host_grant",
   "supervisor.install_open_model_credential",
   "supervisor.install_worker_credential",
   "supervisor.prepare_bounded_effect",
+  "supervisor.prepare_delivery_drain",
   "supervisor.prepare_room_move",
   "supervisor.purge_agent",
   "supervisor.recover_agent_runtime",
@@ -124,6 +127,8 @@ test("daemon policy and projection domains remain extracted", () => {
   assert.match(roomAgentProjectionSource, /from "\.\/manifest-view-projection\.js"/);
   assert.match(daemonReadModelSource, /from "\.\/room-agent-state-projection\.js"/);
   assert.match(deliveryCutoverExecutionSource, /controlExactTurn/);
+  assert.match(mainSource, /startDelivery: \(entryId\) => this\.startSupervisedDelivery\(entryId, "wake"\)/,
+    "cutover cancellation wakes an existing A without refreshing or aborting its loop");
   assert.equal(matches(mainSource, /\.controlExactTurn\s*\(/g).length, 0);
   assert.match(desiredStateSource, /compareAndSet/);
   assert.equal(matches(mainSource, /private async setDesiredState\s*\(/g).length, 0);

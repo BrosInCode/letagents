@@ -521,6 +521,62 @@ test("historical NULL-authority delivery drains block claims, direct transitions
   }
 });
 
+test("reverse stop intent freezes late poll, bootstrap, and synthetic ingress across reopen and authority commit", async () => {
+  for (const phase of ["dispatching", "uncertain", "complete"] as const) {
+    const env = await fixture(); let store = new SupervisedAgentInboxStore(env.database);
+    let manifest = new ManifestStore(env.database);
+    try {
+      await seedActiveAgent(env, { agentId: "draining", roomId: "room", workAttemptId: "attempt",
+        executionGenerationId: "generation", providerContinuationId: "continuation", operationalExecution: true });
+      await store.ingestSuccessfulPoll({ agent_id: "draining", room_id: "room", execution_generation_id: "generation",
+        last_observed_message_id: "47", messages: [] });
+      const input = inboxDrainRequest("draining", null);
+      await manifest.prepareDeliveryDrain(input); await manifest.markDeliveryDrainDispatch(input);
+      if (phase === "uncertain") await manifest.markDeliveryDrainUncertain(input);
+      if (phase === "complete") await manifest.commitDeliveryDrain((await manifest.load()).generation, input, async (commit) => commit());
+      await store.close(); await manifest.close();
+      store = new SupervisedAgentInboxStore(env.database); manifest = new ManifestStore(env.database);
+      const cursor = await store.cursor("draining"); const health = await store.ingressHealth("draining");
+      const late = { agent_id: "draining", room_id: "room", last_observed_message_id: "48", expected_cursor: "47",
+        messages: [{ source_message_id: "48", source_message: { text: "late B" }, activation: {} }] };
+      await assert.rejects(store.ingestPoll(late), /freezes daemon inbox ingress/);
+      await assert.rejects(store.ingestSuccessfulPoll({ ...late, execution_generation_id: "generation" }), /freezes daemon inbox ingress/);
+      await assert.rejects(store.bootstrapCursor({ agent_id: "draining", room_id: "room", last_observed_message_id: "999" }), /freezes daemon inbox ingress/);
+      await assert.rejects(store.enqueueInitialMessage({ agent_id: "draining", room_id: "room", source_message_id: "initial-B", source_message: {}, activation: {} }), /freezes daemon inbox ingress/);
+      await assert.rejects(store.enqueueCorrection({ agent_id: "draining", room_id: "room", source_message_id: "correction-B", source_message: {}, activation: {} }), /freezes daemon inbox ingress/);
+      assert.deepEqual(await store.cursor("draining"), cursor);
+      assert.deepEqual(await store.ingressHealth("draining"), health);
+      assert.equal(await store.head("draining"), null);
+      assert.equal((await manifest.getDeliveryDrain(input.operationId))?.phase, phase);
+      const database = new DatabaseSync(env.database);
+      try {
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_observed_messages WHERE agent_id='draining'").get()?.n, 0);
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events").get()?.n, 0);
+        assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_generations").get()?.n, 0);
+      } finally { database.close(); }
+    } finally { await store.close(); await manifest.close(); await env.cleanup(); }
+  }
+});
+
+test("reverse ingress fences leave unrelated legacy polling and non-manifest recovery lanes unchanged", async () => {
+  const env = await fixture(); const store = new SupervisedAgentInboxStore(env.database);
+  const manifest = new ManifestStore(env.database);
+  try {
+    await seedActiveAgent(env, { agentId: "legacy", roomId: "room", workAttemptId: "attempt",
+      executionGenerationId: "generation", providerContinuationId: "continuation" });
+    const entry = (await manifest.getEntry("legacy"))!;
+    await manifest.replaceEntry((await manifest.load()).generation, { ...entry, delivery_mode: "mcp_polling" });
+    for (const agentId of ["legacy", "recovery-fixture"]) {
+      await store.bootstrapCursor({ agent_id: agentId, room_id: "room", last_observed_message_id: "7" });
+      const [a] = await store.ingestPoll({ agent_id: agentId, room_id: "room", last_observed_message_id: "8",
+        messages: [{ source_message_id: "8", source_message: {}, activation: {} }] });
+      assert.equal(a!.state, "pending");
+      await store.enqueueInitialMessage({ agent_id: agentId, room_id: "room", source_message_id: "initial", source_message: {}, activation: {} });
+      assert.equal((await store.cursor(agentId))?.last_observed_message_id, "8");
+    }
+  } finally { await store.close(); await manifest.close(); await env.cleanup(); }
+});
+
 test("delivery drain pins exact terminal A inside the 200-receipt bound and cancellation releases it", async () => {
   const env = await fixture();
   const store = new SupervisedAgentInboxStore(env.database);

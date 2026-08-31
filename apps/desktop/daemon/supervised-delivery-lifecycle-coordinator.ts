@@ -10,6 +10,7 @@ import type {
 } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry, DaemonRoomMoveRecord } from "./types.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
+import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 
 type DeliveryMode = "refresh" | "ensure" | "wake";
 type ExactBoundedContextCoordinates = {
@@ -30,6 +31,7 @@ export type SupervisedDeliveryLifecyclePorts = {
     "activeTurn" | "ensureStarted" | "refresh" | "wake"
   > | null;
   manifest: {
+    unresolvedDeliveryDrain(agentId: string): Promise<DeliveryDrainRecord | null>;
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
     getAgentConfiguration(entryId: string): Promise<{ polling_contract?: "custodial_polling_v1" | null } | undefined>;
     pendingRoomMoves(entryId: string): Promise<DaemonRoomMoveRecord[]>;
@@ -123,6 +125,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
     const delivery = this.ports.delivery;
     if (this.ports.isHandoffScheduled() || !delivery || !this.ports.supportsRoomTurns()) return;
     if (this.ports.isLifecycleActive(entryId)) return;
+    if (deliveryDrainBlocksRuntime(await this.ports.manifest.unresolvedDeliveryDrain(entryId))) return;
     const entry = await this.ports.manifest.getEntry(entryId);
     // Legacy worker polling and daemon ingress are mutually exclusive across
     // every crash boundary; complete the durable cutover first.

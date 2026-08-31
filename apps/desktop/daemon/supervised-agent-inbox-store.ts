@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
-import { assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
+import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import {
   pruneSupervisedAgentHistory,
   readDurableNativeFailure,
@@ -183,6 +183,7 @@ export class SupervisedAgentInboxStore {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
     if (input.last_observed_message_id !== null) this.requireNumericCursor(input.last_observed_message_id);
     return this.exclusive(async (database) => this.transaction(database, () => {
+      assertDeliveryDrainIngressAllowed(database, input.agent_id);
       const existing = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
       if (existing) {
         if (String(existing.room_id) !== input.room_id) throw new Error("Supervised inbox ingress room changed for the exact agent identity.");
@@ -233,6 +234,7 @@ export class SupervisedAgentInboxStore {
   private async commitPollIngestion(input: PollIngestionInput, observingExecutionGenerationId?: string): Promise<SupervisedInboxItem[]> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
+      assertDeliveryDrainIngressAllowed(database, input.agent_id);
       const cursor = database.prepare("SELECT room_id,last_observed_message_id FROM supervised_agent_ingress_cursors WHERE agent_id=?").get(input.agent_id) as Row | undefined;
       if (cursor && String(cursor.room_id) !== input.room_id) throw new Error("Supervised inbox ingress room changed for the exact agent identity.");
       const currentCursor = cursor?.last_observed_message_id === null || cursor?.last_observed_message_id === undefined ? null : String(cursor.last_observed_message_id);
@@ -309,6 +311,7 @@ export class SupervisedAgentInboxStore {
   private async enqueueSyntheticMessage(input: { agent_id: string; room_id: string; source_message_id: string; source_message: unknown; activation: unknown }): Promise<SupervisedInboxItem> {
     this.require(input.agent_id, "agent_id"); this.require(input.room_id, "room_id"); this.require(input.source_message_id, "source_message_id");
     return this.exclusive(async (database) => this.transaction(database, () => {
+      assertDeliveryDrainIngressAllowed(database, input.agent_id);
       const existing = database.prepare("SELECT * FROM supervised_agent_inbox WHERE agent_id=? AND room_id=? AND source_message_id=?").get(input.agent_id, input.room_id, input.source_message_id) as Row | undefined;
       if (existing) return rowToItem(existing);
       const sequence = Number((database.prepare("SELECT COALESCE(MAX(fifo_sequence), 0) AS value FROM supervised_agent_inbox WHERE agent_id=?").get(input.agent_id) as Row).value) + 1;
