@@ -1,4 +1,5 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
+import { pathToFileURL } from "node:url";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 
@@ -2323,6 +2324,23 @@ repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion: 1
   }
 }
 
+/** Read-only validation for observers; never enter a predecessor repair path. */
+validateCurrentShape(database: DatabaseSync): void {
+  if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION) {
+    throw new Error("Daemon observation storage requires the already-current schema.");
+  }
+  if (this.hasPendingV6SecretScrub(database)) {
+    throw new Error("Daemon observation storage requires completed credential cleanup.");
+  }
+  this.validateV2Shape(database);
+  this.validateV3Shape(database);
+  this.validateV6Shape(database, false);
+  this.validateBoundedDeliveryV6Shape(database);
+  this.validateV7Shape(database);
+  this.validateV9Shape(database);
+  this.validateV18Shape(database);
+}
+
 /** Preserve later authority when repairing an older physical inbox shape. */
 private detachLaterInboxTables(database: DatabaseSync, names: string[]): () => void {
   const saved = names.flatMap((table) => {
@@ -3681,6 +3699,51 @@ validateV2Shape(database: DatabaseSync): void {
 
 }
 
+function configureDaemonStateConnection(database: DatabaseSync): void {
+  database.exec("PRAGMA foreign_keys = ON");
+  database.exec("PRAGMA synchronous = FULL");
+  // Temporary row snapshots must not spill a second plaintext copy to disk.
+  database.exec("PRAGMA temp_store = MEMORY");
+  // Deleted secret-bearing cells must not remain in reusable SQLite pages.
+  database.exec("PRAGMA secure_delete = ON");
+}
+
+/**
+ * Optional observation writer, opened only after protected migration while the
+ * caller holds the daemon singleton. No creation, repair, WAL conversion or retries.
+ */
+export function openDaemonStateObservationDatabase(path: string): DatabaseSync {
+  // A rejected read-write connection can checkpoint an existing WAL on close.
+  // Preflight read-only so even a future or malformed WAL remains untouched.
+  const inspection = new DatabaseSync(path, { readOnly: true });
+  try {
+    inspection.exec("PRAGMA busy_timeout = 0");
+    configureDaemonStateConnection(inspection);
+    new DaemonStateSchema().validateCurrentShape(inspection);
+    if (String(inspection.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon observation storage requires existing WAL journal mode.");
+    }
+  } finally { inspection.close(); }
+
+  // SQLite's URI mode=rw excludes CREATE atomically; an existence check followed
+  // by the default constructor would recreate a database removed in between.
+  const uri = pathToFileURL(path);
+  uri.searchParams.set("mode", "rw");
+  const database = new DatabaseSync(uri.href);
+  try {
+    database.exec("PRAGMA busy_timeout = 0");
+    if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION
+      || String(database.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon observation storage changed after validation.");
+    }
+    configureDaemonStateConnection(database);
+    return database;
+  } catch (error) {
+    try { database.close(); } catch { /* preserve the triggering error */ }
+    throw error;
+  }
+}
+
 /** Opens a daemon state connection with the non-negotiable durability settings. */
 export async function openDaemonStateDatabase(path: string, initializeSchema: (database: DatabaseSync) => void | Promise<void>): Promise<DatabaseSync> {
   const { chmod, mkdir } = await import("node:fs/promises");
@@ -3704,13 +3767,7 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
       if (mode.toLowerCase() !== "wal") database.exec("PRAGMA journal_mode = WAL");
       const confirmed = String((database.prepare("PRAGMA journal_mode").get() as { journal_mode: unknown }).journal_mode);
       if (confirmed.toLowerCase() !== "wal") throw new Error(`Daemon state requires WAL journal mode, received ${confirmed}.`);
-      database.exec("PRAGMA foreign_keys = ON");
-      database.exec("PRAGMA synchronous = FULL");
-      // Migration row snapshots must not spill a second plaintext copy to disk.
-      database.exec("PRAGMA temp_store = MEMORY");
-      // v6 can retire a formerly-secret column. Zero deleted cells so a
-      // successful migration does not leave its token in reusable SQLite pages.
-      database.exec("PRAGMA secure_delete = ON");
+      configureDaemonStateConnection(database);
       for (const candidate of [path, `${path}-wal`, `${path}-shm`]) { try { await chmod(candidate, 0o600); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; } }
       await initializeSchema(database);
       return database;

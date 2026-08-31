@@ -77,7 +77,7 @@ function unverifiedHistoricalFact(row: Row): boolean {
 }
 
 /**
- * Structural shadow journal only. No production caller is installed in PR2B.
+ * Structural shadow journal only; lifecycle and delivery authority stay separate.
  * This class owns neither the connection nor provider/delivery authority. Its
  * writes are restricted to execution_* tables; no handles for effects exist.
  */
@@ -331,6 +331,31 @@ export class ExecutionShadowStore {
     return token;
   }
 
+  /** Remember observed-but-not-yet-admitted positions without inventing a fact. */
+  observeSourcePosition(sourceId: string, token: ShadowObserver, latestSequence: number): void {
+    validated(time, latestSequence);
+    this.transaction(() => {
+      const current = this.currentObserver(sourceId, token);
+      if (latestSequence < Number(current.last_source_sequence)) throw new ExecutionProtocolError("source_gap");
+      this.database.prepare("UPDATE execution_observers SET max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
+        .run(latestSequence, token.agentId);
+    });
+  }
+
+  private currentObserver(sourceId: string, token: ShadowObserver): Row {
+    if (!this.observers.has(token)) throw new ExecutionProtocolError("stale_observer");
+    if (validated(id, sourceId) !== token.sourceId) throw new ExecutionProtocolError("identity_mismatch");
+    const current = this.required("SELECT * FROM execution_observers WHERE agent_id=?", token.agentId);
+    if (current.observer_epoch !== token.epoch || current.daemon_generation_id !== token.daemonGenerationId
+      || current.source_id !== token.sourceId || current.observer_runtime_generation_id !== token.observerRuntimeGenerationId) {
+      throw new ExecutionProtocolError("stale_observer");
+    }
+    if (!this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?", token.agentId, sourceId)) {
+      throw new ExecutionProtocolError("source_unverified");
+    }
+    return current;
+  }
+
   /** sourceId must come from the observation, not be copied from the token. */
   ingest(sourceId: string, token: ShadowObserver, value: unknown): ShadowIngestion {
     const fact = parseExecutionFact(value);
@@ -338,15 +363,8 @@ export class ExecutionShadowStore {
     if (validated(id, sourceId) !== token.sourceId) throw new ExecutionProtocolError("identity_mismatch");
     let committed: { value: RuntimeProjection; budget: RetainedBudget; stamp: string } | undefined;
     const result = this.transaction<ShadowIngestion>(() => {
-      const current = this.required("SELECT * FROM execution_observers WHERE agent_id=?", token.agentId);
-      if (current.observer_epoch !== token.epoch || current.daemon_generation_id !== token.daemonGenerationId
-        || current.source_id !== token.sourceId || current.observer_runtime_generation_id !== token.observerRuntimeGenerationId
-        || fact.observerEpoch !== token.epoch) {
-        throw new ExecutionProtocolError("stale_observer");
-      }
-      if (!this.row("SELECT 1 FROM execution_observer_sources WHERE agent_id=? AND source_id=?", token.agentId, sourceId)) {
-        throw new ExecutionProtocolError("source_unverified");
-      }
+      const current = this.currentObserver(sourceId, token);
+      if (fact.observerEpoch !== token.epoch) throw new ExecutionProtocolError("stale_observer");
       if (fact.agentId !== token.agentId) throw new ExecutionProtocolError("identity_mismatch");
       let retainedTurn: Row | undefined;
       if (fact.domain === "turn" || fact.domain === "execution") {

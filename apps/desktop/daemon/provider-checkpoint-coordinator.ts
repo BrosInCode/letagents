@@ -18,6 +18,7 @@ import type {
 } from "./supervised-agent-delivery.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
+import type { PreparedRuntime } from "./execution-capture-coordinator.js";
 
 type ProviderCheckpointAuthority = {
   isHandoffScheduled: () => boolean;
@@ -40,6 +41,7 @@ export type ProviderCheckpointCoordinatorOptions = {
   serializeManifest: <T>(operation: () => Promise<T>) => Promise<T>;
   scheduleRecovery: (entryId: string, delayMs: number) => void;
   nowMs: () => number;
+  observePreparedRuntime?: (runtime: PreparedRuntime) => void;
 };
 
 /**
@@ -58,6 +60,7 @@ export class ProviderCheckpointCoordinator {
   private readonly serializeManifest: ProviderCheckpointCoordinatorOptions["serializeManifest"];
   private readonly scheduleRecovery: ProviderCheckpointCoordinatorOptions["scheduleRecovery"];
   private readonly nowMs: () => number;
+  private readonly observePreparedRuntime: ProviderCheckpointCoordinatorOptions["observePreparedRuntime"];
 
   constructor(options: ProviderCheckpointCoordinatorOptions) {
     this.store = options.store;
@@ -70,6 +73,7 @@ export class ProviderCheckpointCoordinator {
     this.serializeManifest = options.serializeManifest;
     this.scheduleRecovery = options.scheduleRecovery;
     this.nowMs = options.nowMs;
+    this.observePreparedRuntime = options.observePreparedRuntime;
   }
 
   /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
@@ -125,6 +129,10 @@ export class ProviderCheckpointCoordinator {
         || !sameProviderActionConnectionSnapshot(live.providerConnection, providerConnection)) {
         throw new DaemonFenceLostError("Cursor prepared turn no longer belongs to the exact supervised lane.");
       }
+      // Inspector configuration is intentionally absent from the flat manifest.
+      // Failure to read optional capture metadata cannot fail this checkpoint.
+      const configuration = this.observePreparedRuntime
+        ? await this.store.getAgentConfiguration(agent.agentId).catch(() => undefined) : undefined;
       try {
         const checkpoint = await this.store.checkpointCursorPreparedTurn(
           this.authority.currentManifestGeneration(),
@@ -148,6 +156,7 @@ export class ProviderCheckpointCoordinator {
         );
         this.authority.acceptManifestGeneration(checkpoint.generation);
         agent.providerConnection = providerConnection;
+        this.observePrepared(agent, providerConnection, configuration?.runtime_configuration_revision);
       } catch (error) {
         // A commit fence may report failure after SQLite committed. The paired
         // manifest+inbox read proves whether the atomic boundary won.
@@ -187,11 +196,20 @@ export class ProviderCheckpointCoordinator {
           const manifest = await this.store.load();
           this.authority.acceptManifestGeneration(manifest.generation);
           agent.providerConnection = providerConnection;
+          this.observePrepared(agent, providerConnection, configuration?.runtime_configuration_revision);
           return;
         }
         throw error;
       }
     }));
+  }
+
+  private observePrepared(agent: SupervisedIngressAgent, connection: ProviderActionConnectionRef, revision: number | undefined): void {
+    if (!agent.handle || revision === undefined) return;
+    try {
+      this.observePreparedRuntime?.({ agentId: agent.agentId, executionGenerationId: agent.executionGenerationId,
+        handle: agent.handle, connection, configurationRevision: revision });
+    } catch { /* A committed prepared turn never fails because optional capture did. */ }
   }
 
   /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
