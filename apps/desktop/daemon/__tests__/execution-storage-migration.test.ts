@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "../daemon-state-database.js";
+import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase, openDaemonStateObservationDatabase } from "../daemon-state-database.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Row = Record<string, unknown>;
@@ -316,6 +316,118 @@ test("migration temporary row snapshots cannot spill plaintext to disk", async (
       new DaemonStateSchema().createSchema(opened);
     });
     database.close();
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("observation opener accepts current WAL with durable settings and no migration", async () => {
+  const env = await fixture();
+  try {
+    const before = { version: versionPair(env.database), schema: env.database.prepare("SELECT * FROM sqlite_master ORDER BY name").all() };
+    const observer = openDaemonStateObservationDatabase(env.path);
+    try {
+      for (const [pragma, expected] of Object.entries({ busy_timeout: 0, foreign_keys: 1, synchronous: 2, temp_store: 2, secure_delete: 1, journal_mode: "wal" })) {
+        assert.equal(Object.values(observer.prepare(`PRAGMA ${pragma}`).get()!)[0], expected, pragma);
+      }
+      observer.exec("BEGIN IMMEDIATE; INSERT INTO execution_generations VALUES('writable-proof','agent',1); ROLLBACK");
+      assert.equal(observer.prepare("SELECT 1 FROM execution_generations WHERE execution_generation_id='writable-proof'").get(), undefined);
+      assert.deepEqual({ version: versionPair(observer), schema: observer.prepare("SELECT * FROM sqlite_master ORDER BY name").all() }, before);
+    } finally { observer.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("observation writer fails immediately behind a live writer without waiting or retrying", async () => {
+  const env = await fixture();
+  try {
+    env.database.exec("BEGIN IMMEDIATE");
+    const started = performance.now();
+    const observer = openDaemonStateObservationDatabase(env.path);
+    try {
+      assert.throws(() => observer.exec("BEGIN IMMEDIATE"), /database is locked|SQLITE_BUSY/i);
+      assert.ok(performance.now() - started < 1000, "optional observation must not inherit the operational five-second busy timeout");
+      env.database.exec("ROLLBACK");
+      observer.exec("BEGIN IMMEDIATE; ROLLBACK");
+    } finally { observer.close(); }
+    env.database.exec("PRAGMA locking_mode=EXCLUSIVE; BEGIN EXCLUSIVE");
+    const readBlockedAt = performance.now();
+    assert.throws(() => openDaemonStateObservationDatabase(env.path), /database is locked|SQLITE_BUSY/i);
+    assert.ok(performance.now() - readBlockedAt < 1000, "opening optional observation must also fail without a retry loop");
+  } finally {
+    try { env.database.exec("ROLLBACK"); } catch { /* the writer may already be released */ }
+    await env.cleanup();
+  }
+});
+
+test("observation opener never creates absent databases or directories and rejects an empty database", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-observation-existing-"));
+  try {
+    assert.throws(() => openDaemonStateObservationDatabase(join(directory, "missing.sqlite")), /unable to open database file/);
+    assert.throws(() => openDaemonStateObservationDatabase(join(directory, "missing-directory", "state.sqlite")), /unable to open database file/);
+    assert.deepEqual(await readdir(directory), []);
+    const path = join(directory, "empty.sqlite");
+    new DatabaseSync(path).close();
+    const before = await readFile(path);
+    assert.throws(() => openDaemonStateObservationDatabase(path), /already-current schema/);
+    assert.deepEqual(await readFile(path), before);
+    assert.deepEqual(await readdir(directory), ["empty.sqlite"]);
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("observation opener escapes URI metacharacters in existing local paths", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-observation-uri-"));
+  try {
+    const path = join(directory, "state space?#%.sqlite");
+    const operational = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
+    try {
+      const observer = openDaemonStateObservationDatabase(path);
+      try {
+        observer.exec("BEGIN IMMEDIATE; INSERT INTO execution_generations VALUES('uri-proof','agent',1); COMMIT");
+        assert.ok(operational.prepare("SELECT 1 FROM execution_generations WHERE execution_generation_id='uri-proof'").get());
+      } finally { observer.close(); }
+      assert.ok((await readdir(directory)).every((name) => name.startsWith("state space?#%.sqlite")));
+    } finally { operational.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+for (const invalid of ["older17", "older20", "newer", "non_wal", "typed_journal_missing", "legacy_journal_missing"] as const) {
+  test(`observation opener rejects ${invalid} without migration, repair or WAL conversion`, async () => {
+    const env = await fixture();
+    try {
+      if (invalid === "older17") restoreV17Fixture(env.database);
+      if (invalid === "older20") restoreV20Fixture(env.database);
+      if (invalid === "newer") env.database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION + 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION + 1}`);
+      if (invalid === "typed_journal_missing") env.database.exec("DROP TABLE execution_observer_sources");
+      if (invalid === "legacy_journal_missing") env.database.exec("DROP TABLE supervised_agent_inbox_events");
+      env.database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      if (invalid === "non_wal") env.database.exec("PRAGMA journal_mode=DELETE");
+      const before = await readFile(env.path);
+      const schema = env.database.prepare("SELECT * FROM sqlite_master ORDER BY name").all();
+      const versions = versionPair(env.database);
+      assert.throws(() => openDaemonStateObservationDatabase(env.path), /already-current schema|Unsupported daemon state schema|existing WAL journal mode|Execution storage schema mismatch|invalid strict schema/);
+      assert.deepEqual(await readFile(env.path), before);
+      assert.deepEqual(versionPair(env.database), versions);
+      assert.deepEqual(env.database.prepare("SELECT * FROM sqlite_master ORDER BY name").all(), schema);
+      assert.equal(env.database.prepare("PRAGMA journal_mode").get()!.journal_mode, invalid === "non_wal" ? "delete" : "wal");
+      if (invalid !== "non_wal") assert.equal((await readFile(`${env.path}-wal`)).length, 0);
+    } finally { await env.cleanup(); }
+  });
+}
+
+test("rejected future observation database does not checkpoint an unowned WAL", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-observation-future-wal-"));
+  const path = join(directory, "state.sqlite");
+  try {
+    const script = `
+      import { DatabaseSync } from 'node:sqlite';
+      const database = new DatabaseSync(process.argv[1]);
+      database.exec('PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; CREATE TABLE manifest_metadata(singleton INTEGER PRIMARY KEY,generation INTEGER,schema_version INTEGER); INSERT INTO manifest_metadata VALUES(1,1,${DAEMON_STATE_SCHEMA_VERSION + 1}); PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION + 1}');
+      process.exit(0);
+    `;
+    const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, path], { encoding: "utf8", timeout: 10_000 });
+    assert.equal(child.status, 0, child.stderr);
+    const before = { database: await readFile(path), wal: await readFile(`${path}-wal`) };
+    assert.ok(before.wal.length > 0);
+    assert.throws(() => openDaemonStateObservationDatabase(path), /Unsupported daemon state schema version/);
+    assert.deepEqual({ database: await readFile(path), wal: await readFile(`${path}-wal`) }, before);
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 

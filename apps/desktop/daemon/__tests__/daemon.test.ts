@@ -31,13 +31,17 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
   provider_continuation_id: "continuation",
 } as const;
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import type { SupervisedDeliveryHttp } from "../supervised-agent-delivery.js";
+import type { SupervisedDeliveryHttp, SupervisedIngressAgent } from "../supervised-agent-delivery.js";
 import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs, watchdogShouldEscalate } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
 import { advanceReconciliationState, recordReconciliationActionFailure, rememberCompletedControlAction } from "../reconciler-state.js";
-import type { ProviderActionPort } from "../provider-action-port.js";
+import type { ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
+import type { NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
+import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
+import type { ProviderCheckpointCoordinator } from "../provider-checkpoint-coordinator.js";
+import type { ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
@@ -1176,6 +1180,266 @@ const entry: DaemonManifestEntry = {
   id: "agent_1", room_id: "room_1", display_name: "Agent", provider: "test", model: null, charter: "test",
   desired_state: "running", observed_state: "idle", condition: "none", permission_profile_id: null, created_by: "test", created_at: "2026-01-01T00:00:00.000Z",
 };
+
+/** Real daemon storage/lifecycle wiring with only the native observer faked. */
+async function observationDaemonFixture(onExecution: NonNullable<ProviderActionPort["onExecution"]>, provider: "codex" | "cursor" = "codex") {
+  const env = await fixture();
+  const id = "observed-agent";
+  const paths = {
+    lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
+    manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
+    attemptsPath: join(env.root, "attempts.json"), attemptsRoot: join(env.root, "attempt-data"), workspaceRoot: env.root,
+  };
+  const port: ProviderActionPort = {
+    capabilities: async () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: true }),
+    spawn: async () => { throw new Error("observation fixture installs an existing exact handle"); },
+    attach: async () => null, attachAction: async () => ({ state: "absent" }),
+    resume: async () => { throw new Error("observation fixture must not resume a provider"); }, poke: async () => {},
+    stop: async () => { throw new Error("observation must never control the provider"); },
+    onExit: async () => () => {}, onStream: async () => () => {}, onExecution,
+  };
+  const daemon = new SupervisorDaemon(paths, "darwin", port, false);
+  const internals = daemon as unknown as {
+    durability: WorkDurabilityStore; store: ManifestStore; supervisedInbox: SupervisedAgentInboxStore;
+    workerBindings: WorkerBindingStore; providerStreams: ProviderStreamCoordinator;
+    providerCheckpoints: ProviderCheckpointCoordinator; executionCapture: ExecutionCaptureCoordinator | null;
+    liveHandles: Map<string, ProviderActionHandle>;
+  };
+  try {
+    await daemon.start();
+    assert.ok(internals.executionCapture, "optional writer opens only after real protected schema initialization");
+    const workspace = await provisionedWorkspace(env.root, id);
+    const attempt = await internals.durability.createAttempt({
+      taskId: id, leaseId: id, leaseEpoch: 0, workspacePath: workspace.path, workAttemptId: workspace.id,
+    });
+    const execution = await internals.durability.startGeneration(attempt.work_attempt_id, "daemon-provider", 1);
+    const handle: ProviderActionHandle = {
+      workAttemptId: attempt.work_attempt_id, providerContinuationId: "observed-continuation", observedState: "working",
+      pid: provider === "cursor" ? null : 7123,
+      providerConnection: provider === "cursor" ? { kind: "cursor_cli", pid: null, processIdentity: null }
+        : { kind: "codex_app_server", pid: 7123, processIdentity: "observed-birth", url: "ws://127.0.0.1:7123" },
+    };
+    const stored: DaemonManifestEntry = {
+      ...entry, id, provider, delivery_mode: "daemon_inbox", workspace_path: attempt.workspace_path,
+      work_attempt_id: attempt.work_attempt_id, run_id: execution.execution_generation_id,
+      deployment_id: serializeDaemonDeploymentId(id, execution.execution_generation_id),
+      runtime_configuration_revision: 1,
+      provider_ref: { work_attempt_id: attempt.work_attempt_id, execution_generation_id: execution.execution_generation_id,
+        provider_continuation_id: handle.providerContinuationId!, provider_connection: handle.providerConnection! },
+    };
+    const inserted = await daemonRequest(paths.socketPath, "manifest.put", { entry: stored });
+    assert.equal(inserted.ok, true, inserted.error);
+    return { ...env, id, paths, daemon, internals, handle, port, generation: execution.execution_generation_id,
+      cleanup: async () => { await daemon.stop(); await env.cleanup(); } };
+  } catch (error) {
+    await daemon.stop().catch(() => undefined); await env.cleanup(); throw error;
+  }
+}
+
+for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only committed native-turn identity and fences live observation on ${shutdown}`, async () => {
+  let listener: ((event: NativeExecutionObservation) => void) | undefined;
+  let disposed = 0;
+  let latestSequence = 2;
+  const env = await observationDaemonFixture(async (handle, callback) => {
+    listener = callback;
+    callback({ sourceId: "source-live", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+      fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } });
+    callback({ sourceId: "source-live", sequence: 2, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+      fact: { domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+        providerContinuationId: handle.providerContinuationId!, providerTurnId: "native-turn" } });
+    return { sourceId: "source-live", position: () => ({ firstRetainedSequence: 1, latestSequence }), dispose: () => { disposed += 1; } };
+  });
+  const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
+  try {
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    await eventually(async () => inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count === 1,
+      "runtime fact without fabricated native-turn mapping");
+    assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM execution_turns").get()!.count, 0);
+    const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: entry.room_id,
+      last_observed_message_id: "901", messages: [{ source_message_id: "901", source_message: { text: "private source text" }, activation: {} }] });
+    assert.ok(item);
+    await env.internals.supervisedInbox.transition(item.inbox_item_id, "dispatching");
+    await env.internals.supervisedInbox.checkpointTurnStarted(item.inbox_item_id, "native-turn", {
+      work_attempt_id: env.handle.workAttemptId, origin_execution_generation_id: env.generation,
+      provider_continuation_id: env.handle.providerContinuationId!,
+    });
+    await eventually(async () => inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count === 2,
+      "post-commit inbox notification resumes structural capture");
+    const mapped = inspection.prepare(`SELECT t.agent_id,t.execution_generation_id,t.provider_continuation_id,t.provider_turn_id,
+      a.room_id,a.source_message_id FROM execution_turns t JOIN execution_message_attempts a USING(attempt_id)`).get();
+    assert.deepEqual({ ...mapped }, { agent_id: env.id, execution_generation_id: env.generation,
+      provider_continuation_id: env.handle.providerContinuationId, provider_turn_id: "native-turn",
+      room_id: entry.room_id, source_message_id: "901" });
+    const before = inspection.prepare("SELECT * FROM execution_facts ORDER BY sequence").all();
+    assert.ok(!JSON.stringify(before).includes("private source text"));
+    if (shutdown === "stop") {
+      const stopped = env.daemon.stop();
+      assert.equal(disposed, 1, "stop closes capture synchronously before awaiting operational drains");
+      await within(stopped, "observation-aware daemon stop");
+    } else {
+      const handoff = env.daemon.waitForHandoff();
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
+      assert.equal(disposed, 1, "handoff acknowledgement cannot leave a live observation subscription");
+      await within(handoff, "observation-aware daemon handoff");
+    }
+    assert.equal(disposed, 1, "capture close and stream teardown must not dispose the same native subscription twice");
+    latestSequence = 3;
+    listener!({ sourceId: "source-live", sequence: 3, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+      fact: { domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal((env.internals.executionCapture as unknown as { database: DatabaseSync }).database.isOpen, false);
+    assert.deepEqual(inspection.prepare("SELECT * FROM execution_facts ORDER BY sequence").all(), before,
+      "late native callbacks cannot persist after daemon authority closes");
+  } finally { inspection.close(); await env.cleanup(); }
+});
+
+for (const shutdown of ["stop", "handoff"] as const) test(`daemon ${shutdown} does not wait for a pending native subscription and disposes its late result`, async () => {
+  let release!: (subscription: NativeExecutionSubscription) => void;
+  const pending = new Promise<NativeExecutionSubscription>((resolve) => { release = resolve; });
+  let listener: ((event: NativeExecutionObservation) => void) | undefined;
+  let subscriptions = 0;
+  let disposed = 0;
+  const env = await observationDaemonFixture(async (_handle, callback) => { subscriptions += 1; listener = callback; return pending; });
+  try {
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    await eventually(async () => subscriptions === 1, "pending native subscription starts");
+    const event: NativeExecutionObservation = { sourceId: "source-late", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+      fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } };
+    listener!(event);
+    if (shutdown === "stop") await within(env.daemon.stop(), "stop with unresolved optional subscription", 1000);
+    else {
+      const handoff = env.daemon.waitForHandoff();
+      assert.equal((await daemonRequest(env.paths.socketPath, "daemon.prepare_handoff")).ok, true);
+      await within(handoff, "handoff with unresolved optional subscription", 1000);
+    }
+    release({ sourceId: "source-late", position: () => ({ firstRetainedSequence: 1, latestSequence: 1 }), dispose: () => { disposed += 1; } });
+    await eventually(async () => disposed === 1, "late subscription is disposed rather than reinstalled");
+    listener!(event);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
+    try { assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count, 0); }
+    finally { inspection.close(); }
+    assert.equal(subscriptions, 1);
+    assert.equal((env.internals.executionCapture as unknown as { database: DatabaseSync }).database.isOpen, false);
+  } finally {
+    release({ sourceId: "source-late", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => {} });
+    await env.cleanup();
+  }
+});
+
+for (const failure of ["observer_rejection", "storage_closed"] as const) test(`optional ${failure} cannot fail provider installation or a committed daemon mutation`, async () => {
+  let subscriptions = 0;
+  const env = await observationDaemonFixture(async (_handle, callback) => {
+    subscriptions += 1;
+    if (failure === "observer_rejection") throw new Error("optional observer refused");
+    callback({ sourceId: "source-storage", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+      fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } });
+    return { sourceId: "source-storage", position: () => ({ firstRetainedSequence: 1, latestSequence: 1 }), dispose: () => {} };
+  });
+  try {
+    if (failure === "storage_closed") (env.internals.executionCapture as unknown as { database: DatabaseSync }).database.close();
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    await eventually(async () => subscriptions === 1, "optional observer invoked");
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(env.internals.liveHandles.get(env.id), env.handle);
+    const updated = await daemonRequest(env.paths.socketPath, "manifest.set_desired_state", { id: env.id, desired_state: "paused" });
+    assert.equal(updated.ok, true, updated.error);
+    assert.equal((await env.internals.store.getEntry(env.id))?.desired_state, "paused");
+    assert.equal((await daemonRequest(env.paths.socketPath, "daemon.status")).ok, true);
+  } finally { await env.cleanup(); }
+});
+
+test("a stream installation that completes after daemon stop cannot restart its early observation subscription", async () => {
+  let subscriptions = 0;
+  let disposed = 0;
+  let observe!: (event: NativeExecutionObservation) => void;
+  const env = await observationDaemonFixture(async (_handle, listener) => {
+    subscriptions += 1;
+    observe = listener;
+    return { sourceId: "source-early-installed", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => { disposed += 1; } };
+  });
+  let entered!: () => void;
+  const waiting = new Promise<void>((resolve) => { entered = resolve; });
+  let release!: () => void;
+  const delayedStream = new Promise<void>((resolve) => { release = resolve; });
+  env.port.onStream = async () => { entered(); await delayedStream; return () => {}; };
+  try {
+    const installing = env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    await waiting;
+    await eventually(async () => subscriptions === 1, "early optional subscription installed");
+    await within(env.daemon.stop(), "stop while stream installation is pending", 1000);
+    assert.equal(disposed, 1, "stop disposes the already-installed optional subscription synchronously");
+    release();
+    await installing;
+    observe({ sourceId: "source-early-installed", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+      fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(subscriptions, 1, "late stream completion must not start another optional subscription");
+    assert.equal(disposed, 1);
+    assert.equal((env.internals.executionCapture as unknown as { database: DatabaseSync }).database.isOpen, false);
+    const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
+    try { assert.equal(inspection.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()!.count, 0); }
+    finally { inspection.close(); }
+  } finally { release(); await env.cleanup(); }
+});
+
+for (const commit of ["normal", "recovered"] as const) test(`Cursor observation callback follows only an exact ${commit} prepared checkpoint and cannot reject it`, async () => {
+  const env = await observationDaemonFixture(async () => ({
+    sourceId: "source-cursor", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => {},
+  }), "cursor");
+  const inspection = new DatabaseSync(env.paths.manifestPath, { readOnly: true });
+  try {
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    await env.internals.workerBindings.bind({ entry_id: env.id, room_id: entry.room_id,
+      work_attempt_id: env.handle.workAttemptId, execution_generation_id: env.generation,
+      agent_session_id: "cursor-observation-worker", agent_session_token: "cursor-observation-bearer",
+      credential_ref: "cursor-observation-credential", api_url: "https://letagents.example" });
+    const [item] = await env.internals.supervisedInbox.ingestPoll({ agent_id: env.id, room_id: entry.room_id,
+      last_observed_message_id: "902", messages: [{ source_message_id: "902", source_message: { text: "prepare" }, activation: {} }] });
+    assert.ok(item);
+    await env.internals.supervisedInbox.transition(item.inbox_item_id, "dispatching");
+    const agent: SupervisedIngressAgent = {
+      agentId: env.id, roomId: entry.room_id, provider: "cursor", deliveryMode: "daemon_inbox",
+      apiUrl: "https://letagents.example", agentSessionId: "cursor-observation-worker", bearer: "cursor-observation-bearer",
+      handle: env.handle, workAttemptId: env.handle.workAttemptId, providerContinuationId: env.handle.providerContinuationId,
+      providerConnection: env.handle.providerConnection!, executionGenerationId: env.generation,
+      daemonGeneration: ((await daemonRequest(env.paths.socketPath, "daemon.status")).result as { generation: number }).generation,
+    };
+    const connection = { kind: "cursor_cli" as const, pid: 7124, processIdentity: "cursor-prepared-birth" };
+    env.handle.pid = connection.pid;
+    env.handle.providerConnection = connection;
+    const observations: Array<{ runtime: Parameters<ExecutionCaptureCoordinator["prepared"]>[0]; binding: unknown; connection: unknown }> = [];
+    env.internals.executionCapture!.prepared = (runtime) => {
+      observations.push({ runtime,
+        binding: inspection.prepare("SELECT provider_turn_id,origin_execution_generation_id FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?").get(item.inbox_item_id),
+        connection: inspection.prepare("SELECT provider_connection_pid,provider_process_identity FROM runtime_deployments WHERE agent_id=?").get(env.id) });
+      throw new Error("optional observation callback failed after commit");
+    };
+    const input = { agent, inboxItemId: item.inbox_item_id, providerTurnId: "cursor-prepared-turn",
+      providerContinuationId: env.handle.providerContinuationId!, providerConnection: connection };
+    await assert.rejects(() => env.internals.providerCheckpoints.checkpointPreparedTurn({ ...input, agent: { ...agent, bearer: "wrong-bearer" } }), /exact supervised lane/);
+    assert.equal(observations.length, 0, "failed exact-authority validation cannot mint observation proof");
+    assert.equal((await env.internals.supervisedInbox.get(item.inbox_item_id))?.provider_turn_id, null);
+    if (commit === "recovered") {
+      const checkpoint = env.internals.store.checkpointCursorPreparedTurn.bind(env.internals.store);
+      env.internals.store.checkpointCursorPreparedTurn = async (...args) => {
+        await checkpoint(...args);
+        throw new Error("transport reported failure after the prepared transaction committed");
+      };
+    }
+    await env.internals.providerCheckpoints.checkpointPreparedTurn(input);
+    assert.equal(observations.length, 1, "successful or independently recovered commit publishes exactly one optional observation proof");
+    const observed = observations[0]!;
+    assert.equal(observed.runtime.handle, env.handle);
+    assert.equal(observed.runtime.executionGenerationId, env.generation);
+    assert.equal(observed.runtime.configurationRevision, 1);
+    assert.deepEqual(observed.runtime.connection, connection);
+    assert.deepEqual({ ...observed.binding as object }, { provider_turn_id: "cursor-prepared-turn", origin_execution_generation_id: env.generation });
+    assert.deepEqual({ ...observed.connection as object }, { provider_connection_pid: 7124, provider_process_identity: "cursor-prepared-birth" });
+    assert.deepEqual(agent.providerConnection, connection, "callback failure cannot undo the operational provider snapshot");
+    assert.equal((await env.internals.supervisedInbox.get(item.inbox_item_id))?.provider_turn_id, "cursor-prepared-turn");
+  } finally { inspection.close(); await env.cleanup(); }
+});
 
 test("daemon is visibly gated to macOS", () => {
   assert.throws(() => assertMacOS("linux"), /macOS only/);

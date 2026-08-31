@@ -75,6 +75,8 @@ export type ProviderStreamCoordinatorOptions = {
   /** Optional compatibility map shared with the temporarily-thin daemon facade. */
   liveHandles?: Map<string, ProviderActionHandle>;
   provider?: Pick<ProviderActionPort, "stop" | "onExit" | "onStream">;
+  /** Optional non-authoritative capture; never awaited by provider delivery. */
+  observeExecution?(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): () => void;
   manifest: ProviderStreamManifest;
   bindings: ProviderStreamBindings;
   durability: ProviderStreamDurability;
@@ -189,6 +191,11 @@ export class ProviderStreamCoordinator {
     );
     this.options.streams.reset(entryId);
     this.liveHandles.set(entryId, handle);
+    let disposeExecution = () => {};
+    try { disposeExecution = this.options.observeExecution?.(entryId, handle, executionGenerationId) ?? disposeExecution; }
+    catch { /* optional observation must not reject provider installation */ }
+    const disposeCapture = () => { try { disposeExecution(); } catch { /* observation owns no execution authority */ } };
+    this.liveDisposers.set(entryId, [disposeCapture]);
     const binding = await this.options.bindings.get(entryId);
     const currentBinding = this.options.runtimeCustody.liveBinding(entryId);
     if (binding?.execution_generation_id === executionGenerationId) {
@@ -259,6 +266,7 @@ export class ProviderStreamCoordinator {
     this.liveDisposers.set(entryId, [
       disposeExit,
       disposeStream,
+      disposeCapture,
       () => this.clearHeartbeat(heartbeat),
       () => this.options.streams.end(entryId),
     ]);
