@@ -4,10 +4,11 @@ import type { NativeExecutionObservation, NativeExecutionSubscription } from "..
 import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
 import { ExecutionShadowStore, type ShadowObserver } from "./execution-shadow-store.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
+import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
 
 type Row = Record<string, string | number | null>;
-type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation";
+type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation" | "settlement_unavailable";
 type Runtime = { id: string; generation: string };
 type CaptureOptions = {
   provider: Pick<ProviderActionPort, "onExecution">;
@@ -22,6 +23,7 @@ type Lane = {
   checkpoints: Map<string, PreparedRuntime>; overflow: boolean; suspended: boolean; diagnostic: CaptureCode | null;
   detached: boolean; frontierStored: boolean; verifiedRuntime: Runtime | null;
   subscriptionFailed: boolean;
+  receiptCursor: number;
 };
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
@@ -74,7 +76,7 @@ export class ExecutionCaptureCoordinator {
     if (this.closed || this.suspendedAgents.has(agentId) || !this.options.provider.onExecution) return () => {};
     const lane: Lane = { agentId, generation, handle, subscription: null, observer: null,
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
-      detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false };
+      detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0 };
     this.lanes.set(agentId, lane);
     // Installation follows the provider's durable dispatch/configuration
     // checkpoint. Preserve its attested birth before an immediate exit or a
@@ -103,11 +105,11 @@ export class ExecutionCaptureCoordinator {
   /** A post-COMMIT hint only schedules work; it cannot reject that checkpoint. */
   refresh(): void {
     for (const lane of this.retiring.values()) this.schedule(lane);
-    for (const lane of this.lanes.values()) this.schedule(lane);
+    for (const lane of this.lanes.values()) { lane.receiptCursor = 0; this.schedule(lane); }
   }
 
   private schedule(lane: Lane): void {
-    if (!this.current(lane) || lane.suspended && !lane.detached) return;
+    if (!this.current(lane)) return;
     this.dirty.add(lane);
     if (this.closed || this.scheduled) return;
     this.scheduled = setImmediate(() => {
@@ -115,15 +117,12 @@ export class ExecutionCaptureCoordinator {
       const next = this.dirty.values().next().value;
       if (!next) return;
       this.dirty.delete(next);
+      let retire = false;
       if (this.current(next) && next.subscription && (!next.suspended || next.detached)
         && (next.detached || !this.retiring.has(next.agentId))) {
         try {
           if (this.drain(next)) this.dirty.add(next);
-          else if (next.detached && next.frontierStored) {
-            this.remove(next);
-            const successor = this.lanes.get(next.agentId);
-            if (successor) this.dirty.add(successor);
-          }
+          else if (next.detached && next.frontierStored) retire = true;
         }
         catch (error) {
           if (error instanceof ExecutionProtocolError) next.suspended = true;
@@ -132,7 +131,24 @@ export class ExecutionCaptureCoordinator {
               ? "source_gap" : error instanceof ExecutionProtocolError ? "invalid_observation" : "storage_unavailable");
         }
       }
-      for (const candidate of this.dirty) if (!this.current(candidate) || candidate.suspended && !candidate.detached) this.dirty.delete(candidate);
+      // Operational settlement is independent of native capture continuity.
+      // Suspended lanes can settle receipts; an exit tail can also create an
+      // attempt whose receipt was committed before capture caught up.
+      let receiptsPending = false;
+      if (this.current(next)) {
+        try {
+          const receipts = settleCapturedExecutionAttempts(this.database, next.agentId, { afterFifoSequence: next.receiptCursor });
+          if (receipts.lastFifoSequence !== null) next.receiptCursor = receipts.lastFifoSequence;
+          if (receipts.unavailable) this.report(next, "settlement_unavailable");
+          if (receipts.hasMore) { receiptsPending = true; this.dirty.add(next); }
+        } catch { this.report(next, "settlement_unavailable"); }
+      }
+      if (retire && !receiptsPending) {
+        this.remove(next);
+        const successor = this.lanes.get(next.agentId);
+        if (successor) this.dirty.add(successor);
+      }
+      for (const candidate of this.dirty) if (!this.current(candidate)) this.dirty.delete(candidate);
       const pending = this.dirty.values().next().value;
       if (pending) this.schedule(pending);
     });
@@ -308,6 +324,8 @@ export class ExecutionCaptureCoordinator {
       executionGenerationId: observed.generation, workspaceId: String(binding.work_attempt_id), createdAtMs: Date.parse(String(binding.created_at)) });
     this.store.trackNativeTurn({ agentId: lane.agentId, roomId: String(binding.room_id), executionGenerationId: observed.generation,
       runtimeGenerationId: observed.id, attemptId, ...identity, createdAtMs: event.observedAtMs });
+    // Late native evidence can materialize an attempt behind the receipt scan.
+    lane.receiptCursor = 0;
     return { runtime: observed, identity };
   }
 
