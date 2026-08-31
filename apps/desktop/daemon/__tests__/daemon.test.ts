@@ -7265,6 +7265,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
           execution_generation_id: current.provider_ref!.execution_generation_id, agent_session_id: `session_daemon_${current.id}`,
           daemon_generation: generation, api_url: "http://127.0.0.1:9", contract: "custodial_polling_v1",
           phase: "before", tool_name: "wait_for_messages",
+          process_incarnation_id: "01234567-89ab-4cde-8f01-23456789abcd", mcp_request_id: 1, room_cursor: "msg_47",
         };
         const admitted = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params);
         assert.equal(admitted.ok, false, "changing the contract does not authorize native work");
@@ -7272,9 +7273,13 @@ test(`two Codex room agents keep independent provider executions across stop, re
         // Active expiry/revision/identity tests now live beside the explicit
         // activation gate in worker-authority-coordinator.test.ts. This older
         // fixture proves only dormant grant/worker recovery, not activation.
-        assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
+        const released = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
           ...params, phase: "release", expected_configuration_revision: 1,
-        })).ok, false);
+          expected_activation_id: "unactivated", expected_binding_epoch: 1,
+          input_cursor: "msg_47", offered_frontier: "msg_48",
+        });
+        assert.equal(released.ok, false);
+        assert.match(released.error ?? "", /activation/);
         assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
           ...params, room_cursor: "msg_48",
         })).ok, false, "dormant processes cannot advance the acknowledged cursor");
