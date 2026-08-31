@@ -15,13 +15,15 @@ export type RoomAgentWorkSummary = {
   elapsed_ms: number | null;
   operation_counts: Record<typeof ROOM_WORK_OPERATION_OUTCOMES[number], number>;
 };
+// Server-issued availability marker, not a publisher-supplied execution state.
+export type ClearedRoomAgentWorkSummary = { version: 1; availability: "cleared" };
 export type RoomAgentWork = {
   attempt_id: string;
   room_id: string;
   source_message_id: string;
   agent_key: string;
   revision: number;
-  summary: RoomAgentWorkSummary;
+  summary: RoomAgentWorkSummary | ClearedRoomAgentWorkSummary;
   updated_at: string;
 };
 export type RoomAgentWorkSnapshot = { work: RoomAgentWork[]; truncated: boolean };
@@ -37,6 +39,10 @@ function exactKeys(value: unknown, keys: readonly string[]): value is Record<str
   return !!value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length
     && keys.every((key) => Object.hasOwn(value, key));
+}
+
+export function isClearedRoomAgentWorkSummary(value: unknown): value is ClearedRoomAgentWorkSummary {
+  return exactKeys(value, ["version", "availability"]) && value.version === 1 && value.availability === "cleared";
 }
 
 /** Return a canonical allowlisted copy, or reject without echoing private input. */

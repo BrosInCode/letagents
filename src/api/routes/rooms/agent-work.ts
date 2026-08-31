@@ -3,7 +3,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import type { Express, Response } from "express";
 import { isSupervisorHostGrantFeatureEnabled } from "../../../shared/agent-session-bearer.js";
 import type { RoomAgentWorkPollResponse } from "../../../shared/room-agent-work.js";
-import { publishRoomAgentWork, readRoomAgentWork, RoomAgentWorkError } from "../../db/room-agent-work.js";
+import { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork, RoomAgentWorkError } from "../../db/room-agent-work.js";
 import { parsePollTimeout, respondWithInternalError, type AuthenticatedRequest } from "../../http/helpers.js";
 import { resolveRequestAuth } from "../../request/auth.js";
 import { reauthorizeGitRoomParticipant, resolveRequestProjectRepoAccessRoomName } from "../../rooms/access.js";
@@ -35,6 +35,36 @@ export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageR
       res.setHeader("Cache-Control", "no-store");
       res.json(attemptId ? result.work[0] : result);
     } catch (error) { respondWithInternalError(res, "room-agent-work.read", error, "Could not read room work evidence."); }
+  });
+
+  // Report custody, not room governance: admins cannot clear another owner's
+  // report. Keep this human operation available when publisher rollout is off.
+  app.delete(/^\/rooms\/(.+)\/agent-work\/([^/]+)$/, async (req: AuthenticatedRequest, res) => {
+    if (!req.sessionAccount?.account_id || (req.authKind !== "session" && req.authKind !== "owner_token")) {
+      res.status(401).json({ error: "Clearing work history requires human account authentication." }); return;
+    }
+    const room = await resolveParticipantRoom(req, res, roomDeps);
+    if (!room) return;
+    const attemptId = routeParam(req, 1);
+    if (!/^[a-f0-9]{8}-[a-f0-9]{4}-4[a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(attemptId)) {
+      res.status(404).json({ error: "Work evidence is not available in this room." }); return;
+    }
+    const body = req.body;
+    if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1
+      || !Number.isSafeInteger(body.revision) || body.revision < 1) {
+      res.status(400).json({ error: "The exact work revision is required." }); return;
+    }
+    try {
+      const result = await clearRoomAgentWork({ room_id: room.id, attempt_id: attemptId,
+        owner_account_id: req.sessionAccount.account_id, revision: body.revision });
+      if (!result) { res.status(404).json({ error: "Work evidence is not available in this room." }); return; }
+      res.setHeader("Cache-Control", "no-store"); res.json(result);
+    } catch (error) {
+      if (error instanceof RoomAgentWorkError) {
+        res.status(409).json({ error: "Work evidence could not be cleared.", code: error.code }); return;
+      }
+      respondWithInternalError(res, "room-agent-work.clear", error, "Could not clear room work evidence.");
+    }
   });
 
   if (!isSupervisorHostGrantFeatureEnabled()) return;
