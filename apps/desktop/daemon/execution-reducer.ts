@@ -139,6 +139,7 @@ export function publicApprovalState(state: ApprovalState, decision?: "allow_once
 export type DeliveryEvidence = {
   dispatch: "not_dispatched" | "possible" | "native_bound";
   nativeTurn: NativeTurnIdentity | null;
+  /** Accepted exact durable checkpoint, never merely a provider stream event. */
   nativeTerminal: TurnOutcome | null;
   completion: "reply" | "no_reply" | null;
   published: boolean;
@@ -147,6 +148,7 @@ export type DeliveryEvidence = {
   continuation: ContinuationState;
   preDispatchFailures: number;
   resultReadFailures: number;
+  publicationFailures: number;
 };
 export type DeliveryProjection = {
   state: "pending" | "retryable" | "result_recovery" | "publishing" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "cancelled_by_user";
@@ -155,12 +157,14 @@ export type DeliveryProjection = {
   conclusion: "cleanly_concluded" | "failed" | "interrupted" | null;
 };
 
-export function reduceDeliveryEvidence(evidence: DeliveryEvidence, limits = { preDispatchRetries: 3, resultRereads: 3 }): DeliveryProjection {
+/** Automatic recommendations only; explicit operator admission never erases failure debt. */
+export function reduceDeliveryEvidence(evidence: DeliveryEvidence, limits = { preDispatchRetries: 3, resultRereads: 3, publicationFailures: 3 }): DeliveryProjection {
   const hold = (state: DeliveryProjection["state"], action: DeliveryProjection["action"]): DeliveryProjection =>
     ({ state, action, fifo: "hold", conclusion: null });
   const settled = (state: DeliveryProjection["state"], conclusion: DeliveryProjection["conclusion"]): DeliveryProjection =>
     ({ state, action: "none", fifo: "advance", conclusion });
-  for (const count of [evidence.preDispatchFailures, evidence.resultReadFailures, limits.preDispatchRetries, limits.resultRereads]) {
+  for (const count of [evidence.preDispatchFailures, evidence.resultReadFailures, evidence.publicationFailures,
+    limits.preDispatchRetries, limits.resultRereads, limits.publicationFailures]) {
     if (!Number.isSafeInteger(count) || count < 0) throw new ExecutionProtocolError("invalid_fact");
   }
   if (evidence.authority !== "valid") return hold("blocked", "attention_required");
@@ -170,21 +174,24 @@ export function reduceDeliveryEvidence(evidence: DeliveryEvidence, limits = { pr
     || (evidence.completion && !evidence.nativeTurn)
     || (evidence.published && evidence.completion !== "reply")) return hold("blocked", "attention_required");
   // Saved completion wins over a publication exception or subsequent provider
-  // cleanup failure. Never resend its prompt. FIFO still needs a native terminal.
-  if (evidence.completion === "reply" && !evidence.published) return hold("publishing", "retry_publication");
+  // cleanup failure. Never resend its prompt or require another provider read.
+  if (evidence.completion === "reply") {
+    if (evidence.published) return settled("acknowledged", "cleanly_concluded");
+    return evidence.publicationFailures >= limits.publicationFailures
+      ? hold("blocked", "attention_required") : hold("publishing", "retry_publication");
+  }
+  if (evidence.completion === "no_reply") return settled("acknowledged_no_reply", "cleanly_concluded");
   if (evidence.nativeTerminal && evidence.nativeTerminal !== "unreadable") {
-    if (evidence.completion === "reply" && evidence.published) return settled("acknowledged", "cleanly_concluded");
-    if (evidence.completion === "no_reply") return settled("acknowledged_no_reply", "cleanly_concluded");
-    if (evidence.userInterrupted) return settled("cancelled_by_user", "interrupted");
     if (evidence.nativeTerminal === "failed" || evidence.nativeTerminal === "interrupted") return settled("acknowledged_failed", "failed");
+    if (evidence.userInterrupted) return settled("cancelled_by_user", "interrupted");
   }
   if (evidence.nativeTurn) {
-    return evidence.resultReadFailures > limits.resultRereads
+    return evidence.resultReadFailures >= limits.resultRereads
       ? hold("blocked", "attention_required") : hold("result_recovery", "recover_exact_turn");
   }
   if (evidence.dispatch === "possible") return hold("blocked", "attention_required");
   if (evidence.userInterrupted) return settled("cancelled_by_user", "interrupted");
   if (evidence.continuation !== "available") return hold("blocked", "restore_continuation");
-  if (evidence.preDispatchFailures > limits.preDispatchRetries) return hold("blocked", "attention_required");
+  if (evidence.preDispatchFailures >= limits.preDispatchRetries) return hold("blocked", "attention_required");
   return evidence.preDispatchFailures === 0 ? hold("pending", "dispatch") : hold("retryable", "retry_provider");
 }

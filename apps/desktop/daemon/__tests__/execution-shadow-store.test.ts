@@ -444,12 +444,13 @@ test("shadow projections cannot mutate the legacy inbox or invoke effects", () =
 
 const pending: DeliveryEvidence = {
   dispatch: "not_dispatched", nativeTurn: null, nativeTerminal: null, completion: null, published: false,
-  userInterrupted: false, authority: "valid", continuation: "available", preDispatchFailures: 0, resultReadFailures: 0,
+  userInterrupted: false, authority: "valid", continuation: "available", preDispatchFailures: 0, resultReadFailures: 0, publicationFailures: 0,
 };
 test("retry domains distinguish proven pre-dispatch from ambiguity, exact recovery, and native failure", () => {
-  assert.equal(reduceDeliveryEvidence(pending).action, "dispatch");
-  assert.equal(reduceDeliveryEvidence({ ...pending, preDispatchFailures: 1 }).action, "retry_provider");
-  assert.equal(reduceDeliveryEvidence({ ...pending, preDispatchFailures: 4 }).action, "attention_required");
+  for (const preDispatchFailures of [0, 1, 2, 3]) {
+    assert.equal(reduceDeliveryEvidence({ ...pending, preDispatchFailures }).action,
+      preDispatchFailures === 0 ? "dispatch" : preDispatchFailures < 3 ? "retry_provider" : "attention_required");
+  }
   assert.equal(reduceDeliveryEvidence({ ...pending, continuation: "unavailable" }).action, "restore_continuation");
   for (const e of [{ dispatch: "possible" as const }, { authority: "ambiguous" as const }, { nativeTerminal: "failed" as const }]) {
     const view = reduceDeliveryEvidence({ ...pending, ...e }); assert.equal(view.action, "attention_required"); assert.equal(view.fifo, "hold");
@@ -458,20 +459,34 @@ test("retry domains distinguish proven pre-dispatch from ambiguity, exact recove
   assert.equal(reduceDeliveryEvidence(active).action, "recover_exact_turn");
   for (const nativeTerminal of ["failed", "interrupted"] as const) {
     const view = reduceDeliveryEvidence({ ...active, nativeTerminal }); assert.equal(view.state, "acknowledged_failed"); assert.equal(view.fifo, "advance");
+    assert.deepEqual(reduceDeliveryEvidence({ ...active, nativeTerminal, userInterrupted: true }), view,
+      "accepted native failure wins a later Stop without being relabeled user cancellation");
   }
-  assert.equal(reduceDeliveryEvidence({ ...active, nativeTerminal: "unreadable", resultReadFailures: 3 }).action, "recover_exact_turn");
-  assert.equal(reduceDeliveryEvidence({ ...active, nativeTerminal: "unreadable", resultReadFailures: 4 }).action, "attention_required");
+  for (const resultReadFailures of [0, 1, 2, 3]) {
+    assert.equal(reduceDeliveryEvidence({ ...active, nativeTerminal: "unreadable", resultReadFailures,
+      preDispatchFailures: 99, publicationFailures: 99 }).action,
+    resultReadFailures < 3 ? "recover_exact_turn" : "attention_required");
+  }
   assert.equal(reduceDeliveryEvidence({ ...active, userInterrupted: true }).fifo, "hold");
-  assert.equal(reduceDeliveryEvidence({ ...active, userInterrupted: true, nativeTerminal: "interrupted" }).state, "cancelled_by_user");
+  assert.equal(reduceDeliveryEvidence({ ...pending, userInterrupted: true }).state, "cancelled_by_user");
 });
 
 test("publication-only retries never invoke providers, and no-reply maps to the settled vocabulary", () => {
   const active: DeliveryEvidence = { ...pending, dispatch: "native_bound", nativeTurn: native };
   for (const nativeTerminal of [null, "completed", "failed", "interrupted", "unreadable"] as const) {
-    const view = reduceDeliveryEvidence({ ...active, completion: "reply", nativeTerminal, preDispatchFailures: 99 });
-    assert.equal(view.action, "retry_publication"); assert.equal(view.fifo, "hold");
+    for (const publicationFailures of [0, 1, 2, 3]) {
+      const evidence: DeliveryEvidence = { ...active, completion: "reply", nativeTerminal,
+        preDispatchFailures: 99, resultReadFailures: 99, publicationFailures };
+      const view = reduceDeliveryEvidence(evidence);
+      assert.equal(view.action, publicationFailures < 3 ? "retry_publication" : "attention_required");
+      assert.equal(view.fifo, "hold");
+      assert.equal(reduceDeliveryEvidence({ ...evidence, published: true }).state, "acknowledged",
+        "confirmed publication wins debt without an additional provider checkpoint");
+      assert.equal(reduceDeliveryEvidence({ ...evidence, completion: "no_reply", userInterrupted: true }).state,
+        "acknowledged_no_reply", "saved no-reply wins without another provider read");
+    }
   }
-  assert.equal(reduceDeliveryEvidence({ ...active, completion: "reply", published: true }).fifo, "hold");
+  assert.equal(reduceDeliveryEvidence({ ...active, completion: "reply", published: true }).fifo, "advance");
   assert.equal(reduceDeliveryEvidence({ ...active, completion: "reply", published: true, nativeTerminal: "completed" }).state, "acknowledged");
   assert.deepEqual(reduceDeliveryEvidence({ ...active, completion: "no_reply", nativeTerminal: "completed" }), {
     state: "acknowledged_no_reply", action: "none", fifo: "advance", conclusion: "cleanly_concluded",
