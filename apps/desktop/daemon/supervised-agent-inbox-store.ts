@@ -12,6 +12,7 @@ import {
 
 export type SupervisedInboxState = "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "publishing" | "retryable" | "blocked" | "acknowledged" | "acknowledged_no_reply" | "acknowledged_failed" | "cancelled_by_room_move" | "cancelled_by_user";
 export type SupervisedInboxReceiptState = SupervisedInboxState | "queued_behind_blocked";
+export type SupervisedRetryDomain = "pre_dispatch" | "result_recovery" | "publication";
 export type InboxActivation = Record<string, unknown>;
 export type IngressMessage = { source_message_id: string; source_message: unknown; activation: InboxActivation };
 export type ObservedIngressMessage = IngressMessage & { activation_decision: string };
@@ -561,52 +562,101 @@ export class SupervisedAgentInboxStore {
       return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
     }));
   }
-  /**
-   * Roll back only a provider turn whose durable wrapper proves native dispatch
-   * never happened. This is intentionally narrower than the ordinary retry
-   * transition: exact turn identity, FIFO ownership, and absence of terminal
-   * or tool-effect evidence are all checked in the same transaction.
-   */
-  async resetUndispatchedTurn(inboxItemId: string, providerTurnId: string): Promise<SupervisedInboxItem> {
-    if (!providerTurnId.trim()) throw new Error("Undispatched reset requires an exact provider turn id.");
+  /** Record failure debt and its retry/block disposition in one transaction. */
+  async recordRetryFailure(inboxItemId: string, input: {
+    domain: SupervisedRetryDomain;
+    error: string;
+    resetUndispatchedTurnId?: string;
+  }): Promise<{ item: SupervisedInboxItem; attempt: number }> {
+    if (!["pre_dispatch", "result_recovery", "publication"].includes(input.domain)) {
+      throw new Error("Unknown supervised retry domain.");
+    }
+    const resetTurnId = input.resetUndispatchedTurnId;
+    if (resetTurnId !== undefined && (input.domain !== "pre_dispatch" || !resetTurnId.trim())) {
+      throw new Error("Undispatched reset requires an exact provider turn id and pre-dispatch retry domain.");
+    }
     return this.exclusive(async (database) => this.transaction(database, () => {
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
       if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
       const item = rowToItem(row);
-      if (!["dispatching", "awaiting_result", "result_recovery"].includes(item.state)
-        || item.provider_turn_id !== providerTurnId) {
-        throw new Error("Undispatched reset does not match the exact in-flight provider turn.");
-      }
       this.assertCurrentHead(database, item);
+      if (readDurableNativeFailure(database, inboxItemId)) {
+        throw new Error("Exact native terminal failure cannot be retried.");
+      }
       const binding = database.prepare("SELECT * FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?")
         .get(inboxItemId) as Row | undefined;
-      if (!binding || String(binding.agent_id) !== item.agent_id || String(binding.room_id) !== item.room_id
-        || String(binding.provider_turn_id) !== providerTurnId) {
-        throw new Error("Undispatched reset is missing its exact provider-turn authority binding.");
+      const terminal = database.prepare("SELECT outcome FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(inboxItemId) as Row | undefined;
+      const outcome = safeOutcome(item.outcome) as { kind?: unknown; text?: unknown } | null;
+      if (input.domain === "publication") {
+        if (item.state !== "publishing" || outcome?.kind !== "reply"
+          || typeof outcome.text !== "string" || !outcome.text.trim()) {
+          throw new Error("Publication retry requires a publishing inbox item with its saved reply.");
+        }
+      } else {
+        if (!["dispatching", "awaiting_result", "result_recovery"].includes(item.state)
+          || (resetTurnId !== undefined && item.provider_turn_id !== resetTurnId)) {
+          throw new Error("Retry does not match the exact in-flight provider turn.");
+        }
+        if (input.domain === "result_recovery" || resetTurnId !== undefined) {
+          if (!item.provider_turn_id || !binding || String(binding.agent_id) !== item.agent_id
+            || String(binding.room_id) !== item.room_id || String(binding.provider_turn_id) !== item.provider_turn_id) {
+            throw new Error("Retry is missing its exact provider-turn authority binding.");
+          }
+        }
+        if (input.domain === "result_recovery") {
+          if ((terminal && terminal.outcome !== "unreadable")
+            || (item.outcome !== null && outcome?.kind !== "unreadable")) {
+            throw new Error("Accepted terminal completion cannot consume a result-recovery retry.");
+          }
+        } else if (resetTurnId !== undefined) {
+          const executionGenerationId = String(binding!.origin_execution_generation_id);
+          const effect = database.prepare(`SELECT 1 FROM supervised_agent_effects
+            WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
+            UNION ALL
+            SELECT 1 FROM supervised_agent_effect_tombstones
+            WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
+            LIMIT 1`).get(
+            item.agent_id, item.room_id, executionGenerationId, resetTurnId,
+            item.agent_id, item.room_id, executionGenerationId, resetTurnId,
+          );
+          if (terminal || effect || item.outcome) {
+            throw new Error("Undispatched reset found terminal or effect evidence and was refused.");
+          }
+        } else if (item.provider_turn_id || binding || item.outcome || terminal || item.state === "result_recovery") {
+          throw new Error("Pre-dispatch retry requires an unstarted dispatch without turn or terminal evidence.");
+        }
       }
-      const executionGenerationId = String(binding.origin_execution_generation_id);
-      const terminal = database.prepare("SELECT 1 FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(inboxItemId);
-      const effect = database.prepare(`SELECT 1 FROM supervised_agent_effects
-        WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
-        UNION ALL
-        SELECT 1 FROM supervised_agent_effect_tombstones
-        WHERE agent_id=? AND room_id=? AND execution_generation_id=? AND provider_turn_id=?
-        LIMIT 1`).get(
-        item.agent_id, item.room_id, executionGenerationId, providerTurnId,
-        item.agent_id, item.room_id, executionGenerationId, providerTurnId,
-      );
-      if (terminal || effect || item.outcome) {
-        throw new Error("Undispatched reset found terminal or effect evidence and was refused.");
-      }
+
+      // Count the physical journal, never the receipt's bounded display tail.
+      // Old generic retry keys have unknown provenance: retain that debt for
+      // each domain, without guessing from error text. Known bookkeeping keys
+      // (including room-move rollback and handoff) do not consume a budget.
+      const prefix = `retry_failure:${input.domain}:`;
+      const legacyPrefix = input.domain === "pre_dispatch" ? "undispatched_retry:*"
+        : input.domain === "result_recovery" ? "result_recovery_retry:*" : null;
+      const prior = Number((database.prepare(`SELECT COUNT(*) AS value FROM supervised_agent_inbox_events
+        WHERE inbox_item_id=? AND phase='retry_scheduled'
+          AND (idempotency_key GLOB ? OR idempotency_key GLOB ? OR idempotency_key GLOB 'retry_scheduled:*')`)
+        .get(inboxItemId, `${prefix}*`, legacyPrefix) as Row).value);
+      const attempt = prior + 1;
+      const exhausted = attempt >= 3;
+      const reset = resetTurnId !== undefined && !exhausted;
+      const next = exhausted ? "blocked" : reset ? "pending"
+        : item.state === "result_recovery" ? "result_recovery" : "retryable";
       const timestamp = this.now();
-      run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
+      const label = input.domain === "result_recovery" ? "Result recovery"
+        : input.domain === "publication" ? "Reply publication" : "Pre-dispatch preparation";
+      const error = exhausted ? `${label} failed ${attempt} times: ${input.error}` : input.error;
+      if (reset) run(database.prepare("DELETE FROM supervised_agent_provider_turn_bindings WHERE inbox_item_id=?"), inboxItemId);
       run(database.prepare(`UPDATE supervised_agent_inbox
-        SET state='pending',attempt_count=?,provider_turn_id=NULL,outcome=NULL,last_error=NULL,
-            failure_code=NULL,next_attempt_at_ms=NULL,updated_at=?
-        WHERE inbox_item_id=?`), Math.max(0, item.attempt_count - 1), timestamp, inboxItemId);
-      const retryOrdinal = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='retry_scheduled'").get(inboxItemId) as Row).value) + 1;
-      this.recordEvent(database, inboxItemId, `undispatched_retry:${retryOrdinal}:${providerTurnId}`, "retry_scheduled", timestamp, "Prepared provider wrapper exited before native dispatch; retrying the same FIFO item.");
-      return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
+        SET state=?,attempt_count=?,provider_turn_id=?,last_error=?,failure_code=NULL,
+            blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?
+        WHERE inbox_item_id=?`), next, reset ? Math.max(0, item.attempt_count - 1) : item.attempt_count,
+      reset ? null : item.provider_turn_id, error, timestamp, inboxItemId);
+      this.recordEvent(database, inboxItemId, `${prefix}${attempt}`, "retry_scheduled", timestamp, error);
+      if (exhausted) this.recordEvent(database, inboxItemId, `${prefix}${attempt}:blocked`, "blocked", timestamp, error);
+      return { item: rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row), attempt };
     }));
   }
   /**
@@ -705,22 +755,6 @@ export class SupervisedAgentInboxStore {
 
   async nativeFailure(inboxItemId: string): Promise<"failed" | "interrupted" | null> {
     return this.read(async (database) => readDurableNativeFailure(database, inboxItemId));
-  }
-
-  async recordResultRecoveryRetry(inboxItemId: string, error: string): Promise<number> {
-    return this.exclusive(async (database) => this.transaction(database, () => {
-      const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row | undefined;
-      if (!row) throw new Error(`Unknown supervised inbox item: ${inboxItemId}`);
-      const item = rowToItem(row);
-      if (item.state !== "result_recovery") throw new Error("Only an unreadable terminal result may record a result-recovery retry.");
-      this.assertCurrentHead(database, item);
-      const prior = Number((database.prepare("SELECT COUNT(*) AS value FROM supervised_agent_inbox_events WHERE inbox_item_id=? AND phase='retry_scheduled'").get(inboxItemId) as Row).value);
-      const attempt = prior + 1;
-      const timestamp = this.now();
-      run(database.prepare("UPDATE supervised_agent_inbox SET last_error=?,updated_at=? WHERE inbox_item_id=?"), error, timestamp, inboxItemId);
-      this.recordEvent(database, inboxItemId, `result_recovery_retry:${attempt}`, "retry_scheduled", timestamp, `Re-reading the same completed turn (${attempt}/3): ${error}`);
-      return attempt;
-    }));
   }
 
   async observedContext(agentId: string, roomId: string, limit = 50): Promise<ObservedIngressMessage[]> {

@@ -129,7 +129,6 @@ type ActiveDeliveryInterruptReservation = {
 const SUCCESSFUL_POLL_PACE_MS = 25;
 const POLL_ERROR_BACKOFF_BASE_MS = 250;
 const POLL_ERROR_BACKOFF_CAP_MS = 30_000;
-const MAX_UNDISPATCHED_RETRIES = 2;
 
 /**
  * The daemon-owned delivery loop. It intentionally knows no owner credential
@@ -1116,6 +1115,17 @@ export class SupervisedAgentDelivery {
         agent,
       });
     };
+    const retryFailure = async (failure: Parameters<SupervisedAgentInboxStore["recordRetryFailure"]>[1]): Promise<void> => {
+      if (!await this.hasLaneAuthority(agent, turnController)) return;
+      const { item: recorded, attempt } = await this.inbox.recordRetryFailure(item.inbox_item_id, failure);
+      if (recorded.state === "blocked") return;
+      await this.sleep(failure.domain === "publication" ? this.retryDelayMs
+        : Math.min(2_000, this.retryDelayMs * (2 ** (attempt - 1))));
+      const retryable = await this.inbox.get(item.inbox_item_id);
+      if (await this.hasLaneAuthority(agent, turnController) && retryable?.state === "retryable") {
+        await this.inbox.transition(item.inbox_item_id, "pending");
+      }
+    };
     try {
       if (await this.inbox.nativeFailure(item.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
@@ -1523,14 +1533,9 @@ export class SupervisedAgentDelivery {
         } catch (publicationError) {
           const publishing = await this.inbox.get(item.inbox_item_id);
           if (publishing?.state !== "publishing") throw publicationError;
-          await this.inbox.transition(item.inbox_item_id, "retryable", {
-            last_error: publicationError instanceof Error ? publicationError.message : String(publicationError),
+          await retryFailure({
+            domain: "publication", error: publicationError instanceof Error ? publicationError.message : String(publicationError),
           });
-          await this.sleep(this.retryDelayMs);
-          const retryable = await this.inbox.get(item.inbox_item_id);
-          if (await this.hasLaneAuthority(agent, controller) && retryable?.state === "retryable") {
-            await this.inbox.transition(item.inbox_item_id, "pending");
-          }
         }
         return;
       }
@@ -1565,32 +1570,19 @@ export class SupervisedAgentDelivery {
             });
             return;
           }
-          await this.inbox.resetPreNativeHandoff(item.inbox_item_id);
-          await this.sleep(this.retryDelayMs);
+          await retryFailure({ domain: "pre_dispatch", error: message });
           return;
         }
         try {
           await compensateCursorRuntimeToLiveHandle(current.provider_turn_id);
         } catch (compensationError) {
-          await this.inbox.transition(item.inbox_item_id, "retryable", {
-            last_error: `Prepared Cursor wrapper was reaped, but idle-state compensation must retry: ${compensationError instanceof Error ? compensationError.message : String(compensationError)}`,
-          });
-          if (await this.hasLaneAuthority(agent, controller)) {
-            await this.inbox.transition(item.inbox_item_id, "pending");
-          }
-          return;
-        }
-        const receipt = (await this.inbox.receipts(agent.agentId))
-          .find((candidate) => candidate.inbox_item_id === item.inbox_item_id);
-        const retryCount = receipt?.timeline.filter((event) => event.phase === "retry_scheduled").length ?? 0;
-        if (retryCount >= MAX_UNDISPATCHED_RETRIES) {
-          await this.inbox.transition(item.inbox_item_id, "blocked", {
-            last_error: `Provider wrapper preparation failed ${retryCount + 1} times without native dispatch: ${message}`,
+          await retryFailure({
+            domain: "result_recovery",
+            error: `Prepared Cursor wrapper was reaped, but idle-state compensation must retry: ${compensationError instanceof Error ? compensationError.message : String(compensationError)}`,
           });
           return;
         }
-        await this.inbox.resetUndispatchedTurn(item.inbox_item_id, current.provider_turn_id);
-        await this.sleep(Math.min(2_000, this.retryDelayMs * (2 ** retryCount)));
+        await retryFailure({ domain: "pre_dispatch", error: message, resetUndispatchedTurnId: current.provider_turn_id });
         return;
       }
       if (["ambiguous", "terminal_failure"].includes(
@@ -1599,13 +1591,15 @@ export class SupervisedAgentDelivery {
         await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
         return;
       }
-      if (current.state === "result_recovery") {
-        const retryCount = await this.inbox.recordResultRecoveryRetry(item.inbox_item_id, message);
-        if (retryCount >= 3) {
-          await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: `Result recovery failed ${retryCount} times: ${message}` });
-          return;
-        }
-        await this.sleep(Math.min(2_000, this.retryDelayMs * (2 ** (retryCount - 1))));
+      if (current.state === "publishing") {
+        await retryFailure({ domain: "publication", error: message });
+        return;
+      }
+      if (current.provider_turn_id) {
+        // Startup and newly acknowledged turns can both be dispatching here.
+        // Their exact binding, not the UI state or model-turn count, identifies
+        // recovery work; never spend its budget on publication or a new prompt.
+        await retryFailure({ domain: "result_recovery", error: message });
         return;
       }
       if (providerCallEntered && !current.provider_turn_id && !current.outcome && agent.provider !== "cursor") {
@@ -1618,18 +1612,7 @@ export class SupervisedAgentDelivery {
         });
         return;
       }
-      const receipt = (await this.inbox.receipts(agent.agentId)).find((candidate) => candidate.inbox_item_id === item.inbox_item_id);
-      const retryCount = receipt?.timeline.filter((event) => event.phase === "retry_scheduled").length ?? 0;
-      if (current.attempt_count >= 3 || retryCount >= 2) {
-        await this.inbox.transition(item.inbox_item_id, "blocked", { last_error: message });
-        return;
-      }
-      if (current.state === "dispatching" || current.state === "awaiting_result" || current.state === "publishing") {
-        await this.inbox.transition(item.inbox_item_id, "retryable", { last_error: message });
-      }
-      await this.sleep(this.retryDelayMs);
-      const retryable = await this.inbox.get(item.inbox_item_id);
-      if (await this.hasLaneAuthority(agent, controller) && retryable?.state === "retryable") await this.inbox.transition(item.inbox_item_id, "pending");
+      await retryFailure({ domain: "pre_dispatch", error: message });
     } finally {
       controller.signal.removeEventListener("abort", relayPumpAbort);
       const abort = this.activeTurnAborts.get(agent.agentId);

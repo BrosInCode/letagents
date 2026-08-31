@@ -2276,6 +2276,10 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
 }
 
 repairAndValidateV20Shape(database: DatabaseSync): void {
+  if (!this.tableColumns(database, "supervised_agent_inbox_events").size
+    && database.prepare("SELECT 1 FROM supervised_agent_inbox LIMIT 1").get()) {
+    throw new Error("Daemon state is missing inbox retry history and cannot safely reconstruct consumed retry budgets.");
+  }
   // Missing typed journals are lost authority, not permission to recreate an
   // empty history. Check them before any predecessor's additive repair path.
   validateExecutionStorageSchema(database);
