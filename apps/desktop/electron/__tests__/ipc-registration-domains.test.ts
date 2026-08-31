@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import test from "node:test";
+import test, { mock } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const mainSource = readFileSync(
@@ -236,5 +236,59 @@ test("desktop IPC channel prefixes stay in their owning domains", () => {
         `${channel} is registered in the wrong IPC domain (${domain})`,
       );
     }
+  }
+});
+
+test("auth/setup IPC wakes grant recovery only from authorization and reports native storage availability", async () => {
+  let authorized: () => void = () => { throw new Error("authorized callback was not registered"); };
+  let invalidated: () => void = () => { throw new Error("invalidated callback was not registered"); };
+  let recoveryWakes = 0;
+  let storageAvailable = false;
+  const storageObservations: boolean[] = [];
+  const unexpected = () => { throw new Error("unexpected auth/setup operation"); };
+  const mocks = [
+    mock.module("../main/auth.js", { namedExports: {
+      cancelDeviceAuthFlow: unexpected, getDesktopAuthStatus: unexpected, pollDeviceAuthFlow: unexpected,
+      signOutDesktopAuth: unexpected, startDeviceAuthFlow: unexpected,
+      setAuthAuthorizedHandler: (handler: () => void) => { authorized = handler; },
+      setAuthInvalidatedHandler: (handler: () => void) => { invalidated = handler; },
+    } }),
+    mock.module("../main/mcp-setup.js", { namedExports: {
+      buildMcpInstallState: unexpected, completeMcpOnboarding: unexpected, installLetAgentsMcpServer: unexpected,
+      installLetAgentsMcpServers: unexpected, refreshInstalledLetAgentsMcpServerAuth: async () => {},
+    } }),
+    mock.module("../main/notifications.js", { namedExports: {
+      refreshDesktopNotificationRegistration: async () => {}, unregisterDesktopNotificationAccount: async () => {},
+    } }),
+    mock.module("../main/rooms.js", { namedExports: { clearJoinedRoomInfoCache: () => {} } }),
+    mock.module("../main/external-url.js", { namedExports: { openAllowedExternalUrl: unexpected } }),
+    mock.module("../main/supervisor-grant.js", { namedExports: {
+      getDesktopSupervisorGrantMetadata: unexpected, provisionDesktopSupervisorGrant: unexpected,
+      revokeDesktopSupervisorGrant: unexpected,
+      getDesktopSupervisorGrantStorageStatus: () => ({ available: storageAvailable, detail: "native probe", canOpenCredentialStorage: false }),
+    } }),
+    mock.module("../main/supervisor-grant-coordinator.js", { namedExports: { supervisorGrantCoordinator: {
+      scheduleCredentialRecovery: () => { recoveryWakes += 1; },
+      observeSecureStorageAvailability: (available: boolean) => { storageObservations.push(available); },
+    } } }),
+  ];
+  try {
+    const { registerDesktopAuthAndSetupIpcHandlers } = await import("../main/ipc-handlers/auth-setup.js");
+    const handlers = new Map<string, () => Promise<unknown>>();
+    registerDesktopAuthAndSetupIpcHandlers({ handle: (channel: string, handler: () => Promise<unknown>) => handlers.set(channel, handler) } as never);
+    assert.equal(recoveryWakes, 0, "registration is not an auth recovery event");
+    invalidated();
+    assert.equal(recoveryWakes, 0, "sign-out cannot activate agents");
+    authorized();
+    assert.equal(recoveryWakes, 1);
+    const probe = handlers.get("desktop:supervisor-grant:get-storage-status");
+    assert.ok(probe);
+    assert.deepEqual(await probe(), { available: false, detail: "native probe", canOpenCredentialStorage: false });
+    storageAvailable = true;
+    assert.deepEqual(await probe(), { available: true, detail: "native probe", canOpenCredentialStorage: false });
+    await probe();
+    assert.deepEqual(storageObservations, [false, true, true], "native results, not renderer claims, feed transition deduplication");
+  } finally {
+    for (const stub of mocks.reverse()) stub.restore();
   }
 });

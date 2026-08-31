@@ -10,7 +10,7 @@ import {
   schedulerErrorDetail,
   WorkerCredentialMintError,
 } from "./daemon-error-policy.js";
-import type { ProviderActionHandle } from "./provider-action-port.js";
+import { sameProviderActionConnectionSnapshot, type ProviderActionHandle } from "./provider-action-port.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
 import type { DaemonManifestEntry, TaskWorkAttempt } from "./types.js";
@@ -237,6 +237,7 @@ export class WorkerAuthorityCoordinator {
   private async bindWorkerSessionLocked(
     input: BindWorkerSessionInput,
     mayPublish: () => boolean = () => true,
+    authorization?: MintedWorkerAuthorization,
   ): Promise<{ bound: true; entry_id: string; agent_session_id: string }> {
     const entry = (await this.options.store.load()).entries.find((candidate) => candidate.id === input.entry_id);
     if (!entry) throw new Error(`Unknown daemon manifest entry: ${input.entry_id}`);
@@ -245,6 +246,41 @@ export class WorkerAuthorityCoordinator {
     if (entry.provider_ref?.execution_generation_id !== input.execution_generation_id) {
       throw new Error("Worker session execution generation does not match the active supervised manifest entry.");
     }
+    if (authorization && !this.hasMintAuthority(entry, authorization)) {
+      throw new Error("Minted worker authority changed before binding.");
+    }
+    const daemonGeneration = this.options.authority.currentGeneration();
+    const grant = this.currentHostGrant(entry);
+    const handle = this.options.runtime.currentHandle(entry.id);
+    const providerContinuationId = entry.provider_ref.provider_continuation_id;
+    const providerConnection = structuredClone(entry.provider_ref.provider_connection ?? null);
+    const pid = handle?.pid;
+    const assertEntryCurrent = (current: DaemonManifestEntry | null | undefined): void => {
+      if (!current || current.room_id !== input.room_id
+        || current.work_attempt_id !== input.work_attempt_id
+        || current.provider_ref?.work_attempt_id !== input.work_attempt_id
+        || current.provider_ref.execution_generation_id !== input.execution_generation_id
+        || current.provider_ref.provider_continuation_id !== providerContinuationId
+        || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, providerConnection)
+        || current.desired_state !== entry.desired_state
+        || current.delivery_mode !== entry.delivery_mode
+        || this.options.authority.isHandoffScheduled()
+        || this.options.authority.currentGeneration() !== daemonGeneration
+        || this.currentHostGrant(current) !== grant
+        || this.options.runtime.currentHandle(entry.id) !== handle
+        || (handle && (handle.workAttemptId !== input.work_attempt_id
+          || handle.providerContinuationId !== providerContinuationId
+          || handle.pid !== pid
+          || !sameProviderActionConnectionSnapshot(handle.providerConnection, providerConnection)))) {
+        throw new Error("Worker binding authority changed before readiness.");
+      }
+    };
+    const assertAuthorityCurrent = async (): Promise<void> => {
+      if (!await this.ownsDaemonGeneration(daemonGeneration)) {
+        throw new Error("Worker binding daemon authority changed before readiness.");
+      }
+      assertEntryCurrent(await this.options.store.getEntry(entry.id));
+    };
     const attempt = await this.options.durability.getAttempt(input.work_attempt_id);
     const execution = attempt.execution_generations.find((candidate) => candidate.execution_generation_id === input.execution_generation_id);
     if (!execution || execution.terminal) throw new Error("Worker session execution generation is absent or terminal.");
@@ -259,8 +295,10 @@ export class WorkerAuthorityCoordinator {
       && currentBinding.work_attempt_id === input.work_attempt_id
       && currentBinding.execution_generation_id === input.execution_generation_id
       && currentBinding.agent_session_id === input.agent_session_id
+      && (!input.credential_ref?.trim() || currentBinding.credential_ref === input.credential_ref.trim())
       && currentCredential === input.agent_session_token
       && currentBinding.api_url === normalizedApiUrl);
+    await assertAuthorityCurrent();
     const binding = exactCurrentBinding && currentBinding
       ? currentBinding
       : await this.options.bindings.bind(input);
@@ -269,14 +307,29 @@ export class WorkerAuthorityCoordinator {
       executionGenerationId: binding.execution_generation_id,
       updatedAt: binding.updated_at,
     });
-    this.options.custody.deletePendingResumeBinding(input.entry_id);
     if (mayPublish() && (!exactCurrentBinding || entry.workplace_liveness?.state !== "reachable")) {
       await this.options.activity.publishNative(input.entry_id, "native_harness.bound", "working");
+    }
+    await assertAuthorityCurrent();
+    const confirmed = await this.options.bindings.get(input.entry_id);
+    if (!confirmed || confirmed.entry_id !== binding.entry_id || confirmed.room_id !== binding.room_id
+      || confirmed.work_attempt_id !== binding.work_attempt_id
+      || confirmed.execution_generation_id !== binding.execution_generation_id
+      || confirmed.agent_session_id !== binding.agent_session_id
+      || confirmed.credential_ref !== binding.credential_ref || confirmed.api_url !== binding.api_url
+      || await this.options.bindings.credentialFor(confirmed) !== input.agent_session_token) {
+      throw new Error("Worker binding changed before readiness could be confirmed.");
+    }
+    const confirmedAttempt = await this.options.durability.getAttempt(input.work_attempt_id);
+    if (!confirmedAttempt.execution_generations.some((candidate) =>
+      candidate.execution_generation_id === input.execution_generation_id && !candidate.terminal)) {
+      throw new Error("Worker binding execution is no longer live.");
     }
     this.bindingRecoveryAttempts.delete(input.entry_id);
     this.options.recovery.resetMintAttempts(input.entry_id);
     this.options.convergence.clear(input.entry_id);
     await this.options.manifest.updateEntry(input.entry_id, (current) => {
+      assertEntryCurrent(current);
       const clearsCoordinationLatch = current.desired_state === "running"
         && (current.condition === "coordination_blocked" || current.condition === "auth_blocked");
       const manifestBindingIsCurrent = current.last_worker_binding?.agent_session_id === binding.agent_session_id
@@ -306,6 +359,7 @@ export class WorkerAuthorityCoordinator {
         },
       };
     });
+    this.options.custody.deletePendingResumeBinding(input.entry_id);
     if (mayPublish()) void this.options.delivery.start(input.entry_id).catch(() => undefined);
     return { bound: true, entry_id: input.entry_id, agent_session_id: input.agent_session_id };
   }
@@ -521,6 +575,7 @@ export class WorkerAuthorityCoordinator {
       return null;
     }
     const cached = forceFresh ? null : this.cachedWorkerAuthorization(entry, grant);
+    const authority = { entryId: entry.id, roomId: entry.room_id, workAttemptId: entry.work_attempt_id ?? null, grant };
     if (cached) return {
       agentSessionId: cached.agentSessionId,
       bearer: cached.bearer,
@@ -528,6 +583,7 @@ export class WorkerAuthorityCoordinator {
       expiresAt: cached.expiresAt,
       apiUrl: cached.apiUrl,
       agentSession: cached.agentSession,
+      authority,
     };
     const minted = await this.mintWorkerSessionWithRetry(entry, grant, signal);
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
@@ -560,7 +616,16 @@ export class WorkerAuthorityCoordinator {
       expiresAt: minted.expiresAt,
       apiUrl: grant.apiUrl,
       agentSession: minted.agentSession,
+      authority,
     };
+  }
+
+  private hasMintAuthority(entry: DaemonManifestEntry, minted: MintedWorkerAuthorization): boolean {
+    const authority = minted.authority;
+    return authority.entryId === entry.id && authority.roomId === entry.room_id
+      && authority.workAttemptId === (entry.work_attempt_id ?? null)
+      && minted.apiUrl === authority.grant.apiUrl
+      && this.currentHostGrant(entry) === authority.grant;
   }
 
   async recordMintedHostWorkerSession(
@@ -568,10 +633,11 @@ export class WorkerAuthorityCoordinator {
     executionGenerationId: string,
     minted: MintedWorkerAuthorization,
   ): Promise<BoundWorkerAuthorization | null> {
-    const grant = this.currentHostGrant(entry);
-    if (!grant || !entry.work_attempt_id || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return null;
+    const grant = minted.authority.grant;
+    if (!this.hasMintAuthority(entry, minted) || !entry.work_attempt_id
+      || !await this.ownsDaemonGeneration(grant.daemonGeneration)) return null;
     const current = await this.options.store.getEntry(entry.id);
-    if (!current || !this.currentHostGrant(current) || current.work_attempt_id !== entry.work_attempt_id) return null;
+    if (!current || !this.hasMintAuthority(current, minted)) return null;
     const attempt = await this.options.durability.getAttempt(entry.work_attempt_id);
     if (!attempt.execution_generations.some((candidate) => candidate.execution_generation_id === executionGenerationId && !candidate.terminal)) return null;
     await this.options.bindings.recordSupervisedWorkerSession({
@@ -582,8 +648,9 @@ export class WorkerAuthorityCoordinator {
       credential_ref: minted.bearerId,
       expires_at: minted.expiresAt,
     });
+    const confirmed = await this.options.store.getEntry(entry.id);
     if (!await this.ownsDaemonGeneration(grant.daemonGeneration)
-      || !this.options.custody.hostGrantIsCurrent(entry.id, grant)) {
+      || !confirmed || !this.hasMintAuthority(confirmed, minted)) {
       this.revokeHostGrantIfCurrent(entry.id, grant);
       return null;
     }
@@ -607,7 +674,11 @@ export class WorkerAuthorityCoordinator {
     const entry = await this.options.store.getEntry(entryId);
     if (!entry || !entry.work_attempt_id || !entry.provider_ref
       || entry.provider_ref.execution_generation_id !== session.executionGenerationId
-      || !this.currentHostGrant(entry)) return;
+      || !this.hasMintAuthority(entry, session)
+      || !await this.ownsDaemonGeneration(session.authority.grant.daemonGeneration)
+      || !this.options.runtime.currentHandle(entryId)) {
+      throw new Error("Minted worker authority no longer matches the exact supervised provider.");
+    }
     await this.bindWorkerSessionLocked({
       entry_id: entry.id,
       room_id: entry.room_id,
@@ -617,7 +688,7 @@ export class WorkerAuthorityCoordinator {
       agent_session_token: session.bearer,
       credential_ref: session.bearerId,
       api_url: session.apiUrl,
-    }, mayPublish);
+    }, mayPublish, session);
   }
 
   async recordWorkerBindingRecoveryFailure(
