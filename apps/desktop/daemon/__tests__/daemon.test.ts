@@ -5136,7 +5136,8 @@ test("SIGTERM after authority release uses default process-only termination and 
     });
     provider.unref();
     const daemon = new SupervisorDaemon(defaultDaemonPaths(), "darwin");
-    await daemon.start();
+    // This process-lifecycle fixture has no Electron signing custodian.
+    await daemon.start({ getHostApprovalPublicKey: async () => null });
     process.send({ type: "ready", providerPid: provider.pid });
     await daemon.waitForHandoff();
     process.send({ type: "authority_released", providerPid: provider.pid });

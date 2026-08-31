@@ -30,7 +30,8 @@ export function requestHostApprovalVerifier(): Promise<string | null> {
       if (value.type !== "host_approval_verifier" || value.id !== id) return;
       finish(typeof value.publicKey === "string" && value.publicKey.length <= 128 ? value.publicKey : null);
     };
-    // Missing/locked signing custody must not delay ordinary full-access work.
+    // Enrollment precedes readiness. An IPC spawner that never answers pays
+    // this bounded second; missing/locked custody then disables only approvals.
     const timer = setTimeout(disconnected, 1_000);
     process.on("message", receive);
     process.once("disconnect", disconnected);

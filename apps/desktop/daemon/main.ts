@@ -11,9 +11,7 @@ import {
 } from "./cloud-http.js";
 import { DaemonControlSocket } from "./control-socket.js";
 import { createDaemonControlRequestHandler, type DaemonControlOperations } from "./control-request-router.js";
-import { HostApprovalBroker } from "./host-approval-broker.js";
-import { HostApprovalVerifier } from "./host-approval-auth.js";
-import { requestHostApprovalVerifier } from "./state-recovery-key.js";
+import { createHostApprovalBridge } from "./host-approval-broker.js";
 import { redactCredentialText, sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import { DaemonAuthority } from "./daemon-authority.js";
 import { DaemonReadModel } from "./daemon-read-model.js";
@@ -136,8 +134,7 @@ export class SupervisorDaemon {
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly providerStreams: ProviderStreamCoordinator;
   private executionCapture: ExecutionCaptureCoordinator | null = null;
-  private readonly hostApprovals: HostApprovalBroker;
-  private hostApprovalVerifier: HostApprovalVerifier | null = null;
+  private readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
   private readonly providerCheckpoints: ProviderCheckpointCoordinator;
   private readonly providerExecution: ProviderExecutionCoordinator | null;
   private readonly providerReconciliation: ProviderReconciliationCoordinator | null;
@@ -780,37 +777,16 @@ export class SupervisorDaemon {
       },
       policy: { structuredRoomTurnCompletion },
     });
-    this.hostApprovals = new HostApprovalBroker({
+    this.hostApprovals = createHostApprovalBridge({
       store: this.store, inbox: this.supervisedInbox, provider: this.providerPort,
+      workerBindings: this.workerBindings, providerCheckpoints: this.providerCheckpoints,
+      currentGeneration: () => this.singleton.currentGeneration,
       currentHandle: entryId => this.liveHandles.get(entryId),
       isCurrent: () => !this.handoffScheduled,
       fenceCommit: commit => this.fenceDaemonCommit(commit),
-      exactAuthority: async (entry, handle, generation) => {
-        const binding = await this.workerBindings.get(entry.id);
-        if (!binding || binding.execution_generation_id !== generation) return false;
-        const bearer = await this.workerBindings.credentialFor(binding);
-        if (!bearer) return false;
-        return this.providerCheckpoints.isExactAuthority({ agentId: entry.id, roomId: binding.room_id,
-          provider: entry.provider, apiUrl: binding.api_url, agentSessionId: binding.agent_session_id, bearer,
-          handle, workAttemptId: handle.workAttemptId, executionGenerationId: generation,
-          providerContinuationId: handle.providerContinuationId, providerConnection: handle.providerConnection ?? null,
-          daemonGeneration: this.singleton.currentGeneration });
-      },
     });
     const controlOperations = {
-      hostApprovalChallenge: () => this.hostApprovalVerifier?.challenge() ?? null,
-      hostApprovalRequest: async (envelope: unknown) => {
-        const request = this.hostApprovalVerifier?.verify(envelope);
-        if (!request) throw new Error("Host approvals are unavailable or this request could not be authenticated.");
-        if (request.operation === "list") {
-          const input = request.input as Record<string, unknown> | null;
-          if (!input || Object.keys(input).length !== 1 || typeof input.roomId !== "string") throw new Error("An exact approval room is required.");
-          return this.hostApprovals.list(input.roomId);
-        }
-        const input = request.input as Record<string, unknown> | null;
-        if (input?.actorId !== `host-${this.hostApprovalVerifier!.challenge()!.keyFingerprint}`) throw new Error("The approval actor is not the enrolled host.");
-        return this.hostApprovals.decide(input);
-      },
+      hostApprovals: this.hostApprovals,
       activateCustodialPolling: (input) => this.deliveryCutoverExecution.activatePolling(input),
       getPollingActivation: (input) => this.deliveryCutoverExecution.getPollingActivation(input),
       cancelPollingActivation: (input) => this.deliveryCutoverExecution.cancelPollingActivation(input),
@@ -827,8 +803,8 @@ export class SupervisorDaemon {
       checkpointWorkerCursor: this.workerAuthority.checkpointWorkerCursor.bind(this.workerAuthority),
       commitInspectorRoomMove: (input) => this.roomMoves.commitInspector(input),
       compareAndSetDesiredState: this.desiredStates.compareAndSet.bind(this.desiredStates),
-      completeBoundedEffect: this.completeBoundedEffect.bind(this),
-      executeBoundedTool: this.executeBoundedTool.bind(this),
+      completeBoundedEffect: this.boundedEffects.complete.bind(this.boundedEffects),
+      executeBoundedTool: this.boundedEffects.execute.bind(this.boundedEffects),
       controlTurn: (input) => this.turnControls.control(input),
       entryWithDerivedLiveness: this.entryWithDerivedLiveness.bind(this),
       getAgentConfiguration: this.getAgentConfiguration.bind(this),
@@ -839,7 +815,7 @@ export class SupervisorDaemon {
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
-      prepareBoundedEffect: this.prepareBoundedEffect.bind(this),
+      prepareBoundedEffect: this.boundedEffects.prepare.bind(this.boundedEffects),
       prepareHandoff: this.prepareHandoff.bind(this),
       prepareInspectorRoomMove: (input) => this.roomMoves.prepareInspector(input),
       purgeAgent: this.lifecycleAdministration.purgeAgent.bind(this.lifecycleAdministration),
@@ -880,8 +856,7 @@ export class SupervisorDaemon {
     assertMacOS(this.platform);
     await this.singleton.acquire();
     try {
-      this.hostApprovalVerifier = new HostApprovalVerifier(this.singleton.currentGeneration,
-        await (storage.getHostApprovalPublicKey ?? requestHostApprovalVerifier)());
+      await this.hostApprovals.enroll(storage);
       this.manifestGeneration = await withProtectedStateUpgrade(this.stateDatabasePath, async () => {
         this.durability.bindSupervisorFence(this.supervisorFenceIdentity());
         return (await this.store.load()).generation;
@@ -1044,29 +1019,6 @@ export class SupervisorDaemon {
     entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number; providerTurnId?: string;
   }) {
     return this.supervisedDeliveryLifecycle.exactActiveBoundedContext(input);
-  }
-
-  private prepareBoundedEffect(input: {
-    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
-    providerTurnId: string;
-    mcpRequestId: string; toolName: string; input: unknown; mutation: boolean;
-  }): Promise<Record<string, unknown>> {
-    return this.boundedEffects.prepare(input);
-  }
-
-  private async executeBoundedTool(input: {
-    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
-    providerTurnId: string; mcpRequestId: string; toolName: string; input: unknown;
-  }): Promise<Record<string, unknown>> {
-    return this.boundedEffects.execute(input);
-  }
-
-  private completeBoundedEffect(input: {
-    entryId: string; workAttemptId: string; executionGenerationId: string; daemonGeneration: number;
-    providerTurnId: string;
-    effectId: string; result?: unknown; error?: string;
-  }): Promise<{ completed: true }> {
-    return this.boundedEffects.complete(input);
   }
 
   private async completeBoundedEffectOnce(input: {

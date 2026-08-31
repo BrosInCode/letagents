@@ -54,6 +54,8 @@ const expectedControlMethods = [
   "supervisor.get_delivery_drain",
   "supervisor.get_polling_activation",
   "supervisor.get_room_move",
+  "supervisor.host_approval_challenge",
+  "supervisor.host_approval_request",
   "supervisor.install_host_grant",
   "supervisor.install_open_model_credential",
   "supervisor.install_worker_credential",

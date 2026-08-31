@@ -133,6 +133,28 @@ test("host approvals use exact operational turns without capture and commit sele
   }
 });
 
+test("Codex file-change approvals stay unavailable without exact native edit inspection", async () => {
+  const f = await fixture();
+  try {
+    assert.equal(f.native.provider, "codex");
+    const fileChange: ProviderPermissionRequest = { provider: "codex", native: { ...f.native.native,
+      method: "item/fileChange/requestApproval", params: { threadId: "continuation", turnId: "native-turn",
+        itemId: "edit-1", grantRoot: "/workspace", reason: "Approve these edits" } } };
+    f.emit([fileChange]);
+    const [unavailable] = await f.broker.list("room");
+    assert.equal(unavailable!.status, "unavailable"); assert.equal(unavailable!.reference, null);
+    assert.equal(unavailable!.presentation.title, "Approval unavailable");
+    assert.match(unavailable!.detail!, /actual edits are not available to inspect/);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 0);
+    f.emit();
+    const [command] = await f.broker.list("room"); const selected = decision(command!);
+    f.emit([fileChange]);
+    await assert.rejects(f.broker.decide(selected), /actual edits are not available to inspect/);
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
+    assert.deepEqual(f.sends, []);
+  } finally { await f.close(); }
+});
+
 test("host approval decisions serialize duplicates and conflicts to one native response", async () => {
   const f = await fixture();
   try {

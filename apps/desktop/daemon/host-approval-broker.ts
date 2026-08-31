@@ -8,6 +8,45 @@ import type { ManifestStore } from "./manifest-store.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import type { DaemonManifestEntry } from "./types.js";
+import type { WorkerBindingStore } from "./worker-binding-store.js";
+import type { ProviderCheckpointCoordinator } from "./provider-checkpoint-coordinator.js";
+import { HostApprovalVerifier } from "./host-approval-auth.js";
+import { requestHostApprovalVerifier, type StateRecoveryBootstrap } from "./state-recovery-key.js";
+
+/** Composition of the native broker and its privately enrolled host authority. */
+export function createHostApprovalBridge(options: Omit<Options, "exactAuthority"> & {
+  workerBindings: Pick<WorkerBindingStore, "get" | "credentialFor">;
+  providerCheckpoints: Pick<ProviderCheckpointCoordinator, "isExactAuthority">;
+  currentGeneration(): number;
+}) {
+  let verifier: HostApprovalVerifier | null = null;
+  const broker = new HostApprovalBroker({
+    ...options,
+    exactAuthority: async (entry, handle, generation) => {
+      const binding = await options.workerBindings.get(entry.id);
+      if (!binding || binding.execution_generation_id !== generation) return false;
+      const bearer = await options.workerBindings.credentialFor(binding);
+      if (!bearer) return false;
+      return options.providerCheckpoints.isExactAuthority({ agentId: entry.id, roomId: binding.room_id,
+        provider: entry.provider, apiUrl: binding.api_url, agentSessionId: binding.agent_session_id, bearer,
+        handle, workAttemptId: handle.workAttemptId, executionGenerationId: generation,
+        providerContinuationId: handle.providerContinuationId, providerConnection: handle.providerConnection ?? null,
+        daemonGeneration: options.currentGeneration() });
+    },
+  });
+  return {
+    install: broker.install.bind(broker),
+    close: broker.close.bind(broker),
+    async enroll(storage: StateRecoveryBootstrap): Promise<void> {
+      verifier = new HostApprovalVerifier(options.currentGeneration(),
+        await (storage.getHostApprovalPublicKey ?? requestHostApprovalVerifier)());
+    },
+    challenge: () => verifier?.challenge() ?? null,
+    verify: (envelope: unknown) => verifier?.verify(envelope) ?? null,
+    list: broker.list.bind(broker),
+    decide: broker.decide.bind(broker),
+  };
+}
 
 type Lane = {
   agentId: string; generation: string; handle: ProviderActionHandle; connection: NonNullable<ProviderActionHandle["providerConnection"]>;
@@ -26,6 +65,7 @@ type Options = {
 };
 const MAX_REQUESTS = 32;
 const MAX_PRESENTATION_BYTES = 24 * 1024;
+const CODEX_FILE_CHANGE_UNAVAILABLE = "Codex has requested file changes, but the actual edits are not available to inspect here. Decisions are disabled until those exact edits can be shown.";
 const id = z.string().min(1).max(256);
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const decisionSchema = z.strictObject({
@@ -122,7 +162,9 @@ export class HostApprovalBroker {
         if (result.length >= 64) break;
         try { result.push((await this.prepare(lane, native)).candidate); }
         catch { result.push({ reference: null, recordedDecision: null, presentation: this.presentation(entry, native, "Approval unavailable"),
-          status: "unavailable", detail: "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified." }); }
+          status: "unavailable", detail: native.provider === "codex" && native.native.method === "item/fileChange/requestApproval"
+            ? CODEX_FILE_CHANGE_UNAVAILABLE
+            : "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified." }); }
       }
     }
     // Native callbacks can disappear immediately after sending, including when
@@ -155,6 +197,9 @@ export class HostApprovalBroker {
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
     const revision = lane.revision;
     if (!this.current(lane) || lane.state !== "pending" || !lane.connectionId || !lane.requests.includes(native)) throw new Error("Approval unavailable.");
+    // This native RPC identifies the item but does not contain its edits. The
+    // IDs/grantRoot alone cannot be the presentation a host approves.
+    if (native.provider === "codex" && native.native.method === "item/fileChange/requestApproval") throw new Error(CODEX_FILE_CHANGE_UNAVAILABLE);
     if (Buffer.byteLength(literal(native.native)) > MAX_PRESENTATION_BYTES) throw new Error("Approval presentation exceeds its limit.");
     const entry = await this.options.store.getEntry(lane.agentId);
     if (!entry || !await this.options.exactAuthority(entry, lane.handle, lane.generation)) throw new Error("Approval authority changed.");
