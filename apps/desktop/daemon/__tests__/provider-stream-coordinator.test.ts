@@ -269,6 +269,7 @@ test("terminal fencing is idempotent for one exact handle", async () => {
 });
 
 test("resume staging requires a terminal predecessor and exactly one live successor", async () => {
+  const pollingEntry = { ...entry(), delivery_mode: "mcp_polling" as const };
   const predecessorTerminal = {
     ended_at: "2026-08-26T00:00:00.000Z",
     exit_code: 0,
@@ -301,8 +302,9 @@ test("resume staging requires a terminal predecessor and exactly one live succes
     last_observed_at_ms: 1_777_000_000_000,
     updated_at: "2026-08-26T00:00:00.000Z",
   };
+  harness.setManifest(pollingEntry);
   await harness.coordinator.stageWorkerBindingAfterResume(
-    entry(),
+    pollingEntry,
     priorBinding,
     "generation-2",
     handle,
@@ -318,13 +320,44 @@ test("resume staging requires a terminal predecessor and exactly one live succes
 
   await assert.rejects(
     () => harness.coordinator.stageWorkerBindingAfterResume(
-      entry(),
+      pollingEntry,
       { ...priorBinding, execution_generation_id: "wrong-generation" },
       "generation-2",
       handle,
     ),
     /predecessor execution is not durably terminal/,
   );
+});
+
+test("daemon inbox ignores provider wait evidence and measures illegal legacy authority calls", async () => {
+  const harness = coordinatorHarness();
+  harness.setManifest({ ...entry(), provider: "claude-code" });
+  harness.runtimeCustody.installPendingResumeBinding("agent-1", {
+    roomId: "room-1", workAttemptId: "attempt-1", predecessorExecutionGenerationId: "generation-1",
+    successorExecutionGenerationId: "generation-2", agentSessionId: "session-1", providerContinuationId: "continuation-1",
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.enqueue("agent-1", handle, {
+    ...streamEvent(1, "assistant"), provider: "claude-code",
+    payload: { type: "assistant", message: { content: [{ type: "tool_use", name: "mcp__letagents__wait_for_messages",
+      input: { after_message_id: "8", agent_session_id: "session-1" } }] } },
+  });
+  assert.equal(harness.coordinator.recoveryDiagnostics().daemon_inbox_wait_evidence_dependency, 0,
+    "ordinary provider output never enters a daemon-owned authority path");
+  assert.equal(harness.getManifest().condition, "none");
+  assert.deepEqual(harness.pendingInstalled, []);
+  assert.equal(harness.runtimeCustody.hasPendingResumeBinding("agent-1"), true,
+    "provider output cannot clear or advance a retained authority record");
+
+  await assert.rejects(harness.coordinator.stageWorkerBindingAfterResume(entry(), {} as never, "generation-2", handle),
+    /Only legacy polling/);
+  assert.equal(await harness.coordinator.restoreWorkerBindingFromWait("agent-1", {
+    agentSessionId: "session-1", roomCursor: "8",
+  }), false);
+  await harness.coordinator.checkpointObservedWaitCursor(entry(), "8", "session-1");
+  assert.equal(harness.coordinator.recoveryDiagnostics().daemon_inbox_wait_evidence_dependency, 3,
+    "the diagnostic counts attempted dependencies rather than returning a constant zero");
+  await harness.coordinator.disposeAll();
 });
 
 test("handoff detach attempts every stream disposer, surfaces failures, and never awaits callbacks", async () => {

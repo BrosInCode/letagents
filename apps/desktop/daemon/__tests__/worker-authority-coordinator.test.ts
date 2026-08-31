@@ -127,6 +127,7 @@ type HarnessOptions = {
   loseAuthorityAfterFirstAssert?: "handoff";
   fireMintTimeout?: boolean;
   boundedContextError?: Error;
+  publishNative?: () => Promise<void>;
 };
 
 function fixture(options: HarnessOptions = {}) {
@@ -134,6 +135,7 @@ function fixture(options: HarnessOptions = {}) {
   let entry = options.entry ?? manifestEntry();
   let generation = options.generation ?? 7;
   let handoff = options.handoff ?? false;
+  let handle = options.handle === undefined ? providerHandle() : options.handle ?? undefined;
   let binding = options.binding === undefined ? workerBinding() : options.binding;
   let credential = options.credential === undefined ? "worker-secret" : options.credential;
   let session: SupervisedWorkerSession | null = binding ? {
@@ -296,8 +298,8 @@ function fixture(options: HarnessOptions = {}) {
       },
     },
     runtime: {
-      currentHandle: () => options.handle === undefined ? providerHandle() : options.handle ?? undefined,
-      attach: async () => { events.push("runtime:attach"); return options.handle ?? null; },
+      currentHandle: () => handle,
+      attach: async () => { events.push("runtime:attach"); return handle ?? null; },
     },
     delivery: {
       stop: async () => { deliveryStops += 1; events.push("delivery:stop"); },
@@ -313,7 +315,7 @@ function fixture(options: HarnessOptions = {}) {
       resetMintAttempts: () => { events.push("recovery:reset-mint"); },
     },
     activity: {
-      publishNative: async () => { events.push("activity:publish"); return true; },
+      publishNative: async () => { events.push("activity:publish"); await options.publishNative?.(); return true; },
       transition: async (_entryId, _state, _condition, detail) => { events.push(`transition:${detail}`); },
     },
     boundedContext: async () => {
@@ -354,6 +356,9 @@ function fixture(options: HarnessOptions = {}) {
     setGeneration(value: number) { generation = value; },
     setHandoff(value: boolean) { handoff = value; },
     setCursor(value: string | null) { cursor = value; },
+    setEntry(value: DaemonManifestEntry) { entry = value; },
+    setHandle(value: ProviderActionHandle | undefined) { handle = value; },
+    bindings,
   };
 }
 
@@ -607,6 +612,69 @@ test("binding publishes before clearing recovery and commits exact public metada
   assert.equal(harness.entry.last_worker_binding?.agent_session_id, "session-new");
   assert.equal(JSON.stringify(harness.entry).includes("raw-secret"), false);
   assert.equal(harness.deliveryStarts, 1);
+});
+
+test("binding adopts a provided credential reference even when the worker bearer is unchanged", async () => {
+  const harness = fixture();
+  const input: BindWorkerSessionInput = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-1", agent_session_token: "worker-secret", credential_ref: "minted-ref",
+    api_url: "https://letagents.test",
+  };
+  await harness.subject.bindWorkerSession(input);
+  assert.equal(harness.binding?.credential_ref, "minted-ref");
+  assert.equal(harness.credential, "worker-secret");
+  assert.equal(harness.events.filter((event) => event === "binding:bind").length, 1);
+  await harness.subject.bindWorkerSession(input);
+  await harness.subject.bindWorkerSession({ ...input, credential_ref: undefined });
+  assert.equal(harness.events.filter((event) => event === "binding:bind").length, 1,
+    "same-reference and legacy unspecified-reference confirmations remain idempotent");
+});
+
+test("a minted worker stays fenced to its original room, attempt, daemon, and installed grant object", async () => {
+  for (const mismatch of ["room", "attempt", "daemon", "grant"] as const) {
+    const harness = fixture();
+    const grant = hostGrant();
+    harness.custody.installHostGrant(grant);
+    const minted = await harness.subject.mintHostWorkerAuthorization(harness.entry);
+    assert.ok(minted);
+    const bound = await harness.subject.recordMintedHostWorkerSession(harness.entry, "execution-1", minted);
+    assert.ok(bound);
+    if (mismatch === "room") harness.setEntry({ ...harness.entry, room_id: "other-room" });
+    if (mismatch === "attempt") harness.setEntry({ ...harness.entry, work_attempt_id: "other-attempt" });
+    if (mismatch === "daemon") harness.setGeneration(8);
+    if (mismatch === "grant") harness.custody.installHostGrant({ ...grant });
+    assert.equal(await harness.subject.recordMintedHostWorkerSession(harness.entry, "execution-1", minted), null, mismatch);
+    await assert.rejects(harness.subject.bindMintedHostWorkerSession("agent-1", bound), /no longer matches/, mismatch);
+    assert.equal(harness.events.includes("binding:bind"), false, mismatch);
+    assert.equal(harness.deliveryStarts, 0, mismatch);
+    assert.equal(harness.entry.condition, "coordination_blocked", mismatch);
+  }
+});
+
+test("worker readiness fails closed when authority changes during the binding publication", async () => {
+  for (const mismatch of ["room", "attempt", "generation", "continuation", "handle", "grant", "daemon", "worker"] as const) {
+    let harness!: ReturnType<typeof fixture>;
+    harness = fixture({ publishNative: async () => {
+      if (mismatch === "room") harness.setEntry({ ...harness.entry, room_id: "other-room" });
+      if (mismatch === "attempt") harness.setEntry({ ...harness.entry, work_attempt_id: "other-attempt" });
+      if (mismatch === "generation") harness.setEntry({ ...harness.entry,
+        provider_ref: { ...harness.entry.provider_ref!, execution_generation_id: "replacement" } });
+      if (mismatch === "continuation") harness.setEntry({ ...harness.entry,
+        provider_ref: { ...harness.entry.provider_ref!, provider_continuation_id: "replacement" } });
+      if (mismatch === "handle") harness.setHandle(providerHandle());
+      if (mismatch === "grant") harness.custody.installHostGrant(hostGrant());
+      if (mismatch === "daemon") harness.setHandoff(true);
+      if (mismatch === "worker") harness.bindings.get = async () => workerBinding({ agent_session_id: "other-worker" });
+    } });
+    await assert.rejects(harness.subject.bindWorkerSession({
+      entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+      agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+    }), /authority changed|binding changed/, mismatch);
+    assert.equal(harness.entry.condition, "coordination_blocked", mismatch);
+    assert.equal(harness.deliveryStarts, 0, mismatch);
+    assert.equal(harness.manifestUpdates.length, 0, mismatch);
+  }
 });
 
 test("bind and verify reject every mismatched durable or secret-bearing identity", async () => {

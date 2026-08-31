@@ -40,10 +40,12 @@ import {
   provisionDesktopSupervisorGrant,
   revokeDesktopSupervisorGrant,
 } from "../supervisor-grant.js";
+import { supervisorGrantCoordinator } from "../supervisor-grant-coordinator.js";
 
 export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): void {
   setAuthAuthorizedHandler(() => {
     clearJoinedRoomInfoCache();
+    supervisorGrantCoordinator.scheduleCredentialRecovery();
     void refreshInstalledLetAgentsMcpServerAuth().catch(() => {});
     void refreshDesktopNotificationRegistration().catch(() => {});
   });
@@ -94,7 +96,11 @@ export function registerDesktopAuthAndSetupIpcHandlers(targetIpcMain: IpcMain): 
   );
   targetIpcMain.handle(
     "desktop:supervisor-grant:get-storage-status",
-    async (): Promise<DesktopSecureStorageStatus> => getDesktopSupervisorGrantStorageStatus(),
+    async (): Promise<DesktopSecureStorageStatus> => {
+      const status = getDesktopSupervisorGrantStorageStatus();
+      supervisorGrantCoordinator.observeSecureStorageAvailability(status.available);
+      return status;
+    },
   );
   targetIpcMain.handle(
     "desktop:supervisor-grant:provision",
