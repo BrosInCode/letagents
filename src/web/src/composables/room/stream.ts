@@ -594,15 +594,17 @@ export function createRoomStream(
       try {
         const payload = JSON.parse(event.data)
         const roomId = typeof payload?.room_id === 'string' ? payload.room_id : roomIdentifier
-        if (!Array.isArray(payload?.message_ids) || payload.message_ids.some(
+        const messageIds = payload?.message_ids
+        if (messageIds !== null && (!Array.isArray(messageIds) || messageIds.some(
           (id: unknown) => typeof id !== 'string' || !id,
-        )) {
+        ))) {
           repairMalformedTypedEvent(roomIdentifier, event)
           return
         }
         rememberEventCursor(roomIdentifier, event)
-        const messageIds = payload.message_ids as string[]
         bufferOrApplyRoomEvent(roomIdentifier, () => {
+          // Null deliberately conceals message identities. The open info card
+          // refreshes through its authorized GET, without inventing per-id scope.
           publishMessageInfoInvalidation(roomId, messageIds)
         }, streamEventBytes(event))
       } catch {
