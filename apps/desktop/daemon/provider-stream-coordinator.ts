@@ -133,6 +133,7 @@ export class ProviderStreamCoordinator {
   private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
   private readonly callbacks = new Set<Promise<void>>();
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
+  private daemonInboxWaitEvidenceDependencies = 0;
   private readonly publishWorkerActivity: typeof publishWorkerNativeActivity;
   private readonly setHeartbeat: typeof setInterval;
   private readonly clearHeartbeat: typeof clearInterval;
@@ -150,6 +151,16 @@ export class ProviderStreamCoordinator {
 
   has(entryId: string): boolean {
     return this.liveHandles.has(entryId);
+  }
+
+  recoveryDiagnostics(): { daemon_inbox_wait_evidence_dependency: number } {
+    return { daemon_inbox_wait_evidence_dependency: this.daemonInboxWaitEvidenceDependencies };
+  }
+
+  private acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean {
+    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling") return true;
+    if (entry.delivery_mode === "daemon_inbox") this.daemonInboxWaitEvidenceDependencies += 1;
+    return false;
   }
 
   /** Remove only the expected generation and dispose every listener it owns. */
@@ -260,11 +271,15 @@ export class ProviderStreamCoordinator {
     successorExecutionGenerationId: string,
     handle: ProviderActionHandle,
   ): Promise<void> {
+    if (!this.acceptsLegacyWaitAuthority(entry)) {
+      throw new Error("Only legacy polling can await provider worker-wait evidence.");
+    }
     const ref = entry.provider_ref;
     if (!ref
       || priorBinding.entry_id !== entry.id
       || priorBinding.room_id !== entry.room_id
       || priorBinding.work_attempt_id !== ref.work_attempt_id
+      || ref.execution_generation_id !== successorExecutionGenerationId
       || handle.workAttemptId !== ref.work_attempt_id
       || handle.providerContinuationId !== ref.provider_continuation_id) {
       throw new Error("Resumed provider does not match the durable worker continuation identity.");
@@ -286,6 +301,14 @@ export class ProviderStreamCoordinator {
       || attempt.execution_generations.filter((candidate) => candidate.terminal === null).length !== 1) {
       throw new Error("Worker binding successor is not the single live execution generation.");
     }
+    const current = await this.options.manifest.getEntry(entry.id);
+    if (!current || !this.acceptsLegacyWaitAuthority(current)
+      || current.room_id !== entry.room_id
+      || current.work_attempt_id !== ref.work_attempt_id
+      || current.provider_ref?.execution_generation_id !== successorExecutionGenerationId
+      || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id) {
+      throw new Error("Provider authority changed before legacy worker-wait staging.");
+    }
     this.options.runtimeCustody.installPendingResumeBinding(entry.id, {
       roomId: entry.room_id,
       workAttemptId: ref.work_attempt_id,
@@ -300,9 +323,10 @@ export class ProviderStreamCoordinator {
     entryId: string,
     evidence: SupervisedWaitEvidence,
   ): Promise<boolean> {
+    const entry = await this.options.manifest.getEntry(entryId);
+    if (!entry || !this.acceptsLegacyWaitAuthority(entry)) return false;
     const pending = this.options.runtimeCustody.pendingResumeBinding(entryId);
     if (!pending || evidence.agentSessionId !== pending.agentSessionId) return false;
-    const entry = await this.options.manifest.getEntry(entryId);
     const handle = this.liveHandles.get(entryId);
     if (!entry || !handle
       || entry.room_id !== pending.roomId
@@ -367,7 +391,9 @@ export class ProviderStreamCoordinator {
       updatedAt: verified.updated_at,
     });
     await this.options.manifest.updateEntry(entry.id, (current) => {
-      if (current.work_attempt_id !== pending.workAttemptId
+      if (!this.acceptsLegacyWaitAuthority(current)
+        || current.room_id !== pending.roomId
+        || current.work_attempt_id !== pending.workAttemptId
         || current.provider_ref?.execution_generation_id !== pending.successorExecutionGenerationId
         || current.provider_ref.provider_continuation_id !== pending.providerContinuationId) {
         throw new Error("Manifest moved while restoring the resumed worker binding.");
@@ -461,7 +487,9 @@ export class ProviderStreamCoordinator {
       }
       await this.options.appendActivity(entryId, sanitizedEvent);
     }
-    const waitEvidence = supervisedWaitEvidenceFromProviderEvent(event);
+    const waitEvidence = (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
+      ? supervisedWaitEvidenceFromProviderEvent(event)
+      : null;
     if (waitEvidence) {
       const pending = this.options.runtimeCustody.pendingResumeBinding(entryId);
       if (pending && waitEvidence.agentSessionId === pending.agentSessionId) {
@@ -535,11 +563,13 @@ export class ProviderStreamCoordinator {
     roomCursor: string,
     agentSessionId: string,
   ): Promise<void> {
-    await this.serializeCursorCheckpoint(entry.id, async () => {
+    if (!this.acceptsLegacyWaitAuthority(entry)) return;
+    await this.options.serializeEntry(entry.id, () => this.serializeCursorCheckpoint(entry.id, async () => {
       const executionGenerationId = entry.provider_ref?.execution_generation_id;
       if (!entry.work_attempt_id || !executionGenerationId) return;
       const currentEntry = await this.options.manifest.getEntry(entry.id);
       if (!currentEntry
+        || !this.acceptsLegacyWaitAuthority(currentEntry)
         || currentEntry.room_id !== entry.room_id
         || currentEntry.work_attempt_id !== entry.work_attempt_id
         || currentEntry.provider_ref?.execution_generation_id !== executionGenerationId) return;
@@ -565,7 +595,7 @@ export class ProviderStreamCoordinator {
         room_cursor: durableCursor,
         provider_continuation_id: entry.provider_ref?.provider_continuation_id ?? null,
       });
-    });
+    }));
   }
 
   /** Shared compatibility lane for worker RPC and provider-stream cursor commits. */

@@ -6425,7 +6425,8 @@ test("distinct supervised Codex entries coexist in one room without weakening le
   }
 });
 
-test("two Codex room agents keep independent provider executions across stop, resume, and daemon handoff", async () => {
+for (const deliveryMode of ["mcp_polling", "daemon_inbox"] as const) {
+test(`two Codex room agents keep independent provider executions across stop, resume, and daemon handoff (${deliveryMode})`, async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -6461,6 +6462,7 @@ test("two Codex room agents keep independent provider executions across stop, re
   const attachRequests: ProviderIdentityTuple[] = [];
   const resumeRequests: Array<[entryId: string, workAttemptId: string, continuation: string]> = [];
   const stopRequests: string[] = [];
+  const deliveredTurns: Array<{ workAttemptId: string; turnId: string }> = [];
   let nextPid = 6100;
   const nativeHandle = (runtime: Runtime) => ({
     workAttemptId: runtime.workAttemptId,
@@ -6547,11 +6549,92 @@ test("two Codex room agents keep independent provider executions across stop, re
       listeners.add(listener);
       return () => { listeners.delete(listener); };
     },
+    runRoomTurn: async (handle, request, options) => {
+      const runtime = runtimes.get(handle.workAttemptId)!;
+      assert.notEqual(runtime.state, "stopped");
+      assert.equal(handle.pid, runtime.pid);
+      assert.equal(handle.providerContinuationId, runtime.continuation);
+      assert.deepEqual(handle.providerConnection, connectionFor(runtime));
+      const turnId = `native_${(request.sourceMessage as { id: string }).id}`;
+      await options?.beforeNativeDispatch?.();
+      await options?.checkpointTurnStarted?.(turnId);
+      deliveredTurns.push({ workAttemptId: handle.workAttemptId, turnId });
+      return { turnId, outcome: "no_reply", text: null };
+    },
     onStream: () => () => {},
   };
   const router = () => new ProviderActionPortRouter({ codex: async () => adapter });
   let activeRouter = router();
-  let daemon = new SupervisorDaemon(paths, "darwin", activeRouter, true);
+  let tailReads = 0;
+  const polls: Array<{ bearer: string; afterMessageId: string | null }> = [];
+  const pendingPolls = new Map<string, (response: Awaited<ReturnType<SupervisedDeliveryHttp["poll"]>>) => void>();
+  const createDaemon = () => {
+    const instance = new SupervisorDaemon(paths, "darwin", activeRouter, true, 15_000, undefined, {}, {
+      latest: async () => { tailReads += 1; return { messages: [{ id: "msg_41" }] }; },
+      poll: ({ signal, bearer, afterMessageId }) => new Promise((resolve) => {
+        polls.push({ bearer, afterMessageId });
+        pendingPolls.set(bearer, resolve);
+        if (signal.aborted) resolve({ messages: [] });
+        else signal.addEventListener("abort", () => {
+          if (pendingPolls.get(bearer) === resolve) pendingPolls.delete(bearer);
+          resolve({ messages: [] });
+        }, { once: true });
+      }),
+      publish: async () => {},
+    }, {
+      createWorkerSession: async ({ agentInstanceId }) => ({
+        sessionId: `session_${agentInstanceId.replace(/:/g, "_")}`,
+        bearer: randomUUID(), bearerId: randomUUID(), expiresAt: "2099-01-01T00:00:00.000Z",
+      }),
+    });
+    // Native presence publication is not the readiness proof under test.
+    // No provider stream/wait events or manual worker binds are supplied.
+    (instance as unknown as { publishNativeActivity: () => Promise<boolean> }).publishNativeActivity = async () => true;
+    return instance;
+  };
+  let daemon = createDaemon();
+  const installGrants = async () => {
+    const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+    for (const { entryId } of identities) {
+      const installed = await daemonRequest(paths.socketPath, "supervisor.install_host_grant", {
+        entry_id: entryId, room_id: "codex_runtime_roundtable", agent_key: `owner/${entryId}`,
+        grant_id: `grant_${entryId}_${generation}`, supervisor_grant: `grant-secret-${entryId}`,
+        grant_generation: generation, api_url: "http://127.0.0.1:9", daemon_generation: generation,
+        host_id: "host-test", installation_id: "installation-test", grant_expires_at: "2099-01-01T00:00:00.000Z",
+      });
+      assert.equal(installed.ok, true, installed.error);
+    }
+  };
+  const assertOwnedBindings = async (manifest: DaemonManifestEntry[]) => {
+    assert.ok(manifest.every((current) => (current.delivery_mode ?? "mcp_polling") === deliveryMode));
+    if (deliveryMode !== "daemon_inbox") return;
+    const internals = daemon as unknown as {
+      workerBindings: WorkerBindingStore;
+      supervisedInbox: SupervisedAgentInboxStore;
+      providerStreams: { recoveryDiagnostics(): { daemon_inbox_wait_evidence_dependency: number } };
+    };
+    for (const current of manifest) {
+      await eventually(async () => {
+        const observed = await internals.workerBindings.get(current.id);
+        return observed?.execution_generation_id === current.provider_ref?.execution_generation_id
+          && Boolean(observed && await internals.workerBindings.credentialFor(observed));
+      }, "exact restored worker binding becomes usable");
+      const binding = await internals.workerBindings.get(current.id);
+      assert.equal(current.condition, "none", "owned readiness cannot retain a legacy wait latch");
+      assert.equal(binding?.room_id, current.room_id);
+      assert.equal(binding?.work_attempt_id, current.work_attempt_id);
+      assert.equal(binding?.execution_generation_id, current.provider_ref?.execution_generation_id);
+      assert.equal(binding?.agent_session_id, `session_daemon_${current.id}`);
+      const credential = binding && await internals.workerBindings.credentialFor(binding);
+      assert.ok(credential, "the current generation has a usable in-memory worker credential");
+      await eventually(async () => polls.some((poll) => poll.bearer === credential && poll.afterMessageId === "msg_41"),
+        "owned ingress uses the exact restored credential and existing cursor");
+      const cursor = await internals.supervisedInbox.cursor(current.id);
+      assert.equal(cursor?.room_id, current.room_id);
+      assert.equal(cursor?.last_observed_message_id, "msg_41", "recovery does not reset the admitted room cursor");
+    }
+    assert.equal(internals.providerStreams.recoveryDiagnostics().daemon_inbox_wait_evidence_dependency, 0);
+  };
   try {
     await daemon.start();
     const entries = identities.map(({ entryId }, index): DaemonManifestEntry => ({
@@ -6559,6 +6642,7 @@ test("two Codex room agents keep independent provider executions across stop, re
       id: entryId,
       room_id: "codex_runtime_roundtable",
       provider: "codex",
+      delivery_mode: deliveryMode,
       desired_state: "paused",
       observed_state: "paused",
       source_repo_path: sources[index],
@@ -6568,6 +6652,17 @@ test("two Codex room agents keep independent provider executions across stop, re
     const created = await Promise.all(entries.map((candidate) =>
       daemonRequest(paths.socketPath, "manifest.put", { entry: candidate })));
     assert.ok(created.every((result) => result.ok));
+    if (deliveryMode === "daemon_inbox") {
+      await installGrants();
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      for (const candidate of entries) {
+        const admitted = await daemonRequest(paths.socketPath, "supervisor.bootstrap_room_ingress", {
+          entry_id: candidate.id, daemon_generation: generation,
+        });
+        assert.equal(admitted.ok, true, admitted.error);
+      }
+      assert.equal(tailReads, 2);
+    }
 
     const activated = await Promise.all(entries.map((candidate) =>
       daemonRequest(paths.socketPath, "manifest.compare_and_set_desired_state", {
@@ -6577,7 +6672,8 @@ test("two Codex room agents keep independent provider executions across stop, re
     try {
       await eventually(async () => {
         const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-        return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === "working");
+        return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === "working"
+          && candidate.condition === "none");
       }, "both Codex provider executions", 5_000);
     } catch (error) {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result;
@@ -6585,6 +6681,7 @@ test("two Codex room agents keep independent provider executions across stop, re
     }
 
     const beforeRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    await assertOwnedBindings(beforeRestart);
     const alphaBefore = beforeRestart.find((candidate) => candidate.id === identities[0].entryId)!;
     const bravoBefore = beforeRestart.find((candidate) => candidate.id === identities[1].entryId)!;
     assert.equal(spawnRequests.length, 2);
@@ -6622,12 +6719,13 @@ test("two Codex room agents keep independent provider executions across stop, re
     assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
     await within(handoff, "multi-agent daemon handoff", 1_000);
     activeRouter = router();
-    daemon = new SupervisorDaemon(paths, "darwin", activeRouter, true);
+    daemon = createDaemon();
     await daemon.start();
+    if (deliveryMode === "daemon_inbox") await installGrants();
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
       return manifest.length === 2
-        && manifest.every((candidate) => candidate.observed_state === "working")
+        && manifest.every((candidate) => candidate.observed_state === "working" && candidate.condition === "none")
         && attachRequests.length === 2;
     }, "independent Codex provider reattachment", 5_000);
     assert.equal(attachRequests.length, 2);
@@ -6639,6 +6737,7 @@ test("two Codex room agents keep independent provider executions across stop, re
       ].sort(([left], [right]) => left.localeCompare(right)),
     );
     const afterRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    await assertOwnedBindings(afterRestart);
     for (const prior of beforeRestart) {
       const reattached = afterRestart.find((candidate) => candidate.id === prior.id)!;
       assert.equal(reattached.work_attempt_id, prior.work_attempt_id);
@@ -6683,9 +6782,13 @@ test("two Codex room agents keep independent provider executions across stop, re
     })).ok, true);
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-      return manifest.find((candidate) => candidate.id === identities[0].entryId)?.observed_state === "working";
+      const current = manifest.find((candidate) => candidate.id === identities[0].entryId);
+      return current?.observed_state === "working" && current.condition === "none";
     }, "independent Codex resume", 5_000);
     const afterResume = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    await assertOwnedBindings(afterResume);
+    assert.equal(tailReads, deliveryMode === "daemon_inbox" ? 2 : 0,
+      "restart and native resume never bootstrap a new room tail");
     const alphaAfter = afterResume.find((candidate) => candidate.id === identities[0].entryId)!;
     const bravoAfter = afterResume.find((candidate) => candidate.id === identities[1].entryId)!;
     assert.equal(resumeRequests.length, 1);
@@ -6711,11 +6814,32 @@ test("two Codex room agents keep independent provider executions across stop, re
     assert.equal(bravoAfterAlphaResumeAttempt.execution_generations.length, 1);
     assert.equal(bravoAfterAlphaResumeAttempt.execution_generations[0]?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.equal(bravoAfterAlphaResumeAttempt.execution_generations[0]?.terminal, null);
+    if (deliveryMode === "daemon_inbox") {
+      const internals = daemon as unknown as { workerBindings: WorkerBindingStore; supervisedInbox: SupervisedAgentInboxStore };
+      const binding = await internals.workerBindings.get(alphaAfter.id);
+      const credential = await internals.workerBindings.credentialFor(binding!);
+      const resolvePoll = pendingPolls.get(credential!);
+      assert.ok(resolvePoll, "the recovered worker has an active exact-credential poll");
+      resolvePoll({ messages: [{ id: "msg_42", text: "assess the project", source: "human",
+        activation: { for_current_agent: { decision: "activate", reason: "explicit_mention", addressed: true } },
+      }], last_observed_message_id: "msg_42" });
+      await eventually(async () => (await internals.supervisedInbox.getBySourceMessage(
+        alphaAfter.id, alphaAfter.room_id, "msg_42",
+      ))?.state === "acknowledged_no_reply", "a post-recovery message reaches and settles the exact native turn");
+      const receipt = await internals.supervisedInbox.getBySourceMessage(alphaAfter.id, alphaAfter.room_id, "msg_42");
+      const turnBinding = await internals.supervisedInbox.providerTurnBinding(receipt!.inbox_item_id);
+      assert.equal(turnBinding?.origin_execution_generation_id, alphaAfter.provider_ref?.execution_generation_id);
+      assert.equal(turnBinding?.provider_turn_id, "native_msg_42");
+      assert.deepEqual(deliveredTurns, [{ workAttemptId: alphaAfter.work_attempt_id, turnId: "native_msg_42" }]);
+      assert.equal((await internals.supervisedInbox.cursor(alphaAfter.id))?.last_observed_message_id, "msg_42");
+      assert.equal((await internals.supervisedInbox.cursor(bravoAfter.id))?.last_observed_message_id, "msg_41");
+    }
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
+}
 
 test("two supervised Codex claims wait together behind one legacy Codex owner", async () => {
   const env = await fixture();

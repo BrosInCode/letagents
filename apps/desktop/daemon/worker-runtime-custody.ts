@@ -61,7 +61,16 @@ export type CachedWorkerAuthorization = {
 
 export type MintedWorkerAuthorization = Pick<CachedWorkerAuthorization,
   "agentSessionId" | "bearer" | "bearerId" | "expiresAt" | "agentSession"
-> & { apiUrl: string };
+> & {
+  apiUrl: string;
+  /** Process-only mint authority; grant object identity fences replacement during awaits. */
+  authority: {
+    entryId: string;
+    roomId: string;
+    workAttemptId: string | null;
+    grant: InstalledHostGrant;
+  };
+};
 
 export type BoundWorkerAuthorization = MintedWorkerAuthorization & {
   executionGenerationId: string;

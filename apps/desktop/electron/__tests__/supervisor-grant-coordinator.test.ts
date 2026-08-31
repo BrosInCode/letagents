@@ -7,8 +7,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SupervisorGrantCoordinator, type SupervisorGrantCoordinatorOperations } from "../main/supervisor-grant-coordinator.js";
 import {
+  DesktopSecureStorageUnavailableError,
   desktopSupervisorGrantInstallationId,
   encryptSupervisorGrantForStorage,
+  getDesktopSupervisorGrantStorageStatus,
   getOrProvisionDesktopSupervisorGrantForAgent,
   readDesktopSupervisorGrantAgentKeyForEntry,
   readDesktopSupervisorGrantForAgent,
@@ -770,6 +772,160 @@ test("persistent same-generation reconciliation failure does not retry-storm", a
   } finally {
     console.warn = originalWarn;
   }
+});
+
+test("a successful login retries the exact grant after same-generation credential failure", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let authenticated = false;
+  const key = "owner/supervised_launch_1234567";
+  const stored = { metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
+  const h = harness({
+    readGrant: async () => {
+      if (!authenticated) throw new Error("owner auth unavailable");
+      return stored;
+    },
+  });
+  h.coordinator.scheduleReconciliation({ generation: 7 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.events.includes("install:7"), false);
+  authenticated = true;
+  h.coordinator.scheduleCredentialRecovery();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.events.filter((event) => event.startsWith("install:")), ["install:7"]);
+  assert.deepEqual(h.bootstrapMessages, [undefined], "recovery cannot replay the initial message");
+  assert.equal(h.events.some((event) => event.startsWith("create:")), false);
+  assert.equal(h.grants.get(key)?.lastInstalledDaemonGeneration, 7);
+});
+
+test("credential recovery during an in-flight pass retains one follow-up even if that pass fails", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  for (const firstFails of [true, false]) {
+    let lists = 0;
+    let releaseFirst!: () => void;
+    let signalFirst!: () => void;
+    const firstStarted = new Promise<void>((resolve) => { signalFirst = resolve; });
+    const firstReleased = new Promise<void>((resolve) => { releaseFirst = resolve; });
+    const c = new SupervisorGrantCoordinator({
+      async ensureRunning() { return { generation: 7 }; },
+      async list() {
+        lists += 1;
+        if (lists === 1) {
+          signalFirst();
+          await firstReleased;
+          if (firstFails) throw new Error("owner auth was unavailable");
+        }
+        return [];
+      },
+    } as never);
+    c.scheduleReconciliation({ generation: 7 });
+    await firstStarted;
+    c.scheduleCredentialRecovery();
+    c.scheduleCredentialRecovery();
+    releaseFirst();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(lists, 2, `one follow-up after a ${firstFails ? "failed" : "successful"} pass`);
+  }
+});
+
+test("secure storage recovery wakes once after a startup failure even before a renderer probe", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let available = false;
+  const key = "owner/supervised_launch_1234567";
+  const h = harness({
+    readGrant: async () => {
+      if (!available) throw new DesktopSecureStorageUnavailableError("storage unavailable");
+      return { metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
+    },
+  });
+  await assert.rejects(h.coordinator.reconcileDesiredRunning(), DesktopSecureStorageUnavailableError);
+  available = true;
+  h.coordinator.observeSecureStorageAvailability(true);
+  h.coordinator.observeSecureStorageAvailability(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.events.filter((event) => event.startsWith("install:")), ["install:7"]);
+  h.coordinator.observeSecureStorageAvailability(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.events.filter((event) => event === "ensure").length, 2);
+});
+
+test("successful native probes cannot repeatedly retry a credential-specific encryption failure", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const storage = {
+    ...keychain,
+    encryptString(value: string) {
+      if (value.startsWith("letagents-secure-storage-probe:")) return keychain.encryptString(value);
+      throw new Error("credential encryption unavailable");
+    },
+  };
+  const key = "owner/supervised_launch_1234567";
+  const h = harness({
+    readGrant: async () => ({ metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 }),
+    replaceGrant: async (input) => { encryptSupervisorGrantForStorage(input.token, storage); },
+  });
+  const probe = () => {
+    const status = getDesktopSupervisorGrantStorageStatus(storage);
+    assert.equal(status.available, true);
+    h.coordinator.observeSecureStorageAvailability(status.available);
+  };
+  await assert.rejects(h.coordinator.reconcileDesiredRunning(), DesktopSecureStorageUnavailableError);
+  probe();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.events.filter((event) => event === "install:7").length, 2, "the first available probe still retries a startup storage failure");
+  for (let check = 0; check < 3; check += 1) {
+    probe();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+  }
+  assert.equal(h.events.filter((event) => event === "install:7").length, 2, "unchanged available probes do not retry repeated typed write failures");
+  h.coordinator.observeSecureStorageAvailability(false);
+  probe();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.events.filter((event) => event === "install:7").length, 3, "an actual unavailable-to-available observation allows another recovery");
+  h.coordinator.scheduleCredentialRecovery();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.events.filter((event) => event === "install:7").length, 4, "successful login remains an independent recovery wake");
+});
+
+test("storage probes do not start recovery without a transition or loop after another failure", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  let lists = 0;
+  let generation = 7;
+  const c = new SupervisorGrantCoordinator({
+    async ensureRunning() { return { generation }; },
+    async list() { lists += 1; throw new Error("owner auth still unavailable"); },
+  } as never);
+  for (const available of [true, true, false, false]) c.observeSecureStorageAvailability(available);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(lists, 0);
+  c.observeSecureStorageAvailability(true);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  c.observeSecureStorageAvailability(true);
+  c.scheduleReconciliation({ generation: 7 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(lists, 1, "unchanged probes and the same generation cannot retry the failed recovery");
+  generation = 8;
+  c.scheduleReconciliation({ generation: 8 });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(lists, 2, "a genuinely new daemon generation remains a recovery trigger");
+});
+
+test("a stale installation after credential recovery never advances the durable installation marker", async (t) => {
+  t.mock.method(console, "warn", () => {});
+  const h = harness();
+  const key = "owner/supervised_launch_1234567";
+  const stored = { metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
+  const c = new SupervisorGrantCoordinator({
+    ...h.daemon,
+    async installHostGrant() { h.events.push("install:stale"); return "stale"; },
+  } as never, (async () => { throw new Error("unexpected request"); }) as never, () => "host_1", {
+    ...h.operations,
+    readGrant: async () => stored,
+  });
+  c.scheduleCredentialRecovery();
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.events.filter((event) => event.startsWith("install:")), ["install:stale"]);
+  assert.equal(h.events.some((event) => event.startsWith("replace:") || event.startsWith("bootstrap:")), false);
+  await assert.rejects(c.reconcileDesiredRunning(), /changed generation/);
 });
 
 test("a generation change during reconciliation schedules exactly one follow-up", async () => {

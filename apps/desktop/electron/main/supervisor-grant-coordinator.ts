@@ -1,6 +1,7 @@
 import { apiFetch } from "./auth.js";
 import { getOrCreateDesktopHostId } from "./agents/state.js";
 import {
+  DesktopSecureStorageUnavailableError,
   getOrCreateDesktopSupervisorAgentIdentity,
   getOrProvisionDesktopSupervisorGrantForAgent,
   readDesktopSupervisorGrantAgentKeyForEntry,
@@ -99,7 +100,9 @@ export class SupervisorGrantCoordinator {
   private reconciliation: Promise<void> | null = null;
   private requestedDaemonGeneration: number | null = null;
   private lastReconciledDaemonGeneration: number | null = null;
-  private generationEventSerial = 0;
+  private reconciliationEventSerial = 0;
+  private credentialRecoveryPending = false;
+  private secureStorageAvailable: boolean | null = null;
 
   constructor(
     private readonly daemon: SupervisorDaemonClient = supervisorDaemonClient,
@@ -275,18 +278,26 @@ export class SupervisorGrantCoordinator {
   /** Reinstall the encrypted grant after app/daemon recovery without restarting a provider. */
   async reconcileDesiredRunning(): Promise<void> {
     if (this.reconciliation) return this.reconciliation;
-    const startedEventSerial = this.generationEventSerial;
+    const startedEventSerial = this.reconciliationEventSerial;
+    this.credentialRecoveryPending = false;
     const operation = this.reconcileDesiredRunningOnce();
     this.reconciliation = operation;
     try {
       await operation;
+    } catch (error) {
+      // Seed startup recovery before the first native probe. Once probed,
+      // a credential-specific write failure is not an availability transition:
+      // otherwise every unchanged successful probe would retry that failure.
+      if (error instanceof DesktopSecureStorageUnavailableError && this.secureStorageAvailable === null) {
+        this.secureStorageAvailable = false;
+      }
+      throw error;
     } finally {
       if (this.reconciliation === operation) this.reconciliation = null;
-      // Retry only when a genuinely different generation event arrived while
-      // this pass was active. A persistent same-generation auth/API failure
-      // stays blocked until an explicit recovery trigger instead of spinning
-      // an unbounded microtask/API loop.
-      if (this.generationEventSerial > startedEventSerial) {
+      // A new generation or credential-recovery event may arrive while this
+      // pass is failing. Keep one follow-up, but never retry just because the
+      // previous pass failed: unchanged auth/API failures must not spin.
+      if (this.reconciliationEventSerial > startedEventSerial) {
         queueMicrotask(() => this.startScheduledReconciliation());
       }
     }
@@ -295,13 +306,27 @@ export class SupervisorGrantCoordinator {
   scheduleReconciliation(status: { generation: number }): void {
     if (this.requestedDaemonGeneration === status.generation) return;
     this.requestedDaemonGeneration = status.generation;
-    this.generationEventSerial += 1;
+    this.reconciliationEventSerial += 1;
     this.startScheduledReconciliation();
+  }
+
+  /** A successful login is a recovery wake, not proof that any grant was installed. */
+  scheduleCredentialRecovery(): void {
+    this.credentialRecoveryPending = true;
+    this.reconciliationEventSerial += 1;
+    this.startScheduledReconciliation();
+  }
+
+  observeSecureStorageAvailability(available: boolean): void {
+    const recovered = this.secureStorageAvailable === false && available;
+    this.secureStorageAvailable = available;
+    if (recovered) this.scheduleCredentialRecovery();
   }
 
   private startScheduledReconciliation(): void {
     if (this.reconciliation
-      || this.requestedDaemonGeneration === this.lastReconciledDaemonGeneration) return;
+      || (!this.credentialRecoveryPending
+        && this.requestedDaemonGeneration === this.lastReconciledDaemonGeneration)) return;
     void this.reconcileDesiredRunning().catch((error) => {
       // No bearer is interpolated into diagnostics. The daemon continues to
       // report its paused/auth-blocked state until a later recovery succeeds.

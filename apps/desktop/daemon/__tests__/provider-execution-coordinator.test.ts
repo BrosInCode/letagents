@@ -11,6 +11,8 @@ import type {
   ProviderActionTerminal,
 } from "../provider-action-port.js";
 import type { DaemonManifestEntry, ExecutionTerminalPayload } from "../types.js";
+import type { WorkerSessionBinding } from "../worker-binding-store.js";
+import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-runtime-custody.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -237,7 +239,7 @@ function harness(input: {
       stop: async (entryId) => { stoppedDelivery.push(entryId); },
       start: async () => {},
     },
-    inbox: { cursor: async () => ({ last_observed_message_id: "1" }) },
+    inbox: { cursor: async () => ({ agent_id: "agent-1", room_id: "room-1", last_observed_message_id: "1" }) },
     host: {
       requiresGrant: () => false,
       currentGrant: () => null,
@@ -265,6 +267,8 @@ function harness(input: {
   const coordinator = new ProviderExecutionCoordinator(options);
   return {
     coordinator,
+    options,
+    liveHandles,
     installed,
     stoppedDelivery,
     observedTerminals,
@@ -299,6 +303,174 @@ test("handoff during native dispatch journals the exact returned provider withou
   );
   assert.equal(runtime.installed.length, 0, "retiring daemon never owns returned-handle callbacks");
   await runtime.coordinator.drainDispatches();
+});
+
+test("legacy resume stages wait authority from the persisted successor rather than the predecessor snapshot", async () => {
+  const runtime = harness({
+    entry: {
+      ...baseEntry(), delivery_mode: "mcp_polling",
+      provider_ref: {
+        work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection,
+      },
+    },
+    provider: provider({ capabilities: async () => ({
+      resume: true, midTurnInjection: false, transcriptAccess: false,
+      permissionPromptBridging: false, survivesRestart: false,
+    }) }),
+  });
+  runtime.executionGenerations.push({
+    execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z", actor: "test", generation: 1,
+    terminal: runtime.options.terminalPayload(terminal(returnedHandle), "test"),
+  });
+  runtime.options.bindings.get = async () => ({
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+    execution_generation_id: "generation-1", agent_session_id: "session-1",
+    credential_ref: "legacy-ref", api_url: "https://letagents.test", room_cursor: "7",
+    last_sequence: 9, last_observed_at_ms: 1_000, updated_at: "2026-08-26T00:00:00.000Z",
+  });
+  let stagedGeneration: string | null = null;
+  runtime.options.streams.stageWorkerBindingAfterResume = async (entry, prior, successor, handle) => {
+    assert.equal(entry.provider_ref?.execution_generation_id, successor);
+    assert.equal(entry.provider_ref?.execution_generation_id, runtime.entry().provider_ref?.execution_generation_id);
+    assert.equal(prior.execution_generation_id, "generation-1");
+    assert.equal(handle, returnedHandle);
+    stagedGeneration = successor;
+  };
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.equal(stagedGeneration, "generation-2");
+  assert.equal(runtime.entry().last_error, "resumed provider awaits exact worker wait evidence");
+});
+
+function ownedRecoveryHarness() {
+  const runtime = harness({
+    entry: {
+      ...baseEntry(), delivery_mode: "daemon_inbox", observed_state: "recovering",
+      condition: "coordination_blocked", last_error: "resumed provider awaits exact worker wait evidence",
+      provider_ref: {
+        work_attempt_id: "attempt-1", execution_generation_id: "generation-2",
+        provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection,
+      },
+    },
+    provider: provider({ attach: async () => returnedHandle }),
+  });
+  runtime.executionGenerations.push({
+    execution_generation_id: "generation-2", work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:01.000Z", actor: "test", generation: 2, terminal: null,
+  });
+  let grant: InstalledHostGrant = {
+    entryId: "agent-1", roomId: "room-1", agentKey: "owner/agent-1",
+    grantId: "grant-1", supervisorGrant: "supervisor-secret", grantGeneration: 1,
+    apiUrl: "https://letagents.test", daemonGeneration: 7, hostId: "host-1",
+    installationId: "installation-1", expiresAt: "2099-01-01T00:00:00.000Z",
+  };
+  let binding: WorkerSessionBinding = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+    execution_generation_id: "generation-1", agent_session_id: "session-1",
+    credential_ref: "old-bearer-id", api_url: grant.apiUrl, room_cursor: "7",
+    last_sequence: 9, last_observed_at_ms: 1_000, updated_at: "2026-08-26T00:00:00.000Z",
+  };
+  let credential = "old-secret";
+  let mintCalls = 0;
+  let deliveryStarts = 0;
+  let waitStages = 0;
+  const failures: unknown[] = [];
+  runtime.options.bindings = {
+    get: async () => binding,
+    credentialFor: async () => credential,
+    supervisedWorkerSession: async () => null,
+  };
+  runtime.options.host = {
+    ...runtime.options.host,
+    requiresGrant: () => true,
+    currentGrant: () => grant,
+    ensureGrantFresh: async () => grant,
+    mintSession: async (entry, executionGenerationId): Promise<BoundWorkerAuthorization> => {
+      mintCalls += 1;
+      return {
+        executionGenerationId, agentSessionId: "session-1", bearer: "current-secret",
+        bearerId: "current-bearer-id", expiresAt: grant.expiresAt, apiUrl: grant.apiUrl,
+        authority: { entryId: entry.id, roomId: entry.room_id, workAttemptId: entry.work_attempt_id!, grant },
+      };
+    },
+    bindMintedSession: async (_entryId, minted) => {
+      binding = {
+        ...binding, entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+        execution_generation_id: minted.executionGenerationId, agent_session_id: minted.agentSessionId,
+        credential_ref: minted.bearerId, api_url: minted.apiUrl,
+      };
+      credential = minted.bearer;
+      runtime.setEntry({ ...runtime.entry(), condition: "none", last_error: null });
+    },
+    recordBindingRecoveryFailure: async (_id, _generation, error) => { failures.push(error); },
+  };
+  runtime.options.streams.stageWorkerBindingAfterResume = async () => { waitStages += 1; throw new Error("owned agents never poll"); };
+  runtime.options.delivery.start = async () => { deliveryStarts += 1; };
+  return {
+    ...runtime, failures,
+    get binding() { return binding; },
+    get mintCalls() { return mintCalls; },
+    get deliveryStarts() { return deliveryStarts; },
+    get waitStages() { return waitStages; },
+    replaceGrant: () => { grant = { ...grant, grantId: "grant-2" }; },
+  };
+}
+
+test("daemon-owned reattach binds the current generation despite a still-present predecessor credential", async () => {
+  const runtime = ownedRecoveryHarness();
+  await runtime.coordinator.converge("agent-1");
+  assert.equal(runtime.mintCalls, 1);
+  assert.equal(runtime.binding.execution_generation_id, "generation-2");
+  assert.equal(runtime.binding.agent_session_id, "session-1");
+  assert.equal(runtime.binding.room_cursor, "7", "recovery retains worker cursor and durable ingress owns polling");
+  assert.equal(runtime.binding.last_sequence, 9);
+  assert.equal(runtime.entry().condition, "none");
+  assert.equal(runtime.entry().observed_state, "working");
+  assert.equal(runtime.deliveryStarts, 1);
+  assert.equal(runtime.waitStages, 0);
+  assert.deepEqual(runtime.failures, []);
+});
+
+test("a resolved mint/bind call without exact read-back never makes an owned provider ready", async () => {
+  const runtime = ownedRecoveryHarness();
+  runtime.options.host.bindMintedSession = async () => {};
+  await runtime.coordinator.converge("agent-1");
+  assert.equal(runtime.entry().condition, "coordination_blocked");
+  assert.equal(runtime.entry().observed_state, "recovering");
+  assert.equal(runtime.deliveryStarts, 0);
+  assert.equal(runtime.failures.length, 1);
+  assert.equal(runtime.waitStages, 0);
+});
+
+test("owned convergence rejects a cursor for another room before attaching or minting", async () => {
+  const runtime = ownedRecoveryHarness();
+  runtime.options.inbox.cursor = async () => ({ agent_id: "agent-1", room_id: "other-room", last_observed_message_id: "7" });
+  await runtime.coordinator.converge("agent-1");
+  assert.equal(runtime.installed.length, 0);
+  assert.equal(runtime.mintCalls, 0);
+  assert.equal(runtime.deliveryStarts, 0);
+});
+
+test("owned recovery cannot start delivery after grant, daemon, continuation, or handle changes", async () => {
+  for (const move of ["grant", "daemon", "continuation", "handle"] as const) {
+    const runtime = ownedRecoveryHarness();
+    const bind = runtime.options.host.bindMintedSession;
+    runtime.options.host.bindMintedSession = async (...args) => {
+      await bind(...args);
+      if (move === "grant") runtime.replaceGrant();
+      if (move === "daemon") runtime.setHandoff(true);
+      if (move === "continuation") runtime.setEntry({
+        ...runtime.entry(), provider_ref: { ...runtime.entry().provider_ref!, provider_continuation_id: "replacement" },
+      });
+      if (move === "handle") runtime.liveHandles.set("agent-1", { ...returnedHandle });
+    };
+    await runtime.coordinator.converge("agent-1");
+    assert.equal(runtime.deliveryStarts, 0, move);
+    assert.equal(runtime.waitStages, 0, move);
+  }
 });
 
 test("pause winning after native return fences that exact handle and terminalizes its generation", async () => {

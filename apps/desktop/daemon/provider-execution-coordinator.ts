@@ -8,6 +8,7 @@ import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError } from "./manifest-store.js";
 import {
   sameProviderActionConnectionIdentity,
+  sameProviderActionConnectionSnapshot,
   type ProviderActionAttachTerminal,
   type ProviderActionHandle,
   type ProviderActionPort,
@@ -148,7 +149,11 @@ export type ProviderExecutionCoordinatorOptions = {
     start(entryId: string, mode?: "ensure" | "wake"): Promise<unknown>;
   };
   inbox: {
-    cursor(entryId: string): Promise<unknown>;
+    cursor(entryId: string): Promise<{
+      agent_id: string;
+      room_id: string;
+      last_observed_message_id: string | null;
+    } | null>;
   };
   host: {
     requiresGrant(entry: DaemonManifestEntry): boolean;
@@ -718,7 +723,8 @@ export class ProviderExecutionCoordinator {
       mayStartDelivery,
     );
     const binding = await this.options.bindings.get(authoritativeEntry.id);
-    if (binding && binding.execution_generation_id !== ref.execution_generation_id) {
+    if ((authoritativeEntry.delivery_mode ?? "mcp_polling") === "mcp_polling"
+      && binding && binding.execution_generation_id !== ref.execution_generation_id) {
       try {
         await this.options.streams.stageWorkerBindingAfterResume(
           authoritativeEntry,
@@ -800,7 +806,10 @@ export class ProviderExecutionCoordinator {
       }
     }
     if (this.options.host.requiresGrant(entry) && !this.options.host.currentGrant(entry)) return;
-    if (this.options.host.requiresGrant(entry) && !await this.options.inbox.cursor(entry.id)) return;
+    if (this.options.host.requiresGrant(entry)) {
+      const cursor = await this.options.inbox.cursor(entry.id);
+      if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return;
+    }
     if (this.options.host.requiresGrant(entry) && !await this.options.host.ensureGrantFresh(entry)) return;
     entry = await this.launchEntryIfCurrent(entry.id, launchControlEpoch) ?? entry;
     if (entry.desired_state !== "running"
@@ -862,19 +871,24 @@ export class ProviderExecutionCoordinator {
     handle: ProviderActionHandle,
   ): Promise<void> {
     let entry = initialEntry;
-    if (this.options.host.requiresGrant(entry) && this.options.host.currentGrant(entry)) {
+    const grant = this.options.host.currentGrant(entry);
+    const daemonGeneration = this.options.authority.currentDaemonGeneration();
+    const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
+    if (this.options.host.requiresGrant(entry)) {
+      if (!grant) return;
       const binding = await this.options.bindings.get(entry.id);
-      const credential = binding ? await this.options.bindings.credentialFor(binding) : null;
+      const exactBinding = await this.hasExactHostBinding(entry, handle);
       const supervisedSession = binding
         ? await this.options.bindings.supervisedWorkerSession(entry.id)
         : null;
       const expiring = binding
         ? await this.options.host.bearerNeedsRotation(entry, binding)
         : false;
-      if ((!credential || expiring) && entry.provider_ref?.execution_generation_id) {
+      let minted: BoundWorkerAuthorization | null = null;
+      if ((!exactBinding || expiring) && entry.provider_ref?.execution_generation_id) {
         const executionGenerationId = entry.provider_ref.execution_generation_id;
         try {
-          const minted = await this.options.host.mintSession(entry, executionGenerationId);
+          minted = await this.options.host.mintSession(entry, executionGenerationId);
           if (minted) {
             await this.options.host.bindMintedSession(entry.id, minted);
             entry = await this.options.store.getEntry(entry.id) ?? entry;
@@ -883,7 +897,7 @@ export class ProviderExecutionCoordinator {
           const bearerExpiry = supervisedSession?.expires_at
             ? Date.parse(supervisedSession.expires_at)
             : Number.NaN;
-          if (!credential) {
+          if (!exactBinding) {
             await this.options.host.recordBindingRecoveryFailure(
               entry.id,
               executionGenerationId,
@@ -899,6 +913,18 @@ export class ProviderExecutionCoordinator {
             return;
           }
         }
+      }
+      if (this.options.authority.isHandoffScheduled()
+        || this.options.authority.currentDaemonGeneration() !== daemonGeneration
+        || this.options.concurrency.currentControlEpoch(entry.id) !== controlEpoch
+        || this.options.host.currentGrant(entry) !== grant) return;
+      if (!await this.hasExactHostBinding(entry, handle, minted ?? undefined)) {
+        if (entry.provider_ref?.execution_generation_id) {
+          await this.options.host.recordBindingRecoveryFailure(entry.id,
+            entry.provider_ref.execution_generation_id,
+            new Error("Provider is running; its exact worker authority is not yet bound."));
+        }
+        return;
       }
     }
     if (entry.observed_state !== handle.observedState) {
@@ -920,6 +946,50 @@ export class ProviderExecutionCoordinator {
     if (entry.desired_state === "running" && entry.delivery_mode === "daemon_inbox") {
       await this.options.delivery.start(entry.id, "ensure");
     }
+  }
+
+  /** Delivery readiness comes from durable worker authority, never provider polling output. */
+  private async hasExactHostBinding(
+    entry: DaemonManifestEntry,
+    handle: ProviderActionHandle,
+    minted?: BoundWorkerAuthorization,
+  ): Promise<boolean> {
+    const ref = entry.provider_ref;
+    const grant = this.options.host.currentGrant(entry);
+    const daemonGeneration = this.options.authority.currentDaemonGeneration();
+    const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
+    if (!ref || !grant || entry.work_attempt_id !== ref.work_attempt_id
+      || this.options.streams.get(entry.id) !== handle
+      || handle.workAttemptId !== ref.work_attempt_id
+      || handle.providerContinuationId !== ref.provider_continuation_id
+      || !sameProviderActionConnectionSnapshot(ref.provider_connection, handle.providerConnection)) return false;
+    const binding = await this.options.bindings.get(entry.id);
+    if (!binding || binding.entry_id !== entry.id || binding.room_id !== entry.room_id
+      || binding.work_attempt_id !== ref.work_attempt_id
+      || binding.execution_generation_id !== ref.execution_generation_id
+      || binding.api_url !== grant.apiUrl) return false;
+    const credential = await this.options.bindings.credentialFor(binding);
+    if (!credential || (minted && (binding.agent_session_id !== minted.agentSessionId
+      || binding.credential_ref !== minted.bearerId || credential !== minted.bearer))) return false;
+    const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
+    if (!attempt.execution_generations.some((candidate) =>
+      candidate.execution_generation_id === ref.execution_generation_id && !candidate.terminal)) return false;
+    const cursor = await this.options.inbox.cursor(entry.id);
+    if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id
+      || !await this.options.authority.ownsDaemonGeneration(daemonGeneration)) return false;
+    const current = await this.options.store.getEntry(entry.id);
+    return Boolean(current && current.desired_state === "running"
+      && current.delivery_mode === "daemon_inbox" && current.room_id === entry.room_id
+      && current.work_attempt_id === ref.work_attempt_id
+      && current.provider_ref?.work_attempt_id === ref.work_attempt_id
+      && current.provider_ref.execution_generation_id === ref.execution_generation_id
+      && current.provider_ref.provider_continuation_id === ref.provider_continuation_id
+      && sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, ref.provider_connection)
+      && handle.providerContinuationId === ref.provider_continuation_id
+      && sameProviderActionConnectionSnapshot(handle.providerConnection, ref.provider_connection)
+      && this.options.streams.get(entry.id) === handle
+      && this.options.host.currentGrant(current) === grant
+      && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);
   }
 
   private async launchProvider(
@@ -1339,7 +1409,12 @@ export class ProviderExecutionCoordinator {
       );
       return;
     }
-    if (priorBinding && !resumed) {
+    if (entry.delivery_mode === "daemon_inbox") {
+      const current = await this.options.store.getEntry(entry.id);
+      if (current) await this.convergeAttachedHandle(current, handle);
+      return;
+    }
+    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling" && priorBinding && !resumed) {
       await this.options.transition(
         entry.id,
         "recovering",
@@ -1349,10 +1424,13 @@ export class ProviderExecutionCoordinator {
       );
       return;
     }
-    if (resumed && priorBinding && !reusesActiveCursorExecution) {
+    if ((entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
+      && resumed && priorBinding && !reusesActiveCursorExecution) {
       try {
+        const current = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
+        if (!current) return;
         await this.options.streams.stageWorkerBindingAfterResume(
-          entry,
+          current,
           priorBinding,
           execution.execution_generation_id,
           handle,
