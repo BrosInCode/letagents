@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -1094,6 +1094,245 @@ function permissionFixture(id = "per_a", sessionID = "ses_a"): OpenCodePermissio
 function nativeClient(fetchImpl: OpenModelProviderAdapterDependencies["fetch"]): OpenCodeServerClient {
   return new OpenCodeServerClient("http://127.0.0.1:43821", { username: "opencode", password: "client-test" }, fetchImpl);
 }
+
+function permissionTurnMessages(sessionID = "ses_a") {
+  const assistant = assistantWithTool("msg_user", "msg_assistant", 10,
+    { status: "running", input: { command: "private-command" }, output: "private-output" }, "call_a");
+  assistant.info.sessionID = sessionID;
+  Object.assign(assistant.parts[0]!, { sessionID, messageID: "msg_assistant" });
+  const user = userMessage("msg_user"); user.info.sessionID = sessionID;
+  user.parts.push({ type: "text", text: "private-user-prompt" });
+  return { assistant, user };
+}
+
+test("OpenCode permission correlation reads only the exact assistant and user messages and returns structural linkage", async () => {
+  const { assistant, user } = permissionTurnMessages();
+  const paths: string[] = []; let fences = 0;
+  const client = nativeClient(async (input, init) => {
+    const url = new URL(input); paths.push(url.pathname);
+    assert.equal(init?.method ?? "GET", "GET"); assert.equal(url.search, ""); assert.ok(init?.signal);
+    assert.equal(new Headers(init?.headers).get("authorization"), `Basic ${Buffer.from("opencode:client-test").toString("base64")}`);
+    assert.equal(fences, paths.length, "instance fence precedes each exact read");
+    return json(paths.length === 1 ? assistant : user);
+  });
+  const expected = permissionFixture(); expected.permission = "external_directory";
+  const correlation = await client.correlatePermissionTurn("ses_a", expected, () => { fences += 1; });
+  assert.deepEqual(correlation, { outcome: "correlated", requestId: "per_a", providerContinuationId: "ses_a",
+    providerTurnId: "msg_user", assistantMessageId: "msg_assistant", callId: "call_a" });
+  assert.deepEqual(paths, ["/session/ses_a/message/msg_assistant", "/session/ses_a/message/msg_user"]);
+  assert.equal(fences, 3, "the parent response is fenced too");
+  assert.doesNotMatch(JSON.stringify(correlation), /private-|metadata|command|patterns|output/);
+});
+
+test("OpenCode permission correlation refuses missing tool and foreign or malformed requests without reading", async () => {
+  let reads = 0; const client = nativeClient(async () => { reads += 1; return json({}); });
+  const withoutTool = permissionFixture(); delete withoutTool.tool;
+  for (const [session, request] of [
+    ["", permissionFixture()], ["ses_other", permissionFixture()], ["ses_a", withoutTool],
+    ["ses_a", null], ["ses_a", {}], ["ses_a", { ...permissionFixture(), id: "" }],
+    ["ses_a", { ...permissionFixture(), metadata: [] }], ["ses_a", { ...permissionFixture(), patterns: [1] }],
+    ["ses_a", { ...permissionFixture(), tool: null }],
+    ["ses_a", { ...permissionFixture(), tool: { messageID: " ", callID: "call_a" } }],
+    ["ses_a", { ...permissionFixture(), tool: { messageID: "msg_assistant", callID: "" } }],
+  ] as Array<[string, unknown]>) {
+    assert.deepEqual(await client.correlatePermissionTurn(session, request as OpenCodePermissionRequest), { outcome: "correlation_unproven" });
+  }
+  assert.equal(reads, 0);
+});
+
+test("OpenCode permission correlation rejects malformed, ambiguous, and foreign message links", async () => {
+  const { assistant, user } = permissionTurnMessages(); const part = assistant.parts[0]!;
+  const badAssistants: Array<[string, unknown]> = [
+    ["missing envelope", null], ["array envelope", [assistant]], ["missing info", { parts: assistant.parts }],
+    ...[{ id: "other" }, { sessionID: "other" }, { sessionID: undefined }, { role: "user" },
+      { parentID: undefined }, { parentID: " " }, { parentID: "msg_assistant" }].map(change =>
+      [JSON.stringify(change), { ...assistant, info: { ...assistant.info, ...change } }] as [string, unknown]),
+    ["missing parts", { info: assistant.info }], ["nonarray parts", { ...assistant, parts: {} }],
+    ["no tool part", { ...assistant, parts: [null] }],
+    ...[{ id: "" }, { id: undefined }, { type: "text" }, { callID: "other" }, { sessionID: "other" },
+      { sessionID: undefined }, { messageID: "other" }, { messageID: undefined }].map(change =>
+      [JSON.stringify(change), { ...assistant, parts: [{ ...part, ...change }] }] as [string, unknown]),
+    ["duplicate call", { ...assistant, parts: [part, { ...part, id: "second-tool-part" }] }],
+  ];
+  for (const [name, response] of badAssistants) {
+    let reads = 0; const client = nativeClient(async () => { reads += 1; return json(response); });
+    assert.deepEqual(await client.correlatePermissionTurn("ses_a", permissionFixture()), { outcome: "correlation_unproven" }, name);
+    assert.equal(reads, 1, `${name}: invalid assistant cannot authorize a parent lookup`);
+  }
+  for (const response of [null, [], {}, ...[{ id: "other" }, { sessionID: "other" }, { sessionID: undefined },
+    { role: "assistant" }, { role: undefined }].map(change => ({ ...user, info: { ...user.info, ...change } }))]) {
+    let reads = 0; const client = nativeClient(async () => json(++reads === 1 ? assistant : response));
+    assert.deepEqual(await client.correlatePermissionTurn("ses_a", permissionFixture()), { outcome: "correlation_unproven" });
+    assert.equal(reads, 2);
+  }
+});
+
+test("OpenCode permission correlation treats missing messages and failed reads as unproven without retry or continuation loss", async () => {
+  const { assistant } = permissionTurnMessages();
+  for (const hop of [1, 2]) {
+    for (const failure of ["404", "401", "500", "bad_json", "transport"] as const) {
+      let reads = 0;
+      const client = nativeClient(async () => {
+        if (++reads !== hop) return json(assistant);
+        if (failure === "transport") throw new Error("private-transport-error");
+        if (failure === "bad_json") return new Response("private-malformed-body", { status: 200 });
+        return json({ error: "private-missing-message" }, Number(failure));
+      });
+      assert.deepEqual(await client.correlatePermissionTurn("ses_a", permissionFixture()), { outcome: "correlation_unproven" }, `${failure} hop ${hop}`);
+      assert.equal(reads, hop, "lookup never retries, lists sessions, or repairs a continuation");
+    }
+  }
+});
+
+test("OpenCode permission correlation snapshots native request identity before awaiting either message", async () => {
+  const expected = permissionFixture(); const { assistant, user } = permissionTurnMessages(); const paths: string[] = [];
+  const client = nativeClient(async (input) => {
+    paths.push(new URL(input).pathname);
+    if (paths.length === 1) {
+      expected.id = "replacement-request"; expected.sessionID = "replacement-session";
+      expected.tool!.messageID = "replacement-message"; expected.tool!.callID = "replacement-call";
+      await Promise.resolve(); return json(assistant);
+    }
+    return json(user);
+  });
+  assert.deepEqual(await client.correlatePermissionTurn("ses_a", expected), { outcome: "correlated", requestId: "per_a",
+    providerContinuationId: "ses_a", providerTurnId: "msg_user", assistantMessageId: "msg_assistant", callId: "call_a" });
+  assert.deepEqual(paths, ["/session/ses_a/message/msg_assistant", "/session/ses_a/message/msg_user"]);
+});
+
+test("Open Model permission correlation fences process and continuation loss before and during either exact read", async (t) => {
+  for (const hop of [0, 1, 2]) {
+    for (const loss of ["process_replaced", "process_unknown", "process_exited", "continuation_repaired", "instance_disposed"] as const) {
+      await t.test(`${loss} at hop ${hop}`, async (t) => {
+        const harness = createHarness(); let identity: string | null | undefined = "opencode-birth-6101";
+        const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-permission-correlation-"));
+        t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+        const { assistant, user } = permissionTurnMessages("session-open-model-1");
+        let reads = 0; let release!: () => void; let readStarted!: () => void;
+        const held = new Promise<void>(resolve => { release = resolve; });
+        const started = new Promise<void>(resolve => { readStarted = resolve; });
+        const adapter = new OpenModelProviderAdapter({ runtimeRoot, dependencies: {
+          ...harness.dependencies, getProcessIdentity: () => identity,
+          fetch: async (input, init) => {
+            const match = new URL(input).pathname.match(/^\/session\/[^/]+\/message\/([^/]+)$/);
+            if (!match) return harness.dependencies.fetch(input, init);
+            if (++reads === hop) { readStarted(); await held; }
+            return json(match[1] === "msg_assistant" ? assistant : user);
+          },
+        } });
+        const handle = await adapter.spawn(spawnRequest());
+        const expected = permissionFixture("per_a", handle.providerContinuationId!);
+        const observations: NativeExecutionObservation[] = []; adapter.onExecution(handle, event => observations.push(event));
+        const observer = new AbortController(); let observing: Promise<void> | undefined;
+        if (loss === "instance_disposed") {
+          let ready!: () => void; const snapshot = new Promise<void>(resolve => { ready = resolve; });
+          observing = adapter.observePermissions(handle, event => { if (event.type === "snapshot") ready(); }, observer.signal);
+          await snapshot;
+        }
+        const invalidate = async () => {
+          if (loss === "process_replaced") identity = "replacement-birth";
+          else if (loss === "process_unknown") identity = undefined;
+          else if (loss === "process_exited") identity = null;
+          else if (loss === "continuation_repaired") {
+            await adapter.repairContinuation(handle, { ...spawnRequest(), expectedProviderContinuationId: handle.providerContinuationId!, forceReplacement: true }, { checkpointReplacement: async () => {} });
+          } else { harness.sendEvent({ type: "server.instance.disposed", properties: {} }); await observing; }
+        };
+        try {
+          if (hop === 0) await invalidate();
+          const pending = adapter.correlatePermissionTurn(handle, expected);
+          if (hop > 0) { await started; await invalidate(); }
+          const factsBeforeRelease = observations.length; const stateBeforeRelease = handle.observedState();
+          release();
+          assert.deepEqual(await pending, { outcome: "correlation_unproven" });
+          assert.equal(reads, hop);
+          assert.equal(observations.length, factsBeforeRelease, "lookup itself never publishes liveness or execution facts");
+          assert.equal(handle.observedState(), stateBeforeRelease);
+          assert.deepEqual(harness.permissionReplies, []); assert.deepEqual(harness.promptBodies, []);
+          assert.deepEqual(harness.aborts, []); assert.deepEqual(harness.signals, []); assert.equal(harness.launches.length, 1);
+        } finally { release(); observer.abort(); await observing; }
+      });
+    }
+  }
+});
+
+test("Open Model permission correlation does not use current-turn guesses and rejects foreign, changed, or stopping handles", async (t) => {
+  const harness = createHarness(); const { assistant, user } = permissionTurnMessages("session-open-model-1");
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-permission-correlation-handle-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  let reads = 0; let changeConnection = false; let missingMessage: string | null = null;
+  let finishExit!: (exit: ProviderProcessExit) => void;
+  const exited = new Promise<ProviderProcessExit>(resolve => { finishExit = resolve; });
+  const adapter = new OpenModelProviderAdapter({ runtimeRoot, dependencies: {
+    ...harness.dependencies, observeProcessExit: () => exited,
+    fetch: async (input, init) => {
+      const match = new URL(input).pathname.match(/^\/session\/[^/]+\/message\/([^/]+)$/);
+      if (!match) return harness.dependencies.fetch(input, init);
+      reads += 1;
+      if (changeConnection) {
+        const connection = handle.providerConnection;
+        assert.ok(connection && "url" in connection);
+        connection.url = "http://127.0.0.1:9999";
+      }
+      if (match[1] === missingMessage) return json({ error: "message missing" }, 404);
+      return json(match[1] === "msg_assistant" ? assistant : user);
+    },
+  } });
+  const handle: ProviderHandle = await adapter.spawn(spawnRequest());
+  const expected = permissionFixture("per_a", handle.providerContinuationId!);
+  const observations: NativeExecutionObservation[] = []; adapter.onExecution(handle, event => observations.push(event));
+  (handle as unknown as { activeRoomTurnId: string }).activeRoomTurnId = "unrelated-current-turn";
+  assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlated", requestId: "per_a",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: "msg_user", assistantMessageId: "msg_assistant", callId: "call_a" });
+  assert.equal(reads, 2); assert.equal(observations.length, 0);
+  for (const foreign of [{ ...handle }, { ...handle, workAttemptId: "foreign" }]) {
+    assert.deepEqual(await adapter.correlatePermissionTurn(foreign, expected), { outcome: "correlation_unproven" });
+  }
+  assert.equal(reads, 2);
+  for (const message of ["msg_assistant", "msg_user"]) {
+    missingMessage = message; const state = handle.observedState();
+    assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlation_unproven" });
+    assert.equal(handle.observedState(), state); assert.equal(observations.length, 0);
+    assert.deepEqual(harness.permissionReplies, []); assert.deepEqual(harness.promptBodies, []);
+    assert.deepEqual(harness.aborts, []); assert.deepEqual(harness.signals, []);
+    assert.equal(harness.launches.length, 1, "missing messages never repair or restart the native session");
+  }
+  missingMessage = null;
+  assert.equal(reads, 5);
+  changeConnection = true;
+  assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlation_unproven" });
+  assert.equal(reads, 6); assert.equal(observations.length, 0);
+  const stopped = adapter.stop(handle, { force: true });
+  assert.equal(handle.observedState(), "stopping");
+  assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlation_unproven" });
+  finishExit({ type: "exit", code: null, signal: "SIGKILL" }); await stopped;
+  assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlation_unproven" });
+  assert.equal(reads, 6); assert.deepEqual(harness.permissionReplies, []); assert.deepEqual(harness.promptBodies, []);
+  assert.deepEqual(harness.aborts, []); assert.equal(harness.signals.length, 1, "only the explicitly requested stop signals a process");
+});
+
+test("Open Model permission correlation rechecks the exact instance after the client promise resolves", async (t) => {
+  const harness = createHarness(); let identity = "opencode-birth-6101";
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-permission-correlation-return-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const adapter = new OpenModelProviderAdapter({ runtimeRoot, dependencies: {
+    ...harness.dependencies, getProcessIdentity: () => identity,
+  } });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = (handle as unknown as { client: OpenCodeServerClient }).client;
+  const observations: NativeExecutionObservation[] = []; adapter.onExecution(handle, event => observations.push(event));
+  client.correlatePermissionTurn = async (sessionId, request, assertCurrentInstance) => {
+    assert.ok(assertCurrentInstance); assertCurrentInstance();
+    queueMicrotask(() => { identity = "replacement-birth"; });
+    return { outcome: "correlated", requestId: request.id, providerContinuationId: sessionId,
+      providerTurnId: "msg_user", assistantMessageId: "msg_assistant", callId: "call_a" };
+  };
+  const state = handle.observedState();
+  assert.deepEqual(await adapter.correlatePermissionTurn(handle, permissionFixture("per_a", handle.providerContinuationId!)),
+    { outcome: "correlation_unproven" });
+  assert.equal(handle.observedState(), state); assert.equal(observations.length, 0);
+  assert.deepEqual(harness.permissionReplies, []); assert.deepEqual(harness.promptBodies, []);
+  assert.deepEqual(harness.aborts, []); assert.deepEqual(harness.signals, []);
+});
 
 test("OpenCode client parses permission SSE records strictly without changing unrelated event handling", async () => {
   const harness = createHarness();

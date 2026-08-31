@@ -380,6 +380,14 @@ try {
   const pending = await client.listPendingPermissions(sessionId);
   assert.deepEqual(pending, [asked.properties], "native ask must match the authoritative exact-session list");
   assert.equal(pending[0].permission, "bash");
+  assert.deepEqual(await client.correlatePermissionTurn(sessionId, pending[0]), {
+    outcome: "correlated", requestId: pending[0].id, providerContinuationId: sessionId,
+    providerTurnId: messageId, assistantMessageId: pending[0].tool.messageID, callId: pending[0].tool.callID,
+  }, "native permission must resolve through its exact assistant and tool call to the dispatched user turn");
+  assert.deepEqual(await client.correlatePermissionTurn(sessionId, {
+    ...pending[0], tool: { ...pending[0].tool, messageID: mintNativeUserMessageId(Date.now()) },
+  }), { outcome: "correlation_unproven" }, "missing exact message is not continuation loss");
+  assert.ok((await client.listSessions()).some((session) => session.id === sessionId));
   await observation.close();
 
   // Reconnect the event channel and reconstruct the client while the same
@@ -481,6 +489,8 @@ try {
     nativeAbortAccepted: true,
     sameProcessRepair: true,
     permissionAskAndExactList: true,
+    permissionExactUserTurnCorrelation: true,
+    permissionMissingMessageIsNotSessionLoss: true,
     permissionReconnectWithoutReplay: true,
     permissionAllowOnce: true,
     permissionProcessedReplayRefused: true,

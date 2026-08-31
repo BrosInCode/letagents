@@ -38,6 +38,16 @@ export type OpenCodePermissionRequest = {
   always: string[];
   tool?: { messageID: string; callID: string };
 };
+export type OpenCodePermissionTurnCorrelation =
+  | { outcome: "correlation_unproven" }
+  | {
+    outcome: "correlated";
+    requestId: string;
+    providerContinuationId: string;
+    providerTurnId: string;
+    assistantMessageId: string;
+    callId: string;
+  };
 export type OpenCodePermissionEvent =
   | { type: "permission.asked"; properties: OpenCodePermissionRequest }
   | { type: "permission.replied"; properties: { sessionID: string; requestID: string; reply: "once" | "always" | "reject" } };
@@ -354,6 +364,52 @@ export class OpenCodeServerClient {
       throw new Error("OpenCode returned duplicate pending permission identities.");
     }
     return requests.filter((request) => request.sessionID === sessionId);
+  }
+
+  /** Historical linkage only: this never proves the request is still pending or authorizes a reply. */
+  async correlatePermissionTurn(
+    sessionId: string,
+    expectedRequest: OpenCodePermissionRequest,
+    assertCurrentInstance?: () => void,
+  ): Promise<OpenCodePermissionTurnCorrelation> {
+    const unproven = { outcome: "correlation_unproven" } as const;
+    try {
+      const expected = structuredClone(permissionRequest(expectedRequest));
+      if (!nonEmptyString(sessionId) || expected.sessionID !== sessionId || !expected.tool) return unproven;
+      const { messageID, callID } = expected.tool;
+      assertCurrentInstance?.();
+      const assistant = await this.permissionMessage(sessionId, messageID);
+      assertCurrentInstance?.();
+      const info = record(assistant?.info);
+      if (info?.id !== messageID || info.sessionID !== sessionId || info.role !== "assistant"
+        || !nonEmptyString(info.parentID) || info.parentID === messageID || !Array.isArray(assistant?.parts)) return unproven;
+      const calls = assistant.parts.map(record).filter((part) => part?.type === "tool" && part.callID === callID);
+      if (calls.length !== 1 || !nonEmptyString(calls[0]?.id)
+        || calls[0]?.sessionID !== sessionId || calls[0]?.messageID !== messageID) return unproven;
+      const parentId = info.parentID;
+      const parent = await this.permissionMessage(sessionId, parentId);
+      assertCurrentInstance?.();
+      const user = record(parent?.info);
+      if (user?.id !== parentId || user.sessionID !== sessionId || user.role !== "user") return unproven;
+      return {
+        outcome: "correlated", requestId: expected.id, providerContinuationId: sessionId,
+        providerTurnId: parentId, assistantMessageId: messageID, callId: callID,
+      };
+    } catch {
+      // Missing messages, transport uncertainty, and stale instance fences are
+      // lookup failures, never continuation-loss or execution-lifecycle facts.
+      return unproven;
+    }
+  }
+
+  private async permissionMessage(sessionId: string, messageId: string): Promise<OpenCodeMessage | null> {
+    // Do not use requestJson: its session-route 404 policy would turn a missing
+    // message into ProviderContinuationMissingError and invite session repair.
+    const response = await this.fetchImpl(
+      `${this.url}/session/${encodeURIComponent(sessionId)}/message/${encodeURIComponent(messageId)}`,
+      this.authInit({ signal: AbortSignal.timeout(CONTROL_REQUEST_TIMEOUT_MS) }),
+    );
+    return response.ok ? record(await response.json()) as OpenCodeMessage | null : null;
   }
 
   async replyPermission(
