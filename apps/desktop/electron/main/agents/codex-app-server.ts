@@ -447,17 +447,22 @@ export function launchCodexAppServer(
   const configuredEnv = options.env && Object.keys(options.env).length
     ? { ...runtimeEnv, ...options.env }
     : runtimeEnv;
+  const custodialPolling = configuredEnv.LETAGENTS_EXECUTION_PROFILE === "supervised_mcp_polling";
   const env = isRentalCredentialIsolationRequested(configuredEnv)
     ? rentalIsolatedChildEnvironment(configuredEnv)
-    : configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1"
+    : configuredEnv.LETAGENTS_SUPERVISED_BOUNDED_TURNS === "1" || custodialPolling
       ? { ...configuredEnv }
       : configuredEnv;
   if (env !== configuredEnv) {
-    // A bounded supervised worker borrows exact-generation authority from the
+    // A custodial supervised worker borrows exact-generation authority from the
     // daemon. Ambient desktop owner or fixed worker credentials would bypass
     // that fence and would also leak into provider-started shell commands.
     delete env.LETAGENTS_TOKEN;
     delete env.LETAGENTS_AGENT_SESSION_BEARER;
+    if (custodialPolling) {
+      delete env.LETAGENTS_SUPERVISED_BOUNDED_TURNS;
+      delete env.LETAGENTS_SUPERVISOR_PROVIDER_TURN_ID;
+    }
   }
   const outputCapture = createCodexAppServerOutputCapture(
     sensitiveCodexAppServerLaunchValues(env, options),

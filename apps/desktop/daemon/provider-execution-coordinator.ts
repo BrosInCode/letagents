@@ -45,6 +45,7 @@ import type {
 type CommitFence = (commit: () => Promise<void>) => Promise<void>;
 
 export type ProviderExecutionConfiguration = {
+  polling_contract?: "custodial_polling_v1" | null;
   provider: string;
   model: string | null;
   reasoning_effort: DaemonManifestEntry["reasoning_effort"];
@@ -156,7 +157,7 @@ export type ProviderExecutionCoordinatorOptions = {
     } | null>;
   };
   host: {
-    requiresGrant(entry: DaemonManifestEntry): boolean;
+    requiresGrant(entry: DaemonManifestEntry): boolean | Promise<boolean>;
     currentGrant(entry: DaemonManifestEntry): InstalledHostGrant | null;
     ensureGrantFresh(entry: DaemonManifestEntry): Promise<InstalledHostGrant | null>;
     mintAuthorization(entry: DaemonManifestEntry): Promise<MintedWorkerAuthorization | null>;
@@ -805,12 +806,12 @@ export class ProviderExecutionCoordinator {
         return;
       }
     }
-    if (this.options.host.requiresGrant(entry) && !this.options.host.currentGrant(entry)) return;
-    if (this.options.host.requiresGrant(entry)) {
+    if (await this.options.host.requiresGrant(entry) && !this.options.host.currentGrant(entry)) return;
+    if (entry.delivery_mode === "daemon_inbox") {
       const cursor = await this.options.inbox.cursor(entry.id);
       if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return;
     }
-    if (this.options.host.requiresGrant(entry) && !await this.options.host.ensureGrantFresh(entry)) return;
+    if (await this.options.host.requiresGrant(entry) && !await this.options.host.ensureGrantFresh(entry)) return;
     entry = await this.launchEntryIfCurrent(entry.id, launchControlEpoch) ?? entry;
     if (entry.desired_state !== "running"
       || this.options.concurrency.currentControlEpoch(entry.id) !== launchControlEpoch
@@ -874,7 +875,8 @@ export class ProviderExecutionCoordinator {
     const grant = this.options.host.currentGrant(entry);
     const daemonGeneration = this.options.authority.currentDaemonGeneration();
     const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
-    if (this.options.host.requiresGrant(entry)) {
+    const requiresGrant = await this.options.host.requiresGrant(entry);
+    if (requiresGrant) {
       if (!grant) return;
       const binding = await this.options.bindings.get(entry.id);
       const exactBinding = await this.hasExactHostBinding(entry, handle);
@@ -937,7 +939,7 @@ export class ProviderExecutionCoordinator {
       );
     }
     if (["failed", "stopped"].includes(handle.observedState)
-      || (handle.observedState === "idle" && entry.delivery_mode !== "daemon_inbox")) {
+      || (handle.observedState === "idle" && !requiresGrant)) {
       await this.options.streams.fenceTerminalOnce(
         handle,
         `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
@@ -974,12 +976,14 @@ export class ProviderExecutionCoordinator {
     const attempt = await this.options.durability.getAttempt(ref.work_attempt_id);
     if (!attempt.execution_generations.some((candidate) =>
       candidate.execution_generation_id === ref.execution_generation_id && !candidate.terminal)) return false;
-    const cursor = await this.options.inbox.cursor(entry.id);
-    if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id
-      || !await this.options.authority.ownsDaemonGeneration(daemonGeneration)) return false;
+    if (entry.delivery_mode === "daemon_inbox") {
+      const cursor = await this.options.inbox.cursor(entry.id);
+      if (!cursor || cursor.agent_id !== entry.id || cursor.room_id !== entry.room_id) return false;
+    } else if (!await this.options.host.requiresGrant(entry) || !binding.room_cursor) return false;
+    if (!await this.options.authority.ownsDaemonGeneration(daemonGeneration)) return false;
     const current = await this.options.store.getEntry(entry.id);
     return Boolean(current && current.desired_state === "running"
-      && current.delivery_mode === "daemon_inbox" && current.room_id === entry.room_id
+      && current.delivery_mode === entry.delivery_mode && current.room_id === entry.room_id
       && current.work_attempt_id === ref.work_attempt_id
       && current.provider_ref?.work_attempt_id === ref.work_attempt_id
       && current.provider_ref.execution_generation_id === ref.execution_generation_id
@@ -1030,10 +1034,11 @@ export class ProviderExecutionCoordinator {
         }
       : null;
     const ref = entry.provider_ref ? this.providerRef(entry) : null;
-    const mintedAuthorization = this.options.host.requiresGrant(entry)
+    const requiresGrant = await this.options.host.requiresGrant(entry);
+    const mintedAuthorization = requiresGrant
       ? await this.options.host.mintAuthorization(entry)
       : null;
-    if (this.options.host.requiresGrant(entry) && !mintedAuthorization) return;
+    if (requiresGrant && !mintedAuthorization) return;
     const currentAfterMint = await this.launchEntryIfCurrent(entry.id, launchControlEpoch);
     if (!currentAfterMint) return;
     entry = currentAfterMint;
@@ -1059,7 +1064,7 @@ export class ProviderExecutionCoordinator {
       return;
     }
     const resumed = Boolean(ref && capabilities.resume);
-    if (this.options.host.requiresGrant(entry)) {
+    if (requiresGrant) {
       const grant = this.options.host.currentGrant(entry);
       if (!grant || !await this.options.authority.ownsDaemonGeneration(grant.daemonGeneration)) return;
     }
@@ -1078,7 +1083,7 @@ export class ProviderExecutionCoordinator {
     );
     if (!currentAfterTransition) return;
     entry = currentAfterTransition;
-    if (this.options.host.requiresGrant(entry)) {
+    if (requiresGrant) {
       const grant = this.options.host.currentGrant(entry);
       if (!grant || !await this.options.authority.ownsDaemonGeneration(grant.daemonGeneration)) return;
     }
@@ -1157,6 +1162,7 @@ export class ProviderExecutionCoordinator {
       permissionProfileId: launchSnapshot.permissionProfileId,
       configurationRevision: launchSnapshot.configurationRevision,
       deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      ...(launchConfiguration.polling_contract ? { pollingContract: launchConfiguration.polling_contract } : {}),
       agentDisplayName: entry.display_name,
       actionId: `manifest:${entry.id}:generation:${generationNumber}`,
       supervisorEntryId: entry.id,
@@ -1189,7 +1195,10 @@ export class ProviderExecutionCoordinator {
         Object.assign(spawn, {
           supervisorWorkerSession: {
             agentSessionId: mintedHostSession.agentSessionId,
-            roomCursor: null,
+            ...(launchConfiguration.polling_contract ? { apiUrl: mintedHostSession.apiUrl } : {}),
+            roomCursor: launchConfiguration.polling_contract
+              ? resumeWorker?.roomCursor ?? attempt.checkpoints.at(-1)?.room_cursor ?? null
+              : null,
           },
         });
       }
@@ -1237,7 +1246,9 @@ export class ProviderExecutionCoordinator {
           );
           this.options.authority.acceptManifestGeneration(applied.generation);
           await this.options.durability.checkpoint(attempt.work_attempt_id, {
-            room_cursor: null,
+            room_cursor: launchConfiguration.polling_contract
+              ? spawn.supervisorWorkerSession?.roomCursor ?? null
+              : null,
             provider_continuation_id: handle.providerContinuationId,
           });
           if (this.options.authority.isHandoffScheduled()) return;
@@ -1402,14 +1413,14 @@ export class ProviderExecutionCoordinator {
     }
     if (!handle) throw new Error("Provider launch returned no handle.");
     if (["failed", "stopped"].includes(handle.observedState)
-      || (handle.observedState === "idle" && entry.delivery_mode !== "daemon_inbox")) {
+      || (handle.observedState === "idle" && !requiresGrant)) {
       await this.options.streams.fenceTerminalOnce(
         handle,
         `manifest:${entry.id}:returned-terminal:${generationNumber}`,
       );
       return;
     }
-    if (entry.delivery_mode === "daemon_inbox") {
+    if (requiresGrant) {
       const current = await this.options.store.getEntry(entry.id);
       if (current) await this.convergeAttachedHandle(current, handle);
       return;

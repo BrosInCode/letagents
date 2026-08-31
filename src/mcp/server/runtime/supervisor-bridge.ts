@@ -44,10 +44,62 @@ type ResolvedSupervisorCoordinates = SupervisorCoordinates & {
   supervisorContextCwd: string | null;
 };
 type NegotiatedSupervisor = {
+  custodialPollingV1: boolean;
   protocolVersion: number;
   daemonIdentity: string | null;
   generation: number | null;
 };
+
+export type CustodialPollingAuthorization = {
+  roomId: string;
+  agentSessionId: string;
+  roomCursor: string | null;
+  configurationRevision: number;
+  coordinates: ResolvedSupervisorCoordinates;
+  negotiated: NegotiatedSupervisor;
+  apiUrl: string;
+};
+
+/** Release reuses BEFORE's exact generation; it never authorizes against a successor. */
+export async function authorizeCustodialPolling(
+  toolName: string,
+  prior?: CustodialPollingAuthorization,
+  env: NodeJS.ProcessEnv = process.env,
+  options: SupervisorBridgeOptions = {},
+): Promise<CustodialPollingAuthorization> {
+  if (env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_mcp_polling") throw new Error("Custodial polling profile required.");
+  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() === "1"
+    || env.LETAGENTS_TOKEN?.trim() || env.LETAGENTS_AGENT_SESSION_BEARER?.trim()) {
+    throw new Error("Custodial polling refuses bounded flags and environment credentials.");
+  }
+  const coordinates = prior?.coordinates ?? await resolveSupervisorCoordinates(supervisedContextSession(env), env, options);
+  if (!coordinates?.roomId || !coordinates.agentSessionId) throw new Error("Custodial polling lacks exact worker coordinates.");
+  const timeoutMs = options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  const negotiated = prior?.negotiated ?? await negotiateSupervisor(coordinates.socketPath, timeoutMs);
+  if (!negotiated.custodialPollingV1 || negotiated.generation === null) throw new Error("Daemon does not support custodial_polling_v1.");
+  const apiUrl = prior?.apiUrl ?? env.LETAGENTS_API_URL?.trim();
+  if (!apiUrl) throw new Error("Custodial polling requires an explicit API URL.");
+  const response = await supervisorRequest(coordinates.socketPath, {
+    version: negotiated.protocolVersion, id: randomUUID(), method: "supervisor.authorize_custodial_polling",
+    params: {
+      entry_id: coordinates.entryId, room_id: coordinates.roomId, work_attempt_id: coordinates.workAttemptId,
+      execution_generation_id: coordinates.executionGenerationId, agent_session_id: coordinates.agentSessionId,
+      daemon_generation: negotiated.generation, api_url: apiUrl, contract: "custodial_polling_v1",
+      phase: prior ? "release" : "before", tool_name: toolName,
+      ...(prior ? { expected_configuration_revision: prior.configurationRevision } : {}),
+    },
+  }, timeoutMs);
+  const result = response.result as Record<string, unknown> | undefined;
+  if (!response.ok || response.version !== negotiated.protocolVersion || !result || result.status !== "authorized" || result.contract !== "custodial_polling_v1"
+    || result.room_id !== coordinates.roomId || result.agent_session_id !== coordinates.agentSessionId
+    || !Number.isSafeInteger(result.configuration_revision) || Number(result.configuration_revision) < 1
+    || (prior && result.configuration_revision !== prior.configurationRevision)
+    || !(result.room_cursor === null || (typeof result.room_cursor === "string" && parseRoomMessageNumber(result.room_cursor) !== null))) {
+    throw new Error("Custodial polling authority was rejected or became stale.");
+  }
+  return { coordinates, negotiated, apiUrl, roomId: coordinates.roomId, agentSessionId: coordinates.agentSessionId,
+    roomCursor: result.room_cursor as string | null, configurationRevision: Number(result.configuration_revision) };
+}
 
 const confirmedBindingsBySession = new Map<string, string>();
 const confirmedRequestsBySession = new Map<string, string>();
@@ -265,7 +317,8 @@ export async function borrowCurrentSupervisedWorkerCredential(
   env: NodeJS.ProcessEnv = process.env,
   options: SupervisorBridgeOptions = {},
 ): Promise<SupervisedCredentialBorrowResult> {
-  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1") {
+  if (env.LETAGENTS_SUPERVISED_BOUNDED_TURNS?.trim() !== "1"
+    && env.LETAGENTS_EXECUTION_PROFILE?.trim() !== "supervised_mcp_polling") {
     return { state: "not_supervised" };
   }
   const seed = supervisedContextSession(env);
@@ -861,7 +914,8 @@ async function negotiateSupervisor(socketPath: string, timeoutMs: number): Promi
   const daemonIdentity = hasCompleteIdentity
     ? [result.generation, result.pid, result.started_at].join(":")
     : null;
-  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null };
+  return { protocolVersion, daemonIdentity, generation: hasCompleteIdentity ? Number(result.generation) : null,
+    custodialPollingV1: (result.capabilities as Record<string, unknown> | undefined)?.custodialPollingV1 === true };
 }
 
 function supervisorRequest(socketPath: string, request: Record<string, unknown>, timeoutMs: number | null): Promise<SupervisorResponse> {

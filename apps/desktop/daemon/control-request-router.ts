@@ -1,4 +1,5 @@
 import type { DaemonActivityEvent, DaemonManifestEntry, DaemonRequest, DesiredState } from "./types.js";
+import type { CustodialPollingAuthorizationInput } from "./worker-authority-coordinator.js";
 
 /**
  * The socket router owns protocol parsing and response shaping. Operations are
@@ -74,6 +75,7 @@ export interface DaemonControlOperations {
   }): unknown;
   bootstrapRoomIngress(input: { entry_id: string; daemon_generation: number; initial_message?: string }): unknown;
   borrowWorkerCredential(input: WorkerSessionCoordinates & { daemon_generation: number; provider_turn_id: string; api_url: string }): unknown;
+  authorizeCustodialPolling(input: CustodialPollingAuthorizationInput): unknown;
   checkpointWorkerCursor(input: Omit<WorkerSessionCoordinates, "room_id"> & { room_cursor: string }): unknown;
   readAttempt(id: string): unknown;
 }
@@ -536,6 +538,17 @@ export function createDaemonControlRequestHandler(
         agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? 0),
         provider_turn_id: String(params.provider_turn_id ?? ""),
         api_url: String(params.api_url ?? ""),
+      });
+    }
+    if (request.method === "supervisor.authorize_custodial_polling") {
+      const params = paramsRecord(request.params);
+      return operations.authorizeCustodialPolling({
+        entry_id: String(params.entry_id ?? ""), room_id: String(params.room_id ?? ""),
+        work_attempt_id: String(params.work_attempt_id ?? ""), execution_generation_id: String(params.execution_generation_id ?? ""),
+        agent_session_id: String(params.agent_session_id ?? ""), daemon_generation: Number(params.daemon_generation ?? NaN),
+        api_url: String(params.api_url ?? ""), contract: String(params.contract ?? ""),
+        phase: String(params.phase ?? ""), tool_name: String(params.tool_name ?? ""),
+        expected_configuration_revision: Number(params.expected_configuration_revision ?? NaN),
       });
     }
     if (request.method === "supervisor.checkpoint_worker_cursor") {

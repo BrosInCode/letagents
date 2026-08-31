@@ -16,11 +16,50 @@ import {
 const result = (text: string): CallToolResult => ({ content: [{ type: "text", text }] });
 const withRoom = <T>(roomId: string, callback: () => T): T => runWithSupervisedRoomAuthority(roomId, callback);
 
+test("custodial tools gate before work and fence read release without bounded effects", async () => {
+  for (const tool of ["send_message", "read_messages", "wait_for_messages"]) {
+    for (const rejectAt of ["before", "release", "never"]) {
+      const phases: string[] = [];
+      let calls = 0;
+      const authority = { roomId: "room_exact", agentSessionId: "session_exact", roomCursor: "msg_7", configurationRevision: 3 } as import("../server/runtime/supervisor-bridge.js").CustodialPollingAuthorization;
+      const handler = registeredHandler({
+        authorizePolling: async (_name, prior) => {
+          const phase = prior ? "release" : "before";
+          phases.push(phase);
+          if (prior) assert.equal(prior, authority, "release must retain its before snapshot");
+          if (phase === rejectAt) throw new Error("stale authority");
+          return authority;
+        },
+        prepareEffect: async () => { throw new Error("polling must not use bounded effects"); },
+        completeEffect: async () => { throw new Error("polling must not checkpoint bounded effects"); },
+        withRoom,
+      }, async () => { calls++; assert.equal(getCurrentSupervisedRoomAuthority(), "room_exact"); return result("data"); }, tool, "codex", "supervised_mcp_polling");
+      const fails = rejectAt === "before" || (rejectAt === "release" && tool !== "send_message");
+      if (fails) await assert.rejects(handler({}, {}), /stale authority/);
+      else assert.deepEqual(await handler({}, {}), result("data"));
+      assert.equal(calls, rejectAt === "before" ? 0 : 1);
+      assert.deepEqual(phases, rejectAt === "before" || tool === "send_message" ? ["before"] : ["before", "release"]);
+    }
+  }
+});
+
+test("custodial wait refuses missing durable cursor and cross-room inputs before callback", async () => {
+  let calls = 0;
+  const handler = registeredHandler({
+    authorizePolling: async () => ({ roomId: "room_exact", roomCursor: null } as import("../server/runtime/supervisor-bridge.js").CustodialPollingAuthorization),
+    prepareEffect: async () => { throw new Error("not reached"); }, completeEffect: async () => {}, withRoom,
+  }, async () => { calls++; return result("not reached"); }, "wait_for_messages", "codex", "supervised_mcp_polling");
+  await assert.rejects(handler({}, {}), /no durable cursor/);
+  await assert.rejects(handler({ room_id: "other" }, {}), /exact authority/);
+  assert.equal(calls, 0);
+});
+
 function registeredHandler(
   dependencies: SupervisedToolFacadeDependencies,
   callback: () => Promise<CallToolResult>,
   toolName = "send_message",
   supervisedProvider: string | null = null,
+  profile: "supervised_room_turn" | "supervised_mcp_polling" = "supervised_room_turn",
 ) {
   let handler: ((input: unknown, extra: { requestId?: string }) => Promise<CallToolResult>) | null = null;
   const server = {
@@ -29,7 +68,7 @@ function registeredHandler(
       return {};
     },
   } as unknown as McpServer;
-  const facade = profileAwareToolServer(server, "supervised_room_turn", dependencies, supervisedProvider);
+  const facade = profileAwareToolServer(server, profile, dependencies, supervisedProvider);
   (facade.tool as (...args: unknown[]) => unknown)(toolName, "description", {}, callback);
   assert.ok(handler);
   return handler;

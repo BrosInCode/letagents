@@ -29,6 +29,7 @@ test("delivery drain and FIFO claim atomically select A without admitting succes
     try {
       await store.write(0, [agent]);
       seedActiveDrainExecution(env.databasePath);
+      assert.equal(await store.unresolvedDeliveryDrain(agent.id), null);
       const a = await inbox.enqueueCorrection({ agent_id: agent.id, room_id: agent.room_id, source_message_id: "drain-A", source_message: { text: "A" }, activation: { decision: "activate" } });
       const b = await inbox.enqueueCorrection({ agent_id: agent.id, room_id: agent.room_id, source_message_id: "drain-B", source_message: { text: "B" }, activation: { decision: "activate" } });
       const prepared = await store.prepareDeliveryDrain(input, async (commit) => {
@@ -39,6 +40,7 @@ test("delivery drain and FIFO claim atomically select A without admitting succes
         await commit();
       });
       assert.equal(prepared.created, true);
+      assert.deepEqual(await store.unresolvedDeliveryDrain(agent.id), prepared.cutover);
       assert.equal(prepared.cutover.phase, "draining");
       assert.equal(prepared.cutover.admitted_inbox_item_id, claimFirst ? a.inbox_item_id : null);
       assert.equal(prepared.cutover.admitted_source_message_id, claimFirst ? a.source_message_id : null);
@@ -65,6 +67,7 @@ test("delivery drain and FIFO claim atomically select A without admitting succes
       } finally { inspection.close(); }
       const cancelled = await store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id });
       assert.equal(cancelled.phase, "cancelled");
+      assert.equal(await store.unresolvedDeliveryDrain(agent.id), null);
       assert.equal((await inbox.claimHead(agent.id))?.inbox_item_id, claimFirst ? b.inbox_item_id : a.inbox_item_id);
       assert.equal((await store.getEntry(agent.id))?.delivery_mode, "daemon_inbox", "admission and cancellation never switch delivery mode");
     } finally { await inbox.close(); await store.close(); await env.cleanup(); }
@@ -2066,6 +2069,52 @@ test("historical not-applied recovery cannot send A's turn id through an unrelat
   }
 });
 
+test("polling custody is internal, survives every manifest replacement and does not depend on cutover history", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  try {
+    const spoofed = { ...entry, polling_contract: "custodial_polling_v1" };
+    await store.write(0, [spoofed]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, null,
+      "the flat projection cannot create polling custody");
+    const database = (store as unknown as { database: DatabaseSync }).database;
+    database.prepare("UPDATE agent_configurations SET polling_contract='custodial_polling_v1' WHERE agent_id=?").run(entry.id);
+    database.prepare(`INSERT INTO execution_cutover_v2
+      (operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms)
+      VALUES('completed-reverse','completed-reverse',?,'run_1','daemon_inbox','mcp_polling','drain','complete',1,2)`).run(entry.id);
+    const stale = { ...entry, polling_contract: null };
+    await store.replaceEntry(1, stale);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
+    await store.replaceEntriesBatch(2, [stale]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
+    await store.write(3, [stale]);
+    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
+    const updated = await store.updateAgentConfiguration(4, {
+      agentId: entry.id, expectedRevision: 1, model: "new-model", reasoningEffort: null,
+      charter: "Updated charter", permissionProfileId: "full_access", providerLaunchPolicy: { approvalPolicy: "never" },
+    });
+    assert.equal(updated.outcome, "updated");
+    assert.equal(updated.configuration?.polling_contract, "custodial_polling_v1");
+    const before = await store.load();
+    assert.equal(Object.hasOwn(before.entries[0]!, "polling_contract"), false);
+    assert.equal(Object.hasOwn((await store.getEntry(entry.id))!, "polling_contract"), false);
+    await assert.rejects(() => store.replaceEntry(5, { ...entry, delivery_mode: "daemon_inbox" }), /CHECK/,
+      "an unrelated replacement cannot silently downgrade custodial polling");
+    assert.deepEqual(await store.load(), before, "failed replacement rolls back identity deletion and generation");
+    assert.equal((await store.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1");
+    database.exec("DELETE FROM execution_cutover_v2 WHERE operation_id='completed-reverse'");
+    await store.close();
+    const reopened = new ManifestStore(env.databasePath);
+    try {
+      assert.equal((await reopened.getAgentConfiguration(entry.id))?.polling_contract, "custodial_polling_v1",
+        "history pruning or daemon restart cannot erase current custody");
+      assert.deepEqual(await reopened.load(), before);
+      await reopened.removeEntry(before.generation, entry.id);
+      assert.equal(await reopened.getAgentConfiguration(entry.id), undefined);
+    } finally { await reopened.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("Inspector configuration revisions are optimistic, durable, and do not alter the flat manifest", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
@@ -3956,6 +4005,9 @@ test("v6 repair adds bounded delivery columns without shifting exact turn or cut
     };
     await store.write(0, [seeded]);
     const database = (store as unknown as { database: DatabaseSync }).database;
+    // Only a predecessor may rebuild missing ingress configuration. Current
+    // custody authority must instead fail closed if its column disappears.
+    database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract; UPDATE manifest_metadata SET schema_version=22; PRAGMA user_version=22");
     database.exec("ALTER TABLE agent_configurations DROP COLUMN delivery_mode; ALTER TABLE agent_configurations DROP COLUMN delivery_cutover_json; ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id; ALTER TABLE turn_control_journals DROP COLUMN inbox_item_id; ALTER TABLE turn_control_journals DROP COLUMN correction_text; ALTER TABLE turn_control_journals DROP COLUMN correction_strategy; ALTER TABLE turn_control_journals DROP COLUMN operator_resolution");
     await store.close();
 

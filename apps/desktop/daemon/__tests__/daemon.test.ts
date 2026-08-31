@@ -6689,8 +6689,10 @@ test("distinct supervised Codex entries coexist in one room without weakening le
   }
 });
 
-for (const deliveryMode of ["mcp_polling", "daemon_inbox"] as const) {
-test(`two Codex room agents keep independent provider executions across stop, resume, and daemon handoff (${deliveryMode})`, async () => {
+for (const modeCase of ["mcp_polling", "daemon_inbox", "custodial_polling_v1"] as const) {
+const custodial = modeCase === "custodial_polling_v1";
+const deliveryMode = modeCase === "daemon_inbox" ? "daemon_inbox" : "mcp_polling";
+test(`two Codex room agents keep independent provider executions across stop, resume, and daemon handoff (${modeCase})`, async () => {
   const env = await fixture();
   const paths = {
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
@@ -6727,6 +6729,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
   const resumeRequests: Array<[entryId: string, workAttemptId: string, continuation: string]> = [];
   const stopRequests: string[] = [];
   const deliveredTurns: Array<{ workAttemptId: string; turnId: string }> = [];
+  const custodialBeforeRequests: Array<Record<string, unknown>> = [];
   let nextPid = 6100;
   const nativeHandle = (runtime: Runtime) => ({
     workAttemptId: runtime.workAttemptId,
@@ -6871,7 +6874,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
   };
   const assertOwnedBindings = async (manifest: DaemonManifestEntry[]) => {
     assert.ok(manifest.every((current) => (current.delivery_mode ?? "mcp_polling") === deliveryMode));
-    if (deliveryMode !== "daemon_inbox") return;
+    if (deliveryMode !== "daemon_inbox" && !custodial) return;
     const internals = daemon as unknown as {
       workerBindings: WorkerBindingStore;
       supervisedInbox: SupervisedAgentInboxStore;
@@ -6891,6 +6894,20 @@ test(`two Codex room agents keep independent provider executions across stop, re
       assert.equal(binding?.agent_session_id, `session_daemon_${current.id}`);
       const credential = binding && await internals.workerBindings.credentialFor(binding);
       assert.ok(credential, "the current generation has a usable in-memory worker credential");
+      if (custodial) {
+        assert.equal(binding?.room_cursor, "msg_47", "restart/remint preserves the latest acknowledged polling cursor");
+        assert.equal(polls.length, 0, "custodial grant recovery must not start daemon inbox delivery");
+        const daemonGeneration = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+        const admitted = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
+          entry_id: current.id, room_id: current.room_id, work_attempt_id: current.work_attempt_id,
+          execution_generation_id: current.provider_ref!.execution_generation_id, agent_session_id: binding!.agent_session_id,
+          daemon_generation: daemonGeneration, api_url: "http://127.0.0.1:9", contract: "custodial_polling_v1",
+          phase: "before", tool_name: "read_messages",
+        });
+        assert.equal(admitted.ok, true, admitted.error);
+        assert.equal((admitted.result as { room_cursor: string }).room_cursor, "msg_47");
+        continue;
+      }
       await eventually(async () => polls.some((poll) => poll.bearer === credential && poll.afterMessageId === "msg_41"),
         "owned ingress uses the exact restored credential and existing cursor");
       const cursor = await internals.supervisedInbox.cursor(current.id);
@@ -6945,6 +6962,68 @@ test(`two Codex room agents keep independent provider executions across stop, re
     }
 
     const beforeRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    if (custodial) {
+      // Dormant prerequisite fixture only: install the persisted contract and
+      // an exact acknowledged boundary. This is not a production mode switch.
+      const db = new DatabaseSync(paths.manifestPath);
+      try { db.exec("UPDATE agent_configurations SET polling_contract='custodial_polling_v1'"); }
+      finally { db.close(); }
+      const durability = (daemon as unknown as { durability: WorkDurabilityStore }).durability;
+      for (const current of beforeRestart) await durability.checkpoint(current.work_attempt_id!, {
+        room_cursor: "msg_41", provider_continuation_id: current.provider_ref!.provider_continuation_id,
+      });
+      await installGrants();
+      const generation = ((await daemonRequest(paths.socketPath, "daemon.status")).result as { generation: number }).generation;
+      for (const current of beforeRestart) {
+        const params = {
+          entry_id: current.id, room_id: current.room_id, work_attempt_id: current.work_attempt_id,
+          execution_generation_id: current.provider_ref!.execution_generation_id, agent_session_id: `session_daemon_${current.id}`,
+          daemon_generation: generation, api_url: "http://127.0.0.1:9", contract: "custodial_polling_v1",
+          phase: "before", tool_name: "wait_for_messages",
+        };
+        const admitted = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params);
+        assert.equal(admitted.ok, true, admitted.error);
+        assert.equal((admitted.result as { room_cursor: string }).room_cursor, "msg_41");
+        const revision = (admitted.result as { configuration_revision: number }).configuration_revision;
+        custodialBeforeRequests.push({ ...params, phase: "release", expected_configuration_revision: revision });
+        for (const wrong of [{ agent_session_id: "unowned-worker" }, { room_id: "other-room" },
+          { execution_generation_id: "other-generation" }, { daemon_generation: generation + 1 }]) {
+          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", { ...params, ...wrong })).ok, false);
+        }
+        const stale = await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
+          ...params, phase: "release", expected_configuration_revision: revision + 1,
+        });
+        assert.equal(stale.ok, false);
+        const pendingDb = new DatabaseSync(paths.manifestPath);
+        try {
+          pendingDb.prepare("UPDATE agent_configurations SET config_revision=config_revision+1 WHERE agent_id=?").run(current.id);
+          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params)).ok, false,
+            "unapplied configuration cannot authorize an old runtime");
+          pendingDb.prepare("UPDATE agent_configurations SET config_revision=config_revision-1 WHERE agent_id=?").run(current.id);
+          pendingDb.prepare("UPDATE supervised_worker_sessions SET expires_at='2000-01-01T00:00:00.000Z' WHERE agent_id=?").run(current.id);
+          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params)).ok, false,
+            "an in-memory credential is not authority after its worker expiry");
+          assert.equal(((await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", params)).result as { status: string }).status, "stale");
+          pendingDb.prepare("UPDATE supervised_worker_sessions SET expires_at='2099-01-01T00:00:00.000Z' WHERE agent_id=?").run(current.id);
+        } finally { pendingDb.close(); }
+        const custody = (daemon as unknown as { workerRuntimeCustody: WorkerRuntimeCustody }).workerRuntimeCustody;
+        const grant = custody.currentHostGrant({ entryId: current.id, roomId: current.room_id }, generation, false)!;
+        assert.ok(grant);
+        const freshExpiry = grant.expiresAt;
+        try {
+          grant.expiresAt = "2000-01-01T00:00:00.000Z";
+          assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", params)).ok, false,
+            "expired host grant refuses admission despite still-live provider and bearer");
+          assert.equal(((await daemonRequest(paths.socketPath, "supervisor.borrow_worker_credential", params)).result as { status: string }).status, "stale");
+        } finally { grant.expiresAt = freshExpiry; }
+        assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", {
+          ...params, phase: "release", expected_configuration_revision: revision,
+        })).ok, true);
+        assert.equal((await daemonRequest(paths.socketPath, "supervisor.checkpoint_worker_cursor", {
+          ...params, room_cursor: "msg_47",
+        })).ok, true);
+      }
+    }
     await assertOwnedBindings(beforeRestart);
     const alphaBefore = beforeRestart.find((candidate) => candidate.id === identities[0].entryId)!;
     const bravoBefore = beforeRestart.find((candidate) => candidate.id === identities[1].entryId)!;
@@ -6985,7 +7064,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     activeRouter = router();
     daemon = createDaemon();
     await daemon.start();
-    if (deliveryMode === "daemon_inbox") await installGrants();
+    if (deliveryMode === "daemon_inbox" || custodial) await installGrants();
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
       return manifest.length === 2
@@ -7001,6 +7080,10 @@ test(`two Codex room agents keep independent provider executions across stop, re
       ].sort(([left], [right]) => left.localeCompare(right)),
     );
     const afterRestart = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
+    if (custodial) for (const staleRelease of custodialBeforeRequests) {
+      assert.equal((await daemonRequest(paths.socketPath, "supervisor.authorize_custodial_polling", staleRelease)).ok, false,
+        "successor daemon must not authorize an old response release");
+    }
     await assertOwnedBindings(afterRestart);
     for (const prior of beforeRestart) {
       const reattached = afterRestart.find((candidate) => candidate.id === prior.id)!;

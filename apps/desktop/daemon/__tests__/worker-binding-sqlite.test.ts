@@ -169,6 +169,28 @@ test("rebind preserves globally monotonic native sequence", async () => {
   } finally { await env.cleanup(); }
 });
 
+test("custodial remint retains the acknowledged cursor and refuses a missing cursor without mutation", async () => {
+  const env = await fixture();
+  let store = new WorkerBindingStore(env.legacy, undefined, env.database);
+  try {
+    await store.bind(input());
+    const prior = await store.checkpointCursor("agent_a", "session_a", "run_1", "msg_47");
+    await assert.rejects(store.bind(input("agent_a", "run_2", "session_b"), { roomCursor: null }), /acknowledged numeric room cursor/);
+    assert.deepEqual(await store.get("agent_a"), prior);
+    assert.equal(await store.credentialFor(prior), "token-session_a", "rejected remint keeps the current credential");
+
+    await store.close();
+    store = new WorkerBindingStore(env.legacy, undefined, env.database);
+    const retained = await store.get("agent_a");
+    assert.equal(retained?.room_cursor, "msg_47");
+    const reminted = await store.bind(input("agent_a", "run_2", "session_b"), { roomCursor: retained!.room_cursor });
+    assert.equal(reminted.room_cursor, "msg_47", "new worker identity inherits only the explicitly supplied acknowledged cursor");
+    assert.equal(reminted.agent_session_id, "session_b");
+    assert.equal(reminted.execution_generation_id, "run_2");
+    assert.equal(await store.credentialFor(reminted), "token-session_b");
+  } finally { await store.close(); await env.cleanup(); }
+});
+
 test("unbind and a delayed explicit rejection retain the global watermark across rebind", async () => {
   const env = await fixture(); try {
     const store = new WorkerBindingStore(env.legacy, undefined, env.database);
@@ -285,6 +307,7 @@ test("a canonical v4 database with no later additive tables upgrades through the
         ALTER TABLE agent_configurations DROP COLUMN config_revision;
         ALTER TABLE agent_configurations DROP COLUMN reasoning_effort;
         ALTER TABLE agent_configurations DROP COLUMN delivery_cutover_json;
+        ALTER TABLE agent_configurations DROP COLUMN polling_contract;
         ALTER TABLE agent_configurations DROP COLUMN delivery_mode;
         ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id;
         ALTER TABLE turn_control_journals DROP COLUMN action_sequence;
@@ -330,7 +353,7 @@ test("a canonical v4 database with no later additive tables upgrades through the
         assert.ok(current.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table), `${table} was created before version markers advanced`);
       }
       const configurationColumns = new Set((current.prepare("PRAGMA table_info(agent_configurations)").all() as Array<{ name: string }>).map((column) => column.name));
-      for (const column of ["delivery_mode", "delivery_cutover_json", "reasoning_effort", "config_revision", "runtime_configuration_revision"]) {
+      for (const column of ["delivery_mode", "delivery_cutover_json", "reasoning_effort", "config_revision", "runtime_configuration_revision", "polling_contract"]) {
         assert.ok(configurationColumns.has(column), `${column} was applied during the canonical v4 upgrade`);
       }
       const bindingColumns = new Set((current.prepare("PRAGMA table_info(worker_session_bindings)").all() as Array<{ name: string }>).map((column) => column.name));
