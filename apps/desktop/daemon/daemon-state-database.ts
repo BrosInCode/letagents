@@ -1,7 +1,7 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, validateExecutionStorageSchema } from "./execution-storage-schema.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 19;
+export const DAEMON_STATE_SCHEMA_VERSION = 20;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -9,6 +9,55 @@ type Row = Record<string, unknown>;
 function parseJson<T>(value: unknown): T { return JSON.parse(String(value)) as T; }
 function run(statement: StatementSync, ...values: unknown[]): void { statement.run(...values as never[]); }
 function quoteIdentifier(value: string): string { return `"${value.replaceAll('"', '""')}"`; }
+
+const TERMINAL_RESULTS_TABLE = "supervised_agent_terminal_results";
+const TERMINAL_RESULTS_INDEX = "CREATE UNIQUE INDEX supervised_agent_terminal_result_turn ON supervised_agent_terminal_results(agent_id,execution_generation_id,provider_turn_id)";
+function terminalResultsSql(version: 19 | 20, table = TERMINAL_RESULTS_TABLE): string {
+  return `CREATE TABLE ${table} (
+    inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
+    agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
+    outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable'${version === 20 ? ",'failed','interrupted'" : ""})),
+    normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
+    terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
+    ${version === 20 ? ",CHECK(outcome NOT IN ('failed','interrupted') OR (normalized_text IS NULL AND evidence_source <> 'none'))" : ""}
+  ) STRICT`;
+}
+
+function normalizedTerminalSql(sql: string): string {
+  // Preserve case-sensitive CHECK values; ALTER TABLE may quote identifiers.
+  return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map((part) => part.startsWith("'") ? part
+    : part.replace(/\bIF\s+NOT\s+EXISTS\s+/gi, "").replaceAll('"', "").replace(/\s+/g, "").toLowerCase())
+    .join("").replace(/;$/, "");
+}
+
+/** Terminal rows are authority: never repair a lost or weakened definition. */
+function validateTerminalResults(database: DatabaseSync, requiredVersion?: 20): 19 | 20 {
+  const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name=?").get(TERMINAL_RESULTS_TABLE) as Row | undefined;
+  const version = ([20, 19] as const).find((candidate) => (!requiredVersion || candidate === requiredVersion)
+    && definition && normalizedTerminalSql(String(definition.sql)) === normalizedTerminalSql(terminalResultsSql(candidate)));
+  if (!version) throw new Error("Daemon terminal-result authority has an invalid or missing table definition.");
+  const index = database.prepare("SELECT sql FROM sqlite_master WHERE type='index' AND name='supervised_agent_terminal_result_turn'").get() as Row | undefined;
+  const indexes = database.prepare("PRAGMA index_list(supervised_agent_terminal_results)").all() as Row[];
+  if (!index || normalizedTerminalSql(String(index.sql)) !== normalizedTerminalSql(TERMINAL_RESULTS_INDEX)
+    || indexes.length !== 2 || indexes.filter((entry) => entry.origin === "pk" && Number(entry.unique) === 1).length !== 1
+    || database.prepare("SELECT 1 FROM sqlite_master WHERE type='trigger' AND tbl_name=?").get(TERMINAL_RESULTS_TABLE)) {
+    throw new Error("Daemon terminal-result authority has invalid indexes or triggers.");
+  }
+  for (const { name } of database.prepare("SELECT name FROM sqlite_master WHERE type='table'").all() as Row[]) {
+    if ((database.prepare(`PRAGMA foreign_key_list(${quoteIdentifier(String(name))})`).all() as Row[])
+      .some((key) => key.table === TERMINAL_RESULTS_TABLE)) {
+      throw new Error("Daemon terminal-result authority has an unrecognized inbound dependency.");
+    }
+  }
+  if (database.prepare("PRAGMA foreign_key_check(supervised_agent_terminal_results)").get()
+    || database.prepare(`SELECT 1 FROM supervised_agent_terminal_results
+      WHERE outcome NOT IN ('reply','no_reply','unreadable'${version === 20 ? ",'failed','interrupted'" : ""})
+        OR evidence_source NOT IN ('transcript','stream','none')
+        OR (outcome IN ('failed','interrupted') AND (normalized_text IS NOT NULL OR evidence_source='none')) LIMIT 1`).get()) {
+    throw new Error("Daemon terminal-result authority contains invalid evidence.");
+  }
+  return version;
+}
 
 /** Read-only compatibility gate, also used before opening persistent WAL state. */
 export function assertDaemonStateVersionSupported(database: DatabaseSync): number {
@@ -28,7 +77,8 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
-  if (existingVersion === 18 || existingVersion === 19) validateExecutionStorageSchema(database, existingVersion);
+  if (existingVersion >= 18) validateExecutionStorageSchema(database, existingVersion === 18 ? 18 : 19);
+  if (existingVersion >= 17) validateTerminalResults(database, existingVersion === 20 ? 20 : undefined);
   return existingVersion;
 }
 
@@ -118,11 +168,15 @@ createSchema(database: DatabaseSync): void {
     this.migrateV18ToV19(database);
     return;
   }
+  if (existingVersion === 19) {
+    this.migrateV19ToV20(database);
+    return;
+  }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
     throw new Error(`Unsupported daemon state schema version ${existingVersion}.`);
   }
   if (existingVersion === SCHEMA_VERSION) {
-    this.repairAndValidateV19Shape(database);
+    this.repairAndValidateV20Shape(database);
     return;
   }
   database.exec("BEGIN IMMEDIATE");
@@ -737,6 +791,7 @@ migrateV12ToV13(database: DatabaseSync): void {
     this.validateV17Shape(database);
     this.applyV18Shape(database);
     this.validateV18Shape(database);
+    this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -762,6 +817,7 @@ migrateV13ToV14(database: DatabaseSync): void {
     this.validateV17Shape(database);
     this.applyV18Shape(database);
     this.validateV18Shape(database);
+    this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -785,6 +841,7 @@ migrateV14ToV15(database: DatabaseSync): void {
     this.validateV17Shape(database);
     this.applyV18Shape(database);
     this.validateV18Shape(database);
+    this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -806,6 +863,7 @@ migrateV15ToV16(database: DatabaseSync): void {
     this.validateV17Shape(database);
     this.applyV18Shape(database);
     this.validateV18Shape(database);
+    this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -825,6 +883,7 @@ migrateV16ToV17(database: DatabaseSync): void {
     this.validateV17Shape(database);
     this.applyV18Shape(database);
     this.validateV18Shape(database);
+    this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -842,6 +901,7 @@ migrateV17ToV18(database: DatabaseSync): void {
     this.validateV17Shape(database);
     this.applyV18Shape(database);
     this.validateV18Shape(database);
+    this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -859,6 +919,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     this.validateV18Shape(database, 18);
     migrateExecutionStorageV18ToV19(database);
     this.validateV18Shape(database);
+    this.applyV20Shape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -867,6 +928,35 @@ migrateV18ToV19(database: DatabaseSync): void {
     try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
     throw error;
   }
+}
+
+/** Only the terminal-result CHECK changes; native evidence is not reinterpreted. */
+migrateV19ToV20(database: DatabaseSync): void {
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.validateV18Shape(database);
+    this.applyV20Shape(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
+    throw error;
+  }
+}
+
+private applyV20Shape(database: DatabaseSync): void {
+  if (validateTerminalResults(database) === 20) return;
+  database.exec(`
+    ${terminalResultsSql(20, "supervised_agent_terminal_results_v20")};
+    INSERT INTO supervised_agent_terminal_results_v20(rowid,inbox_item_id,agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source,terminal_evidence_json,observed_at,updated_at)
+      SELECT rowid,inbox_item_id,agent_id,execution_generation_id,provider_turn_id,outcome,normalized_text,evidence_source,terminal_evidence_json,observed_at,updated_at FROM supervised_agent_terminal_results;
+    DROP TABLE supervised_agent_terminal_results;
+    ALTER TABLE supervised_agent_terminal_results_v20 RENAME TO supervised_agent_terminal_results;
+    ${TERMINAL_RESULTS_INDEX};
+  `);
+  validateTerminalResults(database, 20);
 }
 
 private createPurgeOperationsV11(database: DatabaseSync): void {
@@ -1185,6 +1275,7 @@ private applyCurrentSchemaTail(database: DatabaseSync): void {
   this.validateV17Shape(database);
   this.applyV18Shape(database);
   this.validateV18Shape(database);
+  this.applyV20Shape(database);
 }
 
 private validateV12Shape(database: DatabaseSync): void {
@@ -1278,6 +1369,7 @@ private applyV13Shape(database: DatabaseSync): void {
         AND lower(last_error) GLOB 'thread not found: ????????-????-????-????-????????????'
         THEN 'provider_continuation_missing' ELSE NULL END`;
 
+  const terminalVersion = validateTerminalResults(database);
   // A rolled-back version marker or interrupted legacy repair can retain the
   // current repair journal while temporarily rebuilding the older delivery
   // tables. Preserve those rows outside the foreign-key graph while the
@@ -1328,13 +1420,7 @@ private applyV13Shape(database: DatabaseSync): void {
     ) STRICT;
     INSERT INTO supervised_agent_inbox_events_v13 SELECT * FROM supervised_agent_inbox_events;
 
-    CREATE TABLE supervised_agent_terminal_results_v13 (
-      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-      outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
-      normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
-      terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    ) STRICT;
+    ${terminalResultsSql(terminalVersion, "supervised_agent_terminal_results_v13")};
     INSERT INTO supervised_agent_terminal_results_v13 SELECT * FROM supervised_agent_terminal_results;
 
     CREATE TABLE supervised_agent_publications_v13 (
@@ -2178,15 +2264,17 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
   if (database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v18 failed foreign-key validation.");
 }
 
-repairAndValidateV19Shape(database: DatabaseSync): void {
+repairAndValidateV20Shape(database: DatabaseSync): void {
   // Missing typed journals are lost authority, not permission to recreate an
   // empty history. Check them before any predecessor's additive repair path.
   validateExecutionStorageSchema(database);
+  validateTerminalResults(database, 20);
   this.repairAndValidateV17Shape(database);
   database.exec("BEGIN IMMEDIATE");
   try {
     this.applyV18Shape(database);
     this.validateV18Shape(database);
+    validateTerminalResults(database, 20);
     database.exec("COMMIT");
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ }
@@ -2294,6 +2382,7 @@ repairAndValidateV8Shape(database: DatabaseSync): void {
  * collide across room moves for the same durable agent.
  */
 private applyV9Shape(database: DatabaseSync): void {
+  const terminalVersion = validateTerminalResults(database);
   const restoreLaterAuthority = this.detachLaterInboxTables(database, ["provider_continuation_repairs", "supervised_agent_provider_turn_bindings"]);
   database.exec(`
     PRAGMA defer_foreign_keys = ON;
@@ -2329,13 +2418,7 @@ private applyV9Shape(database: DatabaseSync): void {
     ) STRICT;
     INSERT INTO supervised_agent_inbox_events_v9 SELECT * FROM supervised_agent_inbox_events;
 
-    CREATE TABLE supervised_agent_terminal_results_v9 (
-      inbox_item_id TEXT PRIMARY KEY REFERENCES supervised_agent_inbox(inbox_item_id) ON DELETE CASCADE,
-      agent_id TEXT NOT NULL, execution_generation_id TEXT NOT NULL, provider_turn_id TEXT NOT NULL,
-      outcome TEXT NOT NULL CHECK(outcome IN ('reply','no_reply','unreadable')),
-      normalized_text TEXT, evidence_source TEXT NOT NULL CHECK(evidence_source IN ('transcript','stream','none')),
-      terminal_evidence_json TEXT NOT NULL, observed_at TEXT NOT NULL, updated_at TEXT NOT NULL
-    ) STRICT;
+    ${terminalResultsSql(terminalVersion, "supervised_agent_terminal_results_v9")};
     INSERT INTO supervised_agent_terminal_results_v9 SELECT * FROM supervised_agent_terminal_results;
 
     CREATE TABLE supervised_agent_publications_v9 (
