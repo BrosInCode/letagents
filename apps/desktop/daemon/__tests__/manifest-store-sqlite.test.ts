@@ -9,6 +9,7 @@ import test from "node:test";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema } from "../daemon-state-database.js";
 import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
+import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
@@ -18,6 +19,239 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
   origin_execution_generation_id: "run_1",
   provider_continuation_id: "thread_1",
 } as const;
+
+test("delivery drain and FIFO claim atomically select A without admitting successor B", async () => {
+  for (const claimFirst of [false, true]) {
+    const env = await fixture();
+    const store = new ManifestStore(env.databasePath);
+    const inbox = new SupervisedAgentInboxStore(env.databasePath);
+    const { agent, input } = deliveryDrainCoordinates();
+    try {
+      await store.write(0, [agent]);
+      seedActiveDrainExecution(env.databasePath);
+      const a = await inbox.enqueueCorrection({ agent_id: agent.id, room_id: agent.room_id, source_message_id: "drain-A", source_message: { text: "A" }, activation: { decision: "activate" } });
+      const b = await inbox.enqueueCorrection({ agent_id: agent.id, room_id: agent.room_id, source_message_id: "drain-B", source_message: { text: "B" }, activation: { decision: "activate" } });
+      const prepared = await store.prepareDeliveryDrain(input, async (commit) => {
+        if (claimFirst) {
+          assert.equal((await inbox.claimHead(agent.id))?.inbox_item_id, a.inbox_item_id);
+          await inbox.checkpointTurnStarted(a.inbox_item_id, "native-A", TEST_PROVIDER_TURN_AUTHORITY);
+        }
+        await commit();
+      });
+      assert.equal(prepared.created, true);
+      assert.equal(prepared.cutover.phase, "draining");
+      assert.equal(prepared.cutover.admitted_inbox_item_id, claimFirst ? a.inbox_item_id : null);
+      assert.equal(prepared.cutover.admitted_source_message_id, claimFirst ? a.source_message_id : null);
+      assert.equal(prepared.cutover.admitted_action_id, claimFirst ? a.action_id : null);
+      assert.equal(prepared.cutover.native_target_turn_id, claimFirst ? "native-A" : null,
+        "an idle observation made before admission is not a lock against already-admitted A");
+      assert.equal(prepared.cutover.target_turn_id, null, "native authority never becomes an optional shadow turn id");
+      if (claimFirst) {
+        await inbox.transition(a.inbox_item_id, "awaiting_result");
+        await inbox.transition(a.inbox_item_id, "result_recovery");
+        assert.equal((await inbox.claimHead(agent.id))?.inbox_item_id, a.inbox_item_id, "exact result recovery remains available");
+        await inbox.checkpointNormalizedTerminal({ inbox_item_id: a.inbox_item_id, agent_id: agent.id, execution_generation_id: "run_1", provider_turn_id: "native-A", outcome: "reply", text: "A finished", evidence: "stream", terminal_evidence: { turnId: "native-A" } });
+        await inbox.transition(a.inbox_item_id, "publishing");
+        const published = await inbox.checkpointPublication({ inbox_item_id: a.inbox_item_id, room_id: agent.room_id, canonical_message_id: "canonical-A" });
+        assert.equal(published.state, "acknowledged");
+        assert.equal(published.reply_client_message_id, a.reply_client_message_id);
+      }
+      assert.equal(await inbox.claimHead(agent.id), null, "draining never admits pending work or a successor");
+      assert.equal((await inbox.get(b.inbox_item_id))?.state, "pending");
+      const inspection = new DatabaseSync(env.databasePath);
+      try {
+        assert.equal((inspection.prepare("SELECT COUNT(*) AS count FROM execution_runtime_generations").get() as { count: number }).count, 0,
+          "cutover admission does not require optional native activity capture");
+      } finally { inspection.close(); }
+      const cancelled = await store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id });
+      assert.equal(cancelled.phase, "cancelled");
+      assert.equal((await inbox.claimHead(agent.id))?.inbox_item_id, claimFirst ? b.inbox_item_id : a.inbox_item_id);
+      assert.equal((await store.getEntry(agent.id))?.delivery_mode, "daemon_inbox", "admission and cancellation never switch delivery mode");
+    } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+  }
+});
+
+test("delivery drain permits admitted pre-native invocation but not a fresh pre-dispatch retry", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const inbox = new SupervisedAgentInboxStore(env.databasePath);
+  const { agent, input } = deliveryDrainCoordinates();
+  try {
+    await store.write(0, [agent]);
+    seedActiveDrainExecution(env.databasePath);
+    const a = await inbox.enqueueCorrection({ agent_id: agent.id, room_id: agent.room_id, source_message_id: "pre-native-A", source_message: {}, activation: { decision: "activate" } });
+    await inbox.claimHead(agent.id);
+    const { cutover } = await store.prepareDeliveryDrain(input);
+    assert.equal(cutover.admitted_inbox_item_id, a.inbox_item_id);
+    assert.equal(cutover.native_target_turn_id, null);
+    assert.equal((await inbox.checkpointDispatchIntent(a.inbox_item_id)).state, "dispatching");
+    await inbox.recordRetryFailure(a.inbox_item_id, { domain: "pre_dispatch", error: "proven not sent" });
+    await inbox.transition(a.inbox_item_id, "pending");
+    assert.equal(await inbox.claimHead(agent.id), null, "the original A identity is not permission to replay its invocation");
+    await assert.rejects(() => inbox.transition(a.inbox_item_id, "dispatching"), /delivery drain/i,
+      "the generic transition API must not bypass the admission barrier");
+    await assert.rejects(() => inbox.checkpointDispatchIntent(a.inbox_item_id));
+    await store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id });
+    assert.equal((await inbox.claimHead(agent.id))?.inbox_item_id, a.inbox_item_id);
+  } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+});
+
+test("delivery drain snapshots exact witness before await and replays it after runtime changes and reopen", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const { agent, input } = deliveryDrainCoordinates();
+  try {
+    await store.write(0, [agent]);
+    seedActiveDrainExecution(env.databasePath);
+    const original = structuredClone(input);
+    const preparing = store.prepareDeliveryDrain(input);
+    input.roomId = "changed-after-call";
+    input.handle.providerContinuationId = "changed-after-call";
+    if (input.handle.providerConnection?.kind === "codex_app_server") input.handle.providerConnection.url = "http://127.0.0.1:9999";
+    input.boundary.providerContinuationId = "changed-after-call";
+    const { cutover } = await preparing;
+    assert.equal(cutover.room_id, original.roomId);
+    assert.equal(cutover.native_continuation_id, "thread_1");
+    assert.equal(cutover.native_pid, 4311);
+    assert.equal(cutover.native_process_identity, "codex:4311");
+    assert.equal(cutover.native_connection_sha256, createHash("sha256").update(JSON.stringify(["codex_app_server", "http://127.0.0.1:4311", 4311, "codex:4311"])).digest("hex"));
+    assert.equal(cutover.predecessor_operation_id, null);
+    await store.replaceEntry((await store.load()).generation, { ...agent, provider_ref: { ...agent.provider_ref!, provider_continuation_id: "successor-thread" } });
+    assert.deepEqual(await store.prepareDeliveryDrain(original), { created: false, cutover });
+    for (const changed of [
+      { ...original, operationId: "different-operation" },
+      { ...original, agentId: "different-agent" },
+      { ...original, roomId: "different-room" },
+      { ...original, executionGenerationId: "different-generation" },
+      { ...original, handle: { ...original.handle, providerConnection: { ...original.handle.providerConnection!, kind: "codex_app_server" as const, url: "http://127.0.0.1:9999" } } },
+      { ...original, boundary: { state: "active" as const, providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", providerTurnId: "unowned-turn" } },
+    ]) await assert.rejects(() => store.prepareDeliveryDrain(changed), /bound to different|native boundary/i);
+    await store.close();
+    const reopened = new ManifestStore(env.databasePath);
+    try {
+      assert.deepEqual(await reopened.getDeliveryDrain(original.operationId), cutover);
+      await assert.rejects(() => reopened.cancelDeliveryDrain({ operationId: original.operationId, agentId: "wrong-agent" }));
+      const cancelled = await reopened.cancelDeliveryDrain({ operationId: original.operationId, agentId: agent.id });
+      assert.equal(cancelled.phase, "cancelled");
+      assert.deepEqual(await reopened.cancelDeliveryDrain({ operationId: original.operationId, agentId: agent.id }), cancelled,
+        "cancellation retries return the original result without rewriting its timestamp");
+      assert.equal(cancelled.native_connection_sha256, cutover.native_connection_sha256);
+      assert.equal(cancelled.native_continuation_id, cutover.native_continuation_id);
+      assert.equal((await reopened.getEntry(agent.id))?.provider_ref?.provider_continuation_id, "successor-thread");
+    } finally { await reopened.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("delivery drain rejects unknown or stale authority and rolls back failed admission and cancellation fences", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const { agent, input } = deliveryDrainCoordinates();
+  try {
+    await store.write(0, [agent]);
+    seedActiveDrainExecution(env.databasePath);
+    for (const changed of [
+      { ...input, boundary: { state: "unknown" as const } },
+      { ...input, boundary: { ...input.boundary, nativeProcessIdentity: "reused-pid" } },
+      { ...input, boundary: { state: "active" as const, providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", providerTurnId: "unowned-active-turn" } },
+      { ...input, roomId: "wrong-room" },
+      { ...input, executionGenerationId: "stale-generation" },
+      { ...input, handle: { ...input.handle, workAttemptId: "different-attempt" } },
+      { ...input, handle: { ...input.handle, pid: 9999 } },
+      { ...input, handle: { ...input.handle, appliedConfigurationRevision: 2 } },
+    ]) await assert.rejects(() => store.prepareDeliveryDrain(changed));
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.exec("UPDATE agent_configurations SET config_revision=2 WHERE agent_id='agent_1'");
+      await assert.rejects(() => store.prepareDeliveryDrain(input), /applied provider configuration/i);
+      database.exec("UPDATE agent_configurations SET config_revision=1 WHERE agent_id='agent_1'");
+      database.prepare("UPDATE work_attempt_executions SET terminal_json=? WHERE execution_generation_id='run_1'").run(JSON.stringify(terminal));
+      await assert.rejects(() => store.prepareDeliveryDrain(input), /exact execution authority/i);
+      database.exec("UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='run_1'");
+      await assert.rejects(() => store.prepareDeliveryDrain(input, async () => {}), /without committing/i);
+      assert.equal(await store.getDeliveryDrain(input.operationId), null);
+      database.exec("CREATE TRIGGER reject_drain_insert AFTER INSERT ON execution_cutover_v2 BEGIN SELECT RAISE(ABORT,'test drain rollback'); END");
+      await assert.rejects(() => store.prepareDeliveryDrain(input), /test drain rollback/);
+      assert.equal(await store.getDeliveryDrain(input.operationId), null);
+      database.exec("DROP TRIGGER reject_drain_insert");
+      const { cutover } = await store.prepareDeliveryDrain(input);
+      await assert.rejects(() => store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id }, async () => {}), /without committing/i);
+      assert.deepEqual(await store.getDeliveryDrain(input.operationId), cutover);
+      database.exec("CREATE TRIGGER reject_drain_cancel AFTER UPDATE OF phase ON execution_cutover_v2 BEGIN SELECT RAISE(ABORT,'test cancel rollback'); END");
+      await assert.rejects(() => store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id }), /test cancel rollback/);
+      assert.deepEqual(await store.getDeliveryDrain(input.operationId), cutover);
+      database.exec("DROP TRIGGER reject_drain_cancel");
+      for (const phase of ["dispatching", "uncertain"] as const) {
+        database.prepare("UPDATE execution_cutover_v2 SET phase=? WHERE operation_id=?").run(phase, input.operationId);
+        await assert.rejects(() => store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id }), /pre-dispatch authority/i);
+      }
+      database.prepare("UPDATE execution_cutover_v2 SET phase='cancelled' WHERE operation_id=?").run(input.operationId);
+      database.exec("INSERT INTO execution_cutover_v2(operation_id,request_id,agent_id,execution_generation_id,from_mode,to_mode,strategy,phase,created_at_ms,updated_at_ms) VALUES('historical','historical','agent_1','run_1','mcp_polling','daemon_inbox','drain','prepared',1,1)");
+      await assert.rejects(() => store.cancelDeliveryDrain({ operationId: "historical", agentId: agent.id }), /pre-dispatch authority/i);
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("delivery drain and existing control operations exclude one another in either admission order", async () => {
+  for (const kind of ["turn-control", "room-move", "continuation-repair", "legacy-cutover"] as const) {
+    for (const drainFirst of [false, true]) {
+      const env = await fixture();
+      const store = new ManifestStore(env.databasePath);
+      const inbox = new SupervisedAgentInboxStore(env.databasePath);
+      const { agent, input } = deliveryDrainCoordinates();
+      try {
+        await store.write(0, [agent]);
+        seedActiveDrainExecution(env.databasePath);
+        const a = await inbox.enqueueCorrection({ agent_id: agent.id, room_id: agent.room_id, source_message_id: "control-A", source_message: {}, activation: { decision: "activate" } });
+        await inbox.claimHead(agent.id);
+        if (kind === "turn-control") await inbox.checkpointTurnStarted(a.inbox_item_id, "native-A", TEST_PROVIDER_TURN_AUTHORITY);
+        if (kind === "continuation-repair") await inbox.transition(a.inbox_item_id, "blocked", { failure_code: "provider_continuation_missing" });
+        const boundary = kind === "turn-control"
+          ? { state: "active" as const, providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", providerTurnId: "native-A" }
+          : input.boundary;
+        const prepareOther = async () => {
+          if (kind === "turn-control") return store.prepareTurnControlState((await store.load()).generation, {
+            agentId: agent.id, roomId: agent.room_id, expectedInboxItemId: a.inbox_item_id,
+            expectedSourceMessageId: a.source_message_id, expectedProviderTurnId: "native-A",
+            actionId: "control-A", actionSequence: 1, workAttemptId: "attempt_1", executionGenerationId: "run_1",
+            providerContinuationId: "thread_1", providerConnection: agent.provider_ref!.provider_connection,
+            deliveryMode: "daemon_inbox", hasCorrection: false, correctionText: null, correctionStrategy: null,
+            capability: "native_interrupt", recordedAt: "2026-08-31T09:00:00.000Z",
+          });
+          if (kind === "room-move") return store.prepareRoomMove({
+            operation_id: "move-A", request_id: "move-A", agent_id: agent.id, source_room_id: agent.room_id,
+            destination_room_id: "next-room", daemon_generation: 1, work_attempt_id: "attempt_1",
+            execution_generation_id: "run_1", agent_session_id: "session_1", activating_inbox_item_id: null,
+            provider_turn_id: null, effect_id: null, phase: "prepared",
+          });
+          if (kind === "continuation-repair") return inbox.beginContinuationRepair({
+            agent_id: agent.id, room_id: agent.room_id, inbox_item_id: a.inbox_item_id, daemon_generation: 1,
+            execution_generation_id: "run_1", work_attempt_id: "attempt_1", expected_pid: 4311,
+            expected_process_identity: "codex:4311", missing_continuation: "thread_1",
+          });
+          return store.replaceEntry((await store.load()).generation, { ...agent, delivery_cutover: {
+            work_attempt_id: "attempt_1", execution_generation_id: "run_1", provider_continuation_id: "thread_1",
+            provider_turn_id: null, phase: "prepared", updated_at: "2026-08-31T09:00:00.000Z",
+          } });
+        };
+        if (drainFirst) {
+          if (kind === "turn-control") await assert.rejects(() => store.prepareDeliveryDrain({ ...input,
+            boundary: { state: "active", providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", providerTurnId: "unowned-successor" },
+          }), /does not match the admitted turn/i);
+          const { cutover } = await store.prepareDeliveryDrain({ ...input, boundary });
+          assert.equal(cutover.native_target_turn_id, kind === "turn-control" ? "native-A" : null);
+          await assert.rejects(prepareOther, /delivery drain|cutover/i, `${kind} must not bypass the accepted drain`);
+          await store.cancelDeliveryDrain({ operationId: input.operationId, agentId: agent.id });
+          await prepareOther();
+        } else {
+          await prepareOther();
+          await assert.rejects(() => store.prepareDeliveryDrain({ ...input, boundary }), /unresolved control operation/i);
+          assert.equal(await store.getDeliveryDrain(input.operationId), null);
+        }
+      } finally { await inbox.close(); await store.close(); await env.cleanup(); }
+    }
+  }
+});
 
 test("turn-control preparation and FIFO claim have one atomic admission order", async () => {
   const env = await fixture();
@@ -2889,6 +3123,27 @@ async function fixture(): Promise<{ root: string; databasePath: string; legacyPa
     legacyPath: join(root, "daemon-manifest.json"),
     cleanup: () => rm(root, { recursive: true, force: true }),
   };
+}
+
+function deliveryDrainCoordinates() {
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex:4311" };
+  const agent: DaemonManifestEntry = {
+    ...entry, condition: "none", delivery_mode: "daemon_inbox", turn_control: undefined, last_turn_control_sequence: 0,
+    provider_ref: { ...entry.provider_ref!, provider_connection: connection },
+  };
+  const handle: ProviderActionHandle = { workAttemptId: "attempt_1", pid: 4311, providerContinuationId: "thread_1", providerConnection: { ...connection }, observedState: "idle" };
+  return { agent, input: {
+    requestId: "drain-request", operationId: "drain-operation", agentId: agent.id, roomId: agent.room_id,
+    executionGenerationId: "run_1", handle,
+    boundary: { state: "idle" as const, providerContinuationId: "thread_1", nativeProcessIdentity: "codex:4311", latestProviderTurnId: null },
+  } };
+}
+
+function seedActiveDrainExecution(databasePath: string): void {
+  seedTerminalExecution(databasePath, "attempt_1", "run_1");
+  const database = new DatabaseSync(databasePath);
+  try { database.exec("UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='run_1'"); }
+  finally { database.close(); }
 }
 
 function seedTerminalExecution(databasePath: string, workAttemptId: string, executionGenerationId: string): void {
