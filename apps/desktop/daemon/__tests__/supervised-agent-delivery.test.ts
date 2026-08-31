@@ -1078,6 +1078,90 @@ test("a server-hidden prompt advances the durable daemon cursor without entering
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test("uncertain native dispatch without a durable turn id blocks instead of replaying, including after restart", async (t) => {
+  for (const candidate of ["codex", "open-model"]) {
+    for (const failure of ["lost acknowledgement", "failed checkpoint"]) {
+      await t.test(`${candidate}: ${failure}`, async (t) => {
+        const root = await mkdtemp(join(tmpdir(), "letagents-delivery-uncertain-dispatch-"));
+        const databasePath = join(root, "daemon.sqlite");
+        let store = new SupervisedAgentInboxStore(databasePath);
+        const currentAgent = { ...agent, provider: candidate };
+        let runs = 0;
+        let recoveries = 0;
+        const adapter = provider(async (_handle, _request, options) => {
+          runs += 1;
+          await options?.beforeNativeDispatch?.();
+          // Both providers may admit native work before the daemon can save
+          // its exact recovery key. Neither failure proves the prompt unsent.
+          if (failure === "failed checkpoint") await options?.checkpointTurnStarted?.("native-turn");
+          throw new Error("native dispatch acknowledgement was lost");
+        }, async () => {
+          recoveries += 1;
+          throw new Error("no exact durable turn exists to recover");
+        });
+        const transport = { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } };
+        let delivery = new SupervisedAgentDelivery(store, adapter, transport, currentAuthority, 0, async () => {});
+        try {
+          if (failure === "failed checkpoint") {
+            t.mock.method(store, "checkpointTurnStarted", async () => { throw new Error("checkpoint write failed"); });
+          }
+          await delivery.pump(currentAgent);
+          await ingest(store, "1");
+          await ingest(store, "2");
+          await delivery.pump(currentAgent);
+          assert.equal(runs, 1, "an uncertain native send must not be automatically sent again");
+          assert.equal(recoveries, 0);
+          const receipts = await store.receipts(agent.agentId);
+          assert.deepEqual(receipts.map((receipt) => receipt.receipt_state), ["blocked", "queued_behind_blocked"]);
+          assert.equal(receipts[0]?.provider_turn_id, null);
+          assert.match(receipts[0]?.last_error ?? "", /may have started/);
+
+          await delivery.fenceAndDrain();
+          await store.close();
+          store = new SupervisedAgentInboxStore(databasePath);
+          delivery = new SupervisedAgentDelivery(store, adapter, transport, currentAuthority, 0, async () => {});
+          await delivery.pump({ ...currentAgent, daemonGeneration: 2 });
+          assert.equal(runs, 1, "a replacement daemon preserves the ambiguity instead of replaying");
+          assert.equal(recoveries, 0);
+          assert.deepEqual((await store.receipts(agent.agentId)).map((receipt) => receipt.receipt_state), ["blocked", "queued_behind_blocked"]);
+        } finally {
+          await delivery.fenceAndDrain();
+          await store.close();
+          await rm(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+});
+
+test("a generic failure after an exact turn checkpoint recovers that turn without resending", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-exact-recovery-"));
+  const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+  let runs = 0;
+  const recovered: string[] = [];
+  const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, _request, options) => {
+    runs += 1;
+    await options?.beforeNativeDispatch?.();
+    await options?.checkpointTurnStarted?.("native-turn");
+    throw new Error("control connection interrupted after the exact turn was saved");
+  }, async (_handle, request) => {
+    recovered.push(request.providerTurnId);
+    return { turnId: request.providerTurnId, outcome: "no_reply", text: null };
+  }), { poll: async () => ({}), publish: async () => { throw new Error("must not publish"); } }, currentAuthority, 0, async () => {});
+  try {
+    await delivery.pump(agent);
+    await ingest(store);
+    await delivery.pump(agent);
+    assert.equal(runs, 1);
+    assert.deepEqual(recovered, ["native-turn"]);
+    assert.equal((await store.receipts(agent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally {
+    await delivery.fenceAndDrain();
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("a publish retry reuses the persisted terminal reply without rerunning the turn", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retry-"));
   try {
@@ -1388,7 +1472,7 @@ test("@everyone delivery is per-agent and one blocked FIFO cannot stall another 
     const healthyReceipts = await store.receipts(agents.healthy.agentId);
     assert.deepEqual(blockedReceipts.map((receipt) => receipt.receipt_state), ["blocked", "queued_behind_blocked"]);
     assert.deepEqual(healthyReceipts.map((receipt) => receipt.state), ["acknowledged_no_reply", "acknowledged_no_reply"]);
-    assert.equal(blockedTurns, 3, "the blocked agent exhausts only its own bounded retry budget");
+    assert.equal(blockedTurns, 1, "the uncertain native send blocks only its own FIFO without replay");
     assert.equal(healthyTurns, 2, "each @everyone activation independently reaches the healthy Codex worker");
   } finally {
     firstBlockedTurn.resolve({ turnId: "cleanup", outcome: "no_reply", text: null });
@@ -3723,7 +3807,8 @@ test("a failed durable cancellation neither aborts the turn nor strands the FIFO
 
 test("a Stop that loses to an interrupt-rejection retryable still settles — it is not reported published and the turn does not rerun", async () => {
   // claude-code's native interrupt REJECTS the in-flight turn, so deliver()'s
-  // catch can commit `retryable` before the Stop's settlement lands. The Stop
+  // exact turn is already checkpointed before stdin writes. Its catch can
+  // commit `retryable` for exact recovery before the Stop's settlement lands. The Stop
   // must still settle that head cancelled_by_user (not map it to "published"),
   // and the stopped turn must NOT be re-dispatched.
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-retryable-race-"));
@@ -3731,8 +3816,9 @@ test("a Stop that loses to an interrupt-rejection retryable still settles — it
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
     const published: string[] = [];
     let calls = 0;
-    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request) => {
+    const delivery = new SupervisedAgentDelivery(store, provider(async (_handle, request, options) => {
       calls += 1;
+      await options?.checkpointTurnStarted?.(request.inboxItemId);
       if (calls === 1) throw new Error(`Claude bounded room turn ${request.inboxItemId} failed: Claude command ended interrupted.`);
       return { turnId: request.inboxItemId, outcome: "reply", text: "rerun reply after the Stop" };
     }), {
