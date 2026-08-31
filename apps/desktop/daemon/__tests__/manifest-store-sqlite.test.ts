@@ -14,12 +14,306 @@ import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
+import type { AdmitExecutionApproval, ApprovalReference } from "../execution-approval-journal.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
   origin_execution_generation_id: "run_1",
   provider_continuation_id: "thread_1",
 } as const;
+
+function seedApprovalJournalTurn(database: DatabaseSync, provider: "codex" | "open-model" = "codex"): void {
+  database.exec(`PRAGMA foreign_keys=ON;
+    INSERT INTO execution_generations VALUES('generation','agent',100);
+    INSERT INTO execution_message_attempts(attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+      VALUES('attempt','agent','room','message','active',100);
+    INSERT INTO execution_attempt_generations VALUES('attempt','agent','room','generation','workspace',100);`);
+  database.prepare(`INSERT INTO execution_runtime_generations(runtime_generation_id,execution_generation_id,agent_id,provider,
+    runtime_state,control_state,continuation_state,config_revision,created_at_ms)
+    VALUES('runtime','generation','agent',?,'ready','responsive','available',1,100)`).run(provider);
+  database.exec(`INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+    provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms)
+    VALUES('turn','attempt','agent','room','generation','runtime','continuation','native-turn','active','none',100)`);
+}
+
+function approvalJournalRequest(requestId = "request", nativeRequestId: string | number = 1): { expected: ApprovalReference; input: AdmitExecutionApproval } {
+  const expected: ApprovalReference = {
+    requestId, requestVersion: 1, requestSha256: "a".repeat(64), agentId: "agent", roomId: "room",
+    executionGenerationId: "generation", runtimeGenerationId: "runtime", turnId: "turn",
+    providerContinuationId: "continuation", providerTurnId: "native-turn", connectionId: "connection", nativeRequestId,
+  };
+  return { expected, input: { ...expected, kind: "command", risk: "high", recoveryBoundary: "connection", createdAtMs: 100, expiresAtMs: 200 } };
+}
+
+test("approval journal versions preserve typed native identity and only supersede undispatched requests", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database);
+    const { input, expected } = approvalJournalRequest();
+    const first = await store.admitExecutionApproval(input, async commit => commit());
+    assert.equal(first.created, true);
+    assert.deepEqual(await store.admitExecutionApproval(input, async commit => commit()), { ...first, created: false });
+    await assert.rejects(store.admitExecutionApproval({ ...input, requestSha256: "b".repeat(64) }, async commit => commit()), { code: "identity_mismatch" });
+    await assert.rejects(store.admitExecutionApproval({ ...input, requestId: "alias" }, async commit => commit()), { code: "identity_mismatch" });
+    const typed = approvalJournalRequest("string-request", "1");
+    assert.equal((await store.admitExecutionApproval(typed.input, async commit => commit())).approval.request.nativeRequestId, "1");
+    assert.equal((await store.getExecutionApproval(expected))!.request.nativeRequestId, 1);
+    await assert.rejects(store.admitExecutionApproval({ ...input, requestId: "skipped-first", nativeRequestId: 3, requestVersion: 2 }, async commit => commit()), { code: "invalid_transition" });
+    await store.selectHostApproval({ expected, decisionId: "decision", actorId: "owner", decision: "allow_once", projectionSha256: "c".repeat(64), atMs: 110 }, async commit => commit());
+    for (const change of [{ requestVersion: 2 }, { requestVersion: 3, requestSha256: "b".repeat(64) }]) {
+      await assert.rejects(store.admitExecutionApproval({ ...input, ...change }, async commit => commit()), { code: "invalid_transition" });
+    }
+    const next = { ...input, requestVersion: 2, requestSha256: "b".repeat(64), createdAtMs: 120 };
+    const nextReference = { ...expected, requestVersion: 2, requestSha256: next.requestSha256 };
+    assert.equal((await store.admitExecutionApproval(next, async commit => commit())).created, true);
+    const superseded = await store.getExecutionApproval(expected);
+    assert.equal(superseded!.request.state, "superseded");
+    assert.equal(superseded!.decision!.dispatchState, "lost");
+    assert.equal(superseded!.decision!.applicationCertainty, "impossible");
+    assert.deepEqual((await store.admitExecutionApproval(input, async commit => commit())).approval, superseded, "old receipt never reopens the request");
+    await assert.rejects(store.beginExecutionApprovalDispatch({ expected, decisionId: "decision", dispatchId: "old-dispatch", projectionSha256: "c".repeat(64), atMs: 125 }, async commit => commit()), { code: "invalid_transition" });
+    await store.selectHostApproval({ expected: nextReference, decisionId: "next-decision", actorId: "owner", decision: "deny", projectionSha256: "d".repeat(64), atMs: 130 }, async commit => commit());
+    assert.equal((await store.beginExecutionApprovalDispatch({ expected: nextReference, decisionId: "next-decision", dispatchId: "dispatch", projectionSha256: "d".repeat(64), atMs: 140 }, async commit => commit())).dispatch, true);
+    await assert.rejects(store.admitExecutionApproval({ ...next, requestVersion: 3, requestSha256: "e".repeat(64), createdAtMs: 150 }, async commit => commit()), { code: "invalid_transition" });
+    await assert.rejects(store.admitExecutionApproval({ ...input, requestId: "aliased-version", requestVersion: 2 }, async commit => commit()), { code: "identity_mismatch" });
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 3);
+    database.exec(`UPDATE execution_turns SET state='terminal',ended_at_ms=150;
+      INSERT INTO execution_turns(turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+        provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms)
+      VALUES('next-turn','attempt','agent','room','generation','runtime','continuation','next-native-turn','active','none',160)`);
+    const reused = { ...input, requestId: "next-request", turnId: "next-turn", providerTurnId: "next-native-turn", createdAtMs: 160 };
+    await assert.rejects(store.admitExecutionApproval(reused, async commit => commit()), { code: "identity_mismatch" },
+      "native ID reuse across proven turns is refused, never adopted as the old occurrence");
+    assert.equal(await store.getExecutionApproval({ ...expected, requestId: reused.requestId, turnId: reused.turnId, providerTurnId: reused.providerTurnId }), null);
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
+test("approval journal rejects mismatched exact turns and content-bearing or delegated inputs", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database);
+    const { input, expected } = approvalJournalRequest();
+    for (const key of ["agentId", "roomId", "executionGenerationId", "runtimeGenerationId", "turnId", "providerContinuationId", "providerTurnId"] as const) {
+      await assert.rejects(store.admitExecutionApproval({ ...input, [key]: "other" }, async commit => commit()), { code: "missing_turn" });
+    }
+    for (const extra of [{ command: "PRIVATE-CONTENT-NEVER-PERSIST" }, { reason: "PRIVATE-CONTENT-NEVER-PERSIST" }, { delegatable: true }, { kind: "question" }, { token: "PRIVATE-CONTENT-NEVER-PERSIST" }]) {
+      await assert.rejects(store.admitExecutionApproval({ ...input, ...extra } as AdmitExecutionApproval, async commit => commit()), (error: Error) => {
+        assert.match(error.message, /invalid_input/); assert.doesNotMatch(error.message, /PRIVATE-CONTENT/); return true;
+      });
+    }
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 0);
+    await store.admitExecutionApproval(input, async commit => commit());
+    for (const change of [
+      ...["agentId", "roomId", "executionGenerationId", "runtimeGenerationId", "turnId", "providerContinuationId", "providerTurnId", "connectionId"].map(key => ({ [key]: "other" })),
+      { nativeRequestId: "1" }, { requestSha256: "b".repeat(64) },
+    ]) {
+      const wrong = { ...expected, ...change };
+      await assert.rejects(store.getExecutionApproval(wrong), { code: "identity_mismatch" });
+      await assert.rejects(store.selectHostApproval({ expected: wrong, decisionId: "decision", actorId: "owner", decision: "deny", projectionSha256: "c".repeat(64), atMs: 110 }, async commit => commit()), { code: "identity_mismatch" });
+    }
+    database.exec("UPDATE execution_turns SET state='terminal',ended_at_ms=115");
+    await assert.rejects(store.selectHostApproval({ expected, decisionId: "decision", actorId: "owner", decision: "deny", projectionSha256: "c".repeat(64), atMs: 120 }, async commit => commit()), { code: "missing_turn" });
+    assert.equal((await store.getExecutionApproval(expected))!.decision, null);
+    assert.equal(database.prepare("SELECT delegatable FROM execution_approval_requests").get()!.delegatable, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n, 0, "journal does not fabricate provider evidence");
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
+test("approval journal admits one host decision and binds immutable presentation evidence", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath); const other = new ManifestStore(env.databasePath);
+  await store.load(); await other.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database);
+    const { input, expected } = approvalJournalRequest(); await store.admitExecutionApproval(input, async commit => commit());
+    const selection = { expected, decisionId: "allow", actorId: "owner", decision: "allow_once" as const, projectionSha256: "b".repeat(64), atMs: 110 };
+    await assert.rejects(store.selectHostApproval({ ...selection, source: "delegate" } as typeof selection, async commit => commit()), { code: "invalid_input" });
+    for (const projectionSha256 of [undefined, null, "short", "G".repeat(64)]) {
+      await assert.rejects(store.selectHostApproval({ ...selection, projectionSha256: projectionSha256 as string }, async commit => commit()), { code: "invalid_input" });
+    }
+    const choices = [selection, { ...selection, decisionId: "deny", actorId: "other-owner", decision: "deny" as const }];
+    const competing = await Promise.allSettled([store.selectHostApproval(choices[0]!, async commit => commit()), other.selectHostApproval(choices[1]!, async commit => commit())]);
+    assert.equal(competing.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(competing.filter(result => result.status === "rejected" && result.reason.code === "decision_conflict").length, 1);
+    const winner = choices[competing.findIndex(result => result.status === "fulfilled")]!;
+    const chosen = await store.getExecutionApproval(expected);
+    assert.deepEqual(await store.selectHostApproval(winner, async commit => commit()), chosen);
+    await assert.rejects(store.selectHostApproval({ ...winner, projectionSha256: "c".repeat(64) }, async commit => commit()), { code: "decision_conflict" });
+    assert.throws(() => database.exec("UPDATE execution_approval_decisions SET projection_sha256=NULL"), /immutable/);
+    const dispatch = { expected, decisionId: winner.decisionId, dispatchId: "dispatch", projectionSha256: "c".repeat(64), atMs: 120 };
+    await assert.rejects(store.beginExecutionApprovalDispatch(dispatch, async commit => commit()), { code: "identity_mismatch" });
+    assert.deepEqual(await store.getExecutionApproval(expected), chosen);
+    const historical = approvalJournalRequest("historical", 2); await store.admitExecutionApproval(historical.input, async commit => commit());
+    database.exec(`INSERT INTO execution_approval_decisions(decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,
+      turn_id,request_delegatable,request_sha256,decision,source,actor_id,dispatch_state,decided_at_ms)
+      SELECT 'historical-decision',request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,0,request_sha256,
+        'deny','host','owner','not_dispatched',110 FROM execution_approval_requests WHERE request_id='historical';
+      UPDATE execution_approval_requests SET state='decision_recorded' WHERE request_id='historical'`);
+    await assert.rejects(store.beginExecutionApprovalDispatch({ ...dispatch, expected: historical.expected, decisionId: "historical-decision" }, async commit => commit()), { code: "identity_mismatch" });
+    assert.equal((await store.getExecutionApproval(historical.expected))!.decision!.projectionSha256, null);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions WHERE source='host' AND request_delegatable=0").get()!.n, 2);
+  } finally { database.close(); await other.close(); await store.close(); await env.cleanup(); }
+});
+
+test("approval journal requires ownership fences and rolls back both tables without rewriting the manifest", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const manifest = await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database);
+    const { input, expected } = approvalJournalRequest();
+    const selection = { expected, decisionId: "decision", actorId: "owner", decision: "allow_once" as const, projectionSha256: "b".repeat(64), atMs: 110 };
+    const dispatch = { expected, decisionId: "decision", dispatchId: "dispatch", projectionSha256: selection.projectionSha256, atMs: 120 };
+    for (const operation of [
+      () => store.admitExecutionApproval(input, undefined as never), () => store.selectHostApproval(selection, undefined as never),
+      () => store.beginExecutionApprovalDispatch(dispatch, undefined as never),
+      () => store.recordExecutionApprovalOutcome({ expected, decisionId: "decision", dispatchId: "dispatch", evidence: "dispatch_uncertain", atMs: 125 }, undefined as never),
+      () => store.loseExecutionApproval({ expected, atMs: 130 }, undefined as never),
+    ]) await assert.rejects(operation(), /ownership commit fence/);
+    await assert.rejects(store.admitExecutionApproval(input, async () => {}), /without committing/);
+    assert.equal(await store.getExecutionApproval(expected), null);
+    await store.admitExecutionApproval(input, async commit => commit());
+    database.exec("CREATE TRIGGER fail_approval_request AFTER UPDATE ON execution_approval_requests BEGIN SELECT RAISE(ABORT,'approval rollback'); END");
+    await assert.rejects(store.selectHostApproval(selection, async commit => commit()), /approval rollback/);
+    assert.equal((await store.getExecutionApproval(expected))!.request.state, "requested");
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
+    database.exec("DROP TRIGGER fail_approval_request");
+    const decided = await store.selectHostApproval(selection, async commit => commit());
+    database.exec("CREATE TRIGGER fail_approval_request AFTER UPDATE ON execution_approval_requests BEGIN SELECT RAISE(ABORT,'approval rollback'); END");
+    await assert.rejects(store.beginExecutionApprovalDispatch(dispatch, async commit => commit()), /approval rollback/);
+    await assert.rejects(store.loseExecutionApproval({ expected, atMs: 125 }, async commit => commit()), /approval rollback/);
+    await assert.rejects(store.admitExecutionApproval({ ...input, requestVersion: 2, requestSha256: "c".repeat(64), createdAtMs: 125 }, async commit => commit()), /approval rollback/);
+    assert.deepEqual(await store.getExecutionApproval(expected), decided);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 1);
+    database.exec("DROP TRIGGER fail_approval_request");
+    assert.equal((await store.beginExecutionApprovalDispatch(dispatch, async commit => commit())).dispatch, true);
+    assert.deepEqual(await store.load(), manifest);
+    assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
+test("approval journal restart never grants another dispatch permit or treats a Codex send as acknowledgement", async () => {
+  const env = await fixture(); let store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database);
+    const { input, expected } = approvalJournalRequest(); await store.admitExecutionApproval(input, async commit => commit());
+    const selection = { expected, decisionId: "decision", actorId: "owner", decision: "allow_once" as const, projectionSha256: "b".repeat(64), atMs: 110 };
+    await store.selectHostApproval(selection, async commit => commit());
+    const dispatch = { expected, decisionId: "decision", dispatchId: "dispatch", projectionSha256: selection.projectionSha256, atMs: 120 };
+    await assert.rejects(store.beginExecutionApprovalDispatch(dispatch, async commit => {
+      await commit(); throw new Error("dispatch receipt response lost");
+    }), /dispatch receipt response lost/);
+    assert.equal((await store.getExecutionApproval(expected))!.decision!.dispatchState, "dispatching",
+      "a failure after commit preserves intent; retry must not grant a second dispatch");
+    const outcome = { expected, decisionId: "decision", dispatchId: "dispatch", atMs: 130 };
+    for (const evidence of [null, "sent_unacknowledged", "dispatch_uncertain"] as const) {
+      if (evidence) await store.recordExecutionApprovalOutcome({ ...outcome, evidence }, async commit => commit());
+      const before = await store.getExecutionApproval(expected);
+      await store.close(); store = new ManifestStore(env.databasePath);
+      assert.deepEqual(await store.getExecutionApproval(expected), before);
+      assert.deepEqual(await store.beginExecutionApprovalDispatch(dispatch, async commit => commit()), { dispatch: false, approval: before });
+      await assert.rejects(store.beginExecutionApprovalDispatch({ ...dispatch, dispatchId: "retry" }, async commit => commit()), { code: "decision_conflict" });
+      await assert.rejects(store.recordExecutionApprovalOutcome({ ...outcome, evidence: "native_processed" }, async commit => commit()), { code: "invalid_transition" });
+      assert.deepEqual((await store.admitExecutionApproval(input, async commit => commit())).approval, before);
+      assert.deepEqual(await store.selectHostApproval(selection, async commit => commit()), before);
+    }
+    const lost = await store.loseExecutionApproval({ expected, atMs: 140 }, async commit => commit());
+    assert.equal(lost.request.state, "lost"); assert.equal(lost.request.applicationCertainty, "unknown");
+    assert.equal(lost.decision!.dispatchState, "lost"); assert.equal(lost.decision!.applicationCertainty, "unknown");
+    assert.equal((await store.beginExecutionApprovalDispatch(dispatch, async commit => commit())).dispatch, false);
+    await assert.rejects(store.recordExecutionApprovalOutcome({ ...outcome, evidence: "sent_unacknowledged", atMs: 150 }, async commit => commit()), { code: "invalid_transition" });
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 1);
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
+test("approval journal accepts exact OpenCode processing evidence without deciding sibling permissions", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database, "open-model");
+    const { input, expected } = approvalJournalRequest(); await store.admitExecutionApproval(input, async commit => commit());
+    const sibling = approvalJournalRequest("sibling", 2); await store.admitExecutionApproval(sibling.input, async commit => commit());
+    const untouched = await store.getExecutionApproval(sibling.expected);
+    const dispatch = { expected, decisionId: "decision", dispatchId: "dispatch", projectionSha256: "b".repeat(64), atMs: 120 };
+    await store.selectHostApproval({ expected, decisionId: "decision", actorId: "owner", decision: "deny", projectionSha256: dispatch.projectionSha256, atMs: 110 }, async commit => commit());
+    await store.beginExecutionApprovalDispatch(dispatch, async commit => commit());
+    const outcome = { expected, decisionId: "decision", dispatchId: "dispatch", atMs: 130 };
+    await store.recordExecutionApprovalOutcome({ ...outcome, evidence: "dispatch_uncertain" }, async commit => commit());
+    const uncertain = await store.getExecutionApproval(expected);
+    database.exec("CREATE TRIGGER fail_approval_resolution AFTER UPDATE ON execution_approval_requests BEGIN SELECT RAISE(ABORT,'acknowledgement rollback'); END");
+    await assert.rejects(store.recordExecutionApprovalOutcome({ ...outcome, evidence: "native_processed" }, async commit => commit()), /acknowledgement rollback/);
+    assert.deepEqual(await store.getExecutionApproval(expected), uncertain);
+    database.exec("DROP TRIGGER fail_approval_resolution");
+    for (const change of [{ decisionId: "other" }, { dispatchId: "other" }, { expected: sibling.expected }]) {
+      await assert.rejects(store.recordExecutionApprovalOutcome({ ...outcome, ...change, evidence: "native_processed" }, async commit => commit()), { code: "identity_mismatch" });
+    }
+    const resolved = await store.recordExecutionApprovalOutcome({ ...outcome, evidence: "native_processed" }, async commit => commit());
+    assert.equal(resolved.request.state, "resolved"); assert.equal(resolved.decision!.dispatchState, "acknowledged");
+    assert.deepEqual(await store.recordExecutionApprovalOutcome({ ...outcome, evidence: "native_processed" }, async commit => commit()), resolved);
+    assert.deepEqual(await store.getExecutionApproval(sibling.expected), untouched, "session-wide reject cannot fabricate sibling acknowledgement or loss");
+    await assert.rejects(store.loseExecutionApproval({ expected, atMs: 140 }, async commit => commit()), { code: "invalid_transition" });
+    await assert.rejects(store.recordExecutionApprovalOutcome({ ...outcome, evidence: "dispatch_uncertain", atMs: 140 }, async commit => commit()), { code: "invalid_transition" });
+    assert.equal((await store.beginExecutionApprovalDispatch(dispatch, async commit => commit())).dispatch, false);
+    assert.deepEqual(await store.getExecutionApproval(expected), resolved);
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
+test("approval journal records impossible pre-dispatch loss and refuses expiry without silently denying", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database);
+    for (const decided of [false, true]) {
+      const { input, expected } = approvalJournalRequest(decided ? "decided" : "requested", decided ? 2 : 1);
+      await store.admitExecutionApproval(input, async commit => commit());
+      const selection = { expected, decisionId: "decision", actorId: "owner", decision: "deny" as const, projectionSha256: "b".repeat(64), atMs: 110 };
+      if (decided) await store.selectHostApproval(selection, async commit => commit());
+      const lost = await store.loseExecutionApproval({ expected, atMs: 120 }, async commit => commit());
+      assert.equal(lost.request.applicationCertainty, "impossible");
+      assert.equal(lost.decision?.applicationCertainty ?? null, decided ? "impossible" : null);
+      assert.deepEqual(await store.loseExecutionApproval({ expected, atMs: 130 }, async commit => commit()), lost);
+      assert.deepEqual((await store.admitExecutionApproval(input, async commit => commit())).approval, lost);
+      await assert.rejects(store.beginExecutionApprovalDispatch({ expected, decisionId: "decision", dispatchId: "dispatch", projectionSha256: selection.projectionSha256, atMs: 130 }, async commit => commit()));
+    }
+    const { input, expected } = approvalJournalRequest("expired", 3); await store.admitExecutionApproval(input, async commit => commit());
+    const selection = { expected, decisionId: "expiry-decision", actorId: "owner", decision: "allow_once" as const, projectionSha256: "c".repeat(64), atMs: 200 };
+    await assert.rejects(store.selectHostApproval(selection, async commit => commit()), { code: "expired" });
+    assert.equal((await store.getExecutionApproval(expected))!.decision, null);
+    assert.equal((await store.getExecutionApproval(expected))!.request.state, "requested");
+    const selected = await store.selectHostApproval({ ...selection, atMs: 190 }, async commit => commit());
+    await assert.rejects(store.beginExecutionApprovalDispatch({ expected, decisionId: selection.decisionId, dispatchId: "expiry-dispatch", projectionSha256: selection.projectionSha256, atMs: 200 }, async commit => commit()), { code: "expired" });
+    assert.deepEqual(await store.getExecutionApproval(expected), selected, "expiry is refusal, not an invented deny or dispatch");
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
+test("approval journal snapshots caller inputs before awaiting the ownership fence", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    seedApprovalJournalTurn(database);
+    const { input, expected } = approvalJournalRequest(); const original = structuredClone(input);
+    const admission = await store.admitExecutionApproval(input, async commit => {
+      input.roomId = "other-room"; input.nativeRequestId = "other-native-id";
+      await Promise.resolve(); await commit();
+    });
+    assert.deepEqual(admission.approval.request, { ...original, state: "requested", applicationCertainty: null });
+    const selection = { expected: { ...expected }, decisionId: "decision", actorId: "owner", decision: "allow_once" as const, projectionSha256: "b".repeat(64), atMs: 110 };
+    const selected = await store.selectHostApproval(selection, async commit => {
+      selection.expected.connectionId = "replacement"; selection.actorId = "other"; selection.projectionSha256 = "c".repeat(64);
+      await Promise.resolve(); await commit();
+    });
+    assert.equal(selected.decision!.actorId, "owner"); assert.equal(selected.decision!.projectionSha256, "b".repeat(64));
+    const dispatch = { expected: { ...expected }, decisionId: "decision", dispatchId: "dispatch", projectionSha256: "b".repeat(64), atMs: 120 };
+    const started = await store.beginExecutionApprovalDispatch(dispatch, async commit => {
+      dispatch.expected.providerTurnId = "replacement-turn"; dispatch.dispatchId = "replacement-dispatch";
+      await Promise.resolve(); await commit();
+    });
+    assert.equal(started.dispatch, true); assert.equal(started.approval.decision!.dispatchId, "dispatch");
+    assert.equal((await store.getExecutionApproval(expected))!.request.providerTurnId, "native-turn");
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
 
 test("polling offers persist a single successor chain without advancing the cursor until its exact tail is acknowledged", async () => {
   const env = await fixture(); let store = new ManifestStore(env.databasePath);
