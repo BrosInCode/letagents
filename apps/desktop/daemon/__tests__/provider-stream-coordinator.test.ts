@@ -62,12 +62,15 @@ function coordinatorHarness(input: {
   durabilityAttempt?: { execution_generations: Array<Record<string, unknown>>; checkpoints?: unknown[] };
   onExit?: ProviderActionPort["onExit"];
   onStream?: NonNullable<ProviderActionPort["onStream"]>;
+  probeControl?: NonNullable<ProviderActionPort["probeControl"]>;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
   endStream?: (entryId: string) => void;
   observeExecution?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
+  publishNativeActivity?: () => Promise<void>;
+  requestConvergence?: (entryId: string) => void;
 } = {}) {
   let manifest = entry();
   const runtimeCustody = new WorkerRuntimeCustody();
@@ -97,6 +100,7 @@ function coordinatorHarness(input: {
       },
       onExit: input.onExit ?? (async () => () => {}),
       onStream: input.onStream ?? (async () => () => {}),
+      probeControl: input.probeControl,
     },
     manifest: {
       getEntry: async () => manifest,
@@ -134,7 +138,7 @@ function coordinatorHarness(input: {
     appendActivity: async (_entryId, event) => {
       await input.appendActivity?.(event.method);
     },
-    publishNativeActivity: async () => {},
+    publishNativeActivity: async () => input.publishNativeActivity?.(),
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: () => {}, end: (entryId) => input.endStream?.(entryId) },
     delivery: { start: input.startDelivery ?? (async () => {}), startCutover: async () => {} },
@@ -144,7 +148,7 @@ function coordinatorHarness(input: {
       currentHostGrant: () => null,
       hostGrantNeedsRenewal: () => false,
       hostWorkerBearerNeedsRotation: async () => false,
-      requestConvergence: () => {},
+      requestConvergence: input.requestConvergence ?? (() => {}),
     },
     setInterval: input.setInterval
       ?? ((() => ({ unref() {} })) as unknown as typeof setInterval),
@@ -159,6 +163,75 @@ function coordinatorHarness(input: {
     getManifest: () => manifest,
   };
 }
+
+test("daemon-inbox heartbeats probe exact live runtimes without granting recovery authority", async () => {
+  let heartbeat: (() => void) | null = null;
+  let probe: "lost" | "throw" = "lost";
+  let probeCalls = 0;
+  let activityCalls = 0;
+  let convergenceCalls = 0;
+  const harness = coordinatorHarness({
+    probeControl: async () => {
+      probeCalls += 1;
+      if (probe === "throw") throw new Error("probe unavailable");
+      return { state: "lost", controlEvidence: "transport_refused" };
+    },
+    publishNativeActivity: async () => { activityCalls += 1; },
+    requestConvergence: () => { convergenceCalls += 1; },
+    setInterval: ((callback: () => void) => {
+      heartbeat = callback;
+      return { unref() {} };
+    }) as unknown as typeof setInterval,
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+  });
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  probe = "throw";
+  heartbeat!();
+  await harness.coordinator.drainCallbacks();
+  assert.equal(probeCalls, 2);
+  assert.equal(activityCalls, 2, "a failed shadow probe cannot suppress the ordinary heartbeat");
+  assert.equal(convergenceCalls, 0);
+  assert.equal(harness.stopCalls(), 0);
+  assert.equal(harness.getManifest().observed_state, "working");
+  assert.equal(harness.getManifest().condition, "none");
+  await harness.coordinator.disposeAll();
+});
+
+test("control probes exclude non-daemon, non-live, generation-mismatched, and replaced runtimes", async () => {
+  const cases: Array<{ name: string; configure(harness: ReturnType<typeof coordinatorHarness>): void; replaceAfterTick?: boolean }> = [
+    { name: "mcp polling", configure: harness => harness.setManifest({ ...entry(), delivery_mode: "mcp_polling" }) },
+    { name: "non-live manifest", configure: harness => harness.setManifest({ ...entry(), observed_state: "recovering" }) },
+    { name: "generation mismatch", configure: harness => harness.runtimeCustody.installLiveBinding("agent-1", {
+      agentSessionId: "session-1", executionGenerationId: "generation-old", updatedAt: "2026-08-26T00:00:00.000Z",
+    }) },
+    { name: "replaced handle", configure: () => {}, replaceAfterTick: true },
+  ];
+  for (const candidate of cases) {
+    let heartbeat: (() => void) | null = null;
+    let probes = 0;
+    const harness = coordinatorHarness({
+      probeControl: async () => { probes += 1; return { state: "responsive" }; },
+      setInterval: ((callback: () => void) => {
+        heartbeat = callback;
+        return { unref() {} };
+      }) as unknown as typeof setInterval,
+    });
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    if (candidate.name !== "generation mismatch") harness.runtimeCustody.installLiveBinding("agent-1", {
+      agentSessionId: "session-1", executionGenerationId: "generation-2", updatedAt: "2026-08-26T00:00:00.000Z",
+    });
+    candidate.configure(harness);
+    heartbeat!();
+    if (candidate.replaceAfterTick) harness.coordinator.liveHandles.set("agent-1", { ...handle, pid: 99 });
+    await harness.coordinator.drainCallbacks();
+    assert.equal(probes, 0, candidate.name);
+    await harness.coordinator.disposeAll();
+  }
+});
 
 test("installing the approval bridge preserves full-access launch configuration and runtime", async () => {
   const observed: Array<[string, ProviderActionHandle, string]> = [];
