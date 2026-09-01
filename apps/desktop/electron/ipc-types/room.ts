@@ -671,6 +671,11 @@ export type DesktopRoomStreamEvent =
       sessionId: string;
     }
   | {
+      type: "resource_invalidation";
+      roomIdentifier: string;
+      resource: "agent_work";
+    }
+  | {
       type: "rental_activity";
       roomIdentifier: string;
       activity: DesktopRentalActivityEvent;

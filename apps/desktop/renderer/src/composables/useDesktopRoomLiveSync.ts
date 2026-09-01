@@ -37,6 +37,9 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   let roomAgentWorkCursor: string | null = null;
   let roomAgentWorkRefreshSequence = 0;
   let roomAgentWorkInFlightSequence: number | null = null;
+  let roomAgentWorkInvalidationPending = false;
+  let roomAgentWorkInvalidationQueued = false;
+  let roomAgentWorkTrailingRefresh = false;
   const roomAgentWork = ref<DesktopRoomAgentWork[]>([]);
   const roomAgentWorkStatus = ref<"idle" | "loading" | "ready" | "stale" | "error" | "unavailable">("idle");
   const roomAgentWorkTruncated = ref(false);
@@ -46,6 +49,9 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
   ): void {
     roomAgentWorkRefreshSequence += 1;
     roomAgentWorkInFlightSequence = null;
+    roomAgentWorkInvalidationPending = false;
+    roomAgentWorkInvalidationQueued = false;
+    roomAgentWorkTrailingRefresh = false;
     roomAgentWorkCursor = null;
     roomAgentWork.value = [];
     roomAgentWorkTruncated.value = false;
@@ -75,7 +81,12 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
       clearSelectedRoomAgentWork("unavailable");
       return;
     }
-    if (roomAgentWorkInFlightSequence !== null) return;
+    if (roomAgentWorkInFlightSequence !== null) {
+      if (roomAgentWorkInvalidationPending) roomAgentWorkTrailingRefresh = true;
+      return;
+    }
+
+    roomAgentWorkInvalidationPending = false;
 
     const sessionGeneration = options.sessionGeneration.value;
     const refreshSequence = ++roomAgentWorkRefreshSequence;
@@ -101,7 +112,38 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
       if (roomAgentWorkInFlightSequence === refreshSequence) {
         roomAgentWorkInFlightSequence = null;
       }
+      if (
+        roomAgentWorkTrailingRefresh
+        && roomAgentWorkRequestIsCurrent(refreshSequence, roomIdentifier, sessionGeneration, accountId)
+      ) {
+        roomAgentWorkTrailingRefresh = false;
+        roomAgentWorkInvalidationPending = true;
+        scheduleRoomAgentWorkInvalidationRefresh();
+      }
     }
+  }
+
+  function scheduleRoomAgentWorkInvalidationRefresh(): void {
+    if (roomAgentWorkInvalidationQueued) return;
+    roomAgentWorkInvalidationQueued = true;
+    queueMicrotask(() => {
+      roomAgentWorkInvalidationQueued = false;
+      if (!roomAgentWorkInvalidationPending) return;
+      if (shouldSkipPollTick({ hidden: Boolean(window.document?.hidden) })) return;
+      void refreshSelectedRoomAgentWork().catch(() => undefined);
+    });
+  }
+
+  function invalidateSelectedRoomAgentWork(roomIdentifier: string): void {
+    if (
+      !options.accountId.value
+      || (
+        normalizeRoomIdentifier(roomIdentifier) !== normalizeRoomIdentifier(options.selectedRoomIdentifier.value)
+        && !snapshotMatchesRoom(options.selectedSnapshot.value, roomIdentifier)
+      )
+    ) return;
+    roomAgentWorkInvalidationPending = true;
+    scheduleRoomAgentWorkInvalidationRefresh();
   }
 
   watch(
@@ -274,6 +316,7 @@ export function useDesktopRoomLiveSync(options: DesktopRoomLiveSyncOptions) {
     clearLiveMetadataRefreshTimer,
     clearSelectedRoomAgentWork,
     refreshSelectedRoomLiveMetadata,
+    invalidateSelectedRoomAgentWork,
     roomAgentWork,
     roomAgentWorkStatus,
     roomAgentWorkTruncated,

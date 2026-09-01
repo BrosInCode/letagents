@@ -12,6 +12,7 @@ import { normalizeRoomId } from "../../rooms/routing.js";
 import { requireCurrentSupervisorGrant, respondToStaleSupervisorGrantFence, type RoomResolverDeps } from "../supervisor-host-grants.js";
 import { resolveParticipantRoom, routeParam } from "./messages/helpers.js";
 import type { RoomMessageRouteDeps } from "./messages/types.js";
+import { queueAgentWorkInvalidation } from "../../server/events.js";
 
 export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageRouteDeps, supervisorDeps: RoomResolverDeps): void {
   // Reads remain available when grant rollout is disabled. These are retained
@@ -58,6 +59,7 @@ export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageR
       const result = await clearRoomAgentWork({ room_id: room.id, attempt_id: attemptId,
         owner_account_id: req.sessionAccount.account_id, revision: body.revision });
       if (!result) { res.status(404).json({ error: "Work evidence is not available in this room." }); return; }
+      if (result.status === "cleared") queueAgentWorkInvalidation(room.id);
       res.setHeader("Cache-Control", "no-store"); res.json(result);
     } catch (error) {
       if (error instanceof RoomAgentWorkError) {
@@ -89,6 +91,9 @@ export function registerRoomAgentWorkRoutes(app: Express, roomDeps: RoomMessageR
         room_id: roomId, session_id: String(req.params.sessionId), source_message_number: Number(body.source_message_id.slice(4)),
         revision: body.revision as number, summary: body.summary,
       });
+      if (result.status === "created" || result.status === "updated") {
+        queueAgentWorkInvalidation(roomId);
+      }
       res.status(result.status === "created" ? 201 : 200).json(result);
     } catch (error) {
       if (respondToStaleSupervisorGrantFence(res, error)) return;

@@ -37,6 +37,29 @@ const runStreamCheckpoint = createBoundedExecutor({
   timeoutMs: 8_000,
 });
 
+const RESOURCE_INVALIDATION_CAPABILITY = "resource_invalidation_v1";
+const MAX_STREAM_CAPABILITY_VALUES = 16;
+const MAX_STREAM_CAPABILITY_BYTES = 512;
+
+function streamSupportsResourceInvalidation(req: AuthenticatedRequest): boolean {
+  const raw = req.query?.stream_capability;
+  const values = typeof raw === "string"
+    ? [raw]
+    : Array.isArray(raw) && raw.every((value) => typeof value === "string")
+      ? raw
+      : [];
+  if (values.length === 0 || values.length > MAX_STREAM_CAPABILITY_VALUES) return false;
+  let bytes = 0;
+  for (const value of values) {
+    bytes += Buffer.byteLength(value);
+    if (
+      bytes > MAX_STREAM_CAPABILITY_BYTES
+      || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)
+    ) return false;
+  }
+  return values.includes(RESOURCE_INVALIDATION_CAPABILITY);
+}
+
 export function registerMessageStreamRoute(
   app: Express,
   deps: RoomMessageRouteDeps
@@ -46,6 +69,7 @@ export function registerMessageStreamRoute(
     if (!project) return;
 
     const projectId = project.id;
+    const supportsResourceInvalidation = streamSupportsResourceInvalidation(req);
     const accessRoomName = await (
       deps.resolveRequestProjectRepoAccessRoomName ?? resolveRequestProjectRepoAccessRoomName
     )(req, project);
@@ -252,6 +276,24 @@ export function registerMessageStreamRoute(
             room_id: projectId,
             message_ids: event.messageIds,
           })}\n\n`);
+          return;
+        case "agent_work_invalidated":
+          if (supportsResourceInvalidation) {
+            await writeEvent(`${eventId}event: ${RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
+              room_id: projectId,
+              resource: "agent_work",
+            })}\n\n`);
+          } else {
+            // Preserve the broker cursor for older clients without exposing an
+            // event name they do not understand. A gap:false room_sync is an
+            // existing cursor-only no-op for both web and Desktop clients.
+            await writeEvent(`${eventId}${roomSyncSseFrame({
+              room_id: projectId,
+              checkpoint: null,
+              event_cursor: envelope.cursor,
+              gap: false,
+            })}`);
+          }
           return;
         case "rental_activity_created": {
           if (event.activity.visibility !== "rental_visible") return;
