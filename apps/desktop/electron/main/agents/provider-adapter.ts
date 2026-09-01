@@ -354,6 +354,8 @@ export interface ProviderStreamEvent {
   provider: ProviderAdapterId;
   kind: ProviderStreamEventKind;
   method: string;
+  /** Opaque identity shared only with typed facts derived from this exact native lifecycle event. */
+  nativeEventId?: string;
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
   payload: unknown;

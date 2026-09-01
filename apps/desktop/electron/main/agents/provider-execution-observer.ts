@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../../shared/execution-protocol.js";
 
 const MAX_RETAINED_OBSERVATIONS = 256;
@@ -93,4 +93,36 @@ export class ProviderExecutionObserver {
 
 export function nativeExecutionId(value: unknown): value is string {
   return typeof value === "string" && value.length <= 512 && /^[A-Za-z0-9][A-Za-z0-9_.:/-]*$/.test(value);
+}
+
+type NativeLifecycleCheckpointInput = {
+  provider: "codex" | "claude-code" | "cursor";
+  workAttemptId: string;
+  phase: "turn_active" | "turn_terminal";
+  providerContinuationId: string;
+  providerTurnId: string;
+  nativeProcessIdentity?: string;
+  terminalDiscriminator?: string;
+};
+
+/**
+ * Stable, non-reversible correlation for the two projections of one native
+ * lifecycle event. The durable adapter lane (work attempt), provider, phase,
+ * continuation, native turn, optional process birth, and terminal outcome are
+ * the complete derivation tuple; emission order and timestamps never enter it.
+ * Consumers compare this value as opaque data; raw identities never leave the
+ * hash input.
+ */
+export function nativeLifecycleCheckpointId(input: NativeLifecycleCheckpointInput): string {
+  const digest = createHash("sha256").update(JSON.stringify([
+    "native-lifecycle-checkpoint-v1",
+    input.provider,
+    input.workAttemptId,
+    input.phase,
+    input.providerContinuationId,
+    input.providerTurnId,
+    input.nativeProcessIdentity ?? null,
+    input.terminalDiscriminator ?? null,
+  ])).digest("base64url");
+  return `nlc1:${digest}`;
 }
