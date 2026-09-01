@@ -16,6 +16,7 @@ import {
   supervisedReplyTargetForSourceMessage,
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
+import { SupervisedDeliveryLifecycleCoordinator } from "../supervised-delivery-lifecycle-coordinator.js";
 import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 
 const agent = {
@@ -90,6 +91,77 @@ test("daemon delivery treats an absent mode as historical mcp_polling", async ()
     await store.close();
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("the central delivery lifecycle rejects every start until the exact provider birth is admitted", async () => {
+  let admitted = false;
+  let revokeWhileLoading = false;
+  let refreshes = 0;
+  const entry: DaemonManifestEntry = {
+    id: "stone", room_id: "room", display_name: "Stone", provider: "codex", model: null,
+    charter: "test", desired_state: "running", observed_state: "working", condition: "none",
+    permission_profile_id: "supervised", created_by: "test", created_at: new Date().toISOString(),
+    work_attempt_id: "attempt", delivery_mode: "daemon_inbox",
+    provider_ref: {
+      work_attempt_id: "attempt", execution_generation_id: "generation-1",
+      provider_continuation_id: "thread", provider_connection: agent.providerConnection,
+    },
+  };
+  const binding = {
+    entry_id: "stone", room_id: "room", work_attempt_id: "attempt",
+    execution_generation_id: "generation-1", agent_session_id: "session-1",
+    credential_ref: "credential", api_url: "https://letagents.test", updated_at: new Date().toISOString(),
+    room_cursor: null,
+  };
+  const lifecycle = new SupervisedDeliveryLifecycleCoordinator({
+    isHandoffScheduled: () => false,
+    supportsRoomTurns: () => true,
+    isLifecycleActive: () => false,
+    isOperationallyAdmitted: () => admitted,
+    currentDaemonGeneration: () => 1,
+    delivery: {
+      activeTurn: () => null,
+      ensureStarted: async () => { refreshes += 1; },
+      refresh: async () => { refreshes += 1; },
+      wake: () => {},
+    },
+    manifest: {
+      unresolvedDeliveryDrain: async () => null,
+      getEntry: async () => entry,
+      getAgentConfiguration: async () => ({}),
+      pendingRoomMoves: async () => [],
+    },
+    roomMoves: { reconcile: async move => move },
+    cutovers: { start: async () => {} },
+    inbox: {
+      get: async () => null,
+      preparedRoomMove: async () => null,
+      providerTurnBinding: async () => null,
+      receipts: async () => [],
+    },
+    bindings: {
+      get: async () => {
+        if (revokeWhileLoading) admitted = false;
+        return binding;
+      },
+      credentialFor: async () => "memory",
+    },
+    liveHandle: () => agent.handle,
+    providerAuthority: { isExactAuthority: async () => true },
+    scheduleRecovery: () => {},
+  });
+
+  await lifecycle.start("stone");
+  assert.equal(refreshes, 0, "worker bind, restart, wake, and recovery share this inert gate");
+  admitted = true;
+  revokeWhileLoading = true;
+  await lifecycle.start("stone");
+  assert.equal(refreshes, 0,
+    "a birth replaced while durable identity loads cannot cross the final delivery gate");
+  admitted = true;
+  revokeWhileLoading = false;
+  await lifecycle.start("stone");
+  assert.equal(refreshes, 1);
 });
 
 test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async () => {
@@ -2097,17 +2169,27 @@ test("SupervisorDaemon stop fences and drains its production-owned delivery befo
     const internals = daemon as unknown as {
       putManifestEntry(entry: Record<string, unknown>): Promise<void>;
       startSupervisedDelivery(entryId: string): Promise<void>;
-      liveHandles: Map<string, typeof agent.handle>;
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
+      store: ManifestStore;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+      };
     };
     await daemon.start();
     await internals.putManifestEntry({
       id: "stone", room_id: "room", display_name: "Stone", provider: "codex", model: null, charter: "supervised test", desired_state: "running", observed_state: "working", condition: "none", permission_profile_id: null,
       delivery_mode: "daemon_inbox",
-      created_by: "test", created_at: new Date().toISOString(), work_attempt_id: "attempt",
+      created_by: "test", created_at: new Date().toISOString(), workspace_path: root, work_attempt_id: "attempt",
       provider_ref: { work_attempt_id: "attempt", provider_continuation_id: "thread", provider_connection: agent.providerConnection, execution_generation_id: "generation-1" },
     });
-    internals.liveHandles.set("stone", agent.handle);
+    const exactHandle = { ...agent.handle, appliedConfigurationRevision: 1 };
+    await installExactTestProviderBirth(internals, "stone", exactHandle, "generation-1");
     await internals.workerBindings.bind({ entry_id: "stone", room_id: "room", work_attempt_id: "attempt", execution_generation_id: "generation-1", agent_session_id: "session-1", agent_session_token: "memory", api_url: "https://letagents.test" });
     void internals.startSupervisedDelivery("stone"); await entered.promise;
     let stopped = false; const stopping = daemon.stop().then(() => { stopped = true; });

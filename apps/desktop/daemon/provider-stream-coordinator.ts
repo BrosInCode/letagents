@@ -63,6 +63,19 @@ type ProviderListenerLease = {
   disposers: Array<() => void>;
 };
 
+type PendingTypedOperationalActivation = {
+  installation: ProviderInstallationToken;
+  lease: ProviderListenerLease;
+  prerequisitesReady: boolean;
+  physicalOperationsActive: boolean;
+  promotion: Promise<void> | null;
+  retryAttempts: number;
+  retryTimer: ReturnType<typeof setTimeout> | null;
+};
+
+const TYPED_OPERATIONAL_RETRY_BASE_MS = 250;
+const TYPED_OPERATIONAL_RETRY_MAX_MS = 30_000;
+
 export type ProviderRecoveryDiagnostics = {
   daemon_inbox_wait_evidence_dependency: number;
   lifecycle_projection: LifecycleProjectionDiagnostics;
@@ -180,6 +193,7 @@ export type ProviderStreamCoordinatorOptions = {
   markLifecycleProjectionUnavailable?(provider: LifecycleProjectionProvider): void;
   lifecycleProjectionDiagnostics?(): LifecycleProjectionDiagnostics;
   captureAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
+  typedLifecycleAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
   /** Operational approvals have their own lifetime, independent of optional capture. */
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
@@ -189,6 +203,10 @@ export type ProviderStreamCoordinatorOptions = {
   serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   transition: ProviderStreamTransition;
   appendActivity(
+    entryId: string,
+    event: DaemonActivityEvent,
+  ): Promise<unknown>;
+  appendActivityOnly(
     entryId: string,
     event: DaemonActivityEvent,
   ): Promise<unknown>;
@@ -226,6 +244,8 @@ export type ProviderStreamCoordinatorOptions = {
   publishWorkerActivity?: typeof publishWorkerNativeActivity;
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
 };
 
 /**
@@ -242,16 +262,23 @@ export class ProviderStreamCoordinator {
   private readonly callbacks = new Set<Promise<void>>();
   private readonly terminalFenceRequests = new WeakMap<ProviderInstallationToken, Promise<void>>();
   private readonly latestInstallations = new Map<string, ProviderInstallationToken>();
+  private readonly pendingTypedOperationalActivations = new Map<string, PendingTypedOperationalActivation>();
+  private readonly typedDaemonInboxInstallations = new WeakSet<ProviderInstallationToken>();
+  private readonly typedOperationalInstallations = new WeakSet<ProviderInstallationToken>();
   private daemonInboxWaitEvidenceDependencies = 0;
   private readonly publishWorkerActivity: typeof publishWorkerNativeActivity;
   private readonly setHeartbeat: typeof setInterval;
   private readonly clearHeartbeat: typeof clearInterval;
+  private readonly setRetryTimeout: typeof setTimeout;
+  private readonly clearRetryTimeout: typeof clearTimeout;
 
   constructor(private readonly options: ProviderStreamCoordinatorOptions) {
     this.liveHandles = options.liveHandles ?? new Map<string, ProviderActionHandle>();
     this.publishWorkerActivity = options.publishWorkerActivity ?? publishWorkerNativeActivity;
     this.setHeartbeat = options.setInterval ?? setInterval;
     this.clearHeartbeat = options.clearInterval ?? clearInterval;
+    this.setRetryTimeout = options.setTimeout ?? setTimeout;
+    this.clearRetryTimeout = options.clearTimeout ?? clearTimeout;
   }
 
   get(entryId: string): ProviderActionHandle | undefined {
@@ -297,8 +324,11 @@ export class ProviderStreamCoordinator {
       if (!provider) continue;
       const installation = this.currentInstallation(entryId);
       let current: LifecycleCaptureAdmissionStatus = "unavailable";
-      if (installation && this.options.captureAdmission) {
-        try { current = this.options.captureAdmission(installation); }
+      if (installation) {
+        const admission = installation.authorityMode === "typed"
+          ? this.options.typedLifecycleAdmission
+          : this.options.captureAdmission;
+        try { current = admission?.(installation) ?? "unavailable"; }
         catch { current = "unavailable"; }
       }
       if (!seen.has(provider) || priority[current] > priority[admissions[provider]]) admissions[provider] = current;
@@ -338,12 +368,13 @@ export class ProviderStreamCoordinator {
     const lease: ProviderListenerLease = {
       nonce: Symbol(entryId), entryId, handle, executionGenerationId, disposers: [],
     };
-    const installation = await this.prepareInstallation(
+    const prepared = await this.prepareInstallation(
       entryId,
       handle,
       executionGenerationId,
       lease.nonce,
     );
+    const { installation, typedDaemonInbox } = prepared;
     this.latestInstallations.set(entryId, installation);
     this.liveHandles.delete(entryId);
     const replacementCleanupFailures = this.disposeEntryListeners(entryId);
@@ -354,39 +385,204 @@ export class ProviderStreamCoordinator {
     this.options.streams.reset(entryId);
     this.liveHandles.set(entryId, handle);
     this.listenerLeases.set(entryId, lease);
-    let disposeExecution = () => {};
-    try { disposeExecution = this.options.observeExecution?.(installation) ?? disposeExecution; }
-    catch { /* optional observation must not reject provider installation */ }
-    if (!this.adoptLeaseDisposer(lease, disposeExecution)) return;
-    const disposeCapture = () => { try { disposeExecution(); } catch { /* observation owns no execution authority */ } };
-    lease.disposers.splice(lease.disposers.indexOf(disposeExecution), 1, disposeCapture);
-    const disposePermissions = this.options.observePermissions?.(entryId, handle, executionGenerationId) ?? (() => {});
-    if (!this.adoptLeaseDisposer(lease, disposePermissions)) return;
-    const binding = await this.options.bindings.get(entryId);
-    if (!this.isCurrentListenerLease(lease)) return;
-    const currentBinding = this.options.runtimeCustody.liveBinding(entryId);
-    if (binding?.execution_generation_id === executionGenerationId) {
-      if (!currentBinding || binding.updated_at >= currentBinding.updatedAt) {
-        this.options.runtimeCustody.installLiveBinding(entryId, {
-          agentSessionId: binding.agent_session_id,
-          executionGenerationId: binding.execution_generation_id,
-          updatedAt: binding.updated_at,
-        });
-      }
-    } else if (currentBinding?.executionGenerationId !== executionGenerationId) {
-      this.options.runtimeCustody.deleteLiveBinding(entryId);
+    if (typedDaemonInbox) {
+      this.typedDaemonInboxInstallations.add(installation);
+      this.pendingTypedOperationalActivations.set(entryId, {
+        installation,
+        lease,
+        prerequisitesReady: false,
+        physicalOperationsActive: false,
+        promotion: null,
+        retryAttempts: 0,
+        retryTimer: null,
+      });
     }
-    const disposeExit = await provider.onExit(handle, (terminal) => {
-      const currentInstallation = this.currentInstallationForLease(lease);
-      if (!currentInstallation) return;
-      const bindingIdentity = this.options.runtimeCustody.liveBinding(entryId);
-      this.track(this.options.handleTerminal(
-        currentInstallation,
-        bindingIdentity,
-        terminal,
-      ));
-    });
-    if (!this.adoptLeaseDisposer(lease, disposeExit)) return;
+    try {
+      let disposeExecution = () => {};
+      try { disposeExecution = this.options.observeExecution?.(installation) ?? disposeExecution; }
+      catch { /* optional observation must not reject provider installation */ }
+      if (!this.adoptLeaseDisposer(lease, disposeExecution)) return;
+      const disposeCapture = () => { try { disposeExecution(); } catch { /* observation owns no execution authority */ } };
+      lease.disposers.splice(lease.disposers.indexOf(disposeExecution), 1, disposeCapture);
+      const disposePermissions = this.options.observePermissions?.(entryId, handle, executionGenerationId) ?? (() => {});
+      if (!this.adoptLeaseDisposer(lease, disposePermissions)) return;
+      const binding = await this.options.bindings.get(entryId);
+      if (!this.isCurrentListenerLease(lease)) return;
+      const currentBinding = this.options.runtimeCustody.liveBinding(entryId);
+      if (binding?.execution_generation_id === executionGenerationId) {
+        if (!currentBinding || binding.updated_at >= currentBinding.updatedAt) {
+          this.options.runtimeCustody.installLiveBinding(entryId, {
+            agentSessionId: binding.agent_session_id,
+            executionGenerationId: binding.execution_generation_id,
+            updatedAt: binding.updated_at,
+          });
+        }
+      } else if (currentBinding?.executionGenerationId !== executionGenerationId) {
+        this.options.runtimeCustody.deleteLiveBinding(entryId);
+      }
+      const disposeExit = await provider.onExit(handle, (terminal) => {
+        const currentInstallation = this.currentInstallationForLease(lease);
+        if (!currentInstallation) return;
+        const bindingIdentity = this.options.runtimeCustody.liveBinding(entryId);
+        this.track(this.options.handleTerminal(
+          currentInstallation,
+          bindingIdentity,
+          terminal,
+        ));
+      });
+      if (!this.adoptLeaseDisposer(lease, disposeExit)) return;
+      const currentEntry = await this.options.manifest.getEntry(entryId);
+      if (!this.isCurrentInstallation(installation)) return;
+      if (!currentEntry || !this.entryMatchesInstallation(currentEntry, installation)) {
+        throw new Error("Provider installation changed while attaching its operational prerequisites.");
+      }
+      if (typedDaemonInbox) {
+        const pending = this.pendingTypedOperationalActivations.get(entryId);
+        if (pending?.installation !== installation) return;
+        pending.prerequisitesReady = true;
+        this.typedLifecycleAdmissionChanged(entryId);
+        return;
+      }
+      await this.activateOperationalInstallation(installation, lease, mayStartDelivery);
+    } catch (error) {
+      if (!this.isLatestInstallation(installation)
+        || this.listenerLeases.get(entryId) !== lease) throw error;
+      this.latestInstallations.delete(entryId);
+      if (this.liveHandles.get(entryId) === handle) this.liveHandles.delete(entryId);
+      if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
+        === executionGenerationId) {
+        this.options.runtimeCustody.deleteLiveBinding(entryId);
+      }
+      const failures = this.disposeEntryListeners(entryId);
+      if (failures.length === 0) throw error;
+      throw new AggregateError([error, ...failures], `Provider installation cleanup failed for ${entryId}.`);
+    }
+  }
+
+  /** A changed durable capture/effect frontier may arm one exact typed birth. */
+  typedLifecycleAdmissionChanged(entryId: string): void {
+    const pending = this.pendingTypedOperationalActivations.get(entryId);
+    if (!pending) return;
+    const { installation } = pending;
+    if (!this.isCurrentInstallation(installation)
+      || !this.isCurrentListenerLease(pending.lease)) {
+      this.clearPendingTypedOperationalActivation(entryId, pending);
+      return;
+    }
+    const operational = this.typedOperationalInstallations.has(installation);
+    let admission: LifecycleCaptureAdmissionStatus = operational ? "ready" : "unavailable";
+    if (!operational) {
+      try { admission = this.options.typedLifecycleAdmission?.(installation) ?? "unavailable"; }
+      catch { admission = "unavailable"; }
+    }
+    if (!pending.prerequisitesReady || admission !== "ready" || pending.promotion) {
+      if (pending.prerequisitesReady && pending.retryAttempts > 0) {
+        this.scheduleTypedOperationalRetry(pending);
+      }
+      return;
+    }
+    if (pending.retryTimer) {
+      this.clearRetryTimeout(pending.retryTimer);
+      pending.retryTimer = null;
+    }
+    const promotion = this.promoteTypedOperationalInstallation(pending);
+    pending.promotion = promotion;
+    this.track(promotion);
+  }
+
+  /** Every daemon-inbox delivery trigger must cross the same exact-birth latch. */
+  isDeliveryAdmitted(entryId: string): boolean {
+    const installation = this.currentInstallation(entryId);
+    if (!installation) return false;
+    return !this.typedDaemonInboxInstallations.has(installation)
+      || this.typedOperationalInstallations.has(installation);
+  }
+
+  private async promoteTypedOperationalInstallation(
+    pending: PendingTypedOperationalActivation,
+  ): Promise<void> {
+    const { installation, lease } = pending;
+    try {
+      if (!pending.physicalOperationsActive) {
+        const disposerCount = lease.disposers.length;
+        try {
+          await this.activateOperationalInstallation(installation, lease, () => false);
+        } catch (error) {
+          const failures = this.rollbackLeaseDisposers(lease, disposerCount);
+          if (failures.length === 0) throw error;
+          throw new AggregateError([error, ...failures],
+            `Typed operational activation cleanup failed for ${installation.entryId}.`);
+        }
+        if (!this.isCurrentInstallation(installation)
+          || !this.isCurrentListenerLease(lease)
+          || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending) return;
+        pending.physicalOperationsActive = true;
+      }
+      if (!this.isCurrentInstallation(installation)
+        || !this.isCurrentListenerLease(lease)
+        || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending) return;
+      this.typedOperationalInstallations.add(installation);
+      await this.options.delivery.start(installation.entryId);
+      if (!this.isCurrentInstallation(installation)
+        || !this.isCurrentListenerLease(lease)
+        || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending) return;
+      this.clearPendingTypedOperationalActivation(installation.entryId, pending);
+    } catch {
+      if (this.pendingTypedOperationalActivations.get(installation.entryId) === pending) {
+        pending.promotion = null;
+        pending.retryAttempts += 1;
+        this.scheduleTypedOperationalRetry(pending);
+      }
+    }
+  }
+
+  private scheduleTypedOperationalRetry(pending: PendingTypedOperationalActivation): void {
+    const { installation } = pending;
+    if (pending.retryTimer || pending.promotion
+      || !this.isCurrentInstallation(installation)
+      || !this.isCurrentListenerLease(pending.lease)
+      || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending) return;
+    const delayMs = Math.min(
+      TYPED_OPERATIONAL_RETRY_BASE_MS * (2 ** Math.max(0, pending.retryAttempts - 1)),
+      TYPED_OPERATIONAL_RETRY_MAX_MS,
+    );
+    const timer = this.setRetryTimeout(() => {
+      if (this.pendingTypedOperationalActivations.get(installation.entryId) !== pending) return;
+      pending.retryTimer = null;
+      this.typedLifecycleAdmissionChanged(installation.entryId);
+    }, delayMs);
+    timer.unref?.();
+    pending.retryTimer = timer;
+  }
+
+  private clearPendingTypedOperationalActivation(
+    entryId: string,
+    expected?: PendingTypedOperationalActivation,
+  ): void {
+    const pending = this.pendingTypedOperationalActivations.get(entryId);
+    if (!pending || (expected && pending !== expected)) return;
+    if (pending.retryTimer) this.clearRetryTimeout(pending.retryTimer);
+    this.pendingTypedOperationalActivations.delete(entryId);
+  }
+
+  private rollbackLeaseDisposers(lease: ProviderListenerLease, keepCount: number): unknown[] {
+    const added = lease.disposers.splice(keepCount);
+    const failures: unknown[] = [];
+    for (const dispose of added.reverse()) {
+      try { dispose(); } catch (error) { failures.push(error); }
+    }
+    return failures;
+  }
+
+  private async activateOperationalInstallation(
+    installation: ProviderInstallationToken,
+    lease: ProviderListenerLease,
+    mayStartDelivery: () => boolean,
+  ): Promise<void> {
+    const provider = this.options.provider;
+    if (!provider || !this.isCurrentInstallation(installation)
+      || !this.isCurrentListenerLease(lease)) return;
+    const { entryId, handle } = installation;
     const disposeStream = provider.onStream
       ? await provider.onStream(handle, (event) => {
           const currentInstallation = this.currentInstallationForLease(lease);
@@ -514,6 +710,26 @@ export class ProviderStreamCoordinator {
     this.latestInstallations.set(entry.id, installation);
     try { this.options.advanceExecution?.(installation); }
     catch { /* optional observation cannot reject a committed provider birth */ }
+    const priorPending = this.pendingTypedOperationalActivations.get(entry.id);
+    if (priorPending?.installation !== installation) {
+      this.clearPendingTypedOperationalActivation(entry.id, priorPending);
+    }
+    if (frozenAuthorityMode === "typed" && entry.delivery_mode === "daemon_inbox") {
+      this.typedDaemonInboxInstallations.add(installation);
+      this.pendingTypedOperationalActivations.set(entry.id, {
+        installation,
+        lease,
+        prerequisitesReady: true,
+        // Cursor's wrapper listener and heartbeat create and observe child
+        // processes, so they remain physical infrastructure; only each exact
+        // child birth is held from lifecycle persistence and room delivery.
+        physicalOperationsActive: true,
+        promotion: null,
+        retryAttempts: 0,
+        retryTimer: null,
+      });
+      this.typedLifecycleAdmissionChanged(entry.id);
+    }
     return installation;
   }
 
@@ -522,7 +738,7 @@ export class ProviderStreamCoordinator {
     handle: ProviderActionHandle,
     executionGenerationId: string,
     listenerLeaseNonce: symbol,
-  ): Promise<ProviderInstallationToken> {
+  ): Promise<{ installation: ProviderInstallationToken; typedDaemonInbox: boolean }> {
     const continuation = handle.providerContinuationId;
     const connection = handle.providerConnection;
     const configurationRevision = handle.appliedConfigurationRevision;
@@ -550,7 +766,7 @@ export class ProviderStreamCoordinator {
     if (!second || !this.entryMatchesBirth(second, handle, executionGenerationId, connection)) {
       throw new Error("Provider installation changed while verifying frozen lifecycle authority.");
     }
-    return Object.freeze({
+    const installation = Object.freeze({
       nonce: Symbol(entryId),
       listenerLeaseNonce,
       entryId,
@@ -562,6 +778,10 @@ export class ProviderStreamCoordinator {
       configurationRevision: configurationRevision!,
       authorityMode,
     });
+    return {
+      installation,
+      typedDaemonInbox: authorityMode === "typed" && second.delivery_mode === "daemon_inbox",
+    };
   }
 
   private entryMatchesBirth(
@@ -909,7 +1129,11 @@ export class ProviderStreamCoordinator {
       }
       await this.options.serializeEntry(entryId, async () => {
         if (!this.isCurrentInstallation(installation)) return;
-        await this.options.appendActivity(entryId, sanitizedEvent);
+        if (daemonInbox && this.typedDaemonInboxInstallations.has(installation)) {
+          await this.options.appendActivityOnly(entryId, sanitizedEvent);
+        } else {
+          await this.options.appendActivity(entryId, sanitizedEvent);
+        }
       });
       if (!this.isCurrentInstallation(installation)) return;
     }
@@ -955,6 +1179,9 @@ export class ProviderStreamCoordinator {
     }
     const liveBinding = this.options.runtimeCustody.liveBinding(entryId);
     if (liveBinding?.executionGenerationId === entry.provider_ref?.execution_generation_id) {
+      // This is authenticated worker-binding proof, not raw stream lifecycle
+      // classification. Its coordinator may recover only the exact credential-
+      // handoff latch after the remote publication accepts the scoped bearer.
       await this.options.publishNativeActivity(
         entryId,
         sanitizedEvent.method,
@@ -1156,7 +1383,10 @@ export class ProviderStreamCoordinator {
 
   track(operation: Promise<void>): void {
     this.callbacks.add(operation);
-    void operation.finally(() => this.callbacks.delete(operation));
+    void operation.then(
+      () => this.callbacks.delete(operation),
+      () => this.callbacks.delete(operation),
+    );
   }
 
   async drainCallbacks(): Promise<void> {
@@ -1179,6 +1409,7 @@ export class ProviderStreamCoordinator {
   }
 
   private disposeEntryListeners(entryId: string): unknown[] {
+    this.clearPendingTypedOperationalActivation(entryId);
     const disposers = this.listenerLeases.get(entryId)?.disposers ?? [];
     this.listenerLeases.delete(entryId);
     const failures: unknown[] = [];

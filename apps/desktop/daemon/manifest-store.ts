@@ -2279,9 +2279,6 @@ export class ManifestStore {
   ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
     const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
     const result = await this.writeTargeted(expectedGeneration, (database) => {
-      const latest = database.prepare("SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1").get(agentId) as Row | undefined;
-      const lastSequence = latest ? Number(latest.sequence) : -1;
-      if (normalizedEvent.sequence <= lastSequence) throw new Error(`Native activity sequence ${normalizedEvent.sequence} is not newer than ${lastSequence}.`);
       const updated = database.prepare(`
         UPDATE runtime_deployments
         SET observed_state = ?, native_liveness_present = 1, native_liveness_state = ?,
@@ -2289,27 +2286,61 @@ export class ManifestStore {
         WHERE agent_id = ?
       `).run(observedState, nativeLiveness.state, nativeLiveness.observed_at ?? null, nativeLiveness.detail ?? null, agentId);
       if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
-      const order = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM activity_events WHERE agent_id = ?").get(agentId) as Row).next_order);
-      run(database.prepare(`
-        INSERT INTO activity_events(
-          agent_id, sort_order, observed_at, sequence, provider, kind, method, summary,
-          status, payload_json, payload_truncated, payload_redacted, durable_payload_ref
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `), agentId, order, normalizedEvent.observed_at, normalizedEvent.sequence, normalizedEvent.provider,
-      normalizedEvent.kind, normalizedEvent.method, normalizedEvent.summary, normalizedEvent.status,
-      json(normalizedEvent.payload), Number(normalizedEvent.payload_truncated), Number(normalizedEvent.payload_redacted),
-      normalizedEvent.durable_payload_ref);
-      run(database.prepare(`
-        DELETE FROM activity_events
-        WHERE agent_id = ? AND sort_order NOT IN (
-          SELECT sort_order FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?
-        )
-      `), agentId, agentId, limit);
+      this.appendActivityEvent(database, agentId, normalizedEvent, limit);
       const persisted = this.readEntryFromDatabase(database, agentId);
       if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity append: ${agentId}`);
       return persisted;
     }, commitFence);
     return { generation: result.generation, entry: result.value };
+  }
+
+  /** Persist presentation detail without acquiring any runtime lifecycle field. */
+  async appendActivityOnly(
+    expectedGeneration: number,
+    agentId: string,
+    event: DaemonActivityEvent,
+    limit = 200,
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+    const normalizedEvent = parseJson<DaemonActivityEvent>(json(event));
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const updated = database.prepare(`
+        UPDATE runtime_deployments SET activity_present = 1 WHERE agent_id = ?
+      `).run(agentId);
+      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${agentId}`);
+      this.appendActivityEvent(database, agentId, normalizedEvent, limit);
+      const persisted = this.readEntryFromDatabase(database, agentId);
+      if (!persisted) throw new Error(`Daemon manifest entry disappeared during activity-only append: ${agentId}`);
+      return persisted;
+    }, commitFence);
+    return { generation: result.generation, entry: result.value };
+  }
+
+  private appendActivityEvent(
+    database: DatabaseSync,
+    agentId: string,
+    event: DaemonActivityEvent,
+    limit: number,
+  ): void {
+    const latest = database.prepare("SELECT sequence FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT 1").get(agentId) as Row | undefined;
+    const lastSequence = latest ? Number(latest.sequence) : -1;
+    if (event.sequence <= lastSequence) throw new Error(`Native activity sequence ${event.sequence} is not newer than ${lastSequence}.`);
+    const order = Number((database.prepare("SELECT COALESCE(MAX(sort_order), -1) + 1 AS next_order FROM activity_events WHERE agent_id = ?").get(agentId) as Row).next_order);
+    run(database.prepare(`
+      INSERT INTO activity_events(
+        agent_id, sort_order, observed_at, sequence, provider, kind, method, summary,
+        status, payload_json, payload_truncated, payload_redacted, durable_payload_ref
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `), agentId, order, event.observed_at, event.sequence, event.provider,
+    event.kind, event.method, event.summary, event.status,
+    json(event.payload), Number(event.payload_truncated), Number(event.payload_redacted),
+    event.durable_payload_ref);
+    run(database.prepare(`
+      DELETE FROM activity_events
+      WHERE agent_id = ? AND sort_order NOT IN (
+        SELECT sort_order FROM activity_events WHERE agent_id = ? ORDER BY sort_order DESC LIMIT ?
+      )
+    `), agentId, agentId, limit);
   }
 
   async updateWorkplaceLiveness(

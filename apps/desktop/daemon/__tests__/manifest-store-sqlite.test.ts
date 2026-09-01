@@ -87,8 +87,10 @@ test("typed lifecycle effects apply once and restart supersedes work after struc
   assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='active'").get()?.state, "pending",
     "manifest projection and disposition acknowledgement roll back together");
   let manifestGeneration = 1;
+  const admissionChanges: string[] = [];
   const coordinator = (currentInstallation: () => ProviderInstallationToken | undefined) => new TypedLifecycleEffectCoordinator({
     store, currentInstallation, isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
+    changed: agentId => { admissionChanges.push(agentId); },
     authority: { serialize: operation => operation(), assertCurrent: async () => {},
       currentManifestGeneration: () => manifestGeneration,
       acceptManifestGeneration: generation => { manifestGeneration = generation; }, fenceCommit: commit => commit() },
@@ -108,6 +110,8 @@ test("typed lifecycle effects apply once and restart supersedes work after struc
     assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='active'").get()?.state, "applied");
     assert.equal((await store.getEntry("agent"))?.observed_state, "working");
     assert.equal(manifestGeneration, 2);
+    assert.deepEqual(admissionChanges, ["agent"],
+      "a durable lifecycle disposition emits one state-change admission hint");
 
     shadow.ingest("source", observer, { factId: "terminal", agentId: "agent", executionGenerationId: "generation",
       runtimeGenerationId, observerEpoch: 1, sourceSequence: 2, observedAtMs: 102,
@@ -125,6 +129,8 @@ test("typed lifecycle effects apply once and restart supersedes work after struc
     assert.equal((await store.getEntry("agent"))?.observed_state, "working",
       "typed drain loses to already-durable structural terminal authority");
     assert.equal(manifestGeneration, 2, "superseding an effect does not mutate the manifest generation");
+    assert.deepEqual(admissionChanges, ["agent", "agent"],
+      "superseding the terminal effect also wakes exact readiness without granting authority itself");
   } finally {
     await restarted.close(); database.close(); await store.close(); await env.cleanup();
   }
@@ -5331,7 +5337,7 @@ test("all explicit optional undefined fields normalize to absence without fabric
   }
 });
 
-test("targeted activity writes leave every unrelated agent row untouched and avoid full replacement", async () => {
+test("targeted activity writes keep presentation-only events out of lifecycle fields and avoid full replacement", async () => {
   const env = await fixture();
   const store = new ManifestStore(env.databasePath);
   try {
@@ -5364,6 +5370,22 @@ test("targeted activity writes leave every unrelated agent row untouched and avo
     }, 1);
     assert.equal(result.generation, 2);
     assert.deepEqual(result.entry.activity, [nextEvent]);
+    assert.deepEqual(snapshot(), before);
+    assert.deepEqual(await store.getEntry(other.id), created.entries.find((candidate) => candidate.id === other.id));
+
+    const presentationEvent = {
+      ...nextEvent,
+      sequence: 6,
+      observed_at: "2026-07-19T00:05:00.000Z",
+      summary: "Presentation-only event",
+      status: "working" as const,
+    };
+    const presentation = await store.appendActivityOnly(2, entry.id, presentationEvent, 1);
+    assert.equal(presentation.generation, 3);
+    assert.deepEqual(presentation.entry.activity, [presentationEvent]);
+    assert.equal(presentation.entry.observed_state, result.entry.observed_state);
+    assert.deepEqual(presentation.entry.native_liveness, result.entry.native_liveness,
+      "presentation-only persistence cannot acquire lifecycle or liveness authority");
     assert.deepEqual(snapshot(), before);
     assert.deepEqual(await store.getEntry(other.id), created.entries.find((candidate) => candidate.id === other.id));
   } finally {

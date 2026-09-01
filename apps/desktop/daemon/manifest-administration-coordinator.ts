@@ -61,6 +61,13 @@ export type ManifestAdministrationStore = {
     limit: number,
     commitFence: CommitFence,
   ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
+  appendActivityOnly(
+    expectedGeneration: number,
+    entryId: string,
+    event: DaemonActivityEvent,
+    limit: number,
+    commitFence: CommitFence,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry }>;
   updateWorkplaceLiveness(
     expectedGeneration: number,
     entryId: string,
@@ -286,6 +293,31 @@ export class ManifestAdministrationCoordinator {
         sanitizedEvent,
         observedState,
         nativeLiveness,
+        200,
+        this.options.authority.fenceCommit,
+      );
+      this.options.authority.acceptManifestGeneration(next.generation);
+      return next.entry;
+    });
+  }
+
+  async appendActivityOnly(id: string, event: DaemonActivityEvent): Promise<DaemonManifestEntry> {
+    if (!event || typeof event !== "object" || !event.observed_at) {
+      throw new Error("A bounded activity event is required.");
+    }
+    const sanitizedEvent = this.options.policies.sanitizeActivity(event);
+    return this.options.authority.serialize(async () => {
+      await this.options.authority.assertCurrent();
+      const entry = await this.options.store.getEntry(id);
+      if (!entry) throw new Error(`Unknown daemon manifest entry: ${id}`);
+      const lastSequence = entry.activity?.at(-1)?.sequence ?? -1;
+      if (sanitizedEvent.sequence <= lastSequence) {
+        throw new Error(`Native activity sequence ${sanitizedEvent.sequence} is not newer than ${lastSequence}.`);
+      }
+      const next = await this.options.store.appendActivityOnly(
+        this.options.authority.currentManifestGeneration(),
+        id,
+        sanitizedEvent,
         200,
         this.options.authority.fenceCommit,
       );

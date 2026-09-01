@@ -8315,10 +8315,14 @@ test("Pause and Stop fence room-move reconciliation while the activating turn re
           stop: (agentId: string) => Promise<void>;
           ensureStarted: (agent: unknown) => Promise<void>;
         };
+        providerStreams: { isDeliveryAdmitted: (entryId: string) => boolean };
         reconcileRoomMove: (move: DaemonRoomMoveRecord) => Promise<DaemonRoomMoveRecord>;
         startSupervisedDelivery: (entryId: string, mode: "ensure") => Promise<void>;
       };
       internals.requestConvergence = () => {};
+      // This test begins after lifecycle admission so it can isolate the room
+      // move restart boundary without fabricating a provider process birth.
+      internals.providerStreams.isDeliveryAdmitted = () => true;
       let resumedExactWaiter = 0;
       internals.supervisedDelivery.ensureStarted = async () => { resumedExactWaiter += 1; };
       const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {

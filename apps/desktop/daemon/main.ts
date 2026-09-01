@@ -365,6 +365,7 @@ export class SupervisorDaemon {
       lifecycleProjectionDiagnostics: () => this.executionCapture?.lifecycleProjectionDiagnostics()
         ?? unavailableLifecycleProjectionDiagnostics(),
       captureAdmission: (installation) => this.executionCapture?.captureAdmission(installation) ?? "unavailable",
+      typedLifecycleAdmission: (installation) => this.executionCapture?.typedLifecycleAdmission(installation) ?? "unavailable",
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
@@ -380,6 +381,7 @@ export class SupervisorDaemon {
       transition: (entryId, state, condition, detail, actor) =>
         this.transition(entryId, state, condition, detail, actor),
       appendActivity: (entryId, event) => this.appendActivity(entryId, event),
+      appendActivityOnly: (entryId, event) => this.manifestAdministration.appendActivityOnly(entryId, event),
       publishNativeActivity: (entryId, method, status, observedAt) =>
         this.publishNativeActivity(entryId, method, status, observedAt),
       handleTerminal: (installation, _bindingIdentity, terminal) =>
@@ -634,6 +636,7 @@ export class SupervisorDaemon {
       isHandoffScheduled: () => this.handoffScheduled,
       supportsRoomTurns: () => Boolean(this.providerPort?.runRoomTurn),
       isLifecycleActive: (entryId) => this.entryConcurrency.isLifecycleActive(entryId),
+      isOperationallyAdmitted: (entryId) => this.providerStreams.isDeliveryAdmitted(entryId),
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       delivery: this.supervisedDelivery,
       manifest: this.store,
@@ -893,6 +896,7 @@ export class SupervisorDaemon {
         isClosing: () => this.handoffScheduled,
         nowMs: () => this.nowMs(),
         diagnostic: (agentId, error) => console.warn("[typed_lifecycle_effect]", JSON.stringify({ agentId, error: String(error) })),
+        changed: (agentId) => this.providerStreams.typedLifecycleAdmissionChanged(agentId),
       });
       this.typedLifecycleEffects.start();
       this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {
@@ -901,10 +905,7 @@ export class SupervisorDaemon {
       });
       this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
-        changed: (agentId) => {
-          this.roomWorkPublisher?.changed(agentId);
-          this.typedLifecycleEffects?.changed(agentId);
-        },
+        changed: (agentId) => { this.roomWorkPublisher?.changed(agentId); this.typedLifecycleEffects?.changed(agentId); },
       });
     }
     await this.supervisedInbox.normalizeInterruptedEffects();
