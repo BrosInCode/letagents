@@ -50,6 +50,7 @@ function createDeps() {
     artifactEvents: new EventEmitter(),
     rentalActivityEvents: new EventEmitter(),
     messageInfoEvents: new EventEmitter(),
+    agentWorkEvents: new EventEmitter(),
   };
 
   return {
@@ -111,6 +112,80 @@ function createDeps() {
     rememberAccountRoom: async () => undefined,
   };
 }
+
+test("room streams negotiate pointer-only agent-work invalidations without stranding legacy cursors", async () => {
+  const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
+  const app = {
+    get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
+      handlers.set(path.toString(), handler);
+    },
+    post() {}, put() {}, delete() {},
+  };
+  const deps = {
+    ...createDeps(),
+    resolveCanonicalRoomRequestId: async () => "room_1",
+    resolveRoomOrReply: async () => ({ id: "room_1" }),
+    requireParticipant: async () => true,
+  };
+  registerRoomMessageRoutes(app as never, deps as never);
+  const handler = handlers.get("/^\\/rooms\\/(.+)\\/messages\\/stream$/");
+  assert.ok(handler);
+
+  function open(query: Record<string, unknown>) {
+    let closeHandler: (() => void) | null = null;
+    const req = {
+      params: { 0: "room_1" }, query, headers: {}, authKind: "session",
+      sessionAccount: { account_id: "acct_1" },
+      get() { return undefined; },
+      on(event: string, callback: () => void) {
+        if (event === "close") closeHandler = callback;
+        return this;
+      },
+    };
+    const res = {
+      statusCode: 200, headers: new Map<string, string>(), writes: [] as string[], writableEnded: false,
+      socket: { setKeepAlive() {} },
+      setHeader(name: string, value: string) { this.headers.set(name, value); },
+      flushHeaders() {},
+      write(chunk: string) { this.writes.push(chunk); return true; },
+      status(code: number) { this.statusCode = code; return this; },
+      json(body: unknown) { this.writes.push(JSON.stringify(body)); return this; },
+      end() { this.writableEnded = true; },
+    };
+    return { req, res, close: () => closeHandler?.() };
+  }
+
+  const negotiated = open({ stream_capability: "resource_invalidation_v1" });
+  const legacy = open({});
+  await Promise.all([
+    handler(negotiated.req, negotiated.res),
+    handler(legacy.req, legacy.res),
+  ]);
+  negotiated.res.writes.length = 0;
+  legacy.res.writes.length = 0;
+
+  deps.agentWorkEvents.emit("agent_work:invalidated", { projectId: "room_1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const negotiatedOutput = negotiated.res.writes.join("");
+  assert.match(negotiatedOutput, /event: resource_invalidation_v1/);
+  assert.match(negotiatedOutput, /"room_id":"room_1","resource":"agent_work"/);
+  assert.doesNotMatch(negotiatedOutput, /attempt|agent_key|revision|summary/);
+
+  const legacyOutput = legacy.res.writes.join("");
+  assert.doesNotMatch(legacyOutput, /resource_invalidation_v1|agent_work/);
+  assert.match(legacyOutput, /event: room_sync/);
+  const negotiatedCursor = negotiatedOutput.match(/id: ([^\n]+)/)?.[1];
+  assert.ok(negotiatedCursor);
+  assert.match(legacyOutput, new RegExp(`id: ${negotiatedCursor}`));
+  assert.match(legacyOutput, new RegExp(`"event_cursor":"${negotiatedCursor}"`));
+  assert.match(legacyOutput, /"gap":false/);
+
+  negotiated.close();
+  legacy.close();
+  deps.roomEventBroker.close();
+});
 
 const flushAsyncEvents = () => new Promise<void>((resolve) => setImmediate(resolve));
 

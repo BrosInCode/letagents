@@ -168,6 +168,7 @@ import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
   artifactEvents,
+  agentWorkEvents,
   githubRoomEvents,
   messageEvents,
   reasoningEvents,
@@ -208,6 +209,7 @@ function getRoomEventBroker(): RoomEventBroker {
     githubRoomEvents,
     reasoningEvents,
     artifactEvents,
+    agentWorkEvents,
     rentalActivityEvents,
     messageInfoEvents,
     bridgeLossEvents: roomEventBridgeLossEvents,

@@ -33,7 +33,8 @@ export type RoomEvent =
   | { kind: "reasoning_removed"; roomId: string; sessionId: string }
   | { kind: "artifact_updated"; roomId: string; artifact: RoomSharedArtifact | null }
   | { kind: "rental_activity_created"; roomId: string; activity: ActivityEvent }
-  | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null };
+  | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null }
+  | { kind: "agent_work_invalidated"; roomId: string };
 
 export type RoomEventKind = RoomEvent["kind"];
 export const MESSAGE_CREATED_EVENT_KINDS: ReadonlySet<RoomEventKind> = new Set(["message_created"]);
@@ -105,6 +106,7 @@ interface EventSourceDeps {
   artifactEvents?: EventEmitter;
   rentalActivityEvents: EventEmitter;
   messageInfoEvents: EventEmitter;
+  agentWorkEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
 }
 
@@ -248,6 +250,12 @@ export class RoomEventBroker {
         messageIds: event.messageIds,
       };
     });
+    if (deps.agentWorkEvents) {
+      this.addSource(deps.agentWorkEvents, "agent_work:invalidated", (payload) => {
+        const event = payload as { projectId: string };
+        return { kind: "agent_work_invalidated", roomId: event.projectId };
+      });
+    }
     if (deps.bridgeLossEvents) {
       this.addLossSource(deps.bridgeLossEvents);
     }
