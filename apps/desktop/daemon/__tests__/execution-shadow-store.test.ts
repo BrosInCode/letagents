@@ -67,6 +67,37 @@ test("replaying a pre-ledger execution fact cannot manufacture typed comparison 
       "only facts committed by the current typed-shadow implementation may enter the comparison ledger");
   } finally { db.close(); }
 });
+
+test("lifecycle facts receive atomic shadow or pending dispositions while tool facts do not", () => {
+  const shadow = fixture();
+  try {
+    seed(shadow.store); const token = observer(shadow.store);
+    shadow.store.ingest(token.sourceId, token, turnFact(1));
+    shadow.store.ingest(token.sourceId, token, operationFact(2));
+    assert.deepEqual(shadow.db.prepare(`SELECT effect_kind,state,subject_authority_mode,observer_authority_mode
+      FROM execution_lifecycle_effects ORDER BY fact_sequence`).all().map(row => ({ ...row })), [{
+      effect_kind: "manifest_working", state: "shadowed",
+      subject_authority_mode: "typed_shadow", observer_authority_mode: "typed_shadow",
+    }]);
+  } finally { shadow.db.close(); }
+
+  const typed = fixture();
+  try {
+    seed(typed.store, "", "typed"); const token = observer(typed.store);
+    assert.equal(typed.store.ingest(token.sourceId, token, turnFact(1)).status, "accepted");
+    assert.deepEqual({ ...typed.db.prepare(`SELECT effect_kind,state,disposed_at_ms
+      FROM execution_lifecycle_effects`).get() }, {
+      effect_kind: "manifest_working", state: "pending", disposed_at_ms: null,
+    });
+    typed.db.exec(`CREATE TEMP TRIGGER reject_lifecycle_effect BEFORE INSERT ON execution_lifecycle_effects
+      BEGIN SELECT RAISE(ABORT,'injected disposition failure'); END`);
+    assert.throws(() => typed.store.ingest(token.sourceId, token,
+      turnFact(2, { state: "terminal", turnOutcome: "completed" })), /injected disposition failure/);
+    assert.equal(typed.db.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()?.count, 1,
+      "a fact cannot commit without its disposition");
+    assert.equal(typed.db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
+  } finally { typed.db.close(); }
+});
 function countHistoryReads(t: TestContext, db: DatabaseSync): () => number {
   const prepare = db.prepare.bind(db);
   let count = 0;
@@ -100,10 +131,10 @@ function retainFacts(db: DatabaseSync, from: number, through: number): void {
   db.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=? WHERE agent_id='agent'").run(through, through);
 }
 const native = { turnId: "turn", providerContinuationId: "conversation", providerTurnId: "native-turn" };
-function seed(store: ExecutionShadowStore, suffix = "") {
+function seed(store: ExecutionShadowStore, suffix = "", authorityMode: "typed_shadow" | "typed" = "typed_shadow") {
   const runtime = {
     agentId: `agent${suffix}`, executionGenerationId: `generation${suffix}`, runtimeGenerationId: `runtime${suffix}`,
-    provider: "codex" as const, authorityMode: "typed_shadow" as const, configRevision: 1, createdAtMs: 100,
+    provider: "codex" as const, authorityMode, configRevision: 1, createdAtMs: 100,
   };
   store.registerRuntime(runtime);
   const attemptId = store.trackMessage({

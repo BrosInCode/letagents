@@ -17,12 +17,154 @@ import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPol
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
 
 import { executionRuntimeStorageIdentity, executionStorageIdentity, ExecutionShadowStore } from "../execution-shadow-store.js";
+import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
+import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
   origin_execution_generation_id: "run_1",
   provider_continuation_id: "thread_1",
 } as const;
+
+test("typed lifecycle effects apply once and restart supersedes work after structural terminal evidence", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "typed-birth" };
+  const agent: DaemonManifestEntry = {
+    ...entry, id: "agent", room_id: "room", condition: "none", delivery_mode: "daemon_inbox",
+    config_revision: 2, runtime_configuration_revision: 2, turn_control: undefined,
+    work_attempt_id: "workspace", observed_state: "idle",
+    provider_ref: { work_attempt_id: "workspace", execution_generation_id: "generation",
+      provider_continuation_id: "continuation", provider_connection: connection },
+  };
+  await store.write(0, [agent]);
+  seedTerminalExecution(env.databasePath, "workspace", "generation");
+  const database = new DatabaseSync(env.databasePath);
+  database.exec(`PRAGMA foreign_keys=ON;
+    UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='generation';
+    UPDATE agent_configurations SET config_revision=2,runtime_configuration_revision=2 WHERE agent_id='agent'`);
+  const shadow = new ExecutionShadowStore(database);
+  const runtimeGenerationId = executionRuntimeStorageIdentity("agent", "generation", connection.kind, connection.pid, connection.processIdentity);
+  shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
+    provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 });
+  const attemptId = shadow.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message",
+    executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
+  shadow.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation",
+    runtimeGenerationId, attemptId, turnId: "turn", providerContinuationId: "continuation",
+    providerTurnId: "native-turn", createdAtMs: 100 });
+  const observer = shadow.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: runtimeGenerationId,
+    observerRuntimeGenerationId: runtimeGenerationId, sourceId: "source", daemonGenerationId: "1",
+    expectedEpoch: 0, boundAtMs: 100 });
+  shadow.ingest("source", observer, { factId: "active", agentId: "agent", executionGenerationId: "generation",
+    runtimeGenerationId, observerEpoch: 1, sourceSequence: 1, observedAtMs: 101,
+    turnId: "turn", providerContinuationId: "continuation", providerTurnId: "native-turn",
+    domain: "turn", kind: "state_changed", state: "active", sideEffects: "none" });
+
+  const handle: ProviderActionHandle = { workAttemptId: "workspace", pid: connection.pid,
+    providerContinuationId: "continuation", providerConnection: connection, observedState: "idle", appliedConfigurationRevision: 2 };
+  const token = Object.freeze({ nonce: Symbol("installation"), listenerLeaseNonce: Symbol("lease"), entryId: "agent", handle,
+    executionGenerationId: "generation", workAttemptId: "workspace", providerContinuationId: "continuation",
+    providerConnection: connection, configurationRevision: 2, authorityMode: "typed" as const }) satisfies ProviderInstallationToken;
+  const persistedBirth = await store.getEntry("agent");
+  assert.equal(database.prepare("SELECT runtime_configuration_revision FROM agent_configurations WHERE agent_id='agent'").get()?.runtime_configuration_revision,
+    token.configurationRevision);
+  assert.equal(persistedBirth?.work_attempt_id, token.workAttemptId);
+  assert.equal(persistedBirth?.provider_ref?.work_attempt_id, token.workAttemptId);
+  assert.equal(persistedBirth?.provider_ref?.execution_generation_id, token.executionGenerationId);
+  assert.equal(persistedBirth?.provider_ref?.provider_continuation_id, token.providerContinuationId);
+  assert.deepEqual(persistedBirth?.provider_ref?.provider_connection, token.providerConnection);
+  const [pendingActive] = await store.listPendingTypedLifecycleEffects("agent");
+  assert.ok(pendingActive);
+  database.exec(`CREATE TRIGGER reject_lifecycle_ack BEFORE UPDATE ON execution_lifecycle_effects
+    BEGIN SELECT RAISE(ABORT,'injected lifecycle acknowledgement failure'); END`);
+  await assert.rejects(() => store.applyTypedLifecycleEffect(1, pendingActive, {
+    agentId: "agent", executionGenerationId: "generation", workAttemptId: "workspace",
+    providerContinuationId: "continuation", providerConnection: connection,
+    configurationRevision: 2, authorityMode: "typed", disposedAtMs: 200,
+  }, commit => commit()), /injected lifecycle acknowledgement failure/);
+  database.exec("DROP TRIGGER reject_lifecycle_ack");
+  assert.equal(database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get()?.generation, 1);
+  assert.equal(database.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()?.observed_state, "idle");
+  assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='active'").get()?.state, "pending",
+    "manifest projection and disposition acknowledgement roll back together");
+  let manifestGeneration = 1;
+  const coordinator = (currentInstallation: () => ProviderInstallationToken | undefined) => new TypedLifecycleEffectCoordinator({
+    store, currentInstallation, isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => manifestGeneration,
+      acceptManifestGeneration: generation => { manifestGeneration = generation; }, fenceCommit: commit => commit() },
+  });
+  let installed: ProviderInstallationToken | undefined;
+  const first = coordinator(() => installed);
+  try {
+    first.start();
+    await new Promise<void>(resolve => setTimeout(resolve, 10));
+    for (let index = 0; index < 12; index++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='active'").get()?.state, "pending",
+      "a restart without the exact recovered installation preserves the retryable disposition");
+    installed = token;
+    first.changed("agent");
+    await new Promise<void>(resolve => setTimeout(resolve, 10));
+    for (let index = 0; index < 12; index++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='active'").get()?.state, "applied");
+    assert.equal((await store.getEntry("agent"))?.observed_state, "working");
+    assert.equal(manifestGeneration, 2);
+
+    shadow.ingest("source", observer, { factId: "terminal", agentId: "agent", executionGenerationId: "generation",
+      runtimeGenerationId, observerEpoch: 1, sourceSequence: 2, observedAtMs: 102,
+      turnId: "turn", providerContinuationId: "continuation", providerTurnId: "native-turn",
+      domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: "completed", sideEffects: "none" });
+    database.prepare("UPDATE work_attempt_executions SET terminal_json='{}' WHERE execution_generation_id='generation'").run();
+  } finally { await first.close(); }
+
+  const restarted = coordinator(() => undefined);
+  try {
+    restarted.start();
+    await new Promise<void>(resolve => setTimeout(resolve, 10));
+    for (let index = 0; index < 12; index++) await new Promise<void>(resolve => setImmediate(resolve));
+    assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='terminal'").get()?.state, "superseded");
+    assert.equal((await store.getEntry("agent"))?.observed_state, "working",
+      "typed drain loses to already-durable structural terminal authority");
+    assert.equal(manifestGeneration, 2, "superseding an effect does not mutate the manifest generation");
+  } finally {
+    await restarted.close(); database.close(); await store.close(); await env.cleanup();
+  }
+});
+
+test("v29 lifecycle effect migration rolls back its journal and version markers together", async () => {
+  const env = await fixture();
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    await initialized.load();
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec(`DROP TABLE execution_lifecycle_effects;
+      UPDATE manifest_metadata SET schema_version=29 WHERE singleton=1;
+      PRAGMA user_version=29`);
+    historical.close();
+
+    const interrupted = new ManifestStore(env.databasePath, undefined, undefined, () => {
+      throw new Error("interrupt v30 lifecycle effect migration");
+    });
+    await assert.rejects(() => interrupted.load(), /interrupt v30/);
+    await interrupted.close();
+    const rolledBack = new DatabaseSync(env.databasePath);
+    assert.equal(rolledBack.prepare("PRAGMA user_version").get()?.user_version, 29);
+    assert.equal(rolledBack.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()?.schema_version, 29);
+    assert.equal(rolledBack.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_lifecycle_effects'").get(), undefined);
+    rolledBack.close();
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    await migrated.close();
+    const inspection = new DatabaseSync(env.databasePath);
+    assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.ok(inspection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_lifecycle_effects'").get());
+    inspection.close();
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
 
 async function seedApprovalJournalTurn(env: Awaited<ReturnType<typeof fixture>>, store: ManifestStore, database: DatabaseSync,
   provider: "codex" | "open-model" = "codex"): Promise<ApprovalAuthority> {

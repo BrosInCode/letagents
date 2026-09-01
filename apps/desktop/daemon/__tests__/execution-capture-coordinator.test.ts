@@ -7,6 +7,7 @@ import test from "node:test";
 import { DaemonStateSchema } from "../daemon-state-database.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity } from "../execution-shadow-store.js";
+import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
 import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
@@ -33,7 +34,7 @@ function successor(f: ReturnType<typeof fixture>, birth: string): ProviderAction
 }
 
 function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>, changed?: (agentId: string) => void,
-  db = new DatabaseSync(":memory:")) {
+  db = new DatabaseSync(":memory:"), authorityMode: "typed_shadow" | "typed" = "typed_shadow") {
   db.exec("PRAGMA foreign_keys=ON");
   new DaemonStateSchema().createSchema(db);
   db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${now}',0);
@@ -56,7 +57,7 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
     executionGenerationId: "generation",
     runtimeGenerationId: executionRuntimeStorageIdentity("agent", "generation", kind, 42, "birth-secret"),
     provider: provider[kind],
-    authorityMode: "typed_shadow",
+    authorityMode,
     configRevision: 2,
     createdAtMs: Date.parse(now),
   });
@@ -66,25 +67,26 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
     currentHandle: id => handles.get(id), daemonGeneration: () => 1, diagnostic: (_id, code) => diagnostics.push(code), changed });
   const tokens = new WeakMap<ProviderActionHandle, { identity: string; token: ProviderInstallationToken }>();
   const tokenFor = (current = handles.get("agent")!, generation = "generation"): ProviderInstallationToken => {
-    const authorityMode = current.providerConnection?.kind === "cursor_cli"
+    const tokenAuthorityMode = current.providerConnection?.kind === "cursor_cli"
       && current.providerConnection.pid === null
       && current.providerConnection.processIdentity === null
       ? null
-      : "typed_shadow" as const;
-    const identity = JSON.stringify([generation, current.appliedConfigurationRevision, current.providerConnection, authorityMode]);
+      : authorityMode;
+    const identity = JSON.stringify([generation, current.appliedConfigurationRevision, current.providerConnection, tokenAuthorityMode]);
     const existing = tokens.get(current);
     if (existing?.identity === identity) return existing.token;
     const token = Object.freeze({ nonce: Symbol("test-installation"), listenerLeaseNonce: Symbol("test-listener-lease"),
       entryId: "agent", handle: current,
       executionGenerationId: generation, workAttemptId: current.workAttemptId,
       providerContinuationId: current.providerContinuationId!, providerConnection: { ...current.providerConnection! },
-      configurationRevision: current.appliedConfigurationRevision!, authorityMode });
+      configurationRevision: current.appliedConfigurationRevision!, authorityMode: tokenAuthorityMode });
     tokens.set(current, { identity, token });
     return token;
   };
   const install = (current = handles.get("agent")!, generation = "generation") => capture.install(tokenFor(current, generation));
   const advance = (current = handles.get("agent")!, generation = "generation") => capture.advance(tokenFor(current, generation));
   const admission = (current = handles.get("agent")!, generation = "generation") => capture.captureAdmission(tokenFor(current, generation));
+  const typedAdmission = (current = handles.get("agent")!, generation = "generation") => capture.typedLifecycleAdmission(tokenFor(current, generation));
   const emit = (fact: NativeExecutionFact, birth = "birth-secret", pid = 42) => observer.emit(fact, birth, pid);
   const facts = () => db.prepare("SELECT * FROM execution_facts ORDER BY sequence").all();
   const position = () => db.prepare("SELECT last_source_sequence,max_observed_sequence FROM execution_observers").get();
@@ -94,7 +96,7 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
       .run(turn, source, Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1, `action-${turn}`, `reply-${turn}`, turn, now, now);
     db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','workspace','generation','continuation',?)").run(turn, turn);
   };
-  return { db, handle, handles, observer, capture, diagnostics, install, advance, admission, tokenFor, emit, facts, position, bindTurn };
+  return { db, handle, handles, observer, capture, diagnostics, install, advance, admission, typedAdmission, tokenFor, emit, facts, position, bindTurn };
 }
 
 test("capture admission is exact, fail-closed, and never promoted by elapsed time", async () => {
@@ -121,6 +123,55 @@ test("capture admission is exact, fail-closed, and never promoted by elapsed tim
     assert.equal(waiting.admission(), "pending",
       "an unresolved subscription stays pending without elapsed-time promotion");
   } finally { waiting.capture.close(); }
+});
+
+test("typed lifecycle admission requires a caught-up source and fully disposed fact journal", async () => {
+  const shadow = fixture();
+  try {
+    await shadow.install(); await flush();
+    assert.equal(shadow.typedAdmission(), "unavailable", "typed-shadow observation never grows authority");
+  } finally { shadow.capture.close(); }
+
+  const typed = fixture("codex_app_server", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  try {
+    await typed.install(); await flush();
+    assert.equal(typed.typedAdmission(), "ready", "an exact empty typed source is fully disposed");
+    typed.bindTurn(); typed.emit(active); await flush();
+    assert.equal(typed.typedAdmission(), "pending", "capture alone cannot outrun its durable effect");
+    typed.db.prepare(`UPDATE execution_lifecycle_effects SET state='applied',disposed_at_ms=created_at_ms
+      WHERE state='pending'`).run();
+    assert.equal(typed.typedAdmission(), "ready");
+    typed.db.prepare("DELETE FROM execution_lifecycle_effects").run();
+    assert.equal(typed.typedAdmission(), "unavailable", "a missing disposition fails closed");
+  } finally { typed.capture.close(); }
+});
+
+test("typed lifecycle startup scan advances past a full unavailable batch", async () => {
+  const effects = Array.from({ length: 33 }, (_, index) => ({
+    factId: `fact-${index + 1}`, agentId: index < 32 ? "unavailable-agent" : "later-agent",
+    factSequence: index + 1, observerExecutionGenerationId: "generation",
+    observerRuntimeGenerationId: "runtime", effectKind: "manifest_working" as const, observedAtMs: 100,
+  }));
+  const visited: string[] = [];
+  const coordinator = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async (agentId, limit, after) => effects
+        .filter(effect => (!agentId || effect.agentId === agentId) && effect.factSequence > (after ?? 0))
+        .slice(0, limit),
+      applyTypedLifecycleEffect: async (_generation, effect) => {
+        visited.push(effect.factId);
+        return { generation: 0, disposition: "pending" as const };
+      },
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
+  });
+  try {
+    coordinator.start(); await delay(10); await flush();
+    assert.deepEqual(visited, effects.map(effect => effect.factId));
+  } finally { await coordinator.close(); }
 });
 
 test("capture preserves a pre-existing birth mode and rejects policy mismatch", async () => {

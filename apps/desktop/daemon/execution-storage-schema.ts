@@ -338,6 +338,50 @@ const observerSourcesTable = `CREATE TABLE execution_observer_sources (
   FOREIGN KEY(agent_id) REFERENCES execution_observers(agent_id)
 ) STRICT`;
 
+// Journal-before-effect: every accepted lifecycle fact receives one durable
+// disposition in the same transaction as the fact. The FK cascade makes the
+// journal follow retained-fact compaction instead of growing independently.
+// Historical rows cannot recover their exact observer birth, so migration
+// settles them as superseded rather than manufacturing operational authority.
+const lifecycleEffectsTable = `CREATE TABLE execution_lifecycle_effects (
+  fact_id TEXT PRIMARY KEY,
+  fact_sequence INTEGER NOT NULL,
+  agent_id TEXT NOT NULL,
+  observer_execution_generation_id TEXT,
+  observer_runtime_generation_id TEXT,
+  observer_epoch INTEGER NOT NULL CHECK(observer_epoch >= 1),
+  subject_authority_mode TEXT NOT NULL CHECK(subject_authority_mode IN ('legacy','typed_shadow','typed')),
+  observer_authority_mode TEXT CHECK(observer_authority_mode IS NULL OR observer_authority_mode IN ('legacy','typed_shadow','typed')),
+  effect_kind TEXT NOT NULL CHECK(effect_kind IN ('none','manifest_working','manifest_idle')),
+  state TEXT NOT NULL CHECK(state IN ('pending','shadowed','applied','superseded')),
+  created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+  disposed_at_ms INTEGER CHECK(disposed_at_ms >= created_at_ms),
+  CHECK((state='pending' AND effect_kind <> 'none'
+      AND subject_authority_mode='typed' AND observer_authority_mode='typed'
+      AND observer_execution_generation_id IS NOT NULL AND observer_runtime_generation_id IS NOT NULL
+      AND disposed_at_ms IS NULL)
+    OR (state <> 'pending' AND disposed_at_ms IS NOT NULL)),
+  UNIQUE(fact_sequence,agent_id),
+  FOREIGN KEY(fact_id) REFERENCES execution_facts(fact_id) ON DELETE CASCADE,
+  FOREIGN KEY(fact_sequence,agent_id) REFERENCES execution_facts(sequence,agent_id) ON DELETE CASCADE,
+  FOREIGN KEY(agent_id,observer_execution_generation_id,observer_runtime_generation_id)
+    REFERENCES execution_runtime_generations(agent_id,execution_generation_id,runtime_generation_id)
+) STRICT`;
+const lifecycleEffectIndexes = {
+  execution_lifecycle_effect_pending: "CREATE INDEX execution_lifecycle_effect_pending ON execution_lifecycle_effects(state,agent_id,fact_sequence)",
+};
+const lifecycleEffectTriggers = {
+  execution_lifecycle_effect_identity_immutable: `CREATE TRIGGER execution_lifecycle_effect_identity_immutable
+    BEFORE UPDATE OF fact_id,fact_sequence,agent_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
+      subject_authority_mode,observer_authority_mode,effect_kind,created_at_ms
+    ON execution_lifecycle_effects
+    BEGIN SELECT RAISE(ABORT,'Lifecycle effect identity is immutable.'); END`,
+  execution_lifecycle_effect_disposition_final: `CREATE TRIGGER execution_lifecycle_effect_disposition_final
+    BEFORE UPDATE OF state,disposed_at_ms ON execution_lifecycle_effects
+    WHEN OLD.state <> 'pending' OR NEW.state NOT IN ('applied','superseded')
+    BEGIN SELECT RAISE(ABORT,'Lifecycle effect disposition is final.'); END`,
+};
+
 // Cutover authority must not depend on optional activity capture. Historical
 // generation/target values remain untouched, but are not native authority.
 // The connection digest binds the complete private connection reference without
@@ -394,8 +438,12 @@ const cutoverNativeTriggers = {
     BEGIN SELECT RAISE(ABORT,'Cutover native target cannot be replaced.'); END`,
 };
 
-function schemaFor(version: 18 | 19 | 20 | 21): { tables: Record<string, string>; triggers: Record<string, string> } {
-  if (version === 18) return { tables, triggers };
+export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22;
+
+function schemaFor(version: ExecutionStorageSchemaVersion): {
+  tables: Record<string, string>; indexes: Record<string, string>; triggers: Record<string, string>;
+} {
+  if (version === 18) return { tables, indexes, triggers };
   return {
     tables: {
       ...Object.fromEntries(Object.entries(tables).map(([name, sql]) => [name, v19Columns[name]
@@ -405,21 +453,24 @@ function schemaFor(version: 18 | 19 | 20 | 21): { tables: Record<string, string>
           `  ${observerSourceColumn},\n  FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)`),
       ...(version >= 20 ? { execution_observer_sources: observerSourcesTable } : {}),
       ...(version >= 21 ? { execution_cutover_v2: cutoverNativeTable } : {}),
+      ...(version >= 22 ? { execution_lifecycle_effects: lifecycleEffectsTable } : {}),
     },
+    indexes: { ...indexes, ...(version >= 22 ? lifecycleEffectIndexes : {}) },
     triggers: {
       ...triggers,
       execution_approval_decision_immutable: triggers.execution_approval_decision_immutable
         .replace("request_sha256,decision", "request_sha256,projection_sha256,decision"),
       ...(version >= 21 ? cutoverNativeTriggers : {}),
+      ...(version >= 22 ? lifecycleEffectTriggers : {}),
     },
   };
 }
 
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 | 21 = 21): void {
+export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 22): void {
   const schema = schemaFor(version);
   for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
-  for (const statement of Object.values(indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
+  for (const statement of Object.values(schema.indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
   for (const statement of Object.values(schema.triggers)) database.exec(statement.replace("CREATE TRIGGER ", "CREATE TRIGGER IF NOT EXISTS "));
 }
 
@@ -464,9 +515,44 @@ export function migrateExecutionStorageV20ToV21(database: DatabaseSync): void {
   database.exec(cutoverNativeTable);
   database.exec(`INSERT INTO execution_cutover_v2(rowid,${columns}) SELECT original_rowid,${columns} FROM execution_cutover_migration`);
   database.exec("DROP TABLE execution_cutover_migration");
-  database.exec(indexes.execution_cutover_one_unresolved);
+  database.exec(schemaFor(21).indexes.execution_cutover_one_unresolved);
   for (const statement of Object.values(cutoverNativeTriggers)) database.exec(statement);
   validateExecutionStorageSchema(database, 21);
+}
+
+/** Historical facts remain observation-only; never replay old rows as effects. */
+export function migrateExecutionStorageV21ToV22(database: DatabaseSync): void {
+  if (!database.isTransaction) throw new Error("Lifecycle effect storage migration requires a transaction.");
+  validateExecutionStorageSchema(database, 21);
+  const existing = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_lifecycle_effects'").get();
+  if (existing) {
+    // A predecessor repair may encounter a physically complete additive table
+    // with older version markers. Trust it only after exact v22 validation.
+    validateExecutionStorageSchema(database, 22);
+  } else {
+    database.exec(lifecycleEffectsTable);
+    for (const statement of Object.values(lifecycleEffectIndexes)) database.exec(statement);
+    for (const statement of Object.values(lifecycleEffectTriggers)) database.exec(statement);
+  }
+  database.exec(`INSERT OR IGNORE INTO execution_lifecycle_effects(
+      fact_id,fact_sequence,agent_id,observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,
+      subject_authority_mode,observer_authority_mode,effect_kind,state,created_at_ms,disposed_at_ms)
+    SELECT f.fact_id,f.sequence,f.agent_id,NULL,NULL,f.observer_epoch,r.authority_mode,NULL,
+      CASE WHEN f.domain='turn' AND f.state='active' THEN 'manifest_working'
+        WHEN f.domain='turn' AND f.state='terminal' THEN 'manifest_idle' ELSE 'none' END,
+      'superseded',f.observed_at_ms,f.observed_at_ms
+    FROM execution_facts f
+    JOIN execution_runtime_generations r ON r.agent_id=f.agent_id
+      AND r.execution_generation_id=f.execution_generation_id
+      AND r.runtime_generation_id=f.runtime_generation_id
+    WHERE f.domain <> 'execution'`);
+  if (database.prepare(`SELECT 1 FROM execution_facts f
+      WHERE f.domain <> 'execution'
+        AND NOT EXISTS(SELECT 1 FROM execution_lifecycle_effects e WHERE e.fact_id=f.fact_id)
+      LIMIT 1`).get()) {
+    throw new Error("Lifecycle effect storage migration left a fact without a disposition.");
+  }
+  validateExecutionStorageSchema(database, 22);
 }
 
 function normalizedSchema(sql: string): string {
@@ -476,9 +562,9 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync, version: 18 | 19 | 20 | 21 = 21): void {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 22): void {
   const schema = schemaFor(version);
-  for (const [name, statement] of Object.entries({ ...schema.tables, ...indexes, ...schema.triggers })) {
+  for (const [name, statement] of Object.entries({ ...schema.tables, ...schema.indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;
     if (!row || normalizedSchema(row.sql) !== normalizedSchema(statement)) throw new Error(`Execution storage schema mismatch: ${name}.`);
   }
