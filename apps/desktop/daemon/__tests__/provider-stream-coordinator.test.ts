@@ -969,6 +969,7 @@ for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
       { method: "turn/failed", kind: "turn_lifecycle", payload: {} },
       { method: "turn/completed", kind: "turn_lifecycle", payload: { turn: { status: "failed" } } },
       { method: "thread/read", kind: "transcript_snapshot", payload: { latestTurn: { status: "failed" } } },
+      { method: "thread/read", kind: "transcript_snapshot", payload: { latestTurn: { status: { status: "failed" } } } },
     ] as const;
     for (const failure of turnFailures) {
       assert.equal(providerStreamLifecycle({ ...streamEvent(9, failure.method), ...failure }), "terminal", failure.method);
@@ -986,7 +987,7 @@ for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
     assert.equal(harness.stopCalls(), 0, "only the native turn ends, never the reusable runtime");
     await harness.coordinator.enqueue("agent-1", handle, {
       ...streamEvent(11, "thread/read"), kind: "transcript_snapshot",
-      payload: { threadStatus: { type: "systemError" }, latestTurn: { status: "failed" } },
+      payload: { threadStatus: { type: "systemError" }, latestTurn: { status: { status: "failed" } } },
     });
     assert.equal(harness.getManifest().observed_state, "failed");
     assert.equal(harness.stopCalls(), 1, "mixed transcript evidence preserves hard runtime failure precedence");
