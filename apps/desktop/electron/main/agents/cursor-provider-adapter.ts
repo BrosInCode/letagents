@@ -36,7 +36,7 @@ import {
   type ControlProbeResult,
 } from "./provider-adapter.js";
 import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
-import { nativeExecutionId, ProviderExecutionObserver } from "./provider-execution-observer.js";
+import { nativeExecutionId, nativeLifecycleCheckpointId, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import {
   CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
   CURSOR_MCP_CONNECTOR_PARENT,
@@ -547,6 +547,9 @@ interface LiveTurn {
   liveDisplayTools: Map<string, { tool: string; input: unknown }>;
   executionTools: Map<string, { tool: string; completed: boolean }>;
   executionTurnFinished: boolean;
+  executionTerminalCheckpoint: {
+    sessionId: string; subtype: string; isError: boolean; nativeEventId: string;
+  } | null;
   executionContinuationId: string | null;
   completion?: Promise<CursorTurnTerminal>;
 }
@@ -2100,6 +2103,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       liveDisplayTools: new Map(),
       executionTools: new Map(),
       executionTurnFinished: false,
+      executionTerminalCheckpoint: null,
       executionContinuationId: null,
     };
     void child.exited.then(async (exit) => {
@@ -2692,12 +2696,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
       return;
     }
     const safeProviderPayload = safeStreamPayload(message);
-    this.observeNativeExecution(handle, turn, message, sessionId);
+    const nativeEventId = this.observeNativeExecution(handle, turn, message, sessionId);
     const duplicateInit = message.type === "system" && message.subtype === "init" && turn.sawInit;
     // The daemon uses the first verified init as the per-turn display boundary.
     // Preserve duplicate same-session init as diagnostics under a distinct
     // method so it cannot erase assistant/tool output already shown this turn.
-    this.publishSafeStream(handle, duplicateInit ? "system/init_duplicate" : streamMethod(message), safeProviderPayload, cursorStreamKind(message));
+    this.publishSafeStream(handle, duplicateInit ? "system/init_duplicate" : streamMethod(message), safeProviderPayload, cursorStreamKind(message), nativeEventId);
     const rawEventSequence = handle.streamSequence;
     const type = typeof message.type === "string" ? message.type : "";
     if (type === "system") {
@@ -2781,34 +2785,66 @@ export class CursorProviderAdapter implements ProviderAdapter {
     turn.liveDisplayTools.clear();
   }
 
-  private observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): void {
-    if (!sessionId || !nativeExecutionId(sessionId) || turn.executionTurnFinished || handle.protocolError) return;
+  private observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): string | null {
+    if (!sessionId || !nativeExecutionId(sessionId) || handle.protocolError) return null;
+    const replay = turn.executionTerminalCheckpoint;
+    if (turn.executionTurnFinished) {
+      return message.type === "result" && replay
+        && sessionId === replay.sessionId
+        && message.subtype === replay.subtype
+        && message.is_error === replay.isError
+        ? replay.nativeEventId : null;
+    }
     const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity);
     const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
     if (message.type === "system" && message.subtype === "init" && !turn.sawInit) {
+      const nativeEventId = nativeLifecycleCheckpointId({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_active",
+        providerContinuationId: sessionId,
+        providerTurnId: turn.controlTurnId,
+        nativeProcessIdentity: turn.processIdentity,
+      });
       turn.executionContinuationId = sessionId;
       emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
       emit({ domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" });
-      emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", ...nativeTurn });
-      return;
+      emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", nativeEventId, ...nativeTurn });
+      return nativeEventId;
     }
-    if (!turn.sawInit || sessionId !== handle.providerContinuationId) return;
+    if (!turn.sawInit || sessionId !== handle.providerContinuationId) return null;
     if (message.type === "result") {
       if (typeof message.subtype !== "string" || !message.subtype
-        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return;
+        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return null;
+      const nativeEventId = nativeLifecycleCheckpointId({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_terminal",
+        providerContinuationId: sessionId,
+        providerTurnId: turn.controlTurnId,
+        nativeProcessIdentity: turn.processIdentity,
+        terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
+      });
       emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...nativeTurn,
+        nativeEventId,
         turnOutcome: message.subtype === "success" && message.is_error === false ? "completed" : "failed" });
+      turn.executionTerminalCheckpoint = {
+        sessionId,
+        subtype: message.subtype,
+        isError: message.is_error === true,
+        nativeEventId,
+      };
       turn.executionTurnFinished = true;
-      return;
+      return nativeEventId;
     }
-    if (message.type !== "tool_call" || !nativeExecutionId(message.call_id)) return;
+    if (message.type !== "tool_call" || !nativeExecutionId(message.call_id)) return null;
     const calls = cursorRecord(message.tool_call);
-    if (!calls) return;
+    if (!calls) return null;
     // Only exact native envelopes have defined operation semantics. Unknown
     // variants remain diagnostics rather than inferring execution from text.
     const operations = { shellToolCall: "command", readToolCall: "file_read", writeToolCall: "file_change" } as const;
     const entries = Object.entries(operations).filter(([name]) => cursorRecord(calls[name]));
-    if (entries.length !== 1 || Object.keys(calls).filter((key) => key.endsWith("ToolCall")).length !== 1) return;
+    if (entries.length !== 1 || Object.keys(calls).filter((key) => key.endsWith("ToolCall")).length !== 1) return null;
     const [tool, operation] = entries[0]!;
     const call = cursorRecord(calls[tool])!;
     const identity = { domain: "execution" as const, executionId: message.call_id, operation, ...nativeTurn };
@@ -2820,33 +2856,34 @@ export class CursorProviderAdapter implements ProviderAdapter {
       turn.executionTools.set(message.call_id, { tool, completed: false });
     } else if (message.subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
       const result = cursorRecord(call.result);
-      if (!result) return;
+      if (!result) return null;
       const variants = (operation === "command"
         ? ["success", "failure", "timeout", "rejected", "permissionDenied", "spawnError"]
         : ["success", "error", "failure"]).filter((key) => Object.hasOwn(result, key));
-      if (variants.length !== 1 || !cursorRecord(result[variants[0]!])) return;
+      if (variants.length !== 1 || !cursorRecord(result[variants[0]!])) return null;
       const variant = variants[0]!;
       let exitCode: number | undefined;
       if (operation === "command") {
         // Cursor 2026.07.09's ShellResult uses foreground success/failure
         // records with an int32 exitCode (protobuf JSON emits default zero).
         // A background handoff is not command completion.
-        if (result.isBackground !== undefined && typeof result.isBackground !== "boolean") return;
-        if (result.isBackground === true || variant === "timeout") return;
+        if (result.isBackground !== undefined && typeof result.isBackground !== "boolean") return null;
+        if (result.isBackground === true || variant === "timeout") return null;
         if (variant === "rejected" || variant === "permissionDenied" || variant === "spawnError") {
           prior.completed = true;
           emit({ ...identity, kind: "completed", outcome: variant === "spawnError" ? "failed" : "denied_before_start", sideEffects: "none" });
-          return;
+          return null;
         }
         const terminal = cursorRecord(result[variant])!;
         if (!Number.isInteger(terminal.exitCode)
-          || (terminal.exitCode as number) < -2_147_483_648 || (terminal.exitCode as number) > 2_147_483_647) return;
+          || (terminal.exitCode as number) < -2_147_483_648 || (terminal.exitCode as number) > 2_147_483_647) return null;
         exitCode = terminal.exitCode as number;
       }
       prior.completed = true;
       emit({ ...identity, kind: "completed", outcome: variant === "success" && (exitCode === undefined || exitCode === 0)
         ? "succeeded" : "failed", ...(exitCode === undefined ? {} : { exitCode }), sideEffects });
     }
+    return null;
   }
 
   private observeNativeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
@@ -3104,6 +3141,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     method: string,
     safe: ReturnType<typeof safeStreamPayload>,
     kind: ProviderStreamEventKind,
+    nativeEventId: string | null = null,
   ): void {
     const event: ProviderStreamEvent = {
       workAttemptId: handle.workAttemptId,
@@ -3113,6 +3151,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       provider: this.id,
       kind,
       method,
+      ...(nativeEventId ? { nativeEventId } : {}),
       ...safe,
       durablePayloadRef: null,
     };

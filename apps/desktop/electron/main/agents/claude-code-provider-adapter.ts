@@ -33,7 +33,7 @@ import {
   type ControlProbeResult,
 } from "./provider-adapter.js";
 import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
-import { nativeExecutionId, ProviderExecutionObserver } from "./provider-execution-observer.js";
+import { nativeExecutionId, nativeLifecycleCheckpointId, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   isRentalCredentialIsolationRequested,
@@ -538,6 +538,9 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly execution: ProviderExecutionObserver;
   executionTurnId: string | null = null;
   executionTurnStarted = false;
+  executionTerminalCheckpoint: {
+    providerTurnId: string; subtype: string; isError: boolean; nativeEventId: string;
+  } | null = null;
   readonly executionTools = new Map<string, { operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"]; completed: boolean }>();
   executionExitObserved = false;
 
@@ -731,6 +734,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       handle.state = "working";
       handle.executionTurnId = turnId;
       handle.executionTurnStarted = false;
+      handle.executionTerminalCheckpoint = null;
       handle.executionTools.clear();
       try {
         handle.child.writeLine(userStreamJsonLine(boundedClaudeRoomTurnPrompt(request), turnId));
@@ -1156,8 +1160,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "stdout/raw", { line }, "provider_event");
       return;
     }
-    this.observeNativeExecution(handle, message);
-    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message));
+    const nativeEventId = this.observeNativeExecution(handle, message);
+    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message), nativeEventId);
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
@@ -1235,36 +1239,66 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private observeNativeExecution(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): void {
+  private observeNativeExecution(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): string | null {
+    const replay = handle.executionTerminalCheckpoint;
+    if (message.type === "result" && replay
+      && message.session_id === handle.providerContinuationId
+      && message.user_message_uuid === replay.providerTurnId
+      && message.subtype === replay.subtype
+      && message.is_error === replay.isError) return replay.nativeEventId;
     const turnId = handle.executionTurnId;
     if (!turnId || message.session_id !== handle.providerContinuationId
-      || !nativeExecutionId(handle.providerContinuationId)) return;
+      || !nativeExecutionId(handle.providerContinuationId)) return null;
     const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
       handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined);
     const turn = { providerTurnId: turnId, providerContinuationId: handle.providerContinuationId };
     // command_uuid names the user turn, never a shell command. Only an exact
     // native started event proves receipt; writing stdin alone is insufficient.
     if (message.type === "command_lifecycle" && message.command_uuid === turnId && message.state === "started") {
+      const nativeEventId = nativeLifecycleCheckpointId({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_active",
+        providerContinuationId: handle.providerContinuationId,
+        providerTurnId: turnId,
+      });
       if (!handle.executionTurnStarted) {
         handle.executionTurnStarted = true;
         emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
-        emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", ...turn });
+        emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", nativeEventId, ...turn });
       }
+      return nativeEventId;
     } else if (message.type === "result" && message.user_message_uuid === turnId) {
       if (typeof message.subtype !== "string" || !message.subtype
-        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return;
+        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return null;
+      const nativeEventId = nativeLifecycleCheckpointId({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_terminal",
+        providerContinuationId: handle.providerContinuationId,
+        providerTurnId: turnId,
+        terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
+      });
       emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...turn,
+        nativeEventId,
         turnOutcome: message.subtype === "success" && message.is_error === false ? "completed"
           : message.subtype === "interrupted" ? "interrupted" : "failed" });
+      handle.executionTerminalCheckpoint = {
+        providerTurnId: turnId,
+        subtype: message.subtype,
+        isError: message.is_error === true,
+        nativeEventId,
+      };
       handle.executionTurnId = null;
       handle.executionTurnStarted = false;
       handle.executionTools.clear();
+      return nativeEventId;
     } else if (handle.executionTurnStarted && (message.type === "assistant" || message.type === "user")
       && message.parent_tool_use_id == null) {
       // Tool messages carry session/tool identity, not the caller's turn UUID.
       // Do not attribute a bootstrap or previous-turn tail before exact receipt.
       const body = message.message as { content?: unknown } | undefined;
-      if (!Array.isArray(body?.content)) return;
+      if (!Array.isArray(body?.content)) return null;
       for (const value of body.content) {
         if (!value || typeof value !== "object" || Array.isArray(value)) continue;
         const block = value as Record<string, unknown>;
@@ -1288,6 +1322,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         }
       }
     }
+    return null;
   }
 
   private waitForNextTurnResult(handle: ClaudeProviderHandle): Promise<ClaudeStreamMessage> {
@@ -1385,6 +1420,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     method: string,
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
+    nativeEventId: string | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -1395,6 +1431,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       provider: this.id,
       kind,
       method,
+      ...(nativeEventId ? { nativeEventId } : {}),
       ...safe,
       durablePayloadRef: null,
     };

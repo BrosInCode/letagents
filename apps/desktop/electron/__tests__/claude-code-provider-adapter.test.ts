@@ -1188,6 +1188,8 @@ test("Claude typed observations correlate native turns and completed tools witho
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
   const child = harness.children[0]!;
+  const stream: ProviderStreamEvent[] = [];
+  const stopStream = adapter.onStream(handle, (event) => stream.push(event));
   const events: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, () => { throw new Error("shadow persistence unavailable"); });
   adapter.onExecution(handle, (event) => events.push(event));
@@ -1229,8 +1231,10 @@ test("Claude typed observations correlate native turns and completed tools witho
   child.emit({ type: "user", session_id, message: { content: [
     { type: "tool_result", tool_use_id: "shell-1", is_error: true },
   ] } });
-  child.emit({ type: "result", subtype: "error_max_turns", is_error: true, session_id, user_message_uuid: turnId });
+  const failedResult = { type: "result", subtype: "error_max_turns", is_error: true, session_id, user_message_uuid: turnId };
+  child.emit(failedResult);
   await assert.rejects(running, /failed/);
+  child.emit(failedResult);
   assert.equal(handle.observedState(), "idle", "typed collection preserves legacy containment");
   assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" }, "turn failure is not runtime death");
 
@@ -1259,7 +1263,25 @@ test("Claude typed observations correlate native turns and completed tools witho
   assert.equal(projection.turns.get(turnId)?.operations.get("shell-1")?.outcome, "failed");
   assert.equal(events.filter((event) => event.fact.domain === "execution").length, 1);
   assert.doesNotMatch(JSON.stringify(events), /secret-command|secret-output/);
+  const streamCheckpointIds = [...new Set(stream.flatMap((event) => event.nativeEventId ? [event.nativeEventId] : []))];
+  const typedCheckpointIds = [...new Set(events.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
+  assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
+    "exact native command lifecycle and result records correlate both projections");
+  assert.equal(streamCheckpointIds.length, 3, "one start and two terminal records have distinct identities");
+  const terminalIds = stream.filter((event) => event.method.startsWith("result") && event.nativeEventId)
+    .map((event) => event.nativeEventId);
+  assert.equal(terminalIds.length, 3);
+  assert.equal(terminalIds[0], terminalIds[1], "an identical terminal replay keeps the first checkpoint identity");
+  assert.equal(events.filter((event) => event.fact.domain === "turn" && event.fact.state === "terminal"
+    && event.fact.nativeEventId === terminalIds[0]).length, 1, "a replay does not emit another typed terminal");
+  const repeatedStartIds = stream.filter((event) => event.method === "command_lifecycle" && event.nativeEventId)
+    .map((event) => event.nativeEventId);
+  assert.equal(repeatedStartIds.length, 2, "only the two exact repeated native starts are eligible");
+  assert.equal(new Set(repeatedStartIds).size, 1, "a replayed native start keeps the same checkpoint identity");
+  assert.equal(stream.some((event) => ["assistant", "user"].includes(event.method) && event.nativeEventId !== undefined), false);
+  assert.equal(events.some((event) => event.fact.domain === "execution" && event.fact.nativeEventId !== undefined), false);
   assert.deepEqual(harness.signals, []);
+  stopStream();
   child.resolveExit({ type: "exit", code: 0, signal: null });
   await flush();
   assert.deepEqual(await adapter.probeControl(handle), { state: "lost", controlEvidence: "process_exit" });
@@ -1280,8 +1302,11 @@ test("Claude shadow native terminal remains observable behind a legacy failed-st
   child.emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: handle.providerContinuationId, user_message_uuid: "foreign" });
   assert.equal(handle.observedState(), "failed");
   child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId });
-  assert.deepEqual(events.map((event) => event.fact), [{ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
-    providerContinuationId: handle.providerContinuationId, providerTurnId: turnId, turnOutcome: "completed" }]);
+  assert.equal(events.length, 1);
+  const { nativeEventId, ...terminalFact } = events[0]!.fact;
+  assert.match(nativeEventId ?? "", /^nlc1:[A-Za-z0-9_-]{43}$/);
+  assert.deepEqual(terminalFact, { domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
+    providerContinuationId: handle.providerContinuationId, providerTurnId: turnId, turnOutcome: "completed" });
   assert.equal(handle.observedState(), "failed", "shadow must not repair or rewrite legacy behavior");
   assert.deepEqual(harness.signals, []);
   child.resolveExit({ type: "exit", code: 1, signal: null });

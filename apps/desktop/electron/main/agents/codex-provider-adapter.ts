@@ -23,7 +23,7 @@ import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagent
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
-import { ProviderExecutionObserver, nativeExecutionId } from "./provider-execution-observer.js";
+import { ProviderExecutionObserver, nativeExecutionId, nativeLifecycleCheckpointId } from "./provider-execution-observer.js";
 import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 import {
   summarizeCodexRuntimeNotification,
@@ -1762,7 +1762,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle: CodexProviderHandle,
     notification: RpcNotification,
   ): void {
-    this.observeNativeExecution(handle, notification);
+    const nativeEventId = this.observeNativeExecution(handle, notification);
     handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
@@ -1777,7 +1777,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // approved summaryTextDelta stream is accumulated here; raw reasoning
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
     const summary = summarizeCodexRuntimeNotification(notification);
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary);
+    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary, nativeEventId);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
     const lifecycle = isCodexExecutionMethod(notification.method) ? null
@@ -1797,13 +1797,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private observeNativeExecution(handle: CodexProviderHandle, notification: RpcNotification): void {
+  private observeNativeExecution(handle: CodexProviderHandle, notification: RpcNotification): string | null {
     const params = recordValue(notification.params);
-    if (!params || params.threadId !== handle.providerContinuationId || !nativeExecutionId(params.threadId)) return;
+    if (!params || params.threadId !== handle.providerContinuationId || !nativeExecutionId(params.threadId)) return null;
     const turn = recordValue(params.turn);
-    if (params.turnId !== undefined && turn?.id !== undefined && params.turnId !== turn.id) return;
+    if (params.turnId !== undefined && turn?.id !== undefined && params.turnId !== turn.id) return null;
     const providerTurnId = params.turnId ?? turn?.id;
-    if (!nativeExecutionId(providerTurnId)) return;
+    if (!nativeExecutionId(providerTurnId)) return null;
     const identity = { providerContinuationId: params.threadId, providerTurnId };
     const emit = (fact: NativeExecutionFact) => {
       if (fact.domain === "execution") {
@@ -1818,29 +1818,45 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
     };
     if (notification.method === "turn/started") {
+      const nativeEventId = nativeLifecycleCheckpointId({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_active",
+        providerContinuationId: params.threadId,
+        providerTurnId,
+      });
       emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
-      emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none" });
-      return;
+      emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", nativeEventId });
+      return nativeEventId;
     }
     if (notification.method === "turn/completed") {
       const outcome = turn?.status;
       if (outcome === "completed" || outcome === "failed" || outcome === "interrupted") {
-        emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome, sideEffects: "none" });
+        const nativeEventId = nativeLifecycleCheckpointId({
+          provider: this.id,
+          workAttemptId: handle.workAttemptId,
+          phase: "turn_terminal",
+          providerContinuationId: params.threadId,
+          providerTurnId,
+          terminalDiscriminator: outcome,
+        });
+        emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome, sideEffects: "none", nativeEventId });
+        return nativeEventId;
       }
-      return;
+      return null;
     }
     if (notification.method === "item/commandExecution/outputDelta") {
       if (nativeExecutionId(params.itemId) && typeof params.delta === "string" && params.delta.length > 0) {
         emit({ ...identity, domain: "execution", executionId: params.itemId, operation: "command", kind: "output", outputBytes: Buffer.byteLength(params.delta), sideEffects: "possible" });
       }
-      return;
+      return null;
     }
-    if (notification.method !== "item/started" && notification.method !== "item/completed") return;
+    if (notification.method !== "item/started" && notification.method !== "item/completed") return null;
     const item = recordValue(params.item);
-    if (!item || !nativeExecutionId(item.id)) return;
+    if (!item || !nativeExecutionId(item.id)) return null;
     const operation = item.type === "commandExecution" ? "command"
       : item.type === "fileChange" ? "file_change" : item.type === "mcpToolCall" ? "other" : null;
-    if (!operation) return;
+    if (!operation) return null;
     const base = { ...identity, domain: "execution" as const, executionId: item.id, operation } as const;
     if (notification.method === "item/started") {
       // item/started can precede requestApproval. Only an actual PTY process
@@ -1848,7 +1864,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (operation === "command" && item.status === "inProgress" && nativeExecutionId(item.processId)) {
         emit({ ...base, kind: "started", sideEffects: "possible" });
       }
-      return;
+      return null;
     }
     if (item.status === "declined" && (operation === "command" || operation === "file_change")) {
       emit({ ...base, kind: "completed", outcome: "denied_before_start", sideEffects: "none" });
@@ -1859,6 +1875,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         sideEffects: operation === "file_change" && item.status === "completed" ? "observed" : "possible",
         ...(exitCode !== undefined ? { exitCode } : {}) });
     }
+    return null;
   }
 
   private async emitTranscriptTail(handle: CodexProviderHandle): Promise<void> {
@@ -1995,6 +2012,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
     summary: string | null = null,
+    nativeEventId: string | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -2005,6 +2023,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       provider: this.id,
       kind,
       method,
+      ...(nativeEventId ? { nativeEventId } : {}),
       summary,
       ...safe,
       durablePayloadRef: null,
