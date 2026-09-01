@@ -351,6 +351,62 @@ test("ordinary persistence keeps only the worker identity receipted by the nativ
   assert.equal(runtime.entry().provider_ref?.custodial_launch_agent_session_id, undefined, "a successor cannot inherit an unreceipted worker identity");
 });
 
+test("ordinary provider birth holds manifest mutation authority through generation acceptance", async () => {
+  const runtime = harness();
+  let mutationTail = Promise.resolve();
+  runtime.options.authority.serializeManifestMutation = async (operation) => {
+    const previous = mutationTail;
+    let release!: () => void;
+    mutationTail = new Promise<void>((resolve) => { release = resolve; });
+    await previous;
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  };
+
+  const originalCheckpoint = runtime.options.store.checkpointProviderBirth;
+  let checkpointEntered!: () => void;
+  const checkpointStarted = new Promise<void>((resolve) => { checkpointEntered = resolve; });
+  let releaseCheckpoint!: () => void;
+  const checkpointGate = new Promise<void>((resolve) => { releaseCheckpoint = resolve; });
+  let birthCommitted!: () => void;
+  const birthCommit = new Promise<void>((resolve) => { birthCommitted = resolve; });
+  runtime.options.store.checkpointProviderBirth = async (...args) => {
+    checkpointEntered();
+    await checkpointGate;
+    const result = await originalCheckpoint(...args);
+    birthCommitted();
+    return result;
+  };
+
+  const persistence = runtime.coordinator.persistProviderHandle(
+    "agent-1",
+    returnedHandle,
+    "generation-1",
+    1,
+    "typed_shadow",
+  );
+  await checkpointStarted;
+  let peerEntered = false;
+  const peerMutation = runtime.options.authority.serializeManifestMutation(async () => {
+    peerEntered = true;
+    const expectedGeneration = runtime.options.authority.currentManifestGeneration();
+    await birthCommit;
+    assert.equal(
+      runtime.options.authority.currentManifestGeneration(),
+      expectedGeneration,
+      "a peer manifest transition must not capture generation before provider birth commits",
+    );
+  });
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(peerEntered, false, "provider birth keeps a peer transition outside the mutation lane");
+  releaseCheckpoint();
+
+  await Promise.all([persistence, peerMutation]);
+});
+
 test("legacy resume stages wait authority from the persisted successor rather than the predecessor snapshot", async () => {
   const runtime = harness({
     entry: {
