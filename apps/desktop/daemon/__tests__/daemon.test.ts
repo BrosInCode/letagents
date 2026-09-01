@@ -3218,7 +3218,9 @@ test("host grant renewal retries transient failures, rotates the bearer in place
     assert.equal((await daemonRequest(paths.socketPath, "supervisor.install_host_grant", staleInstall)).ok, true);
     await eventually(async () => {
       const binding = await internals.workerBindings.get("host_grant_renewal_retry");
-      return renewalCalls >= 2 && mintCalls >= 3 && binding?.credential_ref === "renewed-worker-bearer-id";
+      const grant = internals.workerRuntimeCustody.hostGrant("host_grant_renewal_retry");
+      return renewalCalls >= 2 && mintCalls >= 3 && binding?.credential_ref === "renewed-worker-bearer-id"
+        && grant?.supervisorGrant === "renewed-parent-secret";
     }, "parent renewal and transient child-session retry");
     const beforeStale = internals.workerRuntimeCustody.hostGrant("host_grant_renewal_retry")!;
     const cachedBeforeStale = internals.workerRuntimeCustody.workerAuthorization("host_grant_renewal_retry");
