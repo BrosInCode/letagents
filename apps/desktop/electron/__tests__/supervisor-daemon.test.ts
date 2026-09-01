@@ -692,15 +692,120 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       assert.equal(olderStatus?.generation, 23);
       assert.equal(olderStatus?.recoveryDiagnostics, null, "missing older-daemon diagnostics cannot pass the zero gate");
       wire.statusRecoveryDiagnostics.value = { daemon_inbox_wait_evidence_dependency: 2 };
+      assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null,
+        "an older wait-only diagnostic cannot imply lifecycle conformance");
+
+      const cleanProjection = {
+        available: true,
+        providers: Object.fromEntries(["codex", "claude-code", "cursor"].map((provider) => [provider, {
+          comparedSegments: 1,
+          matched: 1,
+          missingInTyped: 0,
+          missingInLegacy: 0,
+          pairedButDifferent: 0,
+          conflicts: 0,
+          observationUnavailable: 0,
+        }])),
+      };
+      const eligibility = { codex: true, "claude-code": true, cursor: true };
+      wire.statusRecoveryDiagnostics.value = {
+        daemon_inbox_wait_evidence_dependency: 0,
+        lifecycle_projection: cleanProjection,
+        lifecycle_local_conformance_eligible: eligibility,
+      };
       assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
-        daemonInboxWaitEvidenceDependency: 2,
+        daemonInboxWaitEvidenceDependency: 0,
+        lifecycleProjection: cleanProjection,
+        lifecycleLocalConformanceEligible: eligibility,
       });
+      const unavailableProjection = { ...cleanProjection, available: false };
+      const unavailableEligibility = { codex: false, "claude-code": false, cursor: false };
+      wire.statusRecoveryDiagnostics.value = {
+        daemon_inbox_wait_evidence_dependency: 0,
+        lifecycle_projection: unavailableProjection,
+        lifecycle_local_conformance_eligible: unavailableEligibility,
+      };
+      assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
+        daemonInboxWaitEvidenceDependency: 0,
+        lifecycleProjection: unavailableProjection,
+        lifecycleLocalConformanceEligible: unavailableEligibility,
+      }, "unavailable evidence remains visible but cannot imply eligibility");
+      for (const contradictory of [
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: unavailableProjection,
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 1,
+          lifecycle_projection: cleanProjection,
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: {
+            ...cleanProjection,
+            providers: {
+              ...cleanProjection.providers,
+              codex: { ...cleanProjection.providers.codex, missingInTyped: 1 },
+            },
+          },
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: {
+            ...cleanProjection,
+            providers: {
+              ...cleanProjection.providers,
+              codex: { ...cleanProjection.providers.codex, comparedSegments: 0 },
+            },
+          },
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = contradictory;
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null,
+          "a positive eligibility claim must be supported by the projected evidence");
+      }
+      wire.statusRecoveryDiagnostics.value = {
+        daemon_inbox_wait_evidence_dependency: 0,
+        lifecycle_projection: cleanProjection,
+        lifecycle_local_conformance_eligible: { ...eligibility, codex: false },
+      };
+      assert.equal((await client.connectIfRunning())?.recoveryDiagnostics?.lifecycleLocalConformanceEligible.codex, false,
+        "a stricter false eligibility remains forward-compatible with additional daemon-side blockers");
       for (const malformed of [
         { daemon_inbox_wait_evidence_dependency: -1 },
         { daemon_inbox_wait_evidence_dependency: 1.5 },
         { daemon_inbox_wait_evidence_dependency: "0" },
       ]) {
         wire.statusRecoveryDiagnostics.value = malformed;
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
+      }
+      for (const key of [
+        "comparedSegments", "matched", "missingInTyped", "missingInLegacy",
+        "pairedButDifferent", "conflicts", "observationUnavailable",
+      ]) {
+        const malformedProjection = structuredClone(cleanProjection);
+        (malformedProjection.providers.codex as Record<string, unknown>)[key] = -1;
+        wire.statusRecoveryDiagnostics.value = {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: malformedProjection,
+          lifecycle_local_conformance_eligible: eligibility,
+        };
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null, `${key} fails closed`);
+      }
+      for (const malformedEligibility of [
+        undefined,
+        { codex: true, "claude-code": true },
+        { codex: true, "claude-code": true, cursor: "true" },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: cleanProjection,
+          lifecycle_local_conformance_eligible: malformedEligibility,
+        };
         assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
       }
       assert.equal(spawnCount, 0);
@@ -2276,7 +2381,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.119");
+    assert.equal(status.implementationVersion, "2.0.120");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

@@ -13,6 +13,8 @@ import type {
   DesktopSupervisorCreateInput,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
+  DesktopLifecycleProjectionDiagnostics,
+  DesktopLifecycleProjectionProvider,
   DesktopSupervisorManifestEntry,
   DesktopSupervisorRoomDeliveryRetryInput,
   DesktopSupervisorStateSnapshot,
@@ -38,7 +40,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.119";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.120";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Retirement can queue behind one already-admitted worker mint (3 x 10s) so
@@ -1748,9 +1750,28 @@ export class SupervisorDaemonClient {
 function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatus {
   const rawRecoveryDiagnostics = record(value.recovery_diagnostics);
   const daemonInboxWaitEvidenceDependency = rawRecoveryDiagnostics?.daemon_inbox_wait_evidence_dependency;
+  const lifecycleProjection = mapLifecycleProjectionDiagnostics(rawRecoveryDiagnostics?.lifecycle_projection);
+  const lifecycleLocalConformanceEligible = mapLifecycleLocalConformanceEligibility(
+    rawRecoveryDiagnostics?.lifecycle_local_conformance_eligible,
+  );
+  const eligibilityClaimsAreSupported = lifecycleProjection && lifecycleLocalConformanceEligible
+    ? lifecycleProjectionProviders.every((provider) => !lifecycleLocalConformanceEligible[provider]
+      || lifecycleProjectionSupportsLocalConformance(
+        lifecycleProjection,
+        provider,
+        daemonInboxWaitEvidenceDependency,
+      ))
+    : false;
   const recoveryDiagnostics = Number.isSafeInteger(daemonInboxWaitEvidenceDependency)
     && (daemonInboxWaitEvidenceDependency as number) >= 0
-    ? { daemonInboxWaitEvidenceDependency: daemonInboxWaitEvidenceDependency as number }
+    && lifecycleProjection
+    && lifecycleLocalConformanceEligible
+    && eligibilityClaimsAreSupported
+    ? {
+        daemonInboxWaitEvidenceDependency: daemonInboxWaitEvidenceDependency as number,
+        lifecycleProjection,
+        lifecycleLocalConformanceEligible,
+      }
     : null;
   return {
     healthy: value.healthy === true,
@@ -1773,6 +1794,65 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     startedAt: String(value.started_at ?? ""),
     recoveryDiagnostics,
   };
+}
+
+const lifecycleProjectionProviders = ["codex", "claude-code", "cursor"] as const;
+const lifecycleProjectionCounterKeys = [
+  "comparedSegments",
+  "matched",
+  "missingInTyped",
+  "missingInLegacy",
+  "pairedButDifferent",
+  "conflicts",
+  "observationUnavailable",
+] as const;
+
+function mapLifecycleProjectionDiagnostics(value: unknown): DesktopLifecycleProjectionDiagnostics | null {
+  const projection = record(value);
+  const providers = record(projection?.providers);
+  if (!projection || typeof projection.available !== "boolean" || !providers) return null;
+  const mapped = {} as DesktopLifecycleProjectionDiagnostics["providers"];
+  for (const provider of lifecycleProjectionProviders) {
+    const source = record(providers[provider]);
+    if (!source) return null;
+    const counters = {} as DesktopLifecycleProjectionDiagnostics["providers"][DesktopLifecycleProjectionProvider];
+    for (const key of lifecycleProjectionCounterKeys) {
+      const counter = source[key];
+      if (!Number.isSafeInteger(counter) || (counter as number) < 0) return null;
+      counters[key] = counter as number;
+    }
+    mapped[provider] = counters;
+  }
+  return { available: projection.available, providers: mapped };
+}
+
+function mapLifecycleLocalConformanceEligibility(
+  value: unknown,
+): Record<DesktopLifecycleProjectionProvider, boolean> | null {
+  const source = record(value);
+  if (!source) return null;
+  const mapped = {} as Record<DesktopLifecycleProjectionProvider, boolean>;
+  for (const provider of lifecycleProjectionProviders) {
+    if (typeof source[provider] !== "boolean") return null;
+    mapped[provider] = source[provider];
+  }
+  return mapped;
+}
+
+function lifecycleProjectionSupportsLocalConformance(
+  projection: DesktopLifecycleProjectionDiagnostics,
+  provider: DesktopLifecycleProjectionProvider,
+  daemonInboxWaitEvidenceDependency: unknown,
+): boolean {
+  const evidence = projection.providers[provider];
+  return projection.available
+    && daemonInboxWaitEvidenceDependency === 0
+    && evidence.comparedSegments >= 1
+    && evidence.missingInTyped === 0
+    && evidence.missingInLegacy === 0
+    && evidence.pairedButDifferent === 0
+    && evidence.conflicts === 0
+    && evidence.observationUnavailable === 0;
 }
 
 function mapAgentConfiguration(value: Record<string, unknown>, entryId: string, daemonGeneration: number): import("../ipc-types/agents.js").DesktopSupervisorAgentConfiguration {
