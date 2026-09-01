@@ -34,6 +34,8 @@ import {
   projectDaemonManifestEntry,
   type DaemonManifestDomainProjection,
 } from "./manifest-entry-projection.js";
+import { executionStorageIdentity } from "./execution-shadow-store.js";
+import { lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
@@ -237,6 +239,36 @@ export class ManifestStore {
   async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
     return this.readEntryFromDatabase(database, agentId);
+  }
+
+  /**
+   * Read the authority frozen onto one exact native process birth. This never
+   * consults current release policy and never materializes or relabels a row.
+   */
+  async readRuntimeLifecycleAuthority(input: {
+    agentId: string;
+    executionGenerationId: string;
+    providerConnection: DaemonProviderConnection;
+    configurationRevision: number;
+  }): Promise<LifecycleAuthorityMode | null> {
+    const snapshot = structuredClone(input);
+    if (!snapshot.agentId || !snapshot.executionGenerationId
+      || snapshot.providerConnection.pid === null || !snapshot.providerConnection.processIdentity
+      || !Number.isSafeInteger(snapshot.configurationRevision) || snapshot.configurationRevision < 1) return null;
+    const provider = {
+      codex_app_server: "codex",
+      claude_cli: "claude-code",
+      cursor_cli: "cursor",
+      opencode_server: "open-model",
+    } as const;
+    const runtimeGenerationId = executionStorageIdentity("runtime", snapshot.agentId,
+      snapshot.executionGenerationId, snapshot.providerConnection.kind, snapshot.providerConnection.processIdentity);
+    const row = (await this.getDatabase()).prepare(`SELECT authority_mode FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=? AND provider=? AND config_revision=?`)
+      .get(snapshot.agentId, snapshot.executionGenerationId, runtimeGenerationId,
+        provider[snapshot.providerConnection.kind], snapshot.configurationRevision) as Row | undefined;
+    const authority = lifecycleAuthorityModeSchema.safeParse(row?.authority_mode);
+    return authority.success ? authority.data : null;
   }
 
   /** Host-only operational admission; native pendingness is independently fenced by the broker. */
