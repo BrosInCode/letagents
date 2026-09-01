@@ -64,6 +64,16 @@ type StoredManifest = { manifest: DaemonManifest; checksum: string };
 type Row = Record<string, unknown>;
 type StoredAgentConfiguration = { provider: string; model: string | null; reasoning_effort: DaemonAgentConfiguration["reasoning_effort"]; charter: string; permission_profile_id: string | null; provider_launch_policy: unknown; config_revision: number; runtime_configuration_revision: number; polling_contract: DaemonAgentConfiguration["polling_contract"] };
 type PreMembershipRoomMoveCancellation = { agentId: string; detail: string };
+export type PendingTypedLifecycleEffect = {
+  factId: string; agentId: string; factSequence: number;
+  observerExecutionGenerationId: string; observerRuntimeGenerationId: string;
+  effectKind: "manifest_working" | "manifest_idle"; observedAtMs: number;
+};
+export type TypedLifecycleEffectInstallation = {
+  agentId: string; executionGenerationId: string; workAttemptId: string;
+  providerContinuationId: string; providerConnection: DaemonProviderConnection;
+  configurationRevision: number; authorityMode: "typed"; disposedAtMs: number;
+};
 
 function roomMoveFromRow(row: Row): DaemonRoomMoveRecord {
   return {
@@ -274,6 +284,135 @@ export class ManifestStore {
         provider[snapshot.providerConnection.kind], snapshot.configurationRevision) as Row | undefined;
     const authority = lifecycleAuthorityModeSchema.safeParse(row?.authority_mode);
     return authority.success ? authority.data : null;
+  }
+
+  /** Bounded pending tail; the durable state, not this read, owns retries. */
+  async listPendingTypedLifecycleEffects(agentId?: string, limit = 32, afterFactSequence = 0): Promise<PendingTypedLifecycleEffect[]> {
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > 128) throw new Error("Lifecycle effect read limit is invalid.");
+    if (!Number.isSafeInteger(afterFactSequence) || afterFactSequence < 0) throw new Error("Lifecycle effect cursor is invalid.");
+    return this.serialize(async () => {
+      const database = await this.getDatabase();
+      const rows = database.prepare(`SELECT e.fact_id,e.agent_id,e.fact_sequence,
+          e.observer_execution_generation_id,e.observer_runtime_generation_id,e.effect_kind,f.observed_at_ms
+        FROM execution_lifecycle_effects e JOIN execution_facts f ON f.fact_id=e.fact_id
+        WHERE e.state='pending' AND e.fact_sequence>? AND (? IS NULL OR e.agent_id=?)
+        ORDER BY e.fact_sequence LIMIT ?`).all(afterFactSequence, agentId ?? null, agentId ?? null, limit) as Row[];
+      return rows.map((row) => ({
+        factId: String(row.fact_id), agentId: String(row.agent_id), factSequence: Number(row.fact_sequence),
+        observerExecutionGenerationId: String(row.observer_execution_generation_id),
+        observerRuntimeGenerationId: String(row.observer_runtime_generation_id),
+        effectKind: String(row.effect_kind) as PendingTypedLifecycleEffect["effectKind"],
+        observedAtMs: Number(row.observed_at_ms),
+      }));
+    });
+  }
+
+  /**
+   * Applies one exact typed turn projection and acknowledges it in the same
+   * SQLite transaction. Definitively stale or exited births are superseded;
+   * missing in-memory installation authority is handled by the caller and
+   * leaves the durable row pending for reattach.
+   */
+  async applyTypedLifecycleEffect(
+    expectedGeneration: number,
+    effect: PendingTypedLifecycleEffect,
+    installation: TypedLifecycleEffectInstallation | null,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; disposition: "applied" | "superseded" | "settled" | "pending"; entry?: DaemonManifestEntry }> {
+    const pending = structuredClone(effect);
+    const exact = installation ? structuredClone(installation) : null;
+    return this.writeOperationalJournal((database) => {
+      const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
+      const row = database.prepare(`SELECT e.*,f.observed_at_ms,
+          subject.runtime_state AS subject_runtime_state,observer.runtime_state AS observer_runtime_state,
+          observer.authority_mode AS durable_observer_authority
+        FROM execution_lifecycle_effects e
+        JOIN execution_facts f ON f.fact_id=e.fact_id AND f.sequence=e.fact_sequence AND f.agent_id=e.agent_id
+        JOIN execution_runtime_generations subject ON subject.agent_id=f.agent_id
+          AND subject.execution_generation_id=f.execution_generation_id
+          AND subject.runtime_generation_id=f.runtime_generation_id
+        LEFT JOIN execution_runtime_generations observer ON observer.agent_id=e.agent_id
+          AND observer.execution_generation_id=e.observer_execution_generation_id
+          AND observer.runtime_generation_id=e.observer_runtime_generation_id
+        WHERE e.fact_id=? AND e.agent_id=? AND e.fact_sequence=?`).get(
+        pending.factId, pending.agentId, pending.factSequence,
+      ) as Row | undefined;
+      if (!row || row.state !== "pending") return { generation, disposition: "settled" as const };
+      if (pending.effectKind !== row.effect_kind
+        || pending.observerExecutionGenerationId !== row.observer_execution_generation_id
+        || pending.observerRuntimeGenerationId !== row.observer_runtime_generation_id) {
+        throw new Error("Lifecycle effect installation identity is invalid.");
+      }
+      const entry = this.readEntryFromDatabase(database, pending.agentId);
+      const configuration = database.prepare(`SELECT runtime_configuration_revision
+        FROM agent_configurations WHERE agent_id=?`).get(pending.agentId) as Row | undefined;
+      const manifestConnection = entry?.provider_ref?.provider_connection;
+      const manifestRuntimeId = entry?.provider_ref?.execution_generation_id
+        && manifestConnection?.pid !== null && manifestConnection?.pid !== undefined
+        && manifestConnection.processIdentity
+        ? executionRuntimeStorageIdentity(pending.agentId, entry.provider_ref.execution_generation_id,
+          manifestConnection.kind, manifestConnection.pid, manifestConnection.processIdentity)
+        : null;
+      const terminal = database.prepare(`SELECT terminal_json FROM work_attempt_executions
+        WHERE work_attempt_id=? AND execution_generation_id=?`).get(
+        entry?.provider_ref?.work_attempt_id ?? "", pending.observerExecutionGenerationId,
+      ) as Row | undefined;
+      const durableBirth = manifestRuntimeId === pending.observerRuntimeGenerationId
+        && entry?.provider_ref?.execution_generation_id === pending.observerExecutionGenerationId
+        && row.observer_authority_mode === "typed" && row.subject_authority_mode === "typed"
+        && row.durable_observer_authority === "typed";
+      const definitivelyStale = !durableBirth
+        || row.subject_runtime_state === "exited" || row.observer_runtime_state === "exited"
+        || terminal?.terminal_json !== null
+        || entry?.desired_state !== "running" || entry.condition === "quarantined"
+        || (entry.delivery_mode ?? "mcp_polling") !== "daemon_inbox";
+      const disposedAtMs = Math.max(Number(row.created_at_ms), exact?.disposedAtMs ?? pending.observedAtMs);
+      if (definitivelyStale) {
+        database.prepare(`UPDATE execution_lifecycle_effects SET state='superseded',disposed_at_ms=?
+          WHERE fact_id=? AND state='pending'`).run(disposedAtMs, pending.factId);
+        return { generation, disposition: "superseded" as const };
+      }
+      if (!exact) return { generation, disposition: "pending" as const };
+      if (!entry?.provider_ref) throw new Error("Lifecycle effect lost its durable provider reference.");
+      if (pending.agentId !== exact.agentId || pending.observerExecutionGenerationId !== exact.executionGenerationId
+        || exact.providerConnection.pid === null || !exact.providerConnection.processIdentity
+        || !Number.isSafeInteger(exact.configurationRevision) || exact.configurationRevision < 1
+        || !Number.isSafeInteger(exact.disposedAtMs) || exact.disposedAtMs < 0) {
+        throw new Error("Lifecycle effect installation identity is invalid.");
+      }
+      const runtimeId = executionRuntimeStorageIdentity(exact.agentId, exact.executionGenerationId,
+        exact.providerConnection.kind, exact.providerConnection.pid, exact.providerConnection.processIdentity);
+      const exactBirth = runtimeId === pending.observerRuntimeGenerationId
+        && Number(configuration?.runtime_configuration_revision) === exact.configurationRevision
+        && entry.work_attempt_id === exact.workAttemptId
+        && entry.provider_ref?.work_attempt_id === exact.workAttemptId
+        && entry.provider_ref.provider_continuation_id === exact.providerContinuationId
+        && entry.provider_ref.execution_generation_id === exact.executionGenerationId
+        && sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, exact.providerConnection);
+      if (!exactBirth) return { generation, disposition: "pending" as const };
+      const generationUpdate = database.prepare(`UPDATE manifest_metadata SET generation=generation+1
+        WHERE singleton=1 AND generation=?`).run(expectedGeneration);
+      if (Number(generationUpdate.changes) !== 1) {
+        throw new ManifestConflictError(`Manifest generation ${generation} does not match expected ${expectedGeneration}.`);
+      }
+      const observedAt = new Date(pending.observedAtMs).toISOString();
+      const observedState = pending.effectKind === "manifest_working" ? "working" : "idle";
+      const nativeState = pending.effectKind === "manifest_working" ? "active" : "idle";
+      const updated = database.prepare(`UPDATE runtime_deployments
+        SET observed_state=?,native_liveness_present=1,native_liveness_state=?,
+          native_liveness_observed_at=?,native_liveness_detail=? WHERE agent_id=?`).run(
+        observedState, nativeState, observedAt,
+        pending.effectKind === "manifest_working" ? "Provider turn active" : "Provider turn terminal",
+        pending.agentId,
+      );
+      if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${pending.agentId}`);
+      const acknowledged = database.prepare(`UPDATE execution_lifecycle_effects SET state='applied',disposed_at_ms=?
+        WHERE fact_id=? AND state='pending'`).run(disposedAtMs, pending.factId);
+      if (Number(acknowledged.changes) !== 1) throw new Error("Lifecycle effect disposition changed before apply.");
+      const persisted = this.readEntryFromDatabase(database, pending.agentId);
+      if (!persisted) throw new Error(`Daemon manifest entry disappeared during lifecycle effect apply: ${pending.agentId}`);
+      return { generation: expectedGeneration + 1, disposition: "applied" as const, entry: persisted };
+    }, commitFence);
   }
 
   /** Host-only operational admission; native pendingness is independently fenced by the broker. */
@@ -2814,7 +2953,8 @@ export class ManifestStore {
     owners.forEach((owner, index) => run(insert, owner.reservation_id, owner.room_id, owner.provider, owner.owner_pid, owner.owner_process_identity, owner.state, owner.session_id, owner.created_at, owner.updated_at, index));
   }
 
-  /** Operational journals do not mutate the flat manifest or its generation. */
+  /** Journal-first transaction helper. A manifest projection must perform its
+   * generation CAS inside the mutation so the projection and journal settle together. */
   private writeOperationalJournal<T>(mutation: (database: DatabaseSync) => T, commitFence?: (commit: () => Promise<void>) => Promise<void>): Promise<T> {
     return this.serialize(async () => {
       const database = await this.getDatabase();

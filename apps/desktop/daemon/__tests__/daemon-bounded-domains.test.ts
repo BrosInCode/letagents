@@ -157,9 +157,10 @@ test("daemon policy and projection domains remain extracted", () => {
   assert.equal(matches(mainSource, /projectRoomAgentManifestEntry/g).length, 0);
   assert.equal(matches(mainSource, /^export function providerStreamLifecycle/mg).length, 0);
   assert.equal(matches(mainSource, /^function projectDeliveryReceipts/mg).length, 0);
-  // 1500 -> 1510 at #1043: RoomWorkPublisher composition seam; review confirmed no extractable
-  // policy. Raises must be reviewed, never blank-line-gamed.
-  assert.ok(mainSource.split("\n").length < 1_510, "main.ts must remain a thin composition root");
+  // 1500 -> 1510 at #1043: RoomWorkPublisher composition seam; 1510 -> 1530 for the
+  // typed lifecycle effect consumer. Both keep policy in extracted coordinators.
+  // Raises must be reviewed, never blank-line-gamed.
+  assert.ok(mainSource.split("\n").length < 1_530, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {
