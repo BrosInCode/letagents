@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { applyExecutionStorageSchema, migrateExecutionStorageV20ToV21, validateExecutionStorageSchema } from "../execution-storage-schema.js";
+import { applyExecutionStorageSchema, migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22,
+  validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Values = Record<string, string | number | null>;
 const digest = "a".repeat(64);
@@ -97,7 +98,7 @@ test("schema is additive, empty, idempotent, content-free, and does not own vers
     validateExecutionStorageSchema(db);
     assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 17);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'").all() as Array<{ name: string }>;
-    assert.equal(tables.length, 14);
+    assert.equal(tables.length, 15);
     for (const { name } of tables) {
       assert.equal((db.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get() as { count: number }).count, 0);
       const columns = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string }>;
@@ -108,6 +109,33 @@ test("schema is additive, empty, idempotent, content-free, and does not own vers
     runtime(db);
     db.exec("ROLLBACK");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM execution_runtime_generations").get() as { count: number }).count, 0);
+  } finally { db.close(); }
+});
+
+test("lifecycle dispositions are final, fact-owned, and historical migration never replays effects", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(db, 21);
+    seed(db);
+    insert(db, "execution_facts", {
+      fact_id: "historical-active", agent_id: "agent", execution_generation_id: "generation",
+      runtime_generation_id: "runtime", observer_epoch: 1, source_sequence: 1, turn_id: "turn",
+      domain: "turn", kind: "state_changed", state: "active", side_effects: "none", observed_at_ms: 101,
+    });
+    assert.throws(() => migrateExecutionStorageV21ToV22(db), /requires a transaction/);
+    db.exec("BEGIN IMMEDIATE");
+    migrateExecutionStorageV21ToV22(db);
+    db.exec("COMMIT");
+    assert.deepEqual({ ...db.prepare(`SELECT effect_kind,state,observer_runtime_generation_id,disposed_at_ms
+      FROM execution_lifecycle_effects WHERE fact_id='historical-active'`).get() }, {
+      effect_kind: "manifest_working", state: "superseded", observer_runtime_generation_id: null, disposed_at_ms: 101,
+    });
+    assert.throws(() => db.exec("UPDATE execution_lifecycle_effects SET state='applied'"), /final/);
+    db.exec("DELETE FROM execution_facts WHERE fact_id='historical-active'");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()?.count, 0,
+      "fact compaction cascades its disposition");
+    validateExecutionStorageSchema(db, 22);
   } finally { db.close(); }
 });
 

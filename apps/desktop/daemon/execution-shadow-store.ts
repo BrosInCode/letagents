@@ -80,6 +80,13 @@ function semanticFact(fact: ExecutionFact): string {
   const { factId: _id, observerEpoch: _epoch, sourceSequence: _sequence, observedAtMs: _time, ...semantic } = fact;
   return JSON.stringify(semantic);
 }
+
+function lifecycleEffectKind(fact: ExecutionFact): "none" | "manifest_working" | "manifest_idle" {
+  if (fact.domain !== "turn") return "none";
+  if (fact.state === "active") return "manifest_working";
+  if (fact.state === "terminal") return "manifest_idle";
+  return "none";
+}
 function unverifiedHistoricalFact(row: Row): boolean {
   return (row.domain === "turn" && row.state === "terminal" && row.turn_outcome === null)
     || ((row.domain === "runtime" && row.state === "exited" || row.domain === "control" && row.state === "lost") && row.control_evidence === null);
@@ -526,6 +533,38 @@ export class ExecutionShadowStore {
       const previous = this.cachedProjection(fact.runtimeGenerationId);
       const next = replay ? previous.projection : reduceExecutionFact(previous.projection, fact);
       this.insert("execution_facts", stored);
+      const journalSequence = Number(this.required("SELECT sequence FROM execution_facts WHERE fact_id=?", fact.factId).sequence);
+      if (fact.domain !== "execution") {
+        const subjectRuntime = retainedRuntime ?? this.required(
+          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+          fact.agentId, fact.executionGenerationId, fact.runtimeGenerationId,
+        );
+        const observerRuntime = this.required(
+          "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
+          fact.agentId, current.observer_execution_generation_id, current.observer_runtime_generation_id,
+        );
+        const effectKind = replay ? "none" : lifecycleEffectKind(fact);
+        const operational = subjectRuntime.authority_mode === "typed"
+          && observerRuntime.authority_mode === "typed"
+          && effectKind !== "none";
+        const state = operational ? "pending"
+          : subjectRuntime.authority_mode === "typed_shadow" || observerRuntime.authority_mode === "typed_shadow"
+            ? "shadowed" : "applied";
+        this.insert("execution_lifecycle_effects", {
+          fact_id: fact.factId,
+          fact_sequence: journalSequence,
+          agent_id: fact.agentId,
+          observer_execution_generation_id: current.observer_execution_generation_id,
+          observer_runtime_generation_id: current.observer_runtime_generation_id,
+          observer_epoch: fact.observerEpoch,
+          subject_authority_mode: subjectRuntime.authority_mode,
+          observer_authority_mode: observerRuntime.authority_mode,
+          effect_kind: effectKind,
+          state,
+          created_at_ms: fact.observedAtMs,
+          disposed_at_ms: operational ? null : fact.observedAtMs,
+        });
+      }
       this.recordLifecycleProjection(fact, retainedTurn, retainedRuntime);
       this.database.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
         .run(fact.sourceSequence, fact.sourceSequence, fact.agentId);
@@ -550,7 +589,6 @@ export class ExecutionShadowStore {
             .run(turn.state, sideEffects, turn.state, fact.observedAtMs, fact.turnId);
         }
       }
-      const journalSequence = Number(this.required("SELECT sequence FROM execution_facts WHERE fact_id=?", fact.factId).sequence);
       // Capture under the write transaction, never bless an external commit
       // racing after COMMIT. Publish this candidate to the cache only on success.
       committed = { value: { projection: next, unverifiedFacts: previous.unverifiedFacts, lastJournalSequence: journalSequence }, budget, stamp: this.databaseStamp() };

@@ -20,6 +20,7 @@ import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-executio
 import { schedulerErrorDetail } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
 import { ExecutionCaptureCoordinator } from "./execution-capture-coordinator.js";
+import { TypedLifecycleEffectCoordinator } from "./typed-lifecycle-effect-coordinator.js";
 import { unavailableLifecycleProjectionDiagnostics } from "./lifecycle-projection-ledger.js";
 import { DesiredStateCoordinator } from "./desired-state-coordinator.js";
 import { WorkDurabilityStore } from "./durability-store.js";
@@ -133,6 +134,7 @@ export class SupervisorDaemon {
   private readonly liveHandles = new Map<string, ProviderActionHandle>();
   private readonly providerStreams: ProviderStreamCoordinator;
   private executionCapture: ExecutionCaptureCoordinator | null = null;
+  private typedLifecycleEffects: TypedLifecycleEffectCoordinator | null = null;
   private roomWorkPublisher: RoomWorkPublisher | null = null;
   private readonly hostApprovals: ReturnType<typeof createHostApprovalBridge>;
   private readonly providerCheckpoints: ProviderCheckpointCoordinator;
@@ -355,8 +357,9 @@ export class SupervisorDaemon {
     });
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
-      observeExecution: (installation) => this.executionCapture?.install(installation) ?? (() => {}),
-      advanceExecution: (installation) => this.executionCapture?.advance(installation),
+      observeExecution: (installation) => (this.typedLifecycleEffects?.changed(installation.entryId),
+        this.executionCapture?.install(installation) ?? (() => {})),
+      advanceExecution: (installation) => { this.typedLifecycleEffects?.changed(installation.entryId); this.executionCapture?.advance(installation); },
       observeLegacyLifecycle: (observation) => this.executionCapture?.recordLegacyLifecycle(observation),
       markLifecycleProjectionUnavailable: (provider) => this.executionCapture?.recordLifecycleProjectionUnavailable(provider),
       lifecycleProjectionDiagnostics: () => this.executionCapture?.lifecycleProjectionDiagnostics()
@@ -877,13 +880,31 @@ export class SupervisorDaemon {
       throw error;
     }
     if (!this.handoffScheduled) {
+      this.typedLifecycleEffects = new TypedLifecycleEffectCoordinator({
+        store: this.store,
+        currentInstallation: (entryId) => this.providerStreams.currentInstallation(entryId),
+        authority: {
+          serialize: (operation) => this.serializeManifestMutation(operation),
+          assertCurrent: async () => { await this.singleton.assertCurrent(); },
+          currentManifestGeneration: () => this.manifestGeneration,
+          acceptManifestGeneration: (generation) => { this.manifestGeneration = generation; },
+          fenceCommit: (commit) => this.fenceDaemonCommit(commit),
+        },
+        isClosing: () => this.handoffScheduled,
+        nowMs: () => this.nowMs(),
+        diagnostic: (agentId, error) => console.warn("[typed_lifecycle_effect]", JSON.stringify({ agentId, error: String(error) })),
+      });
+      this.typedLifecycleEffects.start();
       this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {
         custody: this.workerRuntimeCustody, daemonGeneration: () => this.singleton.currentGeneration,
         isClosing: () => this.handoffScheduled, assertCurrent: () => this.singleton.assertCurrent(),
       });
       this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
-        changed: (agentId) => this.roomWorkPublisher?.changed(agentId),
+        changed: (agentId) => {
+          this.roomWorkPublisher?.changed(agentId);
+          this.typedLifecycleEffects?.changed(agentId);
+        },
       });
     }
     await this.supervisedInbox.normalizeInterruptedEffects();
@@ -913,6 +934,7 @@ export class SupervisorDaemon {
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();
     this.executionCapture?.close();
+    await this.typedLifecycleEffects?.close();
     this.supervisedDelivery?.fence();
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
@@ -974,6 +996,7 @@ export class SupervisorDaemon {
     const cleanup = async (operation: () => Promise<void>): Promise<void> => {
       try { await operation(); } catch (error) { failures.push(error); }
     };
+    await cleanup(() => this.typedLifecycleEffects?.close() ?? Promise.resolve());
     await cleanup(() => this.socket.stop());
     await cleanup(() => this.serializeManifestCommit(() => this.singleton.release()));
     await cleanup(() => this.store.close());

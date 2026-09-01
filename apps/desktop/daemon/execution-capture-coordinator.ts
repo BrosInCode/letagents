@@ -347,6 +347,38 @@ export class ExecutionCaptureCoordinator {
     } catch { return "unavailable"; }
   }
 
+  /**
+   * Stricter than captureAdmission: typed lifecycle effects must be fully
+   * drained for the exact source and every retained lifecycle fact must have a
+   * durable disposition. B3 may consume this witness, but B2 suppresses no raw
+   * behavior merely because it is ready.
+   */
+  typedLifecycleAdmission(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus {
+    if (installation.authorityMode !== "typed") return "unavailable";
+    const capture = this.captureAdmission(installation);
+    if (capture !== "ready") return capture;
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane || lane.installation !== installation || !lane.subscription || !lane.observer) return "unavailable";
+    try {
+      const position = lane.subscription.position();
+      const durable = this.row(`SELECT observer_epoch,last_source_sequence,max_observed_sequence
+        FROM execution_observers WHERE agent_id=?`, installation.entryId);
+      if (!durable || Number(durable.observer_epoch) !== lane.observer.epoch) return "unavailable";
+      const last = Number(durable.last_source_sequence);
+      const maximum = Number(durable.max_observed_sequence);
+      if (maximum > last) return "unavailable";
+      if (last < position.latestSequence) return "pending";
+      if (last !== position.latestSequence || maximum !== last) return "unavailable";
+      const missing = this.row(`SELECT 1 FROM execution_facts f
+        LEFT JOIN execution_lifecycle_effects e ON e.fact_id=f.fact_id
+        WHERE f.agent_id=? AND f.domain<>'execution' AND e.fact_id IS NULL LIMIT 1`, installation.entryId);
+      if (missing) return "unavailable";
+      const pending = this.row(`SELECT 1 FROM execution_lifecycle_effects
+        WHERE agent_id=? AND state='pending' LIMIT 1`, installation.entryId);
+      return pending ? "pending" : "ready";
+    } catch { return "unavailable"; }
+  }
+
   private markLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
     if (this.closed) return;
     const current = this.lifecycleProjectionUnavailable.get(provider) ?? 0;
