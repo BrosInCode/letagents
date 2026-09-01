@@ -1008,7 +1008,7 @@ for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.string
   }
 });
 
-test("agent-work invalidations advance the broker cursor and stay out of managed delivery", async () => {
+test("resource invalidations advance the broker cursor while only supported resources render", async () => {
   const router = installFetchRouter();
   try {
     const canonicalRoom = `${ROOM}_canonical`;
@@ -1045,9 +1045,20 @@ test("agent-work invalidations advance the broker cursor and stay out of managed
     });
     assert.equal(managedEmitted.length, managedCount);
 
+    const afterAgentWorkCount = emitted.length;
+    initial.pushRaw(
+      `id: broker_future_resource\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        resource: "agent_approval",
+      })}\n\n`,
+    );
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(emitted.length, afterAgentWorkCount, "a future resource stays a renderer no-op");
+    assert.equal(managedEmitted.length, managedCount, "a future resource must not deliver managed work");
+
     initial.error();
     await waitUntil(() => router.streamCalls.length >= 2, 4_000);
-    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_work");
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_future_resource");
     const invalidationCount = emitted.filter((event) => event.type === "resource_invalidation").length;
     reconnected.pushRaw(
       `id: broker_bad_work\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
