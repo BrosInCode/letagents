@@ -7,7 +7,8 @@ import { createConnection } from "node:net";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { ProviderActionFailure, type ProviderActionPort } from "../provider-action-port.js";
+import { ProviderActionFailure, type ProviderActionHandle, type ProviderActionPort } from "../provider-action-port.js";
+import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 import { SupervisorDaemon } from "../main.js";
 import { ManifestStore } from "../manifest-store.js";
 import {
@@ -15,7 +16,7 @@ import {
   supervisedReplyTargetForSourceMessage,
 } from "../supervised-agent-delivery.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import { DAEMON_PROTOCOL_VERSION } from "../types.js";
+import { DAEMON_PROTOCOL_VERSION, type DaemonManifestEntry } from "../types.js";
 
 const agent = {
   agentId: "stone", roomId: "room", provider: "codex", deliveryMode: "daemon_inbox" as const, apiUrl: "https://letagents.test", agentSessionId: "session-1", bearer: "memory", executionGenerationId: "generation-1", daemonGeneration: 1,
@@ -331,6 +332,64 @@ async function daemonRequest(socketPath: string, method: string, params?: unknow
   });
 }
 
+async function installExactTestProviderBirth(
+  internals: {
+    store: ManifestStore;
+    manifestGeneration: number;
+    providerStreams: {
+      install(
+        entryId: string,
+        handle: ProviderActionHandle,
+        executionGenerationId: string,
+        mayStartDelivery: () => boolean,
+      ): Promise<void>;
+    };
+  },
+  entryId: string,
+  handle: ProviderActionHandle,
+  executionGenerationId: string,
+): Promise<void> {
+  const entry = await internals.store.getEntry(entryId);
+  assert.ok(entry?.work_attempt_id && entry.workspace_path && handle.providerConnection);
+  const database = (internals.store as unknown as { database: DatabaseSync }).database;
+  database.prepare(`INSERT OR IGNORE INTO work_attempts(
+    work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
+    workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at
+  ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+    entry.work_attempt_id,
+    `task:${entryId}`,
+    `lease:${entryId}`,
+    1,
+    entry.workspace_path,
+    "repo",
+    "remote",
+    "revision",
+    `${entry.workspace_path}/.bare`,
+    "active",
+    new Date().toISOString(),
+  );
+  database.prepare(`INSERT OR IGNORE INTO work_attempt_executions(
+    execution_generation_id,work_attempt_id,started_at,actor,generation,terminal_json
+  ) VALUES(?,?,?,?,?,NULL)`).run(
+    executionGenerationId,
+    entry.work_attempt_id,
+    new Date().toISOString(),
+    "test",
+    1,
+  );
+  const snapshot = await internals.store.load();
+  const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+    entry,
+    executionGenerationId,
+    providerConnection: handle.providerConnection,
+    appliedRevision: handle.appliedConfigurationRevision ?? 1,
+    requestedAuthorityMode: "typed_shadow",
+    observedAtMs: Date.now(),
+  });
+  internals.manifestGeneration = birth.generation;
+  await internals.providerStreams.install(entryId, handle, executionGenerationId, () => false);
+}
+
 test("Cursor dynamic checkpoint converges after manifest commit but attempt durability failure", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-cursor-provider-checkpoint-"));
   let daemon: SupervisorDaemon | null = null;
@@ -350,11 +409,13 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
       pid: 43141,
       processIdentity: "pid:43141:birth:exact",
     };
+    let liveContinuation = pendingContinuation;
     const liveHandle = {
       workAttemptId,
-      providerContinuationId: realContinuation,
+      get providerContinuationId() { return liveContinuation; },
       pid: providerConnection.pid,
       providerConnection,
+      appliedConfigurationRevision: 1,
       observedState: () => "working" as const,
     };
     const ingressAgent = {
@@ -404,9 +465,23 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     let checkpointCalls = 0;
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof liveHandle>;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+        currentInstallation(entryId: string): ProviderInstallationToken | undefined;
+      };
+      providerTerminals: { handleTerminal(installation: ProviderInstallationToken, terminal: {
+        endedAt: string; exitCode: number; signal: null; terminalCause: "crashed";
+        providerContinuationId: string;
+      }): Promise<void> };
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
       supervisedInbox: SupervisedAgentInboxStore;
-      store: { getEntry(id: string): Promise<{ provider_ref: { provider_continuation_id: string } } | null> };
+      store: ManifestStore;
       durability: {
         getAttempt(id: string): Promise<{
           checkpoints: Array<{ provider_continuation_id: string | null }>;
@@ -428,21 +503,13 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
           providerConnection: typeof providerConnection;
         }): Promise<void>;
       };
-      handleProviderTerminal(
-        entryId: string,
-        handle: typeof liveHandle,
-        executionGenerationId: string,
-        terminalBinding: undefined,
-        terminal: {
-          endedAt: string;
-          exitCode: number;
-          signal: null;
-          terminalCause: "crashed";
-          providerContinuationId: string;
-        },
-      ): Promise<void>;
     };
-    internals.liveHandles.set(ingressAgent.agentId, liveHandle);
+    await installExactTestProviderBirth(
+      internals,
+      ingressAgent.agentId,
+      liveHandle,
+      executionGenerationId,
+    );
     await internals.workerBindings.bind({
       entry_id: ingressAgent.agentId,
       room_id: ingressAgent.roomId,
@@ -483,6 +550,7 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
       durableCheckpoints.push(realContinuation);
     };
 
+    liveContinuation = realContinuation;
     await internals.providerCheckpoints.checkpointDynamicState({
       agent: ingressAgent,
       inboxItemId: inboxItem.inbox_item_id,
@@ -507,19 +575,15 @@ test("Cursor dynamic checkpoint converges after manifest commit but attempt dura
     });
     assert.deepEqual(durableCheckpoints, [realContinuation], "retry finishes only the missing idempotent checkpoint");
 
-    await internals.handleProviderTerminal(
-      ingressAgent.agentId,
-      liveHandle,
-      executionGenerationId,
-      undefined,
-      {
+    const installation = internals.providerStreams.currentInstallation(ingressAgent.agentId);
+    assert.ok(installation);
+    await internals.providerTerminals.handleTerminal(installation, {
         endedAt: new Date().toISOString(),
         exitCode: 1,
         signal: null,
         terminalCause: "crashed",
         providerContinuationId: realContinuation,
-      },
-    );
+      });
     assert.equal(internals.liveHandles.has(ingressAgent.agentId), false, "terminal notification retires the live handle");
     await assert.rejects(
       internals.providerCheckpoints.checkpointDynamicState({
@@ -559,6 +623,7 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
       get pid() { return connection.pid; },
       get providerContinuationId() { return continuation; },
       get providerConnection() { return connection; },
+      appliedConfigurationRevision: 1,
       observedState: () => connection.pid === null ? "idle" as const : "working" as const,
     };
     const order: string[] = [];
@@ -624,6 +689,15 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
       startSupervisedDelivery(entryId: string): Promise<void>;
       setDisplayName(entryId: string, displayName: string): Promise<unknown>;
       store: ManifestStore;
+      manifestGeneration: number;
+      providerStreams: {
+        install(
+          entryId: string,
+          handle: ProviderActionHandle,
+          executionGenerationId: string,
+          mayStartDelivery: () => boolean,
+        ): Promise<void>;
+      };
     };
     await daemon.start();
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: {
@@ -639,7 +713,12 @@ test("first and sequential Cursor turns cross one atomic prepared boundary witho
       },
     } });
     assert.equal(put.ok, true, put.error);
-    internals.liveHandles.set("cursor-atomic", liveHandle);
+    await installExactTestProviderBirth(
+      internals,
+      "cursor-atomic",
+      liveHandle,
+      executionGenerationId,
+    );
     await internals.workerBindings.bind({
       entry_id: "cursor-atomic", room_id: "room", work_attempt_id: workAttemptId,
       execution_generation_id: executionGenerationId, agent_session_id: "cursor-agent-session",
@@ -722,6 +801,7 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
         get pid() { return connection.pid; },
         get providerContinuationId() { return continuation; },
         get providerConnection() { return connection; },
+        appliedConfigurationRevision: 1,
         observedState: () => connection.pid === null ? "idle" as const : "working" as const,
       };
       const nativeReleased = deferred<void>();
@@ -758,7 +838,16 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
           supervisedInbox: SupervisedAgentInboxStore;
           supervisedDelivery: SupervisedAgentDelivery;
           startSupervisedDelivery(entryId: string): Promise<void>;
-          store: { getEntry(id: string): Promise<{ provider_ref?: { provider_continuation_id: string; provider_connection: unknown } | null } | undefined> };
+          store: ManifestStore;
+          manifestGeneration: number;
+          providerStreams: {
+            install(
+              entryId: string,
+              handle: ProviderActionHandle,
+              executionGenerationId: string,
+              mayStartDelivery: () => boolean,
+            ): Promise<void>;
+          };
         };
         await daemon.start();
         const agentId = `cursor-init-handoff:${initial}`;
@@ -773,7 +862,12 @@ test("handoff after Cursor native release waits for first-turn and resumed init 
           },
         } });
         assert.equal(put.ok, true, put.error);
-        internals.liveHandles.set(agentId, liveHandle);
+        await installExactTestProviderBirth(
+          internals,
+          agentId,
+          liveHandle,
+          executionGenerationId,
+        );
         await internals.workerBindings.bind({
           entry_id: agentId, room_id: "room", work_attempt_id: workAttemptId,
           execution_generation_id: executionGenerationId, agent_session_id: `session:${initial}`,
@@ -2814,6 +2908,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       providerContinuationId: "thread-missing",
       pid: connection.pid,
       providerConnection: connection,
+      appliedConfigurationRevision: 1,
       observedState: "idle" as const,
     };
     let repairs = 0;
@@ -2860,6 +2955,8 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
     );
     const internals = daemon as unknown as {
       liveHandles: Map<string, typeof liveHandle>;
+      store: ManifestStore;
+      manifestGeneration: number;
       supervisedInbox: SupervisedAgentInboxStore;
       workerBindings: { bind(input: Record<string, string>): Promise<unknown> };
       durability: {
@@ -2880,8 +2977,7 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
       assert.ok(checkpoint.provider_continuation_id);
       durableCheckpoints.push(checkpoint.provider_continuation_id);
     };
-    const put = await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: {
+    const manifestEntry = {
         id: "stone", room_id: "room", display_name: "Stone", provider: "codex",
         model: "gpt-5.6-sol", charter: "test", desired_state: "running",
         observed_state: "idle", condition: "none", permission_profile_id: null,
@@ -2893,9 +2989,45 @@ test("daemon socket restores and skips only exact pre-turn authority without rep
           provider_connection: connection,
           execution_generation_id: identity.execution,
         },
-      },
-    });
+      } as const;
+    const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: manifestEntry });
     assert.equal(put.ok, true, put.error);
+    const manifestDatabase = (internals.store as unknown as { database: DatabaseSync }).database;
+    manifestDatabase.prepare(`INSERT INTO work_attempts(
+      work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
+      workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at
+    ) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+      identity.attempt,
+      "task-restore",
+      "lease-restore",
+      1,
+      root,
+      "repo",
+      "remote",
+      "revision",
+      root,
+      "active",
+      new Date().toISOString(),
+    );
+    manifestDatabase.prepare(`INSERT INTO work_attempt_executions(
+      execution_generation_id,work_attempt_id,started_at,actor,generation,terminal_json
+    ) VALUES(?,?,?,?,?,NULL)`).run(
+      identity.execution,
+      identity.attempt,
+      new Date().toISOString(),
+      "test",
+      1,
+    );
+    const snapshot = await internals.store.load();
+    const birth = await internals.store.checkpointProviderBirth(snapshot.generation, {
+      entry: manifestEntry,
+      executionGenerationId: identity.execution,
+      providerConnection: connection,
+      appliedRevision: 1,
+      requestedAuthorityMode: "typed_shadow",
+      observedAtMs: Date.now(),
+    });
+    internals.manifestGeneration = birth.generation;
     internals.liveHandles.set("stone", liveHandle);
     await internals.workerBindings.bind({
       entry_id: "stone", room_id: "room", work_attempt_id: identity.attempt,

@@ -684,16 +684,22 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
   const capturedSpawns: ProviderActionSpawn[] = [];
   const exitListeners3 = new Map<string, Set<(t: ProviderActionTerminal) => void>>();
   let nextDevPid = 7000;
-  function devHandle(workAttemptId: string) {
+  function devHandle(workAttemptId: string, provider: "codex" | "claude-code" | "cursor") {
     const pid = nextDevPid++;
-    return { workAttemptId, pid, providerContinuationId: "dev-thread", providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `dev:${pid}` }, observedState: () => "working" as const };
+    const processIdentity = `dev:${provider}:${pid}`;
+    const providerConnection = provider === "codex"
+      ? { kind: "codex_app_server" as const, url: `ws://127.0.0.1:${pid}`, pid, processIdentity }
+      : provider === "cursor"
+        ? { kind: "cursor_cli" as const, pid, processIdentity }
+        : { kind: "claude_cli" as const, pid, processIdentity };
+    return { workAttemptId, pid, providerContinuationId: "dev-thread", providerConnection, observedState: () => "working" as const };
   }
-  function makeDevAdapter(): NativeProviderAdapter {
+  function makeDevAdapter(provider: "codex" | "claude-code" | "cursor"): NativeProviderAdapter {
     return {
       capabilities: () => ({ resume: false, midTurnInjection: false, transcriptAccess: false, permissionPromptBridging: false, survivesRestart: false }),
-      async spawn(input) { capturedSpawns.push(input); return devHandle(input.workAttemptId); },
+      async spawn(input) { capturedSpawns.push(input); return devHandle(input.workAttemptId, provider); },
       async attach() { return null; },
-      async resume(_ref, input) { return devHandle(input.workAttemptId); },
+      async resume(_ref, input) { return devHandle(input.workAttemptId, provider); },
       async poke() {},
       async stop(handle) {
         const terminal = { endedAt: new Date().toISOString(), exitCode: 0, signal: "SIGTERM", terminalCause: "stopped" as const, providerContinuationId: handle.providerContinuationId };
@@ -725,7 +731,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       id: "dev_gate_codex", room_id: "room", display_name: "CodexAgent", provider: "codex", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
       permission_profile_id: "full_access", provider_launch_policy: { promptForInstallation: false }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
-    const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    const daemon1 = new SupervisorDaemon(paths1, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
     try {
       await daemon1.start();
       assert.equal((await daemonRequest(paths1.socketPath, "manifest.put", { entry: codexEntry })).ok, true);
@@ -751,7 +757,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
     const cursorDaemon = new SupervisorDaemon(
       cursorPaths,
       "darwin",
-      new ProviderActionPortRouter({ cursor: async () => makeDevAdapter() }),
+      new ProviderActionPortRouter({ cursor: async () => makeDevAdapter("cursor") }),
       true,
     );
     try {
@@ -773,7 +779,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       id: "dev_gate_claude", room_id: "room", display_name: "ClaudeAgent", provider: "claude-code", model: null, charter: "poll", desired_state: "running", observed_state: "absent", condition: "none",
       permission_profile_id: "ask_before_write", provider_launch_policy: { permissionMode: "acceptEdits" }, created_by: "test", created_at: new Date().toISOString(), source_repo_path: source,
     };
-    const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter() }), true);
+    const daemon2 = new SupervisorDaemon(paths2, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
     try {
       await daemon2.start();
       assert.equal((await daemonRequest(paths2.socketPath, "manifest.put", { entry: claudeEntry })).ok, true);
@@ -790,7 +796,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       lockPath: join(root, "d3.lock"), socketPath: join(root, "d3.sock"), manifestPath: join(root, "manifest3.json"), auditPath: join(root, "audit3.jsonl"),
       attemptsPath: join(root, "attempts3.json"), attemptsRoot: join(root, "attempts3"), workspaceRoot: root,
     };
-    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter() }), true);
+    const daemon3 = new SupervisorDaemon(paths3, "darwin", new ProviderActionPortRouter({ "claude-code": async () => makeDevAdapter("claude-code") }), true);
     try {
       await daemon3.start();
       assert.equal((await daemonRequest(paths3.socketPath, "manifest.put", { entry: {
@@ -814,7 +820,7 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       lockPath: join(root, "d4.lock"), socketPath: join(root, "d4.sock"), manifestPath: join(root, "manifest4.json"), auditPath: join(root, "audit4.jsonl"),
       attemptsPath: join(root, "attempts4.json"), attemptsRoot: join(root, "attempts4"), workspaceRoot: root,
     };
-    const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter() }), true);
+    const daemon4 = new SupervisorDaemon(paths4, "darwin", new ProviderActionPortRouter({ codex: async () => makeDevAdapter("codex") }), true);
     try {
       await daemon4.start();
       assert.equal((await daemonRequest(paths4.socketPath, "manifest.put", { entry: { ...codexEntry, id: "dev_gate_codex_nourl" } })).ok, true);

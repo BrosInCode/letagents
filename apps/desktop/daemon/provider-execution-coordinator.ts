@@ -17,6 +17,11 @@ import {
   type ProviderActionTerminal,
 } from "./provider-action-port.js";
 import { deriveProviderConfigurationSnapshot } from "./provider-configuration.js";
+import {
+  lifecycleAuthorityModeForProvider,
+  lifecycleAuthorityProviderSchema,
+  type LifecycleAuthorityMode,
+} from "./lifecycle-authority-mode.js";
 import { CRASH_LOOP_EXIT_LIMIT, CRASH_LOOP_WINDOW_MS } from "./reconciler-policy.js";
 import { DaemonFenceLostError } from "./singleton.js";
 import {
@@ -41,6 +46,7 @@ import type {
   InstalledOpenModelCredential,
   MintedWorkerAuthorization,
 } from "./worker-runtime-custody.js";
+import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
 
 import { deliveryDrainBlocksRuntime, type DeliveryDrainRecord } from "./delivery-drain.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
@@ -55,6 +61,7 @@ export type ProviderExecutionConfiguration = {
   permission_profile_id: string | null;
   provider_launch_policy: unknown;
   config_revision: number;
+  runtime_configuration_revision: number;
 };
 
 export type ProviderExecutionStore = {
@@ -63,6 +70,12 @@ export type ProviderExecutionStore = {
   load(): Promise<{ generation: number; entries: DaemonManifestEntry[] }>;
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
   getAgentConfiguration(entryId: string): Promise<ProviderExecutionConfiguration | undefined>;
+  readRuntimeLifecycleAuthority(input: {
+    agentId: string;
+    executionGenerationId: string;
+    providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
+    configurationRevision: number;
+  }): Promise<LifecycleAuthorityMode | null>;
   replaceEntry(
     expectedGeneration: number,
     entry: DaemonManifestEntry,
@@ -77,6 +90,18 @@ export type ProviderExecutionStore = {
     },
     commitFence: CommitFence,
   ): Promise<{ generation: number }>;
+  checkpointProviderBirth(
+    expectedGeneration: number,
+    input: {
+      entry: DaemonManifestEntry;
+      executionGenerationId: string;
+      providerConnection: NonNullable<ProviderActionHandle["providerConnection"]>;
+      appliedRevision: number;
+      requestedAuthorityMode: LifecycleAuthorityMode;
+      observedAtMs: number;
+    },
+    commitFence: CommitFence,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode | null }>;
 };
 
 export type ProviderExecutionDurability = Pick<
@@ -93,7 +118,8 @@ export type ProviderExecutionDurability = Pick<
 export type ProviderExecutionStreams = {
   liveHandles: Map<string, ProviderActionHandle>;
   get(entryId: string): ProviderActionHandle | undefined;
-  remove(entryId: string, expectedHandle?: ProviderActionHandle): boolean;
+  currentInstallation(entryId: string): ProviderInstallationToken | undefined;
+  remove(installation: ProviderInstallationToken): boolean;
   install(
     entryId: string,
     handle: ProviderActionHandle,
@@ -473,10 +499,14 @@ export class ProviderExecutionCoordinator {
       `desired state changed to ${current.desired_state} during provider dispatch`,
       "daemon-convergence",
     );
+    const installation = this.options.streams.currentInstallation(entryId);
     const terminal = await this.options.provider.stop(handle, {
       actionId: `manifest:${entryId}:${current.desired_state}:dispatch-fence:${generation}`,
     });
-    this.options.streams.remove(entryId, handle);
+    if (installation?.handle === handle
+      && installation.executionGenerationId === executionGenerationId) {
+      this.options.streams.remove(installation);
+    }
     const attempt = current.work_attempt_id
       ? await this.options.durability.getAttempt(current.work_attempt_id)
       : null;
@@ -532,22 +562,61 @@ export class ProviderExecutionCoordinator {
     entryId: string,
     handle: ProviderActionHandle,
     executionGenerationId: string,
+    appliedRevision: number,
+    requestedAuthorityMode: LifecycleAuthorityMode,
   ): Promise<void> {
-    if (!handle.providerContinuationId) {
-      throw new Error("Provider launch did not return a durable continuation id.");
+    if (!handle.providerContinuationId || !handle.providerConnection) {
+      throw new Error("Provider launch did not return an exact durable native birth.");
     }
-    await this.options.updateManifestEntry(entryId, (current) => ({
+    for (let attempt = 0; attempt < 8; attempt += 1) {
+      await this.options.authority.assertCurrent();
+      const snapshot = await this.options.store.load();
+      const current = snapshot.entries.find((candidate) => candidate.id === entryId);
+      if (!current || current.work_attempt_id !== handle.workAttemptId) {
+        throw new DaemonFenceLostError("Provider birth no longer matches the durable work attempt.");
+      }
+      try {
+        const next = await this.options.store.checkpointProviderBirth(
+          snapshot.generation,
+          {
+            entry: this.providerBirthEntry(current, handle, executionGenerationId),
+            executionGenerationId,
+            providerConnection: handle.providerConnection,
+            appliedRevision,
+            requestedAuthorityMode,
+            observedAtMs: this.options.nowMs(),
+          },
+          this.options.authority.fenceCommit,
+        );
+        this.options.authority.acceptManifestGeneration(next.generation);
+        return;
+      } catch (error) {
+        if (!(error instanceof ManifestConflictError)) throw error;
+      }
+    }
+    throw new DaemonFenceLostError("Provider birth could not converge on the latest manifest generation.");
+  }
+
+  private providerBirthEntry(
+    current: DaemonManifestEntry,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+  ): DaemonManifestEntry {
+    if (!handle.providerContinuationId || !handle.providerConnection) {
+      throw new Error("Provider launch did not return an exact durable native birth.");
+    }
+    return {
       ...current,
       run_id: executionGenerationId,
-      deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
+      deployment_id: serializeDaemonDeploymentId(current.id, executionGenerationId),
       provider_ref: {
         work_attempt_id: handle.workAttemptId,
-        provider_continuation_id: handle.providerContinuationId!,
-        provider_connection: handle.providerConnection ?? null,
+        provider_continuation_id: handle.providerContinuationId,
+        provider_connection: structuredClone(handle.providerConnection),
         execution_generation_id: executionGenerationId,
         ...(handle.custodyLaunchAgentSessionId ? { custodial_launch_agent_session_id: handle.custodyLaunchAgentSessionId } : {}),
       },
-    }));
+    };
   }
 
   private async persistDispatchedProvider(
@@ -555,6 +624,8 @@ export class ProviderExecutionCoordinator {
     entryId: string,
     handle: ProviderActionHandle,
     executionGenerationId: string,
+    appliedRevision: number,
+    requestedAuthorityMode: LifecycleAuthorityMode,
   ): Promise<void> {
     if (this.options.authority.isHandoffScheduled()) {
       await this.persistReturnedProviderForHandoff(
@@ -562,11 +633,19 @@ export class ProviderExecutionCoordinator {
         entryId,
         handle,
         executionGenerationId,
+        appliedRevision,
+        requestedAuthorityMode,
       );
       return;
     }
     try {
-      await this.persistProviderHandle(entryId, handle, executionGenerationId);
+      await this.persistProviderHandle(
+        entryId,
+        handle,
+        executionGenerationId,
+        appliedRevision,
+        requestedAuthorityMode,
+      );
     } catch (error) {
       if (!this.options.authority.isHandoffScheduled()
         || !(error instanceof DaemonFenceLostError)) throw error;
@@ -575,6 +654,8 @@ export class ProviderExecutionCoordinator {
         entryId,
         handle,
         executionGenerationId,
+        appliedRevision,
+        requestedAuthorityMode,
       );
     }
   }
@@ -584,6 +665,8 @@ export class ProviderExecutionCoordinator {
     entryId: string,
     handle: ProviderActionHandle,
     executionGenerationId: string,
+    appliedRevision: number,
+    requestedAuthorityMode: LifecycleAuthorityMode,
   ): Promise<void> {
     if (!handle.providerContinuationId) {
       throw new Error("Provider launch did not return a durable continuation id.");
@@ -611,27 +694,19 @@ export class ProviderExecutionCoordinator {
           "Retiring provider dispatch no longer matches the durable work attempt.",
         );
       }
-      if (current.provider_ref?.execution_generation_id === executionGenerationId
-        && current.provider_ref.provider_continuation_id === handle.providerContinuationId) {
-        this.options.authority.acceptManifestGeneration(snapshot.generation);
-        return;
-      }
-      const updated: DaemonManifestEntry = {
-        ...current,
-        run_id: executionGenerationId,
-        deployment_id: serializeDaemonDeploymentId(entryId, executionGenerationId),
-        provider_ref: {
-          work_attempt_id: handle.workAttemptId,
-          provider_continuation_id: handle.providerContinuationId,
-          provider_connection: handle.providerConnection ?? null,
-          execution_generation_id: executionGenerationId,
-          ...(handle.custodyLaunchAgentSessionId ? { custodial_launch_agent_session_id: handle.custodyLaunchAgentSessionId } : {}),
-        },
-      };
+      if (!handle.providerConnection) throw new Error("Provider handoff requires an exact native birth.");
+      const updated = this.providerBirthEntry(current, handle, executionGenerationId);
       try {
-        const next = await this.options.store.replaceEntry(
+        const next = await this.options.store.checkpointProviderBirth(
           snapshot.generation,
-          updated,
+          {
+            entry: updated,
+            executionGenerationId,
+            providerConnection: handle.providerConnection,
+            appliedRevision,
+            requestedAuthorityMode,
+            observedAtMs: this.options.nowMs(),
+          },
           (commit) => this.options.authority.serializeManifestCommit(async () => {
             const active = this.activeDispatches.get(token);
             if (!this.options.authority.isHandoffScheduled()
@@ -702,6 +777,10 @@ export class ProviderExecutionCoordinator {
     if (activation && !matchesPollingActivationRuntime(activation, entry, handle)) {
       throw new Error("Attached provider does not match the unresolved polling activation.");
     }
+    if (handle.workAttemptId !== ref.work_attempt_id
+      || handle.providerContinuationId !== ref.provider_continuation_id) {
+      throw new Error("Attached provider does not match the durable provider continuation.");
+    }
     let authoritativeEntry = entry;
     if (handle.providerConnection && ref.provider_connection
       && !sameProviderActionConnectionIdentity(
@@ -712,23 +791,81 @@ export class ProviderExecutionCoordinator {
         "Attached provider returned connection evidence that conflicts with the durable manifest.",
       );
     }
-    if (handle.providerConnection && !ref.provider_connection) {
-      authoritativeEntry = await this.options.updateManifestEntry(entry.id, (current) => {
-        if (current.work_attempt_id !== ref.work_attempt_id
-          || current.provider_ref?.execution_generation_id !== ref.execution_generation_id
-          || current.provider_ref.provider_continuation_id !== ref.provider_continuation_id) {
-          throw new Error(
-            "Provider authority changed before recovered connection evidence could be persisted.",
+    const configuration = await this.options.store.getAgentConfiguration(authoritativeEntry.id);
+    const appliedRevision = configuration?.runtime_configuration_revision;
+    if (!Number.isSafeInteger(appliedRevision) || appliedRevision! < 1
+      || (handle.appliedConfigurationRevision !== undefined
+        && handle.appliedConfigurationRevision !== appliedRevision)) {
+      throw new Error("Attached provider has no exact durable applied configuration.");
+    }
+    handle.appliedConfigurationRevision = appliedRevision;
+    const recoveredConnection = handle.providerConnection;
+    const frozenAuthority = recoveredConnection
+      ? await this.options.store.readRuntimeLifecycleAuthority({
+          agentId: entry.id,
+          executionGenerationId: ref.execution_generation_id,
+          providerConnection: recoveredConnection,
+          configurationRevision: appliedRevision!,
+        })
+      : null;
+    if (recoveredConnection && (!ref.provider_connection || frozenAuthority === null)) {
+      let checkpointed = false;
+      for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
+        await this.options.authority.assertCurrent();
+        const snapshot = await this.options.store.load();
+        const current = snapshot.entries.find((candidate) => candidate.id === entry.id);
+        const currentRef = current?.provider_ref;
+        if (!current || current.work_attempt_id !== ref.work_attempt_id
+          || currentRef?.work_attempt_id !== ref.work_attempt_id
+          || currentRef.execution_generation_id !== ref.execution_generation_id
+          || currentRef.provider_continuation_id !== ref.provider_continuation_id) {
+          throw new DaemonFenceLostError(
+            "Provider authority changed before recovered connection evidence could be checkpointed.",
           );
         }
-        return {
-          ...current,
-          provider_ref: {
-            ...current.provider_ref,
-            provider_connection: handle.providerConnection ?? null,
-          },
-        };
-      });
+        if (currentRef.provider_connection
+          && !sameProviderActionConnectionSnapshot(
+            currentRef.provider_connection,
+            recoveredConnection,
+          )) {
+          throw new Error(
+            "Recovered provider connection conflicts with the durable manifest.",
+          );
+        }
+        try {
+          const next = await this.options.store.checkpointProviderBirth(
+            snapshot.generation,
+            {
+              entry: {
+                ...current,
+                provider_ref: {
+                  ...currentRef,
+                  provider_connection: structuredClone(recoveredConnection),
+                },
+              },
+              executionGenerationId: ref.execution_generation_id,
+              providerConnection: recoveredConnection,
+              appliedRevision: appliedRevision!,
+              // This process predates native-birth capture. Recovering its
+              // connection must not infer authority from the current release.
+              requestedAuthorityMode: "legacy",
+              observedAtMs: this.options.nowMs(),
+            },
+            this.options.authority.fenceCommit,
+          );
+          this.options.authority.acceptManifestGeneration(next.generation);
+          authoritativeEntry = next.entry;
+          checkpointed = true;
+          break;
+        } catch (error) {
+          if (!(error instanceof ManifestConflictError)) throw error;
+        }
+      }
+      if (!checkpointed) {
+        throw new DaemonFenceLostError(
+          "Recovered provider birth could not converge on the latest manifest generation.",
+        );
+      }
     }
     await this.options.durability.recoverExecutionFence(ref.work_attempt_id);
     await this.options.streams.install(
@@ -1258,25 +1395,20 @@ export class ProviderExecutionCoordinator {
             entry.id,
             handle,
             execution.execution_generation_id,
+            launchSnapshot.configurationRevision,
+            lifecycleAuthorityModeForProvider(lifecycleAuthorityProviderSchema.parse(launchSnapshot.provider)),
           );
           providerPersisted = true;
-          const applied = await this.options.store.markRuntimeConfigurationApplied(
-            this.options.authority.currentManifestGeneration(),
-            {
-              agentId: entry.id,
-              executionGenerationId: execution.execution_generation_id,
-              appliedRevision: launchSnapshot.configurationRevision,
-            },
-            this.options.authority.fenceCommit,
-          );
-          this.options.authority.acceptManifestGeneration(applied.generation);
+          // A retiring daemon owns only the atomic provider-birth checkpoint.
+          // Its successor can reconcile the secondary attempt checkpoint from
+          // that durable manifest without extending the handoff boundary.
+          if (this.options.authority.isHandoffScheduled()) return;
           await this.options.durability.checkpoint(attempt.work_attempt_id, {
             room_cursor: launchConfiguration.polling_contract
               ? spawn.supervisorWorkerSession?.roomCursor ?? null
               : null,
             provider_continuation_id: handle.providerContinuationId,
           });
-          if (this.options.authority.isHandoffScheduled()) return;
           let control = await this.revalidateReturnedProviderControl(
             entry.id,
             handle,

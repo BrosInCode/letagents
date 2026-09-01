@@ -2,7 +2,7 @@ import type { DatabaseSync } from "node:sqlite";
 import { z } from "zod";
 import { executionIdentity } from "./execution-protocol.js";
 import type { ApprovalState } from "./execution-reducer.js";
-import { executionStorageIdentity, materializeExecutionIdentity } from "./execution-shadow-store.js";
+import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeExecutionIdentity } from "./execution-shadow-store.js";
 import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 import { sameProviderActionConnectionIdentity } from "./provider-action-port.js";
 import type { DaemonManifestEntry } from "./types.js";
@@ -146,7 +146,8 @@ function eligibleTurn(db: DatabaseSync, expected: Pick<ApprovalReference, "agent
   if (!binding || !db.prepare("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=?")
     .get(String(binding.origin_execution_generation_id), owned.workAttemptId)) reject("missing_turn");
   const generation = String(binding.origin_execution_generation_id);
-  const runtimeId = executionStorageIdentity("runtime", expected.agentId, generation, owned.providerConnection.kind, owned.providerConnection.processIdentity);
+  const runtimeId = executionRuntimeStorageIdentity(expected.agentId, generation,
+    owned.providerConnection.kind, owned.providerConnection.pid, owned.providerConnection.processIdentity);
   // Current durable reference attests this birth only in its own generation.
   // Never retroactively invent an old birth after an uncaptured recovery.
   if (generation !== owned.executionGenerationId && !db.prepare(`SELECT 1 FROM execution_runtime_generations
