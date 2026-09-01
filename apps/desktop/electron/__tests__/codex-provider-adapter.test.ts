@@ -53,7 +53,7 @@ class FakeRpc implements CodexAdapterRpc {
   readonly threadResumeCounts = new Map<string, number>();
   connected = false;
   closed = false;
-  turnStatus = "completed";
+  turnStatus: string | { status?: string } = "completed";
   permissionChanges = [{ path: "/repo/file.ts", kind: { type: "add" as const }, diff: "+file" }];
   private threadStartCount = 0;
   private readonly missingThreadReads = new Map<string, number>();
@@ -2038,7 +2038,7 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
   const createRpcClient = harness.dependencies.createRpcClient;
   harness.dependencies.createRpcClient = (serverUrl, notify) => {
     const client = createRpcClient(serverUrl, notify) as FakeRpc;
-    client.turnStatus = "failed";
+    client.turnStatus = { status: "failed" };
     const request = client.request.bind(client);
     client.request = async <T>(method: string, params?: unknown) => {
       const result = await request<T>(method, params);
@@ -2074,7 +2074,7 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
   assert.ok(snapshot, "reattach emits one normalized transcript snapshot");
   assert.equal((snapshot.payload as { thread?: unknown }).thread, undefined,
     "attach and live transcript snapshots share the same closed payload shape");
-  assert.equal((snapshot.payload as { latestTurn?: { status?: string } }).latestTurn?.status, "failed");
+  assert.deepEqual((snapshot.payload as { latestTurn?: { status?: unknown } }).latestTurn?.status, { status: "failed" });
   assert.equal(snapshot.payloadTruncated, false,
     "oversized transcript items cannot erase the closed lifecycle metadata");
   assert.equal(providerStreamLifecycle(snapshot), "terminal",
