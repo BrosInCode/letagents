@@ -66,7 +66,8 @@ export function providerStreamLifecycle(event: ProviderActionStreamEvent): "fail
         && statuses.some((value) => typeof value === "string" && /^failed$/i.test(value))
     )
     || codexTranscript
-      && nestedStatus(payload.latestTurn).some((value) => typeof value === "string" && /^failed$/i.test(value))
+      && nestedStatus((payload.latestTurn as Record<string, unknown> | undefined)?.status)
+        .some((value) => typeof value === "string" && /^failed$/i.test(value))
   );
   if (codexTurnFailure) return "terminal";
   const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
