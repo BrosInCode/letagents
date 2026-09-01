@@ -434,6 +434,10 @@ const DEFAULT_DEPENDENCIES: CodexProviderAdapterDependencies = {
   sleep: delay,
 };
 
+function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
+  return state === "failed" || state === "stopping" || state === "stopped";
+}
+
 class CodexProviderHandle implements ProviderHandle {
   custodyLaunchAgentSessionId?: string;
   readonly execution: ProviderExecutionObserver;
@@ -473,11 +477,19 @@ class CodexProviderHandle implements ProviderHandle {
     if (this.turnWaiters.size) {
       throw new Error("Codex continuation repair cannot replace a thread while a turn observer is active.");
     }
+    if (!this.setLiveState("idle")) {
+      throw new Error("Codex continuation repair cannot replace a thread on an unavailable runtime.");
+    }
     this.terminalTurns.clear();
     this.roomTurnResults.clearAll();
     this.providerContinuationId = providerContinuationId;
-    this.state = "idle";
     this.invalidatePermissions();
+  }
+
+  setLiveState(state: "idle" | "working"): boolean {
+    if (isCodexRuntimeUnavailable(this.state)) return false;
+    this.state = state;
+    return true;
   }
 
   invalidatePermissions(): void {
@@ -723,11 +735,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): Promise<ProviderTurnControlResult> {
     const handle = this.requireHandle(providerHandle);
     if (handle.terminal) throw new Error("Codex continuation is terminal; no turn can be controlled.");
+    const assertRuntimeAvailable = () => {
+      if (isCodexRuntimeUnavailable(handle.state)) {
+        throw new ProviderTurnControlError("Codex turn control lost live runtime authority.", "uncertain");
+      }
+    };
+    assertRuntimeAvailable();
     const text = correction?.trim() || null;
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
       includeTurns: true,
     });
+    assertRuntimeAvailable();
     if (read.thread?.id !== handle.providerContinuationId) {
       throw new Error("Codex turn control resolved a different continuation thread.");
     }
@@ -755,7 +774,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (turnId && !active && !terminal) {
       throw new Error("Codex returned an unknown latest-turn state; refusing ambiguous turn control.");
     }
-    if (turnId) await options.checkpointTurnStarted?.(turnId);
+    if (turnId) {
+      await options.checkpointTurnStarted?.(turnId);
+      assertRuntimeAvailable();
+    }
     if (newerActiveTurnExists) {
       if (text) {
         throw new ProviderTurnControlError(
@@ -767,10 +789,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
     if (active) {
       await options.markDispatched?.();
+      assertRuntimeAvailable();
       const dispatchRead = await handle.client.request<ThreadReadResult>("thread/read", {
         threadId: handle.providerContinuationId,
         includeTurns: true,
       });
+      assertRuntimeAvailable();
       const dispatchTurn = dispatchRead.thread?.turns?.find((candidate) => candidate.id === turnId);
       const dispatchStatus = typeof dispatchTurn?.status === "string"
         ? dispatchTurn.status
@@ -785,18 +809,25 @@ export class CodexProviderAdapter implements ProviderAdapter {
         threadId: handle.providerContinuationId,
         turnId,
       });
+      assertRuntimeAvailable();
       await this.waitForTurnBoundary(handle, turnId!);
-      handle.state = "idle";
+      assertRuntimeAvailable();
+      handle.setLiveState("idle");
     }
     if (text) {
-      if (!active) await options.markDispatched?.();
+      if (!active) {
+        await options.markDispatched?.();
+        assertRuntimeAvailable();
+      }
       const turn = await handle.client.request<TurnStartResult>("turn/start", {
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text, text_elements: [] }],
       });
+      assertRuntimeAvailable();
       if (!turn.turn?.id) throw new Error("Codex did not acknowledge the redirected turn.");
-      handle.state = "working";
+      handle.setLiveState("working");
     }
+    assertRuntimeAvailable();
     return {
       capability: "native_interrupt",
       interrupted: active,
@@ -1008,7 +1039,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     assertAttached();
     await handle.client.request("turn/interrupt", { threadId: handle.providerContinuationId, turnId });
     await this.waitForTurnBoundary(handle, turnId, options.detachSignal);
-    handle.state = "idle";
+    handle.setLiveState("idle");
     return { outcome: "interrupt_dispatched", targetTurnId: turnId };
   }
 
@@ -1019,9 +1050,15 @@ export class CodexProviderAdapter implements ProviderAdapter {
     options: ProviderRoomTurnOptions = {},
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
-    if (handle.terminal) throw new Error("Codex continuation is terminal; no bounded room turn can run.");
     if (!request.inboxItemId.trim() || !request.actionId.trim()) throw new Error("Bounded Codex room turn requires durable inbox and action ids.");
+    const assertRuntimeAvailable = () => {
+      if (handle.terminal || isCodexRuntimeUnavailable(handle.state)) {
+        throw new Error("Codex runtime is unavailable; no bounded room turn can start.");
+      }
+    };
+    assertRuntimeAvailable();
     await options.beforeNativeDispatch?.();
+    assertRuntimeAvailable();
     handle.roomTurnResults.beginTurnStart(handle.providerContinuationId);
     let started: TurnStartResult;
     try {
@@ -1052,9 +1089,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw error;
     }
-    handle.state = "working";
+    handle.setLiveState("working");
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
-    handle.state = terminal.status === "failed" ? "failed" : "idle";
+    // A bounded turn outcome does not describe the reusable app-server. The
+    // daemon settles the exact turn separately; only process/control evidence
+    // may make this handle failed.
+    handle.setLiveState("idle");
     if (terminal.status !== "completed") {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new Error(`Codex bounded room turn ${turnId} ended ${terminal.status}.`);
@@ -1092,7 +1132,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new CodexRoomTurnRecoveryError("Codex room-turn recovery found an unknown exact turn state.");
     }
-    handle.state = "working";
+    handle.setLiveState("working");
     const terminal = await this.waitForExactRoomTurnTerminal(handle, turnId, options.detachSignal);
     return this.roomTurnResultFromTerminal(handle, turnId, terminal.status, terminal.turn, options.checkpointTerminalResult);
   }
@@ -1125,7 +1165,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         throw new CodexRoomTurnObservationDetachedError("Codex continuation repair detached.");
       }
       if (handle.terminal || this.handles.get(handle.workAttemptId) !== handle
-        || handle.providerContinuationId !== expected) {
+        || handle.providerContinuationId !== expected || isCodexRuntimeUnavailable(handle.state)) {
         throw new Error("Codex continuation repair lost exact provider authority.");
       }
     };
@@ -1568,6 +1608,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         observedLaunch,
         this.deps.now,
       );
+      handle.setLiveState("idle");
       this.handles.set(req.workAttemptId, handle);
       if (custodialPolling) {
         handle.custodyLaunchAgentSessionId = req.supervisorWorkerSession!.agentSessionId;
@@ -1591,7 +1632,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       // Both custodial profiles return idle. Daemon-inbox starts work only
       // after its inbox claim; custodial polling activation is a later action.
       if (req.deliveryMode === "daemon_inbox" || custodialPolling) {
-        handle.state = "idle";
+        handle.setLiveState("idle");
         return handle;
       }
 
@@ -1617,7 +1658,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (!turn.turn?.id) {
         throw new Error("Codex app-server did not return a turn id.");
       }
-      handle.state = "working";
+      handle.setLiveState("working");
       void this.emitTranscriptTail(handle);
       return handle;
     } catch (error) {
@@ -1726,7 +1767,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         launch,
         this.deps.now,
       );
-      handle.state = continuationMissing ? "idle" : "working";
+      handle.setLiveState(continuationMissing ? "idle" : "working");
       this.handles.set(ref.workAttemptId, handle);
       this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
       for (const notification of pendingNotifications.splice(0)) {
@@ -1777,7 +1818,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // Record the durable in-memory terminal edge first. Stream/activity
     // observers are best-effort and must never suppress exact turn settlement.
     if (exactTurnId && exactThreadId === handle.providerContinuationId && terminalMatch) {
-      this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalMatch[1]!.toLowerCase());
+      const nativeStatus = recordValue(recordValue(notification.params)?.turn)?.status;
+      const terminalStatus = typeof nativeStatus === "string"
+        && /^(?:completed|interrupted|failed|cancelled|stopped)$/i.test(nativeStatus)
+        ? nativeStatus.toLowerCase()
+        : terminalMatch[1]!.toLowerCase();
+      this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalStatus);
     }
     // Build the readable summary once and attach the same value to both the
     // ordered stream and the compact activity event. In particular, Codex's
@@ -1789,12 +1835,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
     const lifecycle = isCodexExecutionMethod(notification.method) ? null
+      : terminalMatch ? "idle"
       : /(?:^|\/)(?:failed|systemError)$/i.test(notification.method)
       ? "failed"
       : codexLifecycleStatus(notification.params)
         ?? (/^(?:turn|thread)\/(?:completed|interrupted|stopped)$/i.test(notification.method) ? "idle" : null)
         ?? (/^(?:turn|thread)\/(?:started|resumed)$/i.test(notification.method) ? "working" : null);
-    if (lifecycle && (handle.state !== "failed" || lifecycle === "failed")) handle.state = lifecycle;
+    if (lifecycle === "failed") handle.state = "failed";
+    else if (lifecycle) handle.setLiveState(lifecycle);
     this.publishActivity(handle, {
       source: "native_harness",
       method: notification.method,
@@ -1971,6 +2019,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     turn: ThreadReadTurn,
     checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"],
   ): Promise<ProviderRoomTurnResult> {
+    // A terminal native turn leaves the reusable app-server at an idle turn
+    // boundary even when that turn failed or was interrupted.
+    handle.setLiveState("idle");
     if (status !== "completed") {
       handle.roomTurnResults.clear(handle.providerContinuationId, turnId);
       throw new CodexRoomTurnRecoveryError(`Codex bounded room turn ${turnId} ended ${status}.`);

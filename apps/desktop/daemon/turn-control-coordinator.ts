@@ -26,6 +26,10 @@ const MAX_TURN_CONTROL_ACTION_ID_BYTES = 256;
 const TURN_CONTROL_ADMISSION_WINDOW_MS = 60_000;
 const MAX_NEW_TURN_CONTROLS_PER_WINDOW = 24;
 
+function isHealthyTurnControlState(state: string): state is "idle" | "working" {
+  return state === "idle" || state === "working";
+}
+
 export type TurnControlInput = {
   entryId: string;
   daemonGeneration: number;
@@ -731,6 +735,17 @@ export class TurnControlCoordinator {
     try {
       committed = await this.ports.serializeEntry(entry.id, () => this.ports.serializeManifest(async () => {
         await this.ports.authority.assertCurrent();
+        const currentHandle = this.ports.currentHandle(entry.id);
+        if (currentHandle !== handle || !isHealthyTurnControlState(currentHandle.observedState)) {
+          throw new Error("Turn control lost its exact healthy runtime before durable commit.");
+        }
+        const fenceHealthyRuntime: CommitFence = (commit) => this.ports.authority.fenceCommit(async () => {
+          const fencedHandle = this.ports.currentHandle(entry.id);
+          if (fencedHandle !== handle || !isHealthyTurnControlState(fencedHandle.observedState)) {
+            throw new Error("Turn control lost its exact healthy runtime at durable commit.");
+          }
+          await commit();
+        });
         const checkpoint = await this.ports.store.commitTurnControlState(this.manifestGeneration, {
           agentId: entry.id,
           roomId: entry.room_id,
@@ -742,6 +757,13 @@ export class TurnControlCoordinator {
           activateCorrection: correctionStrategy === "stop_then_resend",
           observedAt,
         }, (current, outcome) => {
+          const commitHandle = this.ports.currentHandle(entry.id);
+          if (commitHandle !== handle || !isHealthyTurnControlState(commitHandle.observedState)) {
+            throw new Error("Turn control lost its exact healthy runtime at durable commit.");
+          }
+          if (!isHealthyTurnControlState(current.observed_state)) {
+            throw new Error("Turn control cannot overwrite a concurrent durable runtime transition.");
+          }
           const terminalWon = outcome.original === "terminal_won";
           const interrupted = outcome.original === "publication_won" || terminalWon ? false : providerResult.interrupted;
           const resumed = correctionStrategy === "stop_then_resend" ? true : providerResult.resumed;
@@ -810,7 +832,7 @@ export class TurnControlCoordinator {
               updated_at: observedAt,
             },
           };
-        }, this.ports.authority.fenceCommit);
+        }, fenceHealthyRuntime);
         this.manifestGeneration = checkpoint.generation;
         return checkpoint;
       }));
