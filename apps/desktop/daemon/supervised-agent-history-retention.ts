@@ -110,6 +110,8 @@ function capturedReceiptConclusion(database: DatabaseSync, row: Row): "replied" 
   if (row.terminal_reason !== null || !row.provider_turn_id) return null;
   // The independent capture graph must agree with the original operational
   // turn, including workspace and generation, not merely its source message.
+  // Keep this SQL set aligned with isTypedCaptureAuthority in lifecycle-authority-mode.ts;
+  // legacy and any unknown future mode must remain fail-closed here.
   const binding = database.prepare(`SELECT b.origin_execution_generation_id,b.provider_continuation_id
     FROM supervised_agent_provider_turn_bindings b
     JOIN execution_turns t ON t.attempt_id=? AND t.agent_id=b.agent_id AND t.room_id=b.room_id
@@ -118,7 +120,7 @@ function capturedReceiptConclusion(database: DatabaseSync, row: Row): "replied" 
     JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
       AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id AND g.workspace_id=b.work_attempt_id
     JOIN execution_runtime_generations r ON r.agent_id=t.agent_id AND r.execution_generation_id=t.execution_generation_id
-      AND r.runtime_generation_id=t.runtime_generation_id AND r.authority_mode='typed_shadow'
+      AND r.runtime_generation_id=t.runtime_generation_id AND r.authority_mode IN ('typed_shadow','typed')
     WHERE b.inbox_item_id=? AND b.agent_id=? AND b.room_id=? AND b.provider_turn_id=?`)
     .get(String(row.attempt_id), String(row.inbox_item_id), String(row.agent_id), String(row.room_id), String(row.provider_turn_id)) as Row | undefined;
   if (!binding) return null;
