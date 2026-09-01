@@ -465,7 +465,8 @@ class CodexProviderHandle implements ProviderHandle {
   ) {
     this.providerContinuationId = providerContinuationId;
     this.execution = new ProviderExecutionObserver(now);
-    client.onDisconnect(() => this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" }, providerConnection.processIdentity ?? undefined));
+    client.onDisconnect(() => this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+      providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined));
   }
 
   replaceContinuation(providerContinuationId: string): void {
@@ -1377,7 +1378,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         result = proof() ?? { state: isMethodNotFound(error) ? "unprobeable" : "degraded" };
       }
     }
-    handle.execution.emit({ domain: "control", kind: "state_changed", sideEffects: "none", ...result }, handle.providerConnection.processIdentity ?? undefined);
+    handle.execution.emit({ domain: "control", kind: "state_changed", sideEffects: "none", ...result },
+      handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
     return result;
   }
 
@@ -1821,7 +1823,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         if (fact.state === "active") handle.nativeActiveTurns.set(key, identity);
         else handle.nativeActiveTurns.delete(key);
       }
-      handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
+      handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined,
+        handle.providerConnection.pid ?? undefined);
     };
     if (notification.method === "turn/started") {
       const nativeLifecycle = nativeLifecycleCheckpoint({
@@ -1830,6 +1833,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         phase: "turn_active",
         providerContinuationId: params.threadId,
         providerTurnId,
+        nativeProcessPid: handle.providerConnection.pid ?? undefined,
+        nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
       });
       emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
       emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
@@ -1845,6 +1850,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
           phase: "turn_terminal",
           providerContinuationId: params.threadId,
           providerTurnId,
+          nativeProcessPid: handle.providerConnection.pid ?? undefined,
+          nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
           terminalDiscriminator: outcome,
         });
         emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
@@ -2073,7 +2080,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     exit: CodexAppServerExit,
   ): ProviderTerminalPayload {
     if (exit.type === "exit") {
-      const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
+      const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
+        handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
       for (const fact of handle.nativeActiveOperations.values()) {
         emit({ domain: "execution", kind: "completed", executionId: fact.executionId, operation: fact.operation,
           providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId,
@@ -2087,7 +2095,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
       emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
       emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
     } else {
-      handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" }, handle.providerConnection.processIdentity ?? undefined);
+      handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+        handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
     }
     const terminal = exit.type === "error"
       ? {

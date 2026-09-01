@@ -18,6 +18,7 @@ export class ProviderExecutionObserver {
     state: string;
     controlEvidence: string | null;
     nativeEventId: string | null;
+    nativeProcessPid: number | null;
     nativeProcessIdentity: string | null;
   } | null = null;
   private readonly listeners = new Set<Subscription>();
@@ -37,12 +38,13 @@ export class ProviderExecutionObserver {
     });
   }
 
-  emit(fact: NativeExecutionFact, nativeProcessIdentity?: string): void {
+  emit(fact: NativeExecutionFact, nativeProcessIdentity?: string, nativeProcessPid?: number): void {
     const control = fact.domain === "control" && fact.kind === "state_changed"
       ? {
           state: fact.state,
           controlEvidence: "controlEvidence" in fact ? fact.controlEvidence ?? null : null,
           nativeEventId: fact.nativeEventId ?? null,
+          nativeProcessPid: nativeProcessPid ?? null,
           nativeProcessIdentity: nativeProcessIdentity ?? null,
         }
       : null;
@@ -51,9 +53,11 @@ export class ProviderExecutionObserver {
       && this.lastControl.state === control.state
       && this.lastControl.controlEvidence === control.controlEvidence
       && this.lastControl.nativeEventId === control.nativeEventId
+      && this.lastControl.nativeProcessPid === control.nativeProcessPid
       && this.lastControl.nativeProcessIdentity === control.nativeProcessIdentity) return;
     const event = Object.freeze({ sourceId: this.sourceId, sequence: ++this.sequence, observedAtMs: Date.parse(this.now()), fact: Object.freeze({ ...fact }),
-      ...(nativeProcessIdentity ? { nativeProcessIdentity } : {}) });
+      ...(nativeProcessIdentity ? { nativeProcessIdentity } : {}),
+      ...(Number.isSafeInteger(nativeProcessPid) && nativeProcessPid! > 0 ? { nativeProcessPid } : {}) });
     const bytes = Buffer.byteLength(JSON.stringify(event));
     // Never relabel a retained suffix as complete history. Oversized facts
     // also consume their original position. position() exposes a dropped tail;
@@ -101,6 +105,7 @@ type NativeLifecycleCheckpointInput = {
   phase: "turn_active" | "turn_terminal";
   providerContinuationId: string;
   providerTurnId: string;
+  nativeProcessPid?: number;
   nativeProcessIdentity?: string;
   terminalDiscriminator?: string;
 };
@@ -126,6 +131,7 @@ export function nativeLifecycleCheckpoint(input: NativeLifecycleCheckpointInput)
     input.phase,
     input.providerContinuationId,
     input.providerTurnId,
+    input.nativeProcessPid ?? null,
     input.nativeProcessIdentity ?? null,
     input.terminalDiscriminator ?? null,
   ])).digest("base64url");

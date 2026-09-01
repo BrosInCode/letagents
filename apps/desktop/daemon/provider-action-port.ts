@@ -115,6 +115,10 @@ export type ProviderActionStreamEvent = {
   method: string;
   /** Opaque identity shared only with typed facts derived from this exact native lifecycle event. */
   nativeEventId?: string;
+  /** Exact native process birth that emitted the event; required for Cursor child fencing. */
+  nativeProcessIdentity?: string;
+  /** PID paired with nativeProcessIdentity; neither field is exact alone. */
+  nativeProcessPid?: number;
   /** Structural boundary for the correlated lifecycle checkpoint; never provider-authored text. */
   nativeLifecyclePhase?: "turn_active" | "turn_terminal";
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */

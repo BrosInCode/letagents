@@ -1498,6 +1498,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       handle.execution.emit(
         { domain: "control", kind: "state_changed", sideEffects: "none", ...result },
         processIdentity,
+        handle.providerConnection.pid ?? undefined,
       );
     }
     return result;
@@ -2801,7 +2802,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         && message.is_error === replay.isError
         ? replay.nativeLifecycle : null;
     }
-    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity);
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity, turn.pid);
     const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
     if (message.type === "system" && message.subtype === "init" && !turn.sawInit) {
       const nativeLifecycle = nativeLifecycleCheckpoint({
@@ -2810,6 +2811,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         phase: "turn_active",
         providerContinuationId: sessionId,
         providerTurnId: turn.controlTurnId,
+        nativeProcessPid: turn.pid,
         nativeProcessIdentity: turn.processIdentity,
       });
       turn.executionContinuationId = sessionId;
@@ -2829,6 +2831,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         phase: "turn_terminal",
         providerContinuationId: sessionId,
         providerTurnId: turn.controlTurnId,
+        nativeProcessPid: turn.pid,
         nativeProcessIdentity: turn.processIdentity,
         terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
       });
@@ -2895,7 +2898,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   private observeNativeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
     if (exit.type !== "exit") return;
-    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity);
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity, turn.pid);
     const sessionId = turn.executionContinuationId;
     if (turn.sawInit && nativeExecutionId(sessionId)) {
       const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
@@ -3159,6 +3162,10 @@ export class CursorProviderAdapter implements ProviderAdapter {
       provider: this.id,
       kind,
       method,
+      ...(handle.liveTurn?.processIdentity
+        ? { nativeProcessIdentity: handle.liveTurn.processIdentity }
+        : {}),
+      ...(handle.liveTurn?.pid ? { nativeProcessPid: handle.liveTurn.pid } : {}),
       ...(nativeEventId ? { nativeEventId } : {}),
       ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       ...safe,

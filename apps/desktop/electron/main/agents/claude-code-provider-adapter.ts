@@ -881,6 +881,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       handle.providerConnection.kind === "claude_cli"
         ? handle.providerConnection.processIdentity ?? undefined
         : undefined,
+      handle.providerConnection.kind === "claude_cli"
+        ? handle.providerConnection.pid ?? undefined
+        : undefined,
     );
     return result;
   }
@@ -1258,7 +1261,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!turnId || message.session_id !== handle.providerContinuationId
       || !nativeExecutionId(handle.providerContinuationId)) return null;
     const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
-      handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined);
+      handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined,
+      handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.pid ?? undefined : undefined);
     const turn = { providerTurnId: turnId, providerContinuationId: handle.providerContinuationId };
     // command_uuid names the user turn, never a shell command. Only an exact
     // native started event proves receipt; writing stdin alone is insufficient.
@@ -1269,6 +1273,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         phase: "turn_active",
         providerContinuationId: handle.providerContinuationId,
         providerTurnId: turnId,
+        nativeProcessPid: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.pid ?? undefined : undefined,
+        nativeProcessIdentity: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.processIdentity ?? undefined : undefined,
       });
       if (!handle.executionTurnStarted) {
         handle.executionTurnStarted = true;
@@ -1286,6 +1294,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         phase: "turn_terminal",
         providerContinuationId: handle.providerContinuationId,
         providerTurnId: turnId,
+        nativeProcessPid: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.pid ?? undefined : undefined,
+        nativeProcessIdentity: handle.providerConnection.kind === "claude_cli"
+          ? handle.providerConnection.processIdentity ?? undefined : undefined,
         terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
       });
       emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...turn,
@@ -1483,15 +1495,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (exit.type === "exit") {
       handle.executionExitObserved = true;
       const identity = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined;
+      const pid = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.pid ?? undefined : undefined;
       if (handle.executionTurnId && nativeExecutionId(handle.providerContinuationId)) {
         handle.execution.emit({ domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none",
-          providerContinuationId: handle.providerContinuationId, providerTurnId: handle.executionTurnId }, identity);
+          providerContinuationId: handle.providerContinuationId, providerTurnId: handle.executionTurnId }, identity, pid);
         handle.executionTurnId = null;
         handle.executionTurnStarted = false;
         handle.executionTools.clear();
       }
-      handle.execution.emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" }, identity);
-      handle.execution.emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" }, identity);
+      handle.execution.emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" }, identity, pid);
+      handle.execution.emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" }, identity, pid);
     }
     const terminal = exit.type === "error"
       ? {

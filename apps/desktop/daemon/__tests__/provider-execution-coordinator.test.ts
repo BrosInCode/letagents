@@ -89,6 +89,8 @@ function harness(input: {
   let manifestGeneration = 1;
   let handoff = input.handoff ?? false;
   let controlEpoch = input.controlEpoch ?? 0;
+  let frozenAuthorityMode: "legacy" | "typed_shadow" | "typed" | null =
+    manifestEntry.provider_ref?.provider_connection?.pid != null ? "legacy" : null;
   const liveHandles = new Map<string, ProviderActionHandle>();
   const installed: ProviderActionHandle[] = [];
   const stoppedDelivery: string[] = [];
@@ -118,7 +120,26 @@ function harness(input: {
         permission_profile_id: "full_access",
         provider_launch_policy: {},
         config_revision: 1,
+        runtime_configuration_revision: 1,
       }),
+      readRuntimeLifecycleAuthority: async () => frozenAuthorityMode,
+      checkpointProviderBirth: async (expectedGeneration, input, commitFence) => {
+        assert.equal(expectedGeneration, manifestGeneration);
+        await commitFence(async () => {
+          manifestEntry = input.entry;
+          manifestGeneration += 1;
+        });
+        if (input.providerConnection.pid !== null && frozenAuthorityMode === null) {
+          frozenAuthorityMode = input.requestedAuthorityMode;
+        }
+        return {
+          generation: manifestGeneration,
+          entry: manifestEntry,
+          authorityMode: input.providerConnection.pid === null
+            ? null
+            : frozenAuthorityMode,
+        };
+      },
       replaceEntry: async (expectedGeneration, updated, commitFence) => {
         assert.equal(expectedGeneration, manifestGeneration);
         await commitFence(async () => {
@@ -179,6 +200,7 @@ function harness(input: {
     streams: {
       liveHandles,
       get: (entryId) => liveHandles.get(entryId),
+      currentInstallation: () => undefined,
       remove: (entryId, expected) => {
         const current = liveHandles.get(entryId);
         if (!current || expected && current !== expected) return false;
@@ -465,7 +487,8 @@ test("unresolved polling activation permits exact recovery and explicit stop but
       ...runtime.entry().provider_ref!, custodial_launch_agent_session_id: "session-1",
     } });
     runtime.options.store.getAgentConfiguration = async () => ({ provider: "codex", model: null, reasoning_effort: null,
-      permission_profile_id: "full_access", provider_launch_policy: {}, config_revision: 1, polling_contract: "custodial_polling_v1" });
+      permission_profile_id: "full_access", provider_launch_policy: {}, config_revision: 1,
+      runtime_configuration_revision: 1, polling_contract: "custodial_polling_v1" });
     const activation: PollingActivationRecord = {
       operation_id: "activation-1", request_id: "activate-1", reverse_operation_id: "reverse-1",
       agent_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "generation-2",

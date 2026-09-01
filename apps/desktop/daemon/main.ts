@@ -61,10 +61,7 @@ import {
 import { createGitCommand, WorkspaceProvisioner, type GitCommand } from "./workspace-provisioner.js";
 import { WorkerBindingStore, type WorkerSessionBinding } from "./worker-binding-store.js";
 import { WorkerAuthorityCoordinator, type BootstrapOperation } from "./worker-authority-coordinator.js";
-import {
-  WorkerRuntimeCustody,
-  type LiveBindingIdentity,
-} from "./worker-runtime-custody.js";
+import { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import { SupervisedAgentDelivery, type SupervisedDeliveryHttp, type SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import { SupervisedDeliveryLifecycleCoordinator } from "./supervised-delivery-lifecycle-coordinator.js";
@@ -358,18 +355,20 @@ export class SupervisorDaemon {
     });
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
-      observeExecution: (entryId, handle, generation) => this.executionCapture?.install(entryId, handle, generation) ?? (() => {}),
+      observeExecution: (installation) => this.executionCapture?.install(installation) ?? (() => {}),
+      advanceExecution: (installation) => this.executionCapture?.advance(installation),
       observeLegacyLifecycle: (observation) => this.executionCapture?.recordLegacyLifecycle(observation),
       markLifecycleProjectionUnavailable: (provider) => this.executionCapture?.recordLifecycleProjectionUnavailable(provider),
       lifecycleProjectionDiagnostics: () => this.executionCapture?.lifecycleProjectionDiagnostics()
         ?? unavailableLifecycleProjectionDiagnostics(),
-      captureAdmission: (entryId, handle, generation) => this.executionCapture?.captureAdmission(entryId, handle, generation) ?? "unavailable",
+      captureAdmission: (installation) => this.executionCapture?.captureAdmission(installation) ?? "unavailable",
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
         getEntry: (entryId) => this.store.getEntry(entryId),
         load: () => this.store.load(),
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
+        readRuntimeLifecycleAuthority: (input) => this.store.readRuntimeLifecycleAuthority(input),
       },
       bindings: this.workerBindings,
       durability: this.durability,
@@ -380,8 +379,8 @@ export class SupervisorDaemon {
       appendActivity: (entryId, event) => this.appendActivity(entryId, event),
       publishNativeActivity: (entryId, method, status, observedAt) =>
         this.publishNativeActivity(entryId, method, status, observedAt),
-      handleTerminal: (entryId, handle, executionGenerationId, bindingIdentity, terminal) =>
-        this.handleProviderTerminal(entryId, handle, executionGenerationId, bindingIdentity, terminal),
+      handleTerminal: (installation, _bindingIdentity, terminal) =>
+        this.providerTerminals.handleTerminal(installation, terminal),
       streams: {
         reset: (entryId) => this.resetAgentStream(entryId),
         push: (entryId, event) => this.pushAgentStreamEvent(entryId, event),
@@ -570,6 +569,7 @@ export class SupervisorDaemon {
     });
     this.providerCheckpoints = new ProviderCheckpointCoordinator({
       observePreparedRuntime: (runtime) => this.executionCapture?.prepared(runtime),
+      activateCommittedCursorRuntime: (input) => this.providerStreams.activateCommittedCursorRuntime(input),
       store: this.store,
       bindings: this.workerBindings,
       inbox: this.supervisedInbox,
@@ -1341,10 +1341,6 @@ export class SupervisorDaemon {
 
   private async publishNativeActivity(entryId: string, method: string, status: "working" | "idle", observedAt = new Date().toISOString()): Promise<boolean> {
     return this.nativeActivity.publish(entryId, method, status, observedAt);
-  }
-
-  private async handleProviderTerminal(entryId: string, handle: ProviderActionHandle, executionGenerationId: string, _terminalBinding: LiveBindingIdentity | undefined, terminal: ProviderActionTerminal): Promise<void> {
-    await this.providerTerminals.handleTerminal(entryId, handle, executionGenerationId, terminal);
   }
 
   private async updateManifestEntry(

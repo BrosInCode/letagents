@@ -47,6 +47,8 @@ export type NativeExecutionObservation = {
   sequence: number; observedAtMs: number; fact: NativeExecutionFact;
   /** Exact observed OS birth, especially for Cursor's per-turn child. Host-private. */
   nativeProcessIdentity?: string;
+  /** PID paired with nativeProcessIdentity; neither field is exact alone. */
+  nativeProcessPid?: number;
 };
 export type NativeExecutionSubscription = {
   readonly sourceId: string;

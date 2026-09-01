@@ -11,6 +11,7 @@ import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../
 import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import { RoomWorkPublicationStore, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
 import { validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
+import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
 
 type Row = Record<string, unknown>;
 const now = "2026-08-30T00:00:00.000Z";
@@ -130,6 +131,70 @@ function restoreV27Fixture(database: DatabaseSync): void {
     DROP TABLE lifecycle_projection_totals;
     UPDATE manifest_metadata SET schema_version=27 WHERE singleton=1;
     PRAGMA user_version=27`);
+}
+
+function restoreV28Fixture(database: DatabaseSync): void {
+  database.exec("UPDATE manifest_metadata SET schema_version=28 WHERE singleton=1; PRAGMA user_version=28");
+}
+
+function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
+  agentId: string;
+  provider: "codex" | "claude-code" | "cursor" | "open-model";
+  connectionKind: "codex_app_server" | "claude_cli" | "cursor_cli" | "opencode_server";
+  processIdentity?: string | null;
+  pid?: number | null;
+  terminal?: boolean;
+}): {
+  executionGenerationId: string;
+  runtimeGenerationId: string | null;
+  historicalRuntimeGenerationId: string | null;
+} {
+  const workAttemptId = `attempt-${input.agentId}`;
+  const executionGenerationId = `generation-${input.agentId}`;
+  const processIdentity = input.processIdentity === undefined ? `birth-${input.agentId}` : input.processIdentity;
+  const pid = input.pid === undefined ? 100 + Number(database.prepare("SELECT COUNT(*) AS n FROM agent_identities").get()!.n) : input.pid;
+  const sortOrder = Number(database.prepare("SELECT COUNT(*) AS n FROM agent_identities").get()!.n);
+  database.prepare("INSERT INTO agent_identities VALUES(?,?,?,?)").run(input.agentId, "migration-test", now, sortOrder);
+  database.prepare(`INSERT INTO agent_configurations
+    (agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,
+     config_revision,runtime_configuration_revision)
+    VALUES(?,?,?,'daemon_inbox',0,0,7,3)`).run(input.agentId, input.provider, "test");
+  database.prepare(`INSERT INTO work_attempts
+    (work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,
+     workspace_resolved_revision,workspace_bare_path,state,created_at)
+    VALUES(?,?,?,1,?,?,?,?,?,'active',?)`).run(workAttemptId, `task-${input.agentId}`, `lease-${input.agentId}`,
+    `/workspace/${input.agentId}`, input.agentId, `https://example.test/${input.agentId}`, "revision", `/bare/${input.agentId}`, now);
+  database.prepare(`INSERT INTO work_attempt_executions
+    (execution_generation_id,work_attempt_id,started_at,actor,generation,terminal_json)
+    VALUES(?,?,?,?,1,?)`).run(executionGenerationId, workAttemptId, now, "migration-test", input.terminal ? "{}" : null);
+  database.prepare(`INSERT INTO runtime_deployments
+    (agent_id,observed_state,workspace_path_present,work_attempt_id_present,work_attempt_id,
+     provider_ref_present,provider_work_attempt_id,provider_continuation_id,provider_connection_kind,
+     provider_connection_url,provider_server_auth_path,provider_connection_pid,
+     provider_process_identity_present,provider_process_identity,provider_execution_generation_id,
+     workplace_liveness_present,native_liveness_present,activity_present)
+    VALUES(?,'working',0,1,?,1,?,?,?,?, ?,?,?,?, ?,0,0,0)`).run(
+    input.agentId,
+    workAttemptId,
+    workAttemptId,
+    `continuation-${input.agentId}`,
+    input.connectionKind,
+    input.connectionKind === "opencode_server" ? "http://127.0.0.1:4311" : null,
+    input.connectionKind === "opencode_server" ? "/private/opencode-auth" : null,
+    pid,
+    processIdentity === null ? 0 : 1,
+    processIdentity,
+    executionGenerationId,
+  );
+  return {
+    executionGenerationId,
+    runtimeGenerationId: processIdentity === null || pid === null ? null : executionRuntimeStorageIdentity(
+      input.agentId, executionGenerationId, input.connectionKind, pid, processIdentity,
+    ),
+    historicalRuntimeGenerationId: processIdentity === null ? null : executionStorageIdentity(
+      "runtime", input.agentId, executionGenerationId, input.connectionKind, processIdentity,
+    ),
+  };
 }
 
 function seedPollingActivations(database: DatabaseSync, phases: readonly ("complete" | "uncertain" | "active")[] = ["complete", "uncertain"]): void {
@@ -1240,6 +1305,140 @@ test("v28 refuses malformed lifecycle comparison storage before WAL or initializ
       assert.deepEqual(await readFile(env.path), before);
     } finally { await env.cleanup(); }
   }
+});
+
+test("v29 freezes only exact active pre-B1 native births as legacy", async () => {
+  const env = await fixture();
+  try {
+    restoreV28Fixture(env.database);
+    const exact = [
+      seedPreB1RuntimeBirth(env.database, { agentId: "codex-active", provider: "codex", connectionKind: "codex_app_server" }),
+      seedPreB1RuntimeBirth(env.database, { agentId: "claude-active", provider: "claude-code", connectionKind: "claude_cli" }),
+      seedPreB1RuntimeBirth(env.database, { agentId: "cursor-active", provider: "cursor", connectionKind: "cursor_cli" }),
+      seedPreB1RuntimeBirth(env.database, { agentId: "open-active", provider: "open-model", connectionKind: "opencode_server" }),
+    ];
+    seedPreB1RuntimeBirth(env.database, {
+      agentId: "cursor-idle", provider: "cursor", connectionKind: "cursor_cli", pid: null, processIdentity: null,
+    });
+    seedPreB1RuntimeBirth(env.database, {
+      agentId: "terminal", provider: "codex", connectionKind: "codex_app_server", terminal: true,
+    });
+    seedPreB1RuntimeBirth(env.database, {
+      agentId: "provider-mismatch", provider: "codex", connectionKind: "claude_cli",
+    });
+    const preserved = seedPreB1RuntimeBirth(env.database, {
+      agentId: "already-frozen", provider: "codex", connectionKind: "codex_app_server",
+    });
+    env.database.exec("BEGIN IMMEDIATE");
+    materializeRuntimeIdentity(env.database, {
+      agentId: "already-frozen",
+      executionGenerationId: preserved.executionGenerationId,
+      runtimeGenerationId: preserved.historicalRuntimeGenerationId!,
+      provider: "codex",
+      authorityMode: "typed_shadow",
+      configRevision: 3,
+      createdAtMs: 9,
+    });
+    env.database.exec("COMMIT");
+    const beforePreserved = env.database.prepare("SELECT rowid,* FROM execution_runtime_generations WHERE agent_id='already-frozen'").get();
+
+    new DaemonStateSchema().createSchema(env.database);
+
+    const frozen = (env.database.prepare(`SELECT agent_id,authority_mode,config_revision
+      FROM execution_runtime_generations ORDER BY agent_id,authority_mode`).all() as Row[]).map((row) => ({ ...row }));
+    assert.deepEqual(frozen, [
+      { agent_id: "already-frozen", authority_mode: "legacy", config_revision: 3 },
+      { agent_id: "already-frozen", authority_mode: "typed_shadow", config_revision: 3 },
+      { agent_id: "claude-active", authority_mode: "legacy", config_revision: 3 },
+      { agent_id: "codex-active", authority_mode: "legacy", config_revision: 3 },
+      { agent_id: "cursor-active", authority_mode: "legacy", config_revision: 3 },
+      { agent_id: "open-active", authority_mode: "legacy", config_revision: 3 },
+    ]);
+    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_runtime_generations WHERE runtime_generation_id=?")
+      .get(preserved.historicalRuntimeGenerationId!), beforePreserved,
+    "the historical PID-less row remains byte-for-byte immutable");
+    assert.equal(env.database.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
+      .get(preserved.runtimeGenerationId!)?.authority_mode, "legacy",
+    "only the separate PID-inclusive active birth grants current runtime authority");
+    for (const birth of exact) assert.ok(birth.runtimeGenerationId);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()!.schema_version,
+      DAEMON_STATE_SCHEMA_VERSION);
+
+    const once = env.database.prepare("SELECT rowid,* FROM execution_generations ORDER BY rowid").all();
+    const runtimes = env.database.prepare("SELECT rowid,* FROM execution_runtime_generations ORDER BY rowid").all();
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_generations ORDER BY rowid").all(), once);
+    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_runtime_generations ORDER BY rowid").all(), runtimes);
+  } finally { await env.cleanup(); }
+});
+
+test("skipped-release upgrades freeze exact active births in the same migration transaction", async () => {
+  for (const priorVersion of [18, 27] as const) {
+    const env = await fixture();
+    try {
+      const exact = seedPreB1RuntimeBirth(env.database, {
+        agentId: `codex-v${priorVersion}`, provider: "codex", connectionKind: "codex_app_server",
+      });
+      const idle = seedPreB1RuntimeBirth(env.database, {
+        agentId: `cursor-idle-v${priorVersion}`, provider: "cursor", connectionKind: "cursor_cli",
+        pid: null, processIdentity: null,
+      });
+      if (priorVersion === 18) restoreV18Fixture(env.database);
+      else restoreV27Fixture(env.database);
+      const beforeVersions = versionPair(env.database);
+
+      assert.throws(() => new DaemonStateSchema((database) => {
+        assert.equal(database.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
+          .get(exact.runtimeGenerationId!)?.authority_mode, "legacy");
+        assert.equal(database.prepare("SELECT 1 FROM execution_runtime_generations WHERE agent_id=?")
+          .get(`cursor-idle-v${priorVersion}`), undefined);
+        throw new Error("interrupt skipped-release runtime birth migration");
+      }).createSchema(env.database), /interrupt skipped-release runtime birth migration/);
+      assert.deepEqual(versionPair(env.database), beforeVersions);
+      assert.equal(env.database.prepare("SELECT 1 FROM execution_runtime_generations WHERE runtime_generation_id=?")
+        .get(exact.runtimeGenerationId!), undefined);
+
+      new DaemonStateSchema().createSchema(env.database);
+      assert.equal(env.database.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
+        .get(exact.runtimeGenerationId!)?.authority_mode, "legacy");
+      assert.equal(env.database.prepare("SELECT 1 FROM execution_runtime_generations WHERE agent_id=?")
+        .get(`cursor-idle-v${priorVersion}`), undefined);
+      assert.equal(idle.runtimeGenerationId, null);
+      assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+      assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()!.schema_version,
+        DAEMON_STATE_SCHEMA_VERSION);
+    } finally { await env.cleanup(); }
+  }
+});
+
+test("v29 runtime-birth backfill and paired markers roll back together", async () => {
+  const env = await fixture();
+  try {
+    restoreV28Fixture(env.database);
+    const birth = seedPreB1RuntimeBirth(env.database, {
+      agentId: "rollback", provider: "codex", connectionKind: "codex_app_server",
+    });
+    const before = {
+      versions: versionPair(env.database),
+      generations: env.database.prepare("SELECT rowid,* FROM execution_generations ORDER BY rowid").all(),
+      runtimes: env.database.prepare("SELECT rowid,* FROM execution_runtime_generations ORDER BY rowid").all(),
+    };
+    assert.throws(() => new DaemonStateSchema((database) => {
+      assert.equal(database.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
+        .get(birth.runtimeGenerationId!)?.authority_mode, "legacy");
+      assert.deepEqual(versionPair(database), before.versions);
+      throw new Error("interrupt runtime birth migration");
+    }).createSchema(env.database), /interrupt runtime birth migration/);
+    assert.deepEqual({
+      versions: versionPair(env.database),
+      generations: env.database.prepare("SELECT rowid,* FROM execution_generations ORDER BY rowid").all(),
+      runtimes: env.database.prepare("SELECT rowid,* FROM execution_runtime_generations ORDER BY rowid").all(),
+    }, before);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.equal(env.database.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
+      .get(birth.runtimeGenerationId!)?.authority_mode, "legacy");
+  } finally { await env.cleanup(); }
 });
 
 test("v27 preserves publication receipts across reopen and refuses malformed journals before WAL", async () => {

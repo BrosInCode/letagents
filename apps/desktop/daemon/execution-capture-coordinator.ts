@@ -1,15 +1,16 @@
 import type { DatabaseSync, SQLInputValue } from "node:sqlite";
 import type { NativeExecutionObservation, NativeExecutionSubscription } from "../shared/execution-protocol.js";
 import { ExecutionProtocolError, executionIdentity, type NativeTurnIdentity } from "./execution-protocol.js";
-import { ExecutionShadowStore, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
+import { ExecutionShadowStore, executionRuntimeStorageIdentity, executionStorageIdentity as opaque, type ShadowObserver } from "./execution-shadow-store.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
 import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
   type LifecycleCaptureAdmissionStatus, type LifecycleProjectionObservation,
   type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
-import { isTypedCaptureAuthority, lifecycleAuthorityModeForProvider, lifecycleAuthorityModeSchema,
-  type LifecycleAuthorityMode, type LifecycleAuthorityProvider } from "./lifecycle-authority-mode.js";
+import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema,
+  type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
 
 type Row = Record<string, string | number | null>;
 type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation" | "settlement_unavailable";
@@ -22,7 +23,7 @@ type CaptureOptions = {
   changed?(agentId: string): void;
 };
 type Lane = {
-  agentId: string; generation: string; handle: ProviderActionHandle;
+  agentId: string; generation: string; handle: ProviderActionHandle; installation: ProviderInstallationToken;
   subscription: NativeExecutionSubscription | null; observer: ShadowObserver | null;
   pending: Map<number, { event: NativeExecutionObservation; bytes: number }>; bytes: number;
   checkpoints: Map<string, PreparedRuntime>; overflow: boolean; suspended: boolean; diagnostic: CaptureCode | null;
@@ -45,16 +46,6 @@ function lifecycleProvider(connection: ProviderActionConnectionRef | null | unde
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
   return null;
-}
-function authorityProvider(connection: ProviderActionConnectionRef | null | undefined): LifecycleAuthorityProvider | null {
-  if (connection?.kind === "codex_app_server") return "codex";
-  if (connection?.kind === "claude_cli") return "claude-code";
-  if (connection?.kind === "cursor_cli") return "cursor";
-  if (connection?.kind === "opencode_server") return "open-model";
-  return null;
-}
-function runtimeId(agentId: string, generation: string, kind: string, birth: string): string {
-  return opaque("runtime", agentId, generation, kind, birth);
 }
 
 /**
@@ -90,39 +81,54 @@ export class ExecutionCaptureCoordinator {
     this.store = new ExecutionShadowStore(database);
   }
 
-  /** Does not await adapter loading/subscription or execute any SQLite. */
-  install(agentId: string, handle: ProviderActionHandle, generation: string): () => void {
+  /** Start subscribing before raw listeners without letting optional capture block delivery. */
+  install(installation: ProviderInstallationToken): () => void {
+    const { entryId: agentId, handle, executionGenerationId: generation } = installation;
     const prior = this.lanes.get(agentId);
     if (prior) this.detach(prior);
     if (this.closed || this.suspendedAgents.has(agentId) || !this.options.provider.onExecution) return () => {};
-    const authority = authorityProvider(handle.providerConnection);
-    const lane: Lane = { agentId, generation, handle, subscription: null, observer: null,
+    const lane: Lane = { agentId, generation, handle, installation, subscription: null, observer: null,
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
       detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
-      expectedAuthorityMode: authority ? lifecycleAuthorityModeForProvider(authority) : null };
+      expectedAuthorityMode: installation.authorityMode };
     this.lanes.set(agentId, lane);
-    // Installation follows the provider's durable dispatch/configuration
-    // checkpoint. Preserve its attested birth before an immediate exit or a
-    // successor can replace the operational manifest reference.
-    if (handle.providerConnection && handle.appliedConfigurationRevision !== undefined) {
-      this.prepared({ agentId, executionGenerationId: generation, handle,
-        connection: handle.providerConnection, configurationRevision: handle.appliedConfigurationRevision });
+    let pending: Promise<NativeExecutionSubscription>;
+    try {
+      pending = Promise.resolve(this.options.provider.onExecution(handle, event => this.enqueue(lane, event)));
+    } catch {
+      lane.subscriptionFailed = true;
+      if (this.current(lane)) {
+        this.report(lane, "identity_unavailable");
+        if (lane.detached && !lane.pending.size) { this.remove(lane); this.refresh(); }
+      }
+      return () => this.detach(lane);
     }
-    void Promise.resolve().then(() => this.current(lane)
-      ? this.options.provider.onExecution!(handle, event => this.enqueue(lane, event)) : null)
-      .then(subscription => {
-        if (!subscription) return;
-        if (!this.owns(lane)) { subscription.dispose(); return; }
-        lane.subscription = lane.detached ? this.freezeSubscription(subscription) : subscription;
-        this.schedule(lane);
-      }).catch(() => {
-        lane.subscriptionFailed = true;
-        if (this.current(lane)) {
-          this.report(lane, "identity_unavailable");
-          if (lane.detached && !lane.pending.size) { this.remove(lane); this.refresh(); }
-        }
-      });
+    void pending.then((subscription) => {
+      if (!this.owns(lane)) { subscription.dispose(); return; }
+      lane.subscription = lane.detached ? this.freezeSubscription(subscription) : subscription;
+      this.schedule(lane);
+    }).catch(() => {
+      lane.subscriptionFailed = true;
+      if (this.current(lane)) {
+        this.report(lane, "identity_unavailable");
+        if (lane.detached && !lane.pending.size) { this.remove(lane); this.refresh(); }
+      }
+    });
     return () => this.detach(lane);
+  }
+
+  /** Keep the physical subscription while advancing its committed Cursor birth token. */
+  advance(installation: ProviderInstallationToken): void {
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane || !this.current(lane)
+      || lane.handle !== installation.handle
+      || lane.generation !== installation.executionGenerationId) {
+      throw new ExecutionProtocolError("identity_mismatch");
+    }
+    lane.installation = installation;
+    lane.expectedAuthorityMode = installation.authorityMode;
+    lane.receiptCursor = 0;
+    this.schedule(lane);
   }
 
   /** A post-COMMIT hint only schedules work; it cannot reject that checkpoint. */
@@ -186,9 +192,11 @@ export class ExecutionCaptureCoordinator {
     const lane = this.lanes.get(checkpoint.agentId);
     if (!lane || !this.current(lane) || lane.suspended || lane.handle !== checkpoint.handle || lane.generation !== checkpoint.executionGenerationId) return;
     const birth = checkpoint.connection.processIdentity;
-    if (!birth || checkpoint.connection.pid === null) return;
-    if (lane.checkpoints.size >= QUEUE_FACTS && !lane.checkpoints.has(birth)) lane.overflow = true;
-    else lane.checkpoints.set(birth, { ...checkpoint, connection: { ...checkpoint.connection } });
+    const pid = checkpoint.connection.pid;
+    if (!birth || pid === null) return;
+    const runtime = JSON.stringify([pid, birth]);
+    if (lane.checkpoints.size >= QUEUE_FACTS && !lane.checkpoints.has(runtime)) lane.overflow = true;
+    else lane.checkpoints.set(runtime, { ...checkpoint, connection: { ...checkpoint.connection } });
     this.schedule(lane);
   }
 
@@ -287,9 +295,11 @@ export class ExecutionCaptureCoordinator {
    * Exact, read-time admission for the current handle generation. No elapsed
    * time can promote or demote it, and no second status is cached or persisted.
    */
-  captureAdmission(agentId: string, handle: ProviderActionHandle, generation: string): LifecycleCaptureAdmissionStatus {
+  captureAdmission(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus {
+    const { entryId: agentId, handle, executionGenerationId: generation } = installation;
     const lane = this.lanes.get(agentId);
     if (!lane || !this.current(lane) || lane.handle !== handle || lane.generation !== generation
+      || lane.installation !== installation
       || lane.detached || lane.suspended || lane.subscriptionFailed || lane.overflow
       || (lane.diagnostic !== null && lane.diagnostic !== "settlement_unavailable")) return "unavailable";
     if (!lane.subscription || !lane.observer) return "pending";
@@ -456,33 +466,31 @@ export class ExecutionCaptureCoordinator {
       c.delivery_mode,c.runtime_configuration_revision
       FROM runtime_deployments d JOIN agent_configurations c USING(agent_id) WHERE d.agent_id=?`, lane.agentId);
     if (!row || row.delivery_mode !== "daemon_inbox" || row.provider_execution_generation_id !== lane.generation
-      || row.provider_work_attempt_id !== lane.handle.workAttemptId || row.work_attempt_id !== lane.handle.workAttemptId) return null;
+      || row.provider_work_attempt_id !== lane.handle.workAttemptId || row.work_attempt_id !== lane.handle.workAttemptId
+      || Number(row.runtime_configuration_revision) !== lane.installation.configurationRevision) return null;
     const connection = { kind: row.provider_connection_kind, pid: row.provider_connection_pid,
       processIdentity: row.provider_process_identity, url: row.provider_connection_url, serverAuthPath: row.provider_server_auth_path } as ProviderActionConnectionRef;
     if (!sameProviderActionConnectionIdentity(connection, lane.handle.providerConnection)) return null;
-    return this.registerRuntime(lane, connection, Number(row.runtime_configuration_revision));
+    const runtime = this.knownRuntime(lane, connection.pid ?? undefined,
+      connection.processIdentity ?? undefined);
+    return runtime && (lane.expectedAuthorityMode === null
+      || runtime.authorityMode === lane.expectedAuthorityMode) ? runtime : null;
   }
 
-  private registerRuntime(lane: Lane, connection: ProviderActionConnectionRef, revision: number): Runtime | null {
-    if (!connection.processIdentity || connection.pid === null) return null;
-    const generation = this.row("SELECT 1 FROM work_attempt_executions WHERE execution_generation_id=? AND work_attempt_id=?", lane.generation, lane.handle.workAttemptId);
-    if (!generation) return null;
-    const provider = { codex_app_server: "codex", claude_cli: "claude-code", cursor_cli: "cursor", opencode_server: "open-model" } as const;
-    const runtime = { id: runtimeId(lane.agentId, lane.generation, connection.kind, connection.processIdentity), generation: lane.generation };
-    const requestedMode = lifecycleAuthorityModeForProvider(provider[connection.kind]);
-    const authorityMode = this.store.registerRuntime({ agentId: lane.agentId, executionGenerationId: runtime.generation,
-      runtimeGenerationId: runtime.id, provider: provider[connection.kind], authorityMode: requestedMode,
-      configRevision: revision, createdAtMs: Date.now() });
-    return { ...runtime, authorityMode };
-  }
-
-  private knownRuntime(lane: Lane, birth: string | undefined, generation = lane.generation): Runtime | null {
+  private knownRuntime(
+    lane: Lane,
+    pid: number | undefined,
+    birth: string | undefined,
+    generation = lane.generation,
+  ): Runtime | null {
     const kind = lane.handle.providerConnection?.kind;
-    if (!birth || !kind) return null;
-    const id = runtimeId(lane.agentId, generation, kind, birth);
-    const runtime = this.row("SELECT runtime_generation_id,authority_mode FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
+    if (!birth || !kind || !Number.isSafeInteger(pid) || pid! < 1) return null;
+    const id = executionRuntimeStorageIdentity(lane.agentId, generation, kind, pid!, birth);
+    const runtime = this.row("SELECT runtime_generation_id,authority_mode,config_revision FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
     const authorityMode = lifecycleAuthorityModeSchema.safeParse(runtime?.authority_mode);
-    return runtime && authorityMode.success ? { id, generation, authorityMode: authorityMode.data } : null;
+    return runtime && authorityMode.success
+      && Number(runtime.config_revision) === lane.installation.configurationRevision
+      ? { id, generation, authorityMode: authorityMode.data } : null;
   }
 
   private bind(lane: Lane, subject: Runtime, observer: Runtime, recovery?: NativeTurnIdentity): ShadowObserver {
@@ -529,7 +537,14 @@ export class ExecutionCaptureCoordinator {
     let checkpointCount = 0;
     for (const [birth, checkpoint] of lane.checkpoints) {
       if (checkpointCount++ >= BATCH_FACTS) return true;
-      lane.verifiedRuntime = this.registerRuntime(lane, checkpoint.connection, checkpoint.configurationRevision) ?? lane.verifiedRuntime;
+      const runtime = checkpoint.configurationRevision === lane.installation.configurationRevision
+        ? this.knownRuntime(lane, checkpoint.connection.pid ?? undefined,
+          checkpoint.connection.processIdentity ?? undefined)
+        : null;
+      if (runtime) {
+        lane.verifiedRuntime = runtime;
+        lane.expectedAuthorityMode = runtime.authorityMode;
+      }
       lane.checkpoints.delete(birth);
     }
     const source = lane.subscription!.sourceId;
@@ -541,7 +556,7 @@ export class ExecutionCaptureCoordinator {
     const live = lane.detached ? lane.verifiedRuntime : this.liveRuntime(lane);
     if (live) lane.verifiedRuntime = live;
     const first = lane.pending.values().next().value?.event;
-    const observed = first && this.knownRuntime(lane, first.nativeProcessIdentity);
+    const observed = first && this.knownRuntime(lane, first.nativeProcessPid, first.nativeProcessIdentity);
     const initial = observed || live;
     if (!initial) {
       if (!lane.pending.size && prior?.source_id === source && prior.last_source_sequence === lane.subscription!.position().latestSequence) {
@@ -573,10 +588,11 @@ export class ExecutionCaptureCoordinator {
       if (event.sourceId !== lane.subscription!.sourceId || sequence !== cursor + 1) {
         lane.suspended = true; this.report(lane, "source_gap"); return false;
       }
-      let runtime = this.knownRuntime(lane, event.nativeProcessIdentity);
+      let runtime = this.knownRuntime(lane, event.nativeProcessPid, event.nativeProcessIdentity);
       if (!runtime && (event.fact.domain === "turn" || event.fact.domain === "execution")) {
         const known = this.row("SELECT execution_generation_id FROM execution_turns WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?", lane.agentId, event.fact.providerContinuationId, event.fact.providerTurnId);
-        if (known) runtime = this.knownRuntime(lane, event.nativeProcessIdentity, String(known.execution_generation_id));
+        if (known) runtime = this.knownRuntime(lane, event.nativeProcessPid,
+          event.nativeProcessIdentity, String(known.execution_generation_id));
       }
       if (!runtime) { this.report(lane, "identity_unavailable"); return false; }
       const turn = event.fact.domain === "turn" || event.fact.domain === "execution" ? this.turn(lane, event, runtime) : null;

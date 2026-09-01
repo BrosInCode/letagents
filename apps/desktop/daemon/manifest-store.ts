@@ -34,8 +34,12 @@ import {
   projectDaemonManifestEntry,
   type DaemonManifestDomainProjection,
 } from "./manifest-entry-projection.js";
-import { executionStorageIdentity } from "./execution-shadow-store.js";
-import { lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
+import {
+  lifecycleAuthorityModeSchema,
+  lifecycleAuthorityProviderSchema,
+  type LifecycleAuthorityMode,
+} from "./lifecycle-authority-mode.js";
 import type {
   DaemonActivityEvent,
   DaemonAgentConfiguration,
@@ -261,8 +265,9 @@ export class ManifestStore {
       cursor_cli: "cursor",
       opencode_server: "open-model",
     } as const;
-    const runtimeGenerationId = executionStorageIdentity("runtime", snapshot.agentId,
-      snapshot.executionGenerationId, snapshot.providerConnection.kind, snapshot.providerConnection.processIdentity);
+    const runtimeGenerationId = executionRuntimeStorageIdentity(snapshot.agentId,
+      snapshot.executionGenerationId, snapshot.providerConnection.kind,
+      snapshot.providerConnection.pid, snapshot.providerConnection.processIdentity);
     const row = (await this.getDatabase()).prepare(`SELECT authority_mode FROM execution_runtime_generations
       WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=? AND provider=? AND config_revision=?`)
       .get(snapshot.agentId, snapshot.executionGenerationId, runtimeGenerationId,
@@ -1023,6 +1028,91 @@ export class ManifestStore {
   }
 
   /**
+   * Persist the provider reference, applied configuration, and exact native
+   * process birth in one transaction. Cursor's idle lane has no process birth;
+   * each paused child is materialized by checkpointCursorPreparedTurn instead.
+   */
+  async checkpointProviderBirth(
+    expectedGeneration: number,
+    input: {
+      entry: DaemonManifestEntry;
+      executionGenerationId: string;
+      providerConnection: DaemonProviderConnection;
+      appliedRevision: number;
+      requestedAuthorityMode: LifecycleAuthorityMode;
+      observedAtMs: number;
+    },
+    commitFence?: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode | null }> {
+    const snapshot = structuredClone(input);
+    const normalized = canonicalManifestEntry(snapshot.entry);
+    const result = await this.writeTargeted(expectedGeneration, (database) => {
+      const row = database.prepare("SELECT sort_order FROM agent_identities WHERE agent_id=?")
+        .get(normalized.id) as Row | undefined;
+      const configuration = database.prepare("SELECT * FROM agent_configurations WHERE agent_id=?")
+        .get(normalized.id) as Row | undefined;
+      const ref = normalized.provider_ref;
+      if (!row || !configuration || !ref
+        || normalized.work_attempt_id !== ref.work_attempt_id
+        || ref.execution_generation_id !== snapshot.executionGenerationId
+        || !sameProviderActionConnectionSnapshot(ref.provider_connection, snapshot.providerConnection)
+        || !Number.isSafeInteger(snapshot.appliedRevision)
+        || snapshot.appliedRevision < 1
+        || snapshot.appliedRevision > Number(configuration.config_revision)
+        || Number(configuration.runtime_configuration_revision) > snapshot.appliedRevision
+        || !Number.isSafeInteger(snapshot.observedAtMs)
+        || snapshot.observedAtMs < 0) {
+        throw new ManifestConflictError("Provider birth lost its exact manifest or configuration authority.");
+      }
+      if (!database.prepare(`SELECT 1 FROM work_attempt_executions
+        WHERE work_attempt_id=? AND execution_generation_id=?`)
+        .get(ref.work_attempt_id, snapshot.executionGenerationId)) {
+        throw new ManifestConflictError("Provider birth has no exact durable execution generation.");
+      }
+      const provider = lifecycleAuthorityProviderSchema.safeParse(normalized.provider);
+      const expectedProvider = {
+        codex_app_server: "codex",
+        claude_cli: "claude-code",
+        cursor_cli: "cursor",
+        opencode_server: "open-model",
+      } as const;
+      if (!provider.success || provider.data !== expectedProvider[snapshot.providerConnection.kind]) {
+        throw new ManifestConflictError("Provider birth connection does not match its provider.");
+      }
+      const projection = projectDaemonManifestEntry(normalized);
+      this.preserveInspectorConfiguration(projection, configuration);
+      run(database.prepare("DELETE FROM agent_identities WHERE agent_id=?"), normalized.id);
+      this.insertProjection(database, projection, Number(row.sort_order));
+      run(database.prepare("UPDATE agent_configurations SET runtime_configuration_revision=? WHERE agent_id=?"),
+        snapshot.appliedRevision, normalized.id);
+
+      const connection = snapshot.providerConnection;
+      let authorityMode: LifecycleAuthorityMode | null = null;
+      if (connection.pid === null || !connection.processIdentity) {
+        if (connection.kind !== "cursor_cli" || connection.pid !== null || connection.processIdentity != null) {
+          throw new ManifestConflictError("Provider birth requires an exact native process identity.");
+        }
+      } else {
+        const runtimeGenerationId = executionRuntimeStorageIdentity(normalized.id,
+          snapshot.executionGenerationId, connection.kind, connection.pid, connection.processIdentity);
+        authorityMode = materializeRuntimeIdentity(database, {
+          agentId: normalized.id,
+          executionGenerationId: snapshot.executionGenerationId,
+          runtimeGenerationId,
+          provider: provider.data,
+          authorityMode: snapshot.requestedAuthorityMode,
+          configRevision: snapshot.appliedRevision,
+          createdAtMs: snapshot.observedAtMs,
+        });
+      }
+      const persisted = this.readEntryFromDatabase(database, normalized.id);
+      if (!persisted) throw new Error("Provider birth disappeared during its atomic checkpoint.");
+      return { entry: persisted, authorityMode };
+    }, commitFence);
+    return { generation: result.generation, ...result.value };
+  }
+
+  /**
    * Atomically install an accepted turn-control barrier and classify the exact
    * FIFO head at that same SQLite boundary. If claimHead won first, the journal
    * links that already-admitted row; if this transaction wins first, a pending
@@ -1730,16 +1820,23 @@ export class ManifestStore {
       expectedProviderContinuationId: string;
       expectedProviderConnection: DaemonProviderConnection | null;
       providerConnection: Extract<DaemonProviderConnection, { kind: "cursor_cli" }>;
+      configurationRevision: number;
+      requestedAuthorityMode: LifecycleAuthorityMode;
       observedAt: string;
     },
     commitFence?: (commit: () => Promise<void>) => Promise<void>,
-  ): Promise<{ generation: number; entry: DaemonManifestEntry }> {
+  ): Promise<{ generation: number; entry: DaemonManifestEntry; authorityMode: LifecycleAuthorityMode }> {
     if (!input.providerTurnId.trim() || !input.inboxItemId.trim() || !input.providerContinuationId.trim()) {
       throw new Error("Cursor prepared-turn checkpoint requires exact inbox and provider turn ids.");
     }
     if (input.providerConnection.pid === null || !input.providerConnection.processIdentity?.trim()) {
       throw new Error("Cursor prepared-turn checkpoint requires a verified wrapper process birth.");
     }
+    if (!Number.isSafeInteger(input.configurationRevision) || input.configurationRevision < 1) {
+      throw new Error("Cursor prepared-turn checkpoint requires an exact applied configuration revision.");
+    }
+    const processPid = input.providerConnection.pid;
+    const processIdentity = input.providerConnection.processIdentity;
     const result = await this.writeTargeted(expectedGeneration, (database) => {
       const entry = this.readEntryFromDatabase(database, input.agentId);
       if (!entry
@@ -1762,6 +1859,13 @@ export class ManifestStore {
         || String(binding.credential_ref) !== input.credentialRef
         || String(binding.api_url) !== input.apiUrl) {
         throw new ManifestConflictError("Cursor prepared turn lost its exact worker binding.");
+      }
+      const configuration = database.prepare(`SELECT config_revision,runtime_configuration_revision
+        FROM agent_configurations WHERE agent_id=?`).get(input.agentId) as Row | undefined;
+      if (!configuration
+        || Number(configuration.runtime_configuration_revision) !== input.configurationRevision
+        || input.configurationRevision > Number(configuration.config_revision)) {
+        throw new ManifestConflictError("Cursor prepared turn lost its exact applied configuration.");
       }
       const row = database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(input.inboxItemId) as Row | undefined;
       if (!row
@@ -1812,6 +1916,18 @@ export class ManifestStore {
         input.providerConnection.pid, input.providerConnection.processIdentity,
         input.agentId, input.executionGenerationId);
       }
+      const runtimeGenerationId = executionRuntimeStorageIdentity(input.agentId,
+        input.executionGenerationId, input.providerConnection.kind,
+        processPid, processIdentity);
+      const authorityMode = materializeRuntimeIdentity(database, {
+        agentId: input.agentId,
+        executionGenerationId: input.executionGenerationId,
+        runtimeGenerationId,
+        provider: "cursor",
+        authorityMode: input.requestedAuthorityMode,
+        configRevision: input.configurationRevision,
+        createdAtMs: Date.parse(input.observedAt),
+      });
       if (!persistedTurnId) {
         const nextAttemptCount = Number(row.attempt_count) + 1;
         run(database.prepare(`UPDATE supervised_agent_inbox
@@ -1830,9 +1946,9 @@ export class ManifestStore {
       }
       const persisted = this.readEntryFromDatabase(database, input.agentId);
       if (!persisted) throw new Error("Cursor prepared-turn entry disappeared during checkpoint.");
-      return persisted;
+      return { entry: persisted, authorityMode };
     }, commitFence);
-    return { generation: result.generation, entry: result.value };
+    return { generation: result.generation, ...result.value };
   }
 
   /** CAS a later Cursor runtime edge against the exact durable inbox turn. */

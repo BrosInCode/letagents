@@ -20,6 +20,7 @@ import type {
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
 import type { WorkerBindingStore } from "./worker-binding-store.js";
 import type { PreparedRuntime } from "./execution-capture-coordinator.js";
+import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 
 type ProviderCheckpointAuthority = {
   isHandoffScheduled: () => boolean;
@@ -43,6 +44,12 @@ export type ProviderCheckpointCoordinatorOptions = {
   scheduleRecovery: (entryId: string, delayMs: number) => void;
   nowMs: () => number;
   observePreparedRuntime?: (runtime: PreparedRuntime) => void;
+  activateCommittedCursorRuntime?: (input: {
+    entry: NonNullable<Awaited<ReturnType<ManifestStore["getEntry"]>>>;
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+    authorityMode?: ReturnType<typeof lifecycleAuthorityModeForProvider> | null;
+  }) => void;
 };
 
 /**
@@ -62,6 +69,7 @@ export class ProviderCheckpointCoordinator {
   private readonly scheduleRecovery: ProviderCheckpointCoordinatorOptions["scheduleRecovery"];
   private readonly nowMs: () => number;
   private readonly observePreparedRuntime: ProviderCheckpointCoordinatorOptions["observePreparedRuntime"];
+  private readonly activateCommittedCursorRuntime: ProviderCheckpointCoordinatorOptions["activateCommittedCursorRuntime"];
 
   constructor(options: ProviderCheckpointCoordinatorOptions) {
     this.store = options.store;
@@ -75,6 +83,7 @@ export class ProviderCheckpointCoordinator {
     this.scheduleRecovery = options.scheduleRecovery;
     this.nowMs = options.nowMs;
     this.observePreparedRuntime = options.observePreparedRuntime;
+    this.activateCommittedCursorRuntime = options.activateCommittedCursorRuntime;
   }
 
   /** Re-check every authority component after delivery awaits; bearer equality stays memory-only. */
@@ -130,10 +139,14 @@ export class ProviderCheckpointCoordinator {
         || !sameProviderActionConnectionSnapshot(live.providerConnection, providerConnection)) {
         throw new DaemonFenceLostError("Cursor prepared turn no longer belongs to the exact supervised lane.");
       }
-      // Inspector configuration is intentionally absent from the flat manifest.
-      // Failure to read optional capture metadata cannot fail this checkpoint.
-      const configuration = this.observePreparedRuntime
-        ? await this.store.getAgentConfiguration(agent.agentId).catch(() => undefined) : undefined;
+      const configuration = await this.store.getAgentConfiguration(agent.agentId);
+      const configurationRevision = configuration?.runtime_configuration_revision;
+      if (!Number.isSafeInteger(configurationRevision) || configurationRevision! < 1
+        || (agent.handle.appliedConfigurationRevision !== undefined
+          && agent.handle.appliedConfigurationRevision !== configurationRevision)) {
+        throw new DaemonFenceLostError("Cursor prepared turn lost its exact applied configuration.");
+      }
+      agent.handle.appliedConfigurationRevision = configurationRevision;
       try {
         const checkpoint = await this.store.checkpointCursorPreparedTurn(
           this.authority.currentManifestGeneration(),
@@ -151,13 +164,17 @@ export class ProviderCheckpointCoordinator {
             expectedProviderContinuationId: agent.providerContinuationId!,
             expectedProviderConnection: expectedConnection,
             providerConnection,
+            configurationRevision: configurationRevision!,
+            requestedAuthorityMode: lifecycleAuthorityModeForProvider("cursor"),
             observedAt: new Date(this.nowMs()).toISOString(),
           },
           (commit) => this.authority.fenceCommit(commit),
         );
         this.authority.acceptManifestGeneration(checkpoint.generation);
         agent.providerConnection = providerConnection;
-        this.observePrepared(agent, providerConnection, configuration?.runtime_configuration_revision);
+        this.activateCommittedCursorRuntime?.({ entry: checkpoint.entry, handle: agent.handle,
+          executionGenerationId: agent.executionGenerationId, authorityMode: checkpoint.authorityMode });
+        this.observePrepared(agent, providerConnection, configurationRevision!);
       } catch (error) {
         // A commit fence may report failure after SQLite committed. The paired
         // manifest+inbox read proves whether the atomic boundary won.
@@ -197,7 +214,16 @@ export class ProviderCheckpointCoordinator {
           const manifest = await this.store.load();
           this.authority.acceptManifestGeneration(manifest.generation);
           agent.providerConnection = providerConnection;
-          this.observePrepared(agent, providerConnection, configuration?.runtime_configuration_revision);
+          const authorityMode = await this.store.readRuntimeLifecycleAuthority({
+            agentId: agent.agentId,
+            executionGenerationId: agent.executionGenerationId,
+            providerConnection,
+            configurationRevision: configurationRevision!,
+          });
+          if (!authorityMode) throw error;
+          this.activateCommittedCursorRuntime?.({ entry: persisted, handle: agent.handle,
+            executionGenerationId: agent.executionGenerationId, authorityMode });
+          this.observePrepared(agent, providerConnection, configurationRevision!);
           return;
         }
         throw error;
@@ -289,6 +315,7 @@ export class ProviderCheckpointCoordinator {
         throw new DaemonFenceLostError("Cursor provider state no longer belongs to the exact supervised lane.");
       }
       try {
+        let committedEntry = current;
         if (current.provider_ref.provider_continuation_id !== providerContinuationId
           || !sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, providerConnection)) {
           const checkpoint = await this.store.checkpointCursorProviderState(
@@ -314,7 +341,11 @@ export class ProviderCheckpointCoordinator {
               : this.authority.fenceCommit(commit),
           );
           this.authority.acceptManifestGeneration(checkpoint.generation);
+          committedEntry = checkpoint.entry;
         }
+        this.activateCommittedCursorRuntime?.({ entry: committedEntry, handle: agent.handle,
+          executionGenerationId: agent.executionGenerationId,
+          ...(isIdleCursorConnection(providerConnection) ? { authorityMode: null } : {}) });
         // Manifest and live handle now agree. Advance the in-memory ingress
         // authority before the separate attempt checkpoint so a failure in the
         // latter cannot split manifest=new from agent/handle=old.
@@ -380,6 +411,9 @@ export class ProviderCheckpointCoordinator {
           )) {
           const manifest = await this.store.load();
           this.authority.acceptManifestGeneration(manifest.generation);
+          this.activateCommittedCursorRuntime?.({ entry: persisted, handle: agent.handle,
+            executionGenerationId: agent.executionGenerationId,
+            ...(isIdleCursorConnection(providerConnection) ? { authorityMode: null } : {}) });
           agent.providerContinuationId = providerContinuationId;
           agent.providerConnection = providerConnection;
           return;

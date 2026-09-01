@@ -51,33 +51,73 @@ import { OpenCodeRuntimeGoneError } from "../../electron/main/agents/open-model-
 
 /**
  * Unit ports stand in for the production router, whose successful spawn and
- * resume responses attest the exact configuration revision applied by the
- * native adapter. Keep that contract explicit in this daemon harness instead
- * of weakening the production daemon's attestation check.
+ * resume responses attest the exact configuration revision and native process
+ * birth applied by the adapter. Keep those contracts explicit in this daemon
+ * harness instead of weakening the production daemon's attestation checks.
  */
 function configurationAttestingTestPort(port: ProviderActionPort): ProviderActionPort {
+  const attestNativeBirth = (
+    handle: ProviderActionHandle,
+    provider: string | undefined,
+  ): ProviderActionHandle => {
+    if (handle.providerConnection !== undefined) return handle;
+    const processIdentity = handle.pid === null
+      ? null
+      : `daemon-test:${provider ?? "unknown"}:${handle.pid}:${handle.providerContinuationId ?? "none"}`;
+    if (provider === "codex") {
+      handle.providerConnection = {
+        kind: "codex_app_server",
+        url: `ws://127.0.0.1:${handle.pid ?? 0}`,
+        pid: handle.pid,
+        processIdentity,
+      };
+    } else if (provider === "claude-code") {
+      handle.providerConnection = { kind: "claude_cli", pid: handle.pid, processIdentity };
+    } else if (provider === "cursor") {
+      handle.providerConnection = { kind: "cursor_cli", pid: handle.pid, processIdentity };
+    } else if (provider === "open-model") {
+      handle.providerConnection = {
+        kind: "opencode_server",
+        url: `http://127.0.0.1:${handle.pid ?? 0}`,
+        pid: handle.pid,
+        processIdentity,
+        serverAuthPath: `/tmp/letagents-daemon-test-${handle.pid ?? 0}.auth`,
+      };
+    }
+    return handle;
+  };
   return new Proxy(port, {
     get(target, property, receiver) {
       if (property === "spawn") {
         return async (request: Parameters<ProviderActionPort["spawn"]>[0]) => {
-          const handle = await target.spawn(request);
+          const handle = attestNativeBirth(await target.spawn(request), request.provider);
           Object.defineProperty(handle, "appliedConfigurationRevision", {
             value: request.configurationRevision,
             enumerable: false,
             configurable: true,
+            writable: true,
           });
           return handle;
         };
       }
       if (property === "resume") {
         return async (ref: Parameters<ProviderActionPort["resume"]>[0], request: Parameters<ProviderActionPort["resume"]>[1]) => {
-          const handle = await target.resume(ref, request);
+          const handle = attestNativeBirth(await target.resume(ref, request), request.provider ?? ref.provider);
           Object.defineProperty(handle, "appliedConfigurationRevision", {
             value: request.configurationRevision,
             enumerable: false,
             configurable: true,
+            writable: true,
           });
           return handle;
+        };
+      }
+      if (property === "attach") {
+        return async (ref: Parameters<ProviderActionPort["attach"]>[0]) => {
+          const attachment = await target.attach(ref);
+          return attachment && !("state" in attachment && attachment.state === "terminal")
+            ? attestNativeBirth(attachment, ref.provider)
+            : attachment;
         };
       }
       return Reflect.get(target, property, receiver);
@@ -1184,7 +1224,7 @@ const entry: DaemonManifestEntry = {
 };
 
 /** Real daemon storage/lifecycle wiring with only the native observer faked. */
-async function observationDaemonFixture(onExecution: NonNullable<ProviderActionPort["onExecution"]>, provider: "codex" | "cursor" = "codex", overrides: Partial<ProviderActionPort> = {}, codexConnection?: Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "codex_app_server" }>) {
+async function observationDaemonFixture(onExecution: NonNullable<ProviderActionPort["onExecution"]>, provider: "codex" | "claude-code" | "cursor" = "codex", overrides: Partial<ProviderActionPort> = {}, codexConnection?: Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "codex_app_server" }>) {
   const env = await fixture();
   const id = "observed-agent";
   const paths = {
@@ -1206,6 +1246,7 @@ async function observationDaemonFixture(onExecution: NonNullable<ProviderActionP
     workerBindings: WorkerBindingStore; providerStreams: ProviderStreamCoordinator;
     providerCheckpoints: ProviderCheckpointCoordinator; executionCapture: ExecutionCaptureCoordinator | null;
     liveHandles: Map<string, ProviderActionHandle>;
+    manifestGeneration: number;
   };
   try {
     await daemon.start();
@@ -1219,7 +1260,8 @@ async function observationDaemonFixture(onExecution: NonNullable<ProviderActionP
       workAttemptId: attempt.work_attempt_id, providerContinuationId: "observed-continuation", observedState: "working",
       pid: provider === "cursor" ? null : codexConnection?.pid ?? 7123,
       providerConnection: provider === "cursor" ? { kind: "cursor_cli", pid: null, processIdentity: null }
-        : codexConnection ?? { kind: "codex_app_server", pid: 7123, processIdentity: "observed-birth", url: "ws://127.0.0.1:7123" },
+        : provider === "claude-code" ? { kind: "claude_cli", pid: 7123, processIdentity: "observed-birth" }
+          : codexConnection ?? { kind: "codex_app_server", pid: 7123, processIdentity: "observed-birth", url: "ws://127.0.0.1:7123" },
     };
     const stored: DaemonManifestEntry = {
       ...entry, id, provider, delivery_mode: "daemon_inbox", workspace_path: attempt.workspace_path,
@@ -1231,6 +1273,19 @@ async function observationDaemonFixture(onExecution: NonNullable<ProviderActionP
     };
     const inserted = await daemonRequest(paths.socketPath, "manifest.put", { entry: stored });
     assert.equal(inserted.ok, true, inserted.error);
+    handle.appliedConfigurationRevision = 1;
+    const persisted = await internals.store.load();
+    const current = persisted.entries.find((candidate) => candidate.id === id);
+    assert.ok(current);
+    const birth = await internals.store.checkpointProviderBirth(persisted.generation, {
+      entry: current,
+      executionGenerationId: execution.execution_generation_id,
+      providerConnection: handle.providerConnection!,
+      appliedRevision: 1,
+      requestedAuthorityMode: "typed_shadow",
+      observedAtMs: Date.now(),
+    });
+    internals.manifestGeneration = birth.generation;
     return { ...env, id, paths, daemon, internals, handle, port, generation: execution.execution_generation_id,
       cleanup: async () => { await daemon.stop(); await env.cleanup(); } };
   } catch (error) {
@@ -1530,9 +1585,9 @@ for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only 
   let latestSequence = 2;
   const env = await observationDaemonFixture(async (handle, callback) => {
     listener = callback;
-    callback({ sourceId: "source-live", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+    callback({ sourceId: "source-live", sequence: 1, observedAtMs: Date.now(), nativeProcessPid: 7123, nativeProcessIdentity: "observed-birth",
       fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } });
-    callback({ sourceId: "source-live", sequence: 2, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+    callback({ sourceId: "source-live", sequence: 2, observedAtMs: Date.now(), nativeProcessPid: 7123, nativeProcessIdentity: "observed-birth",
       fact: { domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
         providerContinuationId: handle.providerContinuationId!, providerTurnId: "native-turn" } });
     return { sourceId: "source-live", position: () => ({ firstRetainedSequence: 1, latestSequence }), dispose: () => { disposed += 1; } };
@@ -1572,7 +1627,7 @@ for (const shutdown of ["stop", "handoff"] as const) test(`daemon captures only 
     }
     assert.equal(disposed, 1, "capture close and stream teardown must not dispose the same native subscription twice");
     latestSequence = 3;
-    listener!({ sourceId: "source-live", sequence: 3, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+    listener!({ sourceId: "source-live", sequence: 3, observedAtMs: Date.now(), nativeProcessPid: 7123, nativeProcessIdentity: "observed-birth",
       fact: { domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" } });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal((env.internals.executionCapture as unknown as { database: DatabaseSync }).database.isOpen, false);
@@ -1591,7 +1646,7 @@ for (const shutdown of ["stop", "handoff"] as const) test(`daemon ${shutdown} do
   try {
     await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
     await eventually(async () => subscriptions === 1, "pending native subscription starts");
-    const event: NativeExecutionObservation = { sourceId: "source-late", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+    const event: NativeExecutionObservation = { sourceId: "source-late", sequence: 1, observedAtMs: Date.now(), nativeProcessPid: 7123, nativeProcessIdentity: "observed-birth",
       fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } };
     listener!(event);
     if (shutdown === "stop") await within(env.daemon.stop(), "stop with unresolved optional subscription", 1000);
@@ -1620,7 +1675,7 @@ for (const failure of ["observer_rejection", "storage_closed"] as const) test(`o
   const env = await observationDaemonFixture(async (_handle, callback) => {
     subscriptions += 1;
     if (failure === "observer_rejection") throw new Error("optional observer refused");
-    callback({ sourceId: "source-storage", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+    callback({ sourceId: "source-storage", sequence: 1, observedAtMs: Date.now(), nativeProcessPid: 7123, nativeProcessIdentity: "observed-birth",
       fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } });
     return { sourceId: "source-storage", position: () => ({ firstRetainedSequence: 1, latestSequence: 1 }), dispose: () => {} };
   });
@@ -1659,7 +1714,7 @@ test("a stream installation that completes after daemon stop cannot restart its 
     assert.equal(disposed, 1, "stop disposes the already-installed optional subscription synchronously");
     release();
     await installing;
-    observe({ sourceId: "source-early-installed", sequence: 1, observedAtMs: Date.now(), nativeProcessIdentity: "observed-birth",
+    observe({ sourceId: "source-early-installed", sequence: 1, observedAtMs: Date.now(), nativeProcessPid: 7123, nativeProcessIdentity: "observed-birth",
       fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" } });
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(subscriptions, 1, "late stream completion must not start another optional subscription");
@@ -1734,46 +1789,30 @@ test("daemon is visibly gated to macOS", () => {
 });
 
 test("failed room waits remain retryable for one healthy provider execution", async () => {
-  const env = await fixture();
-  const paths = {
-    lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"),
-    auditPath: join(env.root, "audit.jsonl"),
-    workerBindingsPath: join(env.root, "worker-bindings.json"),
-  };
-  const daemon = new SupervisorDaemon(paths, "darwin");
+  const env = await observationDaemonFixture(async () => ({
+    sourceId: "source-room-wait", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => {},
+  }));
   try {
-    await daemon.start();
-    assert.equal((await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: { ...entry, id: "terminal_stream", provider: "codex", observed_state: "working" },
-    })).ok, true);
-    const handle = {
-      workAttemptId: "attempt_exact",
-      pid: 4100,
-      providerContinuationId: "thread_exact",
-      providerConnection: null,
-      observedState: "failed" as const,
-    };
-    const internals = daemon as unknown as {
-      liveHandles: Map<string, typeof handle>;
+    env.handle.observedState = "failed";
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    const handle = env.handle;
+    const internals = env.daemon as unknown as {
       handleProviderStream: (entryId: string, providerHandle: typeof handle, event: {
         workAttemptId: string; providerContinuationId: string; observedAt: string; sequence: number;
         provider: string; kind: string; method: string; summary?: string | null; payload: unknown; payloadTruncated: boolean;
         payloadRedacted: boolean; durablePayloadRef: null;
       }) => Promise<void>;
     };
-    internals.liveHandles.set("terminal_stream", handle);
     const base = {
-      workAttemptId: "attempt_exact",
-      providerContinuationId: "thread_exact",
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!,
       observedAt: new Date().toISOString(),
       provider: "codex",
       payloadTruncated: false,
       payloadRedacted: false,
       durablePayloadRef: null,
     };
-    await internals.handleProviderStream("terminal_stream", handle, {
+    await internals.handleProviderStream(env.id, handle, {
       ...base,
       sequence: 1,
       kind: "item_lifecycle",
@@ -1785,22 +1824,24 @@ test("failed room waits remain retryable for one healthy provider execution", as
         },
       },
     });
-    let current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
+    let current = await env.internals.store.getEntry(env.id);
+    assert.ok(current);
     assert.equal(current.observed_state, "idle");
     assert.equal(current.activity?.at(-1)?.status, "idle");
 
-    await internals.handleProviderStream("terminal_stream", handle, {
+    await internals.handleProviderStream(env.id, handle, {
       ...base,
       sequence: 2,
       kind: "text_delta",
       method: "item/agentMessage/delta",
       payload: { delta: "late evidence" },
     });
-    current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
+    current = await env.internals.store.getEntry(env.id);
+    assert.ok(current);
     assert.equal(current.observed_state, "working", "the same healthy execution continues after a retryable wait failure");
     assert.equal(current.activity?.at(-1)?.status, "working");
 
-    await internals.handleProviderStream("terminal_stream", handle, {
+    await internals.handleProviderStream(env.id, handle, {
       ...base,
       sequence: 3,
       kind: "text_delta",
@@ -1814,13 +1855,14 @@ test("failed room waits remain retryable for one healthy provider execution", as
         delta: "Checking the durable room delivery path.",
       },
     });
-    current = (await new ManifestStore(paths.manifestPath).load()).entries[0]!;
+    current = await env.internals.store.getEntry(env.id);
+    assert.ok(current);
     assert.equal(
       current.activity?.at(-1)?.summary,
       "Checking the durable room delivery path.",
       "the daemon preserves the provider-approved display summary instead of replacing it with a protocol method",
     );
-    await internals.handleProviderStream("terminal_stream", handle, {
+    await internals.handleProviderStream(env.id, handle, {
       ...base,
       sequence: 4,
       kind: "text_delta",
@@ -1833,8 +1875,8 @@ test("failed room waits remain retryable for one healthy provider execution", as
         delta: "private chain of thought must never enter Live",
       },
     });
-    const live = (await daemonRequest(paths.socketPath, "supervisor.watch_agent_stream", {
-      entry_id: "terminal_stream", after_sequence: 0, wait_ms: 0,
+    const live = (await daemonRequest(env.paths.socketPath, "supervisor.watch_agent_stream", {
+      entry_id: env.id, after_sequence: 0, wait_ms: 0,
     })).result as { events: Array<{ method: string; summary: string | null }> };
     assert.deepEqual(
       live.events.map((event) => event.method),
@@ -1844,33 +1886,22 @@ test("failed room waits remain retryable for one healthy provider execution", as
     assert.equal(live.events[1]?.summary, "Checking the durable room delivery path.");
     assert.doesNotMatch(JSON.stringify(live), /private chain of thought/);
   } finally {
-    await daemon.stop().catch(() => undefined);
     await env.cleanup();
   }
 });
 
 test("daemon keeps empty wait results idle across the real stream handler and restart", async () => {
-  const env = await fixture();
-  const paths = {
-    lockPath: join(env.root, "daemon.lock"),
-    socketPath: join(env.root, "daemon.sock"),
-    manifestPath: join(env.root, "manifest.json"),
-    auditPath: join(env.root, "audit.jsonl"),
-  };
-  const handle = {
-    workAttemptId: "attempt_poll",
-    pid: 4200,
-    providerContinuationId: "claude_poll",
-    providerConnection: null,
-    observedState: "working" as const,
-  };
+  const env = await observationDaemonFixture(async () => ({
+    sourceId: "source-quiet-poll", position: () => ({ firstRetainedSequence: 1, latestSequence: 0 }), dispose: () => {},
+  }), "claude-code");
+  const { paths, handle } = env;
   type StreamEvent = {
     workAttemptId: string; providerContinuationId: string; observedAt: string; sequence: number;
     provider: string; kind: string; method: string; payload: unknown; payloadTruncated: boolean;
     payloadRedacted: boolean; durablePayloadRef: null;
   };
   type StreamInternals = {
-    liveHandles: Map<string, typeof handle>;
+    providerStreams: ProviderStreamCoordinator;
     workerRuntimeCustody: WorkerRuntimeCustody;
     handleProviderStream: (entryId: string, providerHandle: typeof handle, event: StreamEvent) => Promise<void>;
     publishNativeActivity: (entryId: string, method: string, status: "working" | "idle") => Promise<boolean>;
@@ -1905,43 +1936,26 @@ test("daemon keeps empty wait results idle across the real stream handler and re
       content: [{ type: "text", text: JSON.stringify({ messages, room_id: "focus_37" }) }],
     }] },
   });
-  const install = (daemon: SupervisorDaemon, published: Array<"working" | "idle">): StreamInternals => {
+  const install = async (daemon: SupervisorDaemon, published: Array<"working" | "idle">): Promise<StreamInternals> => {
     const internals = daemon as unknown as StreamInternals;
-    internals.liveHandles.set("quiet_poll", handle);
-    internals.workerRuntimeCustody.installLiveBinding("quiet_poll", {
+    await internals.providerStreams.install(env.id, handle, env.generation, () => false);
+    internals.workerRuntimeCustody.installLiveBinding(env.id, {
       agentSessionId: "session-poll",
-      executionGenerationId: "generation-poll",
+      executionGenerationId: env.generation,
       updatedAt: new Date().toISOString(),
     });
     internals.publishNativeActivity = async (_entryId, _method, status) => { published.push(status); return true; };
     return internals;
   };
 
-  const first = new SupervisorDaemon(paths, "darwin");
+  const first = env.daemon;
   let second: SupervisorDaemon | null = null;
   try {
-    await first.start();
-    await daemonRequest(paths.socketPath, "manifest.put", {
-      entry: {
-        ...entry,
-        id: "quiet_poll",
-        room_id: "focus_37",
-        provider: "claude-code",
-        desired_state: "paused",
-        work_attempt_id: handle.workAttemptId,
-        provider_ref: {
-          work_attempt_id: handle.workAttemptId,
-          provider_continuation_id: handle.providerContinuationId,
-          provider_connection: null,
-          execution_generation_id: "generation-poll",
-        },
-      },
-    });
     const published: Array<"working" | "idle"> = [];
-    const firstInternals = install(first, published);
-    await firstInternals.handleProviderStream("quiet_poll", handle, wait("wait_1"));
-    await firstInternals.handleProviderStream("quiet_poll", handle, result("wait_1", []));
-    await firstInternals.handleProviderStream("quiet_poll", handle, event("assistant", {
+    const firstInternals = await install(first, published);
+    await firstInternals.handleProviderStream(env.id, handle, wait("wait_1"));
+    await firstInternals.handleProviderStream(env.id, handle, result("wait_1", []));
+    await firstInternals.handleProviderStream(env.id, handle, event("assistant", {
       type: "assistant", message: { content: [{ type: "thinking", thinking: "provider-internal handoff" }] },
     }));
     assert.deepEqual(published, ["idle", "idle", "idle"], "empty Claude wait lifecycle never flips room presence to working");
@@ -1949,8 +1963,8 @@ test("daemon keeps empty wait results idle across the real stream handler and re
     assert.equal(projection.observed_state, "idle");
     assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
 
-    await firstInternals.handleProviderStream("quiet_poll", handle, wait("wait_2"));
-    await firstInternals.handleProviderStream("quiet_poll", handle, result("wait_2", [{ id: "msg_12", text: "please review" }]));
+    await firstInternals.handleProviderStream(env.id, handle, wait("wait_2"));
+    await firstInternals.handleProviderStream(env.id, handle, result("wait_2", [{ id: "msg_12", text: "please review" }]));
     assert.equal(published.at(-1), "working", "a nonempty addressed wait result remains visible work");
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "working");
@@ -1983,9 +1997,9 @@ test("daemon keeps empty wait results idle across the real stream handler and re
       turnId: "turn_codex",
       completedAtMs: Date.now(),
     });
-    await firstInternals.handleProviderStream("quiet_poll", handle, codexStarted);
-    await firstInternals.handleProviderStream("quiet_poll", handle, codexProgress);
-    await firstInternals.handleProviderStream("quiet_poll", handle, codexCompleted);
+    await firstInternals.handleProviderStream(env.id, handle, codexStarted);
+    await firstInternals.handleProviderStream(env.id, handle, codexProgress);
+    await firstInternals.handleProviderStream(env.id, handle, codexCompleted);
     assert.deepEqual(published.slice(-3), ["idle", "idle", "idle"], "real Codex start, progress, and empty/silent completion stay idle");
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.deepEqual(projection.activity?.slice(-3).map((activity) => activity.status), ["idle", "idle", "idle"]);
@@ -2005,20 +2019,20 @@ test("daemon keeps empty wait results idle across the real stream handler and re
         durationMs: 1,
       },
     });
-    await firstInternals.handleProviderStream("quiet_poll", handle, addressedStarted);
-    await firstInternals.handleProviderStream("quiet_poll", handle, addressedCompleted);
+    await firstInternals.handleProviderStream(env.id, handle, addressedStarted);
+    await firstInternals.handleProviderStream(env.id, handle, addressedCompleted);
     assert.deepEqual(published.slice(-2), ["idle", "working"], "a real addressed Codex completion wakes the work indicator");
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "working");
     assert.equal(projection.activity?.at(-1)?.status, "working");
 
-    await firstInternals.handleProviderStream("quiet_poll", handle, wait("wait_restart"));
+    await firstInternals.handleProviderStream(env.id, handle, wait("wait_restart"));
     await first.stop();
-    second = new SupervisorDaemon(paths, "darwin");
+    second = new SupervisorDaemon(paths, "darwin", env.port, false);
     await second.start();
     const afterRestart: Array<"working" | "idle"> = [];
-    const secondInternals = install(second, afterRestart);
-    await secondInternals.handleProviderStream("quiet_poll", handle, result("wait_restart", []));
+    const secondInternals = await install(second, afterRestart);
+    await secondInternals.handleProviderStream(env.id, handle, result("wait_restart", []));
     assert.deepEqual(afterRestart, ["idle"], "persisted wait correlation survives a daemon restart mid-poll");
     projection = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]!;
     assert.equal(projection.observed_state, "idle");
@@ -2803,7 +2817,7 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
   let releaseCommit!: () => void;
   const commitGate = new Promise<void>((resolve) => { releaseCommit = resolve; });
   let gated = false;
-  let providerRefReplaceCalls = 0;
+  let providerBirthCheckpointCalls = 0;
   let handoffRequested = false;
   let retirementConflictInjected = false;
   let spawns = 0;
@@ -2825,25 +2839,25 @@ test("handoff winning the normal post-dispatch commit falls back to exact retire
     await first.start();
     const store = (first as unknown as { store: ManifestStore }).store;
     const originalReplace = store.replaceEntry.bind(store);
-    store.replaceEntry = async (expected, updated, fence) => {
-      const providerRefWrite = updated.provider_ref?.provider_continuation_id === returnedHandle.providerContinuationId;
-      if (providerRefWrite) providerRefReplaceCalls += 1;
-      if (!gated && providerRefWrite) {
+    const originalCheckpoint = store.checkpointProviderBirth.bind(store);
+    store.checkpointProviderBirth = async (...args) => {
+      providerBirthCheckpointCalls += 1;
+      if (!gated) {
         gated = true;
         commitEntered();
         await commitGate;
       }
-      if (providerRefReplaceCalls >= 2 && handoffRequested && !retirementConflictInjected && providerRefWrite) {
+      if (providerBirthCheckpointCalls >= 2 && handoffRequested && !retirementConflictInjected) {
         retirementConflictInjected = true;
         const admitted = await store.getEntry(id);
         assert(admitted);
         // Charter is Inspector-owned configuration and must survive unrelated
         // lifecycle replacement. Use profile metadata to model the admitted
         // concurrent mutation this handoff fallback must preserve.
-        await originalReplace(expected, { ...admitted, display_name: `${admitted.display_name} admitted-before-handoff` }, async (commit) => commit());
+        await originalReplace(args[0], { ...admitted, display_name: `${admitted.display_name} admitted-before-handoff` }, async (commit) => commit());
         throw new ManifestConflictError("injected admitted mutation advanced the manifest generation");
       }
-      return originalReplace(expected, updated, fence);
+      return originalCheckpoint(...args);
     };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id, provider: "claude-code", observed_state: "absent",
@@ -2910,14 +2924,14 @@ test("pause and stop at the normal post-dispatch commit fence the exact returned
     try {
       await daemon.start();
       const store = (daemon as unknown as { store: ManifestStore }).store;
-      const originalReplace = store.replaceEntry.bind(store);
-      store.replaceEntry = async (expected, updated, fence) => {
-        if (!gated && updated.provider_ref?.provider_continuation_id === returnedHandle.providerContinuationId) {
+      const originalCheckpoint = store.checkpointProviderBirth.bind(store);
+      store.checkpointProviderBirth = async (...args) => {
+        if (!gated) {
           gated = true;
           commitEntered();
           await commitGate;
         }
-        return originalReplace(expected, updated, fence);
+        return originalCheckpoint(...args);
       };
       await daemonRequest(paths.socketPath, "manifest.put", { entry: {
         ...entry, id, provider: "claude-code", observed_state: "absent",
@@ -2974,13 +2988,7 @@ test("fatal returned-handle journal and stop failure rejects handoff before ackn
   try {
     await daemon.start();
     const store = (daemon as unknown as { store: ManifestStore }).store;
-    const originalReplace = store.replaceEntry.bind(store);
-    store.replaceEntry = async (expected, updated, fence) => {
-      if (updated.provider_ref?.provider_continuation_id === returnedHandle.providerContinuationId) {
-        throw new Error("injected provider journal failure");
-      }
-      return originalReplace(expected, updated, fence);
-    };
+    store.checkpointProviderBirth = async () => { throw new Error("injected provider journal failure"); };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id, provider: "claude-code", observed_state: "absent",
       workspace_path: attempt.workspace_path, work_attempt_id: attempt.work_attempt_id,
@@ -5073,9 +5081,18 @@ test("handoff observer cleanup failures still release socket, singleton, and SQL
   try {
     await first.start();
     (first as unknown as {
-      providerStreams: { liveDisposers: Map<string, Array<() => void>> };
-    }).providerStreams.liveDisposers
-      .set("throws", [() => { throw new Error("injected observer disposal failure"); }]);
+      providerStreams: {
+        listenerLeases: Map<string, {
+          handle: unknown;
+          executionGenerationId: string;
+          disposers: Array<() => void>;
+        }>;
+      };
+    }).providerStreams.listenerLeases.set("throws", {
+      handle: {},
+      executionGenerationId: "generation-injected",
+      disposers: [() => { throw new Error("injected observer disposal failure"); }],
+    });
     const handoff = first.waitForHandoff();
     assert.equal((await daemonRequest(paths.socketPath, "daemon.prepare_handoff")).ok, true);
     await assert.rejects(within(handoff, "failed handoff completion", 1_000), /handoff cleanup did not complete cleanly/i);
@@ -5930,6 +5947,15 @@ test("credential-only reconnect reattaches the exact OpenCode runtime and checkp
     assert.deepEqual(restored?.provider_ref?.provider_connection, recoveredConnection);
     assert.equal(restored?.provider_ref?.execution_generation_id, execution.execution_generation_id);
     assert.equal(restored?.provider_ref?.provider_continuation_id, handle.providerContinuationId);
+    const internalStore = (daemon as unknown as { store: ManifestStore }).store;
+    const restoredConfiguration = await internalStore.getAgentConfiguration(id);
+    assert.ok(restoredConfiguration);
+    assert.equal(await internalStore.readRuntimeLifecycleAuthority({
+      agentId: id,
+      executionGenerationId: execution.execution_generation_id,
+      providerConnection: recoveredConnection,
+      configurationRevision: restoredConfiguration.runtime_configuration_revision,
+    }), "legacy", "reattach freezes the pre-existing native birth without current-policy inference");
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();
@@ -6743,7 +6769,13 @@ test("handoff destroys open control sockets and fences a mutation paused before 
         getAttempt: (id: string) => Promise<{ execution_generations: Array<{ execution_generation_id: string; terminal: unknown; actor: string; generation: number }> }>;
         recordTerminal: (workAttemptId: string, executionGenerationId: string, terminal: unknown) => Promise<void>;
       };
-      handleProviderTerminal: (entryId: string, handle: typeof staleHandle, executionGenerationId: string, binding: { agentSessionId: string; executionGenerationId: string; updatedAt: string }, terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "stopped"; providerContinuationId: string }) => Promise<void>;
+      providerTerminals: { observeExit(
+        entryId: string,
+        terminal: { endedAt: string; exitCode: number | null; signal: string | null; terminalCause: "stopped"; providerContinuationId: string },
+        actor: string,
+        expectedExecutionGenerationId: string,
+        expectedHandle: typeof staleHandle,
+      ): Promise<void> };
     };
     replacementInternals.liveHandles.set("binding_race", staleHandle);
     const predecessorIdentity = {
@@ -6771,9 +6803,9 @@ test("handoff destroys open control sockets and fences a mutation paused before 
       }
       return originalReplacementLoad();
     };
-    const staleTerminal = replacementInternals.handleProviderTerminal("binding_race", staleHandle, "execution_old", predecessorIdentity, {
+    const staleTerminal = replacementInternals.providerTerminals.observeExit("binding_race", {
       endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: "continuation_old",
-    });
+    }, "daemon-provider", "execution_old", staleHandle);
     await terminalLoadReached;
     const successorBinding = await replacementBindings.bind({
       entry_id: "binding_race", room_id: "focus_37", work_attempt_id: "attempt_new",
