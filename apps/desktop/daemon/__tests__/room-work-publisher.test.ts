@@ -37,7 +37,7 @@ async function fixture(t: TestContext) {
   const capture = new ExecutionShadowStore(db);
   const receipts = new RoomWorkPublicationStore(db);
   capture.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: "runtime",
-    provider: "codex", configRevision: 1, createdAtMs: 100 });
+    provider: "codex", authorityMode: "typed_shadow", configRevision: 1, createdAtMs: 100 });
   const observer = capture.bindObserver({ agentId: "agent", subjectRuntimeGenerationId: "runtime", observerRuntimeGenerationId: "runtime",
     sourceId: "source", daemonGenerationId: "1", expectedEpoch: 0, boundAtMs: 100 });
   const sent: RoomWorkPublishInput[] = [];

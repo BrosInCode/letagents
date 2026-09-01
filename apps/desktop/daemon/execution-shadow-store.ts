@@ -6,6 +6,7 @@ import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgent
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
+import { isTypedCaptureAuthority, lifecycleAuthorityModeSchema, type LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
 import { LifecycleProjectionLedger, type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
   type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
@@ -13,7 +14,8 @@ type Row = Record<string, string | number | null>;
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
 const runtimeInput = z.strictObject({
   agentId: id, executionGenerationId: id, runtimeGenerationId: id,
-  provider: z.enum(["codex", "claude-code", "cursor", "open-model"]), configRevision: time.min(1), createdAtMs: time,
+  provider: z.enum(["codex", "claude-code", "cursor", "open-model"]), authorityMode: lifecycleAuthorityModeSchema,
+  configRevision: time.min(1), createdAtMs: time,
 });
 const attemptInput = z.strictObject({ agentId: id, roomId: id, sourceMessageId: id, executionGenerationId: id, workspaceId: id, createdAtMs: time });
 const turnInput = z.strictObject({
@@ -92,7 +94,7 @@ export function executionStorageIdentity(kind: string, ...identity: string[]): s
 export function materializeExecutionIdentity(database: DatabaseSync, value: {
   runtime: z.input<typeof runtimeInput>; message: z.input<typeof attemptInput>;
   turn: Omit<z.input<typeof turnInput>, "attemptId">;
-}): void {
+}): LifecycleAuthorityMode {
   const runtime = validated(runtimeInput, value.runtime);
   const message = validated(attemptInput, value.message);
   const turn = validated(turnInput.omit({ attemptId: true }), value.turn);
@@ -101,9 +103,10 @@ export function materializeExecutionIdentity(database: DatabaseSync, value: {
     || runtime.runtimeGenerationId !== turn.runtimeGenerationId || message.roomId !== turn.roomId) {
     throw new ExecutionProtocolError("identity_mismatch");
   }
-  materializeRuntime(database, runtime);
+  const authorityMode = materializeRuntime(database, runtime);
   const attemptId = materializeMessage(database, message);
   materializeTurn(database, { ...turn, attemptId });
+  return authorityMode;
 }
 
 function exactRow(database: DatabaseSync, table: string, key: string, value: string,
@@ -117,16 +120,23 @@ function insertIdentity(database: DatabaseSync, table: string, fields: Record<st
   database.prepare(`INSERT INTO ${table}(${Object.keys(fields).join(",")}) VALUES(${Object.keys(fields).map(() => "?").join(",")})`)
     .run(...Object.values(fields));
 }
-function materializeRuntime(database: DatabaseSync, input: z.output<typeof runtimeInput>): void {
+/** First exact materialization freezes authority; later policy requests can only observe it. */
+function materializeRuntime(database: DatabaseSync, input: z.output<typeof runtimeInput>): LifecycleAuthorityMode {
   if (!exactRow(database, "execution_generations", "execution_generation_id", input.executionGenerationId, { agent_id: input.agentId })) {
     insertIdentity(database, "execution_generations", { execution_generation_id: input.executionGenerationId, agent_id: input.agentId, created_at_ms: input.createdAtMs });
   }
   const fields = { runtime_generation_id: input.runtimeGenerationId, execution_generation_id: input.executionGenerationId,
     agent_id: input.agentId, provider: input.provider, config_revision: input.configRevision };
-  if (!exactRow(database, "execution_runtime_generations", "runtime_generation_id", input.runtimeGenerationId, fields)) {
-    insertIdentity(database, "execution_runtime_generations", { ...fields, authority_mode: "typed_shadow", runtime_state: "starting",
-      control_state: "connecting", continuation_state: "available", created_at_ms: input.createdAtMs });
+  const existing = database.prepare("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?").get(input.runtimeGenerationId);
+  if (existing) {
+    if (Object.entries(fields).some(([column, expected]) => existing[column] !== expected)) throw new ExecutionProtocolError("identity_mismatch");
+    const authorityMode = lifecycleAuthorityModeSchema.safeParse(existing.authority_mode);
+    if (!authorityMode.success) throw new ExecutionProtocolError("identity_mismatch");
+    return authorityMode.data;
   }
+  insertIdentity(database, "execution_runtime_generations", { ...fields, authority_mode: input.authorityMode, runtime_state: "starting",
+    control_state: "connecting", continuation_state: "available", created_at_ms: input.createdAtMs });
+  return input.authorityMode;
 }
 function materializeMessage(database: DatabaseSync, input: z.output<typeof attemptInput>): string {
   const attempt = database.prepare("SELECT attempt_id FROM execution_message_attempts WHERE agent_id=? AND room_id=? AND source_message_id=?")
@@ -258,13 +268,9 @@ export class ExecutionShadowStore {
       .run(...Object.values(row));
   }
 
-  registerRuntime(value: z.input<typeof runtimeInput>): void {
+  registerRuntime(value: z.input<typeof runtimeInput>): LifecycleAuthorityMode {
     const input = validated(runtimeInput, value);
-    this.transaction(() => {
-      const existing = this.row("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?", input.runtimeGenerationId);
-      if (existing && existing.authority_mode !== "typed_shadow") throw new ExecutionProtocolError("identity_mismatch");
-      materializeRuntime(this.database, input);
-    });
+    return this.transaction(() => materializeRuntime(this.database, input));
   }
 
   trackMessage(value: z.input<typeof attemptInput>): string {
@@ -296,7 +302,7 @@ export class ExecutionShadowStore {
         return;
       }
       if (attempt.state !== "active") throw new ExecutionProtocolError("attempt_settled");
-      if (runtime.runtime_state === "exited" || runtime.authority_mode !== "typed_shadow"
+      if (runtime.runtime_state === "exited" || !isTypedCaptureAuthority(runtime.authority_mode)
         || this.row("SELECT 1 FROM execution_turns WHERE agent_id=? AND state IN ('none','active','lost')", input.agentId)) {
         throw new ExecutionProtocolError("invalid_transition");
       }
@@ -314,7 +320,9 @@ export class ExecutionShadowStore {
     const token = this.transaction((): ShadowObserver => {
       const subject = this.required("SELECT * FROM execution_runtime_generations WHERE agent_id=? AND runtime_generation_id=?", input.agentId, input.subjectRuntimeGenerationId);
       const observer = this.required("SELECT * FROM execution_runtime_generations WHERE agent_id=? AND runtime_generation_id=?", input.agentId, input.observerRuntimeGenerationId);
-      if (observer.runtime_state === "exited" || observer.authority_mode !== "typed_shadow" || subject.authority_mode !== "typed_shadow"
+      // Cursor recovery may observe a shadow-born turn from a typed-born child
+      // (or the reverse); each exact runtime keeps its own frozen authority.
+      if (observer.runtime_state === "exited" || !isTypedCaptureAuthority(observer.authority_mode) || !isTypedCaptureAuthority(subject.authority_mode)
         || observer.provider !== subject.provider) throw new ExecutionProtocolError("identity_mismatch");
       if (input.recovery) {
         this.required(`SELECT 1 FROM execution_turns WHERE turn_id=? AND agent_id=? AND execution_generation_id=?
