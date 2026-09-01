@@ -23,7 +23,12 @@ import { resolveLetAgentsMcpRuntime, type LetAgentsMcpRuntime } from "./letagent
 import { writeCodexSupervisorBridgeContext } from "./codex-supervisor-bridge-context.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import { rentalCredentialIsolationMarker } from "./rental-child-environment.js";
-import { ProviderExecutionObserver, nativeExecutionId, nativeLifecycleCheckpointId } from "./provider-execution-observer.js";
+import {
+  ProviderExecutionObserver,
+  nativeExecutionId,
+  nativeLifecycleCheckpoint,
+  type NativeLifecycleCheckpoint,
+} from "./provider-execution-observer.js";
 import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 import {
   summarizeCodexRuntimeNotification,
@@ -1762,7 +1767,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle: CodexProviderHandle,
     notification: RpcNotification,
   ): void {
-    const nativeEventId = this.observeNativeExecution(handle, notification);
+    const nativeLifecycle = this.observeNativeExecution(handle, notification);
     handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
@@ -1777,12 +1782,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // approved summaryTextDelta stream is accumulated here; raw reasoning
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
     const summary = summarizeCodexRuntimeNotification(notification);
-    const nativeLifecyclePhase = nativeEventId
-      ? notification.method === "turn/started" ? "turn_active" as const
-        : notification.method === "turn/completed" ? "turn_terminal" as const : null
-      : null;
     this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary,
-      nativeEventId, nativeLifecyclePhase);
+      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
     const lifecycle = isCodexExecutionMethod(notification.method) ? null
@@ -1802,7 +1803,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private observeNativeExecution(handle: CodexProviderHandle, notification: RpcNotification): string | null {
+  private observeNativeExecution(handle: CodexProviderHandle, notification: RpcNotification): NativeLifecycleCheckpoint | null {
     const params = recordValue(notification.params);
     if (!params || params.threadId !== handle.providerContinuationId || !nativeExecutionId(params.threadId)) return null;
     const turn = recordValue(params.turn);
@@ -1823,7 +1824,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
     };
     if (notification.method === "turn/started") {
-      const nativeEventId = nativeLifecycleCheckpointId({
+      const nativeLifecycle = nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
         phase: "turn_active",
@@ -1831,13 +1832,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
         providerTurnId,
       });
       emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
-      emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", nativeEventId });
-      return nativeEventId;
+      emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+        nativeEventId: nativeLifecycle.nativeEventId });
+      return nativeLifecycle;
     }
     if (notification.method === "turn/completed") {
       const outcome = turn?.status;
       if (outcome === "completed" || outcome === "failed" || outcome === "interrupted") {
-        const nativeEventId = nativeLifecycleCheckpointId({
+        const nativeLifecycle = nativeLifecycleCheckpoint({
           provider: this.id,
           workAttemptId: handle.workAttemptId,
           phase: "turn_terminal",
@@ -1845,8 +1847,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
           providerTurnId,
           terminalDiscriminator: outcome,
         });
-        emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome, sideEffects: "none", nativeEventId });
-        return nativeEventId;
+        emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
+          sideEffects: "none", nativeEventId: nativeLifecycle.nativeEventId });
+        return nativeLifecycle;
       }
       return null;
     }

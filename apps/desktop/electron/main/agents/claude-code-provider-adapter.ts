@@ -33,7 +33,12 @@ import {
   type ControlProbeResult,
 } from "./provider-adapter.js";
 import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
-import { nativeExecutionId, nativeLifecycleCheckpointId, ProviderExecutionObserver } from "./provider-execution-observer.js";
+import {
+  nativeExecutionId,
+  nativeLifecycleCheckpoint,
+  ProviderExecutionObserver,
+  type NativeLifecycleCheckpoint,
+} from "./provider-execution-observer.js";
 import { attestProviderSpawnPolicy } from "./provider-spawn-configuration.js";
 import {
   isRentalCredentialIsolationRequested,
@@ -539,7 +544,7 @@ class ClaudeProviderHandle implements ProviderHandle {
   executionTurnId: string | null = null;
   executionTurnStarted = false;
   executionTerminalCheckpoint: {
-    providerTurnId: string; subtype: string; isError: boolean; nativeEventId: string;
+    providerTurnId: string; subtype: string; isError: boolean; nativeLifecycle: NativeLifecycleCheckpoint;
   } | null = null;
   readonly executionTools = new Map<string, { operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"]; completed: boolean }>();
   executionExitObserved = false;
@@ -1160,12 +1165,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "stdout/raw", { line }, "provider_event");
       return;
     }
-    const nativeEventId = this.observeNativeExecution(handle, message);
-    const nativeLifecyclePhase = nativeEventId
-      ? message.type === "command_lifecycle" ? "turn_active" as const
-        : message.type === "result" ? "turn_terminal" as const : null
-      : null;
-    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message), nativeEventId, nativeLifecyclePhase);
+    const nativeLifecycle = this.observeNativeExecution(handle, message);
+    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message),
+      nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
@@ -1243,13 +1245,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private observeNativeExecution(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): string | null {
+  private observeNativeExecution(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): NativeLifecycleCheckpoint | null {
     const replay = handle.executionTerminalCheckpoint;
     if (message.type === "result" && replay
       && message.session_id === handle.providerContinuationId
       && message.user_message_uuid === replay.providerTurnId
       && message.subtype === replay.subtype
-      && message.is_error === replay.isError) return replay.nativeEventId;
+      && message.is_error === replay.isError) {
+      return replay.nativeLifecycle;
+    }
     const turnId = handle.executionTurnId;
     if (!turnId || message.session_id !== handle.providerContinuationId
       || !nativeExecutionId(handle.providerContinuationId)) return null;
@@ -1259,7 +1263,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     // command_uuid names the user turn, never a shell command. Only an exact
     // native started event proves receipt; writing stdin alone is insufficient.
     if (message.type === "command_lifecycle" && message.command_uuid === turnId && message.state === "started") {
-      const nativeEventId = nativeLifecycleCheckpointId({
+      const nativeLifecycle = nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
         phase: "turn_active",
@@ -1269,13 +1273,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       if (!handle.executionTurnStarted) {
         handle.executionTurnStarted = true;
         emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
-        emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", nativeEventId, ...turn });
+        emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+          nativeEventId: nativeLifecycle.nativeEventId, ...turn });
       }
-      return nativeEventId;
+      return nativeLifecycle;
     } else if (message.type === "result" && message.user_message_uuid === turnId) {
       if (typeof message.subtype !== "string" || !message.subtype
         || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return null;
-      const nativeEventId = nativeLifecycleCheckpointId({
+      const nativeLifecycle = nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
         phase: "turn_terminal",
@@ -1284,19 +1289,19 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
       });
       emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...turn,
-        nativeEventId,
+        nativeEventId: nativeLifecycle.nativeEventId,
         turnOutcome: message.subtype === "success" && message.is_error === false ? "completed"
           : message.subtype === "interrupted" ? "interrupted" : "failed" });
       handle.executionTerminalCheckpoint = {
         providerTurnId: turnId,
         subtype: message.subtype,
         isError: message.is_error === true,
-        nativeEventId,
+        nativeLifecycle,
       };
       handle.executionTurnId = null;
       handle.executionTurnStarted = false;
       handle.executionTools.clear();
-      return nativeEventId;
+      return nativeLifecycle;
     } else if (handle.executionTurnStarted && (message.type === "assistant" || message.type === "user")
       && message.parent_tool_use_id == null) {
       // Tool messages carry session/tool identity, not the caller's turn UUID.
