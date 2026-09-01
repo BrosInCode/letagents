@@ -921,12 +921,14 @@ function handleRoomStreamFrame(
   if (eventName === "resource_invalidation_v1") {
     const keys = Object.keys(payload).sort();
     const payloadRoomIdentifier = payload.room_id;
+    const resource = payload.resource;
     if (
       keys.length !== 2
       || keys[0] !== "resource"
       || keys[1] !== "room_id"
       || !isValidStreamRoomIdentifier(payloadRoomIdentifier)
-      || payload.resource !== "agent_work"
+      || typeof resource !== "string"
+      || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(resource)
       || payloadRoomIdentifier !== (
         activeRoomStream?.roomIdentifier === roomIdentifier
           ? activeRoomStream.canonicalRoomIdentifier ?? roomIdentifier
@@ -937,11 +939,13 @@ function handleRoomStreamFrame(
       return;
     }
     stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
-    emitRoomStreamEvent({
-      type: "resource_invalidation",
-      roomIdentifier: payloadRoomIdentifier,
-      resource: "agent_work",
-    }, { deliverToManagedAgents: false });
+    if (resource === "agent_work") {
+      emitRoomStreamEvent({
+        type: "resource_invalidation",
+        roomIdentifier: payloadRoomIdentifier,
+        resource,
+      }, { deliverToManagedAgents: false });
+    }
     return;
   }
 
