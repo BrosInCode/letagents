@@ -167,7 +167,7 @@ test("a crash after native Stop quarantines exact A until operator resolution at
       pid,
       providerContinuationId: continuation,
       providerConnection: { kind: "claude_cli" as const, pid, processIdentity: `claude:${pid}` },
-      observedState: () => "working" as const,
+      observedState: "working" as const,
     });
     await internals.putManifestEntry({
       id: entryId, room_id: roomId, display_name: "Claude", provider: "claude-code", model: null, charter: "poll",
@@ -421,7 +421,7 @@ test("a linked prepared crash lets A finish, fences B, then folds the exact corr
   const handle = {
     workAttemptId, pid, providerContinuationId: continuation,
     providerConnection: { kind: "codex_app_server" as const, url: "http://127.0.0.1:7222", pid, processIdentity: `codex:${pid}` },
-    observedState: () => "working" as const,
+    observedState: "working" as const,
   };
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: true, midTurnInjection: false, midTurnCorrection: true, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true, turnControl: "native_interrupt" }),
@@ -537,7 +537,7 @@ test("daemon-inbox native-correction capability still uses pure Stop and preserv
   const handle = {
     workAttemptId, pid, providerContinuationId: continuation,
     providerConnection: { kind: "codex_app_server" as const, url: "http://127.0.0.1:7333", pid, processIdentity: `codex:${pid}` },
-    observedState: () => "working" as const,
+    observedState: "working" as const,
   };
   let proveNotApplied = true;
   const port: ProviderActionPort = {
