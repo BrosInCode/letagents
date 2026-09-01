@@ -360,6 +360,29 @@ test("target-turn checkpoint is fenced by the exact live handle on both sides", 
   assert.equal(harness.providerCalls, 1);
 });
 
+test("a hard runtime failure after provider control cannot be committed as healthy", async () => {
+  for (const [failure, message] of [
+    ["handle_and_durable", /lost its exact healthy runtime at durable commit/],
+    ["handle_only_at_fence", /lost its exact healthy runtime at durable commit/],
+    ["durable_only", /cannot overwrite a concurrent durable runtime transition/],
+  ] as const) {
+    const harness = effectFixture({ runtimeFailureBeforeCommit: failure });
+
+    await assert.rejects(harness.subject.control(turnInput()), message);
+
+    assert.equal(harness.providerCalls, 1, `${failure}: native control completed before the runtime failed`);
+    if (failure !== "handle_only_at_fence") {
+      assert.equal(harness.current.observed_state, "failed", `${failure}: durable runtime failure remains authoritative`);
+    }
+    if (failure !== "durable_only") {
+      assert.equal(harness.runtimeState, "failed", `${failure}: exact handle remains hard-unavailable`);
+    }
+    assert.equal(harness.current.turn_control?.status, "uncertain", `${failure}: dispatched control is not reported as completed`);
+    assert.equal(harness.current.turn_control?.state, null, `${failure}: no stale healthy provider state is journaled`);
+    assert.deepEqual(harness.deliveryDecisions, ["finish:freeze"]);
+  }
+});
+
 test("daemon-inbox correction is stop-then-resend while a legacy lane keeps native correction", async () => {
   const daemonInbox = effectFixture({ deliveryMode: "daemon_inbox" });
   const daemonResult = await daemonInbox.subject.control({ ...turnInput(), correction: "redirect" });
@@ -586,16 +609,18 @@ function effectFixture(options: {
   preparePostCommitError?: boolean;
   commitPostCommitError?: boolean;
   nativeFailure?: "failed" | "interrupted";
+  runtimeFailureBeforeCommit?: "handle_and_durable" | "handle_only_at_fence" | "durable_only";
 } = {}) {
   const deliveryMode = options.deliveryMode ?? "daemon_inbox";
   let current = entry({ delivery_mode: deliveryMode });
   let generation = 7;
+  let runtimeState: "working" | "failed" = "working";
   const handle = {
     workAttemptId: "attempt-1",
     providerContinuationId: "continuation-1",
     providerConnection: null,
     pid: null,
-    observedState: "working" as const,
+    get observedState() { return runtimeState; },
   };
   let activeHandle = handle;
   let providerCalls = 0;
@@ -615,7 +640,15 @@ function effectFixture(options: {
       assertCurrent: async () => undefined,
       manifestGeneration: () => generation,
       setManifestGeneration: (next) => { generation = next; },
-      fenceCommit: async (commit) => commit(),
+      fenceCommit: async (commit) => {
+        if (providerCalls > 0 && options.runtimeFailureBeforeCommit) {
+          if (options.runtimeFailureBeforeCommit !== "durable_only") runtimeState = "failed";
+          if (options.runtimeFailureBeforeCommit !== "handle_only_at_fence") {
+            current = { ...current, observed_state: "failed" };
+          }
+        }
+        await commit();
+      },
     },
     store: {
       getEntry: async () => current,
@@ -668,27 +701,33 @@ function effectFixture(options: {
         }
         return { generation, entry: current };
       },
-      commitTurnControlState: async (_expected, input, buildEntry) => {
-        commits += 1;
-        commitActivations.push(input.activateCorrection);
-        const linkedInboxItemId = deliveryMode === "daemon_inbox" ? "inbox-1" : null;
-        const original = deliveryMode !== "daemon_inbox" ? "none" as const
-          : options.nativeFailure ? "terminal_won" as const : "cancelled" as const;
-        current = buildEntry(current, {
-          original,
-          inboxItemId: linkedInboxItemId,
-          correctionInboxItemId: input.activateCorrection ? "correction-1" : null,
-          providerTurnId: deliveryMode === "daemon_inbox" ? "turn-1" : null,
-        });
-        generation += 1;
-        if (options.commitPostCommitError) throw new Error("commit transport failed after commit");
-        return {
-          generation,
-          entry: current,
-          original,
-          correctionInboxItemId: input.activateCorrection ? "correction-1" : null,
-          providerTurnId: deliveryMode === "daemon_inbox" ? "turn-1" : null,
+      commitTurnControlState: async (_expected, input, buildEntry, commitFence) => {
+        let committed!: Awaited<ReturnType<TurnControlCoordinatorPorts["store"]["commitTurnControlState"]>>;
+        const commit = async () => {
+          commits += 1;
+          commitActivations.push(input.activateCorrection);
+          const linkedInboxItemId = deliveryMode === "daemon_inbox" ? "inbox-1" : null;
+          const original = deliveryMode !== "daemon_inbox" ? "none" as const
+            : options.nativeFailure ? "terminal_won" as const : "cancelled" as const;
+          current = buildEntry(current, {
+            original,
+            inboxItemId: linkedInboxItemId,
+            correctionInboxItemId: input.activateCorrection ? "correction-1" : null,
+            providerTurnId: deliveryMode === "daemon_inbox" ? "turn-1" : null,
+          });
+          generation += 1;
+          committed = {
+            generation,
+            entry: current,
+            original,
+            correctionInboxItemId: input.activateCorrection ? "correction-1" : null,
+            providerTurnId: deliveryMode === "daemon_inbox" ? "turn-1" : null,
+          };
         };
+        if (commitFence) await commitFence(commit);
+        else await commit();
+        if (options.commitPostCommitError) throw new Error("commit transport failed after commit");
+        return committed;
       },
     },
     durability: { getAttempt: async () => attempt() },
@@ -774,6 +813,7 @@ function effectFixture(options: {
   return {
     subject: new TurnControlCoordinator(ports),
     get current() { return current; },
+    get runtimeState() { return runtimeState; },
     get providerCalls() { return providerCalls; },
     get prepares() { return prepares; },
     get commits() { return commits; },

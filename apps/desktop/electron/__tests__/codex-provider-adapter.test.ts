@@ -29,7 +29,7 @@ import type {
   ProviderStreamEvent,
   ProviderTerminalPayload,
 } from "../main/agents/provider-adapter.js";
-import { ProviderContinuationMissingError } from "../main/agents/provider-adapter.js";
+import { ProviderContinuationMissingError, ProviderTurnControlError } from "../main/agents/provider-adapter.js";
 import { ProviderExecutionObserver } from "../main/agents/provider-execution-observer.js";
 import { LETAGENTS_MCP_RUNTIME_VERSION } from "../main/agents/letagents-mcp-runtime.js";
 import type { NativeExecutionObservation, NativeTurnBoundary } from "../../shared/execution-protocol.js";
@@ -846,6 +846,33 @@ test("Codex turn control interrupts the exact turn and resumes the same thread w
   assert.equal(handle.providerContinuationId, "thread-1");
 });
 
+test("Codex turn control cannot clear or act past a genuine runtime failure", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  client.turnStatus = "inProgress";
+  client.requests.length = 0;
+
+  await assert.rejects(adapter.controlTurn!(handle, "Do not dispatch this correction.", {
+    checkpointTurnStarted: async () => {},
+    markDispatched: async () => {
+      client.emit({ method: "thread/status/changed", params: {
+        threadId: handle.providerContinuationId, status: { type: "systemError" },
+      } });
+      await flush();
+    },
+  }), (error: unknown) => error instanceof ProviderTurnControlError
+    && error.turnControlOutcome === "uncertain");
+  assert.equal(handle.observedState(), "failed");
+  assert.equal(client.requests.some((request) => request.method === "turn/interrupt"), false);
+
+  client.turnStatus = "completed";
+  await assert.rejects(adapter.controlTurn!(handle, null), (error: unknown) =>
+    error instanceof ProviderTurnControlError && error.turnControlOutcome === "uncertain");
+  assert.equal(handle.observedState(), "failed");
+});
+
 test("Codex retry never retargets completed A to newer active B", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -1020,6 +1047,134 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
   assert.equal(handle.providerContinuationId, "thread-1", "the bounded delivery retains the original app-server thread");
 });
 
+test("a failed Codex room turn leaves the same runtime available for its successor", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  let turnNumber = 0;
+  const statuses = new Map<string, string>();
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") {
+      const turnId = turnNumber++ === 0 ? "turn-failed" : "turn-successor";
+      statuses.set(turnId, "inProgress");
+      return { turn: { id: turnId } } as T;
+    }
+    if (method === "thread/read") return { thread: {
+      id: handle.providerContinuationId,
+      turns: [...statuses].map(([id, status]) => ({
+        id,
+        status,
+        items: id === "turn-successor"
+          ? [{ type: "agentMessage", phase: "final", text: "Successor completed." }]
+          : [],
+      })),
+    } } as T;
+    return originalRequest<T>(method, params);
+  };
+
+  const failed = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-failed", actionId: "action-failed", sourceMessage: {}, activation: {},
+  }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  await flush();
+  statuses.set("turn-failed", "failed");
+  client.emit({ method: "turn/completed", params: {
+    threadId: handle.providerContinuationId, turnId: "turn-failed", turn: { id: "turn-failed", status: "failed" },
+  } });
+  await assert.rejects(failed, /turn-failed ended failed/);
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(harness.launches[0]?.alive, true);
+
+  const successor = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-successor", actionId: "action-successor", sourceMessage: {}, activation: {},
+  }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  await flush();
+  statuses.set("turn-successor", "completed");
+  client.emit({ method: "turn/completed", params: {
+    threadId: handle.providerContinuationId, turnId: "turn-successor", turn: { id: "turn-successor", status: "completed" },
+  } });
+  assert.deepEqual(await successor, {
+    turnId: "turn-successor", outcome: "reply", text: "Successor completed.", evidence: "transcript",
+  });
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(harness.launches.length, 1, "the successor reuses the same native app-server");
+  assert.deepEqual(harness.signals, []);
+});
+
+test("a runtime failure during the turn checkpoint cannot be cleared by turn settlement", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: "turn-runtime-failure" } } as T;
+    if (method === "thread/read") return { thread: {
+      id: handle.providerContinuationId,
+      turns: [{ id: "turn-runtime-failure", status: "completed", items: [
+        { type: "agentMessage", phase: "final", text: "Turn completed after runtime failure." },
+      ] }],
+    } } as T;
+    return originalRequest<T>(method, params);
+  };
+
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-runtime-failure", actionId: "action-runtime-failure", sourceMessage: {}, activation: {},
+  }, {
+    beforeNativeDispatch: async () => {},
+    checkpointTurnStarted: async () => {
+      client.emit({ method: "thread/status/changed", params: {
+        threadId: handle.providerContinuationId, status: { type: "systemError" },
+      } });
+      await flush();
+    },
+  });
+  await flush();
+  assert.equal(handle.observedState(), "failed");
+  client.emit({ method: "turn/completed", params: {
+    threadId: handle.providerContinuationId,
+    turnId: "turn-runtime-failure",
+    turn: { id: "turn-runtime-failure", status: "completed" },
+  } });
+  assert.deepEqual(await pending, {
+    turnId: "turn-runtime-failure", outcome: "reply",
+    text: "Turn completed after runtime failure.", evidence: "transcript",
+  });
+  assert.equal(handle.observedState(), "failed");
+});
+
+test("a hard runtime failure prevents bounded room-turn dispatch across the durable callback", async () => {
+  for (const failureTiming of ["before", "during-callback"] as const) {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.requests.length = 0;
+    const failRuntime = async () => {
+      client.emit({ method: "thread/status/changed", params: {
+        threadId: handle.providerContinuationId, status: { type: "systemError" },
+      } });
+      await flush();
+    };
+    if (failureTiming === "before") await failRuntime();
+
+    await assert.rejects(adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-${failureTiming}`,
+      actionId: `action-${failureTiming}`,
+      sourceMessage: {},
+      activation: {},
+    }, {
+      beforeNativeDispatch: failureTiming === "during-callback" ? failRuntime : async () => {},
+      checkpointTurnStarted: async () => {},
+    }), /runtime is unavailable/);
+
+    assert.equal(handle.observedState(), "failed");
+    assert.equal(client.requests.some((request) => request.method === "turn/start"), false,
+      `${failureTiming}: no native work starts after hard runtime failure`);
+  }
+});
+
 test("Codex bounded room turn consumes a fast exact terminal cached before its waiter", async () => {
   const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest()); const client = harness.clients[0]!; const originalRequest = client.request.bind(client);
@@ -1182,6 +1337,30 @@ test("Codex repairs a readable-but-not-runnable conversation on the same app-ser
   assert.equal(handle.providerContinuationId, "thread-1-replacement-1");
 });
 
+test("Codex continuation repair cannot replace authority after runtime failure wins the checkpoint race", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  client.markThreadMissing("thread-1");
+
+  await assert.rejects(adapter.repairContinuation!(handle, {
+    workAttemptId: handle.workAttemptId,
+    expectedProviderContinuationId: "thread-1",
+    cwd: "/tmp/letagents-work-attempt",
+    launchPolicy: spawnRequest().launchPolicy,
+  }, {
+    checkpointReplacement: async () => {
+      client.emit({ method: "thread/status/changed", params: {
+        threadId: handle.providerContinuationId, status: { type: "systemError" },
+      } });
+      await flush();
+    },
+  }), /lost exact provider authority/);
+  assert.equal(handle.observedState(), "failed");
+  assert.equal(handle.providerContinuationId, "thread-1", "failed repair cannot install its replacement");
+});
+
 test("Codex reuses a conversation that materializes during the grace window", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -1285,6 +1464,77 @@ test("Codex room-turn recovery returns already-terminal exact output without sta
   const startsBefore = client.requests.filter((request) => request.method === "turn/start").length;
   assert.deepEqual(await adapter.recoverRoomTurn!(handle, { inboxItemId: "inbox-done", providerTurnId: "turn-done" }), { turnId: "turn-done", outcome: "reply", text: "Already durable.", evidence: "transcript" });
   assert.equal(client.requests.filter((request) => request.method === "turn/start").length, startsBefore);
+});
+
+test("Codex room-turn recovery treats an already-failed turn as idle runtime evidence", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  client.emit({ method: "turn/started", params: {
+    threadId: handle.providerContinuationId,
+    turnId: "turn-already-failed",
+    turn: { id: "turn-already-failed", status: "inProgress" },
+  } });
+  await flush();
+  assert.equal(handle.observedState(), "working", "the recovery assertion must prove a working-to-idle transition");
+  const originalRequest = client.request.bind(client);
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") return { thread: {
+      id: handle.providerContinuationId,
+      turns: [{ id: "turn-already-failed", status: "failed" }],
+    } } as T;
+    return originalRequest<T>(method, params);
+  };
+
+  await assert.rejects(adapter.recoverRoomTurn!(handle, {
+    inboxItemId: "inbox-already-failed", providerTurnId: "turn-already-failed",
+  }), /turn-already-failed ended failed/);
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(harness.launches[0]?.alive, true);
+  assert.deepEqual(harness.signals, []);
+});
+
+test("a runtime failure during recovery cannot be cleared by an active or terminal turn", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  let status = "inProgress";
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "thread/read") {
+      client.emit({ method: "thread/status/changed", params: {
+        threadId: handle.providerContinuationId, status: { type: "systemError" },
+      } });
+      await flush();
+      return { thread: {
+        id: handle.providerContinuationId,
+        turns: [{ id: "turn-recovery-runtime-failure", status, items: [
+          { type: "agentMessage", phase: "final", text: "Recovered after runtime failure." },
+        ] }],
+      } } as T;
+    }
+    return originalRequest<T>(method, params);
+  };
+
+  const pending = adapter.recoverRoomTurn!(handle, {
+    inboxItemId: "inbox-recovery-runtime-failure",
+    providerTurnId: "turn-recovery-runtime-failure",
+  });
+  await flush();
+  assert.equal(handle.observedState(), "failed");
+  status = "completed";
+  client.emit({ method: "turn/completed", params: {
+    threadId: handle.providerContinuationId,
+    turnId: "turn-recovery-runtime-failure",
+    turn: { id: "turn-recovery-runtime-failure", status: "completed" },
+  } });
+  assert.deepEqual(await pending, {
+    turnId: "turn-recovery-runtime-failure", outcome: "reply",
+    text: "Recovered after runtime failure.", evidence: "transcript",
+  });
+  assert.equal(handle.observedState(), "failed");
 });
 
 test("Codex room-turn recovery rejects missing and unknown exact turns as ambiguous", async () => {
@@ -2388,7 +2638,7 @@ test("native stream carries accumulated readable reasoning summaries but never r
   );
 });
 
-test("native terminal failure status changes the Codex handle to failed", async () => {
+test("native turn failure leaves the Codex runtime reusable while system failure latches", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
@@ -2398,14 +2648,61 @@ test("native terminal failure status changes the Codex handle to failed", async 
     params: { turn: { status: "failed" } },
   });
   await flush();
-  assert.equal(handle.observedState(), "failed");
+  assert.equal(handle.observedState(), "idle");
 
   harness.clients[0]!.emit({
     method: "thread/status/changed",
-    params: { threadStatus: { type: "systemError" } },
+    params: { threadId: handle.providerContinuationId, status: { type: "systemError" } },
   });
   await flush();
   assert.equal(handle.observedState(), "failed");
+
+  harness.clients[0]!.emit({
+    method: "turn/completed",
+    params: { turn: { status: "completed" } },
+  });
+  await flush();
+  assert.equal(handle.observedState(), "failed", "turn settlement cannot clear process/control failure");
+});
+
+test("Codex spawn cannot clear runtime failure observed before handle admission or initial turn acknowledgement", async () => {
+  const queuedHarness = createHarness();
+  const queuedCreateClient = queuedHarness.dependencies.createRpcClient;
+  const queuedAdapter = new CodexProviderAdapter({ dependencies: {
+    ...queuedHarness.dependencies,
+    createRpcClient: (serverUrl, notify) => {
+      const client = queuedCreateClient(serverUrl, notify) as FakeRpc;
+      client.emit({ method: "thread/status/changed", params: {
+        threadId: "thread-1", status: { type: "systemError" },
+      } });
+      return client;
+    },
+  } });
+  const queuedHandle = await queuedAdapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  assert.equal(queuedHandle.observedState(), "failed", "queued native failure survives the idle launch baseline");
+
+  const pollingHarness = createHarness();
+  const pollingCreateClient = pollingHarness.dependencies.createRpcClient;
+  const pollingAdapter = new CodexProviderAdapter({ dependencies: {
+    ...pollingHarness.dependencies,
+    createRpcClient: (serverUrl, notify) => {
+      const client = pollingCreateClient(serverUrl, notify) as FakeRpc;
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        const result = await request<T>(method, params);
+        if (method === "turn/start") {
+          client.emit({ method: "thread/status/changed", params: {
+            threadId: "thread-1", status: { type: "systemError" },
+          } });
+          await flush();
+        }
+        return result;
+      };
+      return client;
+    },
+  } });
+  const pollingHandle = await pollingAdapter.spawn(spawnRequest());
+  assert.equal(pollingHandle.observedState(), "failed", "turn acknowledgement cannot clear runtime failure");
 });
 
 test("execution failures preserve the Codex runtime and subsequent exact room turns", async () => {
@@ -2500,7 +2797,7 @@ test("launch policy cannot override adapter-owned thread fields", async () => {
   assert.equal(harness.launches.length, 0);
 });
 
-test("Codex typed shadow separates exact tool and turn failures from the unchanged legacy runtime", async () => {
+test("Codex typed shadow separates exact tool and turn failures from the reusable runtime handle", async () => {
   const harness = createHarness();
   const stream: ProviderStreamEvent[] = [];
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies, streamSink: (event) => stream.push(event) });
@@ -2520,7 +2817,7 @@ test("Codex typed shadow separates exact tool and turn failures from the unchang
   const failedTurn = { turn: { id: "turn-1", status: "failed" } };
   emit("turn/completed", failedTurn);
   emit("turn/completed", failedTurn);
-  assert.equal(handle.observedState(), "failed", "legacy authority is deliberately unchanged in PR3");
+  assert.equal(handle.observedState(), "idle", "the failed turn does not poison the reusable runtime handle");
   emit("turn/started", { turnId: "turn-2", turn: { id: "turn-2", status: "inProgress" } });
   let projection = emptyExecutionProjection();
   for (const observation of observations) {
