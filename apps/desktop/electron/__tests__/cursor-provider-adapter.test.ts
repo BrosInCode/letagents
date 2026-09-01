@@ -1209,7 +1209,17 @@ let initialized = false;
 let listed = false;
 let largeResponse = false;
 let secondBlocked = false;
+let replayProbeStarted = false;
 let finished = false;
+function startReplayProbe() {
+  if (replayProbeStarted) return;
+  replayProbeStarted = true;
+  const second = net.createConnection({ path: socketPath });
+  let accepted = false;
+  second.once("connect", () => { accepted = true; second.write("replay"); });
+  second.once("error", () => { secondBlocked = true; finishIfReady(); });
+  second.once("close", () => { if (accepted) { secondBlocked = true; finishIfReady(); } });
+}
 function finishIfReady() {
   if (finished || !initialized || !listed || !largeResponse || !secondBlocked) return;
   finished = true;
@@ -1233,6 +1243,7 @@ lines.on("line", (line) => {
   if (response.id === 1) initialized = true;
   if (response.id === 2) listed = response.result.tools.some((tool) => tool.name === "connector_boundary_valid");
   if (response.id === 3) largeResponse = response.result.payload.length === 2 * 1024 * 1024;
+  startReplayProbe();
   finishIfReady();
 });
 connector.once("error", () => process.exit(72));
@@ -1240,13 +1251,6 @@ connector.once("close", (code, signal) => note("connector-close:" + code + ":" +
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "fixture", version: "1" } } }) + "\\n");
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }) + "\\n");
 connector.stdin.write(JSON.stringify({ jsonrpc: "2.0", id: 3, method: "fixture/large", params: {} }) + "\\n");
-setTimeout(() => {
-  const second = net.createConnection({ path: socketPath });
-  let accepted = false;
-  second.once("connect", () => { accepted = true; second.write("replay"); });
-  second.once("error", () => { secondBlocked = true; finishIfReady(); });
-  second.once("close", () => { if (accepted) { secondBlocked = true; finishIfReady(); } });
-}, 25);
 setTimeout(() => process.exit(73), 5000).unref();
 `);
   chmodSync(cursorBin, 0o700);
