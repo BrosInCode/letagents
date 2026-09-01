@@ -363,6 +363,7 @@ export class SupervisorDaemon {
       markLifecycleProjectionUnavailable: (provider) => this.executionCapture?.recordLifecycleProjectionUnavailable(provider),
       lifecycleProjectionDiagnostics: () => this.executionCapture?.lifecycleProjectionDiagnostics()
         ?? unavailableLifecycleProjectionDiagnostics(),
+      captureAdmission: (entryId, handle, generation) => this.executionCapture?.captureAdmission(entryId, handle, generation) ?? "unavailable",
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {
