@@ -6,6 +6,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { DaemonStateSchema } from "../daemon-state-database.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
+import { ExecutionShadowStore, executionStorageIdentity } from "../execution-shadow-store.js";
 import { ProviderExecutionObserver } from "../../electron/main/agents/provider-execution-observer.js";
 import type { NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription } from "../../shared/execution-protocol.js";
 import type { ProviderActionConnectionRef, ProviderActionHandle, ProviderActionPort } from "../provider-action-port.js";
@@ -85,6 +86,31 @@ test("capture admission is exact, fail-closed, and never promoted by elapsed tim
     assert.equal(waiting.capture.captureAdmission("agent", waiting.handle, "generation"), "pending",
       "an unresolved subscription stays pending without elapsed-time promotion");
   } finally { waiting.capture.close(); }
+});
+
+test("capture preserves a pre-existing birth mode and rejects policy mismatch", async () => {
+  const f = fixture();
+  try {
+    const runtimeGenerationId = executionStorageIdentity("runtime", "agent", "generation", "codex_app_server", "birth-secret");
+    const shadow = new ExecutionShadowStore(f.db);
+    assert.equal(shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId,
+      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 }), "typed");
+    f.install(); f.emit(ready); await flush();
+    assert.equal(f.db.prepare("SELECT authority_mode FROM execution_runtime_generations WHERE runtime_generation_id=?")
+      .get(runtimeGenerationId)?.authority_mode, "typed", "capture cannot rewrite the exact birth to the current release policy");
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "unavailable",
+      "the installed typed-shadow expectation never silently adopts a different frozen mode");
+  } finally { f.capture.close(); }
+});
+
+test("Open Model births use the same closed typed-shadow release policy", async () => {
+  const f = fixture("opencode_server");
+  try {
+    f.install(); f.emit(ready); await flush();
+    assert.deepEqual({ ...f.db.prepare("SELECT provider,authority_mode FROM execution_runtime_generations").get() },
+      { provider: "open-model", authority_mode: "typed_shadow" });
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready");
+  } finally { f.capture.close(); }
 });
 
 test("capture admission fails closed on durable reads and live source positions", async (t) => {
