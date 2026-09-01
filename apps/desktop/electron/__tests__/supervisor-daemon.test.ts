@@ -688,7 +688,21 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       23,
     );
     try {
-      assert.equal((await client.connectIfRunning())?.generation, 23);
+      const olderStatus = await client.connectIfRunning();
+      assert.equal(olderStatus?.generation, 23);
+      assert.equal(olderStatus?.recoveryDiagnostics, null, "missing older-daemon diagnostics cannot pass the zero gate");
+      wire.statusRecoveryDiagnostics.value = { daemon_inbox_wait_evidence_dependency: 2 };
+      assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
+        daemonInboxWaitEvidenceDependency: 2,
+      });
+      for (const malformed of [
+        { daemon_inbox_wait_evidence_dependency: -1 },
+        { daemon_inbox_wait_evidence_dependency: 1.5 },
+        { daemon_inbox_wait_evidence_dependency: "0" },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = malformed;
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
+      }
       assert.equal(spawnCount, 0);
     } finally {
       await closeServer(wire.server, env.socketPath);
@@ -819,6 +833,7 @@ async function startWireDaemon(
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
   const requests: Array<{ method: string; params: Record<string, any> | undefined }> = [];
+  const statusRecoveryDiagnostics: { value: unknown } = { value: undefined };
   const hostApprovals = { challenge: (): unknown => null, request: (_params: unknown): unknown => { throw new Error("unsupported"); } };
   let handoffPrepared = false;
   const server = createServer((socket) => {
@@ -833,7 +848,8 @@ async function startWireDaemon(
       let result: unknown;
       let responseDelayMs = 0;
       if (request.method === "daemon.negotiate" || request.method === "daemon.status") {
-        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z" };
+        result = { healthy: true, protocol_version: version, implementation_version: implementationVersion, runtime_environment_fingerprint: runtimeEnvironmentFingerprint ?? supervisorDaemonSpawnEnvironment().LETAGENTS_SUPERVISOR_RUNTIME_ENVIRONMENT_FINGERPRINT, capabilities: { room_delivery_retry: true, agent_inspector_detail_v1: true, agent_inspector_settings_v1: true, agent_room_move_v1: true, agent_lifecycle_v1: agentLifecycleCapability, agent_runtime_recovery_v1: true, agent_state_subscription_v1: true }, generation, pid: 77, started_at: "2026-01-01T00:00:00.000Z",
+          ...(statusRecoveryDiagnostics.value === undefined ? {} : { recovery_diagnostics: statusRecoveryDiagnostics.value }) };
       } else if (request.method === "daemon.prepare_handoff") {
         result = { accepted: true };
         handoffPrepared = true;
@@ -958,7 +974,7 @@ async function startWireDaemon(
   });
   await mkdir(dirname(socketPath), { recursive: true });
   await new Promise<void>((resolve, reject) => { server.once("error", reject); server.listen(socketPath, resolve); });
-  return { server, entries, requests, hostApprovals };
+  return { server, entries, requests, hostApprovals, statusRecoveryDiagnostics };
 }
 
 async function closeServer(server: Server | null, socketPath: string): Promise<void> {

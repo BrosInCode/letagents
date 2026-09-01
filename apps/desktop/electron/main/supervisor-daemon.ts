@@ -1746,6 +1746,12 @@ export class SupervisorDaemonClient {
 }
 
 function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatus {
+  const rawRecoveryDiagnostics = record(value.recovery_diagnostics);
+  const daemonInboxWaitEvidenceDependency = rawRecoveryDiagnostics?.daemon_inbox_wait_evidence_dependency;
+  const recoveryDiagnostics = Number.isSafeInteger(daemonInboxWaitEvidenceDependency)
+    && (daemonInboxWaitEvidenceDependency as number) >= 0
+    ? { daemonInboxWaitEvidenceDependency: daemonInboxWaitEvidenceDependency as number }
+    : null;
   return {
     healthy: value.healthy === true,
     protocolVersion: Number(value.protocol_version ?? 0),
@@ -1765,6 +1771,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
     generation: Number(value.generation ?? 0),
     pid: Number(value.pid ?? 0),
     startedAt: String(value.started_at ?? ""),
+    recoveryDiagnostics,
   };
 }
 

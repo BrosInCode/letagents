@@ -32,6 +32,7 @@ export type DaemonReadModelPorts = {
     supportsRoomTurns(): boolean;
     supportsContinuationRepair(): boolean;
   };
+  recoveryDiagnostics(): { daemon_inbox_wait_evidence_dependency: number };
   manifest: {
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
@@ -77,6 +78,7 @@ export class DaemonReadModel {
       generation: this.ports.currentDaemonGeneration(),
       pid: process.pid,
       started_at: this.ports.startedAt,
+      recovery_diagnostics: this.ports.recoveryDiagnostics(),
     };
   }
 
