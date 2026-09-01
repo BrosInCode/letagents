@@ -150,6 +150,7 @@ function coordinatorHarness(input: {
   authorityMode?: "legacy" | "typed_shadow" | "typed";
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
+  startCutover?: (entryId: string) => Promise<void>;
   bindingGet?: (entryId: string) => Promise<null>;
   publishNativeActivity?: () => Promise<void>;
   requestConvergence?: (entryId: string) => void;
@@ -241,7 +242,7 @@ function coordinatorHarness(input: {
     publishNativeActivity: async () => input.publishNativeActivity?.(),
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: () => {}, end: (entryId) => input.endStream?.(entryId) },
-    delivery: { start: input.startDelivery ?? (async () => {}), startCutover: async () => {} },
+    delivery: { start: input.startDelivery ?? (async () => {}), startCutover: input.startCutover ?? (async () => {}) },
     heartbeat: {
       intervalMs: 60_000,
       requiresHostGrant: () => false,
@@ -373,9 +374,9 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
 
   rawListeners[0]!({ ...streamEvent(2, "turn/failed"), kind: "turn_lifecycle" });
   await harness.coordinator.drainCallbacks();
-  assert.equal(harness.getManifest().observed_state, "failed",
-    "B3 leaves raw failure and terminal fencing operational after the latch");
-  assert.equal(harness.stopCalls(), 1);
+  assert.equal(harness.getManifest().observed_state, "working",
+    "an exact failed turn cannot poison the reusable typed Codex runtime");
+  assert.equal(harness.stopCalls(), 0);
   await harness.coordinator.disposeAll();
 });
 
@@ -944,7 +945,8 @@ test("optional execution observation failures cannot block installation, deliver
 
 for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
   test(`execution errors do not fence or latch failure on a healthy ${delivery_mode} runtime`, async () => {
-    const harness = coordinatorHarness();
+    const cutovers: string[] = [];
+    const harness = coordinatorHarness({ startCutover: async (entryId) => { cutovers.push(entryId); } });
     harness.setManifest({ ...entry(), delivery_mode });
     await harness.coordinator.install("agent-1", handle, "generation-2");
     const failures: Array<Pick<ProviderActionStreamEvent, "method" | "kind" | "payload">> = [
@@ -963,8 +965,31 @@ for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
       await harness.coordinator.enqueue("agent-1", handle, event);
       assert.notEqual(harness.getManifest().observed_state, "failed", failure.method);
     }
-    await harness.coordinator.enqueue("agent-1", handle, { ...streamEvent(9, "turn/completed"), kind: "turn_lifecycle" });
+    const turnFailures = [
+      { method: "turn/failed", kind: "turn_lifecycle", payload: {} },
+      { method: "turn/completed", kind: "turn_lifecycle", payload: { turn: { status: "failed" } } },
+      { method: "thread/read", kind: "transcript_snapshot", payload: { latestTurn: { status: "failed" } } },
+    ] as const;
+    for (const failure of turnFailures) {
+      assert.equal(providerStreamLifecycle({ ...streamEvent(9, failure.method), ...failure }), "terminal", failure.method);
+    }
+    await harness.coordinator.enqueue("agent-1", handle, {
+      ...streamEvent(9, turnFailures[0].method), ...turnFailures[0],
+    });
+    assert.notEqual(harness.getManifest().observed_state, "failed");
+    assert.equal(cutovers.length, delivery_mode === "mcp_polling" ? 1 : 0,
+      "only legacy polling observes the terminal edge as a cutover trigger");
+    await harness.coordinator.enqueue("agent-1", handle, {
+      ...streamEvent(10, "turn/started"), kind: "turn_lifecycle", payload: { turn: { status: "inProgress" } },
+    });
+    assert.equal(harness.getManifest().observed_state, "working", "the next turn remains admissible");
     assert.equal(harness.stopCalls(), 0, "only the native turn ends, never the reusable runtime");
+    await harness.coordinator.enqueue("agent-1", handle, {
+      ...streamEvent(11, "thread/read"), kind: "transcript_snapshot",
+      payload: { threadStatus: { type: "systemError" }, latestTurn: { status: "failed" } },
+    });
+    assert.equal(harness.getManifest().observed_state, "failed");
+    assert.equal(harness.stopCalls(), 1, "mixed transcript evidence preserves hard runtime failure precedence");
     await harness.coordinator.disposeAll();
   });
 
@@ -992,20 +1017,22 @@ for (const delivery_mode of ["daemon_inbox", "mcp_polling"] as const) {
   });
 }
 
-test("genuine runtime/turn failures and failed MCP waits keep their existing classification", () => {
+test("genuine runtime failures and failed MCP waits keep their existing classification", () => {
   assert.equal(providerStreamLifecycle({
     ...streamEvent(1, "item/completed"), kind: "item_lifecycle",
     payload: { item: { type: "commandExecution", status: "completed", exitCode: 0 } },
   }), "idle", "successful item completion preserves the existing presence signal");
   for (const failure of [
-    { method: "turn/failed", kind: "turn_lifecycle", payload: {} },
-    { method: "turn/completed", kind: "turn_lifecycle", payload: { turn: { status: "failed" } } },
     { method: "thread/status/changed", kind: "provider_event", payload: { threadStatus: { type: "systemError" } } },
     { method: "result", kind: "error", payload: { is_error: true } },
     { method: "process/systemError", kind: "command_output", payload: { status: "systemError" } },
   ] as const) {
     assert.equal(providerStreamLifecycle({ ...streamEvent(1, failure.method), ...failure }), "failed", failure.method);
   }
+  assert.equal(providerStreamLifecycle({
+    ...streamEvent(1, "thread/read"), provider: "codex", kind: "provider_event",
+    payload: { latestTurn: { status: "failed" } },
+  }), "failed", "unsupported snapshot kinds fail closed instead of taking the turn-scoped carve-out");
   for (const tool of ["wait_for_messages", "mcp__letagents__wait_for_messages", "read_messages"]) {
     assert.equal(providerStreamLifecycle({
       ...streamEvent(1, "item/completed"), kind: "item_lifecycle",
