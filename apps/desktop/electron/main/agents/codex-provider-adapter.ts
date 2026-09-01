@@ -1777,7 +1777,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     // approved summaryTextDelta stream is accumulated here; raw reasoning
     // textDelta content remains hidden by summarizeCodexRuntimeNotification.
     const summary = summarizeCodexRuntimeNotification(notification);
-    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary, nativeEventId);
+    const nativeLifecyclePhase = nativeEventId
+      ? notification.method === "turn/started" ? "turn_active" as const
+        : notification.method === "turn/completed" ? "turn_terminal" as const : null
+      : null;
+    this.publishStream(handle, notification.method, notification.params, streamKind(notification.method), summary.summary,
+      nativeEventId, nativeLifecyclePhase);
     // Execution status belongs to the item, never to the reusable app-server.
     // Exact turn settlement above remains independent of this runtime state.
     const lifecycle = isCodexExecutionMethod(notification.method) ? null
@@ -2013,6 +2018,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     kind: ProviderStreamEventKind,
     summary: string | null = null,
     nativeEventId: string | null = null,
+    nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -2024,6 +2030,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       kind,
       method,
       ...(nativeEventId ? { nativeEventId } : {}),
+      ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       summary,
       ...safe,
       durablePayloadRef: null,

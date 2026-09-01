@@ -2697,11 +2697,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
     const safeProviderPayload = safeStreamPayload(message);
     const nativeEventId = this.observeNativeExecution(handle, turn, message, sessionId);
+    const nativeLifecyclePhase = nativeEventId
+      ? message.type === "system" && message.subtype === "init" ? "turn_active" as const
+        : message.type === "result" ? "turn_terminal" as const : null
+      : null;
     const duplicateInit = message.type === "system" && message.subtype === "init" && turn.sawInit;
     // The daemon uses the first verified init as the per-turn display boundary.
     // Preserve duplicate same-session init as diagnostics under a distinct
     // method so it cannot erase assistant/tool output already shown this turn.
-    this.publishSafeStream(handle, duplicateInit ? "system/init_duplicate" : streamMethod(message), safeProviderPayload, cursorStreamKind(message), nativeEventId);
+    this.publishSafeStream(handle, duplicateInit ? "system/init_duplicate" : streamMethod(message), safeProviderPayload,
+      cursorStreamKind(message), nativeEventId, nativeLifecyclePhase);
     const rawEventSequence = handle.streamSequence;
     const type = typeof message.type === "string" ? message.type : "";
     if (type === "system") {
@@ -3142,6 +3147,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     safe: ReturnType<typeof safeStreamPayload>,
     kind: ProviderStreamEventKind,
     nativeEventId: string | null = null,
+    nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
   ): void {
     const event: ProviderStreamEvent = {
       workAttemptId: handle.workAttemptId,
@@ -3152,6 +3158,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       kind,
       method,
       ...(nativeEventId ? { nativeEventId } : {}),
+      ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       ...safe,
       durablePayloadRef: null,
     };

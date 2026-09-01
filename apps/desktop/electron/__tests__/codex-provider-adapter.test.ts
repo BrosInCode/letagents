@@ -2541,6 +2541,9 @@ test("Codex typed shadow separates exact tool and turn failures from the unchang
   const typedCheckpointIds = [...new Set(observations.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
   assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
     "exact native turn lifecycle events carry the same opaque identity in typed and legacy projections");
+  assert.equal(stream.every((event) => !event.nativeEventId || event.nativeLifecyclePhase ===
+    (event.method === "turn/started" ? "turn_active" : "turn_terminal")), true,
+  "correlated Codex events expose only the closed structural lifecycle phase");
   assert.equal(streamCheckpointIds.length, 3, "two native starts and one native terminal are independently correlated");
   const terminalIds = stream.filter((event) => event.method === "turn/completed")
     .map((event) => event.nativeEventId);

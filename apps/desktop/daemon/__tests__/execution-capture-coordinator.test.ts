@@ -13,6 +13,7 @@ const nativeTurn = { providerContinuationId: "continuation", providerTurnId: "na
 const active: NativeExecutionFact = { ...nativeTurn, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none" };
 const terminal: NativeExecutionFact = { ...active, state: "terminal", turnOutcome: "completed" };
 async function flush(): Promise<void> { for (let i = 0; i < 12; i++) await new Promise<void>(resolve => setImmediate(resolve)); }
+async function delay(ms: number): Promise<void> { await new Promise(resolve => setTimeout(resolve, ms)); }
 
 function successor(f: ReturnType<typeof fixture>, birth: string): ProviderActionHandle {
   const handle = { ...f.handle, appliedConfigurationRevision: 2,
@@ -79,6 +80,65 @@ test("capture replays native facts only after the exact committed turn binding, 
     assert.doesNotMatch(JSON.stringify(f.facts()), /PRIVATE|birth-secret|localhost|private/);
     f.install(); await flush();
     assert.equal(f.facts().length, 4, "same-source reconnect skips the committed replay prefix");
+  } finally { f.capture.close(); }
+});
+
+test("typed and legacy lifecycle checkpoints meet in the durable comparator without changing execution", async () => {
+  const f = fixture();
+  try {
+    f.bindTurn(); f.install(); f.emit(ready);
+    f.emit({ ...active, nativeEventId: "native-active" });
+    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
+      executionGenerationId: "generation", nativeEventId: "native-active", phase: "turn_active", state: "working" });
+    f.emit({ ...terminal, nativeEventId: "native-terminal" });
+    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
+      executionGenerationId: "generation", nativeEventId: "native-terminal", phase: "turn_terminal", state: "terminal" });
+    await flush();
+    assert.deepEqual(f.capture.lifecycleProjectionDiagnostics().providers.codex, {
+      comparedSegments: 1, matched: 2, missingInTyped: 0, missingInLegacy: 0,
+      pairedButDifferent: 0, conflicts: 0, observationUnavailable: 0,
+    });
+    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()!.observed_state, "working");
+  } finally { f.capture.close(); }
+});
+
+test("busy lifecycle storage retries the bounded raw witness without blocking or losing it", async () => {
+  const f = fixture();
+  const exec = f.db.exec.bind(f.db);
+  let busy = true;
+  try {
+    f.db.exec = sql => {
+      if (busy && sql === "BEGIN IMMEDIATE") { busy = false; throw new Error("database is locked"); }
+      return exec(sql);
+    };
+    f.capture.recordLegacyLifecycle({ agentId: "agent", provider: "codex", workAttemptId: "workspace",
+      executionGenerationId: "generation", nativeEventId: "raw-active", phase: "turn_active", state: "working" });
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0,
+      "the provider callback performs no synchronous SQLite write");
+    await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0);
+    f.db.exec = exec;
+    await delay(40); await flush();
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 1);
+    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 0,
+      "a retained witness is retried rather than declared lost");
+  } finally { f.db.exec = exec; f.capture.close(); }
+});
+
+test("raw lifecycle queue overflow is bounded and becomes durable unavailability", async () => {
+  const f = fixture();
+  try {
+    for (let index = 0; index < 257; index++) f.capture.recordLegacyLifecycle({
+      agentId: "agent", provider: "codex", workAttemptId: "workspace", executionGenerationId: "generation",
+      nativeEventId: `raw-${index}`, phase: "turn_active", state: "working",
+    });
+    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
+    for (let attempt = 0; attempt < 30
+      && Number(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count) < 256; attempt++) {
+      await delay(5);
+    }
+    assert.equal(f.db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 256);
+    assert.equal(f.capture.lifecycleProjectionDiagnostics().providers.codex.observationUnavailable, 1);
   } finally { f.capture.close(); }
 });
 
@@ -235,8 +295,8 @@ test("detached exit drains before a fresh source and storage-busy retirement ret
     const fresh = new ProviderExecutionObserver(() => now); sources.set(next, fresh);
     f.capture.install("agent", next, "generation"); fresh.emit(ready, "fresh-birth");
     await flush();
-    assert.equal(blocked, 1); assert.equal(f.facts().length, 1);
-    await flush(); assert.equal(blocked, 1, "no timer or immediate-loop storage retry");
+    assert.ok(blocked >= 1); assert.equal(f.facts().length, 1);
+    await flush(); assert.equal(f.facts().length, 1, "optional diagnostics cannot timer-retry operational fact capture");
     f.db.exec = exec; f.capture.refresh(); await flush();
     assert.equal(f.facts().length, 3);
     const rows = f.facts();
@@ -420,8 +480,11 @@ test("optional storage failure retains queued facts and retries only on a later 
       return exec(sql);
     });
     assert.doesNotThrow(() => f.emit(ready)); await flush();
-    assert.equal(failures, 1, "no self-retry loop on busy storage");
+    assert.ok(failures >= 1);
+    assert.equal(f.facts().length, 0, "diagnostic retry cannot timer-retry operational fact capture");
     assert.equal(f.diagnostics.at(-1), "storage_unavailable");
+    await delay(40); await flush();
+    assert.equal(f.facts().length, 0, "operational capture resumes only from an explicit later hint");
     mock.mock.restore(); f.capture.refresh(); await flush();
     assert.equal(f.facts().length, 1);
   } finally { f.capture.close(); }

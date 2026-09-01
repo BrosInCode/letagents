@@ -4,8 +4,9 @@ import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateEx
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "./room-work-publication-store.js";
+import { applyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 27;
+export const DAEMON_STATE_SCHEMA_VERSION = 28;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -120,6 +121,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database);
+  if (existingVersion >= 28) validateLifecycleProjectionLedgerSchema(database);
   if (existingVersion >= 25) validatePollingOfferSchema(database, existingVersion >= 26 ? 26 : 25);
   if (existingVersion >= 24) { validatePollingActivationSchema(database, existingVersion >= 26 ? 26 : 24); validateCustodialLaunchSession(database); }
   if (existingVersion >= 23) validatePollingContract(database);
@@ -251,6 +253,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 26) {
     this.migrateRoomWorkPublicationStorage(database);
+    return;
+  }
+  if (existingVersion === 27) {
+    this.migrateLifecycleProjectionStorage(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1147,8 +1153,27 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     applyRoomWorkPublicationSchema(database);
+    applyLifecycleProjectionLedgerSchema(database);
     this.schemaInitializationHook?.(database);
     validateRoomWorkPublicationSchema(database);
+    validateLifecycleProjectionLedgerSchema(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Add empty comparison evidence; never infer a historical projection pair. */
+private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyLifecycleProjectionLedgerSchema(database);
+    this.schemaInitializationHook?.(database);
+    validateLifecycleProjectionLedgerSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -1178,6 +1203,7 @@ private applyCurrentConfigurationShape(database: DatabaseSync): void {
     applyPollingOfferSchema(database);
   }
   applyRoomWorkPublicationSchema(database);
+  applyLifecycleProjectionLedgerSchema(database);
 }
 
 private applyV20Shape(database: DatabaseSync): void {
@@ -2500,6 +2526,7 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: 18 | 1
 
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion: 19 | 20 | 21 = 21): void {
   const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
+  if (version >= 28) validateLifecycleProjectionLedgerSchema(database);
   if (version >= 27) validateRoomWorkPublicationSchema(database);
   if (version >= 25) validatePollingOfferSchema(database, version >= 26 ? 26 : 25);
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 24) {

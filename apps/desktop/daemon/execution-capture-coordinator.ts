@@ -5,6 +5,8 @@ import { ExecutionShadowStore, executionStorageIdentity as opaque, type ShadowOb
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
+import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
+  type LifecycleProjectionObservation, type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
 type Row = Record<string, string | number | null>;
 type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation" | "settlement_unavailable";
@@ -33,6 +35,13 @@ export type PreparedRuntime = {
 const QUEUE_FACTS = 256;
 const QUEUE_BYTES = 256 * 1024;
 const BATCH_FACTS = 32;
+const LIFECYCLE_PROJECTION_RETRY_MS = 25;
+function lifecycleProvider(connection: ProviderActionConnectionRef | null | undefined): LifecycleProjectionProvider | null {
+  if (connection?.kind === "codex_app_server") return "codex";
+  if (connection?.kind === "claude_cli") return "claude-code";
+  if (connection?.kind === "cursor_cli") return "cursor";
+  return null;
+}
 function runtimeId(agentId: string, generation: string, kind: string, birth: string): string {
   return opaque("runtime", agentId, generation, kind, birth);
 }
@@ -48,6 +57,10 @@ export class ExecutionCaptureCoordinator {
   private readonly retiring = new Map<string, Lane>();
   private readonly suspendedAgents = new Set<string>();
   private readonly dirty = new Set<Lane>();
+  private readonly lifecycleProjectionPending = new Map<string, { observation: LifecycleProjectionObservation; bytes: number }>();
+  private readonly lifecycleProjectionUnavailable = new Map<LifecycleProjectionProvider, number>();
+  private lifecycleProjectionBytes = 0;
+  private lifecycleProjectionTimer: NodeJS.Timeout | null = null;
   private scheduled: NodeJS.Immediate | null = null;
   private closed = false;
 
@@ -169,6 +182,19 @@ export class ExecutionCaptureCoordinator {
   close(): void {
     if (this.closed) return;
     this.closed = true;
+    if (this.lifecycleProjectionTimer) clearTimeout(this.lifecycleProjectionTimer);
+    this.lifecycleProjectionTimer = null;
+    for (const { observation } of this.lifecycleProjectionPending.values()) {
+      this.lifecycleProjectionUnavailable.set(observation.provider,
+        (this.lifecycleProjectionUnavailable.get(observation.provider) ?? 0) + 1);
+    }
+    this.lifecycleProjectionPending.clear();
+    this.lifecycleProjectionBytes = 0;
+    for (const [provider, count] of this.lifecycleProjectionUnavailable) {
+      try { this.store.recordLifecycleProjectionUnavailable(provider, count); }
+      catch { /* shutdown cannot wait on optional observation storage */ }
+    }
+    this.lifecycleProjectionUnavailable.clear();
     if (this.scheduled) clearImmediate(this.scheduled);
     this.scheduled = null;
     this.dirty.clear();
@@ -197,6 +223,91 @@ export class ExecutionCaptureCoordinator {
     }
     for (const lane of closing) this.remove(lane);
     try { this.database.close(); } catch { console.warn("[execution_capture] close_failed"); }
+  }
+
+  /** Bounded raw-classifier witness; provider delivery never waits on SQLite. */
+  recordLegacyLifecycle(value: LifecycleProjectionObservation): void {
+    if (this.closed) return;
+    const provider = value?.provider;
+    if (!(provider === "codex" || provider === "claude-code" || provider === "cursor")
+      || ![value.agentId, value.workAttemptId, value.executionGenerationId, value.nativeEventId]
+        .every(identity => executionIdentity.safeParse(identity).success)
+      || !(value.phase === "turn_active" || value.phase === "turn_terminal")
+      || !(value.state === "working" || value.state === "idle" || value.state === "terminal" || value.state === "failed")) {
+      if (provider === "codex" || provider === "claude-code" || provider === "cursor") this.markLifecycleProjectionUnavailable(provider);
+      return;
+    }
+    try {
+      const observation = structuredClone(value);
+      const bytes = Buffer.byteLength(JSON.stringify(observation));
+      const key = JSON.stringify([observation.agentId, observation.provider, observation.workAttemptId,
+        observation.executionGenerationId, observation.nativeEventId, observation.phase, observation.state]);
+      if (this.lifecycleProjectionPending.has(key)) return;
+      if (bytes > QUEUE_BYTES || this.lifecycleProjectionPending.size >= QUEUE_FACTS
+        || this.lifecycleProjectionBytes + bytes > QUEUE_BYTES) {
+        this.markLifecycleProjectionUnavailable(provider);
+        return;
+      }
+      this.lifecycleProjectionPending.set(key, { observation, bytes });
+      this.lifecycleProjectionBytes += bytes;
+      this.scheduleLifecycleProjection();
+    } catch { this.markLifecycleProjectionUnavailable(provider); }
+  }
+
+  recordLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
+    this.markLifecycleProjectionUnavailable(provider);
+  }
+
+  lifecycleProjectionDiagnostics(): LifecycleProjectionDiagnostics {
+    if (this.closed) return unavailableLifecycleProjectionDiagnostics();
+    try {
+      const diagnostics = this.store.lifecycleProjectionDiagnostics();
+      for (const [provider, count] of this.lifecycleProjectionUnavailable) {
+        diagnostics.providers[provider].observationUnavailable += count;
+      }
+      return diagnostics;
+    }
+    catch { return unavailableLifecycleProjectionDiagnostics(); }
+  }
+
+  private markLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
+    if (this.closed) return;
+    const current = this.lifecycleProjectionUnavailable.get(provider) ?? 0;
+    this.lifecycleProjectionUnavailable.set(provider, Math.min(Number.MAX_SAFE_INTEGER, current + 1));
+    this.scheduleLifecycleProjection();
+  }
+
+  private scheduleLifecycleProjection(delayMs = 0): void {
+    if (this.closed || this.lifecycleProjectionTimer) return;
+    this.lifecycleProjectionTimer = setTimeout(() => {
+      this.lifecycleProjectionTimer = null;
+      this.drainLifecycleProjection();
+    }, delayMs);
+    this.lifecycleProjectionTimer.unref();
+  }
+
+  private drainLifecycleProjection(): void {
+    if (this.closed) return;
+    let processed = 0;
+    try {
+      for (const [provider, count] of this.lifecycleProjectionUnavailable) {
+        if (processed++ >= BATCH_FACTS) break;
+        this.store.recordLifecycleProjectionUnavailable(provider, count);
+        this.lifecycleProjectionUnavailable.delete(provider);
+      }
+      if (!this.lifecycleProjectionUnavailable.size) {
+        for (const [key, pending] of this.lifecycleProjectionPending) {
+          if (processed++ >= BATCH_FACTS) break;
+          this.store.recordLegacyLifecycle(pending.observation);
+          this.lifecycleProjectionPending.delete(key);
+          this.lifecycleProjectionBytes -= pending.bytes;
+        }
+      }
+    } catch {
+      this.scheduleLifecycleProjection(LIFECYCLE_PROJECTION_RETRY_MS);
+      return;
+    }
+    if (this.lifecycleProjectionUnavailable.size || this.lifecycleProjectionPending.size) this.scheduleLifecycleProjection();
   }
 
   private current(lane: Lane): boolean {
@@ -240,6 +351,10 @@ export class ExecutionCaptureCoordinator {
   private report(lane: Lane, code: CaptureCode): void {
     if (lane.diagnostic === code) return;
     lane.diagnostic = code;
+    if (code !== "settlement_unavailable") {
+      const provider = lifecycleProvider(lane.handle.providerConnection);
+      if (provider) this.markLifecycleProjectionUnavailable(provider);
+    }
     try { this.options.diagnostic(lane.agentId, code); } catch { /* never turn an observation failure into delivery failure */ }
   }
   private enqueue(lane: Lane, event: NativeExecutionObservation): void {

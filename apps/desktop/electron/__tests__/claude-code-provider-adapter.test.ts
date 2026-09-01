@@ -1267,6 +1267,9 @@ test("Claude typed observations correlate native turns and completed tools witho
   const typedCheckpointIds = [...new Set(events.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
   assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
     "exact native command lifecycle and result records correlate both projections");
+  assert.equal(stream.every((event) => !event.nativeEventId || event.nativeLifecyclePhase ===
+    (event.method === "command_lifecycle" ? "turn_active" : "turn_terminal")), true,
+  "correlated Claude events expose only the closed structural lifecycle phase");
   assert.equal(streamCheckpointIds.length, 3, "one start and two terminal records have distinct identities");
   const terminalIds = stream.filter((event) => event.method.startsWith("result") && event.nativeEventId)
     .map((event) => event.nativeEventId);
