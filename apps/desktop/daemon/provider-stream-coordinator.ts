@@ -39,7 +39,48 @@ import {
 export type ProviderRecoveryDiagnostics = {
   daemon_inbox_wait_evidence_dependency: number;
   lifecycle_projection: LifecycleProjectionDiagnostics;
+  lifecycle_local_conformance_eligible: Record<LifecycleProjectionProvider, boolean>;
 };
+
+const lifecycleProjectionProviders = ["codex", "claude-code", "cursor"] as const;
+
+/**
+ * Evidence-present-and-clean is only a local conformance prerequisite. It is
+ * not soak sufficiency or authority to flip a provider. Projection totals are
+ * monotonic, so any recorded mismatch, conflict, or unavailable observation
+ * keeps that provider ineligible until a separately designed evidence epoch
+ * exists; this read-time predicate never caches or persists a second result.
+ */
+export function lifecycleLocalConformanceEligibility(
+  projection: LifecycleProjectionDiagnostics,
+  daemonInboxWaitEvidenceDependency: number,
+): Record<LifecycleProjectionProvider, boolean> {
+  const cleanWaitAuthority = Number.isSafeInteger(daemonInboxWaitEvidenceDependency)
+    && daemonInboxWaitEvidenceDependency === 0;
+  return Object.fromEntries(lifecycleProjectionProviders.map((provider) => {
+    const evidence = projection.providers?.[provider];
+    const counters = evidence && [
+      evidence.comparedSegments,
+      evidence.matched,
+      evidence.missingInTyped,
+      evidence.missingInLegacy,
+      evidence.pairedButDifferent,
+      evidence.conflicts,
+      evidence.observationUnavailable,
+    ];
+    const validCounters = Boolean(counters?.every((value) => Number.isSafeInteger(value) && value >= 0));
+    const eligible = projection.available === true
+      && cleanWaitAuthority
+      && validCounters
+      && evidence.comparedSegments >= 1
+      && evidence.missingInTyped === 0
+      && evidence.missingInLegacy === 0
+      && evidence.pairedButDifferent === 0
+      && evidence.conflicts === 0
+      && evidence.observationUnavailable === 0;
+    return [provider, eligible];
+  })) as Record<LifecycleProjectionProvider, boolean>;
+}
 
 export type ProviderStreamManifest = {
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
@@ -174,10 +215,16 @@ export class ProviderStreamCoordinator {
   }
 
   recoveryDiagnostics(): ProviderRecoveryDiagnostics {
+    const daemonInboxWaitEvidenceDependency = this.daemonInboxWaitEvidenceDependencies;
+    const lifecycleProjection = this.options.lifecycleProjectionDiagnostics?.()
+      ?? unavailableLifecycleProjectionDiagnostics();
     return {
-      daemon_inbox_wait_evidence_dependency: this.daemonInboxWaitEvidenceDependencies,
-      lifecycle_projection: this.options.lifecycleProjectionDiagnostics?.()
-        ?? unavailableLifecycleProjectionDiagnostics(),
+      daemon_inbox_wait_evidence_dependency: daemonInboxWaitEvidenceDependency,
+      lifecycle_projection: lifecycleProjection,
+      lifecycle_local_conformance_eligible: lifecycleLocalConformanceEligibility(
+        lifecycleProjection,
+        daemonInboxWaitEvidenceDependency,
+      ),
     };
   }
 

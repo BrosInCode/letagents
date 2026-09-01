@@ -374,6 +374,19 @@ export interface DesktopManagedAgentInspectResult {
 export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
 export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
+export type DesktopLifecycleProjectionProvider = "codex" | "claude-code" | "cursor";
+export interface DesktopLifecycleProjectionDiagnostics {
+  available: boolean;
+  providers: Record<DesktopLifecycleProjectionProvider, {
+    comparedSegments: number;
+    matched: number;
+    missingInTyped: number;
+    missingInLegacy: number;
+    pairedButDifferent: number;
+    conflicts: number;
+    observationUnavailable: number;
+  }>;
+}
 
 export interface DesktopSupervisorDaemonStatus {
   healthy: boolean;
@@ -384,6 +397,8 @@ export interface DesktopSupervisorDaemonStatus {
   startedAt: string;
   recoveryDiagnostics: {
     daemonInboxWaitEvidenceDependency: number;
+    lifecycleProjection: DesktopLifecycleProjectionDiagnostics;
+    lifecycleLocalConformanceEligible: Record<DesktopLifecycleProjectionProvider, boolean>;
   } | null;
   capabilities: {
     roomDeliveryRetry: boolean;
