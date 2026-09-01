@@ -361,9 +361,12 @@ test("approval journal materializes atomically without capture and preserves lag
     const competing = await Promise.all([admitApproval(store, input, authority, async commit => commit()), admitApproval(other, input, authority, async commit => commit())]);
     assert.deepEqual(competing.map(value => value.created).sort(), [false, true]);
     assert.equal(database.prepare("SELECT state FROM execution_turns").get()!.state, "none", "identity admission does not synthesize a turn-start fact");
+    assert.equal(database.prepare("SELECT authority_mode FROM execution_runtime_generations").get()!.authority_mode, "typed_shadow",
+      "approval-first materialization uses the closed provider release policy");
     const shadow = new ExecutionShadowStore(database);
-    shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: expected.runtimeGenerationId,
-      provider: "codex", configRevision: 1, createdAtMs: 100 });
+    assert.equal(shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: expected.runtimeGenerationId,
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 }), "typed_shadow",
+      "a later capture request cannot relabel an approval-materialized birth");
     const attemptId = shadow.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message", executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
     shadow.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: expected.runtimeGenerationId,
       attemptId, turnId: expected.turnId, providerContinuationId: "continuation", providerTurnId: "native-turn", createdAtMs: 100 });
@@ -450,7 +453,7 @@ test("approval journal never fabricates an original native birth after generatio
       if (captured) {
         const shadow = new ExecutionShadowStore(database);
         shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: expected.runtimeGenerationId,
-          provider: "codex", configRevision: 1, createdAtMs: 100 });
+          provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 });
         shadow.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message", executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
       }
       const attempt = database.prepare("SELECT attempt_id FROM execution_message_attempts").get();
@@ -464,6 +467,8 @@ test("approval journal never fabricates an original native birth after generatio
         assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_runtime_generations").get()!.n, 0);
       } else {
         const result = await admitApproval(store, input, recovered, async commit => commit());
+        assert.equal(database.prepare("SELECT authority_mode FROM execution_runtime_generations").get()!.authority_mode, "typed",
+          "approval admission preserves the captured exact birth's frozen mode");
         assert.equal(result.approval.request.executionGenerationId, "generation");
         assert.equal(result.approval.request.runtimeGenerationId, expected.runtimeGenerationId);
         assert.deepEqual(database.prepare("SELECT attempt_id FROM execution_message_attempts").get(), attempt);

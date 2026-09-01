@@ -8,10 +8,12 @@ import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef,
 import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
   type LifecycleCaptureAdmissionStatus, type LifecycleProjectionObservation,
   type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
+import { isTypedCaptureAuthority, lifecycleAuthorityModeForProvider, lifecycleAuthorityModeSchema,
+  type LifecycleAuthorityMode, type LifecycleAuthorityProvider } from "./lifecycle-authority-mode.js";
 
 type Row = Record<string, string | number | null>;
 type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation" | "settlement_unavailable";
-type Runtime = { id: string; generation: string };
+type Runtime = { id: string; generation: string; authorityMode: LifecycleAuthorityMode };
 type CaptureOptions = {
   provider: Pick<ProviderActionPort, "onExecution">;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
@@ -27,6 +29,7 @@ type Lane = {
   detached: boolean; frontierStored: boolean; verifiedRuntime: Runtime | null;
   subscriptionFailed: boolean;
   receiptCursor: number;
+  expectedAuthorityMode: LifecycleAuthorityMode | null;
 };
 export type PreparedRuntime = {
   agentId: string; executionGenerationId: string; handle: ProviderActionHandle;
@@ -41,6 +44,13 @@ function lifecycleProvider(connection: ProviderActionConnectionRef | null | unde
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
+  return null;
+}
+function authorityProvider(connection: ProviderActionConnectionRef | null | undefined): LifecycleAuthorityProvider | null {
+  if (connection?.kind === "codex_app_server") return "codex";
+  if (connection?.kind === "claude_cli") return "claude-code";
+  if (connection?.kind === "cursor_cli") return "cursor";
+  if (connection?.kind === "opencode_server") return "open-model";
   return null;
 }
 function runtimeId(agentId: string, generation: string, kind: string, birth: string): string {
@@ -85,9 +95,11 @@ export class ExecutionCaptureCoordinator {
     const prior = this.lanes.get(agentId);
     if (prior) this.detach(prior);
     if (this.closed || this.suspendedAgents.has(agentId) || !this.options.provider.onExecution) return () => {};
+    const authority = authorityProvider(handle.providerConnection);
     const lane: Lane = { agentId, generation, handle, subscription: null, observer: null,
       pending: new Map(), bytes: 0, checkpoints: new Map(), overflow: false, suspended: false, diagnostic: null,
-      detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0 };
+      detached: false, frontierStored: false, verifiedRuntime: null, subscriptionFailed: false, receiptCursor: 0,
+      expectedAuthorityMode: authority ? lifecycleAuthorityModeForProvider(authority) : null };
     this.lanes.set(agentId, lane);
     // Installation follows the provider's durable dispatch/configuration
     // checkpoint. Preserve its attested birth before an immediate exit or a
@@ -292,11 +304,15 @@ export class ExecutionCaptureCoordinator {
     try {
       const durable = this.row(`SELECT o.observer_execution_generation_id,o.observer_runtime_generation_id,
         o.daemon_generation_id,o.source_id,o.last_source_sequence,o.max_observed_sequence,
-        r.authority_mode,r.runtime_state,s.source_id AS admitted_source_id
+        observer.authority_mode,observer.runtime_state,subject.authority_mode AS subject_authority_mode,
+        s.source_id AS admitted_source_id
         FROM execution_observers o
-        JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
-          AND r.execution_generation_id=o.observer_execution_generation_id
-          AND r.runtime_generation_id=o.observer_runtime_generation_id
+        JOIN execution_runtime_generations observer ON observer.agent_id=o.agent_id
+          AND observer.execution_generation_id=o.observer_execution_generation_id
+          AND observer.runtime_generation_id=o.observer_runtime_generation_id
+        JOIN execution_runtime_generations subject ON subject.agent_id=o.agent_id
+          AND subject.execution_generation_id=o.execution_generation_id
+          AND subject.runtime_generation_id=o.runtime_generation_id
         JOIN execution_observer_sources s ON s.agent_id=o.agent_id AND s.source_id=o.source_id
         WHERE o.agent_id=?`, agentId);
       if (!durable) return "unavailable";
@@ -308,7 +324,10 @@ export class ExecutionCaptureCoordinator {
         && durable.source_id === lane.subscription.sourceId
         && durable.source_id === lane.observer.sourceId
         && durable.admitted_source_id === durable.source_id
-        && durable.authority_mode === "typed_shadow"
+        && lane.expectedAuthorityMode !== null
+        && durable.authority_mode === lane.expectedAuthorityMode
+        && isTypedCaptureAuthority(durable.authority_mode)
+        && isTypedCaptureAuthority(durable.subject_authority_mode)
         && durable.runtime_state !== "exited";
       const validCursor = Number.isSafeInteger(last) && Number.isSafeInteger(maximum)
         && last >= 0 && maximum >= last && maximum <= position.latestSequence
@@ -450,17 +469,20 @@ export class ExecutionCaptureCoordinator {
     if (!generation) return null;
     const provider = { codex_app_server: "codex", claude_cli: "claude-code", cursor_cli: "cursor", opencode_server: "open-model" } as const;
     const runtime = { id: runtimeId(lane.agentId, lane.generation, connection.kind, connection.processIdentity), generation: lane.generation };
-    this.store.registerRuntime({ agentId: lane.agentId, executionGenerationId: runtime.generation, runtimeGenerationId: runtime.id,
-      provider: provider[connection.kind], configRevision: revision, createdAtMs: Date.now() });
-    return runtime;
+    const requestedMode = lifecycleAuthorityModeForProvider(provider[connection.kind]);
+    const authorityMode = this.store.registerRuntime({ agentId: lane.agentId, executionGenerationId: runtime.generation,
+      runtimeGenerationId: runtime.id, provider: provider[connection.kind], authorityMode: requestedMode,
+      configRevision: revision, createdAtMs: Date.now() });
+    return { ...runtime, authorityMode };
   }
 
   private knownRuntime(lane: Lane, birth: string | undefined, generation = lane.generation): Runtime | null {
     const kind = lane.handle.providerConnection?.kind;
     if (!birth || !kind) return null;
     const id = runtimeId(lane.agentId, generation, kind, birth);
-    const runtime = this.row("SELECT runtime_generation_id FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
-    return runtime ? { id, generation } : null;
+    const runtime = this.row("SELECT runtime_generation_id,authority_mode FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?", lane.agentId, generation, id);
+    const authorityMode = lifecycleAuthorityModeSchema.safeParse(runtime?.authority_mode);
+    return runtime && authorityMode.success ? { id, generation, authorityMode: authorityMode.data } : null;
   }
 
   private bind(lane: Lane, subject: Runtime, observer: Runtime, recovery?: NativeTurnIdentity): ShadowObserver {
@@ -477,10 +499,14 @@ export class ExecutionCaptureCoordinator {
   private turn(lane: Lane, event: NativeExecutionObservation, observed: Runtime): { runtime: Runtime; identity: NativeTurnIdentity } | null {
     const fact = event.fact;
     if (fact.domain !== "turn" && fact.domain !== "execution") return null;
-    const existing = this.row(`SELECT turn_id,execution_generation_id,runtime_generation_id,provider_continuation_id,provider_turn_id
-      FROM execution_turns WHERE agent_id=? AND provider_continuation_id=? AND provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
-    if (existing) return { runtime: { id: String(existing.runtime_generation_id), generation: String(existing.execution_generation_id) },
-      identity: { turnId: String(existing.turn_id), providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId } };
+    const existing = this.row(`SELECT t.turn_id,t.execution_generation_id,t.runtime_generation_id,t.provider_continuation_id,t.provider_turn_id,
+      r.authority_mode FROM execution_turns t JOIN execution_runtime_generations r USING(agent_id,execution_generation_id,runtime_generation_id)
+      WHERE t.agent_id=? AND t.provider_continuation_id=? AND t.provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
+    const authorityMode = lifecycleAuthorityModeSchema.safeParse(existing?.authority_mode);
+    if (existing && authorityMode.success) return { runtime: { id: String(existing.runtime_generation_id), generation: String(existing.execution_generation_id),
+      authorityMode: authorityMode.data }, identity: { turnId: String(existing.turn_id), providerContinuationId: fact.providerContinuationId,
+      providerTurnId: fact.providerTurnId } };
+    if (existing) return null;
     const binding = this.row(`SELECT b.room_id,b.work_attempt_id,b.origin_execution_generation_id,i.source_message_id,i.created_at
       FROM supervised_agent_provider_turn_bindings b JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id AND i.agent_id=b.agent_id AND i.room_id=b.room_id
       WHERE b.agent_id=? AND b.provider_continuation_id=? AND b.provider_turn_id=?`, lane.agentId, fact.providerContinuationId, fact.providerTurnId);
