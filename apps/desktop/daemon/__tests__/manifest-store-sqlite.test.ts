@@ -11,7 +11,7 @@ import { serializeDaemonDeploymentId } from "../manifest-entry-projection.js";
 import { ManifestConflictError, ManifestStore } from "../manifest-store.js";
 import type { ProviderActionHandle } from "../provider-action-port.js";
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
-import type { DaemonManifest, DaemonManifestEntry, LegacyLaneOwner } from "../types.js";
+import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, LegacyLaneOwner } from "../types.js";
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
@@ -385,6 +385,59 @@ test("approval journal materializes atomically without capture and preserves lag
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_facts").get()!.n, 0);
     assert.deepEqual(await store.readLatestExecutionApproval("request"), await store.getExecutionApproval(expected));
   } finally { database.close(); await other.close(); await store.close(); await env.cleanup(); }
+});
+
+test("runtime lifecycle authority lookup reads only the exact frozen native birth", async () => {
+  const env = await fixture(); let store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  const base = { agentId: "agent", executionGenerationId: "generation", configurationRevision: 3 };
+  const births = [
+    { providerConnection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "codex-birth" }, provider: "codex", mode: "legacy" },
+    { providerConnection: { kind: "claude_cli", pid: 4312, processIdentity: "claude-birth" }, provider: "claude-code", mode: "typed_shadow" },
+    { providerConnection: { kind: "cursor_cli", pid: 4313, processIdentity: "cursor-birth-a" }, provider: "cursor", mode: "typed" },
+    { providerConnection: { kind: "opencode_server", url: "http://127.0.0.1:4314", pid: 4314, processIdentity: "opencode-birth", serverAuthPath: "/test/auth" }, provider: "open-model", mode: "typed_shadow" },
+  ] as const satisfies ReadonlyArray<{ providerConnection: DaemonProviderConnection; provider: "codex" | "claude-code" | "cursor" | "open-model"; mode: "legacy" | "typed_shadow" | "typed" }>;
+  const input = { ...base, providerConnection: births[2].providerConnection };
+  try {
+    const shadow = new ExecutionShadowStore(database);
+    for (const [index, birth] of births.entries()) {
+      const runtimeGenerationId = executionStorageIdentity("runtime", base.agentId, base.executionGenerationId,
+        birth.providerConnection.kind, birth.providerConnection.processIdentity!);
+      shadow.registerRuntime({ agentId: base.agentId, executionGenerationId: base.executionGenerationId, runtimeGenerationId,
+        provider: birth.provider, authorityMode: birth.mode, configRevision: base.configurationRevision, createdAtMs: 100 + index });
+      assert.equal(await store.readRuntimeLifecycleAuthority({ ...base, providerConnection: birth.providerConnection }), birth.mode);
+    }
+    const runtimeGenerationId = executionStorageIdentity("runtime", input.agentId, input.executionGenerationId,
+      input.providerConnection.kind, input.providerConnection.processIdentity);
+    const runtime = { agentId: input.agentId, executionGenerationId: input.executionGenerationId, runtimeGenerationId,
+      provider: "cursor" as const, configRevision: input.configurationRevision };
+    assert.equal(shadow.registerRuntime({ ...runtime, authorityMode: "legacy", createdAtMs: 101 }), "typed",
+      "later policy requests cannot relabel the birth");
+    assert.equal(await store.readRuntimeLifecycleAuthority(input), "typed");
+    const queuedChild = structuredClone(input);
+    const queuedRead = store.readRuntimeLifecycleAuthority(queuedChild);
+    queuedChild.providerConnection.processIdentity = "cursor-birth-typed_shadow";
+    assert.equal(await queuedRead, "typed", "a queued child-A lookup cannot borrow the mutable child-B birth");
+
+    for (const mismatch of [
+      { ...input, agentId: "other-agent" },
+      { ...input, executionGenerationId: "other-generation" },
+      { ...input, providerConnection: { ...input.providerConnection, kind: "claude_cli" as const } },
+      { ...input, providerConnection: { ...input.providerConnection, processIdentity: "cursor-birth-b" } },
+      { ...input, configurationRevision: 4 },
+      { ...input, providerConnection: { ...input.providerConnection, pid: null } },
+      { ...input, providerConnection: { ...input.providerConnection, processIdentity: null } },
+    ]) assert.equal(await store.readRuntimeLifecycleAuthority(mismatch), null, "another identity cannot borrow the frozen mode");
+
+    await store.close(); store = new ManifestStore(env.databasePath); await store.load();
+    assert.equal(await store.readRuntimeLifecycleAuthority(input), "typed", "restart reads the same durable frozen row");
+    database.exec("PRAGMA ignore_check_constraints=ON");
+    database.prepare("UPDATE execution_runtime_generations SET authority_mode='unknown' WHERE runtime_generation_id=?").run(runtimeGenerationId);
+    database.exec("PRAGMA ignore_check_constraints=OFF");
+    assert.equal(await store.readRuntimeLifecycleAuthority(input), null, "malformed authority fails closed without policy inference");
+    database.prepare("DELETE FROM execution_runtime_generations WHERE runtime_generation_id=?").run(runtimeGenerationId);
+    assert.equal(await store.readRuntimeLifecycleAuthority(input), null, "missing authority fails closed without materialization");
+  } finally { database.close(); await store.close(); await env.cleanup(); }
 });
 
 test("approval journal rechecks operational checkpoint and configuration at selection, dispatch, and final send", async () => {
