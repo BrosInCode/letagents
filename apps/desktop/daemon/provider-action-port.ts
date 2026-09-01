@@ -115,6 +115,8 @@ export type ProviderActionStreamEvent = {
   method: string;
   /** Opaque identity shared only with typed facts derived from this exact native lifecycle event. */
   nativeEventId?: string;
+  /** Structural boundary for the correlated lifecycle checkpoint; never provider-authored text. */
+  nativeLifecyclePhase?: "turn_active" | "turn_terminal";
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
   payload: unknown;

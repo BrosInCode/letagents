@@ -29,6 +29,17 @@ import type {
   LiveBindingIdentity,
   WorkerRuntimeCustody,
 } from "./worker-runtime-custody.js";
+import {
+  unavailableLifecycleProjectionDiagnostics,
+  type LifecycleProjectionDiagnostics,
+  type LifecycleProjectionObservation,
+  type LifecycleProjectionProvider,
+} from "./lifecycle-projection-ledger.js";
+
+export type ProviderRecoveryDiagnostics = {
+  daemon_inbox_wait_evidence_dependency: number;
+  lifecycle_projection: LifecycleProjectionDiagnostics;
+};
 
 export type ProviderStreamManifest = {
   getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
@@ -77,6 +88,10 @@ export type ProviderStreamCoordinatorOptions = {
   provider?: Pick<ProviderActionPort, "stop" | "onExit" | "onStream" | "probeControl">;
   /** Optional non-authoritative capture; never awaited by provider delivery. */
   observeExecution?(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): () => void;
+  /** Raw legacy-classifier witness. This is comparison evidence, never lifecycle authority. */
+  observeLegacyLifecycle?(observation: LifecycleProjectionObservation): void;
+  markLifecycleProjectionUnavailable?(provider: LifecycleProjectionProvider): void;
+  lifecycleProjectionDiagnostics?(): LifecycleProjectionDiagnostics;
   /** Operational approvals have their own lifetime, independent of optional capture. */
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
@@ -137,6 +152,7 @@ export class ProviderStreamCoordinator {
   private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
   private readonly callbacks = new Set<Promise<void>>();
   private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
+  private readonly installedExecutionGenerations = new WeakMap<ProviderActionHandle, string>();
   private daemonInboxWaitEvidenceDependencies = 0;
   private readonly publishWorkerActivity: typeof publishWorkerNativeActivity;
   private readonly setHeartbeat: typeof setInterval;
@@ -157,8 +173,12 @@ export class ProviderStreamCoordinator {
     return this.liveHandles.has(entryId);
   }
 
-  recoveryDiagnostics(): { daemon_inbox_wait_evidence_dependency: number } {
-    return { daemon_inbox_wait_evidence_dependency: this.daemonInboxWaitEvidenceDependencies };
+  recoveryDiagnostics(): ProviderRecoveryDiagnostics {
+    return {
+      daemon_inbox_wait_evidence_dependency: this.daemonInboxWaitEvidenceDependencies,
+      lifecycle_projection: this.options.lifecycleProjectionDiagnostics?.()
+        ?? unavailableLifecycleProjectionDiagnostics(),
+    };
   }
 
   private acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean {
@@ -193,6 +213,7 @@ export class ProviderStreamCoordinator {
     );
     this.options.streams.reset(entryId);
     this.liveHandles.set(entryId, handle);
+    this.installedExecutionGenerations.set(handle, executionGenerationId);
     const disposePermissions = this.options.observePermissions?.(entryId, handle, executionGenerationId) ?? (() => {});
     let disposeExecution = () => {};
     try { disposeExecution = this.options.observeExecution?.(entryId, handle, executionGenerationId) ?? disposeExecution; }
@@ -224,7 +245,7 @@ export class ProviderStreamCoordinator {
     });
     const disposeStream = provider.onStream
       ? await provider.onStream(handle, (event) => {
-          this.track(this.enqueue(entryId, handle, event));
+          this.track(this.enqueue(entryId, handle, event, executionGenerationId));
         })
       : () => {};
     const heartbeat = this.setHeartbeat(() => {
@@ -445,11 +466,12 @@ export class ProviderStreamCoordinator {
     entryId: string,
     handle: ProviderActionHandle,
     event: ProviderActionStreamEvent,
+    executionGenerationId: string | undefined = this.installedExecutionGenerations.get(handle),
   ): Promise<void> {
     const previous = this.streamQueues.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.handle(entryId, handle, event))
+      .then(() => this.handle(entryId, handle, event, executionGenerationId))
       .finally(() => {
         if (this.streamQueues.get(entryId) === next) this.streamQueues.delete(entryId);
       });
@@ -462,11 +484,19 @@ export class ProviderStreamCoordinator {
     entryId: string,
     handle: ProviderActionHandle,
     event: ProviderActionStreamEvent,
+    executionGenerationId: string | undefined = this.installedExecutionGenerations.get(handle),
   ): Promise<void> {
-    if (this.liveHandles.get(entryId) !== handle) return;
     const observedLifecycle = providerStreamLifecycle(event);
+    if (this.liveHandles.get(entryId) !== handle) {
+      this.markLifecycleProjectionUnavailableForEvent(event);
+      return;
+    }
     const entry = await this.options.manifest.getEntry(entryId);
-    if (!entry) return;
+    if (!entry) {
+      this.markLifecycleProjectionUnavailableForEvent(event);
+      return;
+    }
+    this.observeLegacyLifecycle(entry, handle, event, observedLifecycle, executionGenerationId);
     const daemonInbox = entry.delivery_mode === "daemon_inbox";
     const custodialPolling = !daemonInbox && await this.options.heartbeat.requiresHostGrant(entry);
     const legacyCodexCutover = entry.provider === "codex"
@@ -580,6 +610,45 @@ export class ProviderStreamCoordinator {
         );
       }
     }
+  }
+
+  private observeLegacyLifecycle(entry: DaemonManifestEntry, handle: ProviderActionHandle,
+    event: ProviderActionStreamEvent, state: "failed" | "terminal" | "idle" | "working",
+    executionGenerationId: string | undefined): void {
+    if (!event.nativeEventId || !event.nativeLifecyclePhase || !this.options.observeLegacyLifecycle) return;
+    const expectedProvider = entry.provider;
+    if (!(expectedProvider === "codex" || expectedProvider === "claude-code" || expectedProvider === "cursor")) return;
+    const providerRef = entry.provider_ref;
+    // The listener closure owns the generation installed with this handle.
+    // A mutable successor manifest must neither relabel nor erase its tail.
+    if (entry.provider !== event.provider || event.workAttemptId !== handle.workAttemptId
+      || event.workAttemptId !== entry.work_attempt_id || event.workAttemptId !== providerRef?.work_attempt_id
+      || !event.providerContinuationId || event.providerContinuationId !== handle.providerContinuationId
+      || event.providerContinuationId !== providerRef.provider_continuation_id
+      || !executionGenerationId) {
+      this.options.markLifecycleProjectionUnavailable?.(expectedProvider);
+      return;
+    }
+    try {
+      this.options.observeLegacyLifecycle({
+        agentId: entry.id,
+        provider: expectedProvider,
+        workAttemptId: event.workAttemptId,
+        executionGenerationId,
+        nativeEventId: event.nativeEventId,
+        phase: event.nativeLifecyclePhase,
+        state,
+      });
+    } catch {
+      this.options.markLifecycleProjectionUnavailable?.(expectedProvider);
+      // Optional shadow observation never changes provider delivery or lifecycle.
+    }
+  }
+
+  private markLifecycleProjectionUnavailableForEvent(event: ProviderActionStreamEvent): void {
+    if (!event.nativeEventId || !event.nativeLifecyclePhase) return;
+    if (!(event.provider === "codex" || event.provider === "claude-code" || event.provider === "cursor")) return;
+    this.options.markLifecycleProjectionUnavailable?.(event.provider);
   }
 
   async checkpointObservedWaitCursor(

@@ -6,6 +6,8 @@ import { parseRoomAgentWorkSummary, ROOM_WORK_OPERATION_OUTCOMES, type RoomAgent
 
 import { combineSideEffects, executionIdentity as id, ExecutionProtocolError, nativeTurnIdentity, parseExecutionFact, type ExecutionFact, type SideEffectState } from "./execution-protocol.js";
 import { emptyExecutionProjection, reduceExecutionFact, type ExecutionProjection } from "./execution-reducer.js";
+import { LifecycleProjectionLedger, type LifecycleProjectionDiagnostics, type LifecycleProjectionObservation,
+  type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
 type Row = Record<string, string | number | null>;
 const time = z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER);
@@ -159,7 +161,10 @@ export class ExecutionShadowStore {
   private readonly budgets = new Map<string, RetainedBudget>();
   private projectionWeight = 0;
   private projectionStamp: string | null = null;
-  constructor(private readonly database: DatabaseSync) {}
+  private readonly lifecycleProjection: LifecycleProjectionLedger;
+  constructor(private readonly database: DatabaseSync) {
+    this.lifecycleProjection = new LifecycleProjectionLedger(database);
+  }
 
   private transaction<T>(body: () => T): T {
     this.database.exec("BEGIN IMMEDIATE");
@@ -402,12 +407,14 @@ export class ExecutionShadowStore {
       if (fact.observerEpoch !== token.epoch) throw new ExecutionProtocolError("stale_observer");
       if (fact.agentId !== token.agentId) throw new ExecutionProtocolError("identity_mismatch");
       let retainedTurn: Row | undefined;
+      let retainedRuntime: Row | undefined;
       if (fact.domain === "turn" || fact.domain === "execution") {
         if (fact.runtimeGenerationId !== token.runtimeGenerationId || fact.executionGenerationId !== token.executionGenerationId
           || (token.recoveryTurnId !== null && token.recoveryTurnId !== fact.turnId)) throw new ExecutionProtocolError("identity_mismatch");
         retainedTurn = this.required(`SELECT * FROM execution_turns WHERE turn_id=? AND agent_id=? AND execution_generation_id=?
           AND runtime_generation_id=? AND provider_continuation_id=? AND provider_turn_id=?`, fact.turnId, fact.agentId,
         fact.executionGenerationId, fact.runtimeGenerationId, fact.providerContinuationId, fact.providerTurnId);
+        retainedRuntime = this.required("SELECT * FROM execution_runtime_generations WHERE runtime_generation_id=?", fact.runtimeGenerationId);
       } else if (fact.runtimeGenerationId !== token.observerRuntimeGenerationId || fact.executionGenerationId !== token.observerExecutionGenerationId) {
         throw new ExecutionProtocolError("identity_mismatch");
       }
@@ -478,6 +485,7 @@ export class ExecutionShadowStore {
       const previous = this.cachedProjection(fact.runtimeGenerationId);
       const next = replay ? previous.projection : reduceExecutionFact(previous.projection, fact);
       this.insert("execution_facts", stored);
+      this.recordLifecycleProjection(fact, retainedTurn, retainedRuntime);
       this.database.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=MAX(max_observed_sequence,?) WHERE agent_id=?")
         .run(fact.sourceSequence, fact.sourceSequence, fact.agentId);
       if (!replay && fact.domain === "runtime") {
@@ -516,6 +524,37 @@ export class ExecutionShadowStore {
       this.rememberBudget(fact.agentId, committed.budget);
     }
     return result;
+  }
+
+  recordLegacyLifecycle(value: LifecycleProjectionObservation): void {
+    this.lifecycleProjection.recordLegacy(value);
+  }
+
+  recordLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider, count: number): void {
+    this.lifecycleProjection.recordUnavailable(provider, count);
+  }
+
+  lifecycleProjectionDiagnostics(): LifecycleProjectionDiagnostics {
+    return this.lifecycleProjection.diagnostics();
+  }
+
+  private recordLifecycleProjection(fact: ExecutionFact, retainedTurn: Row | undefined, retainedRuntime: Row | undefined): void {
+    if (fact.domain !== "turn" || fact.nativeEventId === undefined
+      || (fact.state !== "active" && fact.state !== "terminal") || !retainedTurn || !retainedRuntime) return;
+    const provider = String(retainedRuntime.provider);
+    if (!(["codex", "claude-code", "cursor"] as const).includes(provider as LifecycleProjectionProvider)) return;
+    const generation = this.required(`SELECT workspace_id FROM execution_attempt_generations
+      WHERE attempt_id=? AND execution_generation_id=? AND agent_id=?`, retainedTurn.attempt_id,
+    fact.executionGenerationId, fact.agentId);
+    this.lifecycleProjection.recordTypedInCurrentTransaction({
+      agentId: fact.agentId,
+      provider: provider as LifecycleProjectionProvider,
+      workAttemptId: String(generation.workspace_id),
+      executionGenerationId: fact.executionGenerationId,
+      nativeEventId: fact.nativeEventId,
+      phase: fact.state === "active" ? "turn_active" : "turn_terminal",
+      state: fact.state === "active" ? "working" : "terminal",
+    });
   }
 
   /** A bounded, coherent view of retained evidence, never provider authority. */

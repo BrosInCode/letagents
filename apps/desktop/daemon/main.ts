@@ -20,6 +20,7 @@ import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-executio
 import { schedulerErrorDetail } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
 import { ExecutionCaptureCoordinator } from "./execution-capture-coordinator.js";
+import { unavailableLifecycleProjectionDiagnostics } from "./lifecycle-projection-ledger.js";
 import { DesiredStateCoordinator } from "./desired-state-coordinator.js";
 import { WorkDurabilityStore } from "./durability-store.js";
 import { EntryConcurrencyGate } from "./entry-concurrency-gate.js";
@@ -358,6 +359,10 @@ export class SupervisorDaemon {
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
       observeExecution: (entryId, handle, generation) => this.executionCapture?.install(entryId, handle, generation) ?? (() => {}),
+      observeLegacyLifecycle: (observation) => this.executionCapture?.recordLegacyLifecycle(observation),
+      markLifecycleProjectionUnavailable: (provider) => this.executionCapture?.recordLifecycleProjectionUnavailable(provider),
+      lifecycleProjectionDiagnostics: () => this.executionCapture?.lifecycleProjectionDiagnostics()
+        ?? unavailableLifecycleProjectionDiagnostics(),
       observePermissions: (entryId, handle, generation) => this.hostApprovals.install(entryId, handle, generation),
       ...(providerPort ? { provider: providerPort } : {}),
       manifest: {

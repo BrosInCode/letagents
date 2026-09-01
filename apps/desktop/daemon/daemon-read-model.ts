@@ -4,6 +4,7 @@ import {
 } from "./cloud-http.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
+import type { ProviderRecoveryDiagnostics } from "./provider-stream-coordinator.js";
 import {
   bindingMatchesRoomAgentGeneration,
   hasExactRoomAgentDeliveryOwner,
@@ -32,7 +33,7 @@ export type DaemonReadModelPorts = {
     supportsRoomTurns(): boolean;
     supportsContinuationRepair(): boolean;
   };
-  recoveryDiagnostics(): { daemon_inbox_wait_evidence_dependency: number };
+  recoveryDiagnostics(): ProviderRecoveryDiagnostics;
   manifest: {
     load(): Promise<{ entries: DaemonManifestEntry[] }>;
     getEntry(entryId: string): Promise<DaemonManifestEntry | undefined>;
