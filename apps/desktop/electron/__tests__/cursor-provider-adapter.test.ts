@@ -6928,6 +6928,9 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   const typedCheckpointIds = [...new Set(events.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
   assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
     "each exact per-child init/result boundary correlates typed and legacy projections");
+  assert.equal(stream.every((event) => !event.nativeEventId || event.nativeLifecyclePhase ===
+    (event.method === "system/init" ? "turn_active" : "turn_terminal")), true,
+  "correlated Cursor events expose only the closed structural lifecycle phase");
   assert.equal(streamCheckpointIds.length, 4, "two child starts and two native terminals are independently correlated");
   const terminalIds = stream.filter((event) => event.method.startsWith("result") && event.nativeEventId)
     .map((event) => event.nativeEventId);

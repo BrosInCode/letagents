@@ -42,7 +42,8 @@ import type { NativeExecutionObservation, NativeExecutionSubscription } from "..
 import type { HostApprovalChallenge, HostApprovalOperation } from "../../shared/host-approval-auth.js";
 import type { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
 import type { ProviderCheckpointCoordinator } from "../provider-checkpoint-coordinator.js";
-import type { ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
+import type { ProviderRecoveryDiagnostics, ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
+import { unavailableLifecycleProjectionDiagnostics } from "../lifecycle-projection-ledger.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { launchLegacyWithOwnership } from "../../electron/main/supervisor-ownership.js";
 import { defaultGetProcessIdentity } from "../../electron/main/agents/provider-evidence.js";
@@ -6822,6 +6823,7 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     assert.equal((status.result as { generation: number }).generation, 1);
     assert.deepEqual((status.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
       daemon_inbox_wait_evidence_dependency: 0,
+      lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
     });
     const providerStreams = (daemon as unknown as {
       providerStreams: { acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean };
@@ -6830,6 +6832,7 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     const negotiated = await daemonRequest(paths.socketPath, "daemon.negotiate");
     assert.deepEqual((negotiated.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
       daemon_inbox_wait_evidence_dependency: 1,
+      lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
     });
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
     assert.equal(put.ok, true);
@@ -7238,7 +7241,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     const internals = daemon as unknown as {
       workerBindings: WorkerBindingStore;
       supervisedInbox: SupervisedAgentInboxStore;
-      providerStreams: { recoveryDiagnostics(): { daemon_inbox_wait_evidence_dependency: number } };
+      providerStreams: { recoveryDiagnostics(): ProviderRecoveryDiagnostics };
     };
     for (const current of manifest) {
       await eventually(async () => {

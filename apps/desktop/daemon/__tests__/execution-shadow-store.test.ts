@@ -9,15 +9,63 @@ import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../
 import { ExecutionProtocolError, parseExecutionFact, type ExecutionFact } from "../execution-protocol.js";
 import { emptyExecutionProjection, publicApprovalState, reduceDeliveryEvidence, reduceExecutionFact, waitingForApproval, type DeliveryEvidence } from "../execution-reducer.js";
 import { ExecutionShadowStore, type ShadowObserver } from "../execution-shadow-store.js";
+import { applyLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../../shared/room-agent-work.mjs";
 
 function fixture(path = ":memory:") {
   const db = new DatabaseSync(path);
   db.exec("PRAGMA foreign_keys=ON");
   applyExecutionStorageSchema(db);
+  applyLifecycleProjectionLedgerSchema(db);
   const store = new ExecutionShadowStore(db);
   return { db, store };
 }
+
+test("typed lifecycle witnesses commit atomically with their exact execution fact", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    const active = turnFact(1, { nativeEventId: "native-active" });
+    assert.equal(store.ingest(token.sourceId, token, active).status, "accepted");
+    assert.equal(store.ingest(token.sourceId, token, active).status, "duplicate");
+    assert.deepEqual({ ...db.prepare(`SELECT native_event_id,typed_phase,typed_state,legacy_state,classification
+      FROM lifecycle_projection_pairs`).get() }, {
+      native_event_id: "native-active",
+      typed_phase: "turn_active",
+      typed_state: "working",
+      legacy_state: null,
+      classification: "incomplete",
+    });
+
+    db.exec(`CREATE TEMP TRIGGER fail_lifecycle_projection BEFORE INSERT ON lifecycle_projection_pairs
+      BEGIN SELECT RAISE(ABORT,'injected lifecycle write failure'); END`);
+    assert.throws(() => store.ingest(token.sourceId, token,
+      turnFact(2, { factId: "fact-terminal", nativeEventId: "native-terminal", state: "terminal", turnOutcome: "completed" })),
+    /injected lifecycle write failure/);
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_facts WHERE fact_id='fact-terminal'").get()!.count, 0);
+    assert.equal(db.prepare("SELECT last_source_sequence FROM execution_observers WHERE agent_id='agent'").get()!.last_source_sequence, 1);
+    assert.equal(db.isTransaction, false);
+  } finally { db.close(); }
+});
+
+test("replaying a pre-ledger execution fact cannot manufacture typed comparison history", () => {
+  const { db, store } = fixture();
+  try {
+    seed(store); const token = observer(store);
+    const active = turnFact(1, { nativeEventId: "historical-active" });
+    db.prepare(`INSERT INTO execution_facts(fact_id,agent_id,execution_generation_id,runtime_generation_id,
+      observer_epoch,source_sequence,native_event_id,turn_id,domain,kind,state,side_effects,observed_at_ms)
+      VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+      active.factId, active.agentId, active.executionGenerationId, active.runtimeGenerationId,
+      active.observerEpoch, active.sourceSequence, active.nativeEventId!, active.turnId,
+      active.domain, active.kind, active.state, active.sideEffects, active.observedAtMs,
+    );
+    db.prepare("UPDATE execution_observers SET last_source_sequence=1,max_observed_sequence=1 WHERE agent_id='agent'").run();
+    assert.equal(store.ingest(token.sourceId, token, active).status, "duplicate");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0,
+      "only facts committed by the current typed-shadow implementation may enter the comparison ledger");
+  } finally { db.close(); }
+});
 function countHistoryReads(t: TestContext, db: DatabaseSync): () => number {
   const prepare = db.prepare.bind(db);
   let count = 0;

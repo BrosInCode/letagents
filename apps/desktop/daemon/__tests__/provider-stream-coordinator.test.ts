@@ -10,6 +10,7 @@ import { ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonManifestEntry } from "../types.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
+import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
 
 const entry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -67,12 +68,15 @@ function coordinatorHarness(input: {
   clearInterval?: typeof clearInterval;
   endStream?: (entryId: string) => void;
   observeExecution?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
+  observeLegacyLifecycle?: (observation: LifecycleProjectionObservation) => void;
+  markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor") => void;
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
   publishNativeActivity?: () => Promise<void>;
   requestConvergence?: (entryId: string) => void;
 } = {}) {
   let manifest = entry();
+  let manifestAvailable = true;
   const runtimeCustody = new WorkerRuntimeCustody();
   const pendingInstalled: unknown[] = [];
   const bindings = {
@@ -85,6 +89,8 @@ function coordinatorHarness(input: {
   let stopCalls = 0;
   const coordinator = new ProviderStreamCoordinator({
     observeExecution: input.observeExecution,
+    observeLegacyLifecycle: input.observeLegacyLifecycle,
+    markLifecycleProjectionUnavailable: input.markLifecycleProjectionUnavailable,
     observePermissions: input.observePermissions,
     provider: {
       stop: async (current) => {
@@ -103,7 +109,7 @@ function coordinatorHarness(input: {
       probeControl: input.probeControl,
     },
     manifest: {
-      getEntry: async () => manifest,
+      getEntry: async () => manifestAvailable ? manifest : undefined,
       load: async () => ({ entries: [manifest] }),
       updateEntry: async (_entryId, update) => {
         manifest = update(manifest);
@@ -160,6 +166,7 @@ function coordinatorHarness(input: {
     pendingInstalled,
     stopCalls: () => stopCalls,
     setManifest: (next: DaemonManifestEntry) => { manifest = next; },
+    setManifestAvailable: (available: boolean) => { manifestAvailable = available; },
     getManifest: () => manifest,
   };
 }
@@ -390,6 +397,51 @@ test("provider stream events are FIFO per entry and stale handles are ignored", 
   await harness.coordinator.disposeAll();
 });
 
+test("queued raw lifecycle checkpoints record unavailability when replacement wins first", async () => {
+  const unavailable: string[] = [];
+  let releaseFirst!: () => void;
+  const firstBlocked = new Promise<void>((resolve) => { releaseFirst = resolve; });
+  const harness = coordinatorHarness({
+    appendActivity: async (method) => {
+      if (method === "item/first") await firstBlocked;
+    },
+    markLifecycleProjectionUnavailable: provider => unavailable.push(provider),
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  const first = harness.coordinator.enqueue("agent-1", handle, streamEvent(1, "item/first"));
+  const terminal = harness.coordinator.enqueue("agent-1", handle, {
+    ...streamEvent(2, "turn/completed"),
+    kind: "turn_lifecycle",
+    nativeEventId: "native-terminal",
+    nativeLifecyclePhase: "turn_terminal",
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  harness.coordinator.liveHandles.set("agent-1", { ...handle, pid: 99 });
+  releaseFirst();
+  await Promise.all([first, terminal]);
+
+  assert.deepEqual(unavailable, ["codex"]);
+  await harness.coordinator.disposeAll();
+});
+
+test("a raw lifecycle checkpoint records unavailability when its manifest entry disappeared", async () => {
+  const unavailable: string[] = [];
+  const harness = coordinatorHarness({
+    markLifecycleProjectionUnavailable: provider => unavailable.push(provider),
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.setManifestAvailable(false);
+  await harness.coordinator.enqueue("agent-1", handle, {
+    ...streamEvent(1, "turn/completed"),
+    kind: "turn_lifecycle",
+    nativeEventId: "native-terminal",
+    nativeLifecyclePhase: "turn_terminal",
+  });
+
+  assert.deepEqual(unavailable, ["codex"]);
+  await harness.coordinator.disposeAll();
+});
+
 test("terminal fencing is idempotent for one exact handle", async () => {
   let releaseStop!: () => void;
   const stopBlocked = new Promise<void>((resolve) => { releaseStop = resolve; });
@@ -461,6 +513,69 @@ test("resume staging requires a terminal predecessor and exactly one live succes
     ),
     /predecessor execution is not durably terminal/,
   );
+});
+
+test("raw lifecycle shadow capture precedes daemon-inbox terminal rewriting and owns no runtime behavior", async () => {
+  const observations: LifecycleProjectionObservation[] = [];
+  const harness = coordinatorHarness({ observeLegacyLifecycle: (observation) => observations.push(observation) });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.enqueue("agent-1", handle, {
+    ...streamEvent(1, "turn/completed"),
+    kind: "turn_lifecycle",
+    nativeEventId: "native-terminal",
+    nativeLifecyclePhase: "turn_terminal",
+  });
+  assert.deepEqual(observations, [{
+    agentId: "agent-1",
+    provider: "codex",
+    workAttemptId: "attempt-1",
+    executionGenerationId: "generation-2",
+    nativeEventId: "native-terminal",
+    phase: "turn_terminal",
+    state: "terminal",
+  }]);
+  assert.equal(harness.stopCalls(), 0, "daemon-inbox still rewrites operational terminal to idle");
+  assert.notEqual(harness.getManifest().observed_state, "failed");
+  await harness.coordinator.disposeAll();
+});
+
+test("raw lifecycle shadow capture rejects inexact identity and isolates observer failures", async () => {
+  const observations: LifecycleProjectionObservation[] = [];
+  const unavailable: string[] = [];
+  let throwObservation = false;
+  const harness = coordinatorHarness({ observeLegacyLifecycle: (observation) => {
+    if (throwObservation) throw new Error("optional storage unavailable");
+    observations.push(observation);
+  }, markLifecycleProjectionUnavailable: provider => unavailable.push(provider) });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  const exact = {
+    ...streamEvent(1, "turn/started"),
+    kind: "turn_lifecycle",
+    nativeEventId: "native-active",
+    nativeLifecyclePhase: "turn_active" as const,
+  };
+  for (const inexact of [
+    { ...exact, workAttemptId: "other-attempt" },
+    { ...exact, providerContinuationId: "other-continuation" },
+    { ...exact, provider: "other-provider" },
+  ]) await harness.coordinator.enqueue("agent-1", handle, inexact);
+  assert.deepEqual(observations, []);
+  assert.deepEqual(unavailable, ["codex", "codex", "codex"]);
+
+  harness.setManifest({ ...entry(), provider_ref: {
+    ...entry().provider_ref!, execution_generation_id: "generation-replaced",
+  } });
+  await harness.coordinator.enqueue("agent-1", handle, exact);
+  assert.equal(observations.at(-1)?.executionGenerationId, "generation-2",
+    "an old installed stream retains its captured generation instead of borrowing the successor manifest generation");
+  harness.setManifest(entry());
+
+  throwObservation = true;
+  await harness.coordinator.enqueue("agent-1", handle, exact);
+  assert.equal(unavailable.at(-1), "codex");
+  assert.equal(harness.getManifest().observed_state, "working");
+  assert.equal(harness.stopCalls(), 0);
+  await harness.coordinator.disposeAll();
 });
 
 test("daemon inbox ignores provider wait evidence and measures illegal legacy authority calls", async () => {

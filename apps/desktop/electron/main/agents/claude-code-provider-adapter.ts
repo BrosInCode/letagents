@@ -1161,7 +1161,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       return;
     }
     const nativeEventId = this.observeNativeExecution(handle, message);
-    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message), nativeEventId);
+    const nativeLifecyclePhase = nativeEventId
+      ? message.type === "command_lifecycle" ? "turn_active" as const
+        : message.type === "result" ? "turn_terminal" as const : null
+      : null;
+    this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message), nativeEventId, nativeLifecyclePhase);
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
@@ -1421,6 +1425,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     providerPayload: unknown,
     kind: ProviderStreamEventKind,
     nativeEventId: string | null = null,
+    nativeLifecyclePhase: "turn_active" | "turn_terminal" | null = null,
   ): void {
     const safe = safeStreamPayload(providerPayload);
     const event: ProviderStreamEvent = {
@@ -1432,6 +1437,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       kind,
       method,
       ...(nativeEventId ? { nativeEventId } : {}),
+      ...(nativeLifecyclePhase ? { nativeLifecyclePhase } : {}),
       ...safe,
       durablePayloadRef: null,
     };
