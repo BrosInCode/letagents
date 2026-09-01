@@ -45,6 +45,30 @@ export function providerStreamLifecycle(event: ProviderActionStreamEvent): "fail
   // events. Keep their failure payload intact, but never fence the session
   // ("terminal" would still fence legacy mcp_polling continuations).
   if (event.provider === "claude-code" && event.kind === "turn_lifecycle" && /^result\/error_/.test(method)) return "idle";
+  // Codex turn failure is an exact terminal turn outcome, not app-server
+  // failure. The coordinator preserves the observed terminal edge for legacy
+  // cutover, then maps it to runtime-idle without fencing the reusable server.
+  // Transcript snapshots may carry the same turn-scoped result without a live
+  // turn notification, but hard thread failure evidence always wins.
+  const codexTranscript = event.provider === "codex"
+    && event.kind === "transcript_snapshot"
+    && /^thread\/read$/i.test(method);
+  const codexTranscriptRuntimeFailure = codexTranscript
+    && [payload.threadStatus, (payload.thread as Record<string, unknown> | undefined)?.status]
+      .flatMap(nestedStatus)
+      .some((value) => typeof value === "string"
+        && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
+  if (codexTranscriptRuntimeFailure) return "failed";
+  const codexTurnFailure = event.provider === "codex" && (
+    event.kind === "turn_lifecycle" && (
+      /^turn\/failed$/i.test(method)
+      || /^turn\/completed$/i.test(method)
+        && statuses.some((value) => typeof value === "string" && /^failed$/i.test(value))
+    )
+    || codexTranscript
+      && nestedStatus(payload.latestTurn).some((value) => typeof value === "string" && /^failed$/i.test(value))
+  );
+  if (codexTurnFailure) return "terminal";
   const failedStatus = statuses.some((value) => typeof value === "string" && /^(?:systemError|error|error_during_execution|failed)$/i.test(value));
   const failedMethod = /(?:^|\/)(?:failed|systemError|error_during_execution)$/i.test(method);
   const failedResult = /^result(?:\/|$)/i.test(method) && (payload.is_error === true || failedStatus);

@@ -2035,7 +2035,27 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
   const first = await firstAdapter.spawn(request);
   assert.ok(first.providerConnection);
 
-  const freshAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    client.turnStatus = "failed";
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown) => {
+      const result = await request<T>(method, params);
+      if (method === "thread/read") {
+        const thread = (result as { thread?: { turns?: Array<Record<string, unknown>> } }).thread;
+        const latestTurn = thread?.turns?.at(-1);
+        if (latestTurn) latestTurn.items = [{ type: "agentMessage", text: "x".repeat(40_000) }];
+      }
+      return result;
+    };
+    return client;
+  };
+  const stream: ProviderStreamEvent[] = [];
+  const freshAdapter = new CodexProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => stream.push(event),
+  });
   const attached = await freshAdapter.attach({
     workAttemptId: request.workAttemptId,
     providerContinuationId: first.providerContinuationId!,
@@ -2050,6 +2070,15 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
     harness.clients[1]!.requests.some((entry) => entry.method === "thread/start" || entry.method === "turn/start"),
     false,
   );
+  const snapshot = stream.find((event) => event.method === "thread/read");
+  assert.ok(snapshot, "reattach emits one normalized transcript snapshot");
+  assert.equal((snapshot.payload as { thread?: unknown }).thread, undefined,
+    "attach and live transcript snapshots share the same closed payload shape");
+  assert.equal((snapshot.payload as { latestTurn?: { status?: string } }).latestTurn?.status, "failed");
+  assert.equal(snapshot.payloadTruncated, false,
+    "oversized transcript items cannot erase the closed lifecycle metadata");
+  assert.equal(providerStreamLifecycle(snapshot), "terminal",
+    "the exact reattach payload keeps failed-turn evidence scoped to the native turn");
   assert.equal(await freshAdapter.attach({
     workAttemptId: request.workAttemptId,
     providerContinuationId: first.providerContinuationId!,
@@ -2817,7 +2846,13 @@ test("Codex typed shadow separates exact tool and turn failures from the reusabl
   const failedTurn = { turn: { id: "turn-1", status: "failed" } };
   emit("turn/completed", failedTurn);
   emit("turn/completed", failedTurn);
+  emit("turn/failed", failedTurn);
   assert.equal(handle.observedState(), "idle", "the failed turn does not poison the reusable runtime handle");
+  for (const event of stream.filter((candidate) => /^turn\/(?:completed|failed)$/.test(candidate.method))) {
+    assert.equal(event.kind, "turn_lifecycle", "the adapter preserves exact turn identity ahead of generic failure labels");
+    assert.equal(providerStreamLifecycle(event), "terminal",
+      "the daemon agrees that an exact failed turn leaves the Codex app-server reusable");
+  }
   emit("turn/started", { turnId: "turn-2", turn: { id: "turn-2", status: "inProgress" } });
   let projection = emptyExecutionProjection();
   for (const observation of observations) {
@@ -2859,6 +2894,38 @@ test("Codex typed shadow separates exact tool and turn failures from the reusabl
   assert.equal(stopReplay.sourceId, unsubscribe.sourceId);
   assert.ok(replayed.every(event => event.sourceId === stopReplay.sourceId));
   stopReplay.dispose();
+});
+
+test("direct Codex turn/failed emits its own typed terminal checkpoint", async () => {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new CodexProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => stream.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const client = harness.clients[0]!;
+  const params = { threadId: handle.providerContinuationId, turnId: "turn-direct-failed" };
+  client.emit({ method: "turn/started", params: {
+    ...params, turn: { id: params.turnId, status: "inProgress" },
+  } });
+  client.emit({ method: "turn/failed", params: {
+    ...params, turn: { id: params.turnId, status: "failed" },
+  } });
+
+  const failedStream = stream.find((event) => event.method === "turn/failed");
+  assert.ok(failedStream?.nativeEventId);
+  assert.equal(failedStream.kind, "turn_lifecycle");
+  assert.equal(providerStreamLifecycle(failedStream), "terminal");
+  const failedFact = observations.find((event) => event.fact.domain === "turn"
+    && event.fact.providerTurnId === params.turnId
+    && event.fact.state === "terminal");
+  assert.ok(failedFact && failedFact.fact.domain === "turn");
+  assert.equal(failedFact.fact.turnOutcome, "failed");
+  assert.equal(failedFact.fact.nativeEventId, failedStream.nativeEventId,
+    "the direct failure carries one shared typed/legacy checkpoint identity");
 });
 
 test("execution observation replay stays bounded and preserves source gaps", () => {

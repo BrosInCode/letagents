@@ -11241,7 +11241,9 @@ test("providerStreamLifecycle never fails the agent on a tool call's own error s
   // correction was about to resume on).
   assert.equal(providerStreamLifecycle({ ...base, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { status: "error", partId: "tool-1" } }), "working");
   assert.equal(providerStreamLifecycle({ ...base, kind: "tool_lifecycle", method: "item/toolCall/updated", payload: { status: "running", partId: "tool-1" } }), "working");
-  // Genuine process/turn failures are still classified failed (no regression).
+  // A failed Codex turn leaves its reusable runtime available. Genuine process
+  // failures still classify failed.
+  assert.equal(providerStreamLifecycle({ ...base, provider: "codex", kind: "turn_lifecycle", method: "turn/failed", payload: {} }), "terminal");
   assert.equal(providerStreamLifecycle({ ...base, kind: "error", method: "result", payload: { is_error: true } }), "failed");
-  assert.equal(providerStreamLifecycle({ ...base, kind: "turn_lifecycle", method: "turn/failed", payload: {} }), "failed");
+  assert.equal(providerStreamLifecycle({ ...base, provider: "codex", kind: "command_output", method: "process/systemError", payload: { status: "systemError" } }), "failed");
 });
