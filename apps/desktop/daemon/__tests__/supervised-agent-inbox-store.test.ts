@@ -2783,6 +2783,36 @@ for (const writeFailure of [false, true]) test(`terminal receipt settlement does
   } finally { database?.close(); await store.close(); await env.cleanup(); }
 });
 
+test("captured receipt settlement accepts typed-capable authority modes but rejects legacy", async () => {
+  const env = await fixture();
+  const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
+  let database: DatabaseSync | undefined;
+  try {
+    const [item] = await store.ingestPoll({ agent_id: "captured-authority", room_id: "room", last_observed_message_id: "1",
+      messages: [{ source_message_id: "1", source_message: {}, activation: {} }] });
+    database = new DatabaseSync(env.database);
+    const attempt = await completeCapturedReceipt(store, database, item!, "no_reply", "before");
+    const readAttempt = () => ({ ...database!.prepare("SELECT state,conclusion FROM execution_message_attempts WHERE attempt_id=?").get(attempt) });
+    const resetAttempt = database.prepare("UPDATE execution_message_attempts SET state='active',conclusion=NULL,settled_at_ms=NULL WHERE attempt_id=?");
+    const setAuthorityMode = database.prepare(`UPDATE execution_runtime_generations SET authority_mode=?
+      WHERE runtime_generation_id=(SELECT runtime_generation_id FROM execution_turns WHERE attempt_id=?)`);
+    assert.deepEqual(readAttempt(),
+      { state: "cleanly_concluded", conclusion: "acknowledged_no_reply" });
+    resetAttempt.run(attempt);
+    setAuthorityMode.run("typed", attempt);
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-authority"),
+      { lastFifoSequence: 1, hasMore: false, unavailable: false });
+    assert.deepEqual(readAttempt(),
+      { state: "cleanly_concluded", conclusion: "acknowledged_no_reply" });
+    resetAttempt.run(attempt);
+    setAuthorityMode.run("legacy", attempt);
+    assert.deepEqual(settleCapturedExecutionAttempts(database, "captured-authority"),
+      { lastFifoSequence: 1, hasMore: false, unavailable: true });
+    assert.deepEqual(readAttempt(),
+      { state: "active", conclusion: null });
+  } finally { database?.close(); await store.close(); await env.cleanup(); }
+});
+
 for (const writeFailure of [false, true]) test(`captured attempt settlement precedes receipt pruning without blocking it (write failure: ${writeFailure})`, async () => {
   const env = await fixture();
   const store = new SupervisedAgentInboxStore(env.database, () => "2026-08-05T17:00:00.000Z");
