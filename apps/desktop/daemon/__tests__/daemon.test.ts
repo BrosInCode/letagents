@@ -6818,6 +6818,17 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     const status = await daemonRequest(paths.socketPath, "daemon.status");
     assert.equal(status.ok, true);
     assert.equal((status.result as { generation: number }).generation, 1);
+    assert.deepEqual((status.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
+      daemon_inbox_wait_evidence_dependency: 0,
+    });
+    const providerStreams = (daemon as unknown as {
+      providerStreams: { acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean };
+    }).providerStreams;
+    assert.equal(providerStreams.acceptsLegacyWaitAuthority({ ...entry, delivery_mode: "daemon_inbox" }), false);
+    const negotiated = await daemonRequest(paths.socketPath, "daemon.negotiate");
+    assert.deepEqual((negotiated.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
+      daemon_inbox_wait_evidence_dependency: 1,
+    });
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
     assert.equal(put.ok, true);
     const listed = await daemonRequest(paths.socketPath, "manifest.list");

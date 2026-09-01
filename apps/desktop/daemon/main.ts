@@ -609,6 +609,7 @@ export class SupervisorDaemon {
         supportsRoomTurns: () => Boolean(this.providerPort?.runRoomTurn),
         supportsContinuationRepair: () => Boolean(this.providerPort?.repairContinuation),
       },
+      recoveryDiagnostics: () => this.providerStreams.recoveryDiagnostics(),
       manifest: {
         load: () => this.store.load(),
         getEntry: (entryId) => this.store.getEntry(entryId),

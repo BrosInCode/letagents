@@ -382,6 +382,9 @@ export interface DesktopSupervisorDaemonStatus {
   generation: number;
   pid: number;
   startedAt: string;
+  recoveryDiagnostics: {
+    daemonInboxWaitEvidenceDependency: number;
+  } | null;
   capabilities: {
     roomDeliveryRetry: boolean;
     providerContinuationRepair: boolean;
