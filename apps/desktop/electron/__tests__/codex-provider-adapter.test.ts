@@ -2517,7 +2517,9 @@ test("Codex typed shadow separates exact tool and turn failures from the unchang
   emit("item/completed", { item: { id: "command-1", type: "commandExecution", status: "failed", exitCode: 1 } });
   assert.equal(handle.observedState(), "working");
   assert.equal(providerStreamLifecycle(stream.at(-1)!), "working");
-  emit("turn/completed", { turn: { id: "turn-1", status: "failed" } });
+  const failedTurn = { turn: { id: "turn-1", status: "failed" } };
+  emit("turn/completed", failedTurn);
+  emit("turn/completed", failedTurn);
   assert.equal(handle.observedState(), "failed", "legacy authority is deliberately unchanged in PR3");
   emit("turn/started", { turnId: "turn-2", turn: { id: "turn-2", status: "inProgress" } });
   let projection = emptyExecutionProjection();
@@ -2535,6 +2537,19 @@ test("Codex typed shadow separates exact tool and turn failures from the unchang
   assert.equal(projection.turns.get("local-turn-1").operations.get("command-1").exitCode, 1);
   assert.equal(projection.turns.get("local-turn-2").state, "active");
   assert.equal(/SECRET|secret output|private\/project/.test(JSON.stringify(observations)), false);
+  const streamCheckpointIds = [...new Set(stream.flatMap((event) => event.nativeEventId ? [event.nativeEventId] : []))];
+  const typedCheckpointIds = [...new Set(observations.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
+  assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
+    "exact native turn lifecycle events carry the same opaque identity in typed and legacy projections");
+  assert.equal(streamCheckpointIds.length, 3, "two native starts and one native terminal are independently correlated");
+  const terminalIds = stream.filter((event) => event.method === "turn/completed")
+    .map((event) => event.nativeEventId);
+  assert.equal(terminalIds.length, 2);
+  assert.equal(terminalIds[0], terminalIds[1], "an identical terminal replay keeps the first checkpoint identity");
+  assert.ok(streamCheckpointIds.every((value) => /^nlc1:[A-Za-z0-9_-]{43}$/.test(value)));
+  assert.equal(stream.some((event) => event.method.startsWith("item/") && event.nativeEventId !== undefined), false,
+    "execution and display events are outside turn-lifecycle checkpoint identity");
+  assert.equal(observations.some((event) => event.fact.domain === "execution" && event.fact.nativeEventId !== undefined), false);
   assert.deepEqual(harness.signals, []);
   assert.equal(harness.launches.length, 1);
   unsubscribe.dispose();

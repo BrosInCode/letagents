@@ -6845,6 +6845,8 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);
   const handle = await spawnDaemonLane(adapter, harness);
+  const stream: ProviderStreamEvent[] = [];
+  const stopStream = adapter.onStream(handle, (event) => stream.push(event));
   const events: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, () => { throw new Error("observer unavailable"); });
   adapter.onExecution(handle, (event) => events.push(event));
@@ -6857,6 +6859,7 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   await flush();
   const child = harness.children[0]!;
   const session_id = "sess-cursor-1";
+  child.emit({ type: "system", subtype: "init", session_id, model: "cursor-fast" });
   const started = { type: "tool_call", subtype: "started", call_id: "same-call", session_id,
     tool_call: { readToolCall: { args: { path: "secret-path" } } } };
   child.emit(started);
@@ -6875,7 +6878,9 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   assert.deepEqual(probeObservation.fact,
     { domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" },
     "an active child publishes the probe result with its exact runtime birth");
-  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
+  const firstResult = { type: "result", subtype: "success", is_error: false, result: "done", session_id };
+  child.emit(firstResult);
+  child.emit(firstResult);
   assert.equal(events.filter((event) => event.fact.domain === "execution"
     && event.fact.executionId === "unclosed-write" && event.fact.kind === "completed").length, 0,
   "a display-only interrupted card cannot become native interruption evidence");
@@ -6919,6 +6924,22 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   assert.deepEqual(replay, events, "late subscribers retain both exact child births and the shared original sequence");
   assert.ok(replay.every(event => event.sourceId === replaySubscription.sourceId), "successive child births share one observation source");
   replaySubscription.dispose();
+  const streamCheckpointIds = [...new Set(stream.flatMap((event) => event.nativeEventId ? [event.nativeEventId] : []))];
+  const typedCheckpointIds = [...new Set(events.flatMap((event) => event.fact.nativeEventId ? [event.fact.nativeEventId] : []))];
+  assert.deepEqual(typedCheckpointIds, streamCheckpointIds,
+    "each exact per-child init/result boundary correlates typed and legacy projections");
+  assert.equal(streamCheckpointIds.length, 4, "two child starts and two native terminals are independently correlated");
+  const terminalIds = stream.filter((event) => event.method.startsWith("result") && event.nativeEventId)
+    .map((event) => event.nativeEventId);
+  assert.equal(terminalIds.length, 3);
+  assert.equal(terminalIds[0], terminalIds[1], "an identical terminal replay keeps the first checkpoint identity");
+  assert.equal(events.filter((event) => event.fact.domain === "turn" && event.fact.state === "terminal"
+    && event.fact.nativeEventId === terminalIds[0]).length, 1, "a replay does not emit another typed terminal");
+  assert.equal(stream.find((event) => event.method === "system/init_duplicate")?.nativeEventId, undefined,
+    "duplicate init diagnostics do not mint a second lifecycle checkpoint");
+  assert.equal(stream.some((event) => event.kind === "tool_lifecycle" && event.nativeEventId !== undefined), false);
+  assert.equal(events.some((event) => event.fact.domain === "execution" && event.fact.nativeEventId !== undefined), false);
+  stopStream();
 });
 
 test("Cursor typed child loss differs from an exact user interruption", async () => {
