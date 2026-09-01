@@ -565,36 +565,39 @@ export class ProviderExecutionCoordinator {
     appliedRevision: number,
     requestedAuthorityMode: LifecycleAuthorityMode,
   ): Promise<void> {
-    if (!handle.providerContinuationId || !handle.providerConnection) {
+    const providerConnection = handle.providerConnection;
+    if (!handle.providerContinuationId || !providerConnection) {
       throw new Error("Provider launch did not return an exact durable native birth.");
     }
-    for (let attempt = 0; attempt < 8; attempt += 1) {
-      await this.options.authority.assertCurrent();
-      const snapshot = await this.options.store.load();
-      const current = snapshot.entries.find((candidate) => candidate.id === entryId);
-      if (!current || current.work_attempt_id !== handle.workAttemptId) {
-        throw new DaemonFenceLostError("Provider birth no longer matches the durable work attempt.");
+    await this.options.authority.serializeManifestMutation(async () => {
+      for (let attempt = 0; attempt < 8; attempt += 1) {
+        await this.options.authority.assertCurrent();
+        const snapshot = await this.options.store.load();
+        const current = snapshot.entries.find((candidate) => candidate.id === entryId);
+        if (!current || current.work_attempt_id !== handle.workAttemptId) {
+          throw new DaemonFenceLostError("Provider birth no longer matches the durable work attempt.");
+        }
+        try {
+          const next = await this.options.store.checkpointProviderBirth(
+            snapshot.generation,
+            {
+              entry: this.providerBirthEntry(current, handle, executionGenerationId),
+              executionGenerationId,
+              providerConnection,
+              appliedRevision,
+              requestedAuthorityMode,
+              observedAtMs: this.options.nowMs(),
+            },
+            this.options.authority.fenceCommit,
+          );
+          this.options.authority.acceptManifestGeneration(next.generation);
+          return;
+        } catch (error) {
+          if (!(error instanceof ManifestConflictError)) throw error;
+        }
       }
-      try {
-        const next = await this.options.store.checkpointProviderBirth(
-          snapshot.generation,
-          {
-            entry: this.providerBirthEntry(current, handle, executionGenerationId),
-            executionGenerationId,
-            providerConnection: handle.providerConnection,
-            appliedRevision,
-            requestedAuthorityMode,
-            observedAtMs: this.options.nowMs(),
-          },
-          this.options.authority.fenceCommit,
-        );
-        this.options.authority.acceptManifestGeneration(next.generation);
-        return;
-      } catch (error) {
-        if (!(error instanceof ManifestConflictError)) throw error;
-      }
-    }
-    throw new DaemonFenceLostError("Provider birth could not converge on the latest manifest generation.");
+      throw new DaemonFenceLostError("Provider birth could not converge on the latest manifest generation.");
+    });
   }
 
   private providerBirthEntry(
@@ -697,6 +700,9 @@ export class ProviderExecutionCoordinator {
       if (!handle.providerConnection) throw new Error("Provider handoff requires an exact native birth.");
       const updated = this.providerBirthEntry(current, handle, executionGenerationId);
       try {
+        // Deliberately bypass the ordinary manifest-mutation lane: handoff has
+        // fenced new mutations, but the retiring daemon must still journal an
+        // already-returned native birth before yielding singleton authority.
         const next = await this.options.store.checkpointProviderBirth(
           snapshot.generation,
           {
@@ -809,63 +815,60 @@ export class ProviderExecutionCoordinator {
         })
       : null;
     if (recoveredConnection && (!ref.provider_connection || frozenAuthority === null)) {
-      let checkpointed = false;
-      for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
-        await this.options.authority.assertCurrent();
-        const snapshot = await this.options.store.load();
-        const current = snapshot.entries.find((candidate) => candidate.id === entry.id);
-        const currentRef = current?.provider_ref;
-        if (!current || current.work_attempt_id !== ref.work_attempt_id
-          || currentRef?.work_attempt_id !== ref.work_attempt_id
-          || currentRef.execution_generation_id !== ref.execution_generation_id
-          || currentRef.provider_continuation_id !== ref.provider_continuation_id) {
-          throw new DaemonFenceLostError(
-            "Provider authority changed before recovered connection evidence could be checkpointed.",
-          );
-        }
-        if (currentRef.provider_connection
-          && !sameProviderActionConnectionSnapshot(
-            currentRef.provider_connection,
-            recoveredConnection,
-          )) {
-          throw new Error(
-            "Recovered provider connection conflicts with the durable manifest.",
-          );
-        }
-        try {
-          const next = await this.options.store.checkpointProviderBirth(
-            snapshot.generation,
-            {
-              entry: {
-                ...current,
-                provider_ref: {
-                  ...currentRef,
-                  provider_connection: structuredClone(recoveredConnection),
+      authoritativeEntry = await this.options.authority.serializeManifestMutation(async () => {
+        for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
+          await this.options.authority.assertCurrent();
+          const snapshot = await this.options.store.load();
+          const current = snapshot.entries.find((candidate) => candidate.id === entry.id);
+          const currentRef = current?.provider_ref;
+          if (!current || current.work_attempt_id !== ref.work_attempt_id
+            || currentRef?.work_attempt_id !== ref.work_attempt_id
+            || currentRef.execution_generation_id !== ref.execution_generation_id
+            || currentRef.provider_continuation_id !== ref.provider_continuation_id) {
+            throw new DaemonFenceLostError(
+              "Provider authority changed before recovered connection evidence could be checkpointed.",
+            );
+          }
+          if (currentRef.provider_connection
+            && !sameProviderActionConnectionSnapshot(
+              currentRef.provider_connection,
+              recoveredConnection,
+            )) {
+            throw new Error(
+              "Recovered provider connection conflicts with the durable manifest.",
+            );
+          }
+          try {
+            const next = await this.options.store.checkpointProviderBirth(
+              snapshot.generation,
+              {
+                entry: {
+                  ...current,
+                  provider_ref: {
+                    ...currentRef,
+                    provider_connection: structuredClone(recoveredConnection),
+                  },
                 },
+                executionGenerationId: ref.execution_generation_id,
+                providerConnection: recoveredConnection,
+                appliedRevision: appliedRevision!,
+                // This process predates native-birth capture. Recovering its
+                // connection must not infer authority from the current release.
+                requestedAuthorityMode: "legacy",
+                observedAtMs: this.options.nowMs(),
               },
-              executionGenerationId: ref.execution_generation_id,
-              providerConnection: recoveredConnection,
-              appliedRevision: appliedRevision!,
-              // This process predates native-birth capture. Recovering its
-              // connection must not infer authority from the current release.
-              requestedAuthorityMode: "legacy",
-              observedAtMs: this.options.nowMs(),
-            },
-            this.options.authority.fenceCommit,
-          );
-          this.options.authority.acceptManifestGeneration(next.generation);
-          authoritativeEntry = next.entry;
-          checkpointed = true;
-          break;
-        } catch (error) {
-          if (!(error instanceof ManifestConflictError)) throw error;
+              this.options.authority.fenceCommit,
+            );
+            this.options.authority.acceptManifestGeneration(next.generation);
+            return next.entry;
+          } catch (error) {
+            if (!(error instanceof ManifestConflictError)) throw error;
+          }
         }
-      }
-      if (!checkpointed) {
         throw new DaemonFenceLostError(
           "Recovered provider birth could not converge on the latest manifest generation.",
         );
-      }
+      });
     }
     await this.options.durability.recoverExecutionFence(ref.work_attempt_id);
     await this.options.streams.install(
