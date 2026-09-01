@@ -259,12 +259,15 @@ function streamKind(method: string): ProviderStreamEventKind {
     if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
     if (/(?:command|process|terminal)/i.test(method)) return "command_output";
   }
+  // A failed turn is still turn lifecycle evidence. Keep its identity ahead of
+  // the generic error label so daemon policy cannot mistake it for app-server
+  // failure.
+  if (/^turn\//.test(method)) return "turn_lifecycle";
   if (/(?:error|warning|failed)/i.test(method)) return "error";
   if (/(?:usage|tokenUsage|rateLimit)/i.test(method)) return "usage";
   if (/(?:mcpToolCall|toolCall|fileChange|webSearch)/i.test(method)) return "tool_lifecycle";
   if (/(?:command|process|terminal)/i.test(method)) return "command_output";
   if (/(?:delta|transcript)/i.test(method)) return "text_delta";
-  if (/^turn\//.test(method)) return "turn_lifecycle";
   if (/^item\//.test(method)) return "item_lifecycle";
   return "provider_event";
 }
@@ -273,6 +276,11 @@ function recordValue(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
+}
+
+function transcriptLifecycleTurn(value: unknown): { id: unknown; status: unknown } | null {
+  const turn = recordValue(value);
+  return turn ? { id: turn.id, status: turn.status } : null;
 }
 
 function permissionParams(request: RpcServerRequest): Record<string, unknown> | null {
@@ -1774,7 +1782,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
         this.consumeNotification(handle, notification);
       }
       if (!continuationMissing) {
-        this.publishStream(handle, "thread/read", read, "transcript_snapshot");
+        this.publishStream(handle, "thread/read", {
+          threadId: handle.providerContinuationId,
+          threadStatus: read.thread?.status,
+          latestTurn: transcriptLifecycleTurn(read.thread?.turns?.at(-1)),
+        }, "transcript_snapshot");
       }
       return handle;
     } catch (error) {
@@ -1889,8 +1901,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
         nativeEventId: nativeLifecycle.nativeEventId });
       return nativeLifecycle;
     }
-    if (notification.method === "turn/completed") {
-      const outcome = turn?.status;
+    if (notification.method === "turn/completed" || notification.method === "turn/failed") {
+      const outcome = notification.method === "turn/failed" ? "failed" : turn?.status;
       if (outcome === "completed" || outcome === "failed" || outcome === "interrupted") {
         const nativeLifecycle = nativeLifecycleCheckpoint({
           provider: this.id,
@@ -1951,7 +1963,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "thread/read", {
         threadId: handle.providerContinuationId,
         threadStatus: read.thread?.status,
-        latestTurn,
+        latestTurn: transcriptLifecycleTurn(latestTurn),
       }, "transcript_snapshot");
       const snapshot = summarizeCodexRuntimeSnapshot({
         threadStatus: typeof read.thread?.status === "string"
