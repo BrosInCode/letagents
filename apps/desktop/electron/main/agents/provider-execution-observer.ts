@@ -105,6 +105,11 @@ type NativeLifecycleCheckpointInput = {
   terminalDiscriminator?: string;
 };
 
+export type NativeLifecycleCheckpoint = {
+  nativeEventId: string;
+  phase: NativeLifecycleCheckpointInput["phase"];
+};
+
 /**
  * Stable, non-reversible correlation for the two projections of one native
  * lifecycle event. The durable adapter lane (work attempt), provider, phase,
@@ -113,7 +118,7 @@ type NativeLifecycleCheckpointInput = {
  * Consumers compare this value as opaque data; raw identities never leave the
  * hash input.
  */
-export function nativeLifecycleCheckpointId(input: NativeLifecycleCheckpointInput): string {
+export function nativeLifecycleCheckpoint(input: NativeLifecycleCheckpointInput): NativeLifecycleCheckpoint {
   const digest = createHash("sha256").update(JSON.stringify([
     "native-lifecycle-checkpoint-v1",
     input.provider,
@@ -124,5 +129,8 @@ export function nativeLifecycleCheckpointId(input: NativeLifecycleCheckpointInpu
     input.nativeProcessIdentity ?? null,
     input.terminalDiscriminator ?? null,
   ])).digest("base64url");
-  return `nlc1:${digest}`;
+  return {
+    nativeEventId: `nlc1:${digest}`,
+    phase: input.phase,
+  };
 }
