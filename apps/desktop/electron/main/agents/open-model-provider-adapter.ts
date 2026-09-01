@@ -1072,7 +1072,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   }
 
   private emitExecution(handle: OpenModelHandle, fact: NativeExecutionFact): void {
-    handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined);
+    handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined,
+      handle.providerConnection.pid ?? undefined);
   }
 
   private emitTurnTerminal(handle: OpenModelHandle, turnId: string, outcome: TurnOutcome): void {

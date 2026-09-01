@@ -3,6 +3,8 @@ import type {
   ProviderActionHandle,
   ProviderActionTerminal,
 } from "./provider-action-port.js";
+import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
+import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
 import { advanceReconciliationState } from "./reconciler-state.js";
 import type {
   DaemonManifestEntry,
@@ -28,7 +30,8 @@ export type ProviderTerminalPorts = {
     deletePendingResumeBinding(entryId: string): void;
   };
   streams: {
-    remove(entryId: string, expectedHandle?: ProviderActionHandle): boolean;
+    remove(installation: ProviderInstallationToken): boolean;
+    isLatestInstallation(installation: ProviderInstallationToken): boolean;
   };
   delivery: {
     start(entryId: string): Promise<void>;
@@ -70,26 +73,23 @@ export class ProviderTerminalCoordinator {
   }
 
   async handleTerminal(
-    entryId: string,
-    handle: ProviderActionHandle,
-    executionGenerationId: string,
+    installation: ProviderInstallationToken,
     terminal: ProviderActionTerminal,
   ): Promise<void> {
-    if (this.ports.liveHandles.get(entryId) !== handle) return;
+    const { entryId, handle, executionGenerationId } = installation;
+    if (!this.ports.streams.remove(installation)) return;
     this.ports.runtimeCustody.deletePendingResumeBinding(entryId);
-    this.ports.streams.remove(entryId, handle);
-    const lifecycle = await this.ports.manifest.getEntry(entryId);
-    if (lifecycle?.desired_state === "running") {
-      void this.ports.delivery.start(entryId).catch(() => undefined);
-    }
+    let shouldStartDelivery = false;
     await this.ports.serializeEntry(entryId, async () => {
+      if (!this.ports.streams.isLatestInstallation(installation)) return;
       const entry = (await this.ports.manifest.load()).entries.find((candidate) =>
         candidate.id === entryId);
-      const successorHandle = this.ports.liveHandles.get(entryId);
-      if (successorHandle && successorHandle !== handle) return;
+      if (!entry || !this.matchesInstallation(entry, installation)) return;
+      if (this.ports.liveHandles.get(entryId)) return;
       if (entry?.work_attempt_id) {
         const attempt = await this.ports.durability.getAttempt(entry.work_attempt_id);
-        if (this.ports.liveHandles.get(entryId)) return;
+        if (!this.ports.streams.isLatestInstallation(installation)
+          || this.ports.liveHandles.get(entryId)) return;
         const execution = attempt.execution_generations.find((candidate) =>
           candidate.execution_generation_id === executionGenerationId);
         if (execution && !execution.terminal) {
@@ -109,7 +109,8 @@ export class ProviderTerminalCoordinator {
           );
         }
       }
-      if (this.ports.liveHandles.get(entryId)) return;
+      if (!this.ports.streams.isLatestInstallation(installation)
+        || this.ports.liveHandles.get(entryId)) return;
       // The owner-only credential remains available for an exact successor;
       // only its live publication authority was removed with the handle.
       await this.observeExitOnce(
@@ -118,9 +119,31 @@ export class ProviderTerminalCoordinator {
         "daemon-provider",
         executionGenerationId,
         handle,
+        installation,
       );
+      if (!this.ports.streams.isLatestInstallation(installation)
+        || this.ports.liveHandles.get(entryId)) return;
       this.ports.requestConvergence(entryId);
+      shouldStartDelivery = entry.desired_state === "running";
     });
+    if (shouldStartDelivery && this.ports.streams.isLatestInstallation(installation)
+      && !this.ports.liveHandles.get(entryId)) {
+      void this.ports.delivery.start(entryId).catch(() => undefined);
+    }
+  }
+
+  private matchesInstallation(
+    entry: DaemonManifestEntry,
+    installation: ProviderInstallationToken,
+  ): boolean {
+    return entry.work_attempt_id === installation.workAttemptId
+      && entry.provider_ref?.work_attempt_id === installation.workAttemptId
+      && entry.provider_ref.provider_continuation_id === installation.providerContinuationId
+      && entry.provider_ref.execution_generation_id === installation.executionGenerationId
+      && sameProviderActionConnectionSnapshot(
+        entry.provider_ref.provider_connection,
+        installation.providerConnection,
+      );
   }
 
   async observeExit(
@@ -146,8 +169,11 @@ export class ProviderTerminalCoordinator {
     actor: string,
     expectedExecutionGenerationId?: string,
     expectedHandle?: ProviderActionHandle,
+    expectedInstallation?: ProviderInstallationToken,
   ): Promise<void> {
     await this.ports.serializeManifest(async () => {
+      if (expectedInstallation
+        && !this.ports.streams.isLatestInstallation(expectedInstallation)) return;
       const manifest = await this.ports.manifest.load();
       const entry = manifest.entries.find((candidate) => candidate.id === entryId);
       if (!entry) throw new Error(`Unknown daemon manifest entry: ${entryId}`);
@@ -155,6 +181,7 @@ export class ProviderTerminalCoordinator {
         && entry.provider_ref?.execution_generation_id !== expectedExecutionGenerationId) return;
       const currentHandle = this.ports.liveHandles.get(entryId);
       if (expectedHandle && currentHandle && currentHandle !== expectedHandle) return;
+      if (expectedInstallation && !this.matchesInstallation(entry, expectedInstallation)) return;
       const payload = this.terminalPayload(terminal, actor);
       if (entry.condition === "quarantined") {
         await this.ports.transitionOnce(

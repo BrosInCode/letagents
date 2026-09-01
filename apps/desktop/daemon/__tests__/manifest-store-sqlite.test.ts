@@ -16,7 +16,7 @@ import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
 
-import { executionStorageIdentity, ExecutionShadowStore } from "../execution-shadow-store.js";
+import { executionRuntimeStorageIdentity, executionStorageIdentity, ExecutionShadowStore } from "../execution-shadow-store.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
@@ -55,7 +55,9 @@ function admitApproval(store: ManifestStore, input: AdmitExecutionApproval, auth
 function approvalJournalRequest(requestId = "request", nativeRequestId: string | number = 1, provider: "codex" | "open-model" = "codex"): { expected: ApprovalReference; input: AdmitExecutionApproval } {
   const expected: ApprovalReference = {
     requestId, requestVersion: 1, requestSha256: "a".repeat(64), agentId: "agent", roomId: "room",
-    executionGenerationId: "generation", runtimeGenerationId: executionStorageIdentity("runtime", "agent", "generation", provider === "codex" ? "codex_app_server" : "opencode_server", "birth"), turnId: executionStorageIdentity("turn", "agent", "continuation", "native-turn"),
+    executionGenerationId: "generation", runtimeGenerationId: executionRuntimeStorageIdentity(
+      "agent", "generation", provider === "codex" ? "codex_app_server" : "opencode_server", 4311, "birth",
+    ), turnId: executionStorageIdentity("turn", "agent", "continuation", "native-turn"),
     providerContinuationId: "continuation", providerTurnId: "native-turn", connectionId: "connection", nativeRequestId,
   };
   return { expected, input: { ...expected, kind: "command", risk: "high", recoveryBoundary: "connection", createdAtMs: 100, expiresAtMs: 200 } };
@@ -401,14 +403,14 @@ test("runtime lifecycle authority lookup reads only the exact frozen native birt
   try {
     const shadow = new ExecutionShadowStore(database);
     for (const [index, birth] of births.entries()) {
-      const runtimeGenerationId = executionStorageIdentity("runtime", base.agentId, base.executionGenerationId,
-        birth.providerConnection.kind, birth.providerConnection.processIdentity!);
+      const runtimeGenerationId = executionRuntimeStorageIdentity(base.agentId, base.executionGenerationId,
+        birth.providerConnection.kind, birth.providerConnection.pid!, birth.providerConnection.processIdentity!);
       shadow.registerRuntime({ agentId: base.agentId, executionGenerationId: base.executionGenerationId, runtimeGenerationId,
         provider: birth.provider, authorityMode: birth.mode, configRevision: base.configurationRevision, createdAtMs: 100 + index });
       assert.equal(await store.readRuntimeLifecycleAuthority({ ...base, providerConnection: birth.providerConnection }), birth.mode);
     }
-    const runtimeGenerationId = executionStorageIdentity("runtime", input.agentId, input.executionGenerationId,
-      input.providerConnection.kind, input.providerConnection.processIdentity);
+    const runtimeGenerationId = executionRuntimeStorageIdentity(input.agentId, input.executionGenerationId,
+      input.providerConnection.kind, input.providerConnection.pid, input.providerConnection.processIdentity);
     const runtime = { agentId: input.agentId, executionGenerationId: input.executionGenerationId, runtimeGenerationId,
       provider: "cursor" as const, configRevision: input.configurationRevision };
     assert.equal(shadow.registerRuntime({ ...runtime, authorityMode: "legacy", createdAtMs: 101 }), "typed",
@@ -423,6 +425,7 @@ test("runtime lifecycle authority lookup reads only the exact frozen native birt
       { ...input, agentId: "other-agent" },
       { ...input, executionGenerationId: "other-generation" },
       { ...input, providerConnection: { ...input.providerConnection, kind: "claude_cli" as const } },
+      { ...input, providerConnection: { ...input.providerConnection, pid: input.providerConnection.pid + 1 } },
       { ...input, providerConnection: { ...input.providerConnection, processIdentity: "cursor-birth-b" } },
       { ...input, configurationRevision: 4 },
       { ...input, providerConnection: { ...input.providerConnection, pid: null } },
@@ -1816,6 +1819,8 @@ test("Cursor session discovery atomically retargets an already-prepared control 
       expectedProviderContinuationId: pendingContinuation,
       expectedProviderConnection: null,
       providerConnection: wrapperConnection,
+      configurationRevision: 1,
+      requestedAuthorityMode: "typed_shadow",
       observedAt: "2026-08-05T09:30:00.000Z",
     });
     generation = preparedTurn.generation;

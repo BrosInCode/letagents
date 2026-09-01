@@ -90,6 +90,29 @@ export function executionStorageIdentity(kind: string, ...identity: string[]): s
   return `${kind}-${createHash("sha256").update(JSON.stringify(identity)).digest("hex")}`;
 }
 
+/** Exact native runtime identity. PID and OS birth evidence are inseparable. */
+export function executionRuntimeStorageIdentity(
+  agentId: string,
+  executionGenerationId: string,
+  connectionKind: string,
+  pid: number,
+  processIdentity: string,
+): string {
+  if (![agentId, executionGenerationId, connectionKind, processIdentity]
+    .every((value) => typeof value === "string" && value.trim().length > 0)
+    || !Number.isSafeInteger(pid) || pid < 1) {
+    throw new ExecutionProtocolError("identity_mismatch");
+  }
+  return executionStorageIdentity(
+    "runtime",
+    agentId,
+    executionGenerationId,
+    connectionKind,
+    String(pid),
+    processIdentity,
+  );
+}
+
 /** Caller owns the transaction. Preserve existing projections, including lagging terminal state. */
 export function materializeExecutionIdentity(database: DatabaseSync, value: {
   runtime: z.input<typeof runtimeInput>; message: z.input<typeof attemptInput>;
@@ -103,10 +126,20 @@ export function materializeExecutionIdentity(database: DatabaseSync, value: {
     || runtime.runtimeGenerationId !== turn.runtimeGenerationId || message.roomId !== turn.roomId) {
     throw new ExecutionProtocolError("identity_mismatch");
   }
-  const authorityMode = materializeRuntime(database, runtime);
+  const authorityMode = materializeRuntimeIdentity(database, runtime);
   const attemptId = materializeMessage(database, message);
   materializeTurn(database, { ...turn, attemptId });
   return authorityMode;
+}
+
+/** Caller owns the transaction; the first exact native birth freezes authority. */
+export function materializeRuntimeIdentity(
+  database: DatabaseSync,
+  value: z.input<typeof runtimeInput>,
+): LifecycleAuthorityMode {
+  const input = validated(runtimeInput, value);
+  if (!database.isTransaction) throw new ExecutionProtocolError("identity_mismatch");
+  return materializeRuntime(database, input);
 }
 
 function exactRow(database: DatabaseSync, table: string, key: string, value: string,
@@ -270,7 +303,7 @@ export class ExecutionShadowStore {
 
   registerRuntime(value: z.input<typeof runtimeInput>): LifecycleAuthorityMode {
     const input = validated(runtimeInput, value);
-    return this.transaction(() => materializeRuntime(this.database, input));
+    return this.transaction(() => materializeRuntimeIdentity(this.database, input));
   }
 
   trackMessage(value: z.input<typeof attemptInput>): string {

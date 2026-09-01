@@ -5,8 +5,9 @@ import { readDurableNativeFailure } from "./supervised-agent-history-retention.j
 import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "./room-work-publication-store.js";
 import { applyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
+import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 28;
+export const DAEMON_STATE_SCHEMA_VERSION = 29;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -257,6 +258,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 27) {
     this.migrateLifecycleProjectionStorage(database);
+    return;
+  }
+  if (existingVersion === 28) {
+    this.migrateLegacyActiveRuntimeBirths(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1154,6 +1159,7 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
   try {
     applyRoomWorkPublicationSchema(database);
     applyLifecycleProjectionLedgerSchema(database);
+    this.freezeLegacyActiveRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     validateRoomWorkPublicationSchema(database);
     validateLifecycleProjectionLedgerSchema(database);
@@ -1172,6 +1178,7 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     applyLifecycleProjectionLedgerSchema(database);
+    this.freezeLegacyActiveRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     validateLifecycleProjectionLedgerSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1180,6 +1187,101 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
   } catch (error) {
     try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
     throw error;
+  }
+}
+
+/** Freeze only exact pre-B1 native births as legacy; never infer current policy. */
+private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.freezeLegacyActiveRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Caller owns the migration transaction and has already installed current execution/configuration shape. */
+private freezeLegacyActiveRuntimeBirths(database: DatabaseSync): void {
+  const candidates = database.prepare(`SELECT
+      d.agent_id,
+      d.provider_execution_generation_id AS execution_generation_id,
+      d.provider_connection_kind AS connection_kind,
+      d.provider_connection_pid AS connection_pid,
+      d.provider_process_identity AS process_identity,
+      c.provider,
+      c.runtime_configuration_revision AS config_revision
+      FROM runtime_deployments d
+      JOIN agent_configurations c USING(agent_id)
+      JOIN work_attempt_executions w
+        ON w.work_attempt_id=d.provider_work_attempt_id
+       AND w.execution_generation_id=d.provider_execution_generation_id
+      WHERE d.provider_ref_present=1
+        AND d.work_attempt_id_present=1
+        AND d.work_attempt_id=d.provider_work_attempt_id
+        AND d.provider_work_attempt_id IS NOT NULL
+        AND d.provider_continuation_id IS NOT NULL
+        AND length(trim(d.provider_continuation_id))>0
+        AND d.provider_execution_generation_id IS NOT NULL
+        AND w.terminal_json IS NULL
+        AND d.provider_connection_pid>0
+        AND d.provider_process_identity_present=1
+        AND d.provider_process_identity IS NOT NULL
+        AND length(trim(d.provider_process_identity))>0
+        AND c.runtime_configuration_revision>=1
+        AND ((c.provider='codex' AND d.provider_connection_kind='codex_app_server')
+          OR (c.provider='claude-code' AND d.provider_connection_kind='claude_cli')
+          OR (c.provider='cursor' AND d.provider_connection_kind='cursor_cli')
+          OR (c.provider='open-model' AND d.provider_connection_kind='opencode_server'))
+      ORDER BY d.agent_id`).all() as Row[];
+  for (const candidate of candidates) {
+    const agentId = String(candidate.agent_id);
+    const executionGenerationId = String(candidate.execution_generation_id);
+    const connectionKind = String(candidate.connection_kind);
+    const connectionPid = Number(candidate.connection_pid);
+    const processIdentity = String(candidate.process_identity);
+    materializeRuntimeIdentity(database, {
+      agentId,
+      executionGenerationId,
+      runtimeGenerationId: executionRuntimeStorageIdentity(
+        agentId,
+        executionGenerationId,
+        connectionKind,
+        connectionPid,
+        processIdentity,
+      ),
+      provider: String(candidate.provider) as "codex" | "claude-code" | "cursor" | "open-model",
+      authorityMode: "legacy",
+      configRevision: Number(candidate.config_revision),
+      createdAtMs: 0,
+    });
+  }
+  for (const candidate of candidates) {
+    const runtimeGenerationId = executionRuntimeStorageIdentity(
+      String(candidate.agent_id),
+      String(candidate.execution_generation_id),
+      String(candidate.connection_kind),
+      Number(candidate.connection_pid),
+      String(candidate.process_identity),
+    );
+    const frozen = database.prepare(`SELECT provider,config_revision,authority_mode
+      FROM execution_runtime_generations
+      WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`).get(
+      String(candidate.agent_id),
+      String(candidate.execution_generation_id),
+      runtimeGenerationId,
+    ) as Row | undefined;
+    if (!frozen
+      || frozen.provider !== candidate.provider
+      || Number(frozen.config_revision) !== Number(candidate.config_revision)
+      || !["legacy", "typed_shadow", "typed"].includes(String(frozen.authority_mode))) {
+      throw new Error("Daemon runtime-birth migration could not verify exact frozen authority.");
+    }
   }
 }
 
@@ -1204,6 +1306,7 @@ private applyCurrentConfigurationShape(database: DatabaseSync): void {
   }
   applyRoomWorkPublicationSchema(database);
   applyLifecycleProjectionLedgerSchema(database);
+  this.freezeLegacyActiveRuntimeBirths(database);
 }
 
 private applyV20Shape(database: DatabaseSync): void {

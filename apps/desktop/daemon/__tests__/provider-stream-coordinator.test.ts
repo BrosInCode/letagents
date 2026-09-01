@@ -9,6 +9,7 @@ import type {
 import {
   lifecycleLocalConformanceEligibility,
   ProviderStreamCoordinator,
+  type ProviderInstallationToken,
 } from "../provider-stream-coordinator.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonManifestEntry } from "../types.js";
@@ -100,7 +101,7 @@ const entry = (): DaemonManifestEntry => ({
     work_attempt_id: "attempt-1",
     execution_generation_id: "generation-2",
     provider_continuation_id: "continuation-1",
-    provider_connection: null,
+    provider_connection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 42, processIdentity: "codex:42" },
   },
   activity: [],
 });
@@ -111,6 +112,7 @@ const handle: ProviderActionHandle = {
   providerContinuationId: "continuation-1",
   observedState: "working",
   providerConnection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 42, processIdentity: "codex:42" },
+  appliedConfigurationRevision: 1,
 };
 
 const streamEvent = (sequence: number, method: string): ProviderActionStreamEvent => ({
@@ -137,11 +139,12 @@ function coordinatorHarness(input: {
   setInterval?: typeof setInterval;
   clearInterval?: typeof clearInterval;
   endStream?: (entryId: string) => void;
-  observeExecution?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
+  observeExecution?: (installation: ProviderInstallationToken) => () => void;
+  advanceExecution?: (installation: ProviderInstallationToken) => void;
   observeLegacyLifecycle?: (observation: LifecycleProjectionObservation) => void;
   markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor") => void;
   lifecycleProjectionDiagnostics?: () => ReturnType<typeof cleanLifecycleProjection>;
-  captureAdmission?: (entryId: string, handle: ProviderActionHandle, generation: string) => "pending" | "ready" | "unavailable";
+  captureAdmission?: (installation: ProviderInstallationToken) => "pending" | "ready" | "unavailable";
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
   publishNativeActivity?: () => Promise<void>;
@@ -161,6 +164,7 @@ function coordinatorHarness(input: {
   let stopCalls = 0;
   const coordinator = new ProviderStreamCoordinator({
     observeExecution: input.observeExecution,
+    advanceExecution: input.advanceExecution,
     observeLegacyLifecycle: input.observeLegacyLifecycle,
     markLifecycleProjectionUnavailable: input.markLifecycleProjectionUnavailable,
     lifecycleProjectionDiagnostics: input.lifecycleProjectionDiagnostics,
@@ -189,6 +193,16 @@ function coordinatorHarness(input: {
         manifest = update(manifest);
         return manifest;
       },
+      readRuntimeLifecycleAuthority: async ({ agentId, executionGenerationId, providerConnection, configurationRevision }) =>
+        providerConnection.kind === "cursor_cli" && providerConnection.pid === null
+          ? null
+          : manifestAvailable
+          && agentId === manifest.id
+          && executionGenerationId === manifest.provider_ref?.execution_generation_id
+          && providerConnection.pid === manifest.provider_ref?.provider_connection?.pid
+          && providerConnection.processIdentity === manifest.provider_ref?.provider_connection?.processIdentity
+          && configurationRevision === 1
+          ? "typed_shadow" : null,
     },
     bindings,
     durability: {
@@ -215,9 +229,7 @@ function coordinatorHarness(input: {
     transition: async (_entryId, observed_state, condition) => {
       manifest = { ...manifest, observed_state, condition };
     },
-    appendActivity: async (_entryId, event) => {
-      await input.appendActivity?.(event.method);
-    },
+    appendActivity: async (_entryId, event) => input.appendActivity?.(event.method),
     publishNativeActivity: async () => input.publishNativeActivity?.(),
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: () => {}, end: (entryId) => input.endStream?.(entryId) },
@@ -249,7 +261,7 @@ test("recovery diagnostics require every exact live provider lane to be capture-
   const admissions = new Map<string, "pending" | "ready" | "unavailable">([["agent-1", "pending"]]);
   const harness = coordinatorHarness({
     lifecycleProjectionDiagnostics: cleanLifecycleProjection,
-    captureAdmission: entryId => admissions.get(entryId) ?? "unavailable",
+    captureAdmission: installation => admissions.get(installation.entryId) ?? "unavailable",
   });
   await harness.coordinator.install("agent-1", handle, "generation-2");
   assert.deepEqual(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission, {
@@ -263,6 +275,10 @@ test("recovery diagnostics require every exact live provider lane to be capture-
   const second = { ...handle, pid: 43, workAttemptId: "attempt-2",
     providerConnection: { ...handle.providerConnection!, pid: 43, processIdentity: "codex:43" } };
   admissions.set("agent-2", "unavailable");
+  harness.setManifest({ ...entry(), id: "agent-2", work_attempt_id: "attempt-2", provider_ref: {
+    work_attempt_id: "attempt-2", execution_generation_id: "generation-3",
+    provider_continuation_id: "continuation-1", provider_connection: second.providerConnection!,
+  } });
   await harness.coordinator.install("agent-2", second, "generation-3");
   assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "unavailable",
     "one broken current lane fails the provider closed even when another lane is ready");
@@ -278,6 +294,146 @@ test("recovery diagnostics require every exact live provider lane to be capture-
     "an optional capture callback cannot break daemon status");
   assert.equal(throwing.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, false);
   await throwing.coordinator.disposeAll();
+});
+
+test("Cursor keeps one listener lease while immutable child-birth tokens advance", async () => {
+  const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+  const appended: string[] = [];
+  const unavailable: string[] = [];
+  const captureInstalls: ProviderInstallationToken[] = [];
+  const captureAdvances: ProviderInstallationToken[] = [];
+  const cursorHandle: ProviderActionHandle = {
+    workAttemptId: "attempt-1",
+    pid: null,
+    providerContinuationId: "continuation-1",
+    observedState: "idle",
+    providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    appliedConfigurationRevision: 1,
+  };
+  const cursorEntry = (connection: Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "cursor_cli" }>): DaemonManifestEntry => ({
+    ...entry(),
+    provider: "cursor",
+    observed_state: connection.pid === null ? "idle" : "working",
+    provider_ref: { ...entry().provider_ref!, provider_connection: connection },
+  });
+  const harness = coordinatorHarness({
+    appendActivity: async method => { appended.push(method); },
+    markLifecycleProjectionUnavailable: provider => unavailable.push(provider),
+    observeExecution: installation => { captureInstalls.push(installation); return () => {}; },
+    advanceExecution: installation => { captureAdvances.push(installation); },
+    onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+  });
+  harness.setManifest(cursorEntry(cursorHandle.providerConnection as Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "cursor_cli" }>));
+  await harness.coordinator.install("agent-1", cursorHandle, "generation-2");
+  assert.equal(rawListeners.length, 1);
+  assert.equal(captureInstalls.length, 1);
+
+  const birthA = { kind: "cursor_cli" as const, pid: 101, processIdentity: "cursor-birth-a" };
+  cursorHandle.pid = birthA.pid;
+  cursorHandle.providerConnection = birthA;
+  cursorHandle.observedState = "working";
+  harness.setManifest(cursorEntry(birthA));
+  const tokenA = harness.coordinator.activateCommittedCursorRuntime({
+    entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: "typed_shadow",
+  });
+  rawListeners[0]!({ ...streamEvent(1, "cursor/a"), provider: "cursor",
+    nativeProcessPid: birthA.pid, nativeProcessIdentity: birthA.processIdentity });
+  await harness.coordinator.drainCallbacks();
+
+  const idle = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+  cursorHandle.pid = null;
+  cursorHandle.providerConnection = idle;
+  cursorHandle.observedState = "idle";
+  harness.setManifest(cursorEntry(idle));
+  assert.equal(harness.coordinator.currentInstallation("agent-1"), undefined,
+    "the committed child token loses authority as soon as the handle moves to idle");
+  harness.coordinator.activateCommittedCursorRuntime({
+    entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: null,
+  });
+
+  const birthB = { kind: "cursor_cli" as const, pid: 102, processIdentity: "cursor-birth-b" };
+  cursorHandle.pid = birthB.pid;
+  cursorHandle.providerConnection = birthB;
+  cursorHandle.observedState = "working";
+  harness.setManifest(cursorEntry(birthB));
+  assert.equal(harness.coordinator.currentInstallation("agent-1"), undefined,
+    "an uncommitted successor child cannot borrow the prior token");
+  const tokenB = harness.coordinator.activateCommittedCursorRuntime({
+    entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: "typed_shadow",
+  });
+  rawListeners[0]!({ ...streamEvent(2, "cursor/late-a"), provider: "cursor", kind: "turn_lifecycle",
+    nativeProcessPid: birthA.pid, nativeProcessIdentity: birthA.processIdentity,
+    nativeEventId: "late-a", nativeLifecyclePhase: "turn_terminal" });
+  rawListeners[0]!({ ...streamEvent(3, "cursor/b"), provider: "cursor",
+    nativeProcessPid: birthB.pid, nativeProcessIdentity: birthB.processIdentity });
+  await harness.coordinator.drainCallbacks();
+
+  assert.equal(rawListeners.length, 1, "child transitions never reinstall the physical stream listener");
+  assert.equal(captureInstalls.length, 1, "typed capture keeps the stable handle subscription");
+  assert.equal(captureAdvances.length, 3, "capture receives only committed child/idle token advances");
+  assert.notEqual(tokenA, tokenB);
+  assert.deepEqual(appended, ["cursor/a", "cursor/b"]);
+  assert.deepEqual(unavailable, ["cursor"], "a late event from child A cannot borrow child B's token");
+  assert.equal(harness.coordinator.currentInstallation("agent-1"), tokenB);
+
+  const staleListener = rawListeners[0]!;
+  await harness.coordinator.install("agent-1", cursorHandle, "generation-2");
+  const replacementToken = harness.coordinator.currentInstallation("agent-1");
+  assert.ok(replacementToken);
+  assert.notEqual(replacementToken, tokenB);
+  staleListener({ ...streamEvent(4, "cursor/stale-lease"), provider: "cursor",
+    nativeProcessPid: birthB.pid, nativeProcessIdentity: birthB.processIdentity });
+  rawListeners[1]!({ ...streamEvent(5, "cursor/current-lease"), provider: "cursor",
+    nativeProcessPid: birthB.pid, nativeProcessIdentity: birthB.processIdentity });
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(appended, ["cursor/a", "cursor/b", "cursor/current-lease"],
+    "a disposed listener cannot borrow a replacement lease for the same handle and birth");
+  await harness.coordinator.disposeAll();
+});
+
+test("queued Cursor init survives same-birth continuation adoption exactly once", async () => {
+  const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+  const appended: string[] = [];
+  const lifecycle: string[] = [];
+  const cursorHandle: ProviderActionHandle = {
+    workAttemptId: "attempt-1",
+    pid: 101,
+    providerContinuationId: "pending-continuation",
+    observedState: "working",
+    providerConnection: { kind: "cursor_cli", pid: 101, processIdentity: "cursor-birth" },
+    appliedConfigurationRevision: 1,
+  };
+  const cursorEntry = (continuation: string): DaemonManifestEntry => ({
+    ...entry(),
+    provider: "cursor",
+    provider_ref: {
+      ...entry().provider_ref!,
+      provider_continuation_id: continuation,
+      provider_connection: structuredClone(cursorHandle.providerConnection!),
+    },
+  });
+  const harness = coordinatorHarness({
+    appendActivity: async method => { appended.push(method); },
+    observeLegacyLifecycle: observation => { lifecycle.push(observation.nativeEventId); },
+    onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+  });
+  harness.setManifest(cursorEntry("pending-continuation"));
+  await harness.coordinator.install("agent-1", cursorHandle, "generation-2");
+
+  rawListeners[0]!({ ...streamEvent(1, "system/init"), provider: "cursor", kind: "turn_lifecycle",
+    providerContinuationId: "pending-continuation", nativeProcessPid: 101, nativeProcessIdentity: "cursor-birth",
+    nativeEventId: "cursor-init", nativeLifecyclePhase: "turn_active" });
+  cursorHandle.providerContinuationId = "real-continuation";
+  harness.setManifest(cursorEntry("real-continuation"));
+  const adopted = harness.coordinator.activateCommittedCursorRuntime({
+    entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: "typed_shadow",
+  });
+
+  await harness.coordinator.drainCallbacks();
+  assert.equal(adopted.providerContinuationId, "real-continuation");
+  assert.deepEqual(appended, ["system/init"]);
+  assert.deepEqual(lifecycle, ["cursor-init"]);
+  await harness.coordinator.disposeAll();
 });
 
 test("daemon-inbox heartbeats probe exact live runtimes without granting recovery authority", async () => {
@@ -373,7 +529,12 @@ test("installing the approval bridge preserves full-access launch configuration 
   assert.deepEqual(handle, beforeHandle);
   assert.equal(harness.stopCalls(), 0);
   assert.equal(starts, 1);
-  harness.coordinator.remove(configured.id, handle);
+  const installation = harness.coordinator.currentInstallation(configured.id)!;
+  assert.equal(harness.coordinator.remove(installation), true);
+  assert.equal(harness.coordinator.currentInstallation(configured.id), undefined,
+    "removed handles no longer hold live publication authority");
+  assert.equal(harness.coordinator.isLatestInstallation(installation), true,
+    "terminal reconciliation retains the exact latest-birth witness");
   assert.equal(disposed, 1);
   assert.deepEqual(harness.getManifest(), configured);
 });
@@ -383,17 +544,26 @@ test("optional execution observation failures cannot block installation, deliver
   const disposed: ProviderActionHandle[] = [];
   const deliveries: string[] = [];
   const harness = coordinatorHarness({
-    observeExecution: (entryId, current, generation) => {
+    observeExecution: (installation) => {
+      const { entryId, handle: current, executionGenerationId: generation } = installation;
       installed.push([entryId, current, generation]);
       if (current === handle) throw new Error("observation unavailable");
       return () => { disposed.push(current); throw new Error("optional cleanup unavailable"); };
     },
     startDelivery: async (entryId) => { deliveries.push(entryId); },
   });
-  const second = { ...handle, pid: 43 };
-  const third = { ...handle, pid: 44 };
+  const second = { ...handle, pid: 43, providerConnection: {
+    ...handle.providerConnection!, pid: 43, processIdentity: "codex:43",
+  } };
+  const third = { ...handle, pid: 44, providerConnection: {
+    ...handle.providerConnection!, pid: 44, processIdentity: "codex:44",
+  } };
   await harness.coordinator.install("agent-1", handle, "generation-2");
+  harness.setManifest({ ...entry(), provider_ref: { ...entry().provider_ref!, execution_generation_id: "generation-3",
+    provider_connection: second.providerConnection! } });
   await harness.coordinator.install("agent-1", second, "generation-3");
+  harness.setManifest({ ...entry(), provider_ref: { ...entry().provider_ref!, execution_generation_id: "generation-4",
+    provider_connection: third.providerConnection! } });
   await harness.coordinator.install("agent-1", third, "generation-4");
   assert.deepEqual(installed, [["agent-1", handle, "generation-2"], ["agent-1", second, "generation-3"], ["agent-1", third, "generation-4"]]);
   assert.deepEqual(disposed, [second], "replacement disposes only its preceding observer");
@@ -555,6 +725,7 @@ test("terminal fencing is idempotent for one exact handle", async () => {
   let releaseStop!: () => void;
   const stopBlocked = new Promise<void>((resolve) => { releaseStop = resolve; });
   const harness = coordinatorHarness({ stop: async () => stopBlocked });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
   const first = harness.coordinator.fenceTerminalOnce(handle, "terminal-1");
   const second = harness.coordinator.fenceTerminalOnce(handle, "terminal-2");
   assert.equal(first, second);
@@ -675,8 +846,9 @@ test("raw lifecycle shadow capture rejects inexact identity and isolates observe
     ...entry().provider_ref!, execution_generation_id: "generation-replaced",
   } });
   await harness.coordinator.enqueue("agent-1", handle, exact);
-  assert.equal(observations.at(-1)?.executionGenerationId, "generation-2",
-    "an old installed stream retains its captured generation instead of borrowing the successor manifest generation");
+  assert.deepEqual(observations, []);
+  assert.equal(unavailable.at(-1), "codex",
+    "a callback cannot borrow a successor manifest generation");
   harness.setManifest(entry());
 
   throwObservation = true;
@@ -742,9 +914,15 @@ test("handoff detach attempts every stream disposer, surfaces failures, and neve
     endStream: (entryId) => { disposed.push(`end:${entryId}`); },
   });
   await harness.coordinator.install("agent-1", handle, "generation-2");
+  const secondHandle = { ...handle, pid: 43, providerConnection: {
+    ...handle.providerConnection!, pid: 43, processIdentity: "codex:43",
+  } };
+  harness.setManifest({ ...entry(), id: "agent-2", provider_ref: {
+    ...entry().provider_ref!, provider_connection: secondHandle.providerConnection!,
+  } });
   await harness.coordinator.install(
     "agent-2",
-    { ...handle, pid: 43 },
+    secondHandle,
     "generation-2",
   );
   harness.coordinator.track(wedgedCallback);

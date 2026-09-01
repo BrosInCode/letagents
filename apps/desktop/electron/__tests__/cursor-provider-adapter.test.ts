@@ -6932,6 +6932,13 @@ test("Cursor typed observations fence each native child and exclude synthetic di
     (event.method === "system/init" ? "turn_active" : "turn_terminal")), true,
   "correlated Cursor events expose only the closed structural lifecycle phase");
   assert.equal(streamCheckpointIds.length, 4, "two child starts and two native terminals are independently correlated");
+  assert.deepEqual(
+    [...new Set(stream.map((event) => event.nativeProcessIdentity))].sort(),
+    [birthIdentity(child.pid!), birthIdentity(nextChild.pid!)].sort(),
+    "every Cursor display event carries the exact child birth that emitted it",
+  );
+  assert.ok(stream.every((event) => event.nativeProcessIdentity),
+    "a Cursor stream event can never borrow the next child's installation token");
   const terminalIds = stream.filter((event) => event.method.startsWith("result") && event.nativeEventId)
     .map((event) => event.nativeEventId);
   assert.equal(terminalIds.length, 3);

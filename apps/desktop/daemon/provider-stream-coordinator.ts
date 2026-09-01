@@ -3,10 +3,12 @@ import { sanitizeDaemonActivityEvent } from "./credential-redaction.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
 import type {
   ProviderActionHandle,
+  ProviderActionConnectionRef,
   ProviderActionPort,
   ProviderActionStreamEvent,
   ProviderActionTerminal,
 } from "./provider-action-port.js";
+import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
   isAgentInspectorLiveDisplayEvent,
   isCorrelatedNonemptyWaitResult,
@@ -37,6 +39,29 @@ import {
   type LifecycleProjectionObservation,
   type LifecycleProjectionProvider,
 } from "./lifecycle-projection-ledger.js";
+import type { LifecycleAuthorityMode } from "./lifecycle-authority-mode.js";
+
+/** Immutable identity for one exact durable provider installation. */
+export type ProviderInstallationToken = Readonly<{
+  nonce: symbol;
+  listenerLeaseNonce: symbol;
+  entryId: string;
+  handle: ProviderActionHandle;
+  executionGenerationId: string;
+  workAttemptId: string;
+  providerContinuationId: string;
+  providerConnection: ProviderActionConnectionRef;
+  configurationRevision: number;
+  authorityMode: LifecycleAuthorityMode | null;
+}>;
+
+type ProviderListenerLease = {
+  nonce: symbol;
+  entryId: string;
+  handle: ProviderActionHandle;
+  executionGenerationId: string;
+  disposers: Array<() => void>;
+};
 
 export type ProviderRecoveryDiagnostics = {
   daemon_inbox_wait_evidence_dependency: number;
@@ -102,6 +127,12 @@ export type ProviderStreamManifest = {
     entryId: string,
     update: (entry: DaemonManifestEntry) => DaemonManifestEntry,
   ): Promise<DaemonManifestEntry>;
+  readRuntimeLifecycleAuthority(input: {
+    agentId: string;
+    executionGenerationId: string;
+    providerConnection: ProviderActionConnectionRef;
+    configurationRevision: number;
+  }): Promise<LifecycleAuthorityMode | null>;
 };
 
 export type ProviderStreamBindings = Pick<
@@ -141,12 +172,14 @@ export type ProviderStreamCoordinatorOptions = {
   liveHandles?: Map<string, ProviderActionHandle>;
   provider?: Pick<ProviderActionPort, "stop" | "onExit" | "onStream" | "probeControl">;
   /** Optional non-authoritative capture; never awaited by provider delivery. */
-  observeExecution?(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): () => void;
+  observeExecution?(installation: ProviderInstallationToken): () => void;
+  /** Advance an existing capture lease to a newly committed Cursor child birth. */
+  advanceExecution?(installation: ProviderInstallationToken): void;
   /** Raw legacy-classifier witness. This is comparison evidence, never lifecycle authority. */
   observeLegacyLifecycle?(observation: LifecycleProjectionObservation): void;
   markLifecycleProjectionUnavailable?(provider: LifecycleProjectionProvider): void;
   lifecycleProjectionDiagnostics?(): LifecycleProjectionDiagnostics;
-  captureAdmission?(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): LifecycleCaptureAdmissionStatus;
+  captureAdmission?(installation: ProviderInstallationToken): LifecycleCaptureAdmissionStatus;
   /** Operational approvals have their own lifetime, independent of optional capture. */
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
@@ -155,7 +188,10 @@ export type ProviderStreamCoordinatorOptions = {
   runtimeCustody: ProviderStreamRuntimeCustody;
   serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   transition: ProviderStreamTransition;
-  appendActivity(entryId: string, event: DaemonActivityEvent): Promise<unknown>;
+  appendActivity(
+    entryId: string,
+    event: DaemonActivityEvent,
+  ): Promise<unknown>;
   publishNativeActivity(
     entryId: string,
     method: string,
@@ -163,9 +199,7 @@ export type ProviderStreamCoordinatorOptions = {
     observedAt?: string,
   ): Promise<unknown>;
   handleTerminal(
-    entryId: string,
-    handle: ProviderActionHandle,
-    executionGenerationId: string,
+    installation: ProviderInstallationToken,
     bindingIdentity: LiveBindingIdentity | undefined,
     terminal: ProviderActionTerminal,
   ): Promise<void>;
@@ -202,12 +236,12 @@ export class ProviderStreamCoordinator {
   /** Kept public as a temporary compatibility seam for main.ts tests/callers. */
   readonly liveHandles: Map<string, ProviderActionHandle>;
 
-  private readonly liveDisposers = new Map<string, Array<() => void>>();
+  private readonly listenerLeases = new Map<string, ProviderListenerLease>();
   private readonly streamQueues = new Map<string, Promise<void>>();
   private readonly cursorCheckpointQueues = new Map<string, Promise<void>>();
   private readonly callbacks = new Set<Promise<void>>();
-  private readonly terminalFenceRequests = new WeakMap<ProviderActionHandle, Promise<void>>();
-  private readonly installedExecutionGenerations = new WeakMap<ProviderActionHandle, string>();
+  private readonly terminalFenceRequests = new WeakMap<ProviderInstallationToken, Promise<void>>();
+  private readonly latestInstallations = new Map<string, ProviderInstallationToken>();
   private daemonInboxWaitEvidenceDependencies = 0;
   private readonly publishWorkerActivity: typeof publishWorkerNativeActivity;
   private readonly setHeartbeat: typeof setInterval;
@@ -226,6 +260,15 @@ export class ProviderStreamCoordinator {
 
   has(entryId: string): boolean {
     return this.liveHandles.has(entryId);
+  }
+
+  currentInstallation(entryId: string): ProviderInstallationToken | undefined {
+    const installation = this.latestInstallations.get(entryId);
+    return installation && this.isCurrentInstallation(installation) ? installation : undefined;
+  }
+
+  isLatestInstallation(installation: ProviderInstallationToken): boolean {
+    return this.latestInstallations.get(installation.entryId) === installation;
   }
 
   recoveryDiagnostics(): ProviderRecoveryDiagnostics {
@@ -252,10 +295,10 @@ export class ProviderStreamCoordinator {
     for (const [entryId, handle] of this.liveHandles) {
       const provider = providerForLifecycleConnection(handle.providerConnection);
       if (!provider) continue;
-      const generation = this.installedExecutionGenerations.get(handle);
+      const installation = this.currentInstallation(entryId);
       let current: LifecycleCaptureAdmissionStatus = "unavailable";
-      if (generation && this.options.captureAdmission) {
-        try { current = this.options.captureAdmission(entryId, handle, generation); }
+      if (installation && this.options.captureAdmission) {
+        try { current = this.options.captureAdmission(installation); }
         catch { current = "unavailable"; }
       }
       if (!seen.has(provider) || priority[current] > priority[admissions[provider]]) admissions[provider] = current;
@@ -270,14 +313,17 @@ export class ProviderStreamCoordinator {
     return false;
   }
 
-  /** Remove only the expected generation and dispose every listener it owns. */
-  remove(entryId: string, expectedHandle?: ProviderActionHandle): boolean {
-    const current = this.liveHandles.get(entryId);
-    if (!current || (expectedHandle && current !== expectedHandle)) return false;
-    this.liveHandles.delete(entryId);
-    this.options.runtimeCustody.deleteLiveBinding(entryId);
-    const failures = this.disposeEntryListeners(entryId);
-    this.throwCleanupFailures(failures, `Provider stream cleanup failed for ${entryId}.`);
+  /** Remove only one exact installation; handle identity alone is never enough. */
+  remove(installation: ProviderInstallationToken): boolean {
+    if (!this.isCurrentInstallation(installation)) return false;
+    // Keep the inert latest-birth witness until a successor installation
+    // replaces it. Terminal reconciliation uses that exact token after live
+    // publication authority has been removed to reject stale exits without
+    // rejecting the terminal event that performed this removal.
+    this.liveHandles.delete(installation.entryId);
+    this.options.runtimeCustody.deleteLiveBinding(installation.entryId);
+    const failures = this.disposeEntryListeners(installation.entryId);
+    this.throwCleanupFailures(failures, `Provider stream cleanup failed for ${installation.entryId}.`);
     return true;
   }
 
@@ -289,6 +335,17 @@ export class ProviderStreamCoordinator {
   ): Promise<void> {
     const provider = this.options.provider;
     if (!provider) throw new Error("Provider action port is unavailable");
+    const lease: ProviderListenerLease = {
+      nonce: Symbol(entryId), entryId, handle, executionGenerationId, disposers: [],
+    };
+    const installation = await this.prepareInstallation(
+      entryId,
+      handle,
+      executionGenerationId,
+      lease.nonce,
+    );
+    this.latestInstallations.set(entryId, installation);
+    this.liveHandles.delete(entryId);
     const replacementCleanupFailures = this.disposeEntryListeners(entryId);
     this.throwCleanupFailures(
       replacementCleanupFailures,
@@ -296,14 +353,17 @@ export class ProviderStreamCoordinator {
     );
     this.options.streams.reset(entryId);
     this.liveHandles.set(entryId, handle);
-    this.installedExecutionGenerations.set(handle, executionGenerationId);
-    const disposePermissions = this.options.observePermissions?.(entryId, handle, executionGenerationId) ?? (() => {});
+    this.listenerLeases.set(entryId, lease);
     let disposeExecution = () => {};
-    try { disposeExecution = this.options.observeExecution?.(entryId, handle, executionGenerationId) ?? disposeExecution; }
+    try { disposeExecution = this.options.observeExecution?.(installation) ?? disposeExecution; }
     catch { /* optional observation must not reject provider installation */ }
+    if (!this.adoptLeaseDisposer(lease, disposeExecution)) return;
     const disposeCapture = () => { try { disposeExecution(); } catch { /* observation owns no execution authority */ } };
-    this.liveDisposers.set(entryId, [disposeCapture, disposePermissions]);
+    lease.disposers.splice(lease.disposers.indexOf(disposeExecution), 1, disposeCapture);
+    const disposePermissions = this.options.observePermissions?.(entryId, handle, executionGenerationId) ?? (() => {});
+    if (!this.adoptLeaseDisposer(lease, disposePermissions)) return;
     const binding = await this.options.bindings.get(entryId);
+    if (!this.isCurrentListenerLease(lease)) return;
     const currentBinding = this.options.runtimeCustody.liveBinding(entryId);
     if (binding?.execution_generation_id === executionGenerationId) {
       if (!currentBinding || binding.updated_at >= currentBinding.updatedAt) {
@@ -317,26 +377,35 @@ export class ProviderStreamCoordinator {
       this.options.runtimeCustody.deleteLiveBinding(entryId);
     }
     const disposeExit = await provider.onExit(handle, (terminal) => {
+      const currentInstallation = this.currentInstallationForLease(lease);
+      if (!currentInstallation) return;
       const bindingIdentity = this.options.runtimeCustody.liveBinding(entryId);
       this.track(this.options.handleTerminal(
-        entryId,
-        handle,
-        executionGenerationId,
+        currentInstallation,
         bindingIdentity,
         terminal,
       ));
     });
+    if (!this.adoptLeaseDisposer(lease, disposeExit)) return;
     const disposeStream = provider.onStream
       ? await provider.onStream(handle, (event) => {
-          this.track(this.enqueue(entryId, handle, event, executionGenerationId));
+          const currentInstallation = this.currentInstallationForLease(lease);
+          if (!currentInstallation) {
+            this.markLifecycleProjectionUnavailableForEvent(event);
+            return;
+          }
+          this.track(this.enqueueInstalled(currentInstallation, event));
         })
       : () => {};
+    if (!this.adoptLeaseDisposer(lease, disposeStream)) return;
     const heartbeat = this.setHeartbeat(() => {
-      const current = this.liveHandles.get(entryId);
-      if (!current) return;
+      const heartbeatInstallation = this.currentInstallationForLease(lease);
+      if (!heartbeatInstallation) return;
+      const current = heartbeatInstallation.handle;
       this.track((async () => {
         const manifestEntry = await this.options.manifest.getEntry(entryId);
-        if (!manifestEntry || this.liveHandles.get(entryId) !== current) return;
+        if (!manifestEntry || !this.entryMatchesInstallation(manifestEntry, heartbeatInstallation)
+          || !this.isCurrentInstallation(heartbeatInstallation)) return;
         if (this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
           !== manifestEntry.provider_ref?.execution_generation_id) return;
         const retriesCredentialHandoff = manifestEntry.desired_state === "running"
@@ -351,7 +420,7 @@ export class ProviderStreamCoordinator {
           && provider.probeControl) {
           try { await provider.probeControl(current); }
           catch { /* Shadow probes cannot interrupt operational heartbeats. */ }
-          if (this.liveHandles.get(entryId) !== current
+          if (!this.isCurrentInstallation(heartbeatInstallation)
             || this.options.runtimeCustody.liveBinding(entryId)?.executionGenerationId
               !== manifestEntry.provider_ref?.execution_generation_id) return;
         }
@@ -379,15 +448,191 @@ export class ProviderStreamCoordinator {
       })().catch(() => undefined));
     }, this.options.heartbeat.intervalMs);
     heartbeat.unref?.();
-    this.liveDisposers.set(entryId, [
-      disposeExit,
-      disposeStream,
-      disposeCapture,
-      disposePermissions,
-      () => this.clearHeartbeat(heartbeat),
-      () => this.options.streams.end(entryId),
-    ]);
-    if (mayStartDelivery()) void this.options.delivery.start(entryId).catch(() => undefined);
+    if (!this.adoptLeaseDisposer(lease, () => this.clearHeartbeat(heartbeat))) return;
+    if (!this.adoptLeaseDisposer(lease, () => this.options.streams.end(entryId))) return;
+    if (this.isCurrentListenerLease(lease)
+      && this.currentInstallationForLease(lease)
+      && mayStartDelivery()) {
+      void this.options.delivery.start(entryId).catch(() => undefined);
+    }
+  }
+
+  /**
+   * Advance only the immutable token for an already-installed Cursor wrapper.
+   * The caller must pass the exact entry returned by the committed checkpoint;
+   * physical listeners remain attached to the stable handle lease.
+   */
+  activateCommittedCursorRuntime(input: {
+    entry: DaemonManifestEntry;
+    handle: ProviderActionHandle;
+    executionGenerationId: string;
+    authorityMode?: LifecycleAuthorityMode | null;
+  }): ProviderInstallationToken {
+    const { entry, handle, executionGenerationId } = input;
+    const connection = entry.provider_ref?.provider_connection;
+    const configurationRevision = handle.appliedConfigurationRevision;
+    const lease = this.listenerLeases.get(entry.id);
+    if (entry.provider !== "cursor" || connection?.kind !== "cursor_cli"
+      || !lease || !this.isCurrentListenerLease(lease)
+      || lease.handle !== handle || lease.executionGenerationId !== executionGenerationId
+      || !Number.isSafeInteger(configurationRevision) || configurationRevision! < 1
+      || !this.entryMatchesBirth(entry, handle, executionGenerationId, connection)) {
+      throw new Error("Cursor runtime token no longer matches its committed listener lease.");
+    }
+    const prior = this.latestInstallations.get(entry.id);
+    if (!prior || prior.handle !== handle
+      || prior.listenerLeaseNonce !== lease.nonce
+      || prior.executionGenerationId !== executionGenerationId
+      || prior.workAttemptId !== handle.workAttemptId
+      || prior.configurationRevision !== configurationRevision) {
+      throw new Error("Cursor runtime token lost its stable listener lease.");
+    }
+    const idle = connection.pid === null && (connection.processIdentity ?? null) === null;
+    const authorityMode = input.authorityMode === undefined
+      && sameProviderActionConnectionSnapshot(prior.providerConnection, connection)
+      ? prior.authorityMode
+      : input.authorityMode;
+    if (idle ? authorityMode !== null : !connection.processIdentity?.trim() || authorityMode == null) {
+      throw new Error("Cursor runtime token requires authority for exactly one committed process birth.");
+    }
+    const frozenAuthorityMode = authorityMode as LifecycleAuthorityMode | null;
+    if (this.entryMatchesInstallation(entry, prior)
+      && prior.authorityMode === frozenAuthorityMode
+      && this.matchesInstallationSnapshot(prior)) return prior;
+    const installation = Object.freeze({
+      nonce: Symbol(entry.id),
+      listenerLeaseNonce: lease.nonce,
+      entryId: entry.id,
+      handle,
+      executionGenerationId,
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: handle.providerContinuationId!,
+      providerConnection: structuredClone(connection),
+      configurationRevision: configurationRevision!,
+      authorityMode: frozenAuthorityMode,
+    });
+    this.latestInstallations.set(entry.id, installation);
+    try { this.options.advanceExecution?.(installation); }
+    catch { /* optional observation cannot reject a committed provider birth */ }
+    return installation;
+  }
+
+  private async prepareInstallation(
+    entryId: string,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+    listenerLeaseNonce: symbol,
+  ): Promise<ProviderInstallationToken> {
+    const continuation = handle.providerContinuationId;
+    const connection = handle.providerConnection;
+    const configurationRevision = handle.appliedConfigurationRevision;
+    if (!continuation || !connection || !Number.isSafeInteger(configurationRevision)
+      || configurationRevision! < 1) {
+      throw new Error("Provider installation requires an exact durable provider birth.");
+    }
+    const first = await this.options.manifest.getEntry(entryId);
+    if (!first || !this.entryMatchesBirth(first, handle, executionGenerationId, connection)) {
+      throw new Error("Provider installation no longer matches its durable provider birth.");
+    }
+    const authorityMode = await this.options.manifest.readRuntimeLifecycleAuthority({
+      agentId: entryId,
+      executionGenerationId,
+      providerConnection: connection,
+      configurationRevision: configurationRevision!,
+    });
+    const idleCursor = connection.kind === "cursor_cli"
+      && connection.pid === null
+      && (connection.processIdentity ?? null) === null;
+    if (!authorityMode && !idleCursor) {
+      throw new Error("Provider installation has no frozen lifecycle authority.");
+    }
+    const second = await this.options.manifest.getEntry(entryId);
+    if (!second || !this.entryMatchesBirth(second, handle, executionGenerationId, connection)) {
+      throw new Error("Provider installation changed while verifying frozen lifecycle authority.");
+    }
+    return Object.freeze({
+      nonce: Symbol(entryId),
+      listenerLeaseNonce,
+      entryId,
+      handle,
+      executionGenerationId,
+      workAttemptId: handle.workAttemptId,
+      providerContinuationId: continuation,
+      providerConnection: structuredClone(connection),
+      configurationRevision: configurationRevision!,
+      authorityMode,
+    });
+  }
+
+  private entryMatchesBirth(
+    entry: DaemonManifestEntry,
+    handle: ProviderActionHandle,
+    executionGenerationId: string,
+    connection: ProviderActionConnectionRef,
+  ): boolean {
+    return entry.work_attempt_id === handle.workAttemptId
+      && entry.provider_ref?.work_attempt_id === handle.workAttemptId
+      && entry.provider_ref.provider_continuation_id === handle.providerContinuationId
+      && entry.provider_ref.execution_generation_id === executionGenerationId
+      && sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, connection)
+      && handle.appliedConfigurationRevision !== undefined;
+  }
+
+  private entryMatchesInstallation(
+    entry: DaemonManifestEntry,
+    installation: ProviderInstallationToken,
+  ): boolean {
+    return entry.id === installation.entryId
+      && entry.work_attempt_id === installation.workAttemptId
+      && entry.provider_ref?.work_attempt_id === installation.workAttemptId
+      && entry.provider_ref.provider_continuation_id === installation.providerContinuationId
+      && entry.provider_ref.execution_generation_id === installation.executionGenerationId
+      && sameProviderActionConnectionSnapshot(
+        entry.provider_ref.provider_connection,
+        installation.providerConnection,
+      );
+  }
+
+  private matchesInstallationSnapshot(installation: ProviderInstallationToken): boolean {
+    return installation.handle.workAttemptId === installation.workAttemptId
+      && installation.handle.appliedConfigurationRevision === installation.configurationRevision
+      && (installation.providerConnection.kind === "cursor_cli"
+        || installation.handle.providerContinuationId === installation.providerContinuationId)
+      && sameProviderActionConnectionSnapshot(
+        installation.handle.providerConnection,
+        installation.providerConnection,
+      );
+  }
+
+  private isCurrentInstallation(installation: ProviderInstallationToken): boolean {
+    return this.isLatestInstallation(installation)
+      && this.liveHandles.get(installation.entryId) === installation.handle
+      && this.listenerLeases.get(installation.entryId)?.nonce === installation.listenerLeaseNonce
+      && this.matchesInstallationSnapshot(installation);
+  }
+
+  private isCurrentListenerLease(lease: ProviderListenerLease): boolean {
+    return this.listenerLeases.get(lease.entryId) === lease
+      && this.liveHandles.get(lease.entryId) === lease.handle;
+  }
+
+  private currentInstallationForLease(lease: ProviderListenerLease): ProviderInstallationToken | undefined {
+    if (!this.isCurrentListenerLease(lease)) return undefined;
+    const installation = this.latestInstallations.get(lease.entryId);
+    return installation?.listenerLeaseNonce === lease.nonce
+      && this.isCurrentInstallation(installation) ? installation : undefined;
+  }
+
+  private adoptLeaseDisposer(
+    lease: ProviderListenerLease,
+    disposer: () => void,
+  ): boolean {
+    if (this.isCurrentListenerLease(lease)) {
+      lease.disposers.push(disposer);
+      return true;
+    }
+    try { disposer(); } catch { /* stale listener cleanup cannot regain authority */ }
+    return false;
   }
 
   async stageWorkerBindingAfterResume(
@@ -549,12 +794,30 @@ export class ProviderStreamCoordinator {
     entryId: string,
     handle: ProviderActionHandle,
     event: ProviderActionStreamEvent,
-    executionGenerationId: string | undefined = this.installedExecutionGenerations.get(handle),
+    executionGenerationId?: string,
   ): Promise<void> {
+    const installation = this.currentInstallation(entryId);
+    if (!installation || installation.handle !== handle
+      || (executionGenerationId && installation.executionGenerationId !== executionGenerationId)) {
+      this.markLifecycleProjectionUnavailableForEvent(event);
+      return;
+    }
+    return this.enqueueInstalled(installation, event);
+  }
+
+  private async enqueueInstalled(
+    installation: ProviderInstallationToken,
+    event: ProviderActionStreamEvent,
+  ): Promise<void> {
+    if (!this.eventMatchesInstallation(event, installation)) {
+      this.markLifecycleProjectionUnavailableForEvent(event, true);
+      return;
+    }
+    const entryId = installation.entryId;
     const previous = this.streamQueues.get(entryId) ?? Promise.resolve();
     const next = previous
       .catch(() => undefined)
-      .then(() => this.handle(entryId, handle, event, executionGenerationId))
+      .then(() => this.handleInstalled(installation, event))
       .finally(() => {
         if (this.streamQueues.get(entryId) === next) this.streamQueues.delete(entryId);
       });
@@ -567,19 +830,42 @@ export class ProviderStreamCoordinator {
     entryId: string,
     handle: ProviderActionHandle,
     event: ProviderActionStreamEvent,
-    executionGenerationId: string | undefined = this.installedExecutionGenerations.get(handle),
+    executionGenerationId?: string,
   ): Promise<void> {
+    const installation = this.currentInstallation(entryId);
+    if (!installation || installation.handle !== handle
+      || (executionGenerationId && installation.executionGenerationId !== executionGenerationId)) {
+      this.markLifecycleProjectionUnavailableForEvent(event);
+      return;
+    }
+    return this.handleInstalled(installation, event);
+  }
+
+  private async handleInstalled(
+    sourceInstallation: ProviderInstallationToken,
+    event: ProviderActionStreamEvent,
+  ): Promise<void> {
+    const installation = this.resolveCurrentInstallation(sourceInstallation, event);
+    if (!installation) {
+      this.markLifecycleProjectionUnavailableForEvent(event);
+      return;
+    }
+    const { entryId, handle, executionGenerationId } = installation;
     const observedLifecycle = providerStreamLifecycle(event);
-    if (this.liveHandles.get(entryId) !== handle) {
-      this.markLifecycleProjectionUnavailableForEvent(event);
-      return;
-    }
     const entry = await this.options.manifest.getEntry(entryId);
-    if (!entry) {
+    if (!entry || !this.entryMatchesInstallation(entry, installation)
+      || !this.isCurrentInstallation(installation)) {
       this.markLifecycleProjectionUnavailableForEvent(event);
       return;
     }
-    this.observeLegacyLifecycle(entry, handle, event, observedLifecycle, executionGenerationId);
+    this.observeLegacyLifecycle(
+      entry,
+      sourceInstallation,
+      installation,
+      event,
+      observedLifecycle,
+      executionGenerationId,
+    );
     const daemonInbox = entry.delivery_mode === "daemon_inbox";
     const custodialPolling = !daemonInbox && await this.options.heartbeat.requiresHostGrant(entry);
     const legacyCodexCutover = entry.provider === "codex"
@@ -621,7 +907,11 @@ export class ProviderStreamCoordinator {
       if (isAgentInspectorLiveDisplayEvent(event)) {
         this.options.streams.push(entryId, sanitizedEvent);
       }
-      await this.options.appendActivity(entryId, sanitizedEvent);
+      await this.options.serializeEntry(entryId, async () => {
+        if (!this.isCurrentInstallation(installation)) return;
+        await this.options.appendActivity(entryId, sanitizedEvent);
+      });
+      if (!this.isCurrentInstallation(installation)) return;
     }
     const waitEvidence = (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
       && !custodialPolling
@@ -676,11 +966,11 @@ export class ProviderStreamCoordinator {
       void this.options.delivery.startCutover(entryId).catch(() => undefined);
     }
     if ((lifecycle === "failed" || lifecycle === "terminal")
-      && this.liveHandles.get(entryId) === handle
+      && this.isCurrentInstallation(installation)
       && !["stopping", "stopped"].includes(handle.observedState)) {
       try {
-        await this.fenceTerminalOnce(
-          handle,
+        await this.fenceTerminalInstallationOnce(
+          installation,
           `manifest:${entryId}:terminal-turn:${event.sequence}`,
         );
       } catch (error) {
@@ -695,19 +985,27 @@ export class ProviderStreamCoordinator {
     }
   }
 
-  private observeLegacyLifecycle(entry: DaemonManifestEntry, handle: ProviderActionHandle,
+  private observeLegacyLifecycle(
+    entry: DaemonManifestEntry,
+    sourceInstallation: ProviderInstallationToken,
+    currentInstallation: ProviderInstallationToken,
     event: ProviderActionStreamEvent, state: "failed" | "terminal" | "idle" | "working",
-    executionGenerationId: string | undefined): void {
+    executionGenerationId: string | undefined,
+  ): void {
     if (!event.nativeEventId || !event.nativeLifecyclePhase || !this.options.observeLegacyLifecycle) return;
     const expectedProvider = entry.provider;
     if (!(expectedProvider === "codex" || expectedProvider === "claude-code" || expectedProvider === "cursor")) return;
     const providerRef = entry.provider_ref;
     // The listener closure owns the generation installed with this handle.
     // A mutable successor manifest must neither relabel nor erase its tail.
-    if (entry.provider !== event.provider || event.workAttemptId !== handle.workAttemptId
+    if (entry.provider !== event.provider
+      || event.workAttemptId !== sourceInstallation.workAttemptId
+      || event.workAttemptId !== currentInstallation.workAttemptId
       || event.workAttemptId !== entry.work_attempt_id || event.workAttemptId !== providerRef?.work_attempt_id
-      || !event.providerContinuationId || event.providerContinuationId !== handle.providerContinuationId
-      || event.providerContinuationId !== providerRef.provider_continuation_id
+      || !event.providerContinuationId
+      || event.providerContinuationId !== sourceInstallation.providerContinuationId
+      || providerRef.provider_continuation_id !== currentInstallation.providerContinuationId
+      || sourceInstallation.executionGenerationId !== currentInstallation.executionGenerationId
       || !executionGenerationId) {
       this.options.markLifecycleProjectionUnavailable?.(expectedProvider);
       return;
@@ -728,7 +1026,52 @@ export class ProviderStreamCoordinator {
     }
   }
 
-  private markLifecycleProjectionUnavailableForEvent(event: ProviderActionStreamEvent): void {
+  private eventMatchesInstallation(
+    event: ProviderActionStreamEvent,
+    installation: ProviderInstallationToken,
+  ): boolean {
+    if (installation.providerConnection.kind !== "cursor_cli") return true;
+    const birth = installation.providerConnection.processIdentity?.trim();
+    const pid = installation.providerConnection.pid;
+    return Boolean(birth) && pid !== null
+      && event.nativeProcessPid === pid
+      && event.nativeProcessIdentity === birth;
+  }
+
+  /**
+   * Cursor adopts its real continuation after emitting system/init. A queued
+   * event may therefore carry the prior immutable token, but only the same
+   * listener lease and exact PID/birth may advance it to the current token.
+   */
+  private resolveCurrentInstallation(
+    source: ProviderInstallationToken,
+    event: ProviderActionStreamEvent,
+  ): ProviderInstallationToken | null {
+    if (this.isCurrentInstallation(source)) return source;
+    const current = this.currentInstallation(source.entryId);
+    if (!current
+      || source.providerConnection.kind !== "cursor_cli"
+      || current.providerConnection.kind !== "cursor_cli"
+      || source.listenerLeaseNonce !== current.listenerLeaseNonce
+      || source.handle !== current.handle
+      || source.executionGenerationId !== current.executionGenerationId
+      || source.workAttemptId !== current.workAttemptId
+      || source.configurationRevision !== current.configurationRevision
+      || source.authorityMode !== current.authorityMode
+      || !sameProviderActionConnectionSnapshot(source.providerConnection, current.providerConnection)
+      || !this.eventMatchesInstallation(event, source)
+      || !this.eventMatchesInstallation(event, current)) return null;
+    return current;
+  }
+
+  private markLifecycleProjectionUnavailableForEvent(
+    event: ProviderActionStreamEvent,
+    exactCursorBirthMissing = false,
+  ): void {
+    if (exactCursorBirthMissing && event.provider === "cursor") {
+      this.options.markLifecycleProjectionUnavailable?.("cursor");
+      return;
+    }
     if (!event.nativeEventId || !event.nativeLifecyclePhase) return;
     if (!(event.provider === "codex" || event.provider === "claude-code" || event.provider === "cursor")) return;
     this.options.markLifecycleProjectionUnavailable?.(event.provider);
@@ -791,13 +1134,23 @@ export class ProviderStreamCoordinator {
   }
 
   fenceTerminalOnce(handle: ProviderActionHandle, actionId: string): Promise<void> {
-    const existing = this.terminalFenceRequests.get(handle);
+    const installation = [...this.latestInstallations.values()].find((candidate) =>
+      candidate.handle === handle && this.isCurrentInstallation(candidate));
+    if (!installation) return Promise.reject(new Error("Provider installation is unavailable."));
+    return this.fenceTerminalInstallationOnce(installation, actionId);
+  }
+
+  private fenceTerminalInstallationOnce(
+    installation: ProviderInstallationToken,
+    actionId: string,
+  ): Promise<void> {
+    const existing = this.terminalFenceRequests.get(installation);
     if (existing) return existing;
     const provider = this.options.provider;
     const operation = provider
-      ? provider.stop(handle, { actionId }).then(() => undefined)
+      ? provider.stop(installation.handle, { actionId }).then(() => undefined)
       : Promise.reject(new Error("Provider action port is unavailable"));
-    this.terminalFenceRequests.set(handle, operation);
+    this.terminalFenceRequests.set(installation, operation);
     return operation;
   }
 
@@ -811,6 +1164,7 @@ export class ProviderStreamCoordinator {
   }
 
   async disposeAll(): Promise<void> {
+    this.latestInstallations.clear();
     const failures = this.disposeEveryListener();
     try { await this.drainCallbacks(); } catch (error) { failures.push(error); }
     this.throwCleanupFailures(failures, "Provider stream disposal failed.");
@@ -818,14 +1172,15 @@ export class ProviderStreamCoordinator {
 
   /** Handoff drops local observers without waiting on generation-fenced callbacks. */
   detachAll(): void {
+    this.latestInstallations.clear();
     const failures = this.disposeEveryListener();
     this.callbacks.clear();
     this.throwCleanupFailures(failures, "Provider stream handoff cleanup failed.");
   }
 
   private disposeEntryListeners(entryId: string): unknown[] {
-    const disposers = this.liveDisposers.get(entryId) ?? [];
-    this.liveDisposers.delete(entryId);
+    const disposers = this.listenerLeases.get(entryId)?.disposers ?? [];
+    this.listenerLeases.delete(entryId);
     const failures: unknown[] = [];
     for (const dispose of disposers) {
       try { dispose(); } catch (error) { failures.push(error); }
@@ -835,7 +1190,7 @@ export class ProviderStreamCoordinator {
 
   private disposeEveryListener(): unknown[] {
     const failures: unknown[] = [];
-    for (const entryId of [...this.liveDisposers.keys()]) {
+    for (const entryId of [...this.listenerLeases.keys()]) {
       failures.push(...this.disposeEntryListeners(entryId));
     }
     return failures;
