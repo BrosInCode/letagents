@@ -31,6 +31,8 @@ import type {
 } from "./worker-runtime-custody.js";
 import {
   unavailableLifecycleProjectionDiagnostics,
+  type LifecycleCaptureAdmissionDiagnostics,
+  type LifecycleCaptureAdmissionStatus,
   type LifecycleProjectionDiagnostics,
   type LifecycleProjectionObservation,
   type LifecycleProjectionProvider,
@@ -39,10 +41,19 @@ import {
 export type ProviderRecoveryDiagnostics = {
   daemon_inbox_wait_evidence_dependency: number;
   lifecycle_projection: LifecycleProjectionDiagnostics;
+  lifecycle_capture_admission: LifecycleCaptureAdmissionDiagnostics;
   lifecycle_local_conformance_eligible: Record<LifecycleProjectionProvider, boolean>;
 };
 
 const lifecycleProjectionProviders = ["codex", "claude-code", "cursor"] as const;
+function providerForLifecycleConnection(
+  connection: ProviderActionHandle["providerConnection"],
+): LifecycleProjectionProvider | null {
+  if (connection?.kind === "codex_app_server") return "codex";
+  if (connection?.kind === "claude_cli") return "claude-code";
+  if (connection?.kind === "cursor_cli") return "cursor";
+  return null;
+}
 
 /**
  * Evidence-present-and-clean is only a local conformance prerequisite. It is
@@ -54,6 +65,7 @@ const lifecycleProjectionProviders = ["codex", "claude-code", "cursor"] as const
 export function lifecycleLocalConformanceEligibility(
   projection: LifecycleProjectionDiagnostics,
   daemonInboxWaitEvidenceDependency: number,
+  captureAdmission: LifecycleCaptureAdmissionDiagnostics,
 ): Record<LifecycleProjectionProvider, boolean> {
   const cleanWaitAuthority = Number.isSafeInteger(daemonInboxWaitEvidenceDependency)
     && daemonInboxWaitEvidenceDependency === 0;
@@ -71,6 +83,7 @@ export function lifecycleLocalConformanceEligibility(
     const validCounters = Boolean(counters?.every((value) => Number.isSafeInteger(value) && value >= 0));
     const eligible = projection.available === true
       && cleanWaitAuthority
+      && captureAdmission[provider] === "ready"
       && validCounters
       && evidence.comparedSegments >= 1
       && evidence.missingInTyped === 0
@@ -133,6 +146,7 @@ export type ProviderStreamCoordinatorOptions = {
   observeLegacyLifecycle?(observation: LifecycleProjectionObservation): void;
   markLifecycleProjectionUnavailable?(provider: LifecycleProjectionProvider): void;
   lifecycleProjectionDiagnostics?(): LifecycleProjectionDiagnostics;
+  captureAdmission?(entryId: string, handle: ProviderActionHandle, executionGenerationId: string): LifecycleCaptureAdmissionStatus;
   /** Operational approvals have their own lifetime, independent of optional capture. */
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   manifest: ProviderStreamManifest;
@@ -218,14 +232,36 @@ export class ProviderStreamCoordinator {
     const daemonInboxWaitEvidenceDependency = this.daemonInboxWaitEvidenceDependencies;
     const lifecycleProjection = this.options.lifecycleProjectionDiagnostics?.()
       ?? unavailableLifecycleProjectionDiagnostics();
+    const lifecycleCaptureAdmission = this.lifecycleCaptureAdmission();
     return {
       daemon_inbox_wait_evidence_dependency: daemonInboxWaitEvidenceDependency,
       lifecycle_projection: lifecycleProjection,
+      lifecycle_capture_admission: lifecycleCaptureAdmission,
       lifecycle_local_conformance_eligible: lifecycleLocalConformanceEligibility(
         lifecycleProjection,
         daemonInboxWaitEvidenceDependency,
+        lifecycleCaptureAdmission,
       ),
     };
+  }
+
+  private lifecycleCaptureAdmission(): LifecycleCaptureAdmissionDiagnostics {
+    const admissions = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable" } as LifecycleCaptureAdmissionDiagnostics;
+    const seen = new Set<LifecycleProjectionProvider>();
+    const priority = { ready: 0, pending: 1, unavailable: 2 } as const;
+    for (const [entryId, handle] of this.liveHandles) {
+      const provider = providerForLifecycleConnection(handle.providerConnection);
+      if (!provider) continue;
+      const generation = this.installedExecutionGenerations.get(handle);
+      let current: LifecycleCaptureAdmissionStatus = "unavailable";
+      if (generation && this.options.captureAdmission) {
+        try { current = this.options.captureAdmission(entryId, handle, generation); }
+        catch { current = "unavailable"; }
+      }
+      if (!seen.has(provider) || priority[current] > priority[admissions[provider]]) admissions[provider] = current;
+      seen.add(provider);
+    }
+    return admissions;
   }
 
   private acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean {

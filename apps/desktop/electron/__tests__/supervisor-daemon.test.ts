@@ -708,37 +708,45 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
         }])),
       };
       const eligibility = { codex: true, "claude-code": true, cursor: true };
+      const admissionReady = { codex: "ready", "claude-code": "ready", cursor: "ready" };
       wire.statusRecoveryDiagnostics.value = {
         daemon_inbox_wait_evidence_dependency: 0,
         lifecycle_projection: cleanProjection,
+        lifecycle_capture_admission: admissionReady,
         lifecycle_local_conformance_eligible: eligibility,
       };
       assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
         daemonInboxWaitEvidenceDependency: 0,
         lifecycleProjection: cleanProjection,
+        lifecycleCaptureAdmission: admissionReady,
         lifecycleLocalConformanceEligible: eligibility,
       });
       const unavailableProjection = { ...cleanProjection, available: false };
       const unavailableEligibility = { codex: false, "claude-code": false, cursor: false };
+      const admissionUnavailable = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable" };
       wire.statusRecoveryDiagnostics.value = {
         daemon_inbox_wait_evidence_dependency: 0,
         lifecycle_projection: unavailableProjection,
+        lifecycle_capture_admission: admissionUnavailable,
         lifecycle_local_conformance_eligible: unavailableEligibility,
       };
       assert.deepEqual((await client.connectIfRunning())?.recoveryDiagnostics, {
         daemonInboxWaitEvidenceDependency: 0,
         lifecycleProjection: unavailableProjection,
+        lifecycleCaptureAdmission: admissionUnavailable,
         lifecycleLocalConformanceEligible: unavailableEligibility,
       }, "unavailable evidence remains visible but cannot imply eligibility");
       for (const contradictory of [
         {
           daemon_inbox_wait_evidence_dependency: 0,
           lifecycle_projection: unavailableProjection,
+          lifecycle_capture_admission: admissionReady,
           lifecycle_local_conformance_eligible: eligibility,
         },
         {
           daemon_inbox_wait_evidence_dependency: 1,
           lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: admissionReady,
           lifecycle_local_conformance_eligible: eligibility,
         },
         {
@@ -750,6 +758,7 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
               codex: { ...cleanProjection.providers.codex, missingInTyped: 1 },
             },
           },
+          lifecycle_capture_admission: admissionReady,
           lifecycle_local_conformance_eligible: eligibility,
         },
         {
@@ -761,6 +770,13 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
               codex: { ...cleanProjection.providers.codex, comparedSegments: 0 },
             },
           },
+          lifecycle_capture_admission: admissionReady,
+          lifecycle_local_conformance_eligible: eligibility,
+        },
+        {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: { ...admissionReady, codex: "pending" },
           lifecycle_local_conformance_eligible: eligibility,
         },
       ]) {
@@ -771,6 +787,7 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       wire.statusRecoveryDiagnostics.value = {
         daemon_inbox_wait_evidence_dependency: 0,
         lifecycle_projection: cleanProjection,
+        lifecycle_capture_admission: { ...admissionReady, codex: "pending" },
         lifecycle_local_conformance_eligible: { ...eligibility, codex: false },
       };
       assert.equal((await client.connectIfRunning())?.recoveryDiagnostics?.lifecycleLocalConformanceEligible.codex, false,
@@ -792,6 +809,7 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
         wire.statusRecoveryDiagnostics.value = {
           daemon_inbox_wait_evidence_dependency: 0,
           lifecycle_projection: malformedProjection,
+          lifecycle_capture_admission: admissionReady,
           lifecycle_local_conformance_eligible: eligibility,
         };
         assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null, `${key} fails closed`);
@@ -804,7 +822,21 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
         wire.statusRecoveryDiagnostics.value = {
           daemon_inbox_wait_evidence_dependency: 0,
           lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: admissionReady,
           lifecycle_local_conformance_eligible: malformedEligibility,
+        };
+        assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
+      }
+      for (const malformedAdmission of [
+        undefined,
+        { codex: "ready", "claude-code": "ready" },
+        { codex: "ready", "claude-code": "ready", cursor: "unknown" },
+      ]) {
+        wire.statusRecoveryDiagnostics.value = {
+          daemon_inbox_wait_evidence_dependency: 0,
+          lifecycle_projection: cleanProjection,
+          lifecycle_capture_admission: malformedAdmission,
+          lifecycle_local_conformance_eligible: eligibility,
         };
         assert.equal((await client.connectIfRunning())?.recoveryDiagnostics, null);
       }
@@ -2381,7 +2413,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.120");
+    assert.equal(status.implementationVersion, "2.0.121");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

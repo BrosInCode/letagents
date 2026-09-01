@@ -6,7 +6,8 @@ import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { settleCapturedExecutionAttempts } from "./supervised-agent-history-retention.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
 import { unavailableLifecycleProjectionDiagnostics, type LifecycleProjectionDiagnostics,
-  type LifecycleProjectionObservation, type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
+  type LifecycleCaptureAdmissionStatus, type LifecycleProjectionObservation,
+  type LifecycleProjectionProvider } from "./lifecycle-projection-ledger.js";
 
 type Row = Record<string, string | number | null>;
 type CaptureCode = "source_gap" | "identity_unavailable" | "storage_unavailable" | "retention_limit" | "invalid_observation" | "settlement_unavailable";
@@ -270,6 +271,53 @@ export class ExecutionCaptureCoordinator {
     catch { return unavailableLifecycleProjectionDiagnostics(); }
   }
 
+  /**
+   * Exact, read-time admission for the current handle generation. No elapsed
+   * time can promote or demote it, and no second status is cached or persisted.
+   */
+  captureAdmission(agentId: string, handle: ProviderActionHandle, generation: string): LifecycleCaptureAdmissionStatus {
+    const lane = this.lanes.get(agentId);
+    if (!lane || !this.current(lane) || lane.handle !== handle || lane.generation !== generation
+      || lane.detached || lane.suspended || lane.subscriptionFailed || lane.overflow
+      || (lane.diagnostic !== null && lane.diagnostic !== "settlement_unavailable")) return "unavailable";
+    if (!lane.subscription || !lane.observer) return "pending";
+    let position;
+    try {
+      position = lane.subscription.position();
+      if (!Number.isSafeInteger(position.latestSequence) || !Number.isSafeInteger(position.firstRetainedSequence)
+        || position.latestSequence < 0 || position.firstRetainedSequence < 1
+        || position.firstRetainedSequence > position.latestSequence + 1) return "unavailable";
+    }
+    catch { return "unavailable"; }
+    try {
+      const durable = this.row(`SELECT o.observer_execution_generation_id,o.observer_runtime_generation_id,
+        o.daemon_generation_id,o.source_id,o.last_source_sequence,o.max_observed_sequence,
+        r.authority_mode,r.runtime_state,s.source_id AS admitted_source_id
+        FROM execution_observers o
+        JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
+          AND r.execution_generation_id=o.observer_execution_generation_id
+          AND r.runtime_generation_id=o.observer_runtime_generation_id
+        JOIN execution_observer_sources s ON s.agent_id=o.agent_id AND s.source_id=o.source_id
+        WHERE o.agent_id=?`, agentId);
+      if (!durable) return "unavailable";
+      const last = Number(durable.last_source_sequence);
+      const maximum = Number(durable.max_observed_sequence);
+      const exactObserver = durable.observer_execution_generation_id === generation
+        && durable.observer_runtime_generation_id === lane.observer.observerRuntimeGenerationId
+        && durable.daemon_generation_id === String(this.options.daemonGeneration())
+        && durable.source_id === lane.subscription.sourceId
+        && durable.source_id === lane.observer.sourceId
+        && durable.admitted_source_id === durable.source_id
+        && durable.authority_mode === "typed_shadow"
+        && durable.runtime_state !== "exited";
+      const validCursor = Number.isSafeInteger(last) && Number.isSafeInteger(maximum)
+        && last >= 0 && maximum >= last && maximum <= position.latestSequence
+        && last <= position.latestSequence
+        && (position.latestSequence === last || position.firstRetainedSequence <= last + 1);
+      return exactObserver && validCursor ? "ready" : "unavailable";
+    } catch { return "unavailable"; }
+  }
+
   private markLifecycleProjectionUnavailable(provider: LifecycleProjectionProvider): void {
     if (this.closed) return;
     const current = this.lifecycleProjectionUnavailable.get(provider) ?? 0;
@@ -349,6 +397,10 @@ export class ExecutionCaptureCoordinator {
     lane.pending.clear(); lane.checkpoints.clear(); lane.bytes = 0;
   }
   private report(lane: Lane, code: CaptureCode): void {
+    if (code === "settlement_unavailable" && lane.diagnostic !== null && lane.diagnostic !== code) {
+      try { this.options.diagnostic(lane.agentId, code); } catch { /* optional observation */ }
+      return;
+    }
     if (lane.diagnostic === code) return;
     lane.diagnostic = code;
     if (code !== "settlement_unavailable") {

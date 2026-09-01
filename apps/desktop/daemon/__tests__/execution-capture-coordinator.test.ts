@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { DaemonStateSchema } from "../daemon-state-database.js";
 import { ExecutionCaptureCoordinator } from "../execution-capture-coordinator.js";
@@ -23,8 +26,8 @@ function successor(f: ReturnType<typeof fixture>, birth: string): ProviderAction
   return handle;
 }
 
-function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>, changed?: (agentId: string) => void) {
-  const db = new DatabaseSync(":memory:");
+function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server", onExecution?: NonNullable<ProviderActionPort["onExecution"]>, changed?: (agentId: string) => void,
+  db = new DatabaseSync(":memory:")) {
   db.exec("PRAGMA foreign_keys=ON");
   new DaemonStateSchema().createSchema(db);
   db.exec(`INSERT INTO agent_identities VALUES('agent','owner','${now}',0);
@@ -57,6 +60,123 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
   };
   return { db, handle, handles, observer, capture, diagnostics, install, emit, facts, position, bindTurn };
 }
+
+test("capture admission is exact, fail-closed, and never promoted by elapsed time", async () => {
+  const f = fixture();
+  try {
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "unavailable");
+    f.install();
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "pending");
+    await flush();
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready",
+      "an exact empty source is admitted once its durable observer exists");
+    f.emit(ready); await flush();
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready");
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "other-generation"), "unavailable");
+    assert.equal(f.capture.captureAdmission("agent", { ...f.handle }, "generation"), "unavailable");
+    f.db.exec("DELETE FROM execution_observer_sources");
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "unavailable",
+      "ready is re-derived from the durable source row on every read");
+  } finally { f.capture.close(); }
+
+  const waiting = fixture("codex_app_server", () => new Promise<NativeExecutionSubscription>(() => {}));
+  try {
+    waiting.install(); await flush();
+    assert.equal(waiting.capture.captureAdmission("agent", waiting.handle, "generation"), "pending",
+      "an unresolved subscription stays pending without elapsed-time promotion");
+  } finally { waiting.capture.close(); }
+});
+
+test("capture admission fails closed on durable reads and live source positions", async (t) => {
+  const readFailure = fixture();
+  try {
+    readFailure.install(); readFailure.emit(ready); await flush();
+    assert.equal(readFailure.capture.captureAdmission("agent", readFailure.handle, "generation"), "ready");
+    const prepare = readFailure.db.prepare.bind(readFailure.db);
+    t.mock.method(readFailure.db, "prepare", (sql: string) => {
+      if (sql.includes("FROM execution_observers o")) throw new Error("injected admission read failure");
+      return prepare(sql);
+    });
+    assert.equal(readFailure.capture.captureAdmission("agent", readFailure.handle, "generation"), "unavailable");
+  } finally { readFailure.capture.close(); }
+
+  const observer = new ProviderExecutionObserver(() => now);
+  let position: "valid" | "throws" | "malformed" | "null" = "valid";
+  const sourcePosition = fixture("codex_app_server", (_handle, listener) => {
+    const subscription = observer.subscribe(listener);
+    return { ...subscription, position: () => {
+      if (position === "throws") throw new Error("injected position failure");
+      if (position === "malformed") return { firstRetainedSequence: 3, latestSequence: 0 };
+      if (position === "null") return null as never;
+      return subscription.position();
+    } };
+  });
+  try {
+    sourcePosition.install(); observer.emit(ready, "birth-secret"); await flush();
+    assert.equal(sourcePosition.capture.captureAdmission("agent", sourcePosition.handle, "generation"), "ready");
+    position = "throws";
+    assert.equal(sourcePosition.capture.captureAdmission("agent", sourcePosition.handle, "generation"), "unavailable");
+    position = "malformed";
+    assert.equal(sourcePosition.capture.captureAdmission("agent", sourcePosition.handle, "generation"), "unavailable");
+    position = "null";
+    assert.equal(sourcePosition.capture.captureAdmission("agent", sourcePosition.handle, "generation"), "unavailable");
+    position = "valid";
+    assert.equal(sourcePosition.capture.captureAdmission("agent", sourcePosition.handle, "generation"), "ready",
+      "read-time source evidence can recover without elapsed-time inference");
+  } finally { sourcePosition.capture.close(); }
+});
+
+test("capture admission recovers from durable observer rows after coordinator restart", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-capture-admission-"));
+  const path = join(root, "daemon.sqlite");
+  const first = fixture("codex_app_server", undefined, undefined, new DatabaseSync(path));
+  try {
+    first.install(); first.emit(ready); await flush();
+    assert.equal(first.capture.captureAdmission("agent", first.handle, "generation"), "ready");
+    first.capture.close();
+
+    const database = new DatabaseSync(path);
+    const observer = new ProviderExecutionObserver(() => now);
+    const restarted = new ExecutionCaptureCoordinator(database, {
+      provider: { onExecution: (_handle, listener) => observer.subscribe(listener) },
+      currentHandle: () => first.handle,
+      daemonGeneration: () => 2,
+      diagnostic: () => {},
+    });
+    try {
+      restarted.install("agent", first.handle, "generation");
+      assert.equal(restarted.captureAdmission("agent", first.handle, "generation"), "pending");
+      await flush();
+      assert.equal(restarted.captureAdmission("agent", first.handle, "generation"), "ready");
+      assert.equal(database.prepare("SELECT daemon_generation_id FROM execution_observers WHERE agent_id='agent'").get()!.daemon_generation_id, "2",
+        "restart readiness is re-derived from a newly committed observer, not the old in-memory lane");
+    } finally { restarted.close(); }
+  } finally {
+    first.capture.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("capture admission fences a replaced handle before admitting its successor", async () => {
+  const sources = new Map<ProviderActionHandle, ProviderExecutionObserver>();
+  const f = fixture("codex_app_server", (handle, listener) => sources.get(handle)!.subscribe(listener));
+  const original = new ProviderExecutionObserver(() => now);
+  sources.set(f.handle, original);
+  try {
+    f.install(); original.emit(ready, "birth-secret"); await flush();
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready");
+    const previous = f.handle;
+    const next = successor(f, "successor-birth");
+    const replacement = new ProviderExecutionObserver(() => now);
+    sources.set(next, replacement);
+    f.capture.install("agent", next, "generation");
+    assert.equal(f.capture.captureAdmission("agent", previous, "generation"), "unavailable");
+    assert.equal(f.capture.captureAdmission("agent", next, "generation"), "pending");
+    replacement.emit(ready, "successor-birth"); await flush();
+    assert.equal(f.capture.captureAdmission("agent", next, "generation"), "ready");
+    assert.equal(f.capture.captureAdmission("agent", previous, "generation"), "unavailable");
+  } finally { f.capture.close(); }
+});
 
 test("capture replays native facts only after the exact committed turn binding, without delivery mutations", async () => {
   const f = fixture();
@@ -265,6 +385,8 @@ test("scheduled receipt batches advance past unavailable proof without starving 
     assert.equal(f.db.prepare("SELECT COUNT(*) n FROM execution_message_attempts WHERE state='cleanly_concluded'").get()!.n, 39);
     assert.equal(f.db.prepare("SELECT state FROM execution_message_attempts WHERE attempt_id='attempt-0'").get()!.state, "active");
     assert.ok(f.diagnostics.includes("settlement_unavailable"));
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready",
+      "downstream settlement diagnostics do not revoke native capture admission");
     // A later authoritative correction rechecks earlier receipts rather than
     // treating the in-memory scan cursor as durable settlement authority.
     f.db.prepare("UPDATE supervised_agent_inbox SET outcome=? WHERE inbox_item_id='native-0'").run(JSON.stringify({ kind: "no_reply", text: null }));
@@ -275,6 +397,29 @@ test("scheduled receipt batches advance past unavailable proof without starving 
     f.emit({ ...active, providerTurnId: "native-late" }); await flush();
     assert.deepEqual({ ...f.db.prepare("SELECT state,conclusion FROM execution_message_attempts WHERE source_message_id='late-message'").get() },
       { state: "cleanly_concluded", conclusion: "acknowledged_no_reply" });
+  } finally { f.capture.close(); }
+});
+
+test("settlement diagnostics never hide a native capture failure", async () => {
+  const f = fixture();
+  try {
+    f.bindTurn(); f.install(); f.emit(ready); f.emit(active); await flush();
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready");
+    f.db.prepare("UPDATE supervised_agent_inbox SET state='acknowledged_no_reply',outcome=?,acknowledged_at=?")
+      .run(JSON.stringify({ kind: "no_reply", text: null }), now);
+    f.db.exec(`CREATE TRIGGER reject_capture_fact BEFORE INSERT ON execution_facts
+      BEGIN SELECT RAISE(ABORT,'injected capture failure'); END;
+      CREATE TRIGGER reject_attempt_settlement BEFORE UPDATE OF state ON execution_message_attempts
+      BEGIN SELECT RAISE(ABORT,'injected settlement failure'); END;`);
+    f.emit(ready); await flush();
+    assert.ok(f.diagnostics.includes("storage_unavailable"));
+    assert.equal(f.diagnostics.at(-1), "settlement_unavailable");
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "unavailable",
+      "a downstream settlement warning cannot erase the native capture failure");
+    f.db.exec("DROP TRIGGER reject_capture_fact; DROP TRIGGER reject_attempt_settlement");
+    f.capture.refresh(); await flush();
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready",
+      "successful exact capture recovers admission from current evidence without a cached failure status");
   } finally { f.capture.close(); }
 });
 
@@ -350,6 +495,7 @@ test("administrative close records only the admitted source frontier and tolerat
       let closes = 0; f.db.close = () => { closes++; };
       if (busy) f.db.exec = sql => { if (sql === "BEGIN IMMEDIATE") throw new Error("database is busy"); return exec(sql); };
       assert.doesNotThrow(() => f.capture.close());
+      assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "unavailable");
       assert.equal(closes, 1);
       assert.equal(f.facts().length, 1, "shutdown must not drain queued facts");
       assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: busy ? 1 : 3 });
@@ -371,9 +517,11 @@ test("an empty rejected subscription does not strand a later installation", asyn
   });
   try {
     f.install(); await flush(); assert.equal(f.facts().length, 0);
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "unavailable");
     f.install(); observer.emit(ready, "birth-secret"); await flush();
     assert.equal(calls, 2); assert.equal(f.facts().length, 1);
     assert.deepEqual({ ...f.position() }, { last_source_sequence: 1, max_observed_sequence: 1 });
+    assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "ready");
   } finally { f.capture.close(); }
 });
 
@@ -418,6 +566,7 @@ test("bounded replay and queue loss preserve the missing frontier across source 
       assert.equal(f.facts().length, 0);
       assert.deepEqual({ ...f.position() }, { last_source_sequence: 0, max_observed_sequence: 300 });
       assert.equal(f.diagnostics.at(-1), "source_gap");
+      assert.equal(f.capture.captureAdmission("agent", f.handle, "generation"), "unavailable");
       f.install(); await flush();
       assert.equal(f.facts().length, 0);
       assert.equal(f.position()!.max_observed_sequence, 300);

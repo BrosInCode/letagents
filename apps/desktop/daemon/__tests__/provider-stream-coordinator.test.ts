@@ -30,24 +30,29 @@ const cleanLifecycleProjection = () => ({
     pairedButDifferent: number; conflicts: number; observationUnavailable: number;
   }>,
 });
+const captureAdmission = (status: "pending" | "ready" | "unavailable" = "ready") => ({
+  codex: status,
+  "claude-code": status,
+  cursor: status,
+});
 
 test("local lifecycle conformance requires present clean evidence and clean daemon-owned wait authority", () => {
-  assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0), {
+  assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0, captureAdmission()), {
     codex: true, "claude-code": true, cursor: true,
   });
-  assert.deepEqual(lifecycleLocalConformanceEligibility({ ...cleanLifecycleProjection(), available: false }, 0), {
+  assert.deepEqual(lifecycleLocalConformanceEligibility({ ...cleanLifecycleProjection(), available: false }, 0, captureAdmission()), {
     codex: false, "claude-code": false, cursor: false,
   });
-  assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 1), {
+  assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 1, captureAdmission()), {
     codex: false, "claude-code": false, cursor: false,
   });
   const empty = cleanLifecycleProjection();
   empty.providers.codex.comparedSegments = 0;
-  assert.equal(lifecycleLocalConformanceEligibility(empty, 0).codex, false,
+  assert.equal(lifecycleLocalConformanceEligibility(empty, 0, captureAdmission()).codex, false,
     "hollow all-zero evidence is not a conformance sample");
   const multipleCheckpoints = cleanLifecycleProjection();
   multipleCheckpoints.providers.codex.matched = 2;
-  assert.equal(lifecycleLocalConformanceEligibility(multipleCheckpoints, 0).codex, true,
+  assert.equal(lifecycleLocalConformanceEligibility(multipleCheckpoints, 0, captureAdmission()).codex, true,
     "matched checkpoints are not the terminal-delimited segment count");
 
   for (const field of [
@@ -59,7 +64,7 @@ test("local lifecycle conformance requires present clean evidence and clean daem
   ] as const) {
     const projection = cleanLifecycleProjection();
     projection.providers.codex[field] = 1;
-    assert.deepEqual(lifecycleLocalConformanceEligibility(projection, 0), {
+    assert.deepEqual(lifecycleLocalConformanceEligibility(projection, 0, captureAdmission()), {
       codex: false, "claude-code": true, cursor: true,
     }, `${field} blocks only its provider`);
   }
@@ -67,7 +72,12 @@ test("local lifecycle conformance requires present clean evidence and clean daem
   for (const malformed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
     const projection = cleanLifecycleProjection();
     projection.providers.codex.matched = malformed;
-    assert.equal(lifecycleLocalConformanceEligibility(projection, 0).codex, false);
+    assert.equal(lifecycleLocalConformanceEligibility(projection, 0, captureAdmission()).codex, false);
+  }
+  for (const status of ["pending", "unavailable"] as const) {
+    assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0, captureAdmission(status)), {
+      codex: false, "claude-code": false, cursor: false,
+    });
   }
 });
 
@@ -100,6 +110,7 @@ const handle: ProviderActionHandle = {
   pid: 42,
   providerContinuationId: "continuation-1",
   observedState: "working",
+  providerConnection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 42, processIdentity: "codex:42" },
 };
 
 const streamEvent = (sequence: number, method: string): ProviderActionStreamEvent => ({
@@ -129,6 +140,8 @@ function coordinatorHarness(input: {
   observeExecution?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   observeLegacyLifecycle?: (observation: LifecycleProjectionObservation) => void;
   markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor") => void;
+  lifecycleProjectionDiagnostics?: () => ReturnType<typeof cleanLifecycleProjection>;
+  captureAdmission?: (entryId: string, handle: ProviderActionHandle, generation: string) => "pending" | "ready" | "unavailable";
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
   publishNativeActivity?: () => Promise<void>;
@@ -150,6 +163,8 @@ function coordinatorHarness(input: {
     observeExecution: input.observeExecution,
     observeLegacyLifecycle: input.observeLegacyLifecycle,
     markLifecycleProjectionUnavailable: input.markLifecycleProjectionUnavailable,
+    lifecycleProjectionDiagnostics: input.lifecycleProjectionDiagnostics,
+    captureAdmission: input.captureAdmission,
     observePermissions: input.observePermissions,
     provider: {
       stop: async (current) => {
@@ -229,6 +244,41 @@ function coordinatorHarness(input: {
     getManifest: () => manifest,
   };
 }
+
+test("recovery diagnostics require every exact live provider lane to be capture-ready", async () => {
+  const admissions = new Map<string, "pending" | "ready" | "unavailable">([["agent-1", "pending"]]);
+  const harness = coordinatorHarness({
+    lifecycleProjectionDiagnostics: cleanLifecycleProjection,
+    captureAdmission: entryId => admissions.get(entryId) ?? "unavailable",
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  assert.deepEqual(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission, {
+    codex: "pending", "claude-code": "unavailable", cursor: "unavailable",
+  });
+  assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, false);
+
+  admissions.set("agent-1", "ready");
+  assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, true);
+
+  const second = { ...handle, pid: 43, workAttemptId: "attempt-2",
+    providerConnection: { ...handle.providerConnection!, pid: 43, processIdentity: "codex:43" } };
+  admissions.set("agent-2", "unavailable");
+  await harness.coordinator.install("agent-2", second, "generation-3");
+  assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "unavailable",
+    "one broken current lane fails the provider closed even when another lane is ready");
+  assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, false);
+  await harness.coordinator.disposeAll();
+
+  const throwing = coordinatorHarness({
+    lifecycleProjectionDiagnostics: cleanLifecycleProjection,
+    captureAdmission: () => { throw new Error("injected optional capture failure"); },
+  });
+  await throwing.coordinator.install("agent-1", handle, "generation-2");
+  assert.equal(throwing.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "unavailable",
+    "an optional capture callback cannot break daemon status");
+  assert.equal(throwing.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, false);
+  await throwing.coordinator.disposeAll();
+});
 
 test("daemon-inbox heartbeats probe exact live runtimes without granting recovery authority", async () => {
   let heartbeat: (() => void) | null = null;
