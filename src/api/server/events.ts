@@ -22,6 +22,24 @@ export const taskEvents = createBridgedEmitter("tasks");
 export const githubRoomEvents = createBridgedEmitter("github");
 export const reasoningEvents = createBridgedEmitter("reasoning");
 export const artifactEvents = createBridgedEmitter("artifacts");
+export const agentWorkEvents = createBridgedEmitter("agent-work");
+
+const AGENT_WORK_INVALIDATION_COALESCE_MS = 100;
+const pendingAgentWorkInvalidations = new Map<string, ReturnType<typeof setTimeout>>();
+
+/**
+ * Coalesce retained-work mutations into a pointer-only room invalidation.
+ * Consumers always repair through the authoritative agent-work poll endpoint.
+ */
+export function queueAgentWorkInvalidation(projectId: string): void {
+  if (pendingAgentWorkInvalidations.has(projectId)) return;
+  const timer = setTimeout(() => {
+    pendingAgentWorkInvalidations.delete(projectId);
+    agentWorkEvents.emit("agent_work:invalidated", { projectId });
+  }, AGENT_WORK_INVALIDATION_COALESCE_MS);
+  timer.unref?.();
+  pendingAgentWorkInvalidations.set(projectId, timer);
+}
 
 export async function emitProjectMessage(
   projectId: string,

@@ -45,6 +45,7 @@ import {
 
 let activeRoomStream: {
   roomIdentifier: string;
+  canonicalRoomIdentifier: string | null;
   abortController: AbortController;
   reconnectTimer: NodeJS.Timeout | null;
   pollAbortController: AbortController | null;
@@ -731,6 +732,9 @@ function handleRoomStreamFrame(
       stageOrApplyRoomEventCursor(roomIdentifier, true, syncCursor);
     }
     if (activeRoomStream?.roomIdentifier === roomIdentifier) {
+      if (isValidStreamRoomIdentifier(payload.room_id)) {
+        activeRoomStream.canonicalRoomIdentifier = payload.room_id;
+      }
       activeRoomStream.handshakeReceived = true;
       if (activeRoomStream.handshakeTimer) clearTimeout(activeRoomStream.handshakeTimer);
       activeRoomStream.handshakeTimer = null;
@@ -914,6 +918,33 @@ function handleRoomStreamFrame(
     return;
   }
 
+  if (eventName === "resource_invalidation_v1") {
+    const keys = Object.keys(payload).sort();
+    const payloadRoomIdentifier = payload.room_id;
+    if (
+      keys.length !== 2
+      || keys[0] !== "resource"
+      || keys[1] !== "room_id"
+      || !isValidStreamRoomIdentifier(payloadRoomIdentifier)
+      || payload.resource !== "agent_work"
+      || payloadRoomIdentifier !== (
+        activeRoomStream?.roomIdentifier === roomIdentifier
+          ? activeRoomStream.canonicalRoomIdentifier ?? roomIdentifier
+          : roomIdentifier
+      )
+    ) {
+      repairMalformedRoomStreamFrame(roomIdentifier, eventCursor);
+      return;
+    }
+    stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+    emitRoomStreamEvent({
+      type: "resource_invalidation",
+      roomIdentifier: payloadRoomIdentifier,
+      resource: "agent_work",
+    }, { deliverToManagedAgents: false });
+    return;
+  }
+
   if (eventName === "message") {
     const messageId = typeof payload.id === "string" ? payload.id : null;
     if (!messageId) {
@@ -946,6 +977,14 @@ function handleRoomStreamFrame(
     return;
   }
   stageOrApplyRoomEventCursor(roomIdentifier, eventCursor !== null, eventCursor);
+}
+
+function isValidStreamRoomIdentifier(value: unknown): value is string {
+  return typeof value === "string"
+    && value.length > 0
+    && value.length <= 512
+    && value.trim() === value
+    && !/[\u0000-\u001f\u007f]/.test(value);
 }
 
 function queueOrHandleRoomStreamFrame(
@@ -1513,10 +1552,11 @@ async function openDesktopRoomStream(
   }
 
   try {
+    const streamParams = new URLSearchParams();
+    if (stream.lastMessageId) streamParams.set("after", stream.lastMessageId);
+    streamParams.append("stream_capability", "resource_invalidation_v1");
     const response = await fetch(
-      `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/stream${
-        stream.lastMessageId ? `?after=${encodeURIComponent(stream.lastMessageId)}` : ""
-      }`,
+      `${apiUrl}/rooms/${encodeURIComponent(stream.roomIdentifier)}/messages/stream?${streamParams.toString()}`,
       {
         headers: requestHeaders,
         signal: stream.abortController.signal,
@@ -1673,6 +1713,7 @@ export async function startDesktopRoomStream(
   const readyPromise = new Promise<void>((resolve) => { resolveReady = resolve; });
   activeRoomStream = {
     roomIdentifier: trimmedRoomIdentifier,
+    canonicalRoomIdentifier: null,
     abortController: new AbortController(),
     reconnectTimer: null,
     pollAbortController: null,

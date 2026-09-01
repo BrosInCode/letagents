@@ -31,6 +31,7 @@ const { clearRoomAgentWork, publishRoomAgentWork, readRoomAgentWork } = await im
 const { parseRoomAgentWorkSummary } = await import("../../../shared/room-agent-work.mjs");
 const { acquireLiveRoomAuthorization } = await import("../rooms/live-authorization.js");
 const { githubRepoAccessInvalidationEvents } = await import("../github/repo-access.js");
+const { agentWorkEvents } = await import("../server/events.js");
 
 async function reset() {
   if (!client) throw new Error("DB-backed supervisor tests require TEST_DB_URL");
@@ -1248,8 +1249,12 @@ test("room work summary is a canonical, bounded allowlist without private fields
   } finally { process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = before; }
 });
 
-test("room work HTTP writes require the exact supervisor and reads require current human membership", { skip: requiresDatabase }, async () => {
+test("room work HTTP writes require the exact supervisor and reads require current human membership", { skip: requiresDatabase }, async (t) => {
   const f = await setupWork();
+  const invalidatedRooms: string[] = [];
+  const onInvalidated = (event: { projectId: string }) => invalidatedRooms.push(event.projectId);
+  agentWorkEvents.on("agent_work:invalidated", onInvalidated);
+  t.after(() => agentWorkEvents.off("agent_work:invalidated", onInvalidated));
   for (const authKind of ["session", "owner_token", "agent_session", null]) {
     const denied = recorder();
     await f.publish({ ...f.publishRequest, authKind }, denied);
@@ -1265,6 +1270,21 @@ test("room work HTTP writes require the exact supervisor and reads require curre
   const created = recorder();
   await f.publish({ ...f.publishRequest, body: { ...f.publishRequest.body, room_id: "room_alias" } }, created);
   assert.equal(created.statusCode, 201);
+  await delay(150);
+  assert.deepEqual(invalidatedRooms, [f.room.id]);
+  const replayed = recorder();
+  await f.publish({ ...f.publishRequest, body: { ...f.publishRequest.body, room_id: "room_alias" } }, replayed);
+  assert.equal(replayed.body.status, "replayed");
+  await delay(150);
+  assert.deepEqual(invalidatedRooms, [f.room.id], "idempotent replays must not invalidate unchanged work");
+  const updated = recorder();
+  await f.publish({
+    ...f.publishRequest,
+    body: { ...f.publishRequest.body, room_id: "room_alias", revision: 2 },
+  }, updated);
+  assert.equal(updated.body.status, "updated");
+  await delay(150);
+  assert.deepEqual(invalidatedRooms, [f.room.id, f.room.id]);
   const reader = f.handlers.get("GET agent-work");
   const readRequest = { authKind: "session", sessionAccount: { account_id: "owner_route" }, params: { 0: "room_alias", 1: created.body.work.attempt_id } };
   const result = recorder();
@@ -1702,8 +1722,12 @@ for (const first of ["clear", "publish"] as const) {
   });
 }
 
-test("room work clear HTTP requires the human report owner, current membership, visibility and exact revision", { skip: requiresDatabase }, async () => {
+test("room work clear HTTP requires the human report owner, current membership, visibility and exact revision", { skip: requiresDatabase }, async (t) => {
   const f = await setupWorkPoll();
+  const invalidatedRooms: string[] = [];
+  const onInvalidated = (event: { projectId: string }) => invalidatedRooms.push(event.projectId);
+  agentWorkEvents.on("agent_work:invalidated", onInvalidated);
+  t.after(() => agentWorkEvents.off("agent_work:invalidated", onInvalidated));
   const created = await publishRoomAgentWork({ ...f.input, summary: completedWorkSummary });
   await authDb!.createOwnerToken({ accountId: "owner_route", githubUserId: "owner_route", token: "work_clear_owner" });
   await seedOwner("other_human");
@@ -1739,7 +1763,11 @@ test("room work clear HTTP requires the human report owner, current membership, 
     const owner = await clear({ authorization: "Bearer work_clear_owner" });
     assert.equal(owner.status, 200); assert.equal(owner.headers.get("cache-control"), "no-store");
     assert.equal((await owner.json()).status, "cleared");
+    await delay(150);
+    assert.deepEqual(invalidatedRooms, [f.room.id]);
     const replay = await clear(); assert.equal(replay.status, 200); assert.equal((await replay.json()).status, "already_cleared");
+    await delay(150);
+    assert.deepEqual(invalidatedRooms, [f.room.id], "already-cleared replays must not invalidate unchanged work");
   } finally { await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve())); }
 });
 

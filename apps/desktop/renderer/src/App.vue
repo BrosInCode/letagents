@@ -384,6 +384,7 @@ import type {
   DesktopRoomLatestMessage,
   DesktopRoomSnapshot,
   DesktopRoomStorageState,
+  DesktopRoomStreamEvent,
   DiagnosticsSnapshot,
   RepoStatus,
   WorkerSnapshot,
@@ -1280,6 +1281,7 @@ const {
   clearLiveMetadataRefreshInterval,
   clearLiveMetadataRefreshTimer,
   clearSelectedRoomAgentWork,
+  invalidateSelectedRoomAgentWork,
   refreshSelectedRoomLiveMetadata,
   roomAgentWork,
   roomAgentWorkStatus,
@@ -1333,6 +1335,14 @@ const {
   syncRoomStream: syncDesktopRoomStream,
   workers,
 });
+
+function handleDesktopRoomStreamEvent(event: DesktopRoomStreamEvent): void {
+  if (event.type === "resource_invalidation") {
+    invalidateSelectedRoomAgentWork(event.roomIdentifier);
+    return;
+  }
+  handleRoomStreamEvent(event);
+}
 
 const authSnapshotPending = computed(() =>
   isAuthSnapshotPending({
@@ -2430,7 +2440,7 @@ watch(
 );
 
 onMounted(() => {
-  unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleRoomStreamEvent) || null;
+  unsubscribeRoomStream = desktopIpc.room?.onStreamEvent?.(handleDesktopRoomStreamEvent) || null;
   unsubscribeOpenSettings = desktopIpc.ui?.onOpenSettings(openSettingsSurface) || null;
   unsubscribeOpenUpdates = desktopIpc.ui?.onOpenUpdates?.(openUpdatesSurface) || null;
   unsubscribeUpdateStatus = desktopIpc.updates?.onStatusChanged?.((status) => {

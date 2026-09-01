@@ -1008,6 +1008,68 @@ for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.string
   }
 });
 
+test("agent-work invalidations advance the broker cursor and stay out of managed delivery", async () => {
+  const router = installFetchRouter();
+  try {
+    const canonicalRoom = `${ROOM}_canonical`;
+    const initial = makeSse();
+    const reconnected = makeSse();
+    router.streamQueue.push({ kind: "ok", sse: initial }, { kind: "ok", sse: reconnected });
+    router.enqueueCatchUp([]);
+    router.enqueueCatchUp([]);
+    const starting = startDesktopRoomStream(ROOM, "msg_1");
+    await waitUntil(() => router.streamCalls.length === 1);
+    assert.match(router.streamCalls[0]?.url || "", /stream_capability=resource_invalidation_v1/);
+    initial.pushRaw(
+      `event: room_sync\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        checkpoint: "msg_1",
+        gap: false,
+        event_cursor: "broker_before_work",
+      })}\n\n`,
+    );
+    await starting;
+    const emittedCount = emitted.length;
+    const managedCount = managedEmitted.length;
+    initial.pushRaw(
+      `id: broker_work\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        resource: "agent_work",
+      })}\n\n`,
+    );
+    await waitUntil(() => emitted.length > emittedCount);
+    assert.deepEqual(emitted.at(-1), {
+      type: "resource_invalidation",
+      roomIdentifier: canonicalRoom,
+      resource: "agent_work",
+    });
+    assert.equal(managedEmitted.length, managedCount);
+
+    initial.error();
+    await waitUntil(() => router.streamCalls.length >= 2, 4_000);
+    assert.equal(router.streamCalls[1]?.headers.get("Last-Event-ID"), "broker_work");
+    const invalidationCount = emitted.filter((event) => event.type === "resource_invalidation").length;
+    reconnected.pushRaw(
+      `id: broker_bad_work\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: "room_other",
+        resource: "agent_work",
+      })}\n\n`,
+    );
+    await waitUntil(() => emitted.some(
+      (event) => event.type === "open" && event.gap === true && event.verified === true,
+    ));
+    assert.equal(
+      emitted.filter((event) => event.type === "resource_invalidation").length,
+      invalidationCount,
+      "a wrong-room pointer must repair without being delivered",
+    );
+    reconnected.close();
+  } finally {
+    await stopDesktopRoomStream();
+    router.restore();
+  }
+});
+
 test("a live broker gap repairs missed targeted messages and tasks exactly once", async () => {
   const router = installFetchRouter();
   const managedStart = managedEmitted.length;

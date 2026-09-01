@@ -203,6 +203,103 @@ describe("useDesktopRoomLiveSync retained room work", () => {
     assert.equal(harness.sync.roomAgentWorkStatus.value, "ready");
   });
 
+  it("coalesces invalidation bursts into one immediate authoritative poll", async () => {
+    const harness = createHarness();
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      harness.nextAgentWork = Promise.resolve(unchangedRoomAgentWork());
+      harness.sync.invalidateSelectedRoomAgentWork(ROOM);
+      harness.sync.invalidateSelectedRoomAgentWork(ROOM);
+      harness.sync.invalidateSelectedRoomAgentWork("room_other");
+      await harness.settle();
+    });
+
+    assert.deepEqual(harness.pollAgentWorkRequests, [
+      { roomIdentifier: ROOM, cursor: null },
+      { roomIdentifier: ROOM, cursor: WORK_CURSOR },
+    ]);
+  });
+
+  it("accepts the canonical room identifier from the selected alias snapshot", async () => {
+    const harness = createHarness();
+    const canonicalRoom = "room_canonical";
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      const snapshot = baseSnapshot();
+      snapshot.roomIdentifier = canonicalRoom;
+      snapshot.room.identifier = canonicalRoom;
+      harness.selectedSnapshot.value = snapshot;
+      harness.nextAgentWork = Promise.resolve(unchangedRoomAgentWork());
+      harness.sync.invalidateSelectedRoomAgentWork(canonicalRoom);
+      await harness.settle();
+    });
+
+    assert.equal(harness.pollAgentWorkRequests.length, 2);
+  });
+
+  it("runs one trailing poll when invalidation races an in-flight request", async () => {
+    const harness = createHarness();
+    const gate = deferred<DesktopRoomAgentWorkPollResult>();
+    harness.nextAgentWork = gate.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      assert.equal(harness.pollAgentWorkRequests.length, 1);
+      harness.sync.invalidateSelectedRoomAgentWork(ROOM);
+      harness.sync.invalidateSelectedRoomAgentWork(ROOM);
+      await harness.settle();
+      assert.equal(harness.pollAgentWorkRequests.length, 1);
+      gate.resolve(changedRoomAgentWork());
+      await harness.settle();
+    });
+
+    assert.equal(harness.pollAgentWorkRequests.length, 2);
+  });
+
+  it("runs one trailing poll after an invalidated in-flight request fails", async () => {
+    const harness = createHarness();
+    const gate = deferred<DesktopRoomAgentWorkPollResult>();
+    harness.nextAgentWork = gate.promise;
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      harness.sync.invalidateSelectedRoomAgentWork(ROOM);
+      harness.sync.invalidateSelectedRoomAgentWork(ROOM);
+      await harness.settle();
+      assert.equal(harness.pollAgentWorkRequests.length, 1);
+      harness.nextAgentWork = Promise.resolve(changedRoomAgentWork());
+      gate.reject(new Error("transient poll failure"));
+      await harness.settle();
+    });
+
+    assert.equal(harness.pollAgentWorkRequests.length, 2);
+    assert.equal(harness.sync.roomAgentWorkStatus.value, "ready");
+  });
+
+  it("defers hidden-window invalidations until foreground catch-up", async () => {
+    const harness = createHarness();
+
+    await withDesktopBridge(harness.windowBridge, async () => {
+      await harness.sync.syncSelectedRoomStream(ROOM);
+      await harness.settle();
+      const before = harness.pollAgentWorkRequests.length;
+      harness.documentHidden = true;
+      harness.sync.invalidateSelectedRoomAgentWork(ROOM);
+      await harness.settle();
+      assert.equal(harness.pollAgentWorkRequests.length, before);
+      harness.documentHidden = false;
+      await harness.sync.refreshSelectedRoomLiveMetadata();
+    });
+
+    assert.equal(harness.pollAgentWorkRequests.length, 2);
+  });
+
   it("discards responses after room, account, or session identity changes", async () => {
     const cases: Array<(harness: ReturnType<typeof createHarness>) => void> = [
       (harness) => { harness.currentRoomId.value = "room_other"; },
@@ -596,12 +693,18 @@ async function flush(): Promise<void> {
   for (let i = 0; i < 6; i += 1) await Promise.resolve();
 }
 
-function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve: (value: T) => void;
+  reject: (reason?: unknown) => void;
+} {
   let resolve: (value: T) => void = () => undefined;
-  const promise = new Promise<T>((next) => {
+  let reject: (reason?: unknown) => void = () => undefined;
+  const promise = new Promise<T>((next, fail) => {
     resolve = next;
+    reject = fail;
   });
-  return { promise, resolve };
+  return { promise, resolve, reject };
 }
 
 async function withDesktopBridge<T>(value: object, callback: () => Promise<T>): Promise<T> {

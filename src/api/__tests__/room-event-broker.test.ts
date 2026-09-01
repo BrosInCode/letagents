@@ -17,6 +17,7 @@ function createSources() {
     artifactEvents: new EventEmitter(),
     rentalActivityEvents: new EventEmitter(),
     messageInfoEvents: new EventEmitter(),
+    agentWorkEvents: new EventEmitter(),
   };
 }
 
@@ -34,6 +35,7 @@ test("one source listener fans out only to subscribers in the affected room", as
   assert.equal(sources.artifactEvents.listenerCount("artifact:updated"), 1);
   assert.equal(sources.rentalActivityEvents.listenerCount("activity:created"), 1);
   assert.equal(sources.messageInfoEvents.listenerCount("message_info:updated"), 1);
+  assert.equal(sources.agentWorkEvents.listenerCount("agent_work:invalidated"), 1);
 
   sources.taskEvents.emit("task:updated", { projectId: "room_a", task: { id: "task_1" } });
   const deliveries = await Promise.all(roomA.map((subscription) => subscription.next()));
@@ -59,6 +61,26 @@ test("one source listener fans out only to subscribers in the affected room", as
   assert.equal(sources.artifactEvents.listenerCount("artifact:updated"), 0);
   assert.equal(sources.rentalActivityEvents.listenerCount("activity:created"), 0);
   assert.equal(sources.messageInfoEvents.listenerCount("message_info:updated"), 0);
+  assert.equal(sources.agentWorkEvents.listenerCount("agent_work:invalidated"), 0);
+});
+
+test("agent-work invalidations remain pointer-only broker events", async () => {
+  const sources = createSources();
+  const broker = createRoomEventBroker(sources, { instanceId: "broker" });
+  const subscription = broker.subscribe("room_work");
+
+  sources.agentWorkEvents.emit("agent_work:invalidated", { projectId: "room_work" });
+  const delivery = await subscription.next();
+  assert.equal(delivery?.type, "event");
+  if (delivery?.type === "event") {
+    assert.deepEqual(delivery.envelope.event, {
+      kind: "agent_work_invalidated",
+      roomId: "room_work",
+    });
+  }
+
+  subscription.close();
+  broker.close();
 });
 
 test("prompt fanout reuses one recipient set at maximum subscriber cardinality", async () => {
