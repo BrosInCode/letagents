@@ -6824,6 +6824,7 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     assert.deepEqual((status.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
       daemon_inbox_wait_evidence_dependency: 0,
       lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
+      lifecycle_local_conformance_eligible: { codex: false, "claude-code": false, cursor: false },
     });
     const providerStreams = (daemon as unknown as {
       providerStreams: { acceptsLegacyWaitAuthority(entry: DaemonManifestEntry): boolean };
@@ -6833,6 +6834,7 @@ test("daemon control surface persists three-axis state, dual-axis liveness, and 
     assert.deepEqual((negotiated.result as { recovery_diagnostics: unknown }).recovery_diagnostics, {
       daemon_inbox_wait_evidence_dependency: 1,
       lifecycle_projection: unavailableLifecycleProjectionDiagnostics(),
+      lifecycle_local_conformance_eligible: { codex: false, "claude-code": false, cursor: false },
     });
     const put = await daemonRequest(paths.socketPath, "manifest.put", { entry: { ...entry, workspace_path: "/tmp/work" } });
     assert.equal(put.ok, true);

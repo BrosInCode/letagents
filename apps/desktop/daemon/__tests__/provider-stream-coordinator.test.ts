@@ -6,11 +6,70 @@ import type {
   ProviderActionPort,
   ProviderActionStreamEvent,
 } from "../provider-action-port.js";
-import { ProviderStreamCoordinator } from "../provider-stream-coordinator.js";
+import {
+  lifecycleLocalConformanceEligibility,
+  ProviderStreamCoordinator,
+} from "../provider-stream-coordinator.js";
 import { providerStreamLifecycle } from "../provider-stream-policy.js";
 import type { DaemonManifestEntry } from "../types.js";
 import { WorkerRuntimeCustody } from "../worker-runtime-custody.js";
 import type { LifecycleProjectionObservation } from "../lifecycle-projection-ledger.js";
+
+const cleanLifecycleProjection = () => ({
+  available: true,
+  providers: Object.fromEntries(["codex", "claude-code", "cursor"].map((provider) => [provider, {
+    comparedSegments: 1,
+    matched: 1,
+    missingInTyped: 0,
+    missingInLegacy: 0,
+    pairedButDifferent: 0,
+    conflicts: 0,
+    observationUnavailable: 0,
+  }])) as Record<"codex" | "claude-code" | "cursor", {
+    comparedSegments: number; matched: number; missingInTyped: number; missingInLegacy: number;
+    pairedButDifferent: number; conflicts: number; observationUnavailable: number;
+  }>,
+});
+
+test("local lifecycle conformance requires present clean evidence and clean daemon-owned wait authority", () => {
+  assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0), {
+    codex: true, "claude-code": true, cursor: true,
+  });
+  assert.deepEqual(lifecycleLocalConformanceEligibility({ ...cleanLifecycleProjection(), available: false }, 0), {
+    codex: false, "claude-code": false, cursor: false,
+  });
+  assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 1), {
+    codex: false, "claude-code": false, cursor: false,
+  });
+  const empty = cleanLifecycleProjection();
+  empty.providers.codex.comparedSegments = 0;
+  assert.equal(lifecycleLocalConformanceEligibility(empty, 0).codex, false,
+    "hollow all-zero evidence is not a conformance sample");
+  const multipleCheckpoints = cleanLifecycleProjection();
+  multipleCheckpoints.providers.codex.matched = 2;
+  assert.equal(lifecycleLocalConformanceEligibility(multipleCheckpoints, 0).codex, true,
+    "matched checkpoints are not the terminal-delimited segment count");
+
+  for (const field of [
+    "missingInTyped",
+    "missingInLegacy",
+    "pairedButDifferent",
+    "conflicts",
+    "observationUnavailable",
+  ] as const) {
+    const projection = cleanLifecycleProjection();
+    projection.providers.codex[field] = 1;
+    assert.deepEqual(lifecycleLocalConformanceEligibility(projection, 0), {
+      codex: false, "claude-code": true, cursor: true,
+    }, `${field} blocks only its provider`);
+  }
+
+  for (const malformed of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const projection = cleanLifecycleProjection();
+    projection.providers.codex.matched = malformed;
+    assert.equal(lifecycleLocalConformanceEligibility(projection, 0).codex, false);
+  }
+});
 
 const entry = (): DaemonManifestEntry => ({
   id: "agent-1",
