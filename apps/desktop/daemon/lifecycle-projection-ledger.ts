@@ -4,6 +4,8 @@ import { DatabaseSync } from "node:sqlite";
 import { executionIdentity } from "./execution-protocol.js";
 
 export type LifecycleProjectionProvider = "codex" | "claude-code" | "cursor";
+export type LifecycleCaptureAdmissionStatus = "pending" | "ready" | "unavailable";
+export type LifecycleCaptureAdmissionDiagnostics = Record<LifecycleProjectionProvider, LifecycleCaptureAdmissionStatus>;
 export type LifecycleProjectionPhase = "turn_active" | "turn_terminal";
 export type LifecycleTypedProjectionState = "working" | "terminal";
 export type LifecycleLegacyProjectionState = "working" | "idle" | "terminal" | "failed";

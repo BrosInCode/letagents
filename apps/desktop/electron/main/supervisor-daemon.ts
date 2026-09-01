@@ -13,6 +13,7 @@ import type {
   DesktopSupervisorCreateInput,
   DesktopSupervisorDaemonStatus,
   DesktopSupervisorDesiredState,
+  DesktopLifecycleCaptureAdmissionStatus,
   DesktopLifecycleProjectionDiagnostics,
   DesktopLifecycleProjectionProvider,
   DesktopSupervisorManifestEntry,
@@ -40,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.120";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.121";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Retirement can queue behind one already-admitted worker mint (3 x 10s) so
@@ -1751,25 +1752,31 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
   const rawRecoveryDiagnostics = record(value.recovery_diagnostics);
   const daemonInboxWaitEvidenceDependency = rawRecoveryDiagnostics?.daemon_inbox_wait_evidence_dependency;
   const lifecycleProjection = mapLifecycleProjectionDiagnostics(rawRecoveryDiagnostics?.lifecycle_projection);
+  const lifecycleCaptureAdmission = mapLifecycleCaptureAdmission(
+    rawRecoveryDiagnostics?.lifecycle_capture_admission,
+  );
   const lifecycleLocalConformanceEligible = mapLifecycleLocalConformanceEligibility(
     rawRecoveryDiagnostics?.lifecycle_local_conformance_eligible,
   );
-  const eligibilityClaimsAreSupported = lifecycleProjection && lifecycleLocalConformanceEligible
+  const eligibilityClaimsAreSupported = lifecycleProjection && lifecycleCaptureAdmission && lifecycleLocalConformanceEligible
     ? lifecycleProjectionProviders.every((provider) => !lifecycleLocalConformanceEligible[provider]
       || lifecycleProjectionSupportsLocalConformance(
         lifecycleProjection,
         provider,
         daemonInboxWaitEvidenceDependency,
+        lifecycleCaptureAdmission,
       ))
     : false;
   const recoveryDiagnostics = Number.isSafeInteger(daemonInboxWaitEvidenceDependency)
     && (daemonInboxWaitEvidenceDependency as number) >= 0
     && lifecycleProjection
+    && lifecycleCaptureAdmission
     && lifecycleLocalConformanceEligible
     && eligibilityClaimsAreSupported
     ? {
         daemonInboxWaitEvidenceDependency: daemonInboxWaitEvidenceDependency as number,
         lifecycleProjection,
+        lifecycleCaptureAdmission,
         lifecycleLocalConformanceEligible,
       }
     : null;
@@ -1839,14 +1846,30 @@ function mapLifecycleLocalConformanceEligibility(
   return mapped;
 }
 
+function mapLifecycleCaptureAdmission(
+  value: unknown,
+): Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus> | null {
+  const source = record(value);
+  if (!source) return null;
+  const mapped = {} as Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>;
+  for (const provider of lifecycleProjectionProviders) {
+    const status = enumValue(source[provider], ["pending", "ready", "unavailable"] as const);
+    if (!status) return null;
+    mapped[provider] = status;
+  }
+  return mapped;
+}
+
 function lifecycleProjectionSupportsLocalConformance(
   projection: DesktopLifecycleProjectionDiagnostics,
   provider: DesktopLifecycleProjectionProvider,
   daemonInboxWaitEvidenceDependency: unknown,
+  captureAdmission: Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>,
 ): boolean {
   const evidence = projection.providers[provider];
   return projection.available
     && daemonInboxWaitEvidenceDependency === 0
+    && captureAdmission[provider] === "ready"
     && evidence.comparedSegments >= 1
     && evidence.missingInTyped === 0
     && evidence.missingInLegacy === 0

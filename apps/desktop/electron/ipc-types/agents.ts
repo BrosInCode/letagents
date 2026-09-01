@@ -375,6 +375,7 @@ export type DesktopSupervisorDesiredState = "running" | "paused" | "stopped";
 export type DesktopSupervisorObservedState = "absent" | "starting" | "idle" | "working" | "checkpointing" | "pausing" | "paused" | "recovering" | "stopping" | "stopped" | "failed";
 export type DesktopSupervisorCondition = "none" | "quarantined" | "coordination_blocked" | "auth_blocked" | "budget_blocked" | "security_blocked";
 export type DesktopLifecycleProjectionProvider = "codex" | "claude-code" | "cursor";
+export type DesktopLifecycleCaptureAdmissionStatus = "pending" | "ready" | "unavailable";
 export interface DesktopLifecycleProjectionDiagnostics {
   available: boolean;
   providers: Record<DesktopLifecycleProjectionProvider, {
@@ -398,6 +399,7 @@ export interface DesktopSupervisorDaemonStatus {
   recoveryDiagnostics: {
     daemonInboxWaitEvidenceDependency: number;
     lifecycleProjection: DesktopLifecycleProjectionDiagnostics;
+    lifecycleCaptureAdmission: Record<DesktopLifecycleProjectionProvider, DesktopLifecycleCaptureAdmissionStatus>;
     lifecycleLocalConformanceEligible: Record<DesktopLifecycleProjectionProvider, boolean>;
   } | null;
   capabilities: {
