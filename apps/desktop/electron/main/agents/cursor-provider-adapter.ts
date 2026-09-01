@@ -36,7 +36,12 @@ import {
   type ControlProbeResult,
 } from "./provider-adapter.js";
 import type { NativeExecutionFact } from "../../../shared/execution-protocol.js";
-import { nativeExecutionId, nativeLifecycleCheckpointId, ProviderExecutionObserver } from "./provider-execution-observer.js";
+import {
+  nativeExecutionId,
+  nativeLifecycleCheckpoint,
+  ProviderExecutionObserver,
+  type NativeLifecycleCheckpoint,
+} from "./provider-execution-observer.js";
 import {
   CURSOR_IDENTITY_ATTESTATION_TIMEOUT_MS,
   CURSOR_MCP_CONNECTOR_PARENT,
@@ -548,7 +553,7 @@ interface LiveTurn {
   executionTools: Map<string, { tool: string; completed: boolean }>;
   executionTurnFinished: boolean;
   executionTerminalCheckpoint: {
-    sessionId: string; subtype: string; isError: boolean; nativeEventId: string;
+    sessionId: string; subtype: string; isError: boolean; nativeLifecycle: NativeLifecycleCheckpoint;
   } | null;
   executionContinuationId: string | null;
   completion?: Promise<CursorTurnTerminal>;
@@ -2696,17 +2701,13 @@ export class CursorProviderAdapter implements ProviderAdapter {
       return;
     }
     const safeProviderPayload = safeStreamPayload(message);
-    const nativeEventId = this.observeNativeExecution(handle, turn, message, sessionId);
-    const nativeLifecyclePhase = nativeEventId
-      ? message.type === "system" && message.subtype === "init" ? "turn_active" as const
-        : message.type === "result" ? "turn_terminal" as const : null
-      : null;
+    const nativeLifecycle = this.observeNativeExecution(handle, turn, message, sessionId);
     const duplicateInit = message.type === "system" && message.subtype === "init" && turn.sawInit;
     // The daemon uses the first verified init as the per-turn display boundary.
     // Preserve duplicate same-session init as diagnostics under a distinct
     // method so it cannot erase assistant/tool output already shown this turn.
     this.publishSafeStream(handle, duplicateInit ? "system/init_duplicate" : streamMethod(message), safeProviderPayload,
-      cursorStreamKind(message), nativeEventId, nativeLifecyclePhase);
+      cursorStreamKind(message), nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
     const rawEventSequence = handle.streamSequence;
     const type = typeof message.type === "string" ? message.type : "";
     if (type === "system") {
@@ -2790,7 +2791,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     turn.liveDisplayTools.clear();
   }
 
-  private observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): string | null {
+  private observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): NativeLifecycleCheckpoint | null {
     if (!sessionId || !nativeExecutionId(sessionId) || handle.protocolError) return null;
     const replay = turn.executionTerminalCheckpoint;
     if (turn.executionTurnFinished) {
@@ -2798,12 +2799,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
         && sessionId === replay.sessionId
         && message.subtype === replay.subtype
         && message.is_error === replay.isError
-        ? replay.nativeEventId : null;
+        ? replay.nativeLifecycle : null;
     }
     const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity);
     const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
     if (message.type === "system" && message.subtype === "init" && !turn.sawInit) {
-      const nativeEventId = nativeLifecycleCheckpointId({
+      const nativeLifecycle = nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
         phase: "turn_active",
@@ -2814,14 +2815,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
       turn.executionContinuationId = sessionId;
       emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
       emit({ domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" });
-      emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none", nativeEventId, ...nativeTurn });
-      return nativeEventId;
+      emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+        nativeEventId: nativeLifecycle.nativeEventId, ...nativeTurn });
+      return nativeLifecycle;
     }
     if (!turn.sawInit || sessionId !== handle.providerContinuationId) return null;
     if (message.type === "result") {
       if (typeof message.subtype !== "string" || !message.subtype
         || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return null;
-      const nativeEventId = nativeLifecycleCheckpointId({
+      const nativeLifecycle = nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
         phase: "turn_terminal",
@@ -2831,16 +2833,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
         terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
       });
       emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...nativeTurn,
-        nativeEventId,
+        nativeEventId: nativeLifecycle.nativeEventId,
         turnOutcome: message.subtype === "success" && message.is_error === false ? "completed" : "failed" });
       turn.executionTerminalCheckpoint = {
         sessionId,
         subtype: message.subtype,
         isError: message.is_error === true,
-        nativeEventId,
+        nativeLifecycle,
       };
       turn.executionTurnFinished = true;
-      return nativeEventId;
+      return nativeLifecycle;
     }
     if (message.type !== "tool_call" || !nativeExecutionId(message.call_id)) return null;
     const calls = cursorRecord(message.tool_call);
