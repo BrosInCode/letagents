@@ -25,6 +25,7 @@ export type SupervisedDeliveryLifecyclePorts = {
   isHandoffScheduled(): boolean;
   supportsRoomTurns(): boolean;
   isLifecycleActive(entryId: string): boolean;
+  isOperationallyAdmitted(entryId: string): boolean;
   currentDaemonGeneration(): number;
   delivery: Pick<
     SupervisedAgentDelivery,
@@ -136,6 +137,7 @@ export class SupervisedDeliveryLifecycleCoordinator {
       return;
     }
     if (!entry || entry.delivery_mode !== "daemon_inbox") return;
+    if (!this.ports.isOperationallyAdmitted(entryId)) return;
     if (entry.turn_control?.inbox_item_id
       && ["prepared", "dispatching", "uncertain"].includes(entry.turn_control.status)) return;
 
@@ -210,6 +212,9 @@ export class SupervisedDeliveryLifecycleCoordinator {
       deliveryMode: entry.delivery_mode ?? "mcp_polling",
     };
     if (!await this.ports.providerAuthority.isExactAuthority(agent)) return;
+    // Durable identity may have loaded across a provider-birth replacement.
+    // Recheck the exact operational latch immediately before delivery.
+    if (!this.ports.isOperationallyAdmitted(entryId)) return;
     if (mode === "ensure" || mode === "wake") {
       await delivery.ensureStarted(agent);
       if (mode === "wake") delivery.wake(agent);

@@ -14,6 +14,7 @@ type Options = {
   isClosing(): boolean;
   nowMs(): number;
   diagnostic(agentId: string, error: unknown): void;
+  changed?(agentId: string): void;
 };
 
 const BATCH_SIZE = 32;
@@ -94,6 +95,7 @@ export class TypedLifecycleEffectCoordinator {
       }
       let progressed = false;
       let retry = false;
+      const changedAgentIds = new Set<string>();
       for (const effect of effects) {
         if (this.closed || this.options.isClosing()) return;
         try {
@@ -113,6 +115,7 @@ export class TypedLifecycleEffectCoordinator {
             return applied;
           });
           progressed ||= result.disposition !== "pending";
+          if (result.disposition !== "pending") changedAgentIds.add(effect.agentId);
         } catch (error) {
           this.report(effect.agentId, error);
           this.retry(effect.agentId);
@@ -125,6 +128,10 @@ export class TypedLifecycleEffectCoordinator {
         else this.scanAfterFactSequence = 0;
       } else if (effects.length === BATCH_SIZE && progressed) this.dirty.add(agentId);
       if (retry) return;
+      if (agentId !== null) changedAgentIds.add(agentId);
+      for (const changedAgentId of changedAgentIds) {
+        try { this.options.changed?.(changedAgentId); } catch { /* admission hints own no effect authority */ }
+      }
     }
   }
 

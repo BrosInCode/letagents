@@ -197,6 +197,27 @@ function harness(initialEntries: DaemonManifestEntry[] = []) {
       });
       return { generation: durableManifestGeneration, entry: updated };
     },
+    async appendActivityOnly(expectedGeneration, entryId, event, limit, commitFence) {
+      events.push(`store:append-only:${event.sequence}:${limit}`);
+      assert.equal(expectedGeneration, durableManifestGeneration,
+        "activity-only append must use the durable manifest generation");
+      let updated!: DaemonManifestEntry;
+      await commitFence(async () => {
+        events.push("store:commit-activity-only");
+        const current = manifest.entries.find((candidate) => candidate.id === entryId)!;
+        updated = {
+          ...current,
+          activity: [...(current.activity ?? []), event].slice(-limit),
+        };
+        durableManifestGeneration = expectedGeneration + 1;
+        manifest = {
+          ...manifest,
+          generation: durableManifestGeneration,
+          entries: manifest.entries.map((candidate) => candidate.id === entryId ? updated : candidate),
+        };
+      });
+      return { generation: durableManifestGeneration, entry: updated };
+    },
     async updateWorkplaceLiveness(expectedGeneration, entryId, liveness, commitFence) {
       events.push(`store:liveness:${liveness.state}`);
       assert.equal(expectedGeneration, durableManifestGeneration,
@@ -416,6 +437,31 @@ test("activity sanitization precedes sequence admission and persists exact bound
   assert.equal(updated.activity?.at(-1)?.payload_redacted, true);
   assert.equal(JSON.stringify(updated.activity?.at(-1)).includes("secret-value"), false);
   assert.equal(state.events.includes("store:append:6:200"), true);
+  assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
+});
+
+test("activity-only persistence sanitizes presentation without acquiring lifecycle authority", async () => {
+  const prior = activity({ sequence: 5, status: "idle" });
+  const nativeLiveness = { state: "idle" as const, observed_at: prior.observed_at, detail: "provider idle" };
+  const state = harness([entry({
+    activity: [prior],
+    observed_state: "recovering",
+    native_liveness: nativeLiveness,
+  })]);
+
+  const updated = await state.subject.appendActivityOnly("agent-1", activity({
+    sequence: 6,
+    status: "working",
+    summary: "running token=abcdefghijklmnopqrstuvwxyz123456",
+    payload: { api_key: "secret-value" },
+  }));
+  assert.equal(updated.observed_state, "recovering");
+  assert.deepEqual(updated.native_liveness, nativeLiveness);
+  assert.equal(updated.activity?.at(-1)?.payload_redacted, true);
+  assert.equal(JSON.stringify(updated.activity?.at(-1)).includes("secret-value"), false);
+  assert.equal(state.events.includes("store:append-only:6:200"), true);
+  assert.equal(state.events.includes("store:commit-activity"), false,
+    "presentation-only persistence cannot enter the lifecycle-bearing store path");
   assert.equal(state.events.filter((event) => event === "state:notify").length, 1);
 });
 

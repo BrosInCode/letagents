@@ -131,6 +131,7 @@ const streamEvent = (sequence: number, method: string): ProviderActionStreamEven
 
 function coordinatorHarness(input: {
   appendActivity?: (method: string) => Promise<void>;
+  appendActivityOnly?: (method: string) => Promise<void>;
   stop?: () => Promise<void>;
   durabilityAttempt?: { execution_generations: Array<Record<string, unknown>>; checkpoints?: unknown[] };
   onExit?: ProviderActionPort["onExit"];
@@ -145,17 +146,22 @@ function coordinatorHarness(input: {
   markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor") => void;
   lifecycleProjectionDiagnostics?: () => ReturnType<typeof cleanLifecycleProjection>;
   captureAdmission?: (installation: ProviderInstallationToken) => "pending" | "ready" | "unavailable";
+  typedLifecycleAdmission?: (installation: ProviderInstallationToken) => "pending" | "ready" | "unavailable";
+  authorityMode?: "legacy" | "typed_shadow" | "typed";
   observePermissions?: (entryId: string, handle: ProviderActionHandle, generation: string) => () => void;
   startDelivery?: (entryId: string) => Promise<void>;
+  bindingGet?: (entryId: string) => Promise<null>;
   publishNativeActivity?: () => Promise<void>;
   requestConvergence?: (entryId: string) => void;
+  setTimeout?: typeof setTimeout;
+  clearTimeout?: typeof clearTimeout;
 } = {}) {
   let manifest = entry();
   let manifestAvailable = true;
   const runtimeCustody = new WorkerRuntimeCustody();
   const pendingInstalled: unknown[] = [];
   const bindings = {
-    get: async () => null,
+    get: input.bindingGet ?? (async () => null),
     credentialFor: async () => null,
     supervisedWorkerSession: async () => null,
     verifyAndAdvanceExecutionGeneration: async () => { throw new Error("unused"); },
@@ -169,6 +175,7 @@ function coordinatorHarness(input: {
     markLifecycleProjectionUnavailable: input.markLifecycleProjectionUnavailable,
     lifecycleProjectionDiagnostics: input.lifecycleProjectionDiagnostics,
     captureAdmission: input.captureAdmission,
+    typedLifecycleAdmission: input.typedLifecycleAdmission,
     observePermissions: input.observePermissions,
     provider: {
       stop: async (current) => {
@@ -202,7 +209,7 @@ function coordinatorHarness(input: {
           && providerConnection.pid === manifest.provider_ref?.provider_connection?.pid
           && providerConnection.processIdentity === manifest.provider_ref?.provider_connection?.processIdentity
           && configurationRevision === 1
-          ? "typed_shadow" : null,
+          ? input.authorityMode ?? "typed_shadow" : null,
     },
     bindings,
     durability: {
@@ -230,6 +237,7 @@ function coordinatorHarness(input: {
       manifest = { ...manifest, observed_state, condition };
     },
     appendActivity: async (_entryId, event) => input.appendActivity?.(event.method),
+    appendActivityOnly: async (_entryId, event) => input.appendActivityOnly?.(event.method),
     publishNativeActivity: async () => input.publishNativeActivity?.(),
     handleTerminal: async () => {},
     streams: { reset: () => {}, push: () => {}, end: (entryId) => input.endStream?.(entryId) },
@@ -245,6 +253,8 @@ function coordinatorHarness(input: {
     setInterval: input.setInterval
       ?? ((() => ({ unref() {} })) as unknown as typeof setInterval),
     clearInterval: input.clearInterval ?? ((() => {}) as typeof clearInterval),
+    setTimeout: input.setTimeout,
+    clearTimeout: input.clearTimeout,
   });
   return {
     coordinator,
@@ -294,6 +304,363 @@ test("recovery diagnostics require every exact live provider lane to be capture-
     "an optional capture callback cannot break daemon status");
   assert.equal(throwing.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, false);
   await throwing.coordinator.disposeAll();
+});
+
+test("typed daemon-inbox activation waits for exact durable readiness and latches one way", async () => {
+  let admission: "pending" | "ready" | "unavailable" = "pending";
+  let exitRegistrations = 0;
+  let captureRegistrations = 0;
+  let permissionRegistrations = 0;
+  let heartbeatRegistrations = 0;
+  let deliveryStarts = 0;
+  const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+  const activity: string[] = [];
+  const activityOnly: string[] = [];
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => admission,
+    observeExecution: () => { captureRegistrations += 1; return () => {}; },
+    observePermissions: () => { permissionRegistrations += 1; return () => {}; },
+    onExit: async () => { exitRegistrations += 1; return () => {}; },
+    onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+    setInterval: ((() => {
+      heartbeatRegistrations += 1;
+      return { unref() {} };
+    }) as unknown as typeof setInterval),
+    startDelivery: async () => { deliveryStarts += 1; },
+    appendActivity: async method => { activity.push(method); },
+    appendActivityOnly: async method => { activityOnly.push(method); },
+  });
+
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  assert.equal(captureRegistrations, 1);
+  assert.equal(permissionRegistrations, 1);
+  assert.equal(exitRegistrations, 1, "process exit authority attaches before typed readiness");
+  assert.equal(rawListeners.length, 0);
+  assert.equal(heartbeatRegistrations, 0);
+  assert.equal(deliveryStarts, 0);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
+    "canonical worker binding cannot bypass the exact typed hold");
+  assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "pending");
+
+  admission = "unavailable";
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawListeners.length, 0, "unavailable evidence cannot promote a typed birth");
+  assert.equal(deliveryStarts, 0);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false);
+
+  admission = "ready";
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawListeners.length, 1);
+  assert.equal(heartbeatRegistrations, 1);
+  assert.equal(deliveryStarts, 1);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
+  assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "ready");
+
+  admission = "unavailable";
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawListeners.length, 1, "a ready exact birth never demotes or installs twice");
+  assert.equal(deliveryStarts, 1);
+
+  rawListeners[0]!(streamEvent(1, "item/agentMessage/delta"));
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(activity, []);
+  assert.deepEqual(activityOnly, ["item/agentMessage/delta"],
+    "typed raw output is presentation-only and cannot mutate lifecycle fields");
+
+  rawListeners[0]!({ ...streamEvent(2, "turn/failed"), kind: "turn_lifecycle" });
+  await harness.coordinator.drainCallbacks();
+  assert.equal(harness.getManifest().observed_state, "failed",
+    "B3 leaves raw failure and terminal fencing operational after the latch");
+  assert.equal(harness.stopCalls(), 1);
+  await harness.coordinator.disposeAll();
+});
+
+test("typed promotion remains retryable when raw stream registration fails", async () => {
+  let registrations = 0;
+  let deliveryStarts = 0;
+  const retries: Array<() => void> = [];
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    onStream: async () => {
+      registrations += 1;
+      if (registrations === 1) throw new Error("injected registration failure");
+      return () => {};
+    },
+    startDelivery: async () => { deliveryStarts += 1; },
+    setTimeout: (((callback: () => void) => {
+      retries.push(callback);
+      return { unref() {} };
+    }) as unknown as typeof setTimeout),
+    clearTimeout: ((() => {}) as typeof clearTimeout),
+  });
+
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(registrations, 1);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
+    "a failed activation cannot commit the one-way latch");
+  assert.equal(deliveryStarts, 0);
+  assert.equal(retries.length, 1, "promotion schedules its own bounded exact-birth retry");
+
+  retries.shift()!();
+  await harness.coordinator.drainCallbacks();
+  assert.equal(registrations, 2);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
+  assert.equal(deliveryStarts, 1);
+  await harness.coordinator.disposeAll();
+});
+
+test("typed installation publishes its inert hold before asynchronous prerequisites", async () => {
+  let releaseBinding!: (value: null) => void;
+  let bindingStarted!: () => void;
+  const started = new Promise<void>((resolve) => { bindingStarted = resolve; });
+  const blockedBinding = new Promise<null>((resolve) => { releaseBinding = resolve; });
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    bindingGet: async () => {
+      bindingStarted();
+      return blockedBinding;
+    },
+  });
+
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
+    "an absent provider installation always fails the central delivery gate closed");
+  const install = harness.coordinator.install("agent-1", handle, "generation-2");
+  await started;
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
+    "a current typed token is inert before binding and exit prerequisites finish");
+  releaseBinding(null);
+  await install;
+  await harness.coordinator.drainCallbacks();
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
+  await harness.coordinator.disposeAll();
+});
+
+test("a rejected typed prerequisite removes the partial installation before retry", async () => {
+  let bindingAttempts = 0;
+  let deliveryStarts = 0;
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    bindingGet: async () => {
+      bindingAttempts += 1;
+      if (bindingAttempts === 1) throw new Error("injected binding failure");
+      return null;
+    },
+    startDelivery: async () => { deliveryStarts += 1; },
+  });
+
+  await assert.rejects(
+    harness.coordinator.install("agent-1", handle, "generation-2"),
+    /injected binding failure/,
+  );
+  assert.equal(harness.coordinator.get("agent-1"), undefined);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false);
+
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(bindingAttempts, 2);
+  assert.equal(deliveryStarts, 1);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
+  await harness.coordinator.disposeAll();
+});
+
+test("typed delivery-start retry reuses one physical stream and heartbeat", async () => {
+  let admission: "ready" | "unavailable" = "ready";
+  let rawRegistrations = 0;
+  let heartbeatRegistrations = 0;
+  let deliveryStarts = 0;
+  const retries: Array<() => void> = [];
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => admission,
+    onStream: async () => { rawRegistrations += 1; return () => {}; },
+    setInterval: ((() => {
+      heartbeatRegistrations += 1;
+      return { unref() {} };
+    }) as unknown as typeof setInterval),
+    startDelivery: async () => {
+      deliveryStarts += 1;
+      if (deliveryStarts === 1) throw new Error("injected delivery failure");
+    },
+    setTimeout: (((callback: () => void) => {
+      retries.push(callback);
+      return { unref() {} };
+    }) as unknown as typeof setTimeout),
+    clearTimeout: ((() => {}) as typeof clearTimeout),
+  });
+
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawRegistrations, 1);
+  assert.equal(heartbeatRegistrations, 1);
+  assert.equal(deliveryStarts, 1);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true,
+    "the one-way operational latch stays armed after physical activation");
+  assert.equal(retries.length, 1);
+
+  admission = "unavailable";
+  retries.shift()!();
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawRegistrations, 1, "delivery retry cannot duplicate the raw listener");
+  assert.equal(heartbeatRegistrations, 1, "delivery retry cannot duplicate the heartbeat");
+  assert.equal(deliveryStarts, 2);
+  await harness.coordinator.disposeAll();
+});
+
+test("typed readiness belongs to one immutable provider birth", async () => {
+  const admissions = new WeakMap<ProviderInstallationToken, "pending" | "ready">();
+  const installations: ProviderInstallationToken[] = [];
+  const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+  let deliveryStarts = 0;
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: installation => admissions.get(installation) ?? "pending",
+    observeExecution: installation => {
+      installations.push(installation);
+      admissions.set(installation, "pending");
+      return () => {};
+    },
+    onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+    startDelivery: async () => { deliveryStarts += 1; },
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  const first = installations[0]!;
+
+  const replacement: ProviderActionHandle = {
+    ...handle,
+    pid: 43,
+    providerConnection: { ...handle.providerConnection!, pid: 43, processIdentity: "codex:43" },
+  };
+  harness.setManifest({
+    ...entry(),
+    provider_ref: { ...entry().provider_ref!, provider_connection: replacement.providerConnection! },
+  });
+  await harness.coordinator.install("agent-1", replacement, "generation-2");
+  const second = installations[1]!;
+  assert.notEqual(first, second);
+
+  admissions.set(first, "ready");
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawListeners.length, 0, "a stale birth cannot arm its replacement");
+  assert.equal(deliveryStarts, 0);
+
+  admissions.set(second, "ready");
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(rawListeners.length, 1);
+  assert.equal(deliveryStarts, 1);
+  await harness.coordinator.disposeAll();
+});
+
+for (const candidate of [
+  { name: "typed polling", authorityMode: "typed" as const, deliveryMode: "mcp_polling" as const },
+  { name: "shadow daemon-inbox", authorityMode: "typed_shadow" as const, deliveryMode: "daemon_inbox" as const },
+]) {
+  test(`${candidate.name} keeps the existing operational stream and activity path`, async () => {
+    const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+    const activity: string[] = [];
+    const activityOnly: string[] = [];
+    let deliveryStarts = 0;
+    const harness = coordinatorHarness({
+      authorityMode: candidate.authorityMode,
+      typedLifecycleAdmission: () => "pending",
+      onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+      startDelivery: async () => { deliveryStarts += 1; },
+      appendActivity: async method => { activity.push(method); },
+      appendActivityOnly: async method => { activityOnly.push(method); },
+    });
+    harness.setManifest({ ...entry(), delivery_mode: candidate.deliveryMode });
+    await harness.coordinator.install("agent-1", handle, "generation-2");
+    assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true,
+      "only typed daemon-inbox births acquire the operational hold");
+    assert.equal(rawListeners.length, 1);
+    assert.equal(deliveryStarts, 1);
+    rawListeners[0]!(streamEvent(1, "item/agentMessage/delta"));
+    await harness.coordinator.drainCallbacks();
+    assert.deepEqual(activity, ["item/agentMessage/delta"]);
+    assert.deepEqual(activityOnly, []);
+    await harness.coordinator.disposeAll();
+  });
+}
+
+test("Cursor typed child births share one listener but never share operational admission", async () => {
+  const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
+  const admissions = new WeakMap<ProviderInstallationToken, "pending" | "ready">();
+  const childTokens: ProviderInstallationToken[] = [];
+  const activity: string[] = [];
+  const activityOnly: string[] = [];
+  let deliveryStarts = 0;
+  const cursorHandle: ProviderActionHandle = {
+    workAttemptId: "attempt-1", pid: null, providerContinuationId: "continuation-1",
+    observedState: "idle", appliedConfigurationRevision: 1,
+    providerConnection: { kind: "cursor_cli", pid: null, processIdentity: null },
+  };
+  const cursorEntry = (connection: Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "cursor_cli" }>): DaemonManifestEntry => ({
+    ...entry(), provider: "cursor", observed_state: connection.pid === null ? "idle" : "working",
+    provider_ref: { ...entry().provider_ref!, provider_connection: connection },
+  });
+  const event = (sequence: number, method: string, connection: { pid: number; processIdentity: string }): ProviderActionStreamEvent => ({
+    ...streamEvent(sequence, method), provider: "cursor", nativeProcessPid: connection.pid,
+    nativeProcessIdentity: connection.processIdentity,
+  });
+  const harness = coordinatorHarness({
+    typedLifecycleAdmission: installation => admissions.get(installation) ?? "pending",
+    advanceExecution: installation => { childTokens.push(installation); admissions.set(installation, "pending"); },
+    onStream: async (_handle, listener) => { rawListeners.push(listener); return () => {}; },
+    appendActivity: async method => { activity.push(method); },
+    appendActivityOnly: async method => { activityOnly.push(method); },
+    startDelivery: async () => { deliveryStarts += 1; },
+  });
+  harness.setManifest(cursorEntry(cursorHandle.providerConnection as Extract<NonNullable<ProviderActionHandle["providerConnection"]>, { kind: "cursor_cli" }>));
+  await harness.coordinator.install("agent-1", cursorHandle, "generation-2");
+  assert.equal(rawListeners.length, 1);
+  assert.equal(deliveryStarts, 1);
+
+  const birthA = { kind: "cursor_cli" as const, pid: 101, processIdentity: "cursor-typed-a" };
+  cursorHandle.pid = birthA.pid; cursorHandle.providerConnection = birthA; cursorHandle.observedState = "working";
+  harness.setManifest(cursorEntry(birthA));
+  const tokenA = harness.coordinator.activateCommittedCursorRuntime({
+    entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: "typed",
+  });
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false);
+  rawListeners[0]!(event(1, "cursor/a-before-ready", birthA));
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(activity, []);
+  assert.deepEqual(activityOnly, ["cursor/a-before-ready"],
+    "an unadmitted child can expose presentation without acquiring lifecycle fields");
+
+  const birthB = { kind: "cursor_cli" as const, pid: 102, processIdentity: "cursor-typed-b" };
+  cursorHandle.pid = birthB.pid; cursorHandle.providerConnection = birthB;
+  harness.setManifest(cursorEntry(birthB));
+  const tokenB = harness.coordinator.activateCommittedCursorRuntime({
+    entry: harness.getManifest(), handle: cursorHandle, executionGenerationId: "generation-2", authorityMode: "typed",
+  });
+  admissions.set(tokenA, "ready");
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
+    "stale child A cannot arm child B");
+
+  admissions.set(tokenB, "ready");
+  harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
+  assert.equal(rawListeners.length, 1, "child admission never duplicates the stable physical listener");
+  assert.equal(deliveryStarts, 2, "exact readiness reopens the centrally gated delivery lane once");
+  rawListeners[0]!(event(2, "cursor/b-after-ready", birthB));
+  await harness.coordinator.drainCallbacks();
+  assert.deepEqual(activity, []);
+  assert.deepEqual(activityOnly, ["cursor/a-before-ready", "cursor/b-after-ready"]);
+  assert.deepEqual(childTokens, [tokenA, tokenB]);
+  await harness.coordinator.disposeAll();
 });
 
 test("Cursor keeps one listener lease while immutable child-birth tokens advance", async () => {
