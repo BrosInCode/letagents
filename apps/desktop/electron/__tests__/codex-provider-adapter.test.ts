@@ -2174,14 +2174,14 @@ test("fresh Codex attach never orders a snapshot against queued lifecycle eviden
     { name: "typed terminal", expectedActive: false, expectedTerminal: true, expectedLatestSequence: 3,
       emit: (client: FakeRpc, threadId: string, turnId: string) => client.emit({ method: "turn/completed",
         params: { threadId, turnId, turn: { id: turnId, status: "completed" } } }) },
-    { name: "unreadable terminal", expectedActive: false, expectedTerminal: false, expectedLatestSequence: 2,
+    { name: "unreadable terminal", expectedActive: false, expectedTerminal: false, expectedLatestSequence: 4,
       emit: (client: FakeRpc, threadId: string, turnId: string) => client.emit({ method: "turn/completed",
         params: { threadId, turnId } }) },
-    { name: "malformed terminal identity", expectedActive: false, expectedTerminal: false, expectedLatestSequence: 2,
+    { name: "malformed terminal identity", expectedActive: false, expectedTerminal: false, expectedLatestSequence: 4,
       emit: (client: FakeRpc, threadId: string) => client.emit({ method: "turn/completed",
         params: { threadId } }) },
     { name: "mismatched terminal turn identities", expectedActive: false, expectedTerminal: false,
-      expectedLatestSequence: 2,
+      expectedLatestSequence: 4,
       emit: (client: FakeRpc, threadId: string, turnId: string) => client.emit({ method: "turn/completed",
         params: { threadId, turnId, turn: { id: `${turnId}-other`, status: "completed" } } }) },
     { name: "terminal after queued start", expectedActive: true, expectedTerminal: true, expectedLatestSequence: 5,
@@ -2358,9 +2358,9 @@ test("queued lifecycle cannot erase unreadable or contradictory Codex attach evi
     assertProviderHandle(attached);
     const observations: NativeExecutionObservation[] = [];
     const subscription = adapter.onExecution(attached, event => observations.push(event));
-    assert.deepEqual(observations.map(event => event.sequence), [1]);
-    assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 2 },
-      "the terminal contradiction dominates the otherwise exact empty fallback");
+    assert.deepEqual(observations.map(event => event.sequence), [1, 4]);
+    assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 4 },
+      "both the malformed terminal and its contradiction with the empty fallback remain visible as gaps");
     assert.equal(stream.filter(event => event.method === "turn/completed").length, 1);
     subscription.dispose();
   });
@@ -3326,7 +3326,7 @@ test("execution observation replay and live fan-out preserve reentrant order and
   otherSource.dispose();
 });
 
-test("Codex pending approval is not execution start; unknown identities and statuses mint no typed facts", async () => {
+test("Codex pending approval is not execution start; malformed exact terminals consume an unavailable source position", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
@@ -3337,13 +3337,18 @@ test("Codex pending approval is not execution start; unknown identities and stat
   client.emit({ method: "item/started", params: { ...params, item: { id: "pending", type: "commandExecution", status: "inProgress", processId: null } } });
   client.emit({ method: "item/started", params: { ...params, item: { id: "patch", type: "fileChange", status: "inProgress" } } });
   client.emit({ method: "turn/completed", params: { ...params, turn: { id: "pending-turn", status: "futureStatus" } } });
+  assert.equal(observations.length, 1);
+  assert.equal(observations[0]!.sequence, 2, "the malformed terminal consumes sequence one before notifying the live subscriber");
+  assert.deepEqual(observations[0]!.fact, {
+    domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none",
+  });
   client.emit({ method: "item/commandExecution/outputDelta", params: { ...params, threadId: "wrong", itemId: "pending", delta: "data" } });
   client.emit({ method: "item/completed", params: { threadId: params.threadId, item: { id: "no-turn", type: "commandExecution", status: "failed" } } });
   client.emit({ method: "item/reasoning/textDelta", params: { ...params, delta: "private reasoning" } });
-  assert.equal(observations.length, 0);
+  assert.equal(observations.length, 1, "unrelated malformed item/display events still mint no structural facts");
   client.emit({ method: "item/completed", params: { ...params, item: { id: "pending", type: "commandExecution", status: "declined" } } });
-  assert.equal(observations.length, 1);
-  const fact = observations[0]!.fact;
+  assert.equal(observations.length, 2);
+  const fact = observations[1]!.fact;
   assert.equal(fact.domain, "execution");
   assert.equal(fact.kind, "completed");
   assert.equal("outcome" in fact && fact.outcome, "denied_before_start");
@@ -3357,6 +3362,63 @@ test("Codex pending approval is not execution start; unknown identities and stat
   assert.equal(observations.at(-1)?.fact.domain, "runtime");
   assert.equal(await adapter.probeControl(handle).then((result) => result.state), "lost");
   assert.deepEqual(harness.signals, []);
+});
+
+test("explicit Codex system errors emit one typed hard-runtime terminal before process exit", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  const client = harness.clients[0]!;
+  const params = { threadId: handle.providerContinuationId, turnId: "system-error-turn" };
+  let resolveProbe!: (value: unknown) => void;
+  client.request = <T>(): Promise<T> => new Promise((resolve) => {
+    resolveProbe = resolve as (value: unknown) => void;
+  });
+  const pendingProbe = adapter.probeControl(handle);
+  client.emit({ method: "turn/started", params: { ...params, turn: { id: params.turnId, status: "inProgress" } } });
+  client.emit({ method: "item/started", params: { ...params,
+    item: { id: "system-error-command", type: "commandExecution", status: "inProgress", processId: "pty-system-error" } } });
+  client.emit({ method: "thread/status/changed", params: {
+    threadId: handle.providerContinuationId, status: { type: "systemError" },
+  } });
+
+  const hardTerminals = observations.filter((event) => event.fact.domain === "runtime" || event.fact.domain === "control");
+  assert.deepEqual(hardTerminals.map((event) => event.fact), [
+    { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
+    { domain: "control", kind: "state_changed", state: "lost", controlEvidence: "native_session_terminated", sideEffects: "none" },
+    { domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "native_session_terminated", sideEffects: "none" },
+  ]);
+  assert.equal(observations.some((event) => event.fact.domain === "turn" && event.fact.state === "lost"), true);
+  assert.equal(observations.some((event) => event.fact.domain === "execution" && event.fact.kind === "completed"
+    && event.fact.outcome === "lost_after_start"), true);
+
+  const terminalCount = observations.length;
+  resolveProbe({ data: [], nextCursor: null });
+  assert.deepEqual(await pendingProbe, {
+    state: "lost", controlEvidence: "native_session_terminated",
+  }, "an in-flight probe cannot reopen a conclusively lost runtime");
+  assert.equal(observations.length, terminalCount);
+  client.emit({ method: "turn/started", params: {
+    ...params, turnId: "late-turn", turn: { id: "late-turn", status: "inProgress" },
+  } });
+  client.emit({ method: "item/started", params: {
+    ...params, turnId: "late-turn", item: {
+      id: "late-command", type: "commandExecution", status: "inProgress", processId: "pty-late",
+    },
+  } });
+  client.emit({ method: "process/systemError", params: { status: "systemError" } });
+  client.disconnect();
+  harness.launches[0]!.resolveExit({ type: "exit", code: 1, signal: null });
+  await flush();
+  assert.equal(observations.length, terminalCount,
+    "late activity, disconnect, repeated system error, and process exit cannot reopen or extend the terminal tail");
+  assert.deepEqual(await adapter.probeControl(handle), {
+    state: "lost", controlEvidence: "native_session_terminated",
+  }, "a probe preserves the first conclusive terminal without appending another fact");
+  assert.equal(observations.length, terminalCount);
+  assert.equal(handle.observedState(), "failed");
 });
 
 test("Codex cheap probes degrade on uncertainty and lose control only on exact process proof", async () => {

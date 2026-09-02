@@ -81,7 +81,8 @@ function semanticFact(fact: ExecutionFact): string {
   return JSON.stringify(semantic);
 }
 
-function lifecycleEffectKind(fact: ExecutionFact): "none" | "manifest_working" | "manifest_idle" {
+function lifecycleEffectKind(fact: ExecutionFact): "none" | "manifest_working" | "manifest_idle" | "manifest_failed" {
+  if (fact.domain === "runtime" && fact.state === "exited") return "manifest_failed";
   if (fact.domain !== "turn") return "none";
   if (fact.state === "active") return "manifest_working";
   if (fact.state === "terminal") return "manifest_idle";
