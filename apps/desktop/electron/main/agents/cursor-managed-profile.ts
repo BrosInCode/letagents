@@ -81,8 +81,8 @@ export interface CursorSupervisedProfileOptions {
   workAttemptId: string;
   apiBaseUrl: string;
   workspaceRoot: string;
-  /** Room-only rentals must never inherit an ancestor repository boundary. */
-  roomOnlyRental?: boolean;
+  /** Exact scratch workspaces must never inherit an ancestor repository boundary. */
+  exactWorkspaceOnly?: boolean;
   /** Attested native authority; write profiles remain confined to this workspace. */
   permissionProfileId?: DesktopManagedAgentPermissionProfileId;
   sourceHomeDir?: string | null;
@@ -324,7 +324,7 @@ export function prepareCursorSupervisedProfile(
   // Cursor resolves the Git root and merges project authority from every
   // directory down to --workspace. Validate that complete effective chain,
   // not merely the selected subdirectory, before creating any private state.
-  const projectDirectories = options.roomOnlyRental
+  const projectDirectories = options.exactWorkspaceOnly
     ? [cursorExactWorkspaceDirectory(workspaceRoot)]
     : cursorEffectiveProjectDirectories(workspaceRoot);
   assertWorkspaceDoesNotConfigureSupervisedCursorAuthority(workspaceRoot, projectDirectories);
@@ -551,11 +551,11 @@ export function prepareCursorSupervisedProfile(
     ...[...new Set(sandboxPathVariants(workspaceRoot))].map((root) =>
       `^${escapeSandboxRegex(root)}/.*/[.]cursor/mcp[.]json$`),
   ];
-  const gitMetadataReadRoots = options.roomOnlyRental
+  const gitMetadataReadRoots = options.exactWorkspaceOnly
     ? []
     : cursorGitMetadataReadRoots(workspaceRoot);
   const gitAuthorityRoots = [...new Set(gitMetadataReadRoots.flatMap(sandboxPathVariants))];
-  const gitMarkerPath = options.roomOnlyRental
+  const gitMarkerPath = options.exactWorkspaceOnly
     ? null
     : cursorGitMarkerPath(workspaceRoot);
   const nativeDeniedWritePaths = [...new Set([
