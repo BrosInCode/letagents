@@ -165,7 +165,7 @@ export class ProviderCheckpointCoordinator {
             expectedProviderConnection: expectedConnection,
             providerConnection,
             configurationRevision: configurationRevision!,
-            requestedAuthorityMode: lifecycleAuthorityModeForProvider("cursor"),
+            requestedAuthorityMode: lifecycleAuthorityModeForProvider("cursor", "daemon_inbox"),
             observedAt: new Date(this.nowMs()).toISOString(),
           },
           (commit) => this.authority.fenceCommit(commit),
@@ -463,6 +463,8 @@ export class ProviderCheckpointCoordinator {
       || handle !== authority.handle
       || handle.workAttemptId !== authority.workAttemptId) return false;
     if (scope === "lane_lease") return true;
+    if (["failed", "stopping", "stopped"].includes(entry.observed_state)
+      || ["failed", "stopping", "stopped"].includes(handle.observedState)) return false;
     if (handle.pid !== (authority.providerConnection?.pid ?? null)) return false;
     return entry.provider_ref?.provider_continuation_id === authority.providerContinuationId
       && sameProviderActionConnectionSnapshot(

@@ -154,6 +154,7 @@ function coordinatorHarness(input: {
   bindingGet?: (entryId: string) => Promise<null>;
   publishNativeActivity?: () => Promise<void>;
   requestConvergence?: (entryId: string) => void;
+  serializeManifest?: <T>(operation: () => Promise<T>) => Promise<T>;
   setTimeout?: typeof setTimeout;
   clearTimeout?: typeof clearTimeout;
 } = {}) {
@@ -234,6 +235,7 @@ function coordinatorHarness(input: {
       deletePendingResumeBinding: (entryId) => runtimeCustody.deletePendingResumeBinding(entryId),
     },
     serializeEntry: async (_entryId, operation) => operation(),
+    serializeManifest: input.serializeManifest ?? (async operation => operation()),
     transition: async (_entryId, observed_state, condition) => {
       manifest = { ...manifest, observed_state, condition };
     },
@@ -314,9 +316,11 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
   let permissionRegistrations = 0;
   let heartbeatRegistrations = 0;
   let deliveryStarts = 0;
+  let publishedNativeActivity = 0;
   const rawListeners: Array<(event: ProviderActionStreamEvent) => void> = [];
   const activity: string[] = [];
   const activityOnly: string[] = [];
+  const legacyLifecycle: LifecycleProjectionObservation[] = [];
   const harness = coordinatorHarness({
     authorityMode: "typed",
     typedLifecycleAdmission: () => admission,
@@ -329,8 +333,10 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
       return { unref() {} };
     }) as unknown as typeof setInterval),
     startDelivery: async () => { deliveryStarts += 1; },
+    publishNativeActivity: async () => { publishedNativeActivity += 1; },
     appendActivity: async method => { activity.push(method); },
     appendActivityOnly: async method => { activityOnly.push(method); },
+    observeLegacyLifecycle: observation => { legacyLifecycle.push(observation); },
   });
 
   await harness.coordinator.install("agent-1", handle, "generation-2");
@@ -359,6 +365,10 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
   assert.equal(deliveryStarts, 1);
   assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
   assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission.codex, "ready");
+  harness.runtimeCustody.installLiveBinding("agent-1", {
+    agentSessionId: "session-1", executionGenerationId: "generation-2",
+    updatedAt: "2026-08-26T00:00:00.000Z",
+  });
 
   admission = "unavailable";
   harness.coordinator.typedLifecycleAdmissionChanged("agent-1");
@@ -371,12 +381,79 @@ test("typed daemon-inbox activation waits for exact durable readiness and latche
   assert.deepEqual(activity, []);
   assert.deepEqual(activityOnly, ["item/agentMessage/delta"],
     "typed raw output is presentation-only and cannot mutate lifecycle fields");
+  assert.equal(publishedNativeActivity, 0,
+    "typed raw output cannot publish operational room liveness through a valid worker binding");
 
-  rawListeners[0]!({ ...streamEvent(2, "turn/failed"), kind: "turn_lifecycle" });
+  rawListeners[0]!({
+    ...streamEvent(2, "turn/failed"),
+    kind: "turn_lifecycle",
+    nativeEventId: "turn-1:terminal",
+    nativeLifecyclePhase: "turn_terminal",
+  });
   await harness.coordinator.drainCallbacks();
   assert.equal(harness.getManifest().observed_state, "working",
     "an exact failed turn cannot poison the reusable typed Codex runtime");
   assert.equal(harness.stopCalls(), 0);
+  assert.deepEqual(legacyLifecycle.map(({ nativeEventId, phase, state }) => ({ nativeEventId, phase, state })), [
+    { nativeEventId: "turn-1:terminal", phase: "turn_terminal", state: "terminal" },
+  ], "typed operation preserves the legacy comparator without granting it lifecycle authority");
+  await harness.coordinator.disposeAll();
+});
+
+test("typed activation cannot open delivery when durable failure wins the serialized promotion boundary", async () => {
+  let releasePromotion!: () => void;
+  let promotionEntered!: () => void;
+  const entered = new Promise<void>(resolve => { promotionEntered = resolve; });
+  const blocked = new Promise<void>(resolve => { releasePromotion = resolve; });
+  let streamRegistrations = 0;
+  let heartbeatRegistrations = 0;
+  let deliveryStarts = 0;
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    serializeManifest: async operation => {
+      promotionEntered();
+      await blocked;
+      return operation();
+    },
+    onStream: async () => { streamRegistrations += 1; return () => {}; },
+    setInterval: ((() => {
+      heartbeatRegistrations += 1;
+      return { unref() {} };
+    }) as unknown as typeof setInterval),
+    startDelivery: async () => { deliveryStarts += 1; },
+  });
+
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await entered;
+  harness.setManifest({ ...harness.getManifest(), observed_state: "failed" });
+  releasePromotion();
+  await harness.coordinator.drainCallbacks();
+
+  assert.equal(streamRegistrations, 1, "physical observation may begin before the final durable fence");
+  assert.equal(heartbeatRegistrations, 1);
+  assert.equal(deliveryStarts, 0);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
+    "a typed birth that failed before admission remains closed");
+  await harness.coordinator.disposeAll();
+});
+
+test("typed terminal effect revokes an admitted delivery latch before convergence", async () => {
+  let deliveryStarts = 0;
+  const harness = coordinatorHarness({
+    authorityMode: "typed",
+    typedLifecycleAdmission: () => "ready",
+    startDelivery: async () => { deliveryStarts += 1; },
+  });
+  await harness.coordinator.install("agent-1", handle, "generation-2");
+  await harness.coordinator.drainCallbacks();
+  assert.equal(deliveryStarts, 1);
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), true);
+
+  harness.setManifest({ ...harness.getManifest(), observed_state: "failed" });
+  harness.coordinator.typedLifecycleEffectChanged("agent-1", "failed");
+  assert.equal(harness.coordinator.isDeliveryAdmitted("agent-1"), false,
+    "the committed terminal effect closes delivery without waiting for convergence");
   await harness.coordinator.disposeAll();
 });
 
@@ -562,7 +639,7 @@ test("typed readiness belongs to one immutable provider birth", async () => {
 });
 
 for (const candidate of [
-  { name: "typed polling", authorityMode: "typed" as const, deliveryMode: "mcp_polling" as const },
+  { name: "shadow polling", authorityMode: "typed_shadow" as const, deliveryMode: "mcp_polling" as const },
   { name: "shadow daemon-inbox", authorityMode: "typed_shadow" as const, deliveryMode: "daemon_inbox" as const },
 ]) {
   test(`${candidate.name} keeps the existing operational stream and activity path`, async () => {
