@@ -264,7 +264,7 @@ function spawnRequest(overrides: Partial<ProviderSpawnRequest> = {}): ProviderSp
   };
 }
 
-async function spawnAdapter() {
+async function spawnAdapter(overrides: Partial<ProviderSpawnRequest> = {}) {
   const harness = createHarness();
   const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-adapter-"));
   const adapter = new OpenModelProviderAdapter({
@@ -274,7 +274,7 @@ async function spawnAdapter() {
     startTimeoutMs: 100,
     turnTimeoutMs: 100,
   });
-  const handle = await adapter.spawn(spawnRequest());
+  const handle = await adapter.spawn(spawnRequest(overrides));
   return { adapter, handle, harness, runtimeRoot };
 }
 
@@ -332,10 +332,19 @@ function assistantWithTool(
 }
 
 test("Open Model launches a dedicated OpenCode server without putting the provider key in config or MCP", async () => {
-  const { handle, harness } = await spawnAdapter();
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
 
   assert.equal(handle.pid, 6101);
   assert.equal(handle.providerContinuationId, "session-open-model-1");
+  assert.deepEqual(observations.map(({ fact }) => fact), [{
+    domain: "runtime",
+    kind: "state_changed",
+    state: "ready",
+    sideEffects: "none",
+  }], "verified runtime readiness is retained before the first room turn");
+  assert.equal(harness.promptBodies.length, 0);
   assert.deepEqual(handle.providerConnection, {
     kind: "opencode_server",
     url: "http://127.0.0.1:43821",
@@ -366,14 +375,67 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
   assert.ok(connection?.kind === "opencode_server");
   const serverAuth = await readFile(connection.serverAuthPath, "utf8");
   assert.doesNotMatch(serverAuth, /provider-api-key-must-stay-out-of-config/);
+  const serverControl = JSON.parse(serverAuth) as {
+    connection?: unknown;
+    lifecycleAuthorityMode?: string;
+  };
   assert.deepEqual(
-    (JSON.parse(serverAuth) as { connection?: unknown }).connection,
     {
-      url: "http://127.0.0.1:43821",
-      pid: 6101,
-      processIdentity: "opencode-birth-6101",
+      connection: serverControl.connection,
+      lifecycleAuthorityMode: serverControl.lifecycleAuthorityMode,
+    },
+    {
+      connection: {
+        url: "http://127.0.0.1:43821",
+        pid: 6101,
+        processIdentity: "opencode-birth-6101",
+      },
+      lifecycleAuthorityMode: "typed_shadow",
     },
   );
+});
+
+test("Open Model freezes lifecycle authority across spawn, attach, and resume", async () => {
+  const { adapter, handle, harness, runtimeRoot } = await spawnAdapter({ lifecycleAuthorityMode: "typed" });
+  const typedHandle = handle as ProviderHandle & { lifecycleAuthorityMode: string };
+  const ref = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed" as const,
+  };
+  assert.equal(typedHandle.lifecycleAuthorityMode, "typed");
+  assert.equal(await adapter.attach(ref), handle);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
+  await assert.rejects(adapter.resume(ref, spawnRequest({ lifecycleAuthorityMode: "typed_shadow" })),
+    /does not match the frozen provider birth/);
+
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+  assert.equal(await replacement.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
+  const attached = await replacement.attach(ref);
+  assert.ok(attached && !("state" in attached));
+  const attachedObservations: NativeExecutionObservation[] = [];
+  replacement.onExecution(attached, (event) => attachedObservations.push(event));
+  assert.deepEqual(attachedObservations.map(({ fact }) => fact), [{
+    domain: "runtime",
+    kind: "state_changed",
+    state: "ready",
+    sideEffects: "none",
+  }]);
+
+  await assert.rejects(adapter.spawn(spawnRequest({
+    workAttemptId: "typed-non-daemon",
+    lifecycleAuthorityMode: "typed",
+    deliveryMode: "desktop_events",
+  })), /Typed Open Model lifecycle authority requires daemon-inbox delivery/);
+  assert.equal(harness.launches.length, 1);
 });
 
 test("Open Model reattaches from its exact runtime sidecar when a legacy daemon omitted the connection", async () => {
@@ -396,6 +458,36 @@ test("Open Model reattaches from its exact runtime sidecar when a legacy daemon 
   assert.ok(attached && !("state" in attached));
   assert.deepEqual(attached.providerConnection, handle.providerConnection);
   assert.equal(harness.launches.length, 1, "reattachment must not launch another OpenCode server");
+});
+
+/*
+ * A pre-authority sidecar is an existing durable runtime, not a second lifecycle
+ * implementation. Its only safe interpretation is the former default mode.
+ */
+test("Open Model treats a pre-authority runtime sidecar as typed shadow", async () => {
+  const { handle, harness, runtimeRoot } = await spawnAdapter();
+  const connection = handle.providerConnection;
+  assert.ok(connection?.kind === "opencode_server");
+  const control = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as Record<string, unknown>;
+  delete control.lifecycleAuthorityMode;
+  await writeFile(connection.serverAuthPath, `${JSON.stringify(control)}\n`, { mode: 0o600 });
+  const replacement = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+  });
+  assert.equal(await replacement.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: connection,
+    lifecycleAuthorityMode: "typed",
+  }), null);
+  const attached = await replacement.attach({
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: connection,
+  });
+  assert.ok(attached && !("state" in attached));
 });
 
 test("Open Model discovers and checkpoints a pre-sidecar-metadata runtime exactly once", async () => {
@@ -903,10 +995,10 @@ test("Open Model repairs a continuation on the same verified process", async () 
   const checkpointed: string[] = [];
   const originalEvents: NativeExecutionObservation[] = [];
   const originalSource = adapter.onExecution(handle, (event) => originalEvents.push(event));
-  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 0 });
+  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 1 });
   await adapter.probeControl(handle);
   assert.equal(originalEvents[0]?.sourceId, originalSource.sourceId);
-  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 1 });
+  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 2 });
 
   const rematerialized = await adapter.repairContinuation(handle, {
     workAttemptId: handle.workAttemptId,
@@ -940,15 +1032,15 @@ test("Open Model repairs a continuation on the same verified process", async () 
   const replacementEvents: NativeExecutionObservation[] = [];
   const replacementSource = adapter.onExecution(replaced.handle, (event) => replacementEvents.push(event));
   assert.notEqual(replacementSource.sourceId, originalSource.sourceId, "withContinuation creates a new observation source, not a continuation of the old sequence");
-  assert.deepEqual(replacementSource.position(), { firstRetainedSequence: 1, latestSequence: 0 });
+  assert.deepEqual(replacementSource.position(), { firstRetainedSequence: 1, latestSequence: 1 });
   await adapter.probeControl(replaced.handle);
   assert.equal(replacementEvents[0]?.sourceId, replacementSource.sourceId);
   assert.equal(replacementEvents[0]?.sequence, 1);
   assert.equal(replacementEvents[0]?.nativeProcessIdentity, "opencode-birth-6101");
   assert.equal(replacementEvents[0]?.nativeProcessIdentity, originalEvents[0]?.nativeProcessIdentity,
     "observation source lifetime is independent of the unchanged native process birth");
-  assert.equal(originalEvents.length, 1, "replacement observations never enter the old source subscription");
-  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 1 });
+  assert.equal(originalEvents.length, 2, "replacement observations never enter the old source subscription");
+  assert.deepEqual(originalSource.position(), { firstRetainedSequence: 1, latestSequence: 2 });
   assert.equal(harness.launches.length, 1);
   originalSource.dispose();
   replacementSource.dispose();
@@ -1312,10 +1404,11 @@ test("Open Model permission correlation does not use current-turn guesses and re
   const handle: ProviderHandle = await adapter.spawn(spawnRequest());
   const expected = permissionFixture("per_a", handle.providerContinuationId!);
   const observations: NativeExecutionObservation[] = []; adapter.onExecution(handle, event => observations.push(event));
+  const initialObservationCount = observations.length;
   (handle as unknown as { activeRoomTurnId: string }).activeRoomTurnId = "unrelated-current-turn";
   assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlated", requestId: "per_a",
     providerContinuationId: handle.providerContinuationId, providerTurnId: "msg_user", assistantMessageId: "msg_assistant", callId: "call_a" });
-  assert.equal(reads, 2); assert.equal(observations.length, 0);
+  assert.equal(reads, 2); assert.equal(observations.length, initialObservationCount);
   for (const foreign of [{ ...handle }, { ...handle, workAttemptId: "foreign" }]) {
     assert.deepEqual(await adapter.correlatePermissionTurn(foreign, expected), { outcome: "correlation_unproven" });
   }
@@ -1323,7 +1416,7 @@ test("Open Model permission correlation does not use current-turn guesses and re
   for (const message of ["msg_assistant", "msg_user"]) {
     missingMessage = message; const state = handle.observedState();
     assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlation_unproven" });
-    assert.equal(handle.observedState(), state); assert.equal(observations.length, 0);
+    assert.equal(handle.observedState(), state); assert.equal(observations.length, initialObservationCount);
     assert.deepEqual(harness.permissionReplies, []); assert.deepEqual(harness.promptBodies, []);
     assert.deepEqual(harness.aborts, []); assert.deepEqual(harness.signals, []);
     assert.equal(harness.launches.length, 1, "missing messages never repair or restart the native session");
@@ -1332,7 +1425,7 @@ test("Open Model permission correlation does not use current-turn guesses and re
   assert.equal(reads, 5);
   changeConnection = true;
   assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlation_unproven" });
-  assert.equal(reads, 6); assert.equal(observations.length, 0);
+  assert.equal(reads, 6); assert.equal(observations.length, initialObservationCount);
   const stopped = adapter.stop(handle, { force: true });
   assert.equal(handle.observedState(), "stopping");
   assert.deepEqual(await adapter.correlatePermissionTurn(handle, expected), { outcome: "correlation_unproven" });
@@ -1352,6 +1445,7 @@ test("Open Model permission correlation rechecks the exact instance after the cl
   const handle = await adapter.spawn(spawnRequest());
   const client = (handle as unknown as { client: OpenCodeServerClient }).client;
   const observations: NativeExecutionObservation[] = []; adapter.onExecution(handle, event => observations.push(event));
+  const initialObservationCount = observations.length;
   client.correlatePermissionTurn = async (sessionId, request, assertCurrentInstance) => {
     assert.ok(assertCurrentInstance); assertCurrentInstance();
     queueMicrotask(() => { identity = "replacement-birth"; });
@@ -1361,7 +1455,7 @@ test("Open Model permission correlation rechecks the exact instance after the cl
   const state = handle.observedState();
   assert.deepEqual(await adapter.correlatePermissionTurn(handle, permissionFixture("per_a", handle.providerContinuationId!)),
     { outcome: "correlation_unproven" });
-  assert.equal(handle.observedState(), state); assert.equal(observations.length, 0);
+  assert.equal(handle.observedState(), state); assert.equal(observations.length, initialObservationCount);
   assert.deepEqual(harness.permissionReplies, []); assert.deepEqual(harness.promptBodies, []);
   assert.deepEqual(harness.aborts, []); assert.deepEqual(harness.signals, []);
 });
@@ -1527,7 +1621,12 @@ test("Open Model decisions use the exact live handle and retain native once/reje
   assert.deepEqual(await adapter.replyPermission(handle, second, "reject"), { outcome: "processed", nativeScope: "session_pending" });
   assert.deepEqual(await nativeClient(harness.dependencies.fetch).listPendingPermissions(foreign.sessionID), [foreign]);
   assert.deepEqual(harness.permissionReplies, [{ requestId: first.id, reply: "once" }, { requestId: second.id, reply: "reject" }]);
-  assert.deepEqual(observations, [], "native approval data never enters execution facts");
+  assert.deepEqual(observations.map(({ fact }) => fact), [{
+    domain: "runtime",
+    kind: "state_changed",
+    state: "ready",
+    sideEffects: "none",
+  }], "native approval data never enters execution facts");
   assert.deepEqual(harness.promptBodies, []);
   assert.deepEqual(harness.aborts, []);
   assert.deepEqual(harness.signals, []);

@@ -170,6 +170,7 @@ function safeRuntimeId(value: string): string {
 }
 
 type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
+  lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   connection?: {
     url: string;
     pid: number;
@@ -385,6 +386,7 @@ class OpenModelHandle implements ProviderHandle {
     readonly workAttemptId: string,
     readonly pid: number,
     readonly providerContinuationId: string,
+    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
     readonly providerConnection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>,
     readonly client: OpenCodeServerClient,
     readonly configuredModel: string,
@@ -430,6 +432,10 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   capabilities(): ProviderAdapterCapabilities { return { ...CAPABILITIES }; }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
+    if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
+      throw new Error("Typed Open Model lifecycle authority requires daemon-inbox delivery.");
+    }
     if (req.deliveryMode !== "daemon_inbox") {
       throw new Error("Open Model supports daemon-owned bounded room delivery only.");
     }
@@ -447,7 +453,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       username: OPENCODE_SERVER_USERNAME,
       password: randomBytes(32).toString("base64url"),
     };
-    await writeRuntimeControl(authPath, auth);
+    await writeRuntimeControl(authPath, { ...auth, lifecycleAuthorityMode });
     const pluginPath = join(runtimeRoot, "credential-boundary.mjs");
     await writeFile(pluginPath, credentialBoundaryPluginSource(), {
       encoding: "utf8",
@@ -527,12 +533,14 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     };
     await writeRuntimeControl(authPath, {
       ...auth,
+      lifecycleAuthorityMode,
       connection: { url, pid, processIdentity: identity },
     });
     const handle = new OpenModelHandle(
       req.workAttemptId,
       pid,
       sessionId,
+      lifecycleAuthorityMode,
       connection,
       client,
       credential.model,
@@ -542,18 +550,25 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     handle.nativeOrderingVerified = true;
     this.handles.set(req.workAttemptId, handle);
     this.observeTerminal(handle, launch.exited);
+    this.emitRuntimeReady(handle);
     return handle;
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
+    const lifecycleAuthorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
     const resolved = await this.resolveAttachConnection(ref);
     if (!resolved) return null;
     const { connection, control, recoveredLegacyConnection } = resolved;
+    if ((control.lifecycleAuthorityMode ?? "typed_shadow") !== lifecycleAuthorityMode) return null;
     const cached = this.handles.get(ref.workAttemptId);
-    if (cached
-      && cached.providerContinuationId === ref.providerContinuationId
-      && cached.providerConnection.url === connection.url
-      && cached.providerConnection.processIdentity === connection.processIdentity) return cached;
+    if (cached) {
+      return cached.providerContinuationId === ref.providerContinuationId
+        && cached.lifecycleAuthorityMode === lifecycleAuthorityMode
+        && cached.providerConnection.url === connection.url
+        && cached.providerConnection.processIdentity === connection.processIdentity
+        ? cached
+        : null;
+    }
     const identity = this.deps.getProcessIdentity(connection.pid);
     if (identity === null || (typeof identity === "string" && !sameProcessBirthIdentity(identity, connection.processIdentity))) {
       return {
@@ -581,6 +596,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       ref.workAttemptId,
       connection.pid,
       ref.providerContinuationId,
+      lifecycleAuthorityMode,
       connection,
       client,
       configuredModel,
@@ -592,6 +608,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     if (recoveredLegacyConnection) {
       await writeRuntimeControl(connection.serverAuthPath, {
         ...auth,
+        lifecycleAuthorityMode,
         connection: {
           url: connection.url,
           pid: connection.pid,
@@ -599,6 +616,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         },
       });
     }
+    this.emitRuntimeReady(handle);
     return handle;
   }
 
@@ -660,6 +678,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
   }
 
   async resume(ref: ProviderContinuationRef, req: ProviderSpawnRequest): Promise<ProviderHandle> {
+    if ((ref.lifecycleAuthorityMode ?? "typed_shadow") !== (req.lifecycleAuthorityMode ?? "typed_shadow")) {
+      throw new Error("Open Model resume lifecycle authority does not match the frozen provider birth.");
+    }
     // Load-bearing two-writer invariant: attach() may return null when process
     // identity or local control authentication is unreadable. resume() must
     // never interpret that uncertainty as permission to spawn a replacement.
@@ -703,7 +724,6 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
     handle.activeRoomTurnId = turnId;
     handle.observedTurn = { id: turnId, terminal: null };
-    this.emitExecution(handle, { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
     this.emitTurnActive(handle, turnId);
     await options.checkpointTurnStarted?.(turnId);
     try {
@@ -1076,6 +1096,15 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.providerConnection.pid ?? undefined);
   }
 
+  private emitRuntimeReady(handle: OpenModelHandle): void {
+    this.emitExecution(handle, {
+      domain: "runtime",
+      kind: "state_changed",
+      state: "ready",
+      sideEffects: "none",
+    });
+  }
+
   private emitTurnActive(handle: OpenModelHandle, turnId: string): void {
     if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)) return;
     const checkpoint = nativeLifecycleCheckpoint({
@@ -1134,6 +1163,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.workAttemptId,
       handle.pid,
       continuationId,
+      handle.lifecycleAuthorityMode,
       handle.providerConnection,
       handle.client,
       handle.configuredModel,
@@ -1142,6 +1172,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     );
     this.handles.set(handle.workAttemptId, replacement);
     this.observeTerminal(replacement, this.deps.observeProcessExit(handle.pid, handle.providerConnection.processIdentity!));
+    this.emitRuntimeReady(replacement);
     return replacement;
   }
 
@@ -1579,6 +1610,12 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
     || typeof value.password !== "string" || !value.password) {
     throw new Error("OpenCode server authentication sidecar is malformed.");
   }
+  if (value.lifecycleAuthorityMode !== undefined
+    && value.lifecycleAuthorityMode !== "legacy"
+    && value.lifecycleAuthorityMode !== "typed_shadow"
+    && value.lifecycleAuthorityMode !== "typed") {
+    throw new Error("OpenCode server authentication sidecar contains an invalid lifecycle authority.");
+  }
   if (value.connection !== undefined
     && (typeof value.connection !== "object"
       || typeof value.connection.url !== "string"
@@ -1592,6 +1629,7 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
   return {
     username: value.username,
     password: value.password,
+    ...(value.lifecycleAuthorityMode ? { lifecycleAuthorityMode: value.lifecycleAuthorityMode } : {}),
     ...(value.connection ? { connection: value.connection } : {}),
   };
 }

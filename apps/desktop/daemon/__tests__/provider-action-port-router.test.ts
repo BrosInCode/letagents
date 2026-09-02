@@ -663,6 +663,39 @@ test("provider router selects Open Model from an exact OpenCode connection", asy
   ]);
 });
 
+test("provider router only reuses an Open Model handle under its frozen lifecycle authority", async () => {
+  const calls: string[] = [];
+  const adapter = fakeAdapter("open-model", calls);
+  const router = new ProviderActionPortRouter({ "open-model": async () => adapter });
+  const handle = await router.spawn({
+    provider: "open-model",
+    workAttemptId: "open-model-typed",
+    roomId: "room",
+    cwd: "/tmp/open-model",
+    launchPolicy: { permission: { "*": "allow" } },
+    deliveryMode: "daemon_inbox",
+    lifecycleAuthorityMode: "typed",
+    providerCredential: {
+      apiKey: "provider-secret",
+      baseUrl: "https://models.example.test/v1",
+      model: "open-model/test",
+    },
+  });
+  const ref: ProviderActionRef = {
+    provider: "open-model",
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed",
+  };
+
+  assert.deepEqual(await router.attach(ref), handle);
+  assert.deepEqual(await router.attach({ ...ref, providerConnection: null }), handle);
+  assert.equal(await router.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
+  assert.equal(await router.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
+  assert.deepEqual(calls, ["open-model:spawn:open-model-typed"]);
+});
+
 test("devMcpServerEntryFromEnv returns path only when both env gates are set", () => {
   assert.equal(devMcpServerEntryFromEnv({}), null, "both absent → null");
   assert.equal(devMcpServerEntryFromEnv({ LETAGENTS_DESKTOP_DEV_SERVER_URL: "http://localhost:3000" }), null, "entry absent → null");
