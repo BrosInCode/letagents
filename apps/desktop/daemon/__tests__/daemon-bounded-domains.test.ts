@@ -38,6 +38,7 @@ const expectedControlMethods = [
   "manifest.watch_state",
   "supervisor.acknowledge_room_move_source_revocation",
   "supervisor.activate_custodial_polling",
+  "supervisor.apply_agent_configuration",
   "supervisor.authorize_custodial_polling",
   "supervisor.bind_worker_session",
   "supervisor.bootstrap_room_ingress",
@@ -122,6 +123,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "provider-terminal-coordinator",
     "room-delivery-control",
     "room-move-coordinator",
+    "runtime-configuration-apply-coordinator",
     "runtime-recovery-coordinator",
     "supervised-delivery-lifecycle-coordinator",
     "turn-control-coordinator",
@@ -160,7 +162,8 @@ test("daemon policy and projection domains remain extracted", () => {
   // 1500 -> 1510 at #1043: RoomWorkPublisher composition seam; 1510 -> 1531 for the
   // typed lifecycle effect consumer and its atomic activation seam. Policy stays extracted.
   // Raises must be reviewed, never blank-line-gamed.
-  assert.ok(mainSource.split("\n").length < 1_531, "main.ts must remain a thin composition root");
+  // 1531 -> 1550 for the isolated runtime-configuration apply coordinator.
+  assert.ok(mainSource.split("\n").length < 1_550, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

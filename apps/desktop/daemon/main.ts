@@ -49,6 +49,7 @@ import { ProviderStreamCoordinator } from "./provider-stream-coordinator.js";
 import { ProviderTerminalCoordinator } from "./provider-terminal-coordinator.js";
 import { RoomDeliveryControl } from "./room-delivery-control.js";
 import { RoomMoveCoordinator } from "./room-move-coordinator.js";
+import { RuntimeConfigurationApplyCoordinator } from "./runtime-configuration-apply-coordinator.js";
 import { RuntimeRecoveryCoordinator } from "./runtime-recovery-coordinator.js";
 import { DaemonFenceLostError, DaemonSingleton, defaultDaemonPaths } from "./singleton.js";
 import { type DaemonActivityEvent, type DaemonAgentStreamEvent, type DaemonManifestEntry, type DaemonManifestEntryView, type DaemonRequest, type DaemonRoomMoveRecord, type ExecutionTerminalPayload, type LegacyLaneOwner, type ObservedState, type PolicyCondition, type ReconciliationNotice } from "./types.js";
@@ -125,6 +126,7 @@ export class SupervisorDaemon {
   private readonly turnControls: TurnControlCoordinator;
   private readonly roomDeliveryControl: RoomDeliveryControl;
   private readonly runtimeRecovery: RuntimeRecoveryCoordinator;
+  private readonly runtimeConfigurationApply: RuntimeConfigurationApplyCoordinator;
   private readonly boundedEffects: BoundedEffectCoordinator;
   private readonly socket: DaemonControlSocket;
   private readonly stateWatch: DaemonStateWatch;
@@ -673,6 +675,21 @@ export class SupervisorDaemon {
         this.transitionOnce(entryId, state, condition, cause, actor, reconciliation, notice, terminal),
       requestConvergence: (entryId) => this.requestConvergence(entryId),
     });
+    this.runtimeConfigurationApply = new RuntimeConfigurationApplyCoordinator({
+      store: this.store,
+      inbox: this.supervisedInbox,
+      delivery: this.supervisedDelivery,
+      ...(providerPort ? { provider: providerPort } : {}),
+      streams: this.providerStreams,
+      terminals: this.providerTerminals,
+      entryConcurrency: this.entryConcurrency,
+      authority: {
+        assertCurrent: () => this.singleton.assertCurrent(),
+        currentDaemonGeneration: () => this.singleton.currentGeneration,
+        isHandoffScheduled: () => this.handoffScheduled,
+      },
+      requestConvergence: (entryId) => this.requestConvergence(entryId),
+    });
     this.deliveryCutoverExecution = new DeliveryCutoverExecutionCoordinator({
       isHandoffScheduled: () => this.handoffScheduled,
       ...(providerPort ? { provider: providerPort } : {}),
@@ -811,6 +828,7 @@ export class SupervisorDaemon {
       getDeliveryDrain: (input) => this.deliveryCutoverExecution.getDrain(input),
       cancelDeliveryDrain: (input) => this.deliveryCutoverExecution.cancelDrain(input),
       acknowledgeInspectorRoomMoveSourceRevocation: (input) => this.roomMoves.acknowledgeSourceRevocation(input),
+      applyAgentConfiguration: (input) => this.runtimeConfigurationApply.apply(input),
       activateLegacyLane: this.activateLegacyLane.bind(this),
       appendActivity: this.appendActivity.bind(this),
       bindWorkerSession: this.workerAuthority.bindWorkerSession.bind(this.workerAuthority),

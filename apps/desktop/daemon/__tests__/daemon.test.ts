@@ -1311,6 +1311,81 @@ async function observationDaemonFixture(onExecution: NonNullable<ProviderActionP
   }
 }
 
+test("configuration apply socket stops the exact idle birth and leaves the saved revision pending for its successor", async () => {
+  let stops = 0;
+  const env = await observationDaemonFixture(
+    async () => ({ mode: "typed_shadow", dispose() {} }),
+    "codex",
+    {
+      stop: async current => {
+        assert.equal(current.providerContinuationId, "observed-continuation");
+        stops += 1;
+        return {
+          endedAt: new Date().toISOString(),
+          exitCode: 0,
+          signal: null,
+          terminalCause: "stopped",
+          providerContinuationId: current.providerContinuationId,
+        };
+      },
+    },
+  );
+  try {
+    env.handle.observedState = "idle";
+    await env.internals.providerStreams.install(env.id, env.handle, env.generation, () => false);
+    const status = await daemonRequest(env.paths.socketPath, "daemon.status");
+    const daemonGeneration = (status.result as { generation: number }).generation;
+    const before = await daemonRequest(env.paths.socketPath, "supervisor.get_agent_configuration", {
+      entry_id: env.id,
+      daemon_generation: daemonGeneration,
+    });
+    assert.equal(before.ok, true, before.error);
+    const configuration = before.result as {
+      config_revision: number;
+      model: string | null;
+      reasoning_effort: string | null;
+      charter: string;
+      permission_profile_id: string | null;
+    };
+    const update = await daemonRequest(env.paths.socketPath, "supervisor.update_agent_configuration", {
+      entry_id: env.id,
+      daemon_generation: daemonGeneration,
+      expected_revision: configuration.config_revision,
+      configuration: {
+        model: configuration.model,
+        reasoning_effort: configuration.reasoning_effort,
+        charter: `${configuration.charter} with saved change`,
+        permission_profile_id: configuration.permission_profile_id,
+      },
+    });
+    assert.equal(update.ok, true, update.error);
+    const saved = (update.result as {
+      outcome: string;
+      configuration: { config_revision: number; runtime_configuration_revision: number };
+    }).configuration;
+    assert.equal(saved.config_revision, 2);
+    assert.equal(saved.runtime_configuration_revision, 1);
+
+    const applied = await daemonRequest(env.paths.socketPath, "supervisor.apply_agent_configuration", {
+      entry_id: env.id,
+      daemon_generation: daemonGeneration,
+      expected_configuration_revision: saved.config_revision,
+    });
+    assert.equal(applied.ok, true, applied.error);
+    assert.deepEqual(applied.result, { outcome: "restarting" });
+    assert.equal(stops, 1);
+    assert.equal(env.internals.liveHandles.has(env.id), false);
+    const after = await env.internals.store.getEntry(env.id);
+    assert.equal(after?.observed_state, "recovering");
+    assert.deepEqual(after?.provider_ref?.execution_generation_id, env.generation,
+      "the retained continuation remains available to ordinary successor convergence");
+    assert.equal((await env.internals.store.getAgentConfiguration(env.id))?.runtime_configuration_revision, 1,
+      "only a successor birth may advance the applied configuration revision");
+  } finally {
+    await env.cleanup();
+  }
+});
+
 test("reverse drain socket and daemon restart preserve stop intent without a successor or cursor bootstrap", async () => {
   let starts = 0;
   let attaches = 0;

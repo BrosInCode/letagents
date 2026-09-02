@@ -51,9 +51,66 @@ export type ProviderTerminalPorts = {
   requestConvergence(entryId: string): void;
 };
 
+type PlannedConfigurationReplacement = {
+  settled: Promise<void>;
+  resolve(): void;
+  reject(error: unknown): void;
+};
+
 /** Owns terminal evidence, exact-handle retirement, and exit-state projection. */
 export class ProviderTerminalCoordinator {
+  private readonly plannedConfigurationReplacements = new WeakMap<
+    ProviderInstallationToken,
+    PlannedConfigurationReplacement
+  >();
+
   constructor(private readonly ports: ProviderTerminalPorts) {}
+
+  /**
+   * Stop one exact installation as an intentional configuration replacement.
+   * The reservation is installed before native stop so an onExit callback that
+   * wins the race receives the same classification as the returned terminal.
+   */
+  async replaceConfiguration(
+    installation: ProviderInstallationToken,
+    stop: () => Promise<ProviderActionTerminal>,
+  ): Promise<void> {
+    if (!this.ports.streams.isLatestInstallation(installation)
+      || this.ports.liveHandles.get(installation.entryId) !== installation.handle) {
+      throw new Error("Provider installation changed before configuration replacement.");
+    }
+    if (this.plannedConfigurationReplacements.has(installation)) {
+      throw new Error("Configuration replacement is already in progress.");
+    }
+    let resolve!: () => void;
+    let reject!: (error: unknown) => void;
+    const settled = new Promise<void>((accept, decline) => {
+      resolve = accept;
+      reject = decline;
+    });
+    void settled.catch(() => undefined);
+    const replacement = { settled, resolve, reject };
+    this.plannedConfigurationReplacements.set(installation, replacement);
+    let terminal: ProviderActionTerminal;
+    try {
+      terminal = await stop();
+    } catch (error) {
+      if (this.ports.streams.isLatestInstallation(installation)
+        && this.ports.liveHandles.get(installation.entryId) === installation.handle) {
+        if (this.plannedConfigurationReplacements.get(installation) === replacement) {
+          this.plannedConfigurationReplacements.delete(installation);
+        }
+        replacement.resolve();
+        throw error;
+      }
+      // onExit removed the exact live installation before stop rejected.
+      // Its terminal handler remains the sole source of durable classification.
+      await replacement.settled;
+      return;
+    }
+    await this.handleTerminal(installation, terminal);
+    await replacement.settled;
+  }
 
   terminalPayload(
     terminal: ProviderActionTerminal,
@@ -77,58 +134,77 @@ export class ProviderTerminalCoordinator {
     terminal: ProviderActionTerminal,
   ): Promise<void> {
     const { entryId, handle, executionGenerationId } = installation;
+    const replacement = this.plannedConfigurationReplacements.get(installation);
     if (!this.ports.streams.remove(installation)) return;
-    this.ports.runtimeCustody.deletePendingResumeBinding(entryId);
-    let shouldStartDelivery = false;
-    await this.ports.serializeEntry(entryId, async () => {
-      if (!this.ports.streams.isLatestInstallation(installation)) return;
-      const entry = (await this.ports.manifest.load()).entries.find((candidate) =>
-        candidate.id === entryId);
-      if (!entry || !this.matchesInstallation(entry, installation)) return;
-      if (this.ports.liveHandles.get(entryId)) return;
-      if (entry?.work_attempt_id) {
-        const attempt = await this.ports.durability.getAttempt(entry.work_attempt_id);
+    let replacementObserved = false;
+    try {
+      this.ports.runtimeCustody.deletePendingResumeBinding(entryId);
+      let shouldStartDelivery = false;
+      await this.ports.serializeEntry(entryId, async () => {
+        if (!this.ports.streams.isLatestInstallation(installation)) return;
+        const entry = (await this.ports.manifest.load()).entries.find((candidate) =>
+          candidate.id === entryId);
+        if (!entry || !this.matchesInstallation(entry, installation)) return;
+        if (this.ports.liveHandles.get(entryId)) return;
+        if (entry?.work_attempt_id) {
+          const attempt = await this.ports.durability.getAttempt(entry.work_attempt_id);
+          if (!this.ports.streams.isLatestInstallation(installation)
+            || this.ports.liveHandles.get(entryId)) return;
+          const execution = attempt.execution_generations.find((candidate) =>
+            candidate.execution_generation_id === executionGenerationId);
+          if (execution && !execution.terminal) {
+            await this.ports.durability.recordTerminal(
+              entry.work_attempt_id,
+              execution.execution_generation_id,
+              {
+                ...this.terminalPayload(terminal, execution.actor),
+                generation: execution.generation,
+              },
+            );
+          }
+          if (entry.desired_state === "stopped") {
+            await this.ports.durability.releaseTerminalExecutionFence(
+              entry.work_attempt_id,
+              executionGenerationId,
+            );
+          }
+        }
         if (!this.ports.streams.isLatestInstallation(installation)
           || this.ports.liveHandles.get(entryId)) return;
-        const execution = attempt.execution_generations.find((candidate) =>
-          candidate.execution_generation_id === executionGenerationId);
-        if (execution && !execution.terminal) {
-          await this.ports.durability.recordTerminal(
-            entry.work_attempt_id,
-            execution.execution_generation_id,
-            {
-              ...this.terminalPayload(terminal, execution.actor),
-              generation: execution.generation,
-            },
-          );
+        // The owner-only credential remains available for an exact successor;
+        // only its live publication authority was removed with the handle.
+        await this.observeExitOnce(
+          entryId,
+          terminal,
+          "daemon-provider",
+          executionGenerationId,
+          handle,
+          installation,
+          Boolean(replacement),
+        );
+        replacementObserved = Boolean(replacement);
+        if (!this.ports.streams.isLatestInstallation(installation)
+          || this.ports.liveHandles.get(entryId)) return;
+        if (!replacement) {
+          this.ports.requestConvergence(entryId);
+          shouldStartDelivery = entry.desired_state === "running";
         }
-        if (entry.desired_state === "stopped") {
-          await this.ports.durability.releaseTerminalExecutionFence(
-            entry.work_attempt_id,
-            executionGenerationId,
-          );
-        }
+      });
+      if (replacement && !replacementObserved) {
+        throw new Error("Configuration replacement lost exact provider coordinates.");
       }
-      if (!this.ports.streams.isLatestInstallation(installation)
-        || this.ports.liveHandles.get(entryId)) return;
-      // The owner-only credential remains available for an exact successor;
-      // only its live publication authority was removed with the handle.
-      await this.observeExitOnce(
-        entryId,
-        terminal,
-        "daemon-provider",
-        executionGenerationId,
-        handle,
-        installation,
-      );
-      if (!this.ports.streams.isLatestInstallation(installation)
-        || this.ports.liveHandles.get(entryId)) return;
-      this.ports.requestConvergence(entryId);
-      shouldStartDelivery = entry.desired_state === "running";
-    });
-    if (shouldStartDelivery && this.ports.streams.isLatestInstallation(installation)
-      && !this.ports.liveHandles.get(entryId)) {
-      void this.ports.delivery.start(entryId).catch(() => undefined);
+      if (shouldStartDelivery && this.ports.streams.isLatestInstallation(installation)
+        && !this.ports.liveHandles.get(entryId)) {
+        void this.ports.delivery.start(entryId).catch(() => undefined);
+      }
+      replacement?.resolve();
+    } catch (error) {
+      replacement?.reject(error);
+      throw error;
+    } finally {
+      if (replacement && this.plannedConfigurationReplacements.get(installation) === replacement) {
+        this.plannedConfigurationReplacements.delete(installation);
+      }
     }
   }
 
@@ -170,6 +246,7 @@ export class ProviderTerminalCoordinator {
     expectedExecutionGenerationId?: string,
     expectedHandle?: ProviderActionHandle,
     expectedInstallation?: ProviderInstallationToken,
+    plannedConfigurationReplacement = false,
   ): Promise<void> {
     await this.ports.serializeManifest(async () => {
       if (expectedInstallation
@@ -212,16 +289,19 @@ export class ProviderTerminalCoordinator {
         && control?.interrupted === true
         && control?.resumed === false
         && control?.state === "idle";
-      const intentional = entry.desired_state === "stopped"
+      const intentional = plannedConfigurationReplacement
+        || entry.desired_state === "stopped"
         || entry.desired_state === "paused"
         || completedStopTurn;
-      const observedState = completedStopTurn
-        ? "idle"
-        : entry.desired_state === "paused"
-          ? "paused"
-          : intentional
-            ? "stopped"
-            : "failed";
+      const observedState = plannedConfigurationReplacement
+        ? "recovering"
+        : completedStopTurn
+          ? "idle"
+          : entry.desired_state === "paused"
+            ? "paused"
+            : intentional
+              ? "stopped"
+              : "failed";
       const reconciliation = {
         ...advanceReconciliationState(entry.reconciliation, observedState, this.ports.nowMs()),
         last_terminal: payload,
@@ -230,9 +310,11 @@ export class ProviderTerminalCoordinator {
         entryId,
         observedState,
         "none",
-        completedStopTurn
-          ? "provider terminal completed intentional stop-turn"
-          : `provider terminal: ${terminal.terminalCause}`,
+        plannedConfigurationReplacement
+          ? "provider terminal completed intentional configuration replacement"
+          : completedStopTurn
+            ? "provider terminal completed intentional stop-turn"
+            : `provider terminal: ${terminal.terminalCause}`,
         actor,
         reconciliation,
       );
