@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { and, desc, eq, isNull, sql } from "drizzle-orm";
+import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import {
@@ -381,4 +381,60 @@ export async function revokeExecutionDelegationGrant(input: {
     if (!revoked) throw new Error("Delegation revocation lost its current-row fence.");
     return toExecutionDelegationGrant(revoked);
   });
+}
+
+export async function getExecutionDelegationGrantForAccount(input: {
+  account_id: string;
+  delegation_instance_id: string;
+}): Promise<ExecutionDelegationGrant | null> {
+  const [latest] = await db
+    .select()
+    .from(execution_delegation_grants)
+    .where(and(
+      eq(execution_delegation_grants.delegation_instance_id, input.delegation_instance_id),
+      or(
+        eq(execution_delegation_grants.owner_account_id, input.account_id),
+        eq(execution_delegation_grants.approver_account_id, input.account_id),
+      ),
+    ))
+    .orderBy(desc(execution_delegation_grants.revision))
+    .limit(1);
+  return latest ? toExecutionDelegationGrant(latest) : null;
+}
+
+export async function getExecutionDelegationGrantForOwner(input: {
+  owner_account_id: string;
+  delegation_instance_id: string;
+}): Promise<ExecutionDelegationGrant | null> {
+  const [latest] = await db
+    .select()
+    .from(execution_delegation_grants)
+    .where(and(
+      eq(execution_delegation_grants.delegation_instance_id, input.delegation_instance_id),
+      eq(execution_delegation_grants.owner_account_id, input.owner_account_id),
+    ))
+    .orderBy(desc(execution_delegation_grants.revision))
+    .limit(1);
+  return latest ? toExecutionDelegationGrant(latest) : null;
+}
+
+export async function getExecutionDelegationGrantForHost(input: {
+  owner_account_id: string;
+  host_id: string;
+  installation_id: string;
+  delegation_instance_id: string;
+}): Promise<ExecutionDelegationGrant | null> {
+  const [latest] = await db
+    .select()
+    .from(execution_delegation_grants)
+    .where(and(
+      eq(execution_delegation_grants.delegation_instance_id, input.delegation_instance_id),
+      eq(execution_delegation_grants.owner_account_id, input.owner_account_id),
+      eq(execution_delegation_grants.host_id, input.host_id),
+      eq(execution_delegation_grants.installation_id, input.installation_id),
+      eq(execution_delegation_grants.scope_key, "owner"),
+    ))
+    .orderBy(desc(execution_delegation_grants.revision))
+    .limit(1);
+  return latest ? toExecutionDelegationGrant(latest) : null;
 }

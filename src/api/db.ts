@@ -80,6 +80,9 @@ export {
   ExecutionDelegationRevisionConflictError,
   ExecutionDelegationTerminalError,
   admitExecutionDelegationGrantRevision,
+  getExecutionDelegationGrantForAccount,
+  getExecutionDelegationGrantForHost,
+  getExecutionDelegationGrantForOwner,
   revokeExecutionDelegationGrant,
 } from "./db/execution-delegation-grants.js";
 export {

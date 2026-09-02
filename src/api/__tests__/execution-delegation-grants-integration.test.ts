@@ -4,15 +4,23 @@ import test from "node:test";
 
 import { asc, eq } from "drizzle-orm";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
+import express, { type Response } from "express";
+
+import type { AuthenticatedRequest } from "../http/helpers.js";
 
 const testDatabaseUrl = process.env.TEST_DB_URL;
 const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) process.env.DB_URL = testDatabaseUrl;
 else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
+process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "true";
+process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "true";
 
 const client = testDatabaseUrl ? await import("../db/client.js") : null;
 const db = testDatabaseUrl ? await import("../db.js") : null;
 const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
+const { registerHttpMiddleware } = await import("../http/middleware.js");
+const { resolveRequestAuth } = await import("../request/auth.js");
+const { registerExecutionDelegationRoutes } = await import("../routes/execution-delegations.js");
 
 async function reset(): Promise<void> {
   if (!client) throw new Error("DB-backed delegation tests require TEST_DB_URL");
@@ -58,15 +66,15 @@ async function seed() {
     name: `agent-${n}`,
     display_name: `Agent ${n}`,
   });
-  const grant = (await db!.createSupervisorHostGrant({
+  const grantResult = await db!.createSupervisorHostGrant({
     owner_account_id: ownerId,
     host_id: `host_${n}`,
     installation_id: `installation_${n}`,
     allowed_room_ids: [room.id],
     allowed_agent_keys: [agent.canonical_key],
     expires_at: new Date(now.getTime() + 60 * 60_000).toISOString(),
-  })).grant;
-  return { now, ownerId, approverId, room, agent, grant };
+  });
+  return { now, ownerId, approverId, room, agent, grant: grantResult.grant, grantToken: grantResult.token };
 }
 
 function admissionInput(
@@ -379,4 +387,295 @@ test("source grant rotation preserves scope while delegation revocation and expi
     delegation_instance_id: expiringGrant.grant.delegation_instance_id,
     now: new Date(expiresAt.getTime() + 1),
   }));
+});
+
+function delegationRouteDeps(sessionParticipants?: Set<string>, freshChecks?: boolean[]) {
+  return {
+    resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
+    resolveRoomOrReply: async (roomId: string) => db!.getProjectById(roomId),
+    requireParticipant: async (
+      req: AuthenticatedRequest,
+      res: Response,
+      _project: { id: string },
+      options?: { freshCollaboratorCheck?: boolean; throwOnIndeterminate?: boolean },
+    ) => {
+      if (req.authKind === "session") freshChecks?.push(options?.freshCollaboratorCheck === true);
+      if (!sessionParticipants || req.authKind !== "session"
+        || sessionParticipants.has(req.sessionAccount?.account_id)) return true;
+      res.status(403).json({ error: "Room membership is required." });
+      return false;
+    },
+  };
+}
+
+async function listen(app: express.Express) {
+  return new Promise<ReturnType<typeof app.listen>>((resolve) => {
+    const server = app.listen(0, "127.0.0.1", () => resolve(server));
+  });
+}
+
+async function close(server: ReturnType<express.Express["listen"]>): Promise<void> {
+  await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+}
+
+function serverUrl(server: ReturnType<express.Express["listen"]>): string {
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  return `http://127.0.0.1:${address.port}`;
+}
+
+test("HTTP routes bind authorship to auth and expose exact owner, approver, and current-host views", databaseOptions, async () => {
+  const seeded = await seed();
+  const otherId = `delegation_other_${++ordinal}`;
+  await client!.db.insert(schema!.accounts).values({
+    id: otherId,
+    provider: "github",
+    provider_user_id: otherId,
+    login: otherId,
+    display_name: otherId,
+    avatar_url: null,
+    created_at: seeded.now.toISOString(),
+    updated_at: seeded.now.toISOString(),
+  });
+  await Promise.all([
+    db!.createOwnerToken({ accountId: seeded.ownerId, githubUserId: seeded.ownerId, token: "delegation_owner_token" }),
+    db!.createOwnerToken({ accountId: seeded.approverId, githubUserId: seeded.approverId, token: "delegation_approver_token" }),
+    db!.createOwnerToken({ accountId: otherId, githubUserId: otherId, token: "delegation_other_token" }),
+    db!.createSession(
+      seeded.approverId,
+      "delegation_approver_session",
+      new Date(seeded.now.getTime() + 60 * 60_000).toISOString(),
+    ),
+  ]);
+
+  const sessionParticipants = new Set([seeded.approverId]);
+  const freshChecks: boolean[] = [];
+  const app = express();
+  registerHttpMiddleware(app, { resolveRequestAuth });
+  registerExecutionDelegationRoutes(app, delegationRouteDeps(sessionParticipants, freshChecks));
+  const server = await listen(app);
+  try {
+    const baseUrl = serverUrl(server);
+    const ownerHeaders = { authorization: "Bearer delegation_owner_token", "content-type": "application/json" };
+    const approverOwnerHeaders = { authorization: "Bearer delegation_approver_token", "content-type": "application/json" };
+    const approverHeaders = {
+      cookie: "letagents_session=delegation_approver_session",
+      "content-type": "application/json",
+    };
+    const otherHeaders = { authorization: "Bearer delegation_other_token", "content-type": "application/json" };
+    const createBody = {
+      supervisor_grant_id: seeded.grant.grant_id,
+      room_id: seeded.room.id,
+      agent_key: seeded.agent.canonical_key,
+      approver_account_id: seeded.approverId,
+      category: "file_change",
+      risk_ceiling: "low",
+      expires_at: new Date(seeded.now.getTime() + 30 * 60_000).toISOString(),
+      client_request_id: "route_create",
+    };
+    const create = (headers: Record<string, string>, body: unknown) => fetch(`${baseUrl}/execution-delegations`, {
+      method: "POST",
+      headers,
+      body: JSON.stringify(body),
+    });
+
+    assert.equal((await create(ownerHeaders, { ...createBody, owner_account_id: otherId })).status, 400);
+    assert.equal((await create(approverOwnerHeaders, createBody)).status, 403,
+      "a designated account cannot author an owner mutation by naming the owner grant");
+    const createdResponse = await create(ownerHeaders, createBody);
+    assert.equal(createdResponse.status, 201);
+    const created = await createdResponse.json() as { delegation: Record<string, unknown> };
+    const instanceId = String(created.delegation.delegation_instance_id);
+    assert.equal(created.delegation.owner_account_id, seeded.ownerId);
+    assert.equal(created.delegation.approver_account_id, seeded.approverId);
+    assert.equal(created.delegation.status, "active");
+    assert.equal("request_fingerprint" in created.delegation, false);
+    assert.equal("admission_supervisor_grant_id" in created.delegation, false);
+
+    const accountUrl = `${baseUrl}/execution-delegations/${instanceId}`;
+    for (const headers of [ownerHeaders, approverHeaders]) {
+      const response = await fetch(accountUrl, { headers });
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("cache-control"), "no-store");
+      assert.equal((await response.json() as any).delegation.delegation_instance_id, instanceId);
+    }
+    assert.deepEqual(freshChecks, [true], "approver visibility reaches the fresh Git Room membership check");
+    assert.equal((await fetch(accountUrl, { headers: approverOwnerHeaders })).status, 401,
+      "approver visibility requires a current human browser session");
+    sessionParticipants.delete(seeded.approverId);
+    assert.equal((await fetch(accountUrl, { headers: approverHeaders })).status, 403,
+      "approver visibility is revalidated against current room membership");
+    sessionParticipants.add(seeded.approverId);
+    const absentUrl = `${baseUrl}/execution-delegations/execution_delegation_missing`;
+    const foreign = await fetch(accountUrl, { headers: otherHeaders });
+    const absent = await fetch(absentUrl, { headers: otherHeaders });
+    assert.equal(foreign.status, 404);
+    assert.equal(absent.status, 404);
+    assert.deepEqual(await foreign.json(), await absent.json());
+
+    const reviseBody = {
+      ...createBody,
+      client_request_id: "route_revise",
+      expected_revision: 1,
+      expires_at: new Date(seeded.now.getTime() + 35 * 60_000).toISOString(),
+    };
+    const reviseUrl = `${accountUrl}/revisions`;
+    assert.equal((await fetch(reviseUrl, {
+      method: "POST", headers: approverHeaders, body: JSON.stringify(reviseBody),
+    })).status, 404);
+    const revisedResponse = await fetch(reviseUrl, {
+      method: "POST", headers: ownerHeaders, body: JSON.stringify(reviseBody),
+    });
+    assert.equal(revisedResponse.status, 200);
+    assert.equal((await revisedResponse.json() as any).delegation.revision, 2);
+
+    const hostUrl = `${baseUrl}/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/${instanceId}`;
+    const hostResponse = await fetch(hostUrl, { headers: {
+      authorization: `Bearer ${seeded.grantToken}`,
+      "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
+    } });
+    assert.equal(hostResponse.status, 200);
+    assert.equal((await hostResponse.json() as any).delegation.revision, 2);
+
+    const foreignHost = await db!.createSupervisorHostGrant({
+      owner_account_id: seeded.ownerId,
+      host_id: `foreign_host_${++ordinal}`,
+      installation_id: `foreign_installation_${ordinal}`,
+      allowed_room_ids: [seeded.room.id],
+      allowed_agent_keys: [seeded.agent.canonical_key],
+      expires_at: new Date(seeded.now.getTime() + 60 * 60_000).toISOString(),
+    });
+    const foreignHostUrl = `${baseUrl}/supervisor-host-grants/${foreignHost.grant.grant_id}/execution-delegations/${instanceId}`;
+    assert.equal((await fetch(foreignHostUrl, {
+      headers: {
+        authorization: `Bearer ${foreignHost.token}`,
+        "x-letagents-supervisor-generation": String(foreignHost.grant.current_generation),
+      },
+    })).status, 404);
+
+    const rentalHostId = `delegation_rental_host_${++ordinal}`;
+    const rentalListingId = `delegation_rental_listing_${ordinal}`;
+    const rentalSessionId = `delegation_rental_session_${ordinal}`;
+    await client!.db.insert(schema!.rental_provider_hosts).values({
+      id: rentalHostId,
+      provider_account_id: seeded.ownerId,
+      host_id: seeded.grant.host_id,
+      installation_id: seeded.grant.installation_id,
+      enabled: true,
+      last_heartbeat_at: seeded.now,
+    });
+    await client!.db.insert(schema!.rental_listings).values({
+      id: rentalListingId,
+      provider_account_id: seeded.ownerId,
+      provider_host_id: rentalHostId,
+      display_name: "Delegation rental",
+      status: "active",
+      ide_kind: "codex",
+    });
+    await client!.db.insert(schema!.rental_sessions).values({
+      id: rentalSessionId,
+      listing_id: rentalListingId,
+      renter_account_id: seeded.approverId,
+      provider_account_id: seeded.ownerId,
+      room_id: seeded.room.id,
+      task_title: "Delegation rental test",
+      task_prompt: "Exercise rental grant concealment.",
+      provider_host_id: rentalHostId,
+      status: "active",
+      launch_state: "active",
+    });
+    const rentalHost = await db!.createSupervisorHostGrant({
+      owner_account_id: seeded.ownerId,
+      host_id: seeded.grant.host_id,
+      installation_id: seeded.grant.installation_id,
+      scope_key: `rental:${rentalSessionId}`,
+      rental_session_id: rentalSessionId,
+      allowed_room_ids: [seeded.room.id],
+      allowed_agent_keys: [seeded.agent.canonical_key],
+      expires_at: new Date(seeded.now.getTime() + 60 * 60_000).toISOString(),
+    });
+    const rentalHostUrl = `${baseUrl}/supervisor-host-grants/${rentalHost.grant.grant_id}/execution-delegations/${instanceId}`;
+    const rentalResponse = await fetch(rentalHostUrl, {
+      headers: {
+        authorization: `Bearer ${rentalHost.token}`,
+        "x-letagents-supervisor-generation": String(rentalHost.grant.current_generation),
+      },
+    });
+    assert.equal(rentalResponse.status, 404);
+    assert.deepEqual(await rentalResponse.json(), await (await fetch(absentUrl, { headers: otherHeaders })).json(),
+      "rental-lineage grants receive the same concealment response as a missing delegation");
+
+    const foreignRevoke = await fetch(accountUrl, { method: "DELETE", headers: otherHeaders });
+    const missingRevoke = await fetch(absentUrl, { method: "DELETE", headers: otherHeaders });
+    assert.equal(foreignRevoke.status, 404);
+    assert.deepEqual(await foreignRevoke.json(), await missingRevoke.json());
+    const revokedResponse = await fetch(accountUrl, { method: "DELETE", headers: ownerHeaders });
+    assert.equal(revokedResponse.status, 200);
+    assert.equal((await revokedResponse.json() as any).delegation.status, "revoked");
+    assert.equal((await (await fetch(accountUrl, { headers: approverHeaders })).json() as any).delegation.status, "revoked",
+      "the designated approver keeps a transparency view after authority ends");
+    assert.equal((await (await fetch(hostUrl, { headers: {
+      authorization: `Bearer ${seeded.grantToken}`,
+      "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
+    } })).json() as any)
+      .delegation.status, "revoked", "the exact host can reconcile terminal authority");
+  } finally {
+    await close(server);
+  }
+});
+
+test("feature-off delegation routes match nonexistent account, supervisor, and preflight behavior", databaseOptions, async () => {
+  const seeded = await seed();
+  const existing = await db!.admitExecutionDelegationGrantRevision(admissionInput(seeded, {
+    client_request_id: "feature_off_revoke",
+  }));
+  await db!.createOwnerToken({ accountId: seeded.ownerId, githubUserId: seeded.ownerId, token: "delegation_gate_owner" });
+  const prior = process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
+  process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "false";
+  const app = express();
+  registerHttpMiddleware(app, { resolveRequestAuth });
+  registerExecutionDelegationRoutes(app, delegationRouteDeps());
+  const server = await listen(app);
+  try {
+    const baseUrl = serverUrl(server);
+    const ownerHeaders = { authorization: "Bearer delegation_gate_owner" };
+    const gatedAccountRequests = [
+      { method: "GET", path: `/execution-delegations/${existing.grant.delegation_instance_id}` },
+      { method: "POST", path: "/execution-delegations" },
+      { method: "POST", path: `/execution-delegations/${existing.grant.delegation_instance_id}/revisions` },
+    ] as const;
+    for (const request of gatedAccountRequests) {
+      const options = { method: request.method, headers: ownerHeaders };
+      const hidden = await fetch(baseUrl + request.path, options);
+      const unknown = await fetch(baseUrl + "/route-that-does-not-exist", options);
+      assert.equal(hidden.status, unknown.status);
+      assert.equal(hidden.headers.get("content-type"), unknown.headers.get("content-type"));
+      assert.match(await hidden.text(), /^<!DOCTYPE html>/);
+      assert.match(await unknown.text(), /^<!DOCTYPE html>/);
+    }
+    const revoked = await fetch(
+      `${baseUrl}/execution-delegations/${existing.grant.delegation_instance_id}`,
+      { method: "DELETE", headers: ownerHeaders },
+    );
+    assert.equal(revoked.status, 200, "feature-off keeps the owner kill switch available");
+    assert.equal((await revoked.json() as any).delegation.status, "revoked");
+    const hostTarget = `/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/execution_delegation_hidden`;
+    const supervisorHeaders = { authorization: `Bearer ${seeded.grantToken}` };
+    const hiddenHost = await fetch(baseUrl + hostTarget, { headers: supervisorHeaders });
+    const unknownHost = await fetch(baseUrl + "/supervisor-route-that-does-not-exist", { headers: supervisorHeaders });
+    assert.equal(hiddenHost.status, 403);
+    assert.deepEqual(await hiddenHost.json(), await unknownHost.json());
+
+    for (const request of gatedAccountRequests) {
+      const hiddenOptions = await fetch(baseUrl + request.path, { method: "OPTIONS", headers: ownerHeaders });
+      const unknownOptions = await fetch(baseUrl + "/route-that-does-not-exist", { method: "OPTIONS", headers: ownerHeaders });
+      assert.equal(hiddenOptions.status, 204);
+      assert.equal(hiddenOptions.status, unknownOptions.status);
+      assert.equal(await hiddenOptions.text(), await unknownOptions.text());
+    }
+  } finally {
+    await close(server);
+    if (prior === undefined) delete process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
+    else process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = prior;
+  }
 });
