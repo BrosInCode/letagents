@@ -13,7 +13,10 @@ import {
   toPublicManagedAgentChangeSummary,
   type ManagedAgentChangeSummaryAttachmentDraft,
 } from "./managed-agent-change-attachments.js";
-import { publishManagedAgentChangeSummaryArtifact } from "./managed-agent-change-summary-artifacts.js";
+import {
+  prepareManagedAgentLocalChangeSummaryArtifactWrite,
+  publishManagedAgentChangeSummaryArtifact,
+} from "./managed-agent-change-summary-artifacts.js";
 import { buildDesktopManagedAgentChangeSummary } from "./managed-agent-changes.js";
 import type { StoredAgentSessionState } from "./state.js";
 
@@ -151,6 +154,40 @@ export async function publishDesktopManagedAgentReplyChangeSummaryArtifact(input
       error instanceof Error ? error.message : String(error),
     );
   }
+}
+
+export async function prepareDesktopManagedAgentReplyChangeSummaryArtifactWrite(input: {
+  sessionKey: string;
+  roomIdentifier: string;
+  storage: DesktopRoomStorageState;
+  workerSession: StoredAgentSessionState;
+  event: ManagedRoomEvent;
+  context: DesktopManagedAgentReplyChangeContext;
+}): Promise<{
+  database: NonNullable<Awaited<ReturnType<typeof prepareManagedAgentLocalChangeSummaryArtifactWrite>>>["database"];
+  writeInCurrentTransaction: () => void;
+  finalizeAfterCommit: () => Promise<void>;
+} | null> {
+  if (!input.context.summary || !input.context.signature) return null;
+  const taskId = managedRoomEventTaskId(input.event);
+  const publishKey = JSON.stringify({ signature: input.context.signature, taskId });
+  if (replyChangeArtifactPublishKeys.get(input.sessionKey) === publishKey) return null;
+  const prepared = await prepareManagedAgentLocalChangeSummaryArtifactWrite({
+    roomIdentifier: input.roomIdentifier,
+    storage: input.storage,
+    workerSession: input.workerSession,
+    summary: input.context.summary,
+    taskId,
+  });
+  if (!prepared) return null;
+  return {
+    database: prepared.database,
+    writeInCurrentTransaction: prepared.writeInCurrentTransaction,
+    finalizeAfterCommit: async () => {
+      await prepared.finalizeAfterCommit();
+      replyChangeArtifactPublishKeys.set(input.sessionKey, publishKey);
+    },
+  };
 }
 
 export function managedRoomEventTaskId(event: ManagedRoomEvent): string | null {

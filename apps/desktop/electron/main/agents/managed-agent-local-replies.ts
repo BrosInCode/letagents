@@ -5,10 +5,13 @@ import type {
 import {
   localRoomIdentifierForStorage,
 } from "../rooms/local-store.js";
-import { addLocalChatMessage } from "../rooms/messages/local-store.js";
+import {
+  addLocalChatMessageWithDeferredWriteNotification,
+} from "../rooms/messages/local-store.js";
 import { mapRoomMessagePayload } from "../rooms/messages/mappers.js";
 import type { RoomMessageAttachmentPayload } from "../attachments.js";
 import type { StoredAgentSessionState } from "./state.js";
+import type { SqliteDatabase } from "../rooms/local-db.js";
 
 export type DesktopManagedAgentReplyTarget = {
   replyTo: string | null;
@@ -25,7 +28,7 @@ export function desktopManagedAgentReplyTargetForMessage(
   };
 }
 
-export async function persistDesktopManagedAgentLocalReply(input: {
+type PersistDesktopManagedAgentLocalReplyInput = {
   roomIdentifier: string;
   storage: DesktopRoomStorageState;
   workerSession: StoredAgentSessionState;
@@ -36,25 +39,51 @@ export async function persistDesktopManagedAgentLocalReply(input: {
   source?: string;
   sender?: string;
   idempotencyKey?: string | null;
-}): Promise<DesktopRoomMessage | null> {
+  writeInTransaction?: (database: SqliteDatabase) => void;
+};
+
+export type DeferredDesktopManagedAgentLocalReply = {
+  message: DesktopRoomMessage;
+  publishWriteNotification: () => void;
+};
+
+export async function persistDesktopManagedAgentLocalReplyWithDeferredWriteNotification(
+  input: PersistDesktopManagedAgentLocalReplyInput,
+): Promise<DeferredDesktopManagedAgentLocalReply | null> {
   if (input.storage.effectiveMode !== "local") {
     return null;
   }
 
   const localRoomIdentifier = localRoomIdentifierForStorage(input.storage, input.roomIdentifier);
-  const localMessage = await addLocalChatMessage(localRoomIdentifier, {
-    sender: input.sender || desktopManagedAgentReplySender(input.workerSession),
-    text: input.text,
-    reply_to: input.replyTo,
-    thread_root_id: input.threadRootId ?? null,
-    source: input.source || "agent",
-    attachments: input.attachments ?? [],
-    idempotency_key: input.idempotencyKey ?? null,
-    publisher_agent_key: input.workerSession.agent_key ?? null,
-    publisher_agent_session_id: input.workerSession.session_id,
-  });
+  const persisted = await addLocalChatMessageWithDeferredWriteNotification(
+    localRoomIdentifier,
+    {
+      sender: input.sender || desktopManagedAgentReplySender(input.workerSession),
+      text: input.text,
+      reply_to: input.replyTo,
+      thread_root_id: input.threadRootId ?? null,
+      source: input.source || "agent",
+      attachments: input.attachments ?? [],
+      idempotency_key: input.idempotencyKey ?? null,
+      publisher_agent_key: input.workerSession.agent_key ?? null,
+      publisher_agent_session_id: input.workerSession.session_id,
+    },
+    { writeInTransaction: input.writeInTransaction },
+  );
 
-  return mapRoomMessagePayload(localMessage);
+  return {
+    message: mapRoomMessagePayload(persisted.message),
+    publishWriteNotification: persisted.publishWriteNotification,
+  };
+}
+
+export async function persistDesktopManagedAgentLocalReply(
+  input: PersistDesktopManagedAgentLocalReplyInput,
+): Promise<DesktopRoomMessage | null> {
+  const persisted = await persistDesktopManagedAgentLocalReplyWithDeferredWriteNotification(input);
+  if (!persisted) return null;
+  persisted.publishWriteNotification();
+  return persisted.message;
 }
 
 function desktopManagedAgentReplySender(workerSession: StoredAgentSessionState): string {

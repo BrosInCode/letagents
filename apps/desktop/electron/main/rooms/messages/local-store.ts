@@ -10,6 +10,10 @@ import {
   scheduleLocalThreadRoutingRootsRepair,
 } from "../../../../../../shared/sqlite-thread-routing.mjs";
 import {
+  ensureLocalChatWriteNotificationSchema,
+  getLocalChatRoomWriteSequence,
+} from "../../../../../../shared/sqlite-local-write-notifications.mjs";
+import {
   MESSAGE_SENDER_MAX_CODE_POINTS,
   MESSAGE_SENDER_MAX_UTF8_BYTES,
   POSTGRES_INTEGER_MAX,
@@ -19,6 +23,7 @@ import {
 
 import type { RoomMessageAttachmentPayload } from "../../attachments/mappers.js";
 import type { RoomMessagePayload } from "./mappers.js";
+import { publishLocalChatMessageWrite } from "./local-write-notifications.js";
 import {
   addColumnIfMissing,
   beginImmediate,
@@ -95,6 +100,11 @@ export type LocalChatMessageInput = {
   publisher_agent_key?: string | null;
   publisher_agent_session_id?: string | null;
   control_authorized?: boolean | null;
+};
+
+export type DeferredLocalChatMessageWrite = {
+  message: RoomMessagePayload;
+  publishWriteNotification: () => void;
 };
 
 export type LocalSyncMessagePayload = RoomMessagePayload & {
@@ -214,6 +224,7 @@ async function getDb(): Promise<SqliteDatabase> {
       CREATE INDEX IF NOT EXISTS local_chat_thread_reads_reader_idx
         ON local_chat_thread_reads (reader_key);
         `);
+        ensureLocalChatWriteNotificationSchema(database);
       });
       await ensureLocalThreadRoutingProjectionSchemaAsync(database);
       scheduleLocalThreadRoutingBackfill(database);
@@ -639,10 +650,13 @@ function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): n
   return number;
 }
 
-export async function addLocalChatMessage(
+export async function addLocalChatMessageWithDeferredWriteNotification(
   roomId: string,
   input: LocalChatMessageInput,
-): Promise<RoomMessagePayload> {
+  options: {
+    writeInTransaction?: (database: SqliteDatabase) => void;
+  } = {},
+): Promise<DeferredLocalChatMessageWrite> {
   const trimmedRoomId = roomId.trim();
   const sender = input.sender.trim();
   const text = input.text;
@@ -686,7 +700,7 @@ export async function addLocalChatMessage(
 
   const timestamp = new Date().toISOString();
   const attachmentRows = (input.attachments || []).map(normalizeAttachmentPayload);
-  const row = await runLocalSqliteWriteTransactionAsync(database, () => {
+  const result = await runLocalSqliteWriteTransactionAsync(database, () => {
     const idempotencyKey = input.idempotency_key?.trim() || null;
     const existing = idempotencyKey
       ? database
@@ -694,7 +708,8 @@ export async function addLocalChatMessage(
         .get(trimmedRoomId, idempotencyKey)
       : null;
     if (existing) {
-      return mapRow(existing);
+      options.writeInTransaction?.(database);
+      return { row: mapRow(existing), inserted: false };
     }
     const number = allocateLocalMessageNumber(database, trimmedRoomId);
     const insertedRow: LocalMessageRow = {
@@ -772,10 +787,41 @@ export async function addLocalChatMessage(
           insertedRow.timestamp,
         );
     }
-    return insertedRow;
+    options.writeInTransaction?.(database);
+    return { row: insertedRow, inserted: true };
   });
 
-  return (await hydrateMessageRows(database, [row], { readerKey: input.readerKey }))[0]!;
+  const message = (await hydrateMessageRows(
+    database,
+    [result.row],
+    { readerKey: input.readerKey },
+  ))[0]!;
+  let notificationPublished = false;
+  return {
+    message,
+    publishWriteNotification: () => {
+      if (!result.inserted || notificationPublished) return;
+      notificationPublished = true;
+      publishLocalChatMessageWrite({
+        localRoomIdentifier: trimmedRoomId,
+        message,
+      });
+    },
+  };
+}
+
+export async function addLocalChatMessage(
+  roomId: string,
+  input: LocalChatMessageInput,
+): Promise<RoomMessagePayload> {
+  const persisted = await addLocalChatMessageWithDeferredWriteNotification(roomId, input);
+  persisted.publishWriteNotification();
+  return persisted.message;
+}
+
+export async function getLocalChatRoomWriteSequenceValue(roomId: string): Promise<number> {
+  const database = await getDb();
+  return getLocalChatRoomWriteSequence(database, roomId.trim());
 }
 
 export async function getLocalChatMessages(

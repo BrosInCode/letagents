@@ -28,6 +28,7 @@ const {
   addLocalChatMessage,
   claimUnsyncedLocalChatMessages,
   getLocalChatMessages,
+  getLocalChatRoomWriteSequenceValue,
   getLocalChatMessagesBefore,
   getLocalMessageThread,
   getLocalMessageThreads,
@@ -83,13 +84,14 @@ const {
   desktopMessageAccountRoutingRequest,
   resolveLocalCloudPublishAuthority,
 } = await import("../main/rooms/messages.js");
+const { registerDesktopRoomIpcHandlers } = await import("../main/ipc-handlers/rooms.js");
 const {
   clearLocalManagedMessageDeliveryRetriesForTest,
   deliverDesktopRoomMessageToManagedAgents,
-  emitPersistedLocalRoomMessage,
   inspectLocalManagedMessageDeliveryRetriesForTest,
   setLocalAccountAgentRoutingHydratorForTest,
   setManagedAgentRoomStreamDispatcherForTest,
+  setLocalRoomMessagePollDependenciesForTest,
   startDesktopRoomStream,
   stopDesktopRoomStream,
 } = await import("../main/room-stream.js");
@@ -377,6 +379,11 @@ test("persisted local agent messages reach other managed workers once without po
   });
   const workers = [oak, cedar];
   const managedEvents: Array<Extract<DesktopRoomStreamEvent, { type: "message" }>> = [];
+  let resolveWaitScheduled!: () => void;
+  const waitScheduled = new Promise<void>((resolve) => {
+    resolveWaitScheduled = resolve;
+  });
+  const waitResults: boolean[] = [];
 
   setManagedAgentRoomStreamDispatcherForTest((event) => {
     if (event.type === "message") managedEvents.push(event);
@@ -392,9 +399,16 @@ test("persisted local agent messages reach other managed workers once without po
           : [],
       ),
     })));
+  setLocalRoomMessagePollDependenciesForTest({
+    onWaitScheduled: () => resolveWaitScheduled(),
+    onWaitResolved: (notified) => {
+      waitResults.push(notified);
+    },
+  });
 
   try {
     await startDesktopRoomStream(cloudRoomIdentifier);
+    await waitScheduled;
     const root = await addLocalChatMessage(localRoomIdentifier, {
       sender: "Human",
       text: "Coordinate here",
@@ -419,20 +433,17 @@ test("persisted local agent messages reach other managed workers once without po
       });
       const message = mapRoomMessagePayload(payload);
       messages.push(message);
-      emitPersistedLocalRoomMessage(cloudRoomIdentifier, message);
     }
 
-    await new Promise((resolve) => setTimeout(resolve, 50));
-    for (const message of messages) {
-      // This is the same persisted row the durable poll later observes. The
-      // immediate delivery must win once; replay must be a no-op.
-      await deliverDesktopRoomMessageToManagedAgents(cloudRoomIdentifier, message);
-    }
     await new Promise((resolve) => setTimeout(resolve, 50));
 
     for (const message of messages) {
       const deliveries = managedEvents.filter((event) => event.message.id === message.id);
-      assert.equal(deliveries.length, 1, `${message.text} is dispatched exactly once`);
+      assert.equal(
+        deliveries.length,
+        1,
+        `${message.text} is dispatched once through the ordered notification drain`,
+      );
       assert.deepEqual(deliveries[0]?.message.accountAgentRouting, {
         version: 1,
         authority: "legacy",
@@ -445,11 +456,304 @@ test("persisted local agent messages reach other managed workers once without po
         controlAuthorized: false,
       }, message.text);
     }
+    assert.equal(
+      waitResults[0],
+      true,
+      "the same-process commit wakes the ordered drain instead of waiting for scalar fallback",
+    );
   } finally {
     await stopDesktopRoomStream(cloudRoomIdentifier);
     setManagedAgentRoomStreamDispatcherForTest(null);
     setLocalAccountAgentRoutingHydratorForTest(null);
+    setLocalRoomMessagePollDependenciesForTest(null);
   }
+});
+
+test("local Desktop IPC sends stay behind an older in-flight durable page", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/local-write-order";
+  const localRoomIdentifier = "local_write_order";
+  await createLocalRoom({
+    roomIdentifier: localRoomIdentifier,
+    displayName: "Local Write Order",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+  const older = mapRoomMessagePayload(
+    await addLocalChatMessage(localRoomIdentifier, {
+      sender: "Cedar",
+      text: "older instruction",
+      source: "agent",
+      publisher_agent_key: "owner/cedar",
+      publisher_agent_session_id: "agent_session_cedar_order",
+    }),
+  );
+
+  let newer: DesktopRoomMessage | null = null;
+  let pageRead = 0;
+  let resolveFirstPageStarted!: () => void;
+  const firstPageStarted = new Promise<void>((resolve) => {
+    resolveFirstPageStarted = resolve;
+  });
+  let releaseFirstPage!: () => void;
+  const firstPageGate = new Promise<void>((resolve) => {
+    releaseFirstPage = resolve;
+  });
+  const deliveredIds: string[] = [];
+  setLocalRoomMessagePollDependenciesForTest({
+    readMessages: async () => {
+      pageRead += 1;
+      if (pageRead === 1) {
+        resolveFirstPageStarted();
+        await firstPageGate;
+        return { messages: [older], has_more: true };
+      }
+      if (pageRead === 2 && newer) {
+        return { messages: [newer], has_more: false };
+      }
+      return { messages: [], has_more: false };
+    },
+  });
+  setLocalAccountAgentRoutingHydratorForTest(async (_room, _localRoom, messages) =>
+    messages.map((message) => ({
+      ...message,
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy" as const,
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: false,
+      },
+    })));
+  setManagedAgentRoomStreamDispatcherForTest((event) => {
+    if (event.type === "message") deliveredIds.push(event.message.id);
+  });
+  const ipcHandlers = new Map<string, (...args: unknown[]) => unknown>();
+  registerDesktopRoomIpcHandlers({
+    handle: (channel: string, listener: (...args: unknown[]) => unknown) => {
+      ipcHandlers.set(channel, listener);
+    },
+  } as unknown as Parameters<typeof registerDesktopRoomIpcHandlers>[0]);
+  const sendMessage = ipcHandlers.get("desktop:room:send-message");
+  assert.ok(sendMessage);
+
+  try {
+    await startDesktopRoomStream(cloudRoomIdentifier);
+    await firstPageStarted;
+    const sendResult = (await sendMessage(
+      {},
+      cloudRoomIdentifier,
+      "newer instruction",
+    )) as { message: DesktopRoomMessage };
+    newer = sendResult.message;
+    assert.deepEqual(
+      deliveredIds,
+      [],
+      "the local IPC send only wakes the ordered lane and cannot bypass the blocked older page",
+    );
+    releaseFirstPage();
+    for (let attempt = 0; attempt < 50 && deliveredIds.length < 2; attempt += 1) {
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(deliveredIds, [older.id, newer.id]);
+  } finally {
+    releaseFirstPage();
+    await stopDesktopRoomStream(cloudRoomIdentifier);
+    setLocalRoomMessagePollDependenciesForTest(null);
+    setLocalAccountAgentRoutingHydratorForTest(null);
+    setManagedAgentRoomStreamDispatcherForTest(null);
+  }
+});
+
+test("idle local room streams poll one scalar with exponential backoff", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/local-write-sequence";
+  const localRoomIdentifier = "local_write_sequence";
+  await createLocalRoom({
+    roomIdentifier: localRoomIdentifier,
+    displayName: "Local write sequence",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+
+  let messagePageReads = 0;
+  let writeSequence = 0;
+  const waits: number[] = [];
+  let releaseBlockedWait!: (notified: boolean) => void;
+  const blockedWait = new Promise<boolean>((resolve) => {
+    releaseBlockedWait = resolve;
+  });
+  const neverWait = new Promise<boolean>(() => {});
+  setLocalRoomMessagePollDependenciesForTest({
+    readMessages: async () => {
+      messagePageReads += 1;
+      return { messages: [], has_more: false };
+    },
+    readWriteSequence: async () => writeSequence,
+    wait: async (timeoutMs) => {
+      waits.push(timeoutMs);
+      if (waits.length <= 5) return false;
+      return waits.length === 6 ? blockedWait : neverWait;
+    },
+  });
+
+  try {
+    await startDesktopRoomStream(cloudRoomIdentifier);
+    while (waits.length < 6) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      messagePageReads,
+      1,
+      "an idle room drains messages once instead of querying them every interval",
+    );
+    assert.deepEqual(
+      waits.slice(0, 6),
+      [250, 500, 1_000, 2_000, 4_000, 5_000],
+      "empty scalar checks back off exponentially",
+    );
+
+    writeSequence = 1;
+    releaseBlockedWait(false);
+    while (messagePageReads < 2) await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(
+      messagePageReads,
+      2,
+      "an external sequence change re-enables one message-table drain",
+    );
+  } finally {
+    await stopDesktopRoomStream(cloudRoomIdentifier);
+    setLocalRoomMessagePollDependenciesForTest(null);
+  }
+});
+
+test("local room streams close the write-between-sequence-and-wait race", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/local-write-lost-wake";
+  const localRoomIdentifier = "local_write_lost_wake";
+  await createLocalRoom({
+    roomIdentifier: localRoomIdentifier,
+    displayName: "Local write lost wake",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+
+  let sequenceReads = 0;
+  let pageReads = 0;
+  let writeSequence = 0;
+  let interleavedMessage: Awaited<ReturnType<typeof addLocalChatMessage>> | null = null;
+  const events: string[] = [];
+  let resolveWaitCalled!: () => void;
+  const waitCalled = new Promise<void>((resolve) => {
+    resolveWaitCalled = resolve;
+  });
+  setLocalAccountAgentRoutingHydratorForTest(async (_room, _localRoom, messages) =>
+    messages.map((message) => ({
+      ...message,
+      accountAgentRouting: {
+        version: 1,
+        authority: "legacy" as const,
+        recipientAgentKeys: [],
+        recipientSessions: [],
+        controlAuthorized: false,
+      },
+    })));
+  setLocalRoomMessagePollDependenciesForTest({
+    readMessages: async () => {
+      pageReads += 1;
+      events.push(`drain:${pageReads}`);
+      return {
+        messages: pageReads === 2 && interleavedMessage ? [interleavedMessage] : [],
+        has_more: false,
+      };
+    },
+    readWriteSequence: async () => {
+      sequenceReads += 1;
+      if (sequenceReads === 3) {
+        const observedBeforeWrite = writeSequence;
+        interleavedMessage = await addLocalChatMessage(localRoomIdentifier, {
+          sender: "Human",
+          text: "committed between the scalar read and waiter registration",
+          source: "browser",
+        });
+        writeSequence = 1;
+        events.push("write");
+        return observedBeforeWrite;
+      }
+      return writeSequence;
+    },
+    wait: async () => {
+      events.push("wait");
+      resolveWaitCalled();
+      return await new Promise<boolean>(() => {});
+    },
+  });
+
+  try {
+    await startDesktopRoomStream(cloudRoomIdentifier);
+    await waitCalled;
+    assert.ok(events.indexOf("drain:2") > events.indexOf("write"));
+    assert.ok(
+      events.indexOf("drain:2") < events.indexOf("wait"),
+      "the generation recheck drains the interleaved write before sleeping",
+    );
+  } finally {
+    await stopDesktopRoomStream(cloudRoomIdentifier);
+    setLocalRoomMessagePollDependenciesForTest(null);
+    setLocalAccountAgentRoutingHydratorForTest(null);
+  }
+});
+
+test("large local backlogs yield between bounded message-drain passes", async () => {
+  const cloudRoomIdentifier = "github.com/BrosInCode/local-write-bounded-drain";
+  const localRoomIdentifier = "local_write_bounded_drain";
+  await createLocalRoom({
+    roomIdentifier: localRoomIdentifier,
+    displayName: "Local write bounded drain",
+    cloudRoomIdentifier,
+  });
+  await setLocalAwareRoomStorageMode(cloudRoomIdentifier, "local");
+
+  let pageReads = 0;
+  let resolveMacrotask!: () => void;
+  const macrotaskRan = new Promise<void>((resolve) => {
+    resolveMacrotask = resolve;
+  });
+  setLocalRoomMessagePollDependenciesForTest({
+    readMessages: async () => {
+      pageReads += 1;
+      if (pageReads === 4) setImmediate(resolveMacrotask);
+      return { messages: [], has_more: true };
+    },
+    readWriteSequence: async () => 0,
+  });
+
+  try {
+    await startDesktopRoomStream(cloudRoomIdentifier);
+    await macrotaskRan;
+    assert.ok(pageReads >= 4, "one bounded pass reads the expected page budget");
+  } finally {
+    await stopDesktopRoomStream(cloudRoomIdentifier);
+    setLocalRoomMessagePollDependenciesForTest(null);
+  }
+});
+
+test("local message inserts advance a durable per-room write sequence once", async () => {
+  const roomId = "room_write_sequence_trigger";
+  assert.equal(await getLocalChatRoomWriteSequenceValue(roomId), 0);
+  await addLocalChatMessage(roomId, {
+    sender: "Human",
+    text: "first",
+    source: "browser",
+    idempotency_key: "write-sequence-once",
+  });
+  assert.equal(await getLocalChatRoomWriteSequenceValue(roomId), 1);
+  await addLocalChatMessage(roomId, {
+    sender: "Human",
+    text: "duplicate retry",
+    source: "browser",
+    idempotency_key: "write-sequence-once",
+  });
+  assert.equal(
+    await getLocalChatRoomWriteSequenceValue(roomId),
+    1,
+    "idempotent retries do not produce false change notifications",
+  );
 });
 
 test("desktop local chat store persists messages, replies, and sync metadata", async () => {
@@ -1898,6 +2202,11 @@ test("desktop and MCP local chat writers allocate unique ids across processes", 
     return Number(left.replace("msg_", "")) - Number(right.replace("msg_", ""));
   });
   assert.deepEqual(ids, ["msg_1", "msg_2", "msg_3", "msg_4", "msg_5", "msg_6", "msg_7", "msg_8"]);
+  assert.equal(
+    await getLocalChatRoomWriteSequenceValue("room_race"),
+    8,
+    "Desktop and MCP writers share the same durable cross-process signal",
+  );
 });
 
 test("local chat stores keep quote-replies top-level across a process restart", async () => {

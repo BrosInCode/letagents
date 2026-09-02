@@ -84,13 +84,18 @@ type RoomThreadInboxPayload = {
   unread_thread_count: number;
 };
 
+export type DesktopRoomMessageSendOutcome = {
+  result: DesktopSendRoomMessageResult;
+  managedDelivery: "ordered_local_stream" | "direct_cloud";
+};
+
 export async function sendDesktopRoomMessage(
   roomIdentifier: string,
   text: string,
   replyTo?: string | null,
   attachments: Array<{ upload_id: string }> = [],
   threadRootId?: string | null,
-): Promise<DesktopSendRoomMessageResult> {
+): Promise<DesktopRoomMessageSendOutcome> {
   const trimmedRoomIdentifier = roomIdentifier.trim();
   const trimmedText = text.trim();
   if (!trimmedRoomIdentifier) {
@@ -123,7 +128,10 @@ export async function sendDesktopRoomMessage(
       readerKey: await resolveLocalThreadReaderKey(storedAuth),
     });
     return {
-      message: mapRoomMessagePayload(message),
+      result: {
+        message: mapRoomMessagePayload(message),
+      },
+      managedDelivery: "ordered_local_stream",
     };
   }
 
@@ -149,7 +157,10 @@ export async function sendDesktopRoomMessage(
   );
 
   return {
-    message: mapCloudRoomMessagePayload(message),
+    result: {
+      message: mapCloudRoomMessagePayload(message),
+    },
+    managedDelivery: "direct_cloud",
   };
 }
 

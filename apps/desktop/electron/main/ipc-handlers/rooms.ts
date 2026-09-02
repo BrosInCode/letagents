@@ -294,8 +294,20 @@ export function registerDesktopRoomIpcHandlers(targetIpcMain: IpcMain): void {
       attachments?: Array<{ upload_id: string }>,
       threadRootId?: string | null,
     ): Promise<DesktopSendRoomMessageResult> => {
-      const result = await sendDesktopRoomMessage(roomIdentifier, text, replyTo, attachments ?? [], threadRootId);
-      await deliverDesktopRoomMessageToManagedAgents(roomIdentifier, result.message);
+      const send = await sendDesktopRoomMessage(
+        roomIdentifier,
+        text,
+        replyTo,
+        attachments ?? [],
+        threadRootId,
+      );
+      if (send.managedDelivery === "direct_cloud") {
+        await deliverDesktopRoomMessageToManagedAgents(
+          roomIdentifier,
+          send.result.message,
+        );
+      }
+      const result = send.result;
       return result;
     },
   );

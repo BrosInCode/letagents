@@ -246,6 +246,7 @@ const required = [
   ...[
     "shared/message-contracts.mjs",
     "shared/routing-aliases.mjs",
+    "shared/sqlite-local-write-notifications.mjs",
     "shared/sqlite-thread-routing.mjs",
   ].map((relative) => ({
     absolutePath: join(contents, relative),

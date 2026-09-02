@@ -7,7 +7,10 @@ import {
   cloudRoomIdentifierForStorage,
   localRoomIdentifierForStorage,
 } from "../rooms/local-store.js";
-import { publishLocalRoomWorkflowArtifact } from "../rooms/artifacts/local-store.js";
+import {
+  prepareLocalRoomWorkflowArtifactWrite,
+  publishLocalRoomWorkflowArtifact,
+} from "../rooms/artifacts/local-store.js";
 import type { StoredAgentSessionState } from "./state.js";
 
 export function buildManagedAgentChangeSummaryWorkflowArtifact(input: {
@@ -111,6 +114,40 @@ export async function publishManagedAgentLocalChangeSummaryArtifact(
     throw new Error("Managed-agent change summary artifact was published without an identity key.");
   }
   return { artifactIdentityKey };
+}
+
+export async function prepareManagedAgentLocalChangeSummaryArtifactWrite(
+  input: PublishManagedAgentChangeSummaryArtifactInput,
+): Promise<{
+  database: Awaited<ReturnType<typeof prepareLocalRoomWorkflowArtifactWrite>>["database"];
+  writeInCurrentTransaction: () => void;
+  finalizeAfterCommit: () => Promise<{ artifactIdentityKey: string }>;
+} | null> {
+  if (input.storage.effectiveMode !== "local") return null;
+  const artifact = buildManagedAgentChangeSummaryWorkflowArtifact({
+    summary: input.summary,
+    workerSession: input.workerSession,
+  });
+  if (!artifact) return null;
+  const localRoomIdentifier = localRoomIdentifierForStorage(input.storage, input.roomIdentifier);
+  const prepared = await prepareLocalRoomWorkflowArtifactWrite({
+    roomId: localRoomIdentifier,
+    artifact,
+    taskId: input.taskId ?? null,
+    replaceLinkedTaskIds: true,
+  });
+  return {
+    database: prepared.database,
+    writeInCurrentTransaction: prepared.writeInCurrentTransaction,
+    finalizeAfterCommit: async () => {
+      const result = await prepared.finalizeAfterCommit();
+      const artifactIdentityKey = result.artifact.identity_key;
+      if (!artifactIdentityKey) {
+        throw new Error("Managed-agent change summary artifact was published without an identity key.");
+      }
+      return { artifactIdentityKey };
+    },
+  };
 }
 
 async function publishManagedAgentCloudChangeSummaryArtifact(
