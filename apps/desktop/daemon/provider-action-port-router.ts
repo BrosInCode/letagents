@@ -26,6 +26,7 @@ import type { CodexNativePermissionRequest, CodexPermissionFileChange, OpenCodeN
 
 type NativeHandle = {
   custodyLaunchAgentSessionId?: string;
+  lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   workAttemptId: string;
   pid: number | null;
   providerContinuationId: string | null;
@@ -124,6 +125,9 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       const handle = remembered.handle;
       if (
         handle.providerContinuationId !== ref.providerContinuationId
+        || (provider === "codex"
+          && (handle.lifecycleAuthorityMode ?? "typed_shadow")
+            !== (ref.lifecycleAuthorityMode ?? "typed_shadow"))
         || (ref.providerConnection
           && !sameProviderActionConnectionIdentity(handle.providerConnection, ref.providerConnection))
       ) return null;

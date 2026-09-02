@@ -68,6 +68,7 @@ type PendingTypedOperationalActivation = {
   lease: ProviderListenerLease;
   prerequisitesReady: boolean;
   physicalOperationsActive: boolean;
+  physicalOperationsDisposerCount: number | null;
   promotion: Promise<void> | null;
   retryAttempts: number;
   retryTimer: ReturnType<typeof setTimeout> | null;
@@ -201,6 +202,7 @@ export type ProviderStreamCoordinatorOptions = {
   durability: ProviderStreamDurability;
   runtimeCustody: ProviderStreamRuntimeCustody;
   serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
+  serializeManifest<T>(operation: () => Promise<T>): Promise<T>;
   transition: ProviderStreamTransition;
   appendActivity(
     entryId: string,
@@ -392,6 +394,7 @@ export class ProviderStreamCoordinator {
         lease,
         prerequisitesReady: false,
         physicalOperationsActive: false,
+        physicalOperationsDisposerCount: null,
         promotion: null,
         retryAttempts: 0,
         retryTimer: null,
@@ -490,6 +493,17 @@ export class ProviderStreamCoordinator {
     this.track(promotion);
   }
 
+  /** Durable typed effects close delivery before asynchronous convergence. */
+  typedLifecycleEffectChanged(entryId: string, observedState: ObservedState | null): void {
+    const installation = this.currentInstallation(entryId);
+    if (installation && ["failed", "stopping", "stopped"].includes(observedState ?? "")) {
+      this.typedOperationalInstallations.delete(installation);
+      this.clearPendingTypedOperationalActivation(entryId);
+      return;
+    }
+    this.typedLifecycleAdmissionChanged(entryId);
+  }
+
   /** Every daemon-inbox delivery trigger must cross the same exact-birth latch. */
   isDeliveryAdmitted(entryId: string): boolean {
     const installation = this.currentInstallation(entryId);
@@ -503,8 +517,13 @@ export class ProviderStreamCoordinator {
   ): Promise<void> {
     const { installation, lease } = pending;
     try {
+      if (!await this.typedInstallationCanActivate(installation)) {
+        this.clearPendingTypedOperationalActivation(installation.entryId, pending);
+        return;
+      }
       if (!pending.physicalOperationsActive) {
         const disposerCount = lease.disposers.length;
+        pending.physicalOperationsDisposerCount = disposerCount;
         try {
           await this.activateOperationalInstallation(installation, lease, () => false);
         } catch (error) {
@@ -518,10 +537,23 @@ export class ProviderStreamCoordinator {
           || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending) return;
         pending.physicalOperationsActive = true;
       }
-      if (!this.isCurrentInstallation(installation)
-        || !this.isCurrentListenerLease(lease)
-        || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending) return;
-      this.typedOperationalInstallations.add(installation);
+      const admitted = await this.options.serializeManifest(async () => {
+        if (!this.isCurrentInstallation(installation)
+          || !this.isCurrentListenerLease(lease)
+          || this.pendingTypedOperationalActivations.get(installation.entryId) !== pending
+          || !await this.typedInstallationCanActivate(installation)) return false;
+        this.typedOperationalInstallations.add(installation);
+        return true;
+      });
+      if (!admitted) {
+        const failures = this.rollbackPendingPhysicalOperations(pending);
+        this.clearPendingTypedOperationalActivation(installation.entryId, pending);
+        if (failures.length) {
+          throw new AggregateError(failures,
+            `Typed operational activation cleanup failed for ${installation.entryId}.`);
+        }
+        return;
+      }
       await this.options.delivery.start(installation.entryId);
       if (!this.isCurrentInstallation(installation)
         || !this.isCurrentListenerLease(lease)
@@ -534,6 +566,17 @@ export class ProviderStreamCoordinator {
         this.scheduleTypedOperationalRetry(pending);
       }
     }
+  }
+
+  private async typedInstallationCanActivate(
+    installation: ProviderInstallationToken,
+  ): Promise<boolean> {
+    if (!this.isCurrentInstallation(installation)) return false;
+    const entry = await this.options.manifest.getEntry(installation.entryId);
+    return Boolean(entry
+      && this.entryMatchesInstallation(entry, installation)
+      && entry.desired_state === "running"
+      && !["failed", "stopping", "stopped"].includes(entry.observed_state));
   }
 
   private scheduleTypedOperationalRetry(pending: PendingTypedOperationalActivation): void {
@@ -572,6 +615,14 @@ export class ProviderStreamCoordinator {
       try { dispose(); } catch (error) { failures.push(error); }
     }
     return failures;
+  }
+
+  private rollbackPendingPhysicalOperations(pending: PendingTypedOperationalActivation): unknown[] {
+    const keepCount = pending.physicalOperationsDisposerCount;
+    if (!pending.physicalOperationsActive || keepCount === null) return [];
+    pending.physicalOperationsActive = false;
+    pending.physicalOperationsDisposerCount = null;
+    return this.rollbackLeaseDisposers(pending.lease, keepCount);
   }
 
   private async activateOperationalInstallation(
@@ -724,6 +775,7 @@ export class ProviderStreamCoordinator {
         // processes, so they remain physical infrastructure; only each exact
         // child birth is held from lifecycle persistence and room delivery.
         physicalOperationsActive: true,
+        physicalOperationsDisposerCount: null,
         promotion: null,
         retryAttempts: 0,
         retryTimer: null,
@@ -1087,6 +1139,8 @@ export class ProviderStreamCoordinator {
       executionGenerationId,
     );
     const daemonInbox = entry.delivery_mode === "daemon_inbox";
+    const typedDaemonInbox = daemonInbox
+      && this.typedDaemonInboxInstallations.has(installation);
     const custodialPolling = !daemonInbox && await this.options.heartbeat.requiresHostGrant(entry);
     const legacyCodexCutover = entry.provider === "codex"
       && (entry.delivery_mode ?? "mcp_polling") === "mcp_polling"
@@ -1168,7 +1222,7 @@ export class ProviderStreamCoordinator {
         );
       }
     }
-    if (lifecycle === "failed" && entry.observed_state !== "failed") {
+    if (!typedDaemonInbox && lifecycle === "failed" && entry.observed_state !== "failed") {
       await this.options.transition(
         entryId,
         "failed",
@@ -1178,7 +1232,8 @@ export class ProviderStreamCoordinator {
       );
     }
     const liveBinding = this.options.runtimeCustody.liveBinding(entryId);
-    if (liveBinding?.executionGenerationId === entry.provider_ref?.execution_generation_id) {
+    if (!typedDaemonInbox
+      && liveBinding?.executionGenerationId === entry.provider_ref?.execution_generation_id) {
       // This is authenticated worker-binding proof, not raw stream lifecycle
       // classification. Its coordinator may recover only the exact credential-
       // handoff latch after the remote publication accepts the scoped bearer.
@@ -1192,7 +1247,7 @@ export class ProviderStreamCoordinator {
     if (legacyCodexCutover && observedLifecycle === "terminal") {
       void this.options.delivery.startCutover(entryId).catch(() => undefined);
     }
-    if ((lifecycle === "failed" || lifecycle === "terminal")
+    if (!typedDaemonInbox && (lifecycle === "failed" || lifecycle === "terminal")
       && this.isCurrentInstallation(installation)
       && !["stopping", "stopped"].includes(handle.observedState)) {
       try {

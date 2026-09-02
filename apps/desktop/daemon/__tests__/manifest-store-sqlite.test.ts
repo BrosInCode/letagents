@@ -27,6 +27,110 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
   provider_continuation_id: "thread_1",
 } as const;
 
+test("provider birth collisions cannot relabel frozen lifecycle authority", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const connection = {
+    kind: "codex_app_server" as const,
+    url: "http://127.0.0.1:4311",
+    pid: 4311,
+    processIdentity: "frozen-birth",
+  };
+  const agent: DaemonManifestEntry = {
+    ...entry,
+    condition: "none",
+    delivery_mode: "daemon_inbox",
+    turn_control: undefined,
+    work_attempt_id: "attempt_1",
+    provider_ref: {
+      work_attempt_id: "attempt_1",
+      execution_generation_id: "run_1",
+      provider_continuation_id: "thread_1",
+      provider_connection: connection,
+    },
+  };
+  try {
+    const written = await store.write(0, [agent]);
+    seedTerminalExecution(env.databasePath, "attempt_1", "run_1");
+    const first = await store.checkpointProviderBirth(written.generation, {
+      entry: agent,
+      executionGenerationId: "run_1",
+      providerConnection: connection,
+      appliedRevision: 1,
+      requestedAuthorityMode: "typed_shadow",
+      observedAtMs: 100,
+    });
+    const before = await store.load();
+    await assert.rejects(store.checkpointProviderBirth(first.generation, {
+      entry: first.entry,
+      executionGenerationId: "run_1",
+      providerConnection: connection,
+      appliedRevision: 1,
+      requestedAuthorityMode: "typed",
+      observedAtMs: 200,
+    }), /incompatible frozen lifecycle authority/);
+    const after = await store.load();
+    assert.equal(after.generation, before.generation, "rejected relabeling commits no manifest generation");
+    assert.deepEqual(after.entries, before.entries, "rejected relabeling rolls back projection rewrites");
+    assert.equal(await store.readRuntimeLifecycleAuthority({
+      agentId: agent.id,
+      executionGenerationId: "run_1",
+      providerConnection: connection,
+      configurationRevision: 1,
+    }), "typed_shadow");
+  } finally {
+    await env.cleanup();
+  }
+});
+
+test("typed runtime readiness makes a fresh exact birth idle and stamps readiness", async () => {
+  const env = await fixture();
+  const store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "ready-birth" };
+  const { ready_reached_at: _priorReady, ...entryWithoutReadiness } = entry;
+  const agent: DaemonManifestEntry = {
+    ...entryWithoutReadiness, id: "ready-agent", room_id: "room", condition: "none", delivery_mode: "daemon_inbox",
+    config_revision: 2, runtime_configuration_revision: 2, turn_control: undefined,
+    work_attempt_id: "ready-workspace", observed_state: "starting",
+    provider_ref: { work_attempt_id: "ready-workspace", execution_generation_id: "ready-generation",
+      provider_continuation_id: "ready-continuation", provider_connection: connection },
+  };
+  await store.write(0, [agent]);
+  seedTerminalExecution(env.databasePath, "ready-workspace", "ready-generation");
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    database.exec(`PRAGMA foreign_keys=ON;
+      UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='ready-generation';
+      UPDATE agent_configurations SET config_revision=2,runtime_configuration_revision=2 WHERE agent_id='ready-agent'`);
+    const shadow = new ExecutionShadowStore(database);
+    const runtimeGenerationId = executionRuntimeStorageIdentity("ready-agent", "ready-generation",
+      connection.kind, connection.pid, connection.processIdentity);
+    shadow.registerRuntime({ agentId: "ready-agent", executionGenerationId: "ready-generation", runtimeGenerationId,
+      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 });
+    const observer = shadow.bindObserver({ agentId: "ready-agent", subjectRuntimeGenerationId: runtimeGenerationId,
+      observerRuntimeGenerationId: runtimeGenerationId, sourceId: "ready-source", daemonGenerationId: "1",
+      expectedEpoch: 0, boundAtMs: 100 });
+    shadow.ingest("ready-source", observer, { factId: "runtime-ready", agentId: "ready-agent",
+      executionGenerationId: "ready-generation", runtimeGenerationId, observerEpoch: 1, sourceSequence: 1,
+      observedAtMs: 101, domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
+    const [pending] = await store.listPendingTypedLifecycleEffects("ready-agent");
+    assert.equal(pending?.effectKind, "manifest_idle");
+    const applied = await store.applyTypedLifecycleEffect(1, pending!, {
+      agentId: "ready-agent", executionGenerationId: "ready-generation", workAttemptId: "ready-workspace",
+      providerContinuationId: "ready-continuation", providerConnection: connection,
+      configurationRevision: 2, authorityMode: "typed", disposedAtMs: 200,
+    }, commit => commit());
+    assert.equal(applied.disposition, "applied");
+    assert.equal(applied.entry?.observed_state, "idle");
+    assert.equal(applied.entry?.ready_reached_at, new Date(101).toISOString());
+    assert.deepEqual(applied.entry?.native_liveness, {
+      state: "idle", observed_at: new Date(101).toISOString(), detail: "Provider runtime ready",
+    });
+  } finally {
+    database.close(); await store.close(); await env.cleanup();
+  }
+});
+
 test("typed lifecycle effects apply once and restart supersedes work after structural terminal evidence", async () => {
   const env = await fixture(); const store = new ManifestStore(env.databasePath);
   const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "typed-birth" };
@@ -88,10 +192,10 @@ test("typed lifecycle effects apply once and restart supersedes work after struc
   assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='active'").get()?.state, "pending",
     "manifest projection and disposition acknowledgement roll back together");
   let manifestGeneration = 1;
-  const admissionChanges: string[] = [];
+  const admissionChanges: Array<{ agentId: string; observedState: string | null }> = [];
   const coordinator = (currentInstallation: () => ProviderInstallationToken | undefined) => new TypedLifecycleEffectCoordinator({
     store, currentInstallation, isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
-    changed: agentId => { admissionChanges.push(agentId); },
+    changed: (agentId, observedState) => { admissionChanges.push({ agentId, observedState }); },
     authority: { serialize: operation => operation(), assertCurrent: async () => {},
       currentManifestGeneration: () => manifestGeneration,
       acceptManifestGeneration: generation => { manifestGeneration = generation; }, fenceCommit: commit => commit() },
@@ -111,7 +215,7 @@ test("typed lifecycle effects apply once and restart supersedes work after struc
     assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='active'").get()?.state, "applied");
     assert.equal((await store.getEntry("agent"))?.observed_state, "working");
     assert.equal(manifestGeneration, 2);
-    assert.deepEqual(admissionChanges, ["agent"],
+    assert.deepEqual(admissionChanges, [{ agentId: "agent", observedState: "working" }],
       "a durable lifecycle disposition emits one state-change admission hint");
 
     shadow.ingest("source", observer, { factId: "terminal", agentId: "agent", executionGenerationId: "generation",
@@ -130,7 +234,10 @@ test("typed lifecycle effects apply once and restart supersedes work after struc
     assert.equal((await store.getEntry("agent"))?.observed_state, "working",
       "typed drain loses to already-durable structural terminal authority");
     assert.equal(manifestGeneration, 2, "superseding an effect does not mutate the manifest generation");
-    assert.deepEqual(admissionChanges, ["agent", "agent"],
+    assert.deepEqual(admissionChanges, [
+      { agentId: "agent", observedState: "working" },
+      { agentId: "agent", observedState: null },
+    ],
       "superseding the terminal effect also wakes exact readiness without granting authority itself");
   } finally {
     await restarted.close(); database.close(); await store.close(); await env.cleanup();
@@ -658,12 +765,12 @@ test("approval journal materializes atomically without capture and preserves lag
     const competing = await Promise.all([admitApproval(store, input, authority, async commit => commit()), admitApproval(other, input, authority, async commit => commit())]);
     assert.deepEqual(competing.map(value => value.created).sort(), [false, true]);
     assert.equal(database.prepare("SELECT state FROM execution_turns").get()!.state, "none", "identity admission does not synthesize a turn-start fact");
-    assert.equal(database.prepare("SELECT authority_mode FROM execution_runtime_generations").get()!.authority_mode, "typed_shadow",
-      "approval-first materialization uses the closed provider release policy");
+    assert.equal(database.prepare("SELECT authority_mode FROM execution_runtime_generations").get()!.authority_mode, "typed",
+      "approval-first daemon-owned Codex materialization uses typed authority");
     const shadow = new ExecutionShadowStore(database);
     assert.equal(shadow.registerRuntime({ agentId: "agent", executionGenerationId: "generation", runtimeGenerationId: expected.runtimeGenerationId,
-      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 }), "typed_shadow",
-      "a later capture request cannot relabel an approval-materialized birth");
+      provider: "codex", authorityMode: "typed", configRevision: 1, createdAtMs: 100 }), "typed",
+      "a later capture request preserves the approval-materialized typed birth");
     const attemptId = shadow.trackMessage({ agentId: "agent", roomId: "room", sourceMessageId: "message", executionGenerationId: "generation", workspaceId: "workspace", createdAtMs: 100 });
     shadow.trackNativeTurn({ agentId: "agent", roomId: "room", executionGenerationId: "generation", runtimeGenerationId: expected.runtimeGenerationId,
       attemptId, turnId: expected.turnId, providerContinuationId: "continuation", providerTurnId: "native-turn", createdAtMs: 100 });

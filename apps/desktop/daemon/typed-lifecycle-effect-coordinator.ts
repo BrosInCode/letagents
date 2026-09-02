@@ -1,5 +1,6 @@
 import type { ManifestStore, PendingTypedLifecycleEffect, TypedLifecycleEffectInstallation } from "./manifest-store.js";
 import type { ProviderInstallationToken } from "./provider-stream-coordinator.js";
+import type { ObservedState } from "./types.js";
 
 type Options = {
   store: Pick<ManifestStore, "listPendingTypedLifecycleEffects" | "applyTypedLifecycleEffect">;
@@ -14,7 +15,7 @@ type Options = {
   isClosing(): boolean;
   nowMs(): number;
   diagnostic(agentId: string, error: unknown): void;
-  changed?(agentId: string): void;
+  changed?(agentId: string, observedState: ObservedState | null): void;
 };
 
 const BATCH_SIZE = 32;
@@ -96,6 +97,7 @@ export class TypedLifecycleEffectCoordinator {
       let progressed = false;
       let retry = false;
       const changedAgentIds = new Set<string>();
+      const manifestStates = new Map<string, ObservedState>();
       for (const effect of effects) {
         if (this.closed || this.options.isClosing()) return;
         try {
@@ -116,6 +118,9 @@ export class TypedLifecycleEffectCoordinator {
           });
           progressed ||= result.disposition !== "pending";
           if (result.disposition !== "pending") changedAgentIds.add(effect.agentId);
+          if (result.disposition === "applied" && result.entry) {
+            manifestStates.set(effect.agentId, result.entry.observed_state);
+          }
         } catch (error) {
           this.report(effect.agentId, error);
           this.retry(effect.agentId);
@@ -130,7 +135,9 @@ export class TypedLifecycleEffectCoordinator {
       if (retry) return;
       if (agentId !== null) changedAgentIds.add(agentId);
       for (const changedAgentId of changedAgentIds) {
-        try { this.options.changed?.(changedAgentId); } catch { /* admission hints own no effect authority */ }
+        try {
+          this.options.changed?.(changedAgentId, manifestStates.get(changedAgentId) ?? null);
+        } catch { /* admission hints own no effect authority */ }
       }
     }
   }
