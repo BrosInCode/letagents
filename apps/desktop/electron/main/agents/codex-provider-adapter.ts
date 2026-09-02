@@ -29,7 +29,7 @@ import {
   nativeLifecycleCheckpoint,
   type NativeLifecycleCheckpoint,
 } from "./provider-execution-observer.js";
-import type { ControlProbeResult, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
+import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, NativeTurnBoundary } from "../../../shared/execution-protocol.js";
 import {
   summarizeCodexRuntimeNotification,
   summarizeCodexRuntimeSnapshot,
@@ -349,6 +349,18 @@ function codexLifecycleStatus(value: unknown): "failed" | "idle" | "working" | n
   return null;
 }
 
+function hasExplicitCodexSystemError(value: unknown): boolean {
+  const root = recordValue(value);
+  if (!root) return false;
+  const candidates = [root.status, root.threadStatus, recordValue(root.thread)?.status]
+    .flatMap((candidate) => {
+      const nested = recordValue(candidate);
+      return [candidate, nested?.type, nested?.status];
+    });
+  return candidates.some((candidate) => typeof candidate === "string"
+    && /^(?:systemError|error_during_execution)$/i.test(candidate));
+}
+
 function notificationTurnId(value: unknown): string | null {
   const root = recordValue(value);
   const nested = recordValue(root?.turn);
@@ -464,6 +476,7 @@ class CodexProviderHandle implements ProviderHandle {
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
   readonly nativeActiveOperations = new Map<string, Extract<NativeExecutionFact, { domain: "execution" }>>();
+  nativeRuntimeUnavailable: HardControlEvidence | null = null;
   state: ProviderObservedState = "starting";
   stopRequested = false;
   protocolError = false;
@@ -490,8 +503,11 @@ class CodexProviderHandle implements ProviderHandle {
   ) {
     this.providerContinuationId = providerContinuationId;
     this.execution = new ProviderExecutionObserver(now);
-    client.onDisconnect(() => this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
-      providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined));
+    client.onDisconnect(() => {
+      if (this.nativeRuntimeUnavailable) return;
+      this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+        providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined);
+    });
   }
 
   replaceContinuation(providerContinuationId: string): void {
@@ -1417,6 +1433,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
 
   async probeControl(providerHandle: ProviderHandle): Promise<ControlProbeResult> {
     const handle = this.requireHandle(providerHandle);
+    if (handle.nativeRuntimeUnavailable) {
+      return { state: "lost", controlEvidence: handle.nativeRuntimeUnavailable };
+    }
     const proof = (): ControlProbeResult | null => {
       const expected = handle.providerConnection.processIdentity;
       if (handle.pid === null || !expected) return { state: "degraded" };
@@ -1438,6 +1457,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       } catch (error) {
         result = proof() ?? { state: isMethodNotFound(error) ? "unprobeable" : "degraded" };
       }
+    }
+    if (handle.nativeRuntimeUnavailable) {
+      return { state: "lost", controlEvidence: handle.nativeRuntimeUnavailable };
     }
     handle.execution.emit({ domain: "control", kind: "state_changed", sideEffects: "none", ...result },
       handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
@@ -1928,6 +1950,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   private emitNativeExecution(handle: CodexProviderHandle, fact: NativeExecutionFact): void {
+    if (handle.nativeRuntimeUnavailable) return;
     if (fact.domain === "execution") {
       const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId, fact.executionId]);
       if (fact.kind === "completed") handle.nativeActiveOperations.delete(key);
@@ -2001,12 +2024,28 @@ export class CodexProviderAdapter implements ProviderAdapter {
     notification: RpcNotification,
     correlateLifecycle = true,
   ): NativeLifecycleCheckpoint | null {
+    if (handle.nativeRuntimeUnavailable) return null;
     const params = recordValue(notification.params);
+    const explicitRuntimeFailure = notification.method === "process/systemError"
+      || (notification.method === "thread/status/changed"
+        && params?.threadId === handle.providerContinuationId
+        && hasExplicitCodexSystemError(params));
+    if (explicitRuntimeFailure) {
+      this.emitNativeRuntimeUnavailable(handle, "native_session_terminated");
+      return null;
+    }
     if (!params || params.threadId !== handle.providerContinuationId || !nativeExecutionId(params.threadId)) return null;
+    const terminalMethod = /^turn\/(?:completed|failed|interrupted|cancelled|stopped)$/i.test(notification.method);
     const turn = recordValue(params.turn);
-    if (params.turnId !== undefined && turn?.id !== undefined && params.turnId !== turn.id) return null;
+    if (params.turnId !== undefined && turn?.id !== undefined && params.turnId !== turn.id) {
+      if (terminalMethod) this.markNativeExecutionUnavailable(handle);
+      return null;
+    }
     const providerTurnId = params.turnId ?? turn?.id;
-    if (!nativeExecutionId(providerTurnId)) return null;
+    if (!nativeExecutionId(providerTurnId)) {
+      if (terminalMethod) this.markNativeExecutionUnavailable(handle);
+      return null;
+    }
     const identity = { providerContinuationId: params.threadId, providerTurnId };
     const emit = (fact: NativeExecutionFact) => this.emitNativeExecution(handle, fact);
     if (notification.method === "turn/started") {
@@ -2024,7 +2063,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         ...(nativeLifecycle ? { nativeEventId: nativeLifecycle.nativeEventId } : {}) });
       return nativeLifecycle;
     }
-    if (/^turn\/(?:completed|failed|interrupted|cancelled|stopped)$/i.test(notification.method)) {
+    if (terminalMethod) {
       const outcome = terminalTurnOutcome(notification.method, turn);
       if (outcome) {
         const nativeLifecycle = correlateLifecycle ? nativeLifecycleCheckpoint({
@@ -2041,6 +2080,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           sideEffects: "none", ...(nativeLifecycle ? { nativeEventId: nativeLifecycle.nativeEventId } : {}) });
         return nativeLifecycle;
       }
+      this.markNativeExecutionUnavailable(handle);
       return null;
     }
     if (notification.method === "item/commandExecution/outputDelta") {
@@ -2074,6 +2114,34 @@ export class CodexProviderAdapter implements ProviderAdapter {
         ...(exitCode !== undefined ? { exitCode } : {}) });
     }
     return null;
+  }
+
+  private markNativeExecutionUnavailable(handle: CodexProviderHandle): void {
+    handle.execution.markUnavailable();
+    handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+      handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
+  }
+
+  private emitNativeRuntimeUnavailable(
+    handle: CodexProviderHandle,
+    controlEvidence: "process_exit" | "native_session_terminated",
+  ): void {
+    if (handle.nativeRuntimeUnavailable) return;
+    handle.nativeRuntimeUnavailable = controlEvidence;
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
+      handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
+    for (const fact of handle.nativeActiveOperations.values()) {
+      emit({ domain: "execution", kind: "completed", executionId: fact.executionId, operation: fact.operation,
+        providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId,
+        outcome: "lost_after_start", sideEffects: fact.sideEffects });
+    }
+    handle.nativeActiveOperations.clear();
+    for (const turn of handle.nativeActiveTurns.values()) {
+      emit({ ...turn, domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none" });
+    }
+    handle.nativeActiveTurns.clear();
+    emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence, sideEffects: "none" });
+    emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence, sideEffects: "none" });
   }
 
   private async emitTranscriptTail(handle: CodexProviderHandle): Promise<void> {
@@ -2266,21 +2334,8 @@ export class CodexProviderAdapter implements ProviderAdapter {
     exit: CodexAppServerExit,
   ): ProviderTerminalPayload {
     if (exit.type === "exit") {
-      const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
-        handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
-      for (const fact of handle.nativeActiveOperations.values()) {
-        emit({ domain: "execution", kind: "completed", executionId: fact.executionId, operation: fact.operation,
-          providerContinuationId: fact.providerContinuationId, providerTurnId: fact.providerTurnId,
-          outcome: "lost_after_start", sideEffects: fact.sideEffects });
-      }
-      handle.nativeActiveOperations.clear();
-      for (const turn of handle.nativeActiveTurns.values()) {
-        emit({ ...turn, domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none" });
-      }
-      handle.nativeActiveTurns.clear();
-      emit({ domain: "control", kind: "state_changed", state: "lost", controlEvidence: "process_exit", sideEffects: "none" });
-      emit({ domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "process_exit", sideEffects: "none" });
-    } else {
+      this.emitNativeRuntimeUnavailable(handle, "process_exit");
+    } else if (!handle.nativeRuntimeUnavailable) {
       handle.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
         handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
     }
