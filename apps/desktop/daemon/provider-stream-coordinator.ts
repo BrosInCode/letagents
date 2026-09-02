@@ -84,13 +84,14 @@ export type ProviderRecoveryDiagnostics = {
   lifecycle_local_conformance_eligible: Record<LifecycleProjectionProvider, boolean>;
 };
 
-const lifecycleProjectionProviders = ["codex", "claude-code", "cursor"] as const;
+const lifecycleProjectionProviders = ["codex", "claude-code", "cursor", "open-model"] as const;
 function providerForLifecycleConnection(
   connection: ProviderActionHandle["providerConnection"],
 ): LifecycleProjectionProvider | null {
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
+  if (connection?.kind === "opencode_server") return "open-model";
   return null;
 }
 
@@ -318,7 +319,8 @@ export class ProviderStreamCoordinator {
   }
 
   private lifecycleCaptureAdmission(): LifecycleCaptureAdmissionDiagnostics {
-    const admissions = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable" } as LifecycleCaptureAdmissionDiagnostics;
+    const admissions = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable",
+      "open-model": "unavailable" } as LifecycleCaptureAdmissionDiagnostics;
     const seen = new Set<LifecycleProjectionProvider>();
     const priority = { ready: 0, pending: 1, unavailable: 2 } as const;
     for (const [entryId, handle] of this.liveHandles) {
@@ -1130,7 +1132,12 @@ export class ProviderStreamCoordinator {
       this.markLifecycleProjectionUnavailableForEvent(event);
       return;
     }
-    this.observeLegacyLifecycle(
+    if (event.lifecycleProjectionOnly && !isOpenModelLifecycleProjectionFrame(event)) {
+      if (event.provider === "codex" || event.provider === "claude-code" || event.provider === "cursor"
+        || event.provider === "open-model") this.options.markLifecycleProjectionUnavailable?.(event.provider);
+      return;
+    }
+    const projectionObserved = this.observeLegacyLifecycle(
       entry,
       sourceInstallation,
       installation,
@@ -1138,6 +1145,10 @@ export class ProviderStreamCoordinator {
       observedLifecycle,
       executionGenerationId,
     );
+    if (event.lifecycleProjectionOnly) {
+      if (!projectionObserved) this.markLifecycleProjectionUnavailableForEvent(event);
+      return;
+    }
     const daemonInbox = entry.delivery_mode === "daemon_inbox";
     const typedDaemonInbox = daemonInbox
       && this.typedDaemonInboxInstallations.has(installation);
@@ -1273,10 +1284,11 @@ export class ProviderStreamCoordinator {
     currentInstallation: ProviderInstallationToken,
     event: ProviderActionStreamEvent, state: "failed" | "terminal" | "idle" | "working",
     executionGenerationId: string | undefined,
-  ): void {
-    if (!event.nativeEventId || !event.nativeLifecyclePhase || !this.options.observeLegacyLifecycle) return;
+  ): boolean {
+    if (!event.nativeEventId || !event.nativeLifecyclePhase || !this.options.observeLegacyLifecycle) return false;
     const expectedProvider = entry.provider;
-    if (!(expectedProvider === "codex" || expectedProvider === "claude-code" || expectedProvider === "cursor")) return;
+    if (!(expectedProvider === "codex" || expectedProvider === "claude-code" || expectedProvider === "cursor"
+      || expectedProvider === "open-model")) return false;
     const providerRef = entry.provider_ref;
     // The listener closure owns the generation installed with this handle.
     // A mutable successor manifest must neither relabel nor erase its tail.
@@ -1290,7 +1302,7 @@ export class ProviderStreamCoordinator {
       || sourceInstallation.executionGenerationId !== currentInstallation.executionGenerationId
       || !executionGenerationId) {
       this.options.markLifecycleProjectionUnavailable?.(expectedProvider);
-      return;
+      return false;
     }
     try {
       this.options.observeLegacyLifecycle({
@@ -1302,9 +1314,11 @@ export class ProviderStreamCoordinator {
         phase: event.nativeLifecyclePhase,
         state,
       });
+      return true;
     } catch {
       this.options.markLifecycleProjectionUnavailable?.(expectedProvider);
       // Optional shadow observation never changes provider delivery or lifecycle.
+      return false;
     }
   }
 
@@ -1350,12 +1364,18 @@ export class ProviderStreamCoordinator {
     event: ProviderActionStreamEvent,
     exactCursorBirthMissing = false,
   ): void {
+    if (event.lifecycleProjectionOnly) {
+      if (event.provider === "codex" || event.provider === "claude-code" || event.provider === "cursor"
+        || event.provider === "open-model") this.options.markLifecycleProjectionUnavailable?.(event.provider);
+      return;
+    }
     if (exactCursorBirthMissing && event.provider === "cursor") {
       this.options.markLifecycleProjectionUnavailable?.("cursor");
       return;
     }
     if (!event.nativeEventId || !event.nativeLifecyclePhase) return;
-    if (!(event.provider === "codex" || event.provider === "claude-code" || event.provider === "cursor")) return;
+    if (!(event.provider === "codex" || event.provider === "claude-code" || event.provider === "cursor"
+      || event.provider === "open-model")) return;
     this.options.markLifecycleProjectionUnavailable?.(event.provider);
   }
 
@@ -1486,4 +1506,12 @@ export class ProviderStreamCoordinator {
     if (failures.length === 1) throw failures[0];
     if (failures.length > 1) throw new AggregateError(failures, message);
   }
+}
+
+function isOpenModelLifecycleProjectionFrame(event: ProviderActionStreamEvent): boolean {
+  return event.provider === "open-model"
+    && event.kind === "turn_lifecycle"
+    && typeof event.nativeEventId === "string"
+    && ((event.method === "turn/started" && event.nativeLifecyclePhase === "turn_active")
+      || (event.method === "turn/completed" && event.nativeLifecyclePhase === "turn_terminal"));
 }

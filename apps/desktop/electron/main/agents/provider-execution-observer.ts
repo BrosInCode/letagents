@@ -109,7 +109,7 @@ export function nativeExecutionId(value: unknown): value is string {
 }
 
 type NativeLifecycleCheckpointInput = {
-  provider: "codex" | "claude-code" | "cursor";
+  provider: "codex" | "claude-code" | "cursor" | "open-model";
   workAttemptId: string;
   phase: "turn_active" | "turn_terminal";
   providerContinuationId: string;

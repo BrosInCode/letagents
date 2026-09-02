@@ -7,10 +7,11 @@ import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateEx
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "./room-work-publication-store.js";
-import { applyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
+import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema,
+  validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 31;
+export const DAEMON_STATE_SCHEMA_VERSION = 32;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -125,7 +126,10 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database);
-  if (existingVersion >= 28) validateLifecycleProjectionLedgerSchema(database);
+  if (existingVersion >= 28) {
+    if (existingVersion < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
+    else validateLifecycleProjectionLedgerSchema(database);
+  }
   if (existingVersion >= 25) validatePollingOfferSchema(database, existingVersion >= 26 ? 26 : 25);
   if (existingVersion >= 24) { validatePollingActivationSchema(database, existingVersion >= 26 ? 26 : 24); validateCustodialLaunchSession(database); }
   if (existingVersion >= 23) validatePollingContract(database);
@@ -277,6 +281,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 30) {
     this.migrateRuntimeFailureEffectStorage(database);
+    return;
+  }
+  if (existingVersion === 31) {
+    this.migrateLifecycleProjectionProviderSet(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1231,6 +1239,7 @@ private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     migrateExecutionStorageV21ToV22(database);
     migrateExecutionStorageV22ToV23(database);
     this.freezeLegacyActiveRuntimeBirths(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1248,6 +1257,7 @@ private migrateLifecycleEffectStorage(database: DatabaseSync): void {
   try {
     migrateExecutionStorageV21ToV22(database);
     migrateExecutionStorageV22ToV23(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1264,7 +1274,25 @@ private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV22ToV23(database);
+    resetLegacyLifecycleProjectionLedgerSchema(database);
     this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Start a fresh comparator epoch when the admitted provider set changes. */
+private migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.schemaInitializationHook?.(database);
+    validateLifecycleProjectionLedgerSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
     database.exec("COMMIT");
@@ -2698,7 +2726,10 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: Execut
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22 | 23): void {
   const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
   const storageVersion = executionStorageVersion ?? (version >= 31 ? 23 : version >= 30 ? 22 : 21);
-  if (version >= 28) validateLifecycleProjectionLedgerSchema(database);
+  if (version >= 28) {
+    if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
+    else validateLifecycleProjectionLedgerSchema(database);
+  }
   if (version >= 27) validateRoomWorkPublicationSchema(database);
   if (version >= 25) validatePollingOfferSchema(database, version >= 26 ? 26 : 25);
   if (Number((database.prepare("PRAGMA user_version").get() as Row).user_version) >= 24) {
