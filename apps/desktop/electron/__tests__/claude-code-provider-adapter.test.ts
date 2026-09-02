@@ -286,6 +286,8 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
     streamSink: (event) => streamEvents.push(event),
   });
   const handle = await adapter.spawn(spawnRequest({ launchPolicy: { permissionMode: "acceptEdits", model: "opus", dangerouslySkipPermissions: false } }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
 
   assert.equal(harness.launches.length, 1);
   const args = harness.launches[0]!.args;
@@ -309,6 +311,12 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
     processIdentity: birthIdentity(4100),
   });
   assert.equal(handle.observedState(), "idle");
+  assert.deepEqual(observations.map(({ fact }) => fact), [{
+    domain: "runtime",
+    kind: "state_changed",
+    state: "ready",
+    sideEffects: "none",
+  }], "verified bootstrap readiness is retained before the first room turn");
   assert.equal(harness.versionReads, 1, "the installed CLI is checked immediately before launch");
 
   const child = harness.children[0]!;
@@ -321,6 +329,97 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
   assert.doesNotMatch(prompt, /register_agent_session|wait_for_messages|join_room/);
 
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
+});
+
+test("Claude freezes lifecycle authority to the exact CLI process birth", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const typedHandle = handle as typeof handle & { lifecycleAuthorityMode: string };
+  const ref = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    providerConnection: handle.providerConnection,
+    lifecycleAuthorityMode: "typed" as const,
+  };
+
+  assert.equal(typedHandle.lifecycleAuthorityMode, "typed");
+  assert.equal(await adapter.attach(ref), handle);
+  assert.equal(await adapter.attach({
+    ...ref,
+    providerConnection: { kind: "claude_cli", pid: handle.pid, processIdentity: birthIdentity(9999) },
+  }), null);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: "typed_shadow" }), null);
+  assert.equal(await adapter.attach({ ...ref, lifecycleAuthorityMode: undefined }), null);
+  await assert.rejects(adapter.spawn(spawnRequest({
+    workAttemptId: "wa-claude-wrong-delivery",
+    deliveryMode: "mcp_polling",
+    lifecycleAuthorityMode: "typed",
+  })), /require daemon_inbox delivery/);
+
+  const resumed = await adapter.resume(
+    { ...ref, workAttemptId: "wa-claude-resumed", lifecycleAuthorityMode: "typed_shadow" },
+    spawnRequest({ workAttemptId: "wa-claude-resumed", lifecycleAuthorityMode: "typed" }),
+  ) as typeof handle & { lifecycleAuthorityMode: string };
+  assert.equal(resumed.lifecycleAuthorityMode, "typed",
+    "a resumed continuation starts a new process birth under the requested authority");
+});
+
+test("typed Claude lifecycle ignores foreign failures and settles every exact result", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const child = harness.children[0]!;
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const request = { inboxItemId: "typed-malformed", actionId: "typed-malformed", sourceMessage: {}, activation: {} };
+  const running = adapter.runRoomTurn(handle, request);
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  const session_id = handle.providerContinuationId;
+
+  child.emit({
+    type: "result", subtype: "error_during_execution", is_error: true,
+    session_id, user_message_uuid: "foreign-turn",
+  });
+  assert.equal(handle.observedState(), "idle", "foreign raw failure cannot poison typed lifecycle");
+
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
+  assert.equal(handle.observedState(), "working");
+  child.emit({ type: "result", session_id, user_message_uuid: turnId });
+  await assert.rejects(running, /without success/);
+  assert.equal(handle.observedState(), "idle", "an exact failed turn leaves the typed runtime reusable");
+  assert.equal(events.filter((event) => event.fact.domain === "turn"
+    && event.fact.state === "terminal"
+    && event.fact.providerTurnId === turnId
+    && event.fact.turnOutcome === "failed").length, 1,
+  "the same exact result that settles delivery emits one typed terminal");
+
+  const next = adapter.runRoomTurn(handle, { ...request, inboxItemId: "typed-after-malformed" });
+  await flush();
+  const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", subtype: "success", is_error: false, session_id, user_message_uuid: nextId, result: "ready" });
+  assert.equal((await next).text, "ready");
+});
+
+test("typed-shadow Claude keeps malformed exact-result observation unchanged", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed_shadow" }));
+  const child = harness.children[0]!;
+  const events: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  const running = adapter.runRoomTurn(handle, {
+    inboxItemId: "shadow-malformed", actionId: "shadow-malformed", sourceMessage: {}, activation: {},
+  });
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "result", session_id: handle.providerContinuationId, user_message_uuid: turnId });
+
+  await assert.rejects(running, /without success/);
+  assert.equal(handle.observedState(), "idle");
+  assert.equal(events.some((event) => event.fact.domain === "turn" && event.fact.state === "terminal"), false,
+    "the permissive exact-result terminal belongs only to typed authority");
 });
 
 test("preflight and launch use the exact configured Claude Code executable", async () => {
@@ -705,6 +804,31 @@ test("attach to a live unreachable orphan fences it (TERM, identity recheck, KIL
   assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"], "exact-child fence ordering");
   assert.equal(harness.identities.get(4100), null, "the orphan is verifiably gone before recovery may proceed");
   assert.equal(harness.launches.length, 1, "fencing never launches a second writer");
+});
+
+test("concurrent Claude attach authenticates one exact continuation, authority mode, and process birth", async () => {
+  const stableBirth = "Wed Jul 15 23:42:10 2026";
+  const harness = createHarness({ dieOnSigterm: false, identities: new Map([[4100, stableBirth]]) });
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
+  const handle = await adapter.spawn(spawnRequest());
+  const fresh = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies, stopGraceMs: 30 });
+  const ref = {
+    workAttemptId: handle.workAttemptId,
+    providerContinuationId: handle.providerContinuationId!,
+    lifecycleAuthorityMode: "typed_shadow" as const,
+    providerConnection: handle.providerConnection,
+  };
+
+  const exact = fresh.attach(ref);
+  assert.equal(await fresh.attach({ ...ref, providerContinuationId: "foreign-session" }), null);
+  assert.equal(await fresh.attach({ ...ref, lifecycleAuthorityMode: "typed" }), null);
+  assert.equal(await fresh.attach({
+    ...ref,
+    providerConnection: { kind: "claude_cli", pid: handle.pid, processIdentity: birthIdentity(9999) },
+  }), null);
+  assert.equal(await fresh.attach({ ...ref }), await withLoopAlive(exact),
+    "an identical concurrent attach shares only the exact in-flight fence");
+  assert.deepEqual(harness.signals.map((entry) => entry.signal), ["SIGTERM", "SIGKILL"]);
 });
 
 test("resume presents the recorded continuation and asserts the spike-proven same-session identity", async () => {
@@ -1193,12 +1317,15 @@ test("Claude typed observations correlate native turns and completed tools witho
   const events: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, () => { throw new Error("shadow persistence unavailable"); });
   adapter.onExecution(handle, (event) => events.push(event));
-  assert.equal(events.length, 0, "subscription never replays bootstrap as room work");
+  assert.deepEqual(events.map(({ fact }) => fact), [{
+    domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none",
+  }], "subscription replays verified runtime readiness, never bootstrap room work");
   assert.deepEqual(adapter.capabilities().execution, {
     controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
   });
   assert.deepEqual(await adapter.probeControl(handle), { state: "unprobeable" });
   assert.deepEqual(events.map(({ fact }) => fact), [
+    { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
     { domain: "control", kind: "state_changed", state: "unprobeable", sideEffects: "none" },
   ], "the unsupported probe state is still published to typed-shadow history");
   const request = { inboxItemId: "typed-inbox", actionId: "typed-action", sourceMessage: {}, activation: {} };
@@ -1214,7 +1341,7 @@ test("Claude typed observations correlate native turns and completed tools witho
   child.emit({ type: "user", session_id, message: { content: [
     { type: "tool_result", tool_use_id: "bootstrap-tail", is_error: false, content: "finished" },
   ] } });
-  assert.equal(events.length, 1);
+  assert.equal(events.length, 2);
   child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
   child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id });
   child.emit({ type: "user", session_id, message: { content: [
@@ -1305,8 +1432,11 @@ test("Claude shadow native terminal remains observable behind a legacy failed-st
   child.emit({ type: "result", subtype: "error_during_execution", is_error: true, session_id: handle.providerContinuationId, user_message_uuid: "foreign" });
   assert.equal(handle.observedState(), "failed");
   child.emit({ type: "result", subtype: "success", is_error: false, session_id: handle.providerContinuationId, user_message_uuid: turnId });
-  assert.equal(events.length, 1);
-  const { nativeEventId, ...terminalFact } = events[0]!.fact;
+  assert.equal(events.length, 2);
+  assert.deepEqual(events[0]!.fact, {
+    domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none",
+  });
+  const { nativeEventId, ...terminalFact } = events[1]!.fact;
   assert.match(nativeEventId ?? "", /^nlc1:[A-Za-z0-9_-]{43}$/);
   assert.deepEqual(terminalFact, { domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none",
     providerContinuationId: handle.providerContinuationId, providerTurnId: turnId, turnOutcome: "completed" });
