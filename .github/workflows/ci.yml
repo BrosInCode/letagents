@@ -127,7 +127,7 @@ jobs:
   # ── DB-backed integration tests ──
   integration-tests:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 25
     services:
       postgres:
         image: postgres:16-alpine
