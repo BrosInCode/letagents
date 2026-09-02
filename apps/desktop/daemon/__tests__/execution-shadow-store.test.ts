@@ -208,15 +208,13 @@ test("runtime authority freezes on first exact materialization and successor bir
   } finally { db.close(); }
 });
 
-test("the closed release policy gives daemon-owned Codex and Open Model births typed authority", () => {
-  for (const provider of ["codex", "open-model"] as const) {
+test("the closed release policy gives supported daemon-owned provider births typed authority", () => {
+  for (const provider of ["codex", "claude-code", "open-model"] as const) {
     assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed");
     assert.equal(lifecycleAuthorityModeForProvider(provider, "mcp_polling"), "typed_shadow");
     assert.equal(lifecycleAuthorityModeForProvider(provider, "desktop_events"), "typed_shadow");
   }
-  for (const provider of ["claude-code", "cursor"] as const) {
-    assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed_shadow");
-  }
+  assert.equal(lifecycleAuthorityModeForProvider("cursor", "daemon_inbox"), "typed_shadow");
 });
 
 test("typed capture accepts typed runtimes and Cursor recovery preserves each child's frozen mode", () => {
