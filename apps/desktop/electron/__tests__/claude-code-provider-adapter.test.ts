@@ -18,6 +18,7 @@ import {
 } from "../main/agents/claude-code-provider-adapter.js";
 import type {
   ProviderSpawnRequest,
+  ProviderActivityEvent,
   ProviderStreamEvent,
   ProviderTerminalPayload,
   NativeExecutionObservation,
@@ -1246,6 +1247,197 @@ test("Claude turn control interrupts only the active bounded turn and refuses co
   );
   assert.equal(child.written.length, writesAfterInterrupt);
 });
+
+test("Claude 2.1.238 UUID-less interrupt boundary settles only the daemon-fenced exact turn", async () => {
+  const harness = createHarness();
+  const stream: ProviderStreamEvent[] = [];
+  const adapter = new ClaudeCodeProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => stream.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const child = harness.children[0]!;
+  const events: NativeExecutionObservation[] = [];
+  const activities: ProviderActivityEvent[] = [];
+  adapter.onExecution(handle, (event) => events.push(event));
+  adapter.onActivity(handle, (event) => activities.push(event));
+  const request = { inboxItemId: "inbox-uuidless-interrupt", actionId: "action-uuidless-interrupt", sourceMessage: {}, activation: {} };
+  const running = adapter.runRoomTurn!(handle, request);
+  await flush();
+  const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({ type: "command_lifecycle", state: "started", command_uuid: turnId, session_id: handle.providerContinuationId });
+
+  const controlled = adapter.controlTurn!(handle, null, {
+    targetTurnId: turnId,
+    checkpointTurnStarted: async () => {},
+    markDispatched: async () => {},
+  });
+  await flush();
+  const boundary = {
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    terminal_reason: "aborted_streaming",
+    session_id: handle.providerContinuationId,
+  };
+  child.emit(boundary);
+
+  assert.deepEqual(await controlled, {
+    capability: "native_interrupt",
+    interrupted: true,
+    resumed: false,
+    state: "idle",
+  });
+  await assert.rejects(running, /failed.*interrupted/i);
+  assert.equal(handle.observedState(), "idle");
+  const terminalFacts = events.filter(({ fact }) => fact.domain === "turn"
+    && fact.state === "terminal"
+    && fact.providerTurnId === turnId);
+  assert.equal(terminalFacts.length, 1);
+  const terminalFact = terminalFacts[0]!.fact;
+  assert.equal(terminalFact.domain, "turn");
+  if (terminalFact.domain !== "turn") throw new Error("expected an exact turn terminal");
+  assert.equal(terminalFact.turnOutcome, "interrupted");
+  const rawBoundary = stream.find((event) => event.method === "result/error_during_execution");
+  assert.equal(rawBoundary?.nativeLifecyclePhase, "turn_terminal");
+  assert.equal((rawBoundary?.payload as Record<string, unknown>).user_message_uuid, undefined,
+    "the published provider payload remains raw; exact correlation is local context");
+
+  child.emit(boundary);
+  await flush();
+  assert.equal(events.filter(({ fact }) => fact.domain === "turn"
+    && fact.state === "terminal"
+    && fact.providerTurnId === turnId).length, 1,
+  "a duplicate UUID-less boundary reuses the original typed terminal");
+  const replayedBoundaries = stream.filter((event) => event.method === "result/error_during_execution");
+  assert.equal(replayedBoundaries.length, 2);
+  assert.equal(replayedBoundaries[1]!.nativeEventId, replayedBoundaries[0]!.nativeEventId);
+  assert.equal(activities.at(-1)?.summary, "Turn interrupted");
+
+  const next = adapter.runRoomTurn!(handle, { ...request, inboxItemId: "inbox-after-interrupt", actionId: "action-after-interrupt" });
+  await flush();
+  const nextId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+  child.emit({
+    type: "result", subtype: "success", is_error: false,
+    session_id: handle.providerContinuationId, user_message_uuid: nextId, result: "reused",
+  });
+  assert.equal((await next).text, "reused");
+});
+
+test("Claude UUID-less interrupt compatibility stays fenced across malformed and late boundaries", async () => {
+  const withoutStop = createHarness();
+  const standaloneAdapter = new ClaudeCodeProviderAdapter({ dependencies: withoutStop.dependencies });
+  const standaloneHandle = await standaloneAdapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const standaloneChild = withoutStop.children[0]!;
+  const standaloneEvents: NativeExecutionObservation[] = [];
+  standaloneAdapter.onExecution(standaloneHandle, (event) => standaloneEvents.push(event));
+  const standalone = standaloneAdapter.runRoomTurn!(standaloneHandle, {
+    inboxItemId: "inbox-unprompted-abort", actionId: "action-unprompted-abort", sourceMessage: {}, activation: {},
+  });
+  let standaloneSettled = false;
+  void standalone.then(() => { standaloneSettled = true; }, () => { standaloneSettled = true; });
+  await flush();
+  const standaloneTurnId = (JSON.parse(standaloneChild.written.at(-1)!) as { uuid: string }).uuid;
+  standaloneChild.emit({
+    type: "result", subtype: "error_during_execution", is_error: true,
+    terminal_reason: "aborted_streaming", session_id: standaloneHandle.providerContinuationId,
+  });
+  await flush();
+  assert.equal(standaloneSettled, false, "an identical frame without a daemon interrupt is not exact evidence");
+  assert.equal(standaloneEvents.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
+  standaloneChild.emit({
+    type: "result", subtype: "success", is_error: false,
+    session_id: standaloneHandle.providerContinuationId, user_message_uuid: standaloneTurnId, result: "natural",
+  });
+  assert.equal((await standalone).text, "natural");
+
+  for (const { name, patch } of [
+    { name: "wrong terminal reason", patch: { terminal_reason: "different_reason" } },
+    { name: "missing terminal reason", patch: { terminal_reason: undefined } },
+    { name: "wrong session", patch: { session_id: "different-session" } },
+    { name: "foreign turn UUID", patch: { user_message_uuid: "foreign-turn" } },
+    { name: "empty turn UUID", patch: { user_message_uuid: "" } },
+    { name: "wrong subtype", patch: { subtype: "different_subtype" } },
+    { name: "non-error result", patch: { is_error: false } },
+  ]) {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+    const child = harness.children[0]!;
+    const running = adapter.runRoomTurn!(handle, {
+      inboxItemId: "inbox-late-interrupt", actionId: "action-late-interrupt", sourceMessage: {}, activation: {},
+    });
+    await flush();
+    const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+    const controlled = adapter.controlTurn!(handle, null, {
+      targetTurnId: turnId,
+      checkpointTurnStarted: async () => {},
+      markDispatched: async () => {},
+    });
+    await flush();
+    const malformedFrame: Record<string, unknown> = {
+      type: "result", subtype: "error_during_execution", is_error: true,
+      terminal_reason: "aborted_streaming", session_id: handle.providerContinuationId,
+    };
+    Object.assign(malformedFrame, patch);
+    child.emit(malformedFrame);
+    await assert.rejects(controlled, (error: unknown) => {
+      assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "uncertain");
+      return true;
+    }, name);
+
+    child.emit({
+      type: "result", subtype: "error_during_execution", is_error: true,
+      terminal_reason: "aborted_streaming", session_id: handle.providerContinuationId,
+    });
+    await assert.rejects(running, /failed.*interrupted/i,
+      "the retained exact-turn context recognizes the late provider boundary");
+    assert.equal(handle.observedState(), "idle");
+  }
+});
+
+for (const natural of [
+  { name: "success", frame: { subtype: "success", is_error: false, result: "natural result" } },
+  { name: "failure", frame: { subtype: "error_during_execution", is_error: true } },
+]) {
+  test(`Claude exact ${natural.name} racing an interrupt remains the natural terminal`, async () => {
+    const harness = createHarness();
+    const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+    const child = harness.children[0]!;
+    const running = adapter.runRoomTurn!(handle, {
+      inboxItemId: `inbox-natural-${natural.name}`,
+      actionId: `action-natural-${natural.name}`,
+      sourceMessage: {},
+      activation: {},
+    });
+    await flush();
+    const turnId = (JSON.parse(child.written.at(-1)!) as { uuid: string }).uuid;
+    const controlled = adapter.controlTurn!(handle, null, {
+      targetTurnId: turnId,
+      checkpointTurnStarted: async () => {},
+      markDispatched: async () => {},
+    });
+    await flush();
+    child.emit({
+      type: "result",
+      session_id: handle.providerContinuationId,
+      user_message_uuid: turnId,
+      ...natural.frame,
+    });
+
+    await assert.rejects(controlled, (error: unknown) => {
+      assert.equal((error as { turnControlOutcome?: unknown }).turnControlOutcome, "not_applied");
+      return true;
+    });
+    if (natural.name === "success") {
+      assert.equal((await running).text, "natural result");
+    } else {
+      await assert.rejects(running, /failed.*error_during_execution/i);
+    }
+    assert.equal(handle.observedState(), "idle");
+  });
+}
 
 for (const subtype of ["error_max_turns", "error_max_budget_usd", "error_max_structured_output_retries"]) {
   test(`Claude ${subtype} fails only the exact turn and leaves the continuation reusable`, async () => {
