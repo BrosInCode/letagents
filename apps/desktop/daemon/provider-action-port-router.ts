@@ -125,9 +125,8 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       const handle = remembered.handle;
       if (
         handle.providerContinuationId !== ref.providerContinuationId
-        || (provider === "codex"
-          && (handle.lifecycleAuthorityMode ?? "typed_shadow")
-            !== (ref.lifecycleAuthorityMode ?? "typed_shadow"))
+        || (handle.lifecycleAuthorityMode !== undefined
+          && handle.lifecycleAuthorityMode !== (ref.lifecycleAuthorityMode ?? "typed_shadow"))
         || (ref.providerConnection
           && !sameProviderActionConnectionIdentity(handle.providerConnection, ref.providerConnection))
       ) return null;
