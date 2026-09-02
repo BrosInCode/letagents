@@ -241,12 +241,11 @@ test("runtime authority freezes on first exact materialization and successor bir
 });
 
 test("the closed release policy gives supported daemon-owned provider births typed authority", () => {
-  for (const provider of ["codex", "claude-code", "open-model"] as const) {
+  for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
     assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed");
     assert.equal(lifecycleAuthorityModeForProvider(provider, "mcp_polling"), "typed_shadow");
     assert.equal(lifecycleAuthorityModeForProvider(provider, "desktop_events"), "typed_shadow");
   }
-  assert.equal(lifecycleAuthorityModeForProvider("cursor", "daemon_inbox"), "typed_shadow");
 });
 
 test("typed capture accepts typed runtimes and Cursor recovery preserves each child's frozen mode", () => {
