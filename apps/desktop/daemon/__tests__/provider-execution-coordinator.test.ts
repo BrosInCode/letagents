@@ -60,6 +60,15 @@ const openModelHandle: ProviderActionHandle = {
   },
 };
 
+const claudeHandle: ProviderActionHandle = {
+  ...returnedHandle,
+  providerConnection: {
+    kind: "claude_cli",
+    pid: 4444,
+    processIdentity: "birth-4444",
+  },
+};
+
 function terminal(current: ProviderActionHandle): ProviderActionTerminal {
   return {
     endedAt: "2026-08-26T00:00:02.000Z",
@@ -339,6 +348,7 @@ test("delivery handoff freezes convergence and draining never creates a successo
 
 for (const { label, providerId, handle } of [
   { label: "Codex", providerId: "codex", handle: returnedHandle },
+  { label: "Claude Code", providerId: "claude-code", handle: claudeHandle },
   { label: "Open Model", providerId: "open-model", handle: openModelHandle },
 ] as const) {
   test(`new daemon-owned ${label} births launch and freeze with typed authority`, async () => {
@@ -368,6 +378,7 @@ for (const { label, providerId, handle } of [
 
 for (const { label, providerId, handle, frozenAuthorityMode } of [
   { label: "Codex", providerId: "codex", handle: returnedHandle, frozenAuthorityMode: "typed" },
+  { label: "Claude Code", providerId: "claude-code", handle: claudeHandle, frozenAuthorityMode: "typed_shadow" },
   { label: "Open Model", providerId: "open-model", handle: openModelHandle, frozenAuthorityMode: "typed_shadow" },
 ] as const) {
   test(`${label} reattach preserves the exact birth's frozen authority`, async () => {
