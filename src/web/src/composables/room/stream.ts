@@ -1,3 +1,7 @@
+import {
+  ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+  parseRoomResourceInvalidation,
+} from '../../../../../shared/room-resource-invalidation.mjs'
 import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
 import { roomPath } from './api'
 import { isVisibleRoomMessage } from './identity'
@@ -433,8 +437,11 @@ export function createRoomStream(
     handlers.setConnectionState('connecting')
 
     const eventCursor = eventCursors.get(roomIdentifier)
+    const streamParams = new URLSearchParams()
+    if (eventCursor) streamParams.set('event_cursor', eventCursor)
+    streamParams.append('stream_capability', ROOM_RESOURCE_INVALIDATION_CAPABILITY)
     const source = new EventSource(
-      `${roomPath(roomIdentifier)}/messages/stream${eventCursor ? `?event_cursor=${encodeURIComponent(eventCursor)}` : ''}`,
+      `${roomPath(roomIdentifier)}/messages/stream?${streamParams.toString()}`,
     )
     eventSource = source
     const isCurrentSource = () => eventSource === source
@@ -607,6 +614,22 @@ export function createRoomStream(
           // refreshes through its authorized GET, without inventing per-id scope.
           publishMessageInfoInvalidation(roomId, messageIds)
         }, streamEventBytes(event))
+      } catch {
+        repairMalformedTypedEvent(roomIdentifier, event)
+      }
+    })
+
+    source.addEventListener(ROOM_RESOURCE_INVALIDATION_CAPABILITY, (event) => {
+      if (!isCurrentSource()) return
+      try {
+        const result = parseRoomResourceInvalidation(JSON.parse(event.data))
+        if (result.status === 'malformed' || result.pointer.room_id !== roomIdentifier) {
+          repairMalformedTypedEvent(roomIdentifier, event)
+          return
+        }
+        // Resource snapshots are fetched by their owning surfaces. Until a
+        // surface opts in, a valid pointer is deliberately cursor-only.
+        rememberEventCursor(roomIdentifier, event)
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
       }

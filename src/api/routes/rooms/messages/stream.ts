@@ -1,4 +1,5 @@
 import type { Express } from "express";
+import { ROOM_RESOURCE_INVALIDATION_CAPABILITY } from "../../../../../shared/room-resource-invalidation.mjs";
 import {
   openSseConnection,
   type SseConnection,
@@ -37,7 +38,6 @@ const runStreamCheckpoint = createBoundedExecutor({
   timeoutMs: 8_000,
 });
 
-const RESOURCE_INVALIDATION_CAPABILITY = "resource_invalidation_v1";
 const MAX_STREAM_CAPABILITY_VALUES = 16;
 const MAX_STREAM_CAPABILITY_BYTES = 512;
 
@@ -57,7 +57,7 @@ function streamSupportsResourceInvalidation(req: AuthenticatedRequest): boolean 
       || !/^[a-z0-9][a-z0-9._-]{0,63}$/.test(value)
     ) return false;
   }
-  return values.includes(RESOURCE_INVALIDATION_CAPABILITY);
+  return values.includes(ROOM_RESOURCE_INVALIDATION_CAPABILITY);
 }
 
 export function registerMessageStreamRoute(
@@ -279,7 +279,7 @@ export function registerMessageStreamRoute(
           return;
         case "agent_work_invalidated":
           if (supportsResourceInvalidation) {
-            await writeEvent(`${eventId}event: ${RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
+            await writeEvent(`${eventId}event: ${ROOM_RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
               room_id: projectId,
               resource: "agent_work",
             })}\n\n`);

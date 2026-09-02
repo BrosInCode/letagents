@@ -1,5 +1,9 @@
 import assert from 'node:assert/strict'
 import test from 'node:test'
+import {
+  ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+  parseRoomResourceInvalidation,
+} from '../../../../shared/room-resource-invalidation.mjs'
 
 type Listener = (event: { data: string; lastEventId: string }) => void
 
@@ -36,6 +40,27 @@ class FakeEventSource {
       listener({ data, lastEventId })
     }
   }
+}
+
+function assertStreamUrl(
+  source: FakeEventSource,
+  roomIdentifier: string,
+  eventCursor: string | null = null,
+  message?: string,
+) {
+  const url = new URL(source.url, 'https://example.test')
+  assert.equal(url.pathname, `/rooms/${encodeURIComponent(roomIdentifier)}/messages/stream`, message)
+  assert.equal(
+    url.searchParams.get('stream_capability'),
+    ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+    message,
+  )
+  assert.equal(url.searchParams.get('event_cursor'), eventCursor, message)
+  assert.deepEqual(
+    [...url.searchParams.keys()].sort(),
+    eventCursor ? ['event_cursor', 'stream_capability'] : ['stream_capability'],
+    message,
+  )
 }
 
 ;(globalThis as any).localStorage = {
@@ -87,13 +112,86 @@ test('message-info null preserves room scope, refresh signaling, and the subscri
     stream.stop()
     stream.start(alias)
     const replacement = FakeEventSource.instances.at(-1)!
-    assert.equal(new URL(replacement.url, 'https://example.test').searchParams.get('event_cursor'), 'broker_info')
+    assertStreamUrl(replacement, alias, 'broker_info')
     source.dispatch('message_info_updated', { room_id: 'room_canonical', message_ids: null }, 'broker_stale')
     assert.equal(lastMessageInfoInvalidation.value, lastInvalidation, 'a retired stream cannot invalidate an open card')
   } finally {
     stream.stop()
     lastMessageInfoInvalidation.value = null
   }
+})
+
+test('resource pointers negotiate once, advance inertly, and fail closed when malformed', async () => {
+  assert.equal(parseRoomResourceInvalidation({
+    room_id: 'room_pointer', resource: 'agent_work',
+  }).status, 'supported')
+  assert.equal(parseRoomResourceInvalidation({
+    room_id: 'room_pointer', resource: 'future_resource',
+  }).status, 'unsupported')
+  assert.equal(parseRoomResourceInvalidation({
+    room_id: 'room_pointer', resource: 'agent_work', extra: true,
+  }).status, 'malformed')
+  for (const roomId of ['', ' room_pointer', 'room_pointer ', 'room\ncontrol', 'r'.repeat(513)]) {
+    assert.equal(parseRoomResourceInvalidation({
+      room_id: roomId, resource: 'agent_work',
+    }).status, 'malformed')
+  }
+
+  let renders = 0
+  let reconciles = 0
+  const stream = createRoomStream({
+    setConnectionState: () => {},
+    setStreaming: () => {},
+    appendMessage: () => { renders += 1; return true },
+    onGitHubMessage: () => { renders += 1 },
+    onGitHubEvent: () => { renders += 1 },
+    onTaskLifecycleMessage: () => { renders += 1 },
+    onArtifactUpdate: () => { renders += 1 },
+    onAgentActivityMessage: () => { renders += 1 },
+    onParticipantActivityMessage: () => { renders += 1 },
+    upsertTask: () => { renders += 1 },
+    upsertReasoningSession: () => { renders += 1 },
+    removeReasoningSession: () => { renders += 1 },
+    getMessageCursor: () => null,
+    resyncMessages: async (_roomIdentifier, after) => ({ success: true, cursor: after }),
+    reconcileFullState: async () => { reconciles += 1; return false },
+  })
+
+  stream.start('room_pointer')
+  const initial = FakeEventSource.instances.at(-1)!
+  assertStreamUrl(initial, 'room_pointer')
+  for (const [resource, cursor] of [
+    ['agent_work', 'broker_work'],
+    ['agent_approval', 'broker_approval'],
+    ['future_resource', 'broker_future'],
+  ]) {
+    initial.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, {
+      room_id: 'room_pointer', resource,
+    }, cursor)
+  }
+  assert.equal(renders, 0, 'pointer negotiation must not invent a rendering surface')
+  assert.equal(reconciles, 0, 'supported and future resources are valid cursor no-ops')
+
+  stream.stop()
+  stream.start('room_pointer')
+  const resumed = FakeEventSource.instances.at(-1)!
+  assertStreamUrl(resumed, 'room_pointer', 'broker_future')
+  for (const [payload, cursor] of [
+    [{ room_id: 'room_pointer' }, 'broker_missing'],
+    [{ room_id: 'room_pointer', resource: 'agent_work', extra: true }, 'broker_extra'],
+    [{ room_id: 'room_pointer', resource: 'Bad Resource' }, 'broker_resource'],
+    [{ room_id: 'room_other', resource: 'agent_work' }, 'broker_room'],
+  ] as const) {
+    resumed.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, payload, cursor)
+  }
+  resumed.dispatchRaw(ROOM_RESOURCE_INVALIDATION_CAPABILITY, '{malformed', 'broker_json')
+  await waitFor(() => reconciles > 0)
+  assert.equal(renders, 0)
+
+  stream.stop()
+  stream.start('room_pointer')
+  assertStreamUrl(FakeEventSource.instances.at(-1)!, 'room_pointer', 'broker_future')
+  stream.stop()
 })
 
 test('room stream forwards typed GitHub event invalidations', () => {
@@ -124,7 +222,7 @@ test('room stream forwards typed GitHub event invalidations', () => {
   stream.start('focus_27')
   const source = FakeEventSource.instances[FakeEventSource.instances.length - 1]
   assert.ok(source)
-  assert.equal(source.url, '/rooms/focus_27/messages/stream')
+  assertStreamUrl(source, 'focus_27')
 
   source.dispatch('github_event', {
     room_id: 'focus_27',
@@ -252,9 +350,10 @@ test('a same-room restart never reuses an older generation resync to authorize a
   stream.stop()
   stream.start('room_same_generation')
   const resumed = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(
-    resumed.url,
-    '/rooms/room_same_generation/messages/stream?event_cursor=broker_current_gap',
+  assertStreamUrl(
+    resumed,
+    'room_same_generation',
+    'broker_current_gap',
     'only the current generation may commit its repaired broker cursor',
   )
   stream.stop()
@@ -304,9 +403,10 @@ test('room stream preserves broker cursors and performs one full repair per gap 
   stream.stop()
   stream.start('room_cursor')
   const resumedSource = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(
-    resumedSource.url,
-    '/rooms/room_cursor/messages/stream?event_cursor=broker_7',
+  assertStreamUrl(
+    resumedSource,
+    'room_cursor',
+    'broker_7',
     'the gap cursor is not committed before its full repair succeeds',
   )
   releaseReconcile()
@@ -316,14 +416,14 @@ test('room stream preserves broker cursors and performs one full repair per gap 
   stream.stop()
   stream.start('room_cursor')
   const repairedSource = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(repairedSource.url, '/rooms/room_cursor/messages/stream?event_cursor=broker_9')
+  assertStreamUrl(repairedSource, 'room_cursor', 'broker_9')
   repairedSource.dispatch('room_sync', { gap: true, event_cursor: null })
   await waitFor(() => reconciles.length === 3 && durableRepairs === 3)
   await new Promise<void>((resolve) => setImmediate(resolve))
   stream.stop()
   stream.start('room_cursor')
   const resetSource = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(resetSource.url, '/rooms/room_cursor/messages/stream')
+  assertStreamUrl(resetSource, 'room_cursor')
   stream.stop()
 })
 
@@ -357,9 +457,10 @@ test('a semantically malformed typed frame repairs without committing its broker
   stream.stop()
   stream.start('room_malformed')
   const resumed = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(
-    resumed.url,
-    '/rooms/room_malformed/messages/stream?event_cursor=broker_valid',
+  assertStreamUrl(
+    resumed,
+    'room_malformed',
+    'broker_valid',
     'an unapplied typed frame cannot become a reconnect boundary',
   )
   stream.stop()
@@ -405,10 +506,7 @@ test('room stream replays typed events received over an older gap snapshot', asy
   stream.stop()
   stream.start('room_snapshot_race')
   const resumedSource = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(
-    resumedSource.url,
-    '/rooms/room_snapshot_race/messages/stream?event_cursor=broker_2',
-  )
+  assertStreamUrl(resumedSource, 'room_snapshot_race', 'broker_2')
   stream.stop()
 })
 
@@ -446,10 +544,7 @@ test('room stream retries a gap until both repair lanes recover', async () => {
   stream.stop()
   stream.start('room_retry')
   const resumedSource = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(
-    resumedSource.url,
-    '/rooms/room_retry/messages/stream?event_cursor=broker_repaired',
-  )
+  assertStreamUrl(resumedSource, 'room_retry', 'broker_repaired')
   stream.stop()
 })
 
@@ -482,10 +577,13 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   source.dispatch('github_event', { room_id: 'room_bootstrap' }, 'broker_4')
   source.dispatch('message', { id: 'msg_live', source: 'agent', sender: 'agent' }, 'broker_5')
   source.dispatch('message_info_updated', { room_id: 'room_bootstrap', message_ids: null }, 'broker_6')
+  source.dispatch(ROOM_RESOURCE_INVALIDATION_CAPABILITY, {
+    room_id: 'room_bootstrap', resource: 'agent_approval',
+  }, 'broker_7')
   assert.deepEqual(applied, [], 'typed resources remain behind the startup snapshot boundary')
   assert.equal(lastMessageInfoInvalidation.value, previousInvalidation, 'info refresh also waits for the installed snapshot')
 
-  source.dispatch('room_sync', { gap: false, event_cursor: 'broker_6' })
+  source.dispatch('room_sync', { gap: false, event_cursor: 'broker_7' })
   await barrier
   ;(applied as string[]).push('snapshot')
   stream.finishBootstrap('room_bootstrap', true)
@@ -499,7 +597,7 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   stream.stop()
   stream.start('room_bootstrap')
   const resumed = FakeEventSource.instances[FakeEventSource.instances.length - 1]
-  assert.equal(resumed.url, '/rooms/room_bootstrap/messages/stream?event_cursor=broker_6')
+  assertStreamUrl(resumed, 'room_bootstrap', 'broker_7')
   stream.stop()
   lastMessageInfoInvalidation.value = null
 })
