@@ -40,6 +40,9 @@ export interface DaemonControlOperations {
   updateAgentConfiguration(input: {
     entryId: string; daemonGeneration: number; expectedRevision: number; configuration: Record<string, unknown>;
   }): unknown;
+  applyAgentConfiguration(input: {
+    entryId: string; daemonGeneration: number; expectedConfigurationRevision: number;
+  }): unknown;
   prepareInspectorRoomMove(input: { entryId: string; destinationRoomId: string; requestId: string; daemonGeneration: number }): unknown;
   commitInspectorRoomMove(input: RoomMoveIdentity): unknown;
   acknowledgeInspectorRoomMoveSourceRevocation(input: RoomMoveIdentity & { sourceAgentSessionId: string }): unknown;
@@ -334,6 +337,19 @@ export function createDaemonControlRequestHandler(
         daemonGeneration: positiveIntegerParam(params, "daemon_generation", "Agent configuration update requires exact typed coordinates."),
         expectedRevision: positiveIntegerParam(params, "expected_revision", "Agent configuration update requires exact typed coordinates."),
         configuration: paramsRecord(params.configuration),
+      });
+    }
+    if (request.method === "supervisor.apply_agent_configuration") {
+      const params = paramsRecord(request.params);
+      const error = "Agent configuration apply requires exact typed coordinates.";
+      return operations.applyAgentConfiguration({
+        entryId: requiredStringParam(params, "entry_id", error),
+        daemonGeneration: positiveIntegerParam(params, "daemon_generation", error),
+        expectedConfigurationRevision: positiveIntegerParam(
+          params,
+          "expected_configuration_revision",
+          error,
+        ),
       });
     }
     if (request.method === "supervisor.prepare_room_move") {

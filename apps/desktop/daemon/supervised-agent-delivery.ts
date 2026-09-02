@@ -367,6 +367,34 @@ export class SupervisedAgentDelivery {
     return this.stopForRefresh(agentId);
   }
 
+  /**
+   * Stop only an idle delivery lane. The two runtime maps deliberately cover
+   * both sides of the durable-dispatch boundary: activeTurnAborts is installed
+   * before native dispatch, while activeTurns owns the admitted provider turn.
+   * Once stoppingAgents is set, no new pump can cross the synchronous fence.
+   */
+  stopIfIdle(agentId: string): Promise<boolean> {
+    if (this.activeTurnAborts.has(agentId)
+      || this.activeTurns.has(agentId)
+      || this.stoppingOperations.has(agentId)) return Promise.resolve(false);
+    return this.startStopOperation(agentId).then(() => true);
+  }
+
+  private startStopOperation(agentId: string): Promise<void> {
+    this.stoppingAgents.add(agentId);
+    this.freezeInterruptReservations(agentId);
+    const operation = this.stopOperation(agentId);
+    this.stoppingOperations.set(agentId, operation);
+    void operation.then(() => {
+      if (this.stoppingOperations.get(agentId) === operation) this.stoppingOperations.delete(agentId);
+      this.stoppingAgents.delete(agentId);
+    }, () => {
+      if (this.stoppingOperations.get(agentId) === operation) this.stoppingOperations.delete(agentId);
+      this.stoppingAgents.delete(agentId);
+    });
+    return operation;
+  }
+
   /** Fence old-room observation immediately while allowing the activating
    * delivery continuation to finish its durable room-move commit. */
   pauseIngress(agentId: string): void {
@@ -382,18 +410,7 @@ export class SupervisedAgentDelivery {
   private stopForRefresh(agentId: string): Promise<void> {
     const prior = this.stoppingOperations.get(agentId);
     if (prior) return prior;
-    this.stoppingAgents.add(agentId);
-    this.freezeInterruptReservations(agentId);
-    const operation = this.stopOperation(agentId);
-    this.stoppingOperations.set(agentId, operation);
-    void operation.then(() => {
-      if (this.stoppingOperations.get(agentId) === operation) this.stoppingOperations.delete(agentId);
-      this.stoppingAgents.delete(agentId);
-    }, () => {
-      if (this.stoppingOperations.get(agentId) === operation) this.stoppingOperations.delete(agentId);
-      this.stoppingAgents.delete(agentId);
-    });
-    return operation;
+    return this.startStopOperation(agentId);
   }
 
   private async stopOperation(agentId: string): Promise<void> {
