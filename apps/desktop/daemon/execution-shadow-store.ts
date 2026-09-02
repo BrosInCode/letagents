@@ -81,12 +81,20 @@ function semanticFact(fact: ExecutionFact): string {
   return JSON.stringify(semantic);
 }
 
-function lifecycleEffectKind(fact: ExecutionFact): "none" | "manifest_working" | "manifest_idle" | "manifest_failed" {
+function lifecycleEffectKind(
+  fact: ExecutionFact,
+  provider: string,
+): "none" | "manifest_working" | "manifest_idle" | "manifest_failed" {
   if (fact.domain === "runtime" && fact.state === "ready") return "manifest_idle";
-  if (fact.domain === "runtime" && fact.state === "exited") return "manifest_failed";
+  if (fact.domain === "runtime" && fact.state === "exited") {
+    // Cursor owns one short-lived child per turn. Its normal exit closes
+    // history; only the validated turn outcome owns the reusable lane.
+    return provider === "cursor" ? "none" : "manifest_failed";
+  }
   if (fact.domain !== "turn") return "none";
   if (fact.state === "active") return "manifest_working";
   if (fact.state === "terminal") return "manifest_idle";
+  if (fact.state === "lost" && provider === "cursor") return "manifest_failed";
   return "none";
 }
 function unverifiedHistoricalFact(row: Row): boolean {
@@ -545,7 +553,7 @@ export class ExecutionShadowStore {
           "SELECT * FROM execution_runtime_generations WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?",
           fact.agentId, current.observer_execution_generation_id, current.observer_runtime_generation_id,
         );
-        const effectKind = replay ? "none" : lifecycleEffectKind(fact);
+        const effectKind = replay ? "none" : lifecycleEffectKind(fact, String(subjectRuntime.provider));
         const operational = subjectRuntime.authority_mode === "typed"
           && observerRuntime.authority_mode === "typed"
           && effectKind !== "none";

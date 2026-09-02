@@ -102,6 +102,7 @@ export type SupervisedPreparedTurnCheckpointer = (input: {
   providerContinuationId: string;
   providerConnection: ProviderActionConnectionRef;
 }) => Promise<void>;
+export type SupervisedLifecycleSettler = (agent: SupervisedIngressAgent) => Promise<void>;
 
 /**
  * Process-local lease acquired before a native Stop can affect a provider
@@ -179,6 +180,7 @@ export class SupervisedAgentDelivery {
     private readonly checkpointProviderState?: SupervisedProviderStateCheckpointer,
     private readonly checkpointPreparedTurn?: SupervisedPreparedTurnCheckpointer,
     private readonly observeNewSources?: (agent: SupervisedIngressAgent) => ((sourceMessageIds: readonly string[]) => void) | undefined,
+    private readonly settleLifecycleBeforeIdle?: SupervisedLifecycleSettler,
   ) {}
 
   /**
@@ -1342,12 +1344,19 @@ export class SupervisedAgentDelivery {
         this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, state.providerTurnId);
         setActive("responding");
       };
+      const settleLifecycleBeforeIdle = async (): Promise<void> => {
+        if (agent.provider !== "cursor") return;
+        if (!this.settleLifecycleBeforeIdle) {
+          throw new Error("Cursor lifecycle settlement is unavailable.");
+        }
+        await this.settleLifecycleBeforeIdle(agent);
+      };
       providerCallEntered = true;
       const turn = recovering
         ? this.provider.recoverRoomTurn?.(agent.handle, {
           inboxItemId: item.inbox_item_id,
           providerTurnId: item.provider_turn_id!,
-        }, { detachSignal: turnController.signal, checkpointProviderState, checkpointTerminalResult })
+        }, { detachSignal: turnController.signal, checkpointProviderState, settleLifecycleBeforeIdle, checkpointTerminalResult })
         : this.provider.runRoomTurn?.(agent.handle, {
         inboxItemId: item.inbox_item_id,
         sourceMessage: item.source_message,
@@ -1401,7 +1410,7 @@ export class SupervisedAgentDelivery {
         // Cursor additionally checkpoints its wrapper birth before allowing
         // retirement; every other adapter's exact turn id is its recovery key.
         if (agent.provider !== "cursor") markProviderTurnDurablyStarted();
-      }, checkpointPreparedTurn, checkpointProviderState, markDurableTurnStarted: () => {
+      }, checkpointPreparedTurn, checkpointProviderState, settleLifecycleBeforeIdle, markDurableTurnStarted: () => {
         if (agent.provider === "cursor" && this.checkpointPreparedTurn) {
           cursorNativeReleased = true;
         } else {

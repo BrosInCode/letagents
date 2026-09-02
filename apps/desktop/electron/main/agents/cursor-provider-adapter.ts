@@ -552,6 +552,9 @@ interface LiveTurn {
   liveDisplayTools: Map<string, { tool: string; input: unknown }>;
   executionTools: Map<string, { tool: string; completed: boolean }>;
   executionTurnFinished: boolean;
+  executionRuntimeFinished: boolean;
+  /** Keep the exited child birth installed until its typed turn effect is durable. */
+  lifecycleSettlementDeferred: boolean;
   executionTerminalCheckpoint: {
     sessionId: string; subtype: string; isError: boolean; nativeLifecycle: NativeLifecycleCheckpoint;
   } | null;
@@ -887,6 +890,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
           const settled = handle.roomTurnOperationSettled;
           pendingController.abort();
           await settled;
+          if (handle.liveTurn) {
+            throw new CursorRoomTurnRecoveryError(
+              "Cursor turn control could not retire the exact child birth; recovery is required before reporting idle.",
+            );
+          }
           return {
             capability: "restart_resume",
             interrupted: true,
@@ -928,7 +936,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
         }
       }
       await turn.child.exited;
-      if (turn.completion) {
+      if (turn.lifecycleSettlementDeferred) {
+        await this.awaitDeferredRoomTurnSettlement(handle, turn);
+      } else if (turn.completion) {
         await turn.completion;
       } else {
         // A supervised Stop can race the atomic prepared checkpoint before
@@ -1003,6 +1013,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
           options.checkpointPreparedTurn,
           turnAbortController.signal,
           markDurableTurnStarted,
+          options.settleLifecycleBeforeIdle,
         );
       } catch (error) {
         if (!(error instanceof CursorPostDispatchCheckpointError)) throw error;
@@ -1011,20 +1022,41 @@ export class CursorProviderAdapter implements ProviderAdapter {
         unlinkPreparationDetach();
         // Native work may have completed while its real session checkpoint
         // failed. Re-read only this exact wrapper terminal; never redispatch.
-        return this.recoverRoomTurn(handle, {
+        return await this.recoverRoomTurn(handle, {
           inboxItemId: request.inboxItemId,
           providerTurnId: turnId,
         }, {
           detachSignal: options.detachSignal,
           checkpointProviderState: options.checkpointProviderState,
+          settleLifecycleBeforeIdle: options.settleLifecycleBeforeIdle,
           checkpointTerminalResult: options.checkpointTerminalResult,
         });
       }
-      const terminal = await this.awaitRoomTurnTerminal(turn.completion!, options.detachSignal);
-      await options.checkpointProviderState?.({
-        providerContinuationId: handle.providerContinuationId!,
-        providerConnection: handle.providerConnection,
-      });
+      let terminal = await this.awaitRoomTurnTerminal(turn.completion!, options.detachSignal);
+      if (turn.lifecycleSettlementDeferred) {
+        this.observeNativeRuntimeExit(handle, turn, terminal.exit);
+        await options.settleLifecycleBeforeIdle?.();
+        if (handle.liveTurn === turn) handle.liveTurn = null;
+      }
+      try {
+        await options.checkpointProviderState?.({
+          providerContinuationId: handle.providerContinuationId!,
+          providerConnection: handle.providerConnection,
+        });
+      } catch (error) {
+        // The child is already exited and its typed effects are settled, but
+        // the durable manifest may still name that exact birth. Retain it so
+        // recovery can retry the processless-idle compensation idempotently.
+        if (turn.lifecycleSettlementDeferred && !handle.liveTurn) handle.liveTurn = turn;
+        throw error;
+      }
+      if (turn.lifecycleSettlementDeferred && terminal.state === "attempt_terminal") {
+        terminal = {
+          ...terminal,
+          attemptTerminal: this.commitAttemptTerminal(handle,
+            terminal.attemptTerminal ?? this.synthesizeAttemptTerminal(handle, terminal.exit)),
+        };
+      }
       const result = this.providerRoomTurnResult(turnId, terminal);
       const disposition = await options.checkpointTerminalResult?.(result);
       const acceptedResult = disposition?.acceptedResult ?? result;
@@ -1071,6 +1103,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     options: {
       detachSignal?: AbortSignal;
       checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"];
+      settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"];
       checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"];
     } = {},
   ): Promise<ProviderRoomTurnResult> {
@@ -1079,6 +1112,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (!turnId) {
       throw new CursorRoomTurnRecoveryError("Cursor room-turn recovery requires an exact persisted turn id.");
     }
+    const retainedTurn = handle.liveTurn?.roomTurnId === turnId ? handle.liveTurn : null;
     let terminal: CursorTurnTerminal | null;
     try {
       // The wrapper journal keeps consuming native stdout during a TERM fence,
@@ -1087,6 +1121,22 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // cannot be hidden until the next daemon restart.
       terminal = this.readDurableTurnTerminal(handle, turnId) ?? handle.roomTurnResults.get(turnId) ?? null;
     } catch (error) {
+      if (error instanceof CursorRoomTurnNotDispatchedError
+        && retainedTurn?.lifecycleSettlementDeferred) {
+        try {
+          await this.settlePreparedTurnIdle(
+            handle,
+            retainedTurn,
+            await retainedTurn.child.exited,
+            options.settleLifecycleBeforeIdle,
+            options.checkpointProviderState,
+          );
+        } catch (recoveryError) {
+          throw new CursorRoomTurnRecoveryError(
+            `Cursor prepared-wrapper recovery could not retire its exact child birth: ${recoveryError instanceof Error ? recoveryError.message : String(recoveryError)}`,
+          );
+        }
+      }
       throw error;
     }
     if (!terminal && handle.liveTurn?.roomTurnId === turnId && handle.liveTurn.completion) {
@@ -1130,10 +1180,38 @@ export class CursorProviderAdapter implements ProviderAdapter {
       );
     }
     try {
-      await options.checkpointProviderState?.({
-        providerContinuationId: handle.providerContinuationId!,
-        providerConnection: handle.providerConnection,
-      });
+      if (retainedTurn?.lifecycleSettlementDeferred) {
+        // A first Cursor init replaces the prepared cursor-pending identity.
+        // Commit that exact real continuation while the child birth is still
+        // installed, so typed capture can map its terminal facts.
+        await options.checkpointProviderState?.({
+          providerContinuationId: handle.providerContinuationId!,
+          providerConnection: handle.providerConnection,
+        });
+        this.observeValidatedTurnTerminal(handle, retainedTurn,
+          terminal.state === "result" ? terminal.isError ? "failed" : "completed"
+            : terminal.state === "interrupted" ? "interrupted" : "lost");
+        this.observeNativeRuntimeExit(handle, retainedTurn, terminal.exit);
+        await options.settleLifecycleBeforeIdle?.();
+        if (handle.liveTurn === retainedTurn) handle.liveTurn = null;
+        handle.state = "idle";
+        try {
+          await options.checkpointProviderState?.({
+            providerContinuationId: handle.providerContinuationId!,
+            providerConnection: handle.providerConnection,
+          });
+        } catch (error) {
+          // The child is already exited, but retaining its immutable birth lets
+          // an idempotent recovery retry the live->idle checkpoint safely.
+          if (!handle.liveTurn) handle.liveTurn = retainedTurn;
+          throw error;
+        }
+      } else {
+        await options.checkpointProviderState?.({
+          providerContinuationId: handle.providerContinuationId!,
+          providerConnection: handle.providerConnection,
+        });
+      }
     } catch (error) {
       // The manifest write may already have committed before a later durable
       // checkpoint failed. Keep the continuation proven by the exact terminal
@@ -1141,22 +1219,19 @@ export class CursorProviderAdapter implements ProviderAdapter {
       throw new CursorRoomTurnRecoveryError(
         `Cursor terminal recovery could not checkpoint its exact continuation: ${error instanceof Error ? error.message : String(error)}`,
       );
-    } finally {
-      if (terminal.state === "attempt_terminal") {
-        // Recovery has the same attempt-level semantics as live completion. A
-        // trusted wrapper terminal with init but no result proves this native
-        // lane ended. Checkpoint its recovered continuation first because the
-        // daemon's synchronous onExit listener retires the live handle and
-        // would otherwise invalidate that checkpoint's ownership fence. The
-        // finally still guarantees terminalization before either checkpoint
-        // failure or providerRoomTurnResult escapes to the delivery worker.
-        const attemptTerminal = this.finishAttempt(
-          handle,
-          terminal.exit,
-          terminal.attemptTerminal?.terminalCause,
-        );
-        terminal = { ...terminal, attemptTerminal };
-      }
+    }
+    if (terminal.state === "attempt_terminal") {
+      // Recovery has the same attempt-level semantics as live completion. A
+      // trusted wrapper terminal with init but no result proves this native
+      // lane ended. Commit attempt death only after continuation settlement
+      // and the live->idle compensation both succeed; a failed recovery must
+      // retain the immutable child birth for an idempotent retry.
+      const attemptTerminal = this.finishAttempt(
+        handle,
+        terminal.exit,
+        terminal.attemptTerminal?.terminalCause,
+      );
+      terminal = { ...terminal, attemptTerminal };
     }
     const result = this.providerRoomTurnResult(turnId, terminal);
     const disposition = await options.checkpointTerminalResult?.(result);
@@ -1611,6 +1686,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     checkpointPreparedTurn?: ProviderRoomTurnOptions["checkpointPreparedTurn"],
     launchSignal?: AbortSignal,
     markDurableTurnStarted?: ProviderRoomTurnOptions["markDurableTurnStarted"],
+    settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
   ): Promise<LiveTurn> {
     throwIfCursorTurnLaunchAborted(launchSignal, roomTurnId);
     let childEnv: NodeJS.ProcessEnv | undefined;
@@ -2109,13 +2185,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
       liveDisplayTools: new Map(),
       executionTools: new Map(),
       executionTurnFinished: false,
+      executionRuntimeFinished: false,
+      lifecycleSettlementDeferred: Boolean(roomTurnId && settleLifecycleBeforeIdle),
       executionTerminalCheckpoint: null,
       executionContinuationId: null,
     };
     void child.exited.then(async (exit) => {
       // As in completeTurn, drain final stdout before deciding what was lost.
       await new Promise<void>((resolveDrain) => setImmediate(resolveDrain));
-      this.observeNativeExit(handle, turn, exit);
+      if (!turn.lifecycleSettlementDeferred) this.observeNativeExit(handle, turn, exit);
     });
     handle.liveTurn = turn;
     handle.state = "working";
@@ -2166,32 +2244,49 @@ export class CursorProviderAdapter implements ProviderAdapter {
       }
     } catch (error) {
       await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping, nativeLaunchIsDeferred);
+      const exit = turnCheckpointed && turn.lifecycleSettlementDeferred
+        ? await this.readTerminatedTurnExit(turn)
+        : null;
       await abandonPreparedGeneration();
       turn.workspaceGeneration = null;
-      handle.liveTurn = null;
-      handle.state = "idle";
       if (turnCheckpointed) {
         // The atomic prepared checkpoint may already have committed the exact
         // wrapper birth even though native work was never released. Retire
         // that dead birth while the exact inbox turn still fences this
         // callback. The daemon permits this narrow live->idle edge during
         // handoff because the old owner still holds the singleton and drain.
-        try {
+        if (turn.lifecycleSettlementDeferred) {
+          try {
+            await this.settlePreparedTurnIdle(
+              handle,
+              turn,
+              exit!,
+              settleLifecycleBeforeIdle,
+              checkpointProviderState,
+            );
+          } catch (retirementError) {
+            // The exact turn+wrapper checkpoint is already durable. Route
+            // through exact-turn recovery so the dead birth is retired before
+            // delivery can classify this inbox item as safe to rerun.
+            throw new CursorPostDispatchCheckpointError(
+              `Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
+            );
+          }
+        } else {
+          handle.liveTurn = null;
+          handle.state = "idle";
           await checkpointProviderState?.({
             providerContinuationId: handle.providerContinuationId!,
             providerConnection: handle.providerConnection,
           });
-        } catch (retirementError) {
-          throw new CursorRoomTurnNotDispatchedError(
-            `Cursor prepared wrapper was reaped, but its durable idle-state retirement failed: ${retirementError instanceof Error ? retirementError.message : String(retirementError)}`,
-            roomTurnId,
-          );
         }
         throw new CursorRoomTurnNotDispatchedError(
           `Cursor wrapper state could not be checkpointed before native dispatch: ${error instanceof Error ? error.message : String(error)}`,
           roomTurnId,
         );
       }
+      if (handle.liveTurn === turn) handle.liveTurn = null;
+      handle.state = "idle";
       if (launchSignal?.aborted) {
         throw new CursorRoomTurnNotDispatchedError(
           "Cursor turn preparation was interrupted and reaped before native dispatch.",
@@ -2222,6 +2317,24 @@ export class CursorProviderAdapter implements ProviderAdapter {
         providerConnection: handle.providerConnection,
       });
     };
+    const settleReleasedTurnIdle = async (
+      exit: ProviderProcessExit,
+      outcome: "completed" | "failed" | "interrupted" | "lost",
+    ): Promise<void> => {
+      if (turn.lifecycleSettlementDeferred) {
+        this.observeValidatedTurnTerminal(handle, turn, outcome);
+        this.observeNativeRuntimeExit(handle, turn, exit);
+        await settleLifecycleBeforeIdle?.();
+      }
+      if (handle.liveTurn === turn) handle.liveTurn = null;
+      handle.state = "idle";
+      try {
+        await checkpointReleasedTurnIdle();
+      } catch (error) {
+        if (turn.lifecycleSettlementDeferred && !handle.liveTurn) handle.liveTurn = turn;
+        throw error;
+      }
+    };
     try {
       child.release();
     } catch (error) {
@@ -2237,11 +2350,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
         child.ownsDescendantReaping,
         nativeLaunchIsDeferred,
       );
-      const exit = await child.exited;
+      const exit = await this.readTerminatedTurnExit(turn);
       await this.retireTurnWorkspaceGeneration(handle, turn);
-      if (handle.liveTurn === turn) handle.liveTurn = null;
-      handle.state = "idle";
-      await checkpointReleasedTurnIdle();
+      await settleReleasedTurnIdle(exit, "lost");
       if (roomTurnId) {
         throw new CursorPostDispatchCheckpointError(
           `Cursor native release acknowledgement was ambiguous; exact terminal recovery is required: ${error instanceof Error ? error.message : String(error)}`,
@@ -2270,15 +2381,15 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // this is a turn interruption—not evidence that the durable Cursor lane
       // itself died. Retire the wrapper birth and preserve the continuation.
       unsubscribe();
+      let exit: ProviderProcessExit;
       if (first === "timeout") {
         await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
+        exit = await this.readTerminatedTurnExit(turn);
       } else {
-        await child.exited;
+        exit = await child.exited;
       }
       await this.retireTurnWorkspaceGeneration(handle, turn);
-      if (handle.liveTurn === turn) handle.liveTurn = null;
-      handle.state = "idle";
-      await checkpointReleasedTurnIdle();
+      await settleReleasedTurnIdle(exit, "interrupted");
       // Release already admitted native work. Missing init cannot prove that
       // nothing ran; the exact Stop reservation must settle this invocation.
       throw new CursorRoomTurnRecoveryError(
@@ -2288,10 +2399,11 @@ export class CursorProviderAdapter implements ProviderAdapter {
     if (first === "timeout") {
       unsubscribe();
       await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
+      const exit = turn.lifecycleSettlementDeferred
+        ? await this.readTerminatedTurnExit(turn)
+        : { type: "exit" as const, code: null, signal: null };
       await this.retireTurnWorkspaceGeneration(handle, turn);
-      handle.liveTurn = null;
-      handle.state = "idle";
-      await checkpointReleasedTurnIdle();
+      await settleReleasedTurnIdle(exit, "lost");
       this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
       throw new Error("cursor-agent reported no stream-json init within the startup bound; refusing an unobservable turn.");
     }
@@ -2314,9 +2426,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
         // retained-for-recovery state explicit to the caller.
         retirementError = error;
       }
-      handle.liveTurn = null;
-      handle.state = "idle";
-      await checkpointReleasedTurnIdle();
+      await settleReleasedTurnIdle(exit, "lost");
       this.finishAttempt(handle, exit);
       if (retirementError) {
         if (liveFailureDetail) {
@@ -2340,17 +2450,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
       unsubscribe();
       const exit = await child.exited;
       await this.retireTurnWorkspaceGeneration(handle, turn);
-      handle.liveTurn = null;
-      handle.state = "idle";
-      await checkpointReleasedTurnIdle();
+      await settleReleasedTurnIdle(exit, "lost");
       this.finishAttempt(handle, exit);
       throw new Error("cursor-agent reported a different session than the durable continuation.");
     }
     if (!handle.providerContinuationId) {
       unsubscribe();
       await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
+      const exit = await this.readTerminatedTurnExit(turn);
       await this.retireTurnWorkspaceGeneration(handle, turn);
-      handle.liveTurn = null;
+      await settleReleasedTurnIdle(exit, "lost");
       this.finishAttempt(handle, { type: "exit", code: null, signal: null }, "protocol_error");
       throw new Error("cursor-agent init carried no session id; refusing an unverifiable continuation.");
     }
@@ -2363,7 +2472,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
     } catch (error) {
       unsubscribe();
       await this.terminateTurnChild(turn.pid, child.exited, turn.processIdentity, child.ownsDescendantReaping);
-      const exit = await child.exited;
+      const exit = await this.readTerminatedTurnExit(turn);
       this.interruptLiveDisplayTools(handle, turn);
       const reportedContinuationId = handle.providerContinuationId;
       // Do not roll back a session identity proven by Cursor's exact init.
@@ -2386,21 +2495,18 @@ export class CursorProviderAdapter implements ProviderAdapter {
           this.publishStream(handle, "turn/terminal_invalid", {
             reason: evidenceError instanceof Error ? evidenceError.message : String(evidenceError),
           }, "error");
-          this.finishAttempt(handle, exit, "protocol_error");
+          if (!turn.lifecycleSettlementDeferred) {
+            this.finishAttempt(handle, exit, "protocol_error");
+          }
           throw new CursorRoomTurnRecoveryError(
             `Cursor reported a real session but its durable checkpoint failed, and trusted terminal recovery was unavailable: ${evidenceError instanceof Error ? evidenceError.message : String(evidenceError)}`,
           );
         }
       }
       await this.retireTurnWorkspaceGeneration(handle, turn, trustedDurableTerminal);
-      handle.liveTurn = null;
-      handle.state = "idle";
-      if (trustedDurableTerminal) {
-        this.rememberRoomTurnTerminal(handle, turn, trustedDurableTerminal);
-      } else {
-        this.rememberRoomTurnTerminal(handle, turn,
-          turn.sawResult && !handle.protocolError
-            ? {
+      const recoveredTerminal = trustedDurableTerminal
+        ?? (turn.sawResult && !handle.protocolError
+          ? {
               state: "result",
               exit,
               text: turn.resultText,
@@ -2409,8 +2515,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
               attemptTerminal: null,
               publicationContract: "structured_room_turn_v1",
               ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
-            }
-            : {
+            } satisfies CursorTurnTerminal
+          : {
               state: "attempt_terminal",
               exit,
               text: null,
@@ -2419,8 +2525,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
               attemptTerminal: null,
               publicationContract: "structured_room_turn_v1",
               ...(reportedContinuationId ? { providerContinuationId: reportedContinuationId } : {}),
-            });
-      }
+            } satisfies CursorTurnTerminal);
+      this.rememberRoomTurnTerminal(handle, turn, recoveredTerminal, !turn.lifecycleSettlementDeferred);
       throw new CursorPostDispatchCheckpointError(
         `Cursor reported a real session but its durable checkpoint failed: ${error instanceof Error ? error.message : String(error)}`,
       );
@@ -2470,7 +2576,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // Do not touch the provider-authored tree until a successor can prove the
       // exact wrapper retired both process and remote authority. The generation
       // handle/receipt deliberately remains live and recoverable.
-      const attemptTerminal = this.finishAttempt(handle, exit, "protocol_error");
+      const attemptTerminal = turn.lifecycleSettlementDeferred
+        ? this.synthesizeAttemptTerminal(handle, exit, "protocol_error")
+        : this.finishAttempt(handle, exit, "protocol_error");
       return this.rememberRoomTurnTerminal(handle, turn, {
         state: "attempt_terminal",
         exit,
@@ -2487,7 +2595,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
       });
     }
     await this.retireTurnWorkspaceGeneration(handle, turn, trustedDurableTerminal);
-    if (handle.liveTurn === turn) handle.liveTurn = null;
+    if (!turn.lifecycleSettlementDeferred && handle.liveTurn === turn) handle.liveTurn = null;
     if (handle.terminal) {
       return this.rememberRoomTurnTerminal(handle, turn, {
         state: "attempt_terminal",
@@ -2531,13 +2639,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
       // terminal evidence — never silently absorbed as an idle turn. The one
       // refinement: the proven usage-limit signature is provider_quota, not a
       // crash (recoverable by model switch / spend limit, per the spike).
-      const attemptTerminal = this.finishAttempt(
-        handle,
-        exit,
-        !handle.stopRequested && !handle.protocolError && isProviderQuotaExit(turn, exit)
-          ? "provider_quota"
-          : undefined,
-      );
+      const forcedCause = !handle.stopRequested && !handle.protocolError && isProviderQuotaExit(turn, exit)
+        ? "provider_quota"
+        : undefined;
+      const attemptTerminal = turn.lifecycleSettlementDeferred
+        ? this.synthesizeAttemptTerminal(handle, exit, forcedCause)
+        : this.finishAttempt(handle, exit, forcedCause);
       return this.rememberRoomTurnTerminal(handle, turn, {
         state: "attempt_terminal",
         exit,
@@ -2795,13 +2902,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
   private observeNativeExecution(handle: CursorProviderHandle, turn: LiveTurn, message: CursorStreamMessage, sessionId: string | null): NativeLifecycleCheckpoint | null {
     if (!sessionId || !nativeExecutionId(sessionId) || handle.protocolError) return null;
     const replay = turn.executionTerminalCheckpoint;
-    if (turn.executionTurnFinished) {
-      return message.type === "result" && replay
+    if (replay) {
+      return message.type === "result"
         && sessionId === replay.sessionId
         && message.subtype === replay.subtype
         && message.is_error === replay.isError
         ? replay.nativeLifecycle : null;
     }
+    if (turn.executionTurnFinished) return null;
     const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity, turn.pid);
     const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
     if (message.type === "system" && message.subtype === "init" && !turn.sawInit) {
@@ -2835,16 +2943,12 @@ export class CursorProviderAdapter implements ProviderAdapter {
         nativeProcessIdentity: turn.processIdentity,
         terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
       });
-      emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...nativeTurn,
-        nativeEventId: nativeLifecycle.nativeEventId,
-        turnOutcome: message.subtype === "success" && message.is_error === false ? "completed" : "failed" });
       turn.executionTerminalCheckpoint = {
         sessionId,
         subtype: message.subtype,
         isError: message.is_error === true,
         nativeLifecycle,
       };
-      turn.executionTurnFinished = true;
       return nativeLifecycle;
     }
     if (message.type !== "tool_call" || !nativeExecutionId(message.call_id)) return null;
@@ -2898,27 +3002,66 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   private observeNativeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
     if (exit.type !== "exit") return;
-    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity, turn.pid);
-    const sessionId = turn.executionContinuationId;
-    if (turn.sawInit && nativeExecutionId(sessionId)) {
-      const nativeTurn = { providerContinuationId: sessionId, providerTurnId: turn.controlTurnId };
-      // Outstanding requests have no execution-start proof. Process loss
-      // terminates the turn, but cannot invent interrupted/lost executions.
-      if (!turn.executionTurnFinished) emit(turn.interruptRequested
-        ? { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: "interrupted", sideEffects: "none", ...nativeTurn }
-        : { domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none", ...nativeTurn });
+    if (!turn.executionTurnFinished) {
+      this.observeValidatedTurnTerminal(handle, turn, turn.interruptRequested
+        ? "interrupted"
+        : turn.sawResult && turn.executionTerminalCheckpoint
+          ? turn.resultWasError ? "failed" : "completed"
+          : "lost");
+    }
+    this.observeNativeRuntimeExit(handle, turn, exit);
+  }
+
+  private observeValidatedTurnTerminal(
+    handle: CursorProviderHandle,
+    turn: LiveTurn,
+    outcome: "completed" | "failed" | "interrupted" | "lost",
+  ): void {
+    if (turn.executionTurnFinished) return;
+    const sessionId = turn.executionContinuationId ?? handle.providerContinuationId;
+    if (nativeExecutionId(sessionId)) {
+      const nativeLifecycle = turn.executionTerminalCheckpoint?.nativeLifecycle ?? nativeLifecycleCheckpoint({
+        provider: this.id,
+        workAttemptId: handle.workAttemptId,
+        phase: "turn_terminal",
+        providerContinuationId: sessionId,
+        providerTurnId: turn.controlTurnId,
+        nativeProcessPid: turn.pid,
+        nativeProcessIdentity: turn.processIdentity,
+        terminalDiscriminator: outcome,
+      });
+      handle.execution.emit(outcome === "lost"
+        ? { domain: "turn", kind: "state_changed", state: "lost", sideEffects: "none",
+          providerContinuationId: sessionId, providerTurnId: turn.controlTurnId,
+          nativeEventId: nativeLifecycle.nativeEventId }
+        : { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
+          sideEffects: "none", providerContinuationId: sessionId, providerTurnId: turn.controlTurnId,
+          nativeEventId: nativeLifecycle.nativeEventId }, turn.processIdentity, turn.pid);
     }
     turn.executionTools.clear();
     turn.executionTurnFinished = true;
-    emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" });
-    emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" });
+  }
+
+  private observeNativeRuntimeExit(handle: CursorProviderHandle, turn: LiveTurn, exit: ProviderProcessExit): void {
+    if (turn.executionRuntimeFinished) return;
+    const controlEvidence = exit.type === "exit" ? "process_exit" as const : "native_session_terminated" as const;
+    const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact, turn.processIdentity, turn.pid);
+    emit({ domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence });
+    emit({ domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence });
+    turn.executionRuntimeFinished = true;
   }
 
   private rememberRoomTurnTerminal(
     handle: CursorProviderHandle,
     turn: LiveTurn,
     terminal: CursorTurnTerminal,
+    observeLifecycle = true,
   ): CursorTurnTerminal {
+    if (turn.lifecycleSettlementDeferred && observeLifecycle) {
+      this.observeValidatedTurnTerminal(handle, turn,
+        terminal.state === "result" ? terminal.isError ? "failed" : "completed"
+          : terminal.state === "interrupted" ? "interrupted" : "lost");
+    }
     if (turn.roomTurnId) {
       handle.roomTurnResults.set(turn.roomTurnId, terminal);
       while (handle.roomTurnResults.size > 16) {
@@ -3053,6 +3196,19 @@ export class CursorProviderAdapter implements ProviderAdapter {
     await exited;
   }
 
+  private async readTerminatedTurnExit(turn: LiveTurn): Promise<ProviderProcessExit> {
+    if (turn.processIdentity === null) {
+      return { type: "exit", code: null, signal: null };
+    }
+    if (turn.processIdentity !== undefined
+      && this.exactProcessStatus(turn.pid, turn.processIdentity) === "absent") {
+      // A missing exact birth is conclusive terminal evidence even when a
+      // stale ChildProcess object can no longer deliver its exit callback.
+      return { type: "exit", code: null, signal: null };
+    }
+    return turn.child.exited;
+  }
+
   private exactProcessStatus(pid: number, processIdentity: string): "exact" | "absent" | "ambiguous" {
     const identity = this.deps.getProcessIdentity(pid);
     if (identity === undefined) return "ambiguous";
@@ -3076,7 +3232,9 @@ export class CursorProviderAdapter implements ProviderAdapter {
     turn: LiveTurn,
   ): Promise<ProviderTerminalPayload> {
     const exit = await turn.child.exited;
-    if (turn.completion) {
+    if (turn.lifecycleSettlementDeferred) {
+      await this.awaitDeferredRoomTurnSettlement(handle, turn);
+    } else if (turn.completion) {
       await turn.completion;
     } else {
       await this.retireTurnWorkspaceGeneration(handle, turn);
@@ -3085,17 +3243,63 @@ export class CursorProviderAdapter implements ProviderAdapter {
     return handle.terminal ?? this.finishAttempt(handle, exit);
   }
 
-  private finishAfterVerifiedWrapperAbsence(
+  private async finishAfterVerifiedWrapperAbsence(
     handle: CursorProviderHandle,
     turn: LiveTurn,
-  ): ProviderTerminalPayload {
+  ): Promise<ProviderTerminalPayload> {
     if (turn.workspaceGeneration) {
       throw new CursorRoomTurnRecoveryError(
         "Cursor's exact wrapper birth is absent, but its writable generation has no terminal retirement receipt; restart recovery is required.",
       );
     }
-    if (handle.liveTurn === turn) handle.liveTurn = null;
+    if (turn.lifecycleSettlementDeferred) {
+      await this.awaitDeferredRoomTurnSettlement(handle, turn);
+    } else if (handle.liveTurn === turn) {
+      handle.liveTurn = null;
+    }
     return this.finishAttempt(handle, { type: "exit", code: null, signal: null });
+  }
+
+  private async awaitDeferredRoomTurnSettlement(
+    handle: CursorProviderHandle,
+    turn: LiveTurn,
+  ): Promise<void> {
+    const settlement = handle.roomTurnOperationId === turn.roomTurnId
+      ? handle.roomTurnOperationSettled
+      : null;
+    if (!settlement) {
+      throw new CursorRoomTurnRecoveryError(
+        "Cursor's bounded turn has no active settlement owner; retaining its exact child birth for recovery.",
+      );
+    }
+    await settlement;
+    if (handle.liveTurn === turn) {
+      throw new CursorRoomTurnRecoveryError(
+        "Cursor's bounded turn finished without retiring its exact child birth; recovery is required.",
+      );
+    }
+  }
+
+  private async settlePreparedTurnIdle(
+    handle: CursorProviderHandle,
+    turn: LiveTurn,
+    exit: ProviderProcessExit,
+    settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"],
+    checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"],
+  ): Promise<void> {
+    this.observeNativeRuntimeExit(handle, turn, exit);
+    await settleLifecycleBeforeIdle?.();
+    if (handle.liveTurn === turn) handle.liveTurn = null;
+    handle.state = "idle";
+    try {
+      await checkpointProviderState?.({
+        providerContinuationId: handle.providerContinuationId!,
+        providerConnection: handle.providerConnection,
+      });
+    } catch (error) {
+      if (!handle.liveTurn) handle.liveTurn = turn;
+      throw error;
+    }
   }
 
   private finishAttempt(
@@ -3104,6 +3308,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
     forcedCause?: ProviderTerminalPayload["terminalCause"],
   ): ProviderTerminalPayload {
     if (handle.terminal) return handle.terminal;
+    return this.commitAttemptTerminal(handle, this.synthesizeAttemptTerminal(handle, exit, forcedCause));
+  }
+
+  private synthesizeAttemptTerminal(
+    handle: CursorProviderHandle,
+    exit: ProviderProcessExit,
+    forcedCause?: ProviderTerminalPayload["terminalCause"],
+  ): ProviderTerminalPayload {
     const terminal = exit.type === "error"
       ? {
         ...synthesizeTerminalPayload({
@@ -3124,6 +3336,14 @@ export class CursorProviderAdapter implements ProviderAdapter {
       });
     if (forcedCause) terminal.terminalCause = forcedCause;
     if (handle.protocolError) terminal.terminalCause = "protocol_error";
+    return terminal;
+  }
+
+  private commitAttemptTerminal(
+    handle: CursorProviderHandle,
+    terminal: ProviderTerminalPayload,
+  ): ProviderTerminalPayload {
+    if (handle.terminal) return handle.terminal;
     handle.terminal = terminal;
     handle.liveTurn = null;
     handle.state = terminal.terminalCause === "exited" || terminal.terminalCause === "stopped"

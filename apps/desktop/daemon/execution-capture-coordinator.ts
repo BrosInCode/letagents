@@ -132,6 +132,45 @@ export class ExecutionCaptureCoordinator {
     this.schedule(lane);
   }
 
+  /** Drain the exact retained Cursor birth before its reusable lane drops that identity. */
+  flush(installation: ProviderInstallationToken): void {
+    const lane = this.lanes.get(installation.entryId);
+    if (!lane || !this.current(lane) || lane.installation !== installation
+      || lane.handle !== installation.handle || lane.generation !== installation.executionGenerationId
+      || !lane.subscription || lane.detached || lane.suspended || lane.subscriptionFailed || lane.overflow) {
+      throw new ExecutionProtocolError("identity_mismatch");
+    }
+    this.dirty.delete(lane);
+    while (this.drain(lane)) { /* bounded batches drain the retained source synchronously */ }
+    // Delivery admission rejects an exited runtime by design. Retirement is
+    // different: the exact child has exited, and we need proof that its final
+    // source position is durable before dropping that identity.
+    const observer = lane.observer;
+    const position = lane.subscription.position();
+    const expectedRuntime = this.knownRuntime(lane, installation.providerConnection.pid ?? undefined,
+      installation.providerConnection.processIdentity ?? undefined);
+    const durable = this.row(`SELECT execution_generation_id,runtime_generation_id,
+      observer_execution_generation_id,observer_runtime_generation_id,observer_epoch,daemon_generation_id,
+      source_id,last_source_sequence,max_observed_sequence
+      FROM execution_observers WHERE agent_id=?`, installation.entryId);
+    if (lane.pending.size || !observer || !expectedRuntime || !durable
+      || expectedRuntime.authorityMode !== installation.authorityMode
+      || expectedRuntime.id !== observer.observerRuntimeGenerationId
+      || expectedRuntime.generation !== observer.observerExecutionGenerationId
+      || durable.execution_generation_id !== observer.executionGenerationId
+      || durable.runtime_generation_id !== observer.runtimeGenerationId
+      || durable.observer_execution_generation_id !== observer.observerExecutionGenerationId
+      || durable.observer_runtime_generation_id !== observer.observerRuntimeGenerationId
+      || durable.daemon_generation_id !== String(this.options.daemonGeneration())
+      || Number(durable.observer_epoch) !== observer.epoch
+      || durable.source_id !== lane.subscription.sourceId
+      || durable.source_id !== observer.sourceId
+      || Number(durable.last_source_sequence) !== position.latestSequence
+      || Number(durable.max_observed_sequence) !== position.latestSequence) {
+      throw new ExecutionProtocolError("source_gap");
+    }
+  }
+
   /** A post-COMMIT hint only schedules work; it cannot reject that checkpoint. */
   refresh(): void {
     for (const lane of this.retiring.values()) this.schedule(lane);
