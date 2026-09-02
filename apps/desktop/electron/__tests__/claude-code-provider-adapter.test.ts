@@ -331,6 +331,29 @@ test("spawn launches the headless CLI with verbatim policy flags and establishes
   assert.ok(streamEvents.some((event) => event.method === "system/init"), "init published as stream evidence");
 });
 
+test("read-only spawn removes shell tools and ambient settings from the native CLI", async () => {
+  const harness = createHarness();
+  const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    configurationRevision: 1,
+    permissionProfileId: "read_only",
+    launchPolicy: {
+      permissionMode: "dontAsk",
+      dangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep"],
+      allowedTools: ["mcp__letagents__*"],
+      settingSources: "",
+    },
+  }));
+
+  const args = harness.launches[0]!.args;
+  assert.equal(argValue(args, "--permission-mode"), "dontAsk");
+  assert.equal(argValue(args, "--tools"), "Read,Glob,Grep");
+  assert.equal(argValue(args, "--allowed-tools"), "mcp__letagents__*");
+  assert.equal(argValue(args, "--setting-sources"), "");
+  assert.equal(args.includes("--dangerously-skip-permissions"), false);
+});
+
 test("Claude freezes lifecycle authority to the exact CLI process birth", async () => {
   const harness = createHarness();
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });

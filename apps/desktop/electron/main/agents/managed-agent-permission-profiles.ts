@@ -8,10 +8,10 @@ const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "read_only",
     label: "Read-only",
-    description: "Allows read and planning tools, then denies write, edit, and shell tools.",
+    description: "Allows Read, Glob, and Grep while keeping daemon-mediated LetAgents room tools available.",
     status: "available",
     risk: "low",
-    detail: "Claude Code non-read tool calls are denied before a room approval request is created.",
+    detail: "Write, edit, and shell tools are unavailable, and ambient Claude settings are disabled.",
     isDefault: true,
   },
   {

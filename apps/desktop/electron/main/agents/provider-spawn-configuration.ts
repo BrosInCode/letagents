@@ -22,12 +22,19 @@ export function attestProviderSpawnPolicy(
     requireMatch(policy, "permission", { "*": "allow" }, provider);
   } else if (provider === "claude-code") {
     const authority = profile === "read_only"
-      ? { permissionMode: "plan", dangerouslySkipPermissions: false }
+      ? {
+        permissionMode: "dontAsk",
+        dangerouslySkipPermissions: false,
+        tools: ["Read", "Glob", "Grep"],
+        allowedTools: ["mcp__letagents__*"],
+        settingSources: "",
+      }
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
         : { permissionMode: "acceptEdits", dangerouslySkipPermissions: false };
-    requireMatch(policy, "permissionMode", authority.permissionMode, provider);
-    requireMatch(policy, "dangerouslySkipPermissions", authority.dangerouslySkipPermissions, provider);
+    for (const [key, value] of Object.entries(authority)) {
+      requireMatch(policy, key, value, provider);
+    }
   } else if (profile === "read_only") {
     requireMatch(policy, "mode", "ask", provider);
     requireMatch(policy, "force", false, provider);

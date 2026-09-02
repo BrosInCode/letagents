@@ -31,12 +31,18 @@ test("managed provider spawn attestation preserves the resolved native authority
     ...request,
     permissionProfileId: "read_only",
     launchPolicy: {
-      permissionMode: "plan",
+      permissionMode: "dontAsk",
       dangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep"],
+      allowedTools: ["mcp__letagents__*"],
+      settingSources: "",
     },
   }), {
-    permissionMode: "plan",
+    permissionMode: "dontAsk",
     dangerouslySkipPermissions: false,
+    tools: ["Read", "Glob", "Grep"],
+    allowedTools: ["mcp__letagents__*"],
+    settingSources: "",
   });
 
   assert.deepEqual(attestProviderSpawnPolicy("cursor", {
@@ -60,11 +66,25 @@ test("managed provider spawn attestation rejects downgraded or unsupported autho
 
   assert.throws(() => attestProviderSpawnPolicy("claude-code", {
     ...request,
+    permissionProfileId: "read_only",
+    launchPolicy: {
+      permissionMode: "dontAsk",
+      dangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep"],
+      settingSources: "",
+    },
+  }), /authority at 'allowedTools'/);
+
+  assert.throws(() => attestProviderSpawnPolicy("claude-code", {
+    ...request,
     reasoningEffort: "high",
     permissionProfileId: "read_only",
     launchPolicy: {
-      permissionMode: "plan",
+      permissionMode: "dontAsk",
       dangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep"],
+      allowedTools: ["mcp__letagents__*"],
+      settingSources: "",
     },
   }), /does not support.*reasoning effort/);
 
