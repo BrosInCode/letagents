@@ -218,6 +218,16 @@ function createHarness() {
       holdTurnOpen = true;
       transcriptWhileBusy = true;
     },
+    completeTurn() {
+      holdTurnOpen = false;
+      transcriptWhileBusy = false;
+      for (const stream of eventStreams) {
+        stream.send({
+          type: "session.idle",
+          properties: { sessionID: "session-open-model-1" },
+        });
+      }
+    },
     setTranscriptFactories(factories: TranscriptFactory[]) {
       transcriptFactories = factories;
     },
@@ -990,6 +1000,42 @@ test("Open Model aborts and fences a bounded turn that exceeds its assistant-ste
   assert.deepEqual(harness.aborts, ["session-open-model-1"]);
 });
 
+test("typed Open Model reports a step guardrail without aborting the native turn", async () => {
+  const harness = createHarness();
+  harness.setTranscriptFactories([
+    (turnId) => [
+      assistantMessage(turnId, "assistant-1", 10, null, "tool-calls"),
+      assistantMessage(turnId, "assistant-2", 20, "A possible answer."),
+      assistantMessage(turnId, "assistant-3", 30, "LETAGENTS_NO_ROOM_REPLY"),
+    ],
+  ]);
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-soft-steps-")),
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    maxAssistantSteps: 2,
+  });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const stream: ProviderStreamEvent[] = [];
+  adapter.onStream(handle, (event) => stream.push(event));
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-soft-steps",
+    sourceMessage: { text: "say hi" },
+    activation: { decision: "activate" },
+    actionId: "soft-steps",
+  });
+
+  assert.equal(result.outcome, "no_reply");
+  assert.deepEqual(harness.aborts, []);
+  assert.deepEqual(
+    stream.filter((event) => event.method === "letagents/turnAttention").map((event) => event.payload),
+    [{ kind: "step_guardrail", turnId: result.turnId, limit: 2 }],
+  );
+});
+
 test("Open Model repairs a continuation on the same verified process", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
   const checkpointed: string[] = [];
@@ -1143,6 +1189,39 @@ test("Open Model bounded turns time out without polling transcript history", asy
   assert.equal(harness.promptBodies.length, 1);
   assert.equal(harness.messageReads, 1, "one bounded snapshot replaces transcript polling");
   assert.deepEqual(harness.aborts, ["session-open-model-1"], "the watchdog stops the exact native session");
+});
+
+test("typed Open Model reports a duration guardrail and keeps observing the exact turn", async () => {
+  const harness = createHarness();
+  harness.holdTurnOpen();
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-soft-timeout-")),
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 10,
+  });
+  const handle = await adapter.spawn(spawnRequest({ lifecycleAuthorityMode: "typed" }));
+  const attentionEvents: ProviderStreamEvent[] = [];
+  adapter.onStream(handle, (event) => {
+    if (event.method !== "letagents/turnAttention") return;
+    attentionEvents.push(event);
+    harness.completeTurn();
+  });
+
+  const result = await adapter.runRoomTurn(handle, {
+    inboxItemId: "inbox-soft-timeout",
+    sourceMessage: { text: "stay busy" },
+    activation: { decision: "activate" },
+    actionId: "soft-timeout",
+  });
+
+  assert.equal(result.outcome, "reply");
+  assert.deepEqual(harness.aborts, []);
+  assert.deepEqual(attentionEvents.map((event) => event.payload), [
+    { kind: "duration_guardrail", turnId: result.turnId, limitMs: 10 },
+  ]);
+  assert.equal(harness.messageReads, 2, "the guardrail does not restart transcript polling");
 });
 
 test("Open Model bounds a hung status probe to the turn-control budget instead of hanging the Stop", async () => {

@@ -1210,6 +1210,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     recovery = false,
   ): Promise<ProviderRoomTurnResult> {
     const deadline = Date.now() + this.turnTimeoutMs;
+    const softBounds = handle.lifecycleAuthorityMode === "typed";
+    let durationAttentionSent = false;
+    let stepAttentionSent = false;
     const emittedLengths = new Map<string, number>();
     const partTypes = new Map<string, string>();
     // callID -> last-emitted tool status. message.part.updated re-sends the
@@ -1223,6 +1226,56 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     signal?.addEventListener("abort", detach, { once: true });
     if (signal?.aborted) controller.abort();
     const events = handle.client.events(controller.signal)[Symbol.asyncIterator]();
+    const emitAttention = (kind: "duration_guardrail" | "step_guardrail"): void => {
+      this.emitStream(handle, {
+        kind: "provider_event",
+        method: "letagents/turnAttention",
+        summary: kind === "duration_guardrail"
+          ? "Open Model is still working past its duration guardrail."
+          : "Open Model is still working past its step guardrail.",
+        payload: kind === "duration_guardrail"
+          ? { kind, turnId, limitMs: this.turnTimeoutMs }
+          : { kind, turnId, limit: this.maxAssistantSteps },
+      });
+    };
+    const enforceStepBound = (assistantCount: number): void => {
+      if (assistantCount <= this.maxAssistantSteps) return;
+      if (!softBounds) {
+        throw new OpenCodeBoundedTurnError(
+          `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
+        );
+      }
+      if (!stepAttentionSent) {
+        stepAttentionSent = true;
+        emitAttention("step_guardrail");
+      }
+    };
+    const nextObservedEvent = async (): Promise<IteratorResult<OpenCodeEvent>> => {
+      if (!softBounds) return nextEventBefore(events, deadline);
+      if (durationAttentionSent) return events.next();
+      const pending = events.next();
+      const remainingMs = deadline - Date.now();
+      if (remainingMs <= 0) {
+        durationAttentionSent = true;
+        emitAttention("duration_guardrail");
+        return pending;
+      }
+      let timeout: NodeJS.Timeout | undefined;
+      try {
+        const observed = await Promise.race([
+          pending.then((value) => ({ kind: "event" as const, value })),
+          new Promise<{ kind: "attention" }>((resolve) => {
+            timeout = setTimeout(() => resolve({ kind: "attention" }), remainingMs);
+          }),
+        ]);
+        if (observed.kind === "event") return observed.value;
+      } finally {
+        if (timeout) clearTimeout(timeout);
+      }
+      durationAttentionSent = true;
+      emitAttention("duration_guardrail");
+      return pending;
+    };
     const snapshot = async (): Promise<{
       assistantCount: number;
       result: ProviderRoomTurnResult | null;
@@ -1241,11 +1294,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         this.emitMessageEvidence(handle, assistant, emittedLengths, toolStatuses,
           exactSession ? turnId : undefined);
       }
-      if (assistants.length > this.maxAssistantSteps) {
-        throw new OpenCodeBoundedTurnError(
-          `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
-        );
-      }
+      enforceStepBound(assistants.length);
       const finalAssistant = finalAssistantFor(messages, turnId);
       const finalInfo = record(finalAssistant?.info);
       const exactSession = finalInfo?.sessionID === undefined || finalInfo.sessionID === handle.providerContinuationId;
@@ -1275,7 +1324,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       // Opening the SSE stream before the snapshot closes the completion race:
       // history repairs anything that happened before subscription, then every
       // later transition is event-driven rather than O(history) polling.
-      const connected = await nextEventBefore(events, deadline);
+      const connected = await nextObservedEvent();
       if (connected.done) throw new Error("OpenCode event stream ended before turn observation.");
       const initial = await snapshot();
       if (await handle.client.status(handle.providerContinuationId) !== "busy"
@@ -1283,11 +1332,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         return resultAtSessionBoundary(initial);
       }
 
-      while (Date.now() < deadline) {
+      while (softBounds || Date.now() < deadline) {
         if (controller.signal.aborted) {
           throw new Error("OpenCode turn observation detached.");
         }
-        const next = await nextEventBefore(events, deadline);
+        const next = await nextObservedEvent();
         if (next.done) {
           const repaired = await snapshot();
           if (await handle.client.status(handle.providerContinuationId) !== "busy") {
@@ -1302,11 +1351,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           && typeof info.id === "string") {
           assistantIds.add(info.id);
           if (info.sessionID === handle.providerContinuationId) typedAssistantIds.add(info.id);
-          if (assistantIds.size > this.maxAssistantSteps) {
-            throw new OpenCodeBoundedTurnError(
-              `OpenCode exceeded the bounded turn limit of ${this.maxAssistantSteps} assistant steps.`,
-            );
-          }
+          enforceStepBound(assistantIds.size);
         }
         if (event.type === "message.part.updated") {
           const part = record(properties?.part);
