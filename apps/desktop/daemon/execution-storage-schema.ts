@@ -367,6 +367,10 @@ const lifecycleEffectsTable = `CREATE TABLE execution_lifecycle_effects (
   FOREIGN KEY(agent_id,observer_execution_generation_id,observer_runtime_generation_id)
     REFERENCES execution_runtime_generations(agent_id,execution_generation_id,runtime_generation_id)
 ) STRICT`;
+const lifecycleEffectsTableV23 = lifecycleEffectsTable.replace(
+  "effect_kind IN ('none','manifest_working','manifest_idle')",
+  "effect_kind IN ('none','manifest_working','manifest_idle','manifest_failed')",
+);
 const lifecycleEffectIndexes = {
   execution_lifecycle_effect_pending: "CREATE INDEX execution_lifecycle_effect_pending ON execution_lifecycle_effects(state,agent_id,fact_sequence)",
 };
@@ -438,7 +442,7 @@ const cutoverNativeTriggers = {
     BEGIN SELECT RAISE(ABORT,'Cutover native target cannot be replaced.'); END`,
 };
 
-export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22;
+export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22 | 23;
 
 function schemaFor(version: ExecutionStorageSchemaVersion): {
   tables: Record<string, string>; indexes: Record<string, string>; triggers: Record<string, string>;
@@ -453,7 +457,7 @@ function schemaFor(version: ExecutionStorageSchemaVersion): {
           `  ${observerSourceColumn},\n  FOREIGN KEY(agent_id,execution_generation_id,runtime_generation_id)`),
       ...(version >= 20 ? { execution_observer_sources: observerSourcesTable } : {}),
       ...(version >= 21 ? { execution_cutover_v2: cutoverNativeTable } : {}),
-      ...(version >= 22 ? { execution_lifecycle_effects: lifecycleEffectsTable } : {}),
+      ...(version >= 22 ? { execution_lifecycle_effects: version >= 23 ? lifecycleEffectsTableV23 : lifecycleEffectsTable } : {}),
     },
     indexes: { ...indexes, ...(version >= 22 ? lifecycleEffectIndexes : {}) },
     triggers: {
@@ -467,7 +471,7 @@ function schemaFor(version: ExecutionStorageSchemaVersion): {
 }
 
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 22): void {
+export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 23): void {
   const schema = schemaFor(version);
   for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   for (const statement of Object.values(schema.indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
@@ -525,10 +529,16 @@ export function migrateExecutionStorageV21ToV22(database: DatabaseSync): void {
   if (!database.isTransaction) throw new Error("Lifecycle effect storage migration requires a transaction.");
   validateExecutionStorageSchema(database, 21);
   const existing = database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_lifecycle_effects'").get();
+  let physicalVersion: 22 | 23 = 22;
   if (existing) {
     // A predecessor repair may encounter a physically complete additive table
-    // with older version markers. Trust it only after exact v22 validation.
-    validateExecutionStorageSchema(database, 22);
+    // with older version markers. Trust it only after exact known-shape validation,
+    // then still settle every historical fact below.
+    try { validateExecutionStorageSchema(database, 22); }
+    catch {
+      validateExecutionStorageSchema(database, 23);
+      physicalVersion = 23;
+    }
   } else {
     database.exec(lifecycleEffectsTable);
     for (const statement of Object.values(lifecycleEffectIndexes)) database.exec(statement);
@@ -546,13 +556,73 @@ export function migrateExecutionStorageV21ToV22(database: DatabaseSync): void {
       AND r.execution_generation_id=f.execution_generation_id
       AND r.runtime_generation_id=f.runtime_generation_id
     WHERE f.domain <> 'execution'`);
-  if (database.prepare(`SELECT 1 FROM execution_facts f
-      WHERE f.domain <> 'execution'
-        AND NOT EXISTS(SELECT 1 FROM execution_lifecycle_effects e WHERE e.fact_id=f.fact_id)
-      LIMIT 1`).get()) {
+  if (hasMissingLifecycleDisposition(database)) {
     throw new Error("Lifecycle effect storage migration left a fact without a disposition.");
   }
-  validateExecutionStorageSchema(database, 22);
+  validateExecutionStorageSchema(database, physicalVersion);
+}
+
+function hasMissingLifecycleDisposition(database: DatabaseSync): boolean {
+  return Boolean(database.prepare(`SELECT 1 FROM execution_facts f
+    WHERE f.domain <> 'execution'
+      AND NOT EXISTS(SELECT 1 FROM execution_lifecycle_effects e WHERE e.fact_id=f.fact_id)
+    LIMIT 1`).get());
+}
+
+function validateLifecycleEffectDependencies(database: DatabaseSync): void {
+  const allowedObjects = new Set([
+    "execution_lifecycle_effect_pending",
+    "execution_lifecycle_effect_identity_immutable",
+    "execution_lifecycle_effect_disposition_final",
+  ]);
+  const extra = (database.prepare(`SELECT name FROM sqlite_master
+    WHERE tbl_name='execution_lifecycle_effects' AND type IN ('index','trigger') AND sql IS NOT NULL`).all())
+    .find((row) => !allowedObjects.has(String(row.name)));
+  if (extra) throw new Error("Unexpected lifecycle effect storage dependency.");
+  for (const row of database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name <> 'execution_lifecycle_effects'").all()) {
+    const name = String(row.name).replaceAll('"', '""');
+    if (database.prepare(`PRAGMA foreign_key_list("${name}")`).all().some((key) => key.table === "execution_lifecycle_effects")) {
+      throw new Error("Unexpected lifecycle effect storage dependency.");
+    }
+  }
+}
+
+/** Read-only compatibility gate used before WAL conversion and again inside migration. */
+export function validateRuntimeFailureEffectMigrationSource(database: DatabaseSync): 22 | 23 {
+  let version: 22 | 23 = 22;
+  try { validateExecutionStorageSchema(database, 22); }
+  catch {
+    validateExecutionStorageSchema(database, 23);
+    version = 23;
+  }
+  validateLifecycleEffectDependencies(database);
+  if (hasMissingLifecycleDisposition(database)) {
+    throw new Error("Current lifecycle effect storage is missing a fact disposition.");
+  }
+  return version;
+}
+
+/** Add a durable hard-runtime-failure disposition without replaying old facts. */
+export function migrateExecutionStorageV22ToV23(database: DatabaseSync): void {
+  if (!database.isTransaction) throw new Error("Runtime failure effect storage migration requires a transaction.");
+  if (validateRuntimeFailureEffectMigrationSource(database) === 23) return;
+  database.exec(`
+    PRAGMA defer_foreign_keys=ON;
+    CREATE TEMP TABLE execution_lifecycle_effect_migration AS
+      SELECT rowid AS original_rowid,* FROM execution_lifecycle_effects;
+    DROP TABLE execution_lifecycle_effects;
+    ${lifecycleEffectsTableV23};
+    INSERT INTO execution_lifecycle_effects(
+      rowid,fact_id,fact_sequence,agent_id,observer_execution_generation_id,observer_runtime_generation_id,
+      observer_epoch,subject_authority_mode,observer_authority_mode,effect_kind,state,created_at_ms,disposed_at_ms)
+    SELECT original_rowid,fact_id,fact_sequence,agent_id,observer_execution_generation_id,observer_runtime_generation_id,
+      observer_epoch,subject_authority_mode,observer_authority_mode,effect_kind,state,created_at_ms,disposed_at_ms
+    FROM execution_lifecycle_effect_migration;
+    DROP TABLE execution_lifecycle_effect_migration;
+  `);
+  for (const statement of Object.values(lifecycleEffectIndexes)) database.exec(statement);
+  for (const statement of Object.values(lifecycleEffectTriggers)) database.exec(statement);
+  validateExecutionStorageSchema(database, 23);
 }
 
 function normalizedSchema(sql: string): string {
@@ -562,7 +632,7 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 22): void {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 23): void {
   const schema = schemaFor(version);
   for (const [name, statement] of Object.entries({ ...schema.tables, ...schema.indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;

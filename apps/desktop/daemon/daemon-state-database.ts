@@ -1,7 +1,8 @@
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { pathToFileURL } from "node:url";
 import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateExecutionStorageV19ToV20,
-  migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22, validateExecutionStorageSchema,
+  migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22, migrateExecutionStorageV22ToV23,
+  validateExecutionStorageSchema, validateRuntimeFailureEffectMigrationSource,
   type ExecutionStorageSchemaVersion } from "./execution-storage-schema.js";
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
@@ -9,7 +10,7 @@ import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } fro
 import { applyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 30;
+export const DAEMON_STATE_SCHEMA_VERSION = 31;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -128,9 +129,12 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion >= 25) validatePollingOfferSchema(database, existingVersion >= 26 ? 26 : 25);
   if (existingVersion >= 24) { validatePollingActivationSchema(database, existingVersion >= 26 ? 26 : 24); validateCustodialLaunchSession(database); }
   if (existingVersion >= 23) validatePollingContract(database);
-  if (existingVersion >= 18) validateExecutionStorageSchema(database,
-    existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : existingVersion === 21 ? 20
-      : existingVersion < 30 ? 21 : 22);
+  if (existingVersion >= 18) {
+    if (existingVersion === 30) validateRuntimeFailureEffectMigrationSource(database);
+    else validateExecutionStorageSchema(database,
+      existingVersion === 18 ? 18 : existingVersion < 21 ? 19 : existingVersion === 21 ? 20
+        : existingVersion < 30 ? 21 : 23);
+  }
   if (existingVersion >= 17) validateTerminalResults(database, existingVersion >= 20 ? 20 : undefined);
   if (existingVersion >= 20) {
     // Reject inconsistent new terminal authority before legacy upgrade repair
@@ -269,6 +273,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 29) {
     this.migrateLifecycleEffectStorage(database);
+    return;
+  }
+  if (existingVersion === 30) {
+    this.migrateRuntimeFailureEffectStorage(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1038,6 +1046,7 @@ migrateV18ToV19(database: DatabaseSync): void {
     migrateExecutionStorageV19ToV20(database);
     migrateExecutionStorageV20ToV21(database);
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
     this.applyCurrentConfigurationShape(database);
@@ -1059,6 +1068,7 @@ migrateV19ToV20(database: DatabaseSync): void {
     migrateExecutionStorageV19ToV20(database);
     migrateExecutionStorageV20ToV21(database);
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.validateV18Shape(database);
     this.applyV20Shape(database);
     this.applyCurrentConfigurationShape(database);
@@ -1081,6 +1091,7 @@ migrateV20ToV21(database: DatabaseSync): void {
     migrateExecutionStorageV19ToV20(database);
     migrateExecutionStorageV20ToV21(database);
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
     this.applyCurrentConfigurationShape(database);
@@ -1102,6 +1113,7 @@ migrateV21ToV22(database: DatabaseSync): void {
     this.validateV18Shape(database, 20);
     migrateExecutionStorageV20ToV21(database);
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.validateV18Shape(database);
     validateTerminalResults(database, 20);
     this.applyCurrentConfigurationShape(database);
@@ -1121,6 +1133,7 @@ migrateV22ToV23(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1138,6 +1151,7 @@ migrateV23ToV24(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1155,6 +1169,7 @@ migratePollingOfferStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.applyCurrentConfigurationShape(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1172,6 +1187,7 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     applyRoomWorkPublicationSchema(database);
     applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
@@ -1193,6 +1209,7 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
@@ -1212,6 +1229,7 @@ private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
     this.freezeLegacyActiveRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1229,6 +1247,23 @@ private migrateLifecycleEffectStorage(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     migrateExecutionStorageV21ToV22(database);
+    migrateExecutionStorageV22ToV23(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Extend the existing effect journal without changing any retained disposition. */
+private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, validateRuntimeFailureEffectMigrationSource(database));
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    migrateExecutionStorageV22ToV23(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -2576,7 +2611,7 @@ repairAndValidateV17Shape(database: DatabaseSync): void {
   }
 }
 
-private applyV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 22): void {
+private applyV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 23): void {
   const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'")
     .get() as Row | undefined;
   const sql = String(definition?.sql ?? "");
@@ -2627,7 +2662,7 @@ private applyV18Shape(database: DatabaseSync, executionStorageVersion: Execution
   applyExecutionStorageSchema(database, executionStorageVersion);
 }
 
-private validateV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 22): void {
+private validateV18Shape(database: DatabaseSync, executionStorageVersion: ExecutionStorageSchemaVersion = 23): void {
   this.validateV17Shape(database);
   const definition = database.prepare("SELECT sql FROM sqlite_master WHERE type='table' AND name='supervised_agent_inbox'").get() as Row | undefined;
   if (INBOX_STATE_CONSTRAINT.exec(String(definition?.sql))?.[1]?.replace(/\s/g, "") !== `${INBOX_STATES_V17},'acknowledged_failed'`) {
@@ -2660,9 +2695,9 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: Execut
   if (database.prepare("PRAGMA foreign_key_check").get()) throw new Error("Daemon state v18 failed foreign-key validation.");
 }
 
-repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22): void {
+repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22 | 23): void {
   const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
-  const storageVersion = executionStorageVersion ?? (version >= 30 ? 22 : 21);
+  const storageVersion = executionStorageVersion ?? (version >= 31 ? 23 : version >= 30 ? 22 : 21);
   if (version >= 28) validateLifecycleProjectionLedgerSchema(database);
   if (version >= 27) validateRoomWorkPublicationSchema(database);
   if (version >= 25) validatePollingOfferSchema(database, version >= 26 ? 26 : 25);
