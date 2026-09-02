@@ -114,6 +114,33 @@ test("lifecycle facts receive atomic shadow or pending dispositions while tool f
     });
   } finally { typed.db.close(); }
 });
+
+test("Cursor child exit is historical while its validated turn owns the reusable lane", () => {
+  for (const terminal of [
+    { state: "terminal", turnOutcome: "completed", effect: "manifest_idle" },
+    { state: "lost", effect: "manifest_failed" },
+  ] as const) {
+    const { db, store } = fixture();
+    try {
+      seed(store, "", "typed", "cursor");
+      const token = observer(store);
+      store.ingest(token.sourceId, token, turnFact(1));
+      store.ingest(token.sourceId, token, turnFact(2, terminal.state === "terminal"
+        ? { state: terminal.state, turnOutcome: terminal.turnOutcome }
+        : { state: terminal.state }));
+      store.ingest(token.sourceId, token, {
+        ...fact(3), domain: "runtime", kind: "state_changed", state: "exited",
+        controlEvidence: "process_exit", sideEffects: "none",
+      });
+      assert.deepEqual(db.prepare(`SELECT effect_kind,state FROM execution_lifecycle_effects
+        ORDER BY fact_sequence`).all().map(row => ({ ...row })), [
+        { effect_kind: "manifest_working", state: "pending" },
+        { effect_kind: terminal.effect, state: "pending" },
+        { effect_kind: "none", state: "applied" },
+      ]);
+    } finally { db.close(); }
+  }
+});
 function countHistoryReads(t: TestContext, db: DatabaseSync): () => number {
   const prepare = db.prepare.bind(db);
   let count = 0;
@@ -147,10 +174,15 @@ function retainFacts(db: DatabaseSync, from: number, through: number): void {
   db.prepare("UPDATE execution_observers SET last_source_sequence=?,max_observed_sequence=? WHERE agent_id='agent'").run(through, through);
 }
 const native = { turnId: "turn", providerContinuationId: "conversation", providerTurnId: "native-turn" };
-function seed(store: ExecutionShadowStore, suffix = "", authorityMode: "typed_shadow" | "typed" = "typed_shadow") {
+function seed(
+  store: ExecutionShadowStore,
+  suffix = "",
+  authorityMode: "typed_shadow" | "typed" = "typed_shadow",
+  provider: "codex" | "claude-code" | "cursor" | "open-model" = "codex",
+) {
   const runtime = {
     agentId: `agent${suffix}`, executionGenerationId: `generation${suffix}`, runtimeGenerationId: `runtime${suffix}`,
-    provider: "codex" as const, authorityMode, configRevision: 1, createdAtMs: 100,
+    provider, authorityMode, configRevision: 1, createdAtMs: 100,
   };
   store.registerRuntime(runtime);
   const attemptId = store.trackMessage({

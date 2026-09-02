@@ -303,6 +303,91 @@ test("typed hard-runtime failure applies from durable birth evidence after its l
   }
 });
 
+test("a validated Cursor terminal settles only its durable exited child birth", async () => {
+  const cases: Array<{
+    name: string;
+    mutate: (agent: DaemonManifestEntry) => DaemonManifestEntry;
+    expectedDisposition: "applied" | "superseded";
+    expectedState: DaemonManifestEntry["observed_state"];
+  }> = [
+    { name: "exact exited birth", mutate: agent => agent, expectedDisposition: "applied", expectedState: "idle" },
+    { name: "successor child birth", mutate: agent => ({ ...agent, provider_ref: {
+      ...agent.provider_ref!, provider_connection: {
+        ...agent.provider_ref!.provider_connection, pid: 5311, processIdentity: "successor-birth",
+      },
+    } }), expectedDisposition: "superseded", expectedState: "working" },
+    { name: "stopped agent", mutate: agent => ({ ...agent, desired_state: "stopped", observed_state: "stopped" }),
+      expectedDisposition: "superseded", expectedState: "stopped" },
+  ];
+  for (const scenario of cases) {
+    const env = await fixture(); const store = new ManifestStore(env.databasePath);
+    const connection = { kind: "cursor_cli" as const, pid: 4311, processIdentity: "cursor-child-birth" };
+    const agent: DaemonManifestEntry = {
+      ...entry, id: "cursor-agent", room_id: "room", condition: "none", delivery_mode: "daemon_inbox",
+      config_revision: 2, runtime_configuration_revision: 2, turn_control: undefined,
+      work_attempt_id: "cursor-workspace", observed_state: "working",
+      provider_ref: { work_attempt_id: "cursor-workspace", execution_generation_id: "cursor-generation",
+        provider_continuation_id: "cursor-continuation", provider_connection: connection },
+    };
+    await store.write(0, [agent]);
+    seedTerminalExecution(env.databasePath, "cursor-workspace", "cursor-generation");
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      database.exec(`PRAGMA foreign_keys=ON;
+        UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='cursor-generation';
+        UPDATE agent_configurations SET config_revision=2,runtime_configuration_revision=2 WHERE agent_id='cursor-agent'`);
+      const shadow = new ExecutionShadowStore(database);
+      const runtimeGenerationId = executionRuntimeStorageIdentity("cursor-agent", "cursor-generation",
+        connection.kind, connection.pid, connection.processIdentity);
+      shadow.registerRuntime({ agentId: "cursor-agent", executionGenerationId: "cursor-generation", runtimeGenerationId,
+        provider: "cursor", authorityMode: "typed", configRevision: 2, createdAtMs: 100 });
+      const attemptId = shadow.trackMessage({ agentId: "cursor-agent", roomId: "room", sourceMessageId: "message",
+        executionGenerationId: "cursor-generation", workspaceId: "cursor-workspace", createdAtMs: 100 });
+      shadow.trackNativeTurn({ agentId: "cursor-agent", roomId: "room", executionGenerationId: "cursor-generation",
+        runtimeGenerationId, attemptId, turnId: "cursor-turn", providerContinuationId: "cursor-continuation",
+        providerTurnId: "cursor-native-turn", createdAtMs: 100 });
+      const observer = shadow.bindObserver({ agentId: "cursor-agent", subjectRuntimeGenerationId: runtimeGenerationId,
+        observerRuntimeGenerationId: runtimeGenerationId, sourceId: "cursor-source", daemonGenerationId: "1",
+        expectedEpoch: 0, boundAtMs: 100 });
+      const base = { agentId: "cursor-agent", executionGenerationId: "cursor-generation", runtimeGenerationId,
+        observerEpoch: 1, turnId: "cursor-turn", providerContinuationId: "cursor-continuation",
+        providerTurnId: "cursor-native-turn", domain: "turn" as const, kind: "state_changed" as const,
+        sideEffects: "none" as const };
+      shadow.ingest("cursor-source", observer, { ...base, factId: "cursor-active", sourceSequence: 1,
+        observedAtMs: 101, state: "active" });
+      const [active] = await store.listPendingTypedLifecycleEffects("cursor-agent");
+      assert.equal(active?.effectKind, "manifest_working", scenario.name);
+      const installation = { agentId: "cursor-agent", executionGenerationId: "cursor-generation",
+        workAttemptId: "cursor-workspace", providerContinuationId: "cursor-continuation", providerConnection: connection,
+        configurationRevision: 2, authorityMode: "typed" as const, disposedAtMs: 102 };
+      const working = await store.applyTypedLifecycleEffect((await store.load()).generation, active!, installation, commit => commit());
+      assert.equal(working.disposition, "applied", scenario.name);
+
+      shadow.ingest("cursor-source", observer, { ...base, factId: "cursor-terminal", sourceSequence: 2,
+        observedAtMs: 103, state: "terminal", turnOutcome: "completed" });
+      shadow.ingest("cursor-source", observer, { factId: "cursor-runtime-exited", agentId: "cursor-agent",
+        executionGenerationId: "cursor-generation", runtimeGenerationId, observerEpoch: 1, sourceSequence: 3,
+        observedAtMs: 104, domain: "runtime", kind: "state_changed", state: "exited",
+        controlEvidence: "process_exit", sideEffects: "none" });
+      const [terminal] = await store.listPendingTypedLifecycleEffects("cursor-agent");
+      assert.equal(terminal?.effectKind, "manifest_idle", scenario.name);
+      if (scenario.expectedDisposition === "superseded") {
+        const current = await store.load();
+        await store.write(current.generation, current.entries.map(candidate => candidate.id === agent.id
+          ? scenario.mutate(candidate)
+          : candidate));
+      }
+      const before = await store.load();
+      const settled = await store.applyTypedLifecycleEffect(before.generation, terminal!, null, commit => commit());
+      assert.equal(settled.disposition, scenario.expectedDisposition, scenario.name);
+      const persisted = (await store.load()).entries.find(candidate => candidate.id === agent.id);
+      assert.equal(persisted?.observed_state, scenario.expectedState, scenario.name);
+    } finally {
+      database.close(); await store.close(); await env.cleanup();
+    }
+  }
+});
+
 test("typed hard-runtime failure cannot overwrite a replacement or intentionally inactive agent", async () => {
   const cases: Array<{ name: string; mutate: (agent: DaemonManifestEntry) => DaemonManifestEntry }> = [
     { name: "successor birth", mutate: agent => ({ ...agent, provider_ref: {

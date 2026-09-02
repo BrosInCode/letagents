@@ -321,7 +321,8 @@ export class ManifestStore {
     return this.writeOperationalJournal((database) => {
       const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
       const row = database.prepare(`SELECT e.*,f.observed_at_ms,f.domain AS fact_domain,f.state AS fact_state,
-          subject.runtime_state AS subject_runtime_state,observer.runtime_state AS observer_runtime_state,
+          subject.provider AS subject_provider,subject.runtime_state AS subject_runtime_state,
+          observer.runtime_state AS observer_runtime_state,
           observer.authority_mode AS durable_observer_authority,
           observer.config_revision AS durable_observer_configuration_revision
         FROM execution_lifecycle_effects e
@@ -360,6 +361,8 @@ export class ManifestStore {
         && row.observer_authority_mode === "typed" && row.subject_authority_mode === "typed"
         && row.durable_observer_authority === "typed";
       const runtimeFailure = pending.effectKind === "manifest_failed";
+      const cursorTurnEffect = row.subject_provider === "cursor"
+        && row.fact_domain === "turn" && (row.fact_state === "terminal" || row.fact_state === "lost");
       const runtimeReady = pending.effectKind === "manifest_idle"
         && row.fact_domain === "runtime" && row.fact_state === "ready";
       const completedStopTurn = entry?.desired_state === "running"
@@ -370,7 +373,7 @@ export class ManifestStore {
         && entry.turn_control?.resumed === false
         && entry.turn_control?.state === "idle";
       const definitivelyStale = !durableBirth
-        || (!runtimeFailure && (row.subject_runtime_state === "exited"
+        || (!runtimeFailure && !cursorTurnEffect && (row.subject_runtime_state === "exited"
           || row.observer_runtime_state === "exited" || terminal?.terminal_json !== null))
         || (runtimeReady && !["starting", "recovering"].includes(entry?.observed_state ?? ""))
         || (runtimeFailure && completedStopTurn)
@@ -382,7 +385,9 @@ export class ManifestStore {
           WHERE fact_id=? AND state='pending'`).run(disposedAtMs, pending.factId);
         return { generation, disposition: "superseded" as const };
       }
-      if (!exact && !runtimeFailure) return { generation, disposition: "pending" as const };
+      const durableCursorTurn = cursorTurnEffect && durableBirth
+        && row.subject_runtime_state === "exited" && row.observer_runtime_state === "exited";
+      if (!exact && !runtimeFailure && !durableCursorTurn) return { generation, disposition: "pending" as const };
       if (!entry?.provider_ref) throw new Error("Lifecycle effect lost its durable provider reference.");
       if (exact && (pending.agentId !== exact.agentId
         || pending.observerExecutionGenerationId !== exact.executionGenerationId
@@ -399,7 +404,7 @@ export class ManifestStore {
           && entry.provider_ref.provider_continuation_id === exact.providerContinuationId
           && entry.provider_ref.execution_generation_id === exact.executionGenerationId
           && sameProviderActionConnectionSnapshot(entry.provider_ref.provider_connection, exact.providerConnection)
-        : runtimeFailure
+        : (runtimeFailure || durableCursorTurn)
           && Number(configuration?.runtime_configuration_revision) === Number(row.durable_observer_configuration_revision)
           && row.subject_runtime_state === "exited" && row.observer_runtime_state === "exited";
       if (!exactBirth) return { generation, disposition: "pending" as const };

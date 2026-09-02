@@ -297,6 +297,23 @@ export class ProviderStreamCoordinator {
     return installation && this.isCurrentInstallation(installation) ? installation : undefined;
   }
 
+  /** Settle the exact typed Cursor child before its reusable lane drops that birth. */
+  async settleCursorLifecycleBeforeIdle(
+    agent: { agentId: string; handle: ProviderActionHandle | null; executionGenerationId: string },
+    capture: { flush(installation: ProviderInstallationToken): void } | null | undefined,
+    effects: { settle(agentId: string): Promise<void> } | null | undefined,
+  ): Promise<void> {
+    const installation = this.currentInstallation(agent.agentId);
+    if (!installation || installation.handle !== agent.handle
+      || installation.executionGenerationId !== agent.executionGenerationId) {
+      throw new Error("Cursor lifecycle settlement lost its exact installed child birth.");
+    }
+    if (installation.authorityMode !== "typed") return;
+    if (!capture || !effects) throw new Error("Typed Cursor lifecycle settlement is unavailable.");
+    capture.flush(installation);
+    await effects.settle(agent.agentId);
+  }
+
   isLatestInstallation(installation: ProviderInstallationToken): boolean {
     return this.latestInstallations.get(installation.entryId) === installation;
   }
