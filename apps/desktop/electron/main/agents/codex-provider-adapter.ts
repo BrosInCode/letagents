@@ -497,6 +497,7 @@ class CodexProviderHandle implements ProviderHandle {
     readonly pid: number | null,
     providerContinuationId: string,
     readonly providerConnection: ProviderConnectionRef,
+    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
     now: () => string,
@@ -592,10 +593,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
+    const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
     const handle = this.handles.get(ref.workAttemptId);
     if (
       !handle ||
       handle.terminal ||
+      handle.lifecycleAuthorityMode !== authorityMode ||
       handle.providerContinuationId !== ref.providerContinuationId ||
       !sameProviderConnectionIdentity(handle.providerConnection, ref.providerConnection)
     ) {
@@ -611,6 +614,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (pending) {
       if (
         pending.ref.providerContinuationId !== ref.providerContinuationId
+        || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
       ) return null;
       return pending.promise;
@@ -1470,6 +1474,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
     req: ProviderSpawnRequest,
     resumeRef: ProviderContinuationRef | null,
   ): Promise<CodexProviderHandle> {
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
+    if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
+      throw new Error("Typed Codex lifecycle authority requires daemon-inbox delivery.");
+    }
     if (req.pollingContract !== undefined && req.pollingContract !== "custodial_polling_v1") {
       throw new Error("Unsupported Codex polling contract.");
     }
@@ -1647,11 +1655,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
         launch.pid,
         threadId,
         { kind: "codex_app_server", url: serverUrl, pid: launch.pid, processIdentity },
+        lifecycleAuthorityMode,
         client,
         observedLaunch,
         this.deps.now,
       );
       handle.setLiveState("idle");
+      this.emitNativeExecution(handle, {
+        domain: "runtime",
+        kind: "state_changed",
+        state: "ready",
+        sideEffects: "none",
+      });
       this.handles.set(req.workAttemptId, handle);
       if (custodialPolling) {
         handle.custodyLaunchAgentSessionId = req.supervisorWorkerSession!.agentSessionId;
@@ -1808,6 +1823,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         connection.pid,
         ref.providerContinuationId,
         connection,
+        ref.lifecycleAuthorityMode ?? "typed_shadow",
         client,
         launch,
         this.deps.now,
@@ -2007,7 +2023,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
       : codexLifecycleStatus(notification.params)
         ?? (/^(?:turn|thread)\/(?:completed|interrupted|stopped)$/i.test(notification.method) ? "idle" : null)
         ?? (/^(?:turn|thread)\/(?:started|resumed)$/i.test(notification.method) ? "working" : null);
-    if (lifecycle === "failed") handle.state = "failed";
+    if (handle.lifecycleAuthorityMode === "typed") {
+      if (nativeLifecycle?.phase === "turn_active") handle.setLiveState("working");
+      else if (nativeLifecycle?.phase === "turn_terminal") handle.setLiveState("idle");
+    } else if (lifecycle === "failed") handle.state = "failed";
     else if (lifecycle) handle.setLiveState(lifecycle);
     this.publishActivity(handle, {
       source: "native_harness",
@@ -2128,6 +2147,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): void {
     if (handle.nativeRuntimeUnavailable) return;
     handle.nativeRuntimeUnavailable = controlEvidence;
+    handle.state = "failed";
     const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
       handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
     for (const fact of handle.nativeActiveOperations.values()) {

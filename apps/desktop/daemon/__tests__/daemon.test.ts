@@ -125,6 +125,24 @@ function configurationAttestingTestPort(port: ProviderActionPort): ProviderActio
   });
 }
 
+function runtimeReadySubscription(
+  handle: Pick<ProviderActionHandle, "workAttemptId" | "pid" | "providerConnection">,
+  listener: (event: NativeExecutionObservation) => void,
+): NativeExecutionSubscription {
+  const processIdentity = handle.providerConnection?.processIdentity ?? null;
+  const pid = handle.providerConnection?.pid ?? handle.pid;
+  const sourceId = `runtime-ready:${handle.workAttemptId}:${processIdentity ?? "unknown"}`;
+  listener({
+    sourceId,
+    sequence: 1,
+    observedAtMs: Date.now(),
+    ...(pid === null ? {} : { nativeProcessPid: pid }),
+    ...(processIdentity === null ? {} : { nativeProcessIdentity: processIdentity }),
+    fact: { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
+  });
+  return { sourceId, position: () => ({ firstRetainedSequence: 1, latestSequence: 1 }), dispose() {} };
+}
+
 class SupervisorDaemon extends ProductionSupervisorDaemon {
   constructor(...args: ConstructorParameters<typeof ProductionSupervisorDaemon>) {
     const forwarded = [...args] as ConstructorParameters<typeof ProductionSupervisorDaemon>;
@@ -3108,6 +3126,7 @@ test("a live daemon rotates an expiring host worker bearer without reinstalling 
     resume: async () => { throw new Error("bearer rotation must retain the live provider"); }, poke: async () => {},
     stop: async () => ({ endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }),
     onExit: async () => () => {}, onStream: async () => () => {},
+    onExecution: async (runtime, listener) => runtimeReadySubscription(runtime, listener),
   };
   const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
     poll: async () => ({ messages: [] }), publish: async () => {},
@@ -3297,6 +3316,7 @@ test("expired and definitively rejected host grants become auth-blocked without 
       resume: async () => { throw new Error("authority failure must retain the provider"); }, poke: async () => {},
       stop: async () => { stops += 1; return { endedAt: new Date().toISOString(), exitCode: 0, signal: null, terminalCause: "stopped", providerContinuationId: handle.providerContinuationId }; },
       onExit: async () => () => {}, onStream: async () => () => {},
+      onExecution: async (runtime, listener) => runtimeReadySubscription(runtime, listener),
     };
     const daemon = new SupervisorDaemon(paths, "darwin", port, true, 10, undefined, { nowMs: () => clock }, {
       poll: async () => ({ messages: [] }), publish: async () => {},
@@ -7092,6 +7112,7 @@ test("distinct supervised Codex entries coexist in one room without weakening le
 for (const modeCase of ["mcp_polling", "daemon_inbox", "custodial_polling_v1"] as const) {
 const custodial = modeCase === "custodial_polling_v1";
 const deliveryMode = modeCase === "daemon_inbox" ? "daemon_inbox" : "mcp_polling";
+const expectedReadyState = deliveryMode === "daemon_inbox" ? "idle" : "working";
 test(`two Codex room agents keep independent provider executions across stop, resume, and daemon handoff (${modeCase})`, async () => {
   const env = await fixture();
   const paths = {
@@ -7228,6 +7249,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
       return { turnId, outcome: "no_reply", text: null };
     },
     onStream: () => () => {},
+    onExecution: (handle, listener) => runtimeReadySubscription(handle, listener),
   };
   const router = () => new ProviderActionPortRouter({ codex: async () => adapter });
   let activeRouter = router();
@@ -7352,7 +7374,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     try {
       await eventually(async () => {
         const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
-        return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === "working"
+        return manifest.length === 2 && manifest.every((candidate) => candidate.observed_state === expectedReadyState
           && candidate.condition === "none");
       }, "both Codex provider executions", 5_000);
     } catch (error) {
@@ -7443,7 +7465,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
       return manifest.length === 2
-        && manifest.every((candidate) => candidate.observed_state === "working" && candidate.condition === "none")
+        && manifest.every((candidate) => candidate.observed_state === expectedReadyState && candidate.condition === "none")
         && attachRequests.length === 2;
     }, "independent Codex provider reattachment", 5_000);
     assert.equal(attachRequests.length, 2);
@@ -7490,7 +7512,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     }, "independent Codex pause", 5_000);
     const bravoWhileAlphaPaused = ((await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[])
       .find((candidate) => candidate.id === identities[1].entryId)!;
-    assert.equal(bravoWhileAlphaPaused.observed_state, "working");
+    assert.equal(bravoWhileAlphaPaused.observed_state, expectedReadyState);
     assert.equal(bravoWhileAlphaPaused.provider_ref?.execution_generation_id, bravoBefore.provider_ref?.execution_generation_id);
     assert.equal(runtimes.get(bravoBefore.work_attempt_id!)?.state, "working");
     assert.deepEqual(stopRequests, [alphaBefore.work_attempt_id]);
@@ -7501,7 +7523,7 @@ test(`two Codex room agents keep independent provider executions across stop, re
     await eventually(async () => {
       const manifest = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
       const current = manifest.find((candidate) => candidate.id === identities[0].entryId);
-      return current?.observed_state === "working" && current.condition === "none";
+      return current?.observed_state === expectedReadyState && current.condition === "none";
     }, "independent Codex resume", 5_000);
     const afterResume = (await daemonRequest(paths.socketPath, "manifest.list")).result as DaemonManifestEntry[];
     await assertOwnedBindings(afterResume);
@@ -7536,8 +7558,10 @@ test(`two Codex room agents keep independent provider executions across stop, re
       const internals = daemon as unknown as { workerBindings: WorkerBindingStore; supervisedInbox: SupervisedAgentInboxStore };
       const binding = await internals.workerBindings.get(alphaAfter.id);
       const credential = await internals.workerBindings.credentialFor(binding!);
-      const resolvePoll = pendingPolls.get(credential!);
-      assert.ok(resolvePoll, "the recovered worker has an active exact-credential poll");
+      let resolvePoll: ((response: Awaited<ReturnType<SupervisedDeliveryHttp["poll"]>>) => void) | undefined;
+      await eventually(async () => Boolean(resolvePoll = pendingPolls.get(credential!)),
+        "the recovered worker has an active exact-credential poll");
+      assert(resolvePoll);
       resolvePoll({ messages: [{ id: "msg_42", text: "assess the project", source: "human",
         activation: { for_current_agent: { decision: "activate", reason: "explicit_mention", addressed: true } },
       }], last_observed_message_id: "msg_42" });

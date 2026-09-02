@@ -7,14 +7,19 @@ export const lifecycleAuthorityProviderSchema = z.enum(["codex", "claude-code", 
 export type LifecycleAuthorityProvider = z.output<typeof lifecycleAuthorityProviderSchema>;
 
 const RELEASE_AUTHORITY = Object.freeze({
-  codex: "typed_shadow",
   "claude-code": "typed_shadow",
   cursor: "typed_shadow",
   "open-model": "typed_shadow",
-} satisfies Record<LifecycleAuthorityProvider, LifecycleAuthorityMode>);
+} satisfies Record<Exclude<LifecycleAuthorityProvider, "codex">, LifecycleAuthorityMode>);
 
-/** Closed release policy. Authority cannot vary by config, environment, or manifest state. */
-export function lifecycleAuthorityModeForProvider(provider: LifecycleAuthorityProvider): LifecycleAuthorityMode {
+/** Closed release policy. Authority varies only by provider and durable delivery shape. */
+export function lifecycleAuthorityModeForProvider(
+  provider: LifecycleAuthorityProvider,
+  deliveryMode: "mcp_polling" | "desktop_events" | "daemon_inbox",
+): LifecycleAuthorityMode {
+  if (provider === "codex") {
+    return deliveryMode === "daemon_inbox" ? "typed" : "typed_shadow";
+  }
   return RELEASE_AUTHORITY[provider];
 }
 

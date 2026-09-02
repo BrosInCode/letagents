@@ -208,9 +208,12 @@ test("runtime authority freezes on first exact materialization and successor bir
   } finally { db.close(); }
 });
 
-test("the closed production release policy keeps every provider in typed shadow", () => {
-  for (const provider of ["codex", "claude-code", "cursor", "open-model"] as const) {
-    assert.equal(lifecycleAuthorityModeForProvider(provider), "typed_shadow");
+test("the closed release policy gives only daemon-owned Codex births typed authority", () => {
+  assert.equal(lifecycleAuthorityModeForProvider("codex", "daemon_inbox"), "typed");
+  assert.equal(lifecycleAuthorityModeForProvider("codex", "mcp_polling"), "typed_shadow");
+  assert.equal(lifecycleAuthorityModeForProvider("codex", "desktop_events"), "typed_shadow");
+  for (const provider of ["claude-code", "cursor", "open-model"] as const) {
+    assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed_shadow");
   }
 });
 

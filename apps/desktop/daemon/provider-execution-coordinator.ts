@@ -256,7 +256,10 @@ export class ProviderExecutionCoordinator {
     this.clearRecoveryTimeout = options.clearTimeout ?? clearTimeout;
   }
 
-  providerRef(entry: DaemonManifestEntry): ProviderActionRef {
+  providerRef(
+    entry: DaemonManifestEntry,
+    lifecycleAuthorityMode?: LifecycleAuthorityMode,
+  ): ProviderActionRef {
     const ref = entry.provider_ref;
     if (!ref) throw new Error("Manifest entry has no durable provider ref.");
     return {
@@ -264,6 +267,7 @@ export class ProviderExecutionCoordinator {
       providerContinuationId: ref.provider_continuation_id,
       provider: entry.provider,
       providerConnection: ref.provider_connection,
+      ...(lifecycleAuthorityMode ? { lifecycleAuthorityMode } : {}),
     };
   }
 
@@ -754,7 +758,22 @@ export class ProviderExecutionCoordinator {
       throw new Error("Manifest provider reference has no matching durable execution generation.");
     }
     if (execution.terminal) return null;
-    const attachment = await this.options.provider.attach(this.providerRef(entry));
+    const configuration = await this.options.store.getAgentConfiguration(entry.id);
+    const appliedRevision = configuration?.runtime_configuration_revision;
+    if (!Number.isSafeInteger(appliedRevision) || appliedRevision! < 1) {
+      throw new Error("Attached provider has no exact durable applied configuration.");
+    }
+    const frozenAuthority = ref.provider_connection
+      ? await this.options.store.readRuntimeLifecycleAuthority({
+          agentId: entry.id,
+          executionGenerationId: ref.execution_generation_id,
+          providerConnection: ref.provider_connection,
+          configurationRevision: appliedRevision!,
+        })
+      : null;
+    const attachment = await this.options.provider.attach(
+      this.providerRef(entry, frozenAuthority ?? undefined),
+    );
     if (!attachment) return null;
     if (this.isAttachTerminal(attachment)) {
       const terminal = attachment.terminal;
@@ -797,16 +816,13 @@ export class ProviderExecutionCoordinator {
         "Attached provider returned connection evidence that conflicts with the durable manifest.",
       );
     }
-    const configuration = await this.options.store.getAgentConfiguration(authoritativeEntry.id);
-    const appliedRevision = configuration?.runtime_configuration_revision;
-    if (!Number.isSafeInteger(appliedRevision) || appliedRevision! < 1
-      || (handle.appliedConfigurationRevision !== undefined
-        && handle.appliedConfigurationRevision !== appliedRevision)) {
+    if (handle.appliedConfigurationRevision !== undefined
+      && handle.appliedConfigurationRevision !== appliedRevision) {
       throw new Error("Attached provider has no exact durable applied configuration.");
     }
     handle.appliedConfigurationRevision = appliedRevision;
     const recoveredConnection = handle.providerConnection;
-    const frozenAuthority = recoveredConnection
+    const recoveredAuthority = recoveredConnection
       ? await this.options.store.readRuntimeLifecycleAuthority({
           agentId: entry.id,
           executionGenerationId: ref.execution_generation_id,
@@ -814,7 +830,7 @@ export class ProviderExecutionCoordinator {
           configurationRevision: appliedRevision!,
         })
       : null;
-    if (recoveredConnection && (!ref.provider_connection || frozenAuthority === null)) {
+    if (recoveredConnection && (!ref.provider_connection || recoveredAuthority === null)) {
       authoritativeEntry = await this.options.authority.serializeManifestMutation(async () => {
         for (let attemptIndex = 0; attemptIndex < 8; attemptIndex += 1) {
           await this.options.authority.assertCurrent();
@@ -1091,7 +1107,11 @@ export class ProviderExecutionCoordinator {
         return;
       }
     }
-    if (entry.observed_state !== handle.observedState) {
+    const installation = this.options.streams.currentInstallation(entry.id);
+    const typed = entry.delivery_mode === "daemon_inbox"
+      && installation?.handle === handle
+      && installation.authorityMode === "typed";
+    if (!typed && entry.observed_state !== handle.observedState) {
       await this.options.transition(
         entry.id,
         handle.observedState,
@@ -1100,12 +1120,15 @@ export class ProviderExecutionCoordinator {
         "daemon-convergence",
       );
     }
-    if (["failed", "stopped"].includes(handle.observedState)
-      || (handle.observedState === "idle" && !requiresGrant)) {
+    const terminal = (typed && ["failed", "stopped"].includes(entry.observed_state))
+      || (!typed && (["failed", "stopped"].includes(handle.observedState)
+        || (handle.observedState === "idle" && !requiresGrant)));
+    if (terminal) {
       await this.options.streams.fenceTerminalOnce(
         handle,
         `manifest:${entry.id}:reattached-terminal:${entry.provider_ref?.execution_generation_id ?? "unknown"}`,
       );
+      return;
     }
     if (entry.desired_state === "running" && entry.delivery_mode === "daemon_inbox") {
       await this.options.delivery.start(entry.id, "ensure");
@@ -1228,6 +1251,10 @@ export class ProviderExecutionCoordinator {
       );
       return;
     }
+    const requestedAuthorityMode = lifecycleAuthorityModeForProvider(
+      lifecycleAuthorityProviderSchema.parse(entry.provider),
+      deliveryMode,
+    );
     const resumed = Boolean(ref && capabilities.resume);
     if (requiresGrant) {
       const grant = this.options.host.currentGrant(entry);
@@ -1327,6 +1354,7 @@ export class ProviderExecutionCoordinator {
       permissionProfileId: launchSnapshot.permissionProfileId,
       configurationRevision: launchSnapshot.configurationRevision,
       deliveryMode: entry.delivery_mode ?? "mcp_polling",
+      lifecycleAuthorityMode: requestedAuthorityMode,
       ...(launchConfiguration.polling_contract ? { pollingContract: launchConfiguration.polling_contract } : {}),
       agentDisplayName: entry.display_name,
       actionId: `manifest:${entry.id}:generation:${generationNumber}`,
@@ -1399,7 +1427,7 @@ export class ProviderExecutionCoordinator {
             handle,
             execution.execution_generation_id,
             launchSnapshot.configurationRevision,
-            lifecycleAuthorityModeForProvider(lifecycleAuthorityProviderSchema.parse(launchSnapshot.provider)),
+            requestedAuthorityMode,
           );
           providerPersisted = true;
           // A retiring daemon owns only the atomic provider-birth checkpoint.
@@ -1572,8 +1600,8 @@ export class ProviderExecutionCoordinator {
       throw error;
     }
     if (!handle) throw new Error("Provider launch returned no handle.");
-    if (["failed", "stopped"].includes(handle.observedState)
-      || (handle.observedState === "idle" && !requiresGrant)) {
+    if (requestedAuthorityMode !== "typed" && (["failed", "stopped"].includes(handle.observedState)
+      || (handle.observedState === "idle" && !requiresGrant))) {
       await this.options.streams.fenceTerminalOnce(
         handle,
         `manifest:${entry.id}:returned-terminal:${generationNumber}`,

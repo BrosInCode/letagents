@@ -211,7 +211,10 @@ function fakeAdapter(provider: FakeProvider, calls: string[]): NativeProviderAda
     }),
     async spawn(input: ProviderActionSpawn) {
       calls.push(`${provider}:spawn:${input.workAttemptId}`);
-      const handle = nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`, ++nextPid);
+      const handle = {
+        ...nativeHandle(provider, input.workAttemptId, `continuation:${input.workAttemptId}`, ++nextPid),
+        ...(input.lifecycleAuthorityMode ? { lifecycleAuthorityMode: input.lifecycleAuthorityMode } : {}),
+      };
       handles.set(input.workAttemptId, handle);
       return handle;
     },
@@ -579,12 +582,13 @@ test("Cursor router ownership remains stable while its per-turn PID changes", as
   assert.equal(handle.pid, null);
 });
 
-test("provider router accepts a missing legacy connection only for the exact remembered work attempt and continuation", async () => {
+test("provider router accepts a missing connection only for the exact remembered Codex birth authority", async () => {
   const calls: string[] = [];
   const adapter = fakeAdapter("codex", calls);
   const router = new ProviderActionPortRouter({ codex: async () => adapter });
   const alpha = await router.spawn({
     provider: "codex", workAttemptId: "alpha-attempt", roomId: "room", cwd: "/tmp/alpha", launchPolicy: {},
+    deliveryMode: "daemon_inbox", lifecycleAuthorityMode: "typed",
   });
   const bravo = await router.spawn({
     provider: "codex", workAttemptId: "bravo-attempt", roomId: "room", cwd: "/tmp/bravo", launchPolicy: {},
@@ -594,9 +598,12 @@ test("provider router accepts a missing legacy connection only for the exact rem
     provider: "codex",
     providerContinuationId: alpha.providerContinuationId!,
     providerConnection: alpha.providerConnection,
+    lifecycleAuthorityMode: "typed",
   };
 
   assert.deepEqual(await router.attach(alphaRef), alpha);
+  assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: "typed_shadow" }), null);
+  assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: undefined }), null);
   assert.equal(await router.attach({ ...alphaRef, providerContinuationId: bravo.providerContinuationId! }), null);
   assert.equal(await router.attach({ ...alphaRef, providerConnection: bravo.providerConnection }), null);
   assert.deepEqual(

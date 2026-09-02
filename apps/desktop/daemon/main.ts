@@ -378,6 +378,7 @@ export class SupervisorDaemon {
       durability: this.durability,
       runtimeCustody: this.workerRuntimeCustody,
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      serializeManifest: (operation) => this.serializeManifestMutation(operation),
       transition: (entryId, state, condition, detail, actor) =>
         this.transition(entryId, state, condition, detail, actor),
       appendActivity: (entryId, event) => this.appendActivity(entryId, event),
@@ -896,7 +897,7 @@ export class SupervisorDaemon {
         isClosing: () => this.handoffScheduled,
         nowMs: () => this.nowMs(),
         diagnostic: (agentId, error) => console.warn("[typed_lifecycle_effect]", JSON.stringify({ agentId, error: String(error) })),
-        changed: (agentId) => this.providerStreams.typedLifecycleAdmissionChanged(agentId),
+        changed: (agentId, state) => { this.providerStreams.typedLifecycleEffectChanged(agentId, state); if (state) this.requestConvergence(agentId); },
       });
       this.typedLifecycleEffects.start();
       this.roomWorkPublisher = RoomWorkPublisher.open(this.stateDatabasePath, {

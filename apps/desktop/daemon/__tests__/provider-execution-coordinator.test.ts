@@ -15,6 +15,7 @@ import type { DaemonManifestEntry, ExecutionTerminalPayload } from "../types.js"
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { PollingActivationRecord } from "../custodial-polling-activation.js";
+import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 
 const baseEntry = (): DaemonManifestEntry => ({
   id: "agent-1",
@@ -84,13 +85,17 @@ function harness(input: {
   entry?: DaemonManifestEntry;
   handoff?: boolean;
   controlEpoch?: number;
+  frozenAuthorityMode?: "legacy" | "typed_shadow" | "typed" | null;
+  currentInstallation?: (entryId: string) => ProviderInstallationToken | undefined;
 } = {}) {
   let manifestEntry = input.entry ?? baseEntry();
   let manifestGeneration = 1;
   let handoff = input.handoff ?? false;
   let controlEpoch = input.controlEpoch ?? 0;
   let frozenAuthorityMode: "legacy" | "typed_shadow" | "typed" | null =
-    manifestEntry.provider_ref?.provider_connection?.pid != null ? "legacy" : null;
+    input.frozenAuthorityMode !== undefined
+      ? input.frozenAuthorityMode
+      : manifestEntry.provider_ref?.provider_connection?.pid != null ? "legacy" : null;
   const liveHandles = new Map<string, ProviderActionHandle>();
   const installed: ProviderActionHandle[] = [];
   const stoppedDelivery: string[] = [];
@@ -200,7 +205,7 @@ function harness(input: {
     streams: {
       liveHandles,
       get: (entryId) => liveHandles.get(entryId),
-      currentInstallation: () => undefined,
+      currentInstallation: input.currentInstallation ?? (() => undefined),
       remove: (entryId, expected) => {
         const current = liveHandles.get(entryId);
         if (!current || expected && current !== expected) return false;
@@ -317,6 +322,124 @@ test("delivery handoff freezes convergence and draining never creates a successo
     assert.equal(launches, 0, phase);
     assert.equal(runtime.executionGenerations.length, 0, phase);
   }
+});
+
+test("new daemon-owned Codex births launch and freeze with typed authority", async () => {
+  let requestedAuthority: "legacy" | "typed_shadow" | "typed" | undefined;
+  const runtime = harness({
+    entry: { ...baseEntry(), delivery_mode: "daemon_inbox" },
+    provider: provider({
+      spawn: async request => {
+        requestedAuthority = request.lifecycleAuthorityMode;
+        return returnedHandle;
+      },
+    }),
+  });
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.equal(requestedAuthority, "typed");
+  assert.equal(runtime.installed.length, 1);
+  assert.equal(await runtime.options.store.readRuntimeLifecycleAuthority({
+    agentId: "agent-1",
+    executionGenerationId: "generation-1",
+    providerConnection: returnedHandle.providerConnection!,
+    configurationRevision: 1,
+  }), "typed", "the exact provider birth keeps the requested authority mode");
+});
+
+test("reattach passes the exact birth's frozen authority to Codex", async () => {
+  let attachedAuthority: "legacy" | "typed_shadow" | "typed" | undefined;
+  const current = {
+    ...baseEntry(),
+    delivery_mode: "daemon_inbox" as const,
+    observed_state: "recovering" as const,
+    provider_ref: {
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1",
+      provider_connection: returnedHandle.providerConnection,
+    },
+  };
+  const runtime = harness({
+    entry: current,
+    frozenAuthorityMode: "typed",
+    provider: provider({
+      attach: async ref => {
+        attachedAuthority = ref.lifecycleAuthorityMode;
+        return returnedHandle;
+      },
+    }),
+  });
+  runtime.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z",
+    actor: "test",
+    generation: 1,
+    terminal: null,
+  });
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.equal(attachedAuthority, "typed");
+  assert.equal(runtime.installed.length, 1);
+});
+
+test("typed durable terminal authority fences a stale live handle without reopening delivery", async () => {
+  let runtime!: ReturnType<typeof harness>;
+  let stopCalls = 0;
+  let deliveryStarts = 0;
+  const current = {
+    ...baseEntry(),
+    delivery_mode: "daemon_inbox" as const,
+    observed_state: "failed" as const,
+    provider_ref: {
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1",
+      provider_connection: returnedHandle.providerConnection,
+    },
+  };
+  runtime = harness({
+    entry: current,
+    frozenAuthorityMode: "typed",
+    provider: provider({
+      stop: async currentHandle => {
+        stopCalls += 1;
+        return terminal(currentHandle);
+      },
+    }),
+    currentInstallation: () => ({
+      nonce: Symbol("installation"),
+      listenerLeaseNonce: Symbol("lease"),
+      entryId: "agent-1",
+      handle: returnedHandle,
+      executionGenerationId: "generation-1",
+      workAttemptId: "attempt-1",
+      providerContinuationId: "continuation-1",
+      providerConnection: returnedHandle.providerConnection!,
+      configurationRevision: 1,
+      authorityMode: "typed",
+    }),
+  });
+  runtime.liveHandles.set("agent-1", returnedHandle);
+  runtime.executionGenerations.push({
+    execution_generation_id: "generation-1",
+    work_attempt_id: "attempt-1",
+    started_at: "2026-08-26T00:00:00.000Z",
+    actor: "test",
+    generation: 1,
+    terminal: null,
+  });
+  runtime.options.delivery.start = async () => { deliveryStarts += 1; };
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.equal(stopCalls, 1);
+  assert.equal(deliveryStarts, 0);
+  assert.equal(runtime.entry().observed_state, "failed",
+    "raw handle state cannot overwrite durable typed terminal authority");
 });
 
 test("handoff during native dispatch journals the exact returned provider without installing listeners", async () => {

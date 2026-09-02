@@ -485,6 +485,8 @@ test("Codex permission replies target exact pending requests and report sent, ne
   client.turnStatus = "inProgress";
   const facts: NativeExecutionObservation[] = [];
   const subscription = adapter.onExecution(handle, event => facts.push(event));
+  assert.equal(facts[0]?.fact.domain, "runtime");
+  facts.length = 0;
   for (const method of ["item/commandExecution/requestApproval", "item/fileChange/requestApproval"]) {
     // Same native item, distinct typed RPC IDs: neither callback can authorize the other.
     const once = client.askPermission(approvalParams({ approvalId: "callback-1", availableDecisions: ["accept", "decline"] }), 1, method);
@@ -3133,6 +3135,41 @@ test("execution failures preserve the Codex runtime and subsequent exact room tu
   assert.equal(handle.observedState(), "failed", "genuine runtime failure still latches");
 });
 
+test("typed Codex authority is daemon-inbox only and ignores raw execution failure classification", async () => {
+  const rejectedHarness = createHarness();
+  const rejected = new CodexProviderAdapter({ dependencies: rejectedHarness.dependencies });
+  await assert.rejects(
+    rejected.spawn(spawnRequest({ deliveryMode: "mcp_polling", lifecycleAuthorityMode: "typed" })),
+    /Typed Codex lifecycle authority requires daemon-inbox delivery/,
+  );
+  assert.equal(rejectedHarness.launches.length, 0, "an invalid authority/delivery pair starts no runtime");
+
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({
+    deliveryMode: "daemon_inbox",
+    lifecycleAuthorityMode: "typed",
+  }));
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, event => observations.push(event));
+  assert.equal(observations[0]?.fact.domain, "runtime");
+  assert.equal(observations[0]?.fact.state, "ready",
+    "successful app-server setup emits replayable runtime readiness before room work");
+  const client = harness.clients[0]!;
+  client.emit({ method: "turn/started", params: {
+    threadId: handle.providerContinuationId,
+    turnId: "typed-turn",
+    turn: { id: "typed-turn", status: "inProgress" },
+  } });
+  assert.equal(handle.observedState(), "working");
+  client.emit({ method: "thread/status/changed", params: {
+    threadId: "unrelated-thread",
+    status: { type: "systemError" },
+  } });
+  assert.equal(handle.observedState(), "working",
+    "an unrelated raw runtime failure cannot mutate the exact typed runtime handle");
+});
+
 test("native stream bounds oversized provider payloads without dropping method identity", async () => {
   const harness = createHarness();
   const nativeStream: ProviderStreamEvent[] = [];
@@ -3337,18 +3374,18 @@ test("Codex pending approval is not execution start; malformed exact terminals c
   client.emit({ method: "item/started", params: { ...params, item: { id: "pending", type: "commandExecution", status: "inProgress", processId: null } } });
   client.emit({ method: "item/started", params: { ...params, item: { id: "patch", type: "fileChange", status: "inProgress" } } });
   client.emit({ method: "turn/completed", params: { ...params, turn: { id: "pending-turn", status: "futureStatus" } } });
-  assert.equal(observations.length, 1);
-  assert.equal(observations[0]!.sequence, 2, "the malformed terminal consumes sequence one before notifying the live subscriber");
-  assert.deepEqual(observations[0]!.fact, {
+  assert.equal(observations.length, 2);
+  assert.equal(observations[1]!.sequence, 3, "the malformed terminal consumes one position after runtime readiness");
+  assert.deepEqual(observations[1]!.fact, {
     domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none",
   });
   client.emit({ method: "item/commandExecution/outputDelta", params: { ...params, threadId: "wrong", itemId: "pending", delta: "data" } });
   client.emit({ method: "item/completed", params: { threadId: params.threadId, item: { id: "no-turn", type: "commandExecution", status: "failed" } } });
   client.emit({ method: "item/reasoning/textDelta", params: { ...params, delta: "private reasoning" } });
-  assert.equal(observations.length, 1, "unrelated malformed item/display events still mint no structural facts");
+  assert.equal(observations.length, 2, "unrelated malformed item/display events still mint no structural facts");
   client.emit({ method: "item/completed", params: { ...params, item: { id: "pending", type: "commandExecution", status: "declined" } } });
-  assert.equal(observations.length, 2);
-  const fact = observations[1]!.fact;
+  assert.equal(observations.length, 3);
+  const fact = observations[2]!.fact;
   assert.equal(fact.domain, "execution");
   assert.equal(fact.kind, "completed");
   assert.equal("outcome" in fact && fact.outcome, "denied_before_start");
@@ -3367,7 +3404,10 @@ test("Codex pending approval is not execution start; malformed exact terminals c
 test("explicit Codex system errors emit one typed hard-runtime terminal before process exit", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const handle = await adapter.spawn(spawnRequest({
+    deliveryMode: "daemon_inbox",
+    lifecycleAuthorityMode: "typed",
+  }));
   const observations: NativeExecutionObservation[] = [];
   adapter.onExecution(handle, (event) => observations.push(event));
   const client = harness.clients[0]!;
@@ -3386,6 +3426,7 @@ test("explicit Codex system errors emit one typed hard-runtime terminal before p
 
   const hardTerminals = observations.filter((event) => event.fact.domain === "runtime" || event.fact.domain === "control");
   assert.deepEqual(hardTerminals.map((event) => event.fact), [
+    { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
     { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
     { domain: "control", kind: "state_changed", state: "lost", controlEvidence: "native_session_terminated", sideEffects: "none" },
     { domain: "runtime", kind: "state_changed", state: "exited", controlEvidence: "native_session_terminated", sideEffects: "none" },
@@ -3496,6 +3537,9 @@ test("Codex turn-boundary inspection validates the complete native snapshot with
   ];
   const observations: NativeExecutionObservation[] = [];
   const subscription = adapter.onExecution(handle, event => observations.push(event));
+  assert.equal(observations[0]?.fact.domain, "runtime");
+  assert.equal(observations[0]?.fact.state, "ready");
+  observations.length = 0;
   const reads: RecordedRequest[] = [];
   let response: unknown;
   client.request = async <T>(method: string, params?: unknown): Promise<T> => {

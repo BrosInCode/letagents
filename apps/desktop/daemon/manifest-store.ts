@@ -320,7 +320,7 @@ export class ManifestStore {
     const exact = installation ? structuredClone(installation) : null;
     return this.writeOperationalJournal((database) => {
       const generation = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton=1").get() as Row).generation);
-      const row = database.prepare(`SELECT e.*,f.observed_at_ms,
+      const row = database.prepare(`SELECT e.*,f.observed_at_ms,f.domain AS fact_domain,f.state AS fact_state,
           subject.runtime_state AS subject_runtime_state,observer.runtime_state AS observer_runtime_state,
           observer.authority_mode AS durable_observer_authority,
           observer.config_revision AS durable_observer_configuration_revision
@@ -360,6 +360,8 @@ export class ManifestStore {
         && row.observer_authority_mode === "typed" && row.subject_authority_mode === "typed"
         && row.durable_observer_authority === "typed";
       const runtimeFailure = pending.effectKind === "manifest_failed";
+      const runtimeReady = pending.effectKind === "manifest_idle"
+        && row.fact_domain === "runtime" && row.fact_state === "ready";
       const completedStopTurn = entry?.desired_state === "running"
         && entry.turn_control?.execution_generation_id === entry.provider_ref?.execution_generation_id
         && entry.turn_control?.status === "completed"
@@ -370,6 +372,7 @@ export class ManifestStore {
       const definitivelyStale = !durableBirth
         || (!runtimeFailure && (row.subject_runtime_state === "exited"
           || row.observer_runtime_state === "exited" || terminal?.terminal_json !== null))
+        || (runtimeReady && !["starting", "recovering"].includes(entry?.observed_state ?? ""))
         || (runtimeFailure && completedStopTurn)
         || entry?.desired_state !== "running" || entry.condition === "quarantined"
         || (entry.delivery_mode ?? "mcp_polling") !== "daemon_inbox";
@@ -415,10 +418,17 @@ export class ManifestStore {
           native_liveness_observed_at=?,native_liveness_detail=? WHERE agent_id=?`).run(
         observedState, nativeState, observedAt,
         pending.effectKind === "manifest_working" ? "Provider turn active"
-          : pending.effectKind === "manifest_failed" ? "Provider runtime unavailable" : "Provider turn terminal",
+          : pending.effectKind === "manifest_failed" ? "Provider runtime unavailable"
+            : runtimeReady ? "Provider runtime ready" : "Provider turn terminal",
         pending.agentId,
       );
       if (Number(updated.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${pending.agentId}`);
+      if (runtimeReady) {
+        const readiness = database.prepare(`UPDATE agent_readiness
+          SET ready_reached_at_present=1,ready_reached_at=COALESCE(ready_reached_at,?)
+          WHERE agent_id=?`).run(observedAt, pending.agentId);
+        if (Number(readiness.changes) !== 1) throw new Error(`Unknown daemon manifest entry: ${pending.agentId}`);
+      }
       const acknowledged = database.prepare(`UPDATE execution_lifecycle_effects SET state='applied',disposed_at_ms=?
         WHERE fact_id=? AND state='pending'`).run(disposedAtMs, pending.factId);
       if (Number(acknowledged.changes) !== 1) throw new Error("Lifecycle effect disposition changed before apply.");
@@ -1256,6 +1266,9 @@ export class ManifestStore {
           configRevision: snapshot.appliedRevision,
           createdAtMs: snapshot.observedAtMs,
         });
+        if (authorityMode !== snapshot.requestedAuthorityMode) {
+          throw new Error("Provider birth retained an incompatible frozen lifecycle authority.");
+        }
       }
       const persisted = this.readEntryFromDatabase(database, normalized.id);
       if (!persisted) throw new Error("Provider birth disappeared during its atomic checkpoint.");
