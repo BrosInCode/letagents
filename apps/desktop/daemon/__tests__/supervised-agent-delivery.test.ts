@@ -180,6 +180,42 @@ test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async
   }
 });
 
+test("idle-only stop refuses both sides of native turn admission without aborting work", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-idle-stop-"));
+  try {
+    const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+    const delivery = new SupervisedAgentDelivery(
+      store,
+      provider(async () => ({ turnId: "unused", outcome: "no_reply", text: null })),
+      { poll: async () => ({}), publish: async () => {} },
+      currentAuthority,
+    );
+    const internals = delivery as unknown as {
+      activeTurnAborts: Map<string, { inboxItemId: string; controller: AbortController }>;
+      activeTurns: Map<string, unknown>;
+      stoppingAgents: Set<string>;
+    };
+    const preNative = new AbortController();
+    internals.activeTurnAborts.set(agent.agentId, { inboxItemId: "item-1", controller: preNative });
+    assert.equal(await delivery.stopIfIdle(agent.agentId), false);
+    assert.equal(preNative.signal.aborted, false, "a rejected apply cannot interrupt pre-native work");
+
+    internals.activeTurnAborts.delete(agent.agentId);
+    internals.activeTurns.set(agent.agentId, {});
+    assert.equal(await delivery.stopIfIdle(agent.agentId), false);
+    internals.activeTurns.delete(agent.agentId);
+
+    const stopped = delivery.stopIfIdle(agent.agentId);
+    assert.equal(internals.stoppingAgents.has(agent.agentId), true,
+      "the idle lane is fenced synchronously before its drain crosses an await");
+    assert.equal(await stopped, true);
+    assert.equal(internals.stoppingAgents.has(agent.agentId), false);
+    await store.close();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Cursor delivery exposes the exact-agent lifecycle settlement barrier to the adapter", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-settlement-"));
   const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
