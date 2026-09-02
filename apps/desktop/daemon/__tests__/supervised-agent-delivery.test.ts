@@ -180,6 +180,88 @@ test("daemon delivery admits a non-Codex provider that owns daemon_inbox", async
   }
 });
 
+test("Cursor delivery exposes the exact-agent lifecycle settlement barrier to the adapter", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-settlement-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const recordCompletion = installCursorCompletionProjectionFixture(store);
+  const settledAgents: string[] = [];
+  const cursorAgent = { ...agent, provider: "cursor" };
+  const delivery = new SupervisedAgentDelivery(
+    store,
+    provider(async (_handle, request, options) => {
+      assert.equal(typeof options?.settleLifecycleBeforeIdle, "function");
+      await options!.settleLifecycleBeforeIdle!();
+      recordCompletion(request.inboxItemId, { outcome: "no_reply" });
+      return { turnId: request.inboxItemId, outcome: "no_reply", text: null };
+    }),
+    { poll: async () => ({}), publish: async () => { throw new Error("no-reply must not publish"); } },
+    currentAuthority,
+    50,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (settledAgent) => { settledAgents.push(settledAgent.agentId); },
+  );
+  try {
+    await ingest(store);
+    await delivery.pump(cursorAgent);
+    assert.deepEqual(settledAgents, [cursorAgent.agentId]);
+    assert.equal((await store.receipts(cursorAgent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Cursor recovery receives the same exact-agent lifecycle settlement barrier", async () => {
+  const root = await mkdtemp(join(tmpdir(), "letagents-delivery-cursor-recovery-settlement-"));
+  const store = new SupervisedAgentInboxStore(join(root, "state.sqlite"));
+  const recordCompletion = installCursorCompletionProjectionFixture(store);
+  const settledAgents: string[] = [];
+  const cursorAgent = { ...agent, provider: "cursor" };
+  const delivery = new SupervisedAgentDelivery(
+    store,
+    provider(
+      async () => { throw new Error("recovery must not redispatch the Cursor turn"); },
+      async (_handle, request, options) => {
+        assert.equal(typeof options?.settleLifecycleBeforeIdle, "function");
+        await options!.settleLifecycleBeforeIdle!();
+        recordCompletion(request.providerTurnId, { outcome: "no_reply" });
+        return { turnId: request.providerTurnId, outcome: "no_reply", text: null };
+      },
+    ),
+    { poll: async () => ({}), publish: async () => { throw new Error("no-reply must not publish"); } },
+    currentAuthority,
+    50,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    undefined,
+    async (settledAgent) => { settledAgents.push(settledAgent.agentId); },
+  );
+  try {
+    const item = await enqueue(store);
+    await store.checkpointTurnStarted(item.inbox_item_id, "cursor:recover-settlement", TEST_PROVIDER_TURN_AUTHORITY);
+    await delivery.pump(cursorAgent);
+    assert.deepEqual(settledAgents, [cursorAgent.agentId]);
+    assert.equal((await store.receipts(cursorAgent.agentId))[0]?.state, "acknowledged_no_reply");
+  } finally {
+    await delivery.fenceAndDrain().catch(() => undefined);
+    await store.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
 test("Cursor publication and recovery use only the exact-turn structured completion proposal", async () => {
   const proposal = {
     state: "completed",

@@ -610,8 +610,8 @@ export class SupervisorDaemon {
         (input) => this.providerCheckpoints.checkpointDynamicState(input),
         (input) => this.providerCheckpoints.checkpointPreparedTurn(input),
         (agent) => this.roomWorkPublisher?.observeNewSources(agent),
-      )
-      : null;
+        (agent) => this.providerStreams.settleCursorLifecycleBeforeIdle(agent, this.executionCapture, this.typedLifecycleEffects),
+      ) : null;
     this.readModel = new DaemonReadModel({
       currentDaemonGeneration: () => this.singleton.currentGeneration,
       nowMs: () => this.nowMs(),
@@ -936,8 +936,8 @@ export class SupervisorDaemon {
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();
     this.executionCapture?.close();
-    await this.typedLifecycleEffects?.close();
     this.supervisedDelivery?.fence();
+    await this.typedLifecycleEffects?.close();
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
     this.workerRuntimeCustody.destroyAllCredentials();

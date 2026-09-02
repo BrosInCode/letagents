@@ -30,6 +30,7 @@ export class TypedLifecycleEffectCoordinator {
   private readonly dirty = new Set<string | null>();
   private scheduled: NodeJS.Timeout | null = null;
   private draining: Promise<void> | null = null;
+  private settlementTail: Promise<void> = Promise.resolve();
   private closed = false;
   private retryAfterMs = 0;
   private scanAfterFactSequence = 0;
@@ -50,7 +51,41 @@ export class TypedLifecycleEffectCoordinator {
     this.dirty.clear();
     if (this.scheduled) clearTimeout(this.scheduled);
     this.scheduled = null;
+    await this.settlementTail;
     await this.draining?.catch(() => undefined);
+  }
+
+  /** Drain one exact provider birth now; callers use this as an identity-retirement barrier. */
+  settle(agentId: string): Promise<void> {
+    const settlement = this.settlementTail.then(() => this.settleTarget(agentId));
+    this.settlementTail = settlement.catch(() => undefined);
+    return settlement;
+  }
+
+  private async settleTarget(agentId: string): Promise<void> {
+    if (this.closed || this.options.isClosing()) throw new Error("Typed lifecycle settlement is unavailable.");
+    if (this.scheduled) clearTimeout(this.scheduled);
+    this.scheduled = null;
+    await this.draining;
+    // The completed background drain may have scheduled its successor in its
+    // finally block while this barrier was waiting. Retake the scheduler slot
+    // before installing the exact-agent drain so no timer can overwrite it.
+    if (this.scheduled) clearTimeout(this.scheduled);
+    this.scheduled = null;
+    if (this.closed || this.options.isClosing()) throw new Error("Typed lifecycle settlement is unavailable.");
+    this.retryAfterMs = 0;
+    this.dirty.add(agentId);
+    const draining = this.drain(agentId);
+    this.draining = draining;
+    try {
+      await draining;
+    } finally {
+      if (this.draining === draining) this.draining = null;
+      if (this.dirty.size) this.schedule();
+    }
+    if ((await this.options.store.listPendingTypedLifecycleEffects(agentId, 1)).length) {
+      throw new Error("Typed lifecycle effect did not settle before provider identity retirement.");
+    }
   }
 
   private schedule(): void {
@@ -58,6 +93,10 @@ export class TypedLifecycleEffectCoordinator {
     const delay = Math.max(0, this.retryAfterMs - Date.now());
     this.scheduled = setTimeout(() => {
       this.scheduled = null;
+      if (this.draining) {
+        // The active drain owns rescheduling from its finally block.
+        return;
+      }
       this.retryAfterMs = 0;
       this.draining = this.drain().finally(() => {
         this.draining = null;
@@ -76,9 +115,13 @@ export class TypedLifecycleEffectCoordinator {
     try { this.options.diagnostic(agentId, error); } catch { /* diagnostics never own retry */ }
   }
 
-  private async drain(): Promise<void> {
+  private async drain(targetAgentId?: string): Promise<void> {
     while (!this.closed && !this.options.isClosing()) {
-      const next = this.dirty.values().next();
+      const next = targetAgentId === undefined
+        ? this.dirty.values().next()
+        : this.dirty.has(targetAgentId)
+          ? { done: false as const, value: targetAgentId }
+          : { done: true as const, value: undefined };
       if (next.done) return;
       const agentId = next.value;
       this.dirty.delete(agentId);

@@ -231,6 +231,8 @@ export interface ProviderActionPort {
       providerContinuationId: string;
       providerConnection: ProviderActionConnectionRef;
     }) => Promise<void>;
+    /** Dispose the exact native birth's typed lifecycle effect before a reusable lane drops that birth. */
+    settleLifecycleBeforeIdle?: () => Promise<void>;
     /** Synchronously marks that exact turn identity and process recovery state are durable. */
     markDurableTurnStarted?: () => void;
     /** Release provider-local output only after this durable terminal checkpoint succeeds. */
@@ -247,6 +249,7 @@ export interface ProviderActionPort {
       providerContinuationId: string;
       providerConnection: ProviderActionConnectionRef;
     }) => Promise<void>;
+    settleLifecycleBeforeIdle?: () => Promise<void>;
     checkpointTerminalResult?: (result: ProviderRoomTurnResult) => Promise<ProviderRoomTurnCheckpointDisposition | void>;
   }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: ProviderActionHandle, request: ProviderContinuationRepairRequest, options: {

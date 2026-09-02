@@ -20,6 +20,7 @@ import {
 } from "../main/agents/cursor-provider-adapter.js";
 import type {
   ProviderHandle,
+  ProviderRoomTurnOptions,
   ProviderRoomTurnResult,
   ProviderSpawnRequest,
   ProviderStreamEvent,
@@ -2224,6 +2225,9 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
   let durableBoundaryReached = false;
   let persistedTurnId = "";
   const retiredConnections: unknown[] = [];
+  const execution: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, event => execution.push(event));
+  let lifecycleSettlements = 0;
   const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
     checkpointPreparedTurn: async (state) => {
       persistedTurnId = state.providerTurnId;
@@ -2234,6 +2238,11 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
       await providerCheckpointRelease;
     },
     checkpointProviderState: async (state) => { retiredConnections.push(state.providerConnection); },
+    settleLifecycleBeforeIdle: async () => {
+      lifecycleSettlements++;
+      assert.ok(handle.providerConnection?.processIdentity, "the committed wrapper birth remains installed at settlement");
+      assert.ok(execution.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"));
+    },
     markDurableTurnStarted: () => { durableBoundaryReached = true; },
     detachSignal: detach.signal,
   });
@@ -2249,6 +2258,7 @@ test("Cursor handoff stays cancellation-linked until both turn id and wrapper bi
   assert.match(persistedTurnId, /^cursor:/);
   assert.equal(durableBoundaryReached, false);
   assert.equal(child.isReleased, false, "native Cursor stays paused before the combined durability boundary");
+  assert.equal(lifecycleSettlements, 1);
   assert.deepEqual(retiredConnections, [{ kind: "cursor_cli", pid: null, processIdentity: null }]);
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "idle");
@@ -2275,6 +2285,80 @@ test("a failed atomic prepared-turn checkpoint reaps the wrapper before native C
   assert.deepEqual(harness.signals, [{ pid: child.pid, signal: "SIGTERM" }]);
   assert.equal(handle.pid, null);
   assert.equal(handle.observedState(), "idle");
+});
+
+test("a failed prepared-wrapper idle checkpoint recovers before the inbox item becomes retryable", async () => {
+  const root = mkdtempSync(join(tmpdir(), "letagents-cursor-prepared-retirement-"));
+  const harness = createHarness();
+  try {
+    const dependencies: CursorProviderAdapterDependencies = {
+      ...harness.dependencies,
+      prepareTurnState(path) {
+        mkdirSync(dirname(path), { recursive: true });
+        writeFileSync(path, "", { flag: "wx", mode: 0o600 });
+      },
+      launchTurn(input) {
+        const child = harness.dependencies.launchTurn(input);
+        if (input.statePath) {
+          writeFileSync(`${input.statePath}.terminal.json`, JSON.stringify({
+            type: "not_started",
+            native_process_group_reaped: true,
+            reap_scope: "native_process_group",
+            remote_authority_revoked: true,
+          }));
+        }
+        return child;
+      },
+    };
+    const adapter = new CursorProviderAdapter({
+      dependencies,
+      supervisedProfileFactory: () => ({
+        homeDir: join(root, "home"), configDir: join(root, "config"),
+        dataDir: join(root, "data"), cacheDir: join(root, "cache"),
+        env: { HOME: join(root, "home") },
+        ...wrapperHostedMcpFixture(root),
+      }),
+    });
+    const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    const detach = new AbortController();
+    let idleCheckpoints = 0;
+    let settlements = 0;
+    const firstTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointPreparedTurn: async () => { detach.abort(); },
+      checkpointProviderState: async (state) => {
+        assert.equal(state.providerConnection.processIdentity, null);
+        idleCheckpoints += 1;
+        if (idleCheckpoints === 1) throw new Error("transient prepared idle checkpoint failure");
+      },
+      settleLifecycleBeforeIdle: async () => { settlements += 1; },
+      detachSignal: detach.signal,
+    });
+    await assert.rejects(firstTurn, (error: unknown) =>
+      (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "not_dispatched");
+    assert.equal(idleCheckpoints, 2, "exact-turn recovery retries the failed live-to-idle checkpoint");
+    assert.equal(settlements, 2, "typed settlement remains idempotent across compensation retry");
+    assert.equal(handle.pid, null);
+    assert.equal(handle.observedState(), "idle");
+
+    const secondTurn = adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: "prepared-retirement-successor",
+      actionId: "prepared-retirement-successor",
+    }), {
+      checkpointPreparedTurn: async () => {},
+      checkpointProviderState: async () => {},
+      settleLifecycleBeforeIdle: async () => {},
+    });
+    while (!harness.children[1]?.isReleased) await flush();
+    harness.children[1]!.emit({
+      type: "result", subtype: "success", is_error: false,
+      result: "successor ran once", session_id: "sess-cursor-1",
+    });
+    harness.children[1]!.resolveExit({ type: "exit", code: 0, signal: null });
+    assert.equal((await secondTurn).text, "successor ran once");
+    assert.equal(harness.children.length, 2, "compensation does not redispatch the first inbox item");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("Cursor control during a blocked provider checkpoint can never release deferred native work", async () => {
@@ -5894,23 +5978,47 @@ process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_err
       }),
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
+    let persistedTurnId = "";
     let realSessionCheckpoints = 0;
-    const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
-      checkpointTurnStarted: async () => {},
-      checkpointProviderState: async (state) => {
-        if (state.providerContinuationId === "sess-checkpoint-real") {
-          realSessionCheckpoints += 1;
-          if (realSessionCheckpoints === 1) {
-            // Let the already-emitted result drain so this covers recovery of
-            // a terminal first turn, not the separate interrupted-turn case.
-            await new Promise((resolve) => setTimeout(resolve, 50));
-            throw new Error("transient manifest checkpoint failure");
-          }
+    let lifecycleSettlements = 0;
+    const checkpointProviderState: NonNullable<ProviderRoomTurnOptions["checkpointProviderState"]> = async (state) => {
+      if (state.providerContinuationId === "sess-checkpoint-real") {
+        realSessionCheckpoints += 1;
+        if (realSessionCheckpoints === 1) {
+          // Let the already-emitted result drain so this covers recovery of
+          // a terminal first turn, not the separate interrupted-turn case.
+          await new Promise((resolve) => setTimeout(resolve, 50));
+          throw new Error("transient manifest checkpoint failure");
         }
-      },
-    }));
+        if (realSessionCheckpoints === 3) {
+          assert.equal(state.providerConnection.processIdentity, null);
+          throw new Error("transient processless checkpoint failure");
+        }
+      }
+    };
+    const settleLifecycleBeforeIdle = async () => {
+      lifecycleSettlements += 1;
+      assert.equal(realSessionCheckpoints, lifecycleSettlements === 1 ? 2 : 4,
+        "the real live continuation is durable before typed settlement");
+      assert.ok(handle.providerConnection?.processIdentity);
+    };
+    await assert.rejects(withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
+      checkpointTurnStarted: async (turnId) => { persistedTurnId = turnId; },
+      checkpointProviderState,
+      settleLifecycleBeforeIdle,
+    })), /transient processless checkpoint failure/);
+    assert.ok(handle.providerConnection?.processIdentity,
+      "a failed live-to-idle checkpoint keeps the exited child birth recoverable");
+    assert.notEqual(handle.observedState(), "failed");
+
+    const result = await adapter.recoverRoomTurn(handle, {
+      inboxItemId: "inbox-1",
+      providerTurnId: persistedTurnId,
+    }, { checkpointProviderState, settleLifecycleBeforeIdle });
     assert.equal(result.text, "checkpoint recovered");
-    assert.equal(realSessionCheckpoints, 2, "recovery retries the real session checkpoint exactly once");
+    assert.equal(realSessionCheckpoints, 5,
+      "the retry checkpoints the retained child and then its processless lane");
+    assert.equal(lifecycleSettlements, 2);
     assert.equal(handle.providerContinuationId, "sess-checkpoint-real");
     assert.equal(handle.observedState(), "idle");
   } finally {
@@ -5952,6 +6060,7 @@ setInterval(() => {}, 1_000);
     });
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
     let realSessionCheckpoints = 0;
+    let lifecycleSettlements = 0;
     const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest(), {
       checkpointTurnStarted: async () => {},
       checkpointProviderState: async (state) => {
@@ -5960,9 +6069,15 @@ setInterval(() => {}, 1_000);
           if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
         }
       },
+      settleLifecycleBeforeIdle: async () => {
+        lifecycleSettlements += 1;
+        assert.equal(realSessionCheckpoints, 2);
+        assert.ok(handle.providerConnection?.processIdentity);
+      },
     }));
     assert.equal(result.text, "late durable reply");
-    assert.equal(realSessionCheckpoints, 2);
+    assert.equal(realSessionCheckpoints, 3);
+    assert.equal(lifecycleSettlements, 1);
     assert.equal(handle.providerContinuationId, "sess-term-real");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -6001,24 +6116,48 @@ setInterval(() => {}, 1_000);
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
     const terminals: ProviderTerminalPayload[] = [];
     adapter.onExit(handle, (terminal) => terminals.push(terminal));
+    let persistedTurnId = "";
     let realSessionCheckpoints = 0;
+    let lifecycleSettlements = 0;
+    const checkpointProviderState = async (state: { providerContinuationId: string }) => {
+      if (state.providerContinuationId !== "sess-checkpoint-terminal") return;
+      realSessionCheckpoints += 1;
+      if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
+      assert.equal(
+        terminals.length,
+        0,
+        "recovered continuation checkpoints before onExit retires the daemon's live handle",
+      );
+    };
+    const settleLifecycleBeforeIdle = async () => {
+      lifecycleSettlements += 1;
+      assert.ok(handle.providerConnection?.processIdentity);
+      if (lifecycleSettlements === 1) throw new Error("transient lifecycle settlement failure");
+    };
     await assert.rejects(
       withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "checkpoint-terminal" }), {
-        checkpointTurnStarted: async () => {},
-        checkpointProviderState: async (state) => {
-          if (state.providerContinuationId !== "sess-checkpoint-terminal") return;
-          realSessionCheckpoints += 1;
-          if (realSessionCheckpoints === 1) throw new Error("transient manifest checkpoint failure");
-          assert.equal(
-            terminals.length,
-            0,
-            "recovered continuation checkpoints before onExit retires the daemon's live handle",
-          );
-        },
+        checkpointTurnStarted: async (turnId) => { persistedTurnId = turnId; },
+        checkpointProviderState,
+        settleLifecycleBeforeIdle,
       })),
+      /transient lifecycle settlement failure/,
+    );
+    assert.match(persistedTurnId, /^cursor:/);
+    assert.equal(realSessionCheckpoints, 2);
+    assert.equal(lifecycleSettlements, 1);
+    assert.notEqual(handle.observedState(), "failed", "failed recovery does not terminalize the attempt");
+    assert.ok(handle.providerConnection?.processIdentity, "failed recovery retains the exact exited child birth");
+    assert.equal(terminals.length, 0);
+
+    await assert.rejects(
+      withLoopAlive(adapter.recoverRoomTurn(handle, {
+        inboxItemId: "checkpoint-terminal",
+        providerTurnId: persistedTurnId,
+      }, { checkpointProviderState, settleLifecycleBeforeIdle })),
       (error: unknown) => (error as { roomTurnRecoveryOutcome?: unknown }).roomTurnRecoveryOutcome === "terminal_failure",
     );
-    assert.equal(realSessionCheckpoints, 2, "terminal recovery still converges the real session checkpoint");
+    assert.equal(realSessionCheckpoints, 4, "retry checkpoints the live birth, then its processless continuation");
+    assert.equal(lifecycleSettlements, 2);
     assert.equal(handle.observedState(), "failed");
     assert.equal(terminals.length, 1);
     assert.equal(terminals[0]!.terminalCause, "crashed");
@@ -6338,6 +6477,83 @@ test("live Cursor stop never signals a recycled wrapper PID or process group", a
   assert.deepEqual(harness.signals, []);
   assert.equal(stopped.terminalCause, "stopped");
   assert.equal(handle.pid, null);
+});
+
+test("Cursor Stop joins the bounded turn settlement barrier before retiring its exact child birth", async () => {
+  const harness = createHarness();
+  const adapter = supervisedAdapter(harness);
+  const handle = await spawnDaemonLane(adapter, harness);
+  let enterSettlement!: () => void;
+  const settlementEntered = new Promise<void>((resolve) => { enterSettlement = resolve; });
+  let releaseSettlement!: () => void;
+  const settlementRelease = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+  const retiredConnections: unknown[] = [];
+  const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest(), {
+    checkpointPreparedTurn: async () => {},
+    checkpointProviderState: async (state) => { retiredConnections.push(state.providerConnection); },
+    settleLifecycleBeforeIdle: async () => {
+      enterSettlement();
+      await settlementRelease;
+    },
+  });
+  for (let index = 0; index < 100 && !harness.children[0]?.isReleased; index += 1) await flush();
+  const child = harness.children[0]!;
+  assert.notEqual(child.pid, null);
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "settled", session_id: "sess-cursor-1" });
+  harness.identities.set(child.pid!, null);
+  child.resolveExit({ type: "exit", code: 0, signal: null });
+  await settlementEntered;
+
+  let stopSettled = false;
+  const stopping = adapter.stop(handle).finally(() => { stopSettled = true; });
+  await flush();
+  assert.equal(stopSettled, false, "Stop cannot fire onExit while the exact child effect is unsettled");
+  assert.equal(handle.providerConnection?.processIdentity, birthIdentity(child.pid!));
+
+  releaseSettlement();
+  const [result, stopped] = await Promise.all([roomTurn, stopping]);
+  assert.equal(result.text, "settled");
+  assert.equal(stopped.terminalCause, "stopped");
+  assert.deepEqual(retiredConnections.at(-1), { kind: "cursor_cli", pid: null, processIdentity: null });
+  assert.equal(handle.pid, null);
+});
+
+test("Cursor Stop and turn control retain the exact child when bounded settlement fails", async () => {
+  for (const operation of ["stop", "control"] as const) {
+    const harness = createHarness();
+    const adapter = supervisedAdapter(harness);
+    const handle = await spawnDaemonLane(adapter, harness);
+    let enterSettlement!: () => void;
+    const settlementEntered = new Promise<void>((resolve) => { enterSettlement = resolve; });
+    let releaseSettlement!: () => void;
+    const settlementRelease = new Promise<void>((resolve) => { releaseSettlement = resolve; });
+    const terminals: ProviderTerminalPayload[] = [];
+    adapter.onExit(handle, terminal => terminals.push(terminal));
+    const roomTurn = adapter.runRoomTurn(handle, roomTurnRequest({
+      inboxItemId: `failed-settlement-${operation}`,
+      actionId: `failed-settlement-${operation}`,
+    }), {
+      checkpointPreparedTurn: async () => {},
+      checkpointProviderState: async () => {},
+      settleLifecycleBeforeIdle: async () => {
+        enterSettlement();
+        await settlementRelease;
+        throw new Error("injected bounded settlement failure");
+      },
+    });
+    while (!harness.children[0]?.isReleased) await flush();
+    const child = harness.children[0]!;
+    child.emit({ type: "result", subtype: "success", is_error: false, result: "settled", session_id: "sess-cursor-1" });
+    child.resolveExit({ type: "exit", code: 0, signal: null });
+    await settlementEntered;
+
+    const control = operation === "stop" ? adapter.stop(handle) : adapter.controlTurn(handle, null);
+    releaseSettlement();
+    await assert.rejects(roomTurn, /injected bounded settlement failure/);
+    await assert.rejects(control, /recover/);
+    assert.equal(handle.providerConnection?.processIdentity, birthIdentity(child.pid!));
+    assert.equal(terminals.length, 0, `${operation} cannot emit attempt exit after settlement failure`);
+  }
 });
 
 test("stop while idle needs no signal: nothing is running, the attempt ends immediately as stopped", async () => {
@@ -6859,7 +7075,19 @@ test("Cursor typed observations fence each native child and exclude synthetic di
     controlProbe: "unsupported", approvals: { kinds: [], recovery: "unsupported", denyScope: "unsupported" },
   });
   assert.equal(events.length, 0, "an idle lane has no runtime birth and cannot poison capture with a processless fact");
-  const first = adapter.runRoomTurn(handle, roomTurnRequest());
+  const settledBirths: string[] = [];
+  const settleExactBirth = async () => {
+    const connection = handle.providerConnection;
+    assert.equal(connection?.kind, "cursor_cli");
+    assert.ok(connection?.processIdentity, "typed settlement retains the exact child birth");
+    const birth = connection.processIdentity;
+    assert.ok(events.some(({ nativeProcessIdentity, fact }) => nativeProcessIdentity === birth
+      && fact.domain === "turn" && fact.state === "terminal"), "validated turn evidence precedes settlement");
+    assert.ok(events.some(({ nativeProcessIdentity, fact }) => nativeProcessIdentity === birth
+      && fact.domain === "runtime" && fact.state === "exited"), "historical child exit precedes settlement");
+    settledBirths.push(birth);
+  };
+  const first = adapter.runRoomTurn(handle, roomTurnRequest(), { settleLifecycleBeforeIdle: settleExactBirth });
   await flush();
   const child = harness.children[0]!;
   const session_id = "sess-cursor-1";
@@ -6885,6 +7113,8 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   const firstResult = { type: "result", subtype: "success", is_error: false, result: "done", session_id };
   child.emit(firstResult);
   child.emit(firstResult);
+  assert.equal(events.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false,
+    "raw result is only a correlation checkpoint until the wrapper terminal validates it");
   assert.equal(events.filter((event) => event.fact.domain === "execution"
     && event.fact.executionId === "unclosed-write" && event.fact.kind === "completed").length, 0,
   "a display-only interrupted card cannot become native interruption evidence");
@@ -6892,7 +7122,11 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   assert.equal((await first).text, "done");
   await flush();
   assert.equal(handle.observedState(), "idle");
-  const second = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }));
+  assert.equal(handle.providerConnection?.processIdentity, null,
+    "the reusable lane becomes processless only after typed settlement returns");
+  const second = adapter.runRoomTurn(handle, roomTurnRequest({ inboxItemId: "second" }), {
+    settleLifecycleBeforeIdle: settleExactBirth,
+  });
   await flush();
   const nextChild = harness.children[1]!;
   nextChild.emit(started);
@@ -6949,6 +7183,8 @@ test("Cursor typed observations fence each native child and exclude synthetic di
   assert.equal(terminalIds[0], terminalIds[1], "an identical terminal replay keeps the first checkpoint identity");
   assert.equal(events.filter((event) => event.fact.domain === "turn" && event.fact.state === "terminal"
     && event.fact.nativeEventId === terminalIds[0]).length, 1, "a replay does not emit another typed terminal");
+  assert.deepEqual(settledBirths, [birthIdentity(child.pid!), birthIdentity(nextChild.pid!)],
+    "each child birth crosses the settlement barrier exactly once");
   assert.equal(stream.find((event) => event.method === "system/init_duplicate")?.nativeEventId, undefined,
     "duplicate init diagnostics do not mint a second lifecycle checkpoint");
   assert.equal(stream.some((event) => event.kind === "tool_lifecycle" && event.nativeEventId !== undefined), false);
@@ -6957,19 +7193,29 @@ test("Cursor typed observations fence each native child and exclude synthetic di
 });
 
 test("Cursor typed child loss differs from an exact user interruption", async () => {
-  for (const interrupted of [false, true]) {
+  for (const exitKind of ["exit", "error", "interrupted"] as const) {
+    const interrupted = exitKind === "interrupted";
     const harness = createHarness();
     const adapter = supervisedAdapter(harness);
     const handle = await spawnDaemonLane(adapter, harness);
     const events: NativeExecutionObservation[] = [];
     adapter.onExecution(handle, (event) => events.push(event));
-    const running = adapter.runRoomTurn(handle, roomTurnRequest());
-    const rejected = assert.rejects(running);
+    let settlementCalls = 0;
+    const running = adapter.runRoomTurn(handle, roomTurnRequest(), {
+      settleLifecycleBeforeIdle: async () => {
+        settlementCalls++;
+        assert.ok(handle.providerConnection?.processIdentity, "the terminal effect settles against the exact child birth");
+        assert.ok(events.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"));
+      },
+    });
+    const rejected = assert.rejects(running,
+      interrupted ? /interrupted before publication/ : /ended before.*terminal result/);
     await flush();
     const child = harness.children[0]!;
     child.emit({ type: "tool_call", subtype: "started", call_id: "shell", session_id: "sess-cursor-1",
       tool_call: { shellToolCall: { args: { command: "slow-command" } } } });
     if (interrupted) await adapter.controlTurn(handle);
+    else if (exitKind === "error") child.resolveExit({ type: "error", error: new Error("native child error") });
     else child.resolveExit({ type: "exit", code: 1, signal: null });
     await rejected;
     await flush();
@@ -6978,6 +7224,11 @@ test("Cursor typed child loss differs from an exact user interruption", async ()
     const terminal = events.find((event) => event.fact.domain === "turn" && event.fact.state !== "active")?.fact;
     assert.ok(terminal && "state" in terminal);
     assert.equal(terminal.state, interrupted ? "terminal" : "lost");
+    const runtime = events.find((event) => event.fact.domain === "runtime" && event.fact.state === "exited")?.fact;
+    assert.ok(runtime && "controlEvidence" in runtime);
+    assert.equal(runtime.controlEvidence, exitKind === "error" ? "native_session_terminated" : "process_exit");
+    assert.equal(settlementCalls, 1);
+    assert.equal(handle.providerConnection?.processIdentity, null);
     if (!interrupted) assert.deepEqual(harness.signals, []);
   }
 });

@@ -446,6 +446,8 @@ export interface ProviderRoomTurnOptions {
     providerContinuationId: string;
     providerConnection: ProviderConnectionRef;
   }) => Promise<void>;
+  /** Dispose the exact native birth's typed lifecycle effect before a reusable lane drops that birth. */
+  settleLifecycleBeforeIdle?: () => Promise<void>;
   /** Synchronously marks that exact turn identity and process recovery state are durable. */
   markDurableTurnStarted?: () => void;
   /** Persist normalized terminal evidence before provider-local evidence is released. */
@@ -513,6 +515,7 @@ export interface ProviderAdapter {
   recoverRoomTurn?(handle: ProviderHandle, request: ProviderRoomTurnRecoveryRequest, options?: {
     detachSignal?: AbortSignal;
     checkpointProviderState?: ProviderRoomTurnOptions["checkpointProviderState"];
+    settleLifecycleBeforeIdle?: ProviderRoomTurnOptions["settleLifecycleBeforeIdle"];
     checkpointTerminalResult?: ProviderRoomTurnOptions["checkpointTerminalResult"];
   }): Promise<ProviderRoomTurnResult>;
   repairContinuation?(handle: ProviderHandle, request: ProviderContinuationRepairRequest, options: {

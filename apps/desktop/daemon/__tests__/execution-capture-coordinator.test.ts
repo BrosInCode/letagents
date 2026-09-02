@@ -20,6 +20,12 @@ const active: NativeExecutionFact = { ...nativeTurn, domain: "turn", kind: "stat
 const terminal: NativeExecutionFact = { ...active, state: "terminal", turnOutcome: "completed" };
 async function flush(): Promise<void> { for (let i = 0; i < 12; i++) await new Promise<void>(resolve => setImmediate(resolve)); }
 async function delay(ms: number): Promise<void> { await new Promise(resolve => setTimeout(resolve, ms)); }
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((done, fail) => { resolve = done; reject = fail; });
+  return { promise, resolve, reject };
+}
 
 function successor(f: ReturnType<typeof fixture>, birth: string): ProviderActionHandle {
   const handle = { ...f.handle, appliedConfigurationRevision: 2,
@@ -188,6 +194,143 @@ test("typed lifecycle admission requires a caught-up source and fully disposed f
     typed.db.prepare("DELETE FROM execution_lifecycle_effects").run();
     assert.equal(typed.typedAdmission(), "unavailable", "a missing disposition fails closed");
   } finally { typed.capture.close(); }
+});
+
+test("Cursor identity retirement synchronously captures the exact child tail", async () => {
+  const f = fixture("cursor_cli", undefined, undefined, new DatabaseSync(":memory:"), "typed");
+  try {
+    f.bindTurn();
+    await f.install();
+    f.emit(active);
+    f.emit(terminal);
+    f.emit({ domain: "runtime", kind: "state_changed", state: "exited",
+      controlEvidence: "process_exit", sideEffects: "none" });
+    f.capture.flush(f.tokenFor());
+    assert.deepEqual(f.facts().map(row => ({ domain: row.domain, state: row.state })), [
+      { domain: "turn", state: "active" },
+      { domain: "turn", state: "terminal" },
+      { domain: "runtime", state: "exited" },
+    ]);
+    assert.equal(f.admission(), "unavailable",
+      "an exited child is never delivery-ready even though its source tail is durably settled");
+    assert.throws(() => f.capture.flush(f.tokenFor({ ...f.handle })), /identity_mismatch/,
+      "the barrier cannot settle a copied or successor handle");
+  } finally { f.capture.close(); }
+});
+
+test("typed lifecycle settlement drains one agent to a durable terminal disposition", async () => {
+  let pending = Array.from({ length: 40 }, (_, index) => ({
+    factId: `settle-${index}`, agentId: "agent", factSequence: index + 1,
+    observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+    effectKind: "manifest_idle" as const, observedAtMs: 100 + index,
+  })).concat({ factId: "unrelated", agentId: "other", factSequence: 100,
+    observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+    effectKind: "manifest_idle" as const, observedAtMs: 200 });
+  const coordinator = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async (agentId, limit) => pending
+        .filter(effect => !agentId || effect.agentId === agentId).slice(0, limit),
+      applyTypedLifecycleEffect: async (generation, effect) => {
+        if (effect.agentId === "other") throw new Error("unrelated retry");
+        pending = pending.filter(candidate => candidate.factId !== effect.factId);
+        return { generation, disposition: "applied" as const };
+      },
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: (_agentId, error) => { throw error; },
+  });
+  try {
+    coordinator.changed("other");
+    await Promise.all([coordinator.settle("agent"), coordinator.settle("agent")]);
+    assert.deepEqual(pending.map(effect => effect.factId), ["unrelated"],
+      "a requested settlement is serialized and cannot be blocked by another agent's retry");
+  } finally { await coordinator.close(); }
+
+  const backgroundEntered = deferred<void>();
+  const releaseBackground = deferred<void>();
+  const targetEntered = deferred<void>();
+  const releaseTarget = deferred<void>();
+  let backgroundLists = 0;
+  let activeApplies = 0;
+  let maximumConcurrentApplies = 0;
+  let targetPending = true;
+  let backgroundPending = true;
+  const serialized = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async (agentId) => {
+        if (agentId === "background" && backgroundLists++ === 0) {
+          backgroundEntered.resolve();
+          await releaseBackground.promise;
+          throw new Error("retry background drain");
+        }
+        if (agentId === "target" && targetPending) return [{ factId: "target", agentId: "target", factSequence: 1,
+          observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+          effectKind: "manifest_idle" as const, observedAtMs: 100 }];
+        if (agentId === "background" && backgroundPending) return [{ factId: "background", agentId: "background", factSequence: 2,
+          observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+          effectKind: "manifest_idle" as const, observedAtMs: 100 }];
+        return [];
+      },
+      applyTypedLifecycleEffect: async (generation, effect) => {
+        activeApplies += 1;
+        maximumConcurrentApplies = Math.max(maximumConcurrentApplies, activeApplies);
+        try {
+          if (effect.agentId === "target") {
+            targetEntered.resolve();
+            await releaseTarget.promise;
+            targetPending = false;
+          } else {
+            backgroundPending = false;
+          }
+          return { generation, disposition: "applied" as const };
+        } finally {
+          activeApplies -= 1;
+        }
+      },
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: () => {},
+  });
+  try {
+    serialized.changed("background");
+    await delay(0);
+    await backgroundEntered.promise;
+    const settlement = serialized.settle("target");
+    releaseBackground.resolve();
+    await targetEntered.promise;
+    await delay(1_050);
+    assert.equal(maximumConcurrentApplies, 1,
+      "a retry timer scheduled by the prior drain cannot overlap the exact-agent settlement barrier");
+    releaseTarget.resolve();
+    await settlement;
+    for (let i = 0; i < 20 && backgroundPending; i += 1) await delay(10);
+    assert.equal(backgroundPending, false, "the unrelated retry resumes after exact-agent settlement");
+    assert.equal(maximumConcurrentApplies, 1);
+  } finally {
+    releaseBackground.resolve();
+    releaseTarget.resolve();
+    await serialized.close();
+  }
+
+  const blocked = new TypedLifecycleEffectCoordinator({
+    store: {
+      listPendingTypedLifecycleEffects: async () => [{ factId: "pending", agentId: "agent", factSequence: 1,
+        observerExecutionGenerationId: "generation", observerRuntimeGenerationId: "runtime",
+        effectKind: "manifest_idle" as const, observedAtMs: 100 }],
+      applyTypedLifecycleEffect: async generation => ({ generation, disposition: "pending" as const }),
+    },
+    currentInstallation: () => undefined,
+    authority: { serialize: operation => operation(), assertCurrent: async () => {},
+      currentManifestGeneration: () => 0, acceptManifestGeneration: () => {}, fenceCommit: commit => commit() },
+    isClosing: () => false, nowMs: () => 200, diagnostic: () => {},
+  });
+  try {
+    await assert.rejects(() => blocked.settle("agent"), /did not settle/);
+  } finally { await blocked.close(); }
 });
 
 test("typed lifecycle startup scan advances past a full unavailable batch", async () => {
