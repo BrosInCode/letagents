@@ -33,6 +33,10 @@ type StoredGrant = DesktopSupervisorGrantMetadata & {
    * rewrites the grant through the ownership-aware lifecycle.
    */
   credentialLifecycle: "tracked" | "unknown";
+  /** Server-authenticated stable owner fence; absent on legacy/rental grants. */
+  ownerAccountId?: string;
+  /** Server-authenticated stable grant scope; absent on legacy/rental grants. */
+  scopeKey?: string;
   encryptedToken: string;
 };
 type LegacyStoredGrant = DesktopSupervisorGrantMetadata & { encryptedToken: string };
@@ -95,6 +99,11 @@ const registryMutationTails = new Map<string, Promise<void>>();
 const agentLifecycleTails = new Map<string, Promise<void>>();
 
 export type { DesktopProvisionSupervisorGrantInput, DesktopSupervisorGrantMetadata } from "../ipc-types/supervisor-grant.js";
+
+export type DesktopSupervisorGrantAuthority = {
+  ownerAccountId: string;
+  scopeKey: string;
+};
 
 function getStorage(): SecretStorage {
   try {
@@ -183,6 +192,32 @@ function toMetadata(response: {
   };
 }
 
+function authorityFromResponse(response: {
+  owner_account_id: string;
+  scope_key: string;
+}): DesktopSupervisorGrantAuthority {
+  const ownerAccountId = response.owner_account_id.trim();
+  const scopeKey = response.scope_key.trim();
+  if (!ownerAccountId || !scopeKey) {
+    throw new Error("Supervisor grant authority provenance is incomplete.");
+  }
+  return { ownerAccountId, scopeKey };
+}
+
+function authorityFromStored(stored: Pick<StoredGrant, "ownerAccountId" | "scopeKey">): DesktopSupervisorGrantAuthority | null {
+  const ownerAccountId = stored.ownerAccountId?.trim() ?? "";
+  const scopeKey = stored.scopeKey?.trim() ?? "";
+  return ownerAccountId && scopeKey ? { ownerAccountId, scopeKey } : null;
+}
+
+function normalizeAuthority(authority: DesktopSupervisorGrantAuthority | null): DesktopSupervisorGrantAuthority | null {
+  if (!authority) return null;
+  const ownerAccountId = authority.ownerAccountId.trim();
+  const scopeKey = authority.scopeKey.trim();
+  if (!ownerAccountId || !scopeKey) throw new Error("Supervisor grant authority provenance is incomplete.");
+  return { ownerAccountId, scopeKey };
+}
+
 /** Stable local key for a provider agent identity; never use a display name. */
 export function canonicalSupervisorGrantAgentKey(agentKey: string): string {
   // The API's canonical key embeds the owner's login and is stored/looked up
@@ -200,6 +235,8 @@ function metadataOf(stored: StoredGrant): DesktopSupervisorGrantMetadata {
     entryId: _entryId,
     lastInstalledDaemonGeneration: _daemonGeneration,
     credentialLifecycle: _credentialLifecycle,
+    ownerAccountId: _ownerAccountId,
+    scopeKey: _scopeKey,
     encryptedToken: _secret,
     ...metadata
   } = stored;
@@ -279,8 +316,11 @@ function registryFrom(value: unknown): StoredGrantRegistry | null {
     for (const [storedKey, grant] of Object.entries(legacy.grants)) {
       if (!grant?.grantId?.trim() || !grant.encryptedToken?.trim()) continue;
       const exactJournal = credentialRevocations[grant.grantId];
+      const { ownerAccountId: _ownerAccountId, scopeKey: _scopeKey, ...grantWithoutAuthority } = grant;
+      const authority = authorityFromStored(grant);
       grants[storedKey] = {
-        ...grant,
+        ...grantWithoutAuthority,
+        ...(authority ?? {}),
         credentialLifecycle: (registryVersion >= 6 && grant.credentialLifecycle === "tracked")
           || (exactJournal?.grantId === grant.grantId
             && exactJournal.sessionOwnerGrantId === grant.grantId
@@ -374,11 +414,14 @@ export interface DesktopSupervisorGrantLifecycleInput {
   roomScopes: Array<{ requestedRoomId: string; canonicalRoomId: string }>;
   ttlMs?: number;
   lastInstalledDaemonGeneration?: number | null;
+  /** Stable owner/scope tuple an authenticated replacement must preserve. */
+  expectedAuthority?: DesktopSupervisorGrantAuthority;
 }
 
 type SupervisorGrantApiResponse = {
   grant_id: string; host_id: string; installation_id: string; allowed_room_ids: string[];
   allowed_agent_keys: string[]; current_generation: number; expires_at: string; supervisor_grant: string;
+  owner_account_id: string; scope_key: string;
 };
 
 type GrantStorageOptions = { storage?: SecretStorage; apiFetch?: typeof apiFetch };
@@ -429,6 +472,7 @@ export async function provisionDesktopSupervisorGrant(
       body: JSON.stringify({ host_id: input.hostId, installation_id: input.installationId, allowed_room_ids: input.allowedRoomIds, allowed_agent_keys: input.allowedAgentKeys, ttl_ms: input.ttlMs }),
     });
     const metadata = toMetadata(response);
+    const authority = authorityFromResponse(response);
     try {
       if (metadata.allowedAgentKeys.length !== 1) {
         throw new Error("A per-agent desktop grant must be scoped to exactly one agent identity.");
@@ -437,7 +481,7 @@ export async function provisionDesktopSupervisorGrant(
       const encryptedToken = encryptSupervisorGrantForStorage(response.supervisor_grant, storage);
       await writeRegistry({
         version: 7,
-        grants: { [agentKey]: { ...metadata, agentKey, credentialLifecycle: "tracked", encryptedToken } },
+        grants: { [agentKey]: { ...metadata, ...authority, agentKey, credentialLifecycle: "tracked", encryptedToken } },
         entryAgentKeys: registry?.entryAgentKeys ?? {},
         credentialRevocations: registry?.credentialRevocations ?? {},
         purgeRevocationReceipts: registry?.purgeRevocationReceipts ?? {},
@@ -469,6 +513,7 @@ export async function readDesktopSupervisorGrantToken(): Promise<string | null> 
 /** Main-process only. Renderer IPC intentionally exposes metadata, never this value. */
 export async function readDesktopSupervisorGrantForAgent(agentKey: string, options: GrantStorageOptions = {}): Promise<{
   metadata: DesktopSupervisorGrantMetadata;
+  authority: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId: string | null;
   lastInstalledDaemonGeneration: number | null;
@@ -478,7 +523,7 @@ export async function readDesktopSupervisorGrantForAgent(agentKey: string, optio
   const stored = registry?.grants[canonicalSupervisorGrantAgentKey(agentKey)];
   const token = stored && decryptSupervisorGrantFromStorage(stored.encryptedToken, options.storage);
   return stored && token ? {
-    metadata: metadataOf(stored), token,
+    metadata: metadataOf(stored), authority: authorityFromStored(stored), token,
     entryId: stored.entryId?.trim() || null,
     lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,
     credentialLifecycle: stored.credentialLifecycle,
@@ -492,11 +537,13 @@ export async function readDesktopSupervisorGrantForAgent(agentKey: string, optio
 export async function replaceDesktopSupervisorGrantForAgent(input: {
   agentKey: string;
   metadata: DesktopSupervisorGrantMetadata;
+  authority?: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId?: string;
   lastInstalledDaemonGeneration?: number | null;
 }, options: GrantStorageOptions = {}): Promise<void> {
   const agentKey = canonicalSupervisorGrantAgentKey(input.agentKey);
+  const authority = normalizeAuthority(input.authority ?? null);
   if (!input.token.trim()) throw new Error("A supervisor grant is required.");
   if (input.metadata.allowedAgentKeys.length !== 1
     || canonicalSupervisorGrantAgentKey(input.metadata.allowedAgentKeys[0]!) !== agentKey) {
@@ -552,6 +599,7 @@ export async function replaceDesktopSupervisorGrantForAgent(input: {
     }
     registry.grants[agentKey] = {
       ...input.metadata,
+      ...(authority ?? {}),
       agentKey,
       entryId,
       lastInstalledDaemonGeneration: installedGeneration,
@@ -591,6 +639,7 @@ function reusableDesktopSupervisorGrant(input: {
 export async function storeDesktopSupervisorGrantForAgent(input: {
   agentKey: string;
   metadata: DesktopSupervisorGrantMetadata;
+  authority?: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId?: string;
   lastInstalledDaemonGeneration?: number | null;
@@ -791,6 +840,7 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
   options: GrantStorageOptions = {},
 ): Promise<{
   metadata: DesktopSupervisorGrantMetadata;
+  authority: DesktopSupervisorGrantAuthority | null;
   token: string;
   entryId: string;
   lastInstalledDaemonGeneration: number | null;
@@ -817,6 +867,7 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
     })) {
       return {
         metadata: existing.metadata,
+        authority: existing.authority,
         token: existing.token,
         entryId,
         lastInstalledDaemonGeneration: existing.lastInstalledDaemonGeneration,
@@ -852,17 +903,27 @@ export async function getOrProvisionDesktopSupervisorGrantForAgent(
       ttl_ms: input.ttlMs,
     });
     const metadata = toMetadata(response);
+    const authority = authorityFromResponse(response);
     try {
-      if (metadata.installationId !== installationId || metadata.allowedAgentKeys.length !== 1
+      if (metadata.hostId !== hostId || metadata.installationId !== installationId
+        || metadata.allowedAgentKeys.length !== 1
         || canonicalSupervisorGrantAgentKey(metadata.allowedAgentKeys[0]!) !== agentKey) {
         throw new Error("The provisioned desktop grant was not scoped to the requested agent entry.");
       }
+      const expectedAuthority = input.expectedAuthority
+        ? normalizeAuthority(input.expectedAuthority)
+        : null;
+      if (expectedAuthority
+        && (authority.ownerAccountId !== expectedAuthority.ownerAccountId
+          || authority.scopeKey !== expectedAuthority.scopeKey)) {
+        throw new Error("The provisioned desktop grant changed its stable owner authority coordinates.");
+      }
       await replaceDesktopSupervisorGrantForAgent({
-        agentKey, metadata, token: response.supervisor_grant, entryId,
+        agentKey, metadata, authority, token: response.supervisor_grant, entryId,
         lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
       }, { storage });
       return {
-        metadata, token: response.supervisor_grant, entryId,
+        metadata, authority, token: response.supervisor_grant, entryId,
         lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
       };
     } catch (error) {
@@ -961,6 +1022,7 @@ export async function revokeDesktopSupervisorGrantForEntry(
       agentKey,
       grant: {
         metadata: metadataOf(stored),
+        authority: authorityFromStored(stored),
         token,
         entryId: normalizedEntryId,
         lastInstalledDaemonGeneration: stored.lastInstalledDaemonGeneration ?? null,

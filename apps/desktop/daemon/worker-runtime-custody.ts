@@ -29,6 +29,10 @@ export type InstalledHostGrant = {
   daemonGeneration: number;
   hostId: string;
   installationId: string;
+  /** Server-authenticated stable owner fence, or null when unavailable. */
+  ownerAccountId: string | null;
+  /** Server-authenticated stable grant scope, or null when unavailable. */
+  scopeKey: string | null;
   expiresAt: string;
 };
 

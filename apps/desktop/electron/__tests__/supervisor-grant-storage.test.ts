@@ -120,7 +120,8 @@ test("supervisor grant registry keys are stable agent identities rather than dis
 test("encrypted registry retains disjoint grants for two desktop-managed agents", async () => {
   await withRegistry(async (path) => {
     await replaceDesktopSupervisorGrantForAgent({
-      agentKey: "owner/agent-a", metadata: metadata("owner/agent-a", "a"), token: "lashg_secret_a",
+      agentKey: "owner/agent-a", metadata: metadata("owner/agent-a", "a"),
+      authority: { ownerAccountId: "account-a", scopeKey: "owner" }, token: "lashg_secret_a",
       entryId: "entry-a", lastInstalledDaemonGeneration: 3,
     }, { storage: keychain });
     await replaceDesktopSupervisorGrantForAgent({
@@ -132,12 +133,15 @@ test("encrypted registry retains disjoint grants for two desktop-managed agents"
     assert.equal(first?.token, "lashg_secret_a");
     assert.equal(first?.entryId, "entry-a");
     assert.equal(first?.lastInstalledDaemonGeneration, 3);
+    assert.deepEqual(first?.authority, { ownerAccountId: "account-a", scopeKey: "owner" });
+    assert.equal("ownerAccountId" in (first?.metadata ?? {}), false, "renderer-safe metadata excludes owner authority");
     assert.equal(second?.token, "lashg_secret_b");
     assert.equal(second?.metadata.allowedRoomIds[0], "room_b");
     const file = await readFile(path, "utf8");
     assert.doesNotMatch(file, /lashg_secret_a|lashg_secret_b/);
     assert.match(file, /entry-a/);
     assert.match(file, /entry-b/);
+    assert.match(file, /account-a/);
   });
 });
 
@@ -214,6 +218,7 @@ test("never-minted purge revokes only the parent grant and persists an idempoten
           allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
           current_generation: 2, expires_at: new Date(Date.now() + 60_000).toISOString(),
           supervisor_grant: "lashg_legacy_replacement",
+          owner_account_id: "account_1", scope_key: "owner",
         } as T;
       }) as never,
     });
@@ -532,6 +537,7 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
         grant_id: `grant_${index}`, host_id: body.host_id, installation_id: body.installation_id,
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: [agentKey], current_generation: 1,
         expires_at: new Date(Date.now() + 60_000).toISOString(), supervisor_grant: `lashg_secret_${index}`,
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const [first, second] = await Promise.all([
@@ -552,6 +558,8 @@ test("concurrent provisioning preserves both grants and failed storage revokes o
     assert.deepEqual(requestedAgentKeys, ["owner/agent-a", "owner/agent-b"]);
     assert.notEqual(requests[0]!.installation_id, requests[1]!.installation_id);
     assert.notEqual(first.token, second.token, "independent concurrent provisions receive distinct grants");
+    assert.deepEqual(first.authority, { ownerAccountId: "account_1", scopeKey: "owner" });
+    assert.deepEqual(second.authority, first.authority);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-a", { storage: keychain }))?.token, first.token);
     assert.equal((await readDesktopSupervisorGrantForAgent("owner/agent-b", { storage: keychain }))?.token, second.token);
 
@@ -590,6 +598,7 @@ test("concurrent same-agent get-or-provision performs one POST and returns one c
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_same_secret",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const input = {
@@ -621,6 +630,7 @@ test("different aliases resolving to the same canonical room reuse one grant", a
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_alias",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const base = { hostId: "desktop_host", entryId: "entry-alias", agentKey: "owner/agent-alias" };
@@ -649,6 +659,7 @@ test("narrowing the canonical room set rotates away excess authority", async () 
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: `lashg_scope_${posts}`,
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const base = { hostId: "desktop_host", entryId: "entry-scope", agentKey: "owner/agent-scope" };
@@ -686,6 +697,7 @@ test("stale or under-scoped cached grant is revoked and reprovisioned", async ()
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_replacement",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const result = await getOrProvisionDesktopSupervisorGrantForAgent({
@@ -725,6 +737,7 @@ test("pre-send DELETE failure preserves local recovery until an acknowledged ret
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_presend_new",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const input = {
@@ -741,6 +754,63 @@ test("pre-send DELETE failure preserves local recovery until an acknowledged ret
     assert.equal(deletes, 2);
     assert.equal(posts, 1);
     assert.equal(recovered.token, "lashg_presend_new");
+  });
+});
+
+test("replacement authority is validated before the durable grant changes", async () => {
+  await withRegistry(async () => {
+    const agentKey = "owner/agent-authority-fence";
+    const entryId = "entry-authority-fence";
+    const installationId = desktopSupervisorGrantInstallationId("desktop_host", entryId);
+    const expectedAuthority = { ownerAccountId: "account_1", scopeKey: "owner" };
+    await replaceDesktopSupervisorGrantForAgent({
+      agentKey,
+      metadata: {
+        ...metadata(agentKey, "authority-fence"), hostId: "desktop_host", installationId,
+        allowedRoomIds: ["room-old"],
+      },
+      authority: expectedAuthority,
+      token: "lashg_authority_fence_old",
+      entryId,
+    }, { storage: keychain });
+    const revoked: string[] = [];
+    let createAttempts = 0;
+    const apiFetch = (async <T>(path: string, init?: { body?: string }) => {
+      if (!init?.body) {
+        revoked.push(path);
+        return {} as T;
+      }
+      createAttempts += 1;
+      const body = JSON.parse(init.body) as Record<string, unknown>;
+      return {
+        grant_id: `grant_authority_fence_new_${createAttempts}`,
+        host_id: createAttempts === 1 ? body.host_id : "host_other",
+        installation_id: body.installation_id,
+        allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
+        current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
+        supervisor_grant: "lashg_authority_fence_new",
+        owner_account_id: createAttempts === 1 ? "account_other" : "account_1", scope_key: "owner",
+      } as T;
+    }) as never;
+
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-new")],
+      forceReprovision: true, expectedAuthority,
+    }, { storage: keychain, apiFetch }), /changed its stable owner authority coordinates/);
+    await assert.rejects(getOrProvisionDesktopSupervisorGrantForAgent({
+      hostId: "desktop_host", entryId, agentKey, roomScopes: [roomScope("room-new")],
+      forceReprovision: true, expectedAuthority,
+    }, { storage: keychain, apiFetch }), /not scoped to the requested agent entry/);
+
+    const preserved = await readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain });
+    assert.equal(preserved?.token, "lashg_authority_fence_old");
+    assert.deepEqual(preserved?.authority, expectedAuthority);
+    assert.deepEqual(revoked, [
+      "/supervisor-host-grants/grant_authority-fence",
+      "/supervisor-host-grants/grant_authority_fence_new_1",
+      "/supervisor-host-grants/grant_authority-fence",
+      "/supervisor-host-grants/grant_authority_fence_new_2",
+    ]);
   });
 });
 
@@ -773,6 +843,7 @@ test("lost DELETE response preserves local recovery, then an explicit 404 retry 
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_cleanup_new",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const input = {
@@ -843,6 +914,7 @@ for (const scenario of [
           current_generation: 1,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
           supervisor_grant: `lashg_${scenario.name}_recovered`,
+          owner_account_id: "account_1", scope_key: "owner",
         } as T;
       }) as never;
       const recovered = await getOrProvisionDesktopSupervisorGrantForAgent({
@@ -916,6 +988,7 @@ test("replacement restart skips an already-acknowledged exact session end and re
           current_generation: 1,
           expires_at: new Date(Date.now() + 60_000).toISOString(),
           supervisor_grant: "lashg_replacement_restart_new",
+          owner_account_id: "account_1", scope_key: "owner",
         } as T;
       }) as never,
     });
@@ -959,6 +1032,7 @@ test("legacy provision cannot overwrite a concurrent managed registry save", asy
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_manual",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     const manual = provisionDesktopSupervisorGrant({
@@ -991,6 +1065,7 @@ test("legacy provision accepts a registry with identity metadata but no actual g
         allowed_room_ids: body.allowed_room_ids, allowed_agent_keys: body.allowed_agent_keys,
         current_generation: 1, expires_at: new Date(Date.now() + 60_000).toISOString(),
         supervisor_grant: "lashg_manual",
+        owner_account_id: "account_1", scope_key: "owner",
       } as T;
     }) as never;
     await provisionDesktopSupervisorGrant({

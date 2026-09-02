@@ -2,6 +2,7 @@ import { apiFetch } from "./auth.js";
 import { getOrCreateDesktopHostId } from "./agents/state.js";
 import {
   DesktopSecureStorageUnavailableError,
+  desktopSupervisorGrantInstallationId,
   getOrCreateDesktopSupervisorAgentIdentity,
   getOrProvisionDesktopSupervisorGrantForAgent,
   readDesktopSupervisorGrantAgentKeyForEntry,
@@ -9,6 +10,7 @@ import {
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntry,
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
+  type DesktopSupervisorGrantAuthority,
   type DesktopSupervisorGrantMetadata,
 } from "./supervisor-grant.js";
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
@@ -31,6 +33,8 @@ type GrantResponse = {
   current_generation: number;
   expires_at: string;
   supervisor_grant: string;
+  owner_account_id: string;
+  scope_key: string;
 };
 
 function metadataOf(response: GrantResponse): DesktopSupervisorGrantMetadata {
@@ -45,6 +49,13 @@ function metadataOf(response: GrantResponse): DesktopSupervisorGrantMetadata {
   };
 }
 
+function authorityOf(response: GrantResponse): DesktopSupervisorGrantAuthority {
+  const ownerAccountId = response.owner_account_id.trim();
+  const scopeKey = response.scope_key.trim();
+  if (!ownerAccountId || !scopeKey) throw new Error("Supervisor grant authority provenance is incomplete.");
+  return { ownerAccountId, scopeKey };
+}
+
 /** Main-process orchestration result; intentionally contains no bearer. */
 export type SupervisedGrantPreparation = {
   entry: DesktopSupervisorManifestEntry;
@@ -53,6 +64,8 @@ export type SupervisedGrantPreparation = {
 
 export type PreparedSupervisorGrant = {
   metadata: DesktopSupervisorGrantMetadata;
+  /** Null when the issuing endpoint did not attest stable owner/scope provenance. */
+  authority: DesktopSupervisorGrantAuthority | null;
   token: string;
 };
 
@@ -253,6 +266,7 @@ export class SupervisorGrantCoordinator {
       await this.operations.replaceGrant({
         agentKey,
         metadata: grant.metadata,
+        authority: grant.authority,
         token: grant.token,
         entryId: entry.id,
         lastInstalledDaemonGeneration: null,
@@ -262,6 +276,7 @@ export class SupervisorGrantCoordinator {
         agentKey,
         {
           metadata: grant.metadata,
+          authority: grant.authority,
           token: grant.token,
           entryId: entry.id,
           lastInstalledDaemonGeneration: null,
@@ -746,7 +761,7 @@ export class SupervisorGrantCoordinator {
     // Provision persists before returning. Retain this explicit write for
     // injected/fake operations and to make the handoff boundary obvious.
     await this.operations.replaceGrant({
-      agentKey, metadata: grant.metadata, token: grant.token, entryId: entry.id,
+      agentKey, metadata: grant.metadata, authority: grant.authority, token: grant.token, entryId: entry.id,
       lastInstalledDaemonGeneration: null,
     });
     return { agentKey, grant };
@@ -765,28 +780,67 @@ export class SupervisorGrantCoordinator {
         body: JSON.stringify({ generation: stored.metadata.generation }),
       });
       const metadata = metadataOf(response);
+      const authority = this.replacementAuthority(stored, metadata, authorityOf(response));
       // Persist the successor before it can cross the socket. If Electron dies
       // after this point, the next reconcile can safely retry its install.
       await this.operations.replaceGrant({
-        agentKey, metadata, token: response.supervisor_grant, entryId: entry.id, lastInstalledDaemonGeneration: null,
+        agentKey, metadata, authority, token: response.supervisor_grant, entryId: entry.id, lastInstalledDaemonGeneration: null,
       });
-      return { metadata, token: response.supervisor_grant, entryId: entry.id, lastInstalledDaemonGeneration: null };
-    } catch {
+      return { metadata, authority, token: response.supervisor_grant, entryId: entry.id, lastInstalledDaemonGeneration: null };
+    } catch (error) {
       // The handoff may have succeeded but its response was lost, or the old
       // bearer may be revoked. Owner-auth revoke/reprovision is the only safe
       // recovery; do not try an owner token in the daemon or fallback to it.
+      // Rental and legacy grants have no proven owner authority, so they
+      // cannot enter that owner-authenticated recovery path.
+      if (!stored.authority) throw error;
+      const hostId = this.hostId();
+      if (stored.metadata.hostId !== hostId
+        || stored.metadata.installationId !== desktopSupervisorGrantInstallationId(hostId, entry.id)) {
+        throw new Error("Saved supervisor grant does not match this desktop host installation.");
+      }
       const canonicalRoomId = await this.resolveRoomId(entry.roomId);
-      return this.operations.provision({
-        hostId: this.hostId(), entryId: entry.id, agentKey,
+      const replacement = await this.operations.provision({
+        hostId, entryId: entry.id, agentKey,
         roomScopes: [{ requestedRoomId: entry.roomId, canonicalRoomId }], forceReprovision: true,
+        expectedAuthority: stored.authority,
       }, { apiFetch: this.request });
+      const authority = this.replacementAuthority(stored, replacement.metadata, replacement.authority);
+      return { ...replacement, authority, entryId: entry.id, lastInstalledDaemonGeneration: null };
     }
+  }
+
+  private replacementAuthority(
+    stored: NonNullable<Awaited<ReturnType<SupervisorGrantCoordinatorOperations["readGrant"]>>>,
+    metadata: DesktopSupervisorGrantMetadata,
+    authority: DesktopSupervisorGrantAuthority | null,
+  ): DesktopSupervisorGrantAuthority | null {
+    if (metadata.hostId !== stored.metadata.hostId
+      || metadata.installationId !== stored.metadata.installationId) {
+      throw new Error("Replacement supervisor grant changed its stable host authority coordinates.");
+    }
+    // Rental and legacy grants are intentionally delegation-ineligible. A
+    // handoff may rotate their bearer, but it cannot manufacture provenance
+    // that the issuing path never authenticated for local delegation use.
+    if (!stored.authority) return null;
+    if (!authority
+      || authority.ownerAccountId !== stored.authority.ownerAccountId
+      || authority.scopeKey !== stored.authority.scopeKey) {
+      throw new Error("Replacement supervisor grant changed its stable owner authority coordinates.");
+    }
+    return authority;
   }
 
   private async install(
     entry: DesktopSupervisorManifestEntry,
     agentKey: string,
-    grant: { metadata: DesktopSupervisorGrantMetadata; token: string; entryId: string | null; lastInstalledDaemonGeneration: number | null },
+    grant: {
+      metadata: DesktopSupervisorGrantMetadata;
+      authority: DesktopSupervisorGrantAuthority | null;
+      token: string;
+      entryId: string | null;
+      lastInstalledDaemonGeneration: number | null;
+    },
     daemonGeneration: number,
     credentialOnly = false,
     recoveryOnly = false,
@@ -817,6 +871,8 @@ export class SupervisorGrantCoordinator {
       grantId: grant.metadata.grantId, supervisorGrant: grant.token,
       grantGeneration: grant.metadata.generation, daemonGeneration,
       hostId: grant.metadata.hostId, installationId: grant.metadata.installationId,
+      ownerAccountId: grant.authority?.ownerAccountId ?? null,
+      scopeKey: grant.authority?.scopeKey ?? null,
       expiresAt: grant.metadata.expiresAt,
       credentialOnly,
       recoveryOnly,
@@ -839,7 +895,7 @@ export class SupervisorGrantCoordinator {
     // marker. This write contains encrypted storage only; the renderer and
     // manifest never see the bearer.
     await this.operations.replaceGrant({
-      agentKey, metadata: grant.metadata, token: grant.token, entryId: entry.id,
+      agentKey, metadata: grant.metadata, authority: grant.authority, token: grant.token, entryId: entry.id,
       lastInstalledDaemonGeneration: daemonGeneration,
     });
   }

@@ -23,6 +23,8 @@ function hostGrant(overrides: Partial<InstalledHostGrant> = {}): InstalledHostGr
     daemonGeneration: 7,
     hostId: "host-1",
     installationId: "installation-1",
+    ownerAccountId: "account-1",
+    scopeKey: "owner",
     expiresAt: "2026-08-27T10:00:00.000Z",
     ...overrides,
   };

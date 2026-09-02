@@ -339,6 +339,9 @@ export class RentalLaunchCoordinator {
             generation: grantGeneration,
             expiresAt,
           },
+          // This endpoint does not currently attest the stable owner/scope
+          // tuple, so rental grants remain ineligible for remote delegation.
+          authority: null,
           token,
         },
       });
