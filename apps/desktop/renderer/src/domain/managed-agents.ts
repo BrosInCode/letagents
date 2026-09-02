@@ -169,7 +169,13 @@ export function supervisedProviderLaunchPolicy(
 ): Record<string, unknown> | undefined {
   if (providerId !== "claude-code") return undefined;
   switch (permissionProfileId) {
-    case "read_only": return { permissionMode: "plan" };
+    case "read_only": return {
+      permissionMode: "dontAsk",
+      dangerouslySkipPermissions: false,
+      tools: ["Read", "Glob", "Grep"],
+      allowedTools: ["mcp__letagents__*"],
+      settingSources: "",
+    };
     case "ask_before_write": return { permissionMode: "default" };
     case "full_access": return { permissionMode: "bypassPermissions" };
     default: throw new Error("Choose an available Claude Code permission profile before supervised launch.");

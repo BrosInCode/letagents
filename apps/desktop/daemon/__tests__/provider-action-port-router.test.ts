@@ -847,7 +847,13 @@ test("daemon spawn gates the local MCP entry to supported providers and explicit
       } })).ok, true);
       await eventually(async () => ((await daemonRequest(paths3.socketPath, "manifest.list")).result as DaemonManifestEntry[])[0]?.observed_state === "working", "Claude supervised default spawn");
       assert.equal(capturedSpawns[0]?.permissionProfileId, "read_only");
-      assert.deepEqual(capturedSpawns[0]?.launchPolicy, { permissionMode: "plan", dangerouslySkipPermissions: false });
+      assert.deepEqual(capturedSpawns[0]?.launchPolicy, {
+        permissionMode: "dontAsk",
+        dangerouslySkipPermissions: false,
+        tools: ["Read", "Glob", "Grep"],
+        allowedTools: ["mcp__letagents__*"],
+        settingSources: "",
+      });
       assert.equal(capturedSpawns[0]?.devMcpServerEntryPath, undefined, "claude-code + both gates: devMcpServerEntryPath must be absent (provider gate)");
     } finally {
       await daemon3.stop();

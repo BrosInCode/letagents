@@ -248,7 +248,13 @@ test("a grouped non-project room never inherits another project's binding", () =
 });
 
 test("supervised Claude permission profiles become explicit native CLI policies", () => {
-  assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "read_only"), { permissionMode: "plan" });
+  assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "read_only"), {
+    permissionMode: "dontAsk",
+    dangerouslySkipPermissions: false,
+    tools: ["Read", "Glob", "Grep"],
+    allowedTools: ["mcp__letagents__*"],
+    settingSources: "",
+  });
   assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "ask_before_write"), { permissionMode: "default" });
   assert.deepEqual(supervisedProviderLaunchPolicy("claude-code", "full_access"), { permissionMode: "bypassPermissions" });
   assert.throws(() => supervisedProviderLaunchPolicy("claude-code", null), /Choose an available Claude Code permission profile/);
