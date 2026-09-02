@@ -603,6 +603,13 @@
       "when": 1788199200000,
       "tag": "0085_room_agent_work",
       "breakpoints": true
+    },
+    {
+      "idx": 86,
+      "version": "7",
+      "when": 1788386747000,
+      "tag": "0086_execution_delegation_grants",
+      "breakpoints": true
     }
   ]
 }
