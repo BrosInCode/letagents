@@ -71,13 +71,13 @@ async function completeCapturedReceipt(store: SupervisedAgentInboxStore, databas
 
 async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: {
   agentId: string; roomId: string; workAttemptId: string; executionGenerationId: string; providerContinuationId: string;
-  operationalExecution?: boolean;
+  operationalExecution?: boolean; provider?: "codex" | "claude-code";
 }): Promise<void> {
   const manifest = new ManifestStore(env.database);
   const loaded = await manifest.load();
   const active: DaemonManifestEntry = {
     id: input.agentId, room_id: input.roomId, display_name: input.agentId,
-    provider: "codex", model: null, charter: "test", desired_state: "running",
+    provider: input.provider ?? "codex", model: null, charter: "test", desired_state: "running",
     observed_state: "working", condition: "none", permission_profile_id: null,
     delivery_mode: "daemon_inbox", provider_launch_policy: {}, created_by: "test",
     created_at: "2026-08-05T00:00:00.000Z", workspace_path: "/tmp/workspace",
@@ -85,7 +85,9 @@ async function seedActiveAgent(env: Awaited<ReturnType<typeof fixture>>, input: 
     provider_ref: {
       work_attempt_id: input.workAttemptId,
       provider_continuation_id: input.providerContinuationId,
-      provider_connection: { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "test:4311" },
+      provider_connection: input.provider === "claude-code"
+        ? { kind: "claude_cli", pid: 4311, processIdentity: "test:4311" }
+        : { kind: "codex_app_server", url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "test:4311" },
       execution_generation_id: input.executionGenerationId,
     },
     workplace_liveness: { state: "reachable", observed_at: "2026-08-05T00:00:00.000Z", detail: null },
@@ -2484,7 +2486,7 @@ test("v16 migration durably classifies interrupted reads and mutations", async (
     });
     await seedActiveAgent(env, {
       agentId: "v16-effects", roomId: "room", workAttemptId: "attempt",
-      executionGenerationId: "run", providerContinuationId: "continuation",
+      executionGenerationId: "run", providerContinuationId: "continuation", provider: "claude-code",
     });
     const base = {
       agent_id: "v16-effects", room_id: "room", execution_generation_id: "run", provider_turn_id: "turn",

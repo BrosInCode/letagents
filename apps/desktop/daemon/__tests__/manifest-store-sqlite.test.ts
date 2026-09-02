@@ -5153,6 +5153,13 @@ function withRuntimeIdentity(item: DaemonManifestEntry): DaemonManifestEntry {
   return runId ? { ...item, run_id: runId, deployment_id: serializeDaemonDeploymentId(item.id, runId) } : item;
 }
 
+function withImportedRuntimeIdentity(item: DaemonManifestEntry): DaemonManifestEntry {
+  const imported = withRuntimeIdentity(item);
+  return imported.provider === "codex" && imported.provider_ref
+    ? { ...imported, desired_state: "stopped" }
+    : imported;
+}
+
 function removePostV5DeliveryTables(database: DatabaseSync): void {
   database.exec(`
     -- Physical v1-v4 databases cannot contain the later v13 repair journal.
@@ -5330,7 +5337,7 @@ test("SQLite manifest generation CAS serializes independent connections without 
 test("legacy JSON imports once after checksum validation and is retained as a backup", async () => {
   const env = await fixture();
   const manifest: DaemonManifest = { generation: 41, entries: [entry], legacy_lane_owners: [owner] };
-  const imported = { ...manifest, entries: manifest.entries.map(withRuntimeIdentity) };
+  const imported = { ...manifest, entries: manifest.entries.map(withImportedRuntimeIdentity) };
   await writeFile(env.legacyPath, storedManifest(manifest), { mode: 0o600 });
   const store = new ManifestStore(env.databasePath, env.legacyPath);
   try {
@@ -5365,7 +5372,7 @@ test("invalid legacy checksums quarantine the source and durably block empty sta
 test("a post-commit backup failure retries idempotently without reimporting", async () => {
   const env = await fixture();
   const manifest: DaemonManifest = { generation: 7, entries: [entry] };
-  const imported = { ...manifest, entries: manifest.entries.map(withRuntimeIdentity) };
+  const imported = { ...manifest, entries: manifest.entries.map(withImportedRuntimeIdentity) };
   await writeFile(env.legacyPath, storedManifest(manifest));
   await mkdir(`${env.legacyPath}.migrated-backup`);
   const store = new ManifestStore(env.databasePath, env.legacyPath);
@@ -5449,7 +5456,7 @@ test("contradictory SQLite and metadata version pairs reject before migration", 
   }
 });
 
-test("physical v1-v4 databases with no delivery tables advance to the complete current shape before stamping markers", async () => {
+test("physical v1-v4 databases retire incompatible Codex births while preserving the complete current shape", async () => {
   for (const version of [1, 2, 3, 4]) {
     const env = await fixture();
     const initial = new ManifestStore(env.databasePath);
@@ -5467,7 +5474,11 @@ test("physical v1-v4 databases with no delivery tables advance to the complete c
       historical.close();
 
       const migrated = new ManifestStore(env.databasePath);
-      assert.deepEqual(await migrated.load(), expected, `v${version} preserves manifest data`);
+      const retired = {
+        ...expected,
+        entries: expected.entries.map((candidate) => ({ ...candidate, desired_state: "stopped" as const })),
+      };
+      assert.deepEqual(await migrated.load(), retired, `v${version} preserves manifest data behind a stopped birth`);
       await migrated.close();
 
       const inspection = new DatabaseSync(env.databasePath);
@@ -5480,7 +5491,7 @@ test("physical v1-v4 databases with no delivery tables advance to the complete c
       inspection.close();
 
       const reopened = new ManifestStore(env.databasePath);
-      assert.deepEqual(await reopened.load(), expected, `v${version} second reopen is stable`);
+      assert.deepEqual(await reopened.load(), retired, `v${version} second reopen is stable`);
       await reopened.close();
     } finally {
       await initial.close();

@@ -2530,7 +2530,10 @@ export class ManifestStore {
       const current = Number((database.prepare("SELECT generation FROM manifest_metadata WHERE singleton = 1").get() as Row).generation);
       const count = Number((database.prepare("SELECT COUNT(*) AS count FROM agent_identities").get() as Row).count);
       if (current !== 0 || count !== 0) throw new Error("Refusing to import a legacy manifest into non-empty daemon state.");
-      this.replaceEntries(database, stored.manifest.entries, false);
+      this.replaceEntries(database, stored.manifest.entries.map((entry) =>
+        entry.provider === "codex" && entry.provider_ref
+          ? { ...entry, desired_state: "stopped" as const }
+          : entry), false);
       this.replaceLegacyLaneOwners(database, stored.manifest.legacy_lane_owners ?? []);
       run(database.prepare("UPDATE manifest_metadata SET generation = ? WHERE singleton = 1"), stored.manifest.generation);
       run(database.prepare("INSERT INTO migration_records(migration_key, checksum, imported_at) VALUES (?, ?, ?)"), migrationKey, stored.checksum, new Date().toISOString());
