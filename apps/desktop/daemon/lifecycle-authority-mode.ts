@@ -9,15 +9,14 @@ export type LifecycleAuthorityProvider = z.output<typeof lifecycleAuthorityProvi
 const RELEASE_AUTHORITY = Object.freeze({
   "claude-code": "typed_shadow",
   cursor: "typed_shadow",
-  "open-model": "typed_shadow",
-} satisfies Record<Exclude<LifecycleAuthorityProvider, "codex">, LifecycleAuthorityMode>);
+} satisfies Record<Exclude<LifecycleAuthorityProvider, "codex" | "open-model">, LifecycleAuthorityMode>);
 
 /** Closed release policy. Authority varies only by provider and durable delivery shape. */
 export function lifecycleAuthorityModeForProvider(
   provider: LifecycleAuthorityProvider,
   deliveryMode: "mcp_polling" | "desktop_events" | "daemon_inbox",
 ): LifecycleAuthorityMode {
-  if (provider === "codex") {
+  if (provider === "codex" || provider === "open-model") {
     return deliveryMode === "daemon_inbox" ? "typed" : "typed_shadow";
   }
   return RELEASE_AUTHORITY[provider];
