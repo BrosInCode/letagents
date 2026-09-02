@@ -1309,6 +1309,13 @@ test("agent inspector detail mapper validates every bounded wire section", () =>
   assert.equal(mapped.timeline[0]?.sequence, 1);
   assert.equal(mapped.timeline[0]?.observedAt, "2026-01-01T00:00:02.000Z");
   assert.equal(mapped.recorded_execution, undefined, "older supervisors remain compatible");
+  assert.equal(mapped.runtime_control, undefined, "older supervisors may omit control health");
+  const runtimeControl = { control_state: "degraded", runtime_state: "ready", observed_at: "2026-01-01T00:00:03.000Z",
+    execution_generation_id: "generation-1", daemon_generation_id: "4" };
+  assert.deepEqual(mapAgentInspectorDetail({ ...wire, runtime_control: runtimeControl }, input).runtime_control, runtimeControl);
+  const malformedRuntimeControl = mapAgentInspectorDetail({ ...wire, runtime_control: { ...runtimeControl, control_state: "failed" } }, input);
+  assert.equal(malformedRuntimeControl.runtime_control, null, "malformed optional control evidence is isolated");
+  assert.deepEqual(malformedRuntimeControl.receipt, mapped.receipt);
   const operation = { executionId: "command-1", operation: "command", outcome: "failed", startObserved: true, outputBytes: 50, sideEffects: "possible", exitCode: 1, signalNumber: null };
   const turn = { turnId: "retained-turn-1", state: "terminal", outcome: "completed", operations: [operation] };
   const execution = { availability: "available", truncated: false, evidenceIncomplete: true, turns: [turn] };

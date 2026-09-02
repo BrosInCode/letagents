@@ -906,7 +906,7 @@ export class SupervisorDaemon {
       });
       this.executionCapture = ExecutionCaptureCoordinator.open(this.stateDatabasePath, this.providerPort, {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
-        changed: (agentId) => { this.roomWorkPublisher?.changed(agentId); this.typedLifecycleEffects?.changed(agentId); },
+        changed: (agentId) => (this.roomWorkPublisher?.changed(agentId), this.typedLifecycleEffects?.changed(agentId), this.stateWatch.notify()),
       });
     }
     await this.supervisedInbox.normalizeInterruptedEffects();

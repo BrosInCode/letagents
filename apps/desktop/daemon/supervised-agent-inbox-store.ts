@@ -107,6 +107,13 @@ function structuredRoomTurnCompletionResult(completion: StructuredRoomTurnComple
 }
 export type AgentInspectorDetail = {
   recorded_execution?: RetainedExecutionDetail;
+  runtime_control: {
+    control_state: "connecting" | "responsive" | "degraded" | "lost" | "unprobeable";
+    runtime_state: "starting" | "ready" | "stopping" | "exited";
+    observed_at: string | null;
+    execution_generation_id: string;
+    daemon_generation_id: string;
+  } | null;
   availability: "available" | "pruned" | "not_loaded";
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: InboxActivation | null } | null;
@@ -404,8 +411,54 @@ export class SupervisedAgentInboxStore {
     }));
   }
   /** Exact-entry, exact-room, bounded renderer-safe projection. */
-  async detail(agentId: string, roomId: string, sourceMessageId?: string | null): Promise<AgentInspectorDetail> {
+  async detail(
+    agentId: string,
+    roomId: string,
+    sourceMessageId?: string | null,
+    runtimeFence?: { executionGenerationId: string; runtimeGenerationId: string; daemonGenerationId: string } | null,
+  ): Promise<AgentInspectorDetail> {
     return this.read(async (database) => {
+      let runtimeControl: AgentInspectorDetail["runtime_control"] = null;
+      try { if (runtimeFence !== null) {
+        const runtime = database.prepare(`SELECT r.control_state,r.runtime_state,
+          o.observer_execution_generation_id,o.daemon_generation_id,
+          (SELECT MAX(f.observed_at_ms) FROM execution_facts f
+            WHERE f.agent_id=o.agent_id
+              AND f.execution_generation_id=o.observer_execution_generation_id
+              AND f.runtime_generation_id=o.observer_runtime_generation_id
+              AND f.observer_epoch=o.observer_epoch
+              AND f.domain='control') AS observed_at_ms
+          FROM execution_observers o
+          JOIN execution_runtime_generations r ON r.agent_id=o.agent_id
+            AND r.execution_generation_id=o.observer_execution_generation_id
+            AND r.runtime_generation_id=o.observer_runtime_generation_id
+          WHERE o.agent_id=?
+            AND o.max_observed_sequence=o.last_source_sequence
+            AND (? IS NULL OR (o.observer_execution_generation_id=?
+              AND o.observer_runtime_generation_id=? AND o.daemon_generation_id=?))`).get(
+          agentId,
+          runtimeFence?.executionGenerationId ?? null,
+          runtimeFence?.executionGenerationId ?? "",
+          runtimeFence?.runtimeGenerationId ?? "",
+          runtimeFence?.daemonGenerationId ?? "",
+        ) as Row | undefined;
+        if (runtime) {
+          const observedAtMs = runtime.observed_at_ms === null ? null : Number(runtime.observed_at_ms);
+          const observedAt = observedAtMs !== null && Number.isSafeInteger(observedAtMs)
+            ? new Date(observedAtMs).toISOString()
+            : null;
+          runtimeControl = {
+            control_state: String(runtime.control_state) as NonNullable<AgentInspectorDetail["runtime_control"]>["control_state"],
+            runtime_state: String(runtime.runtime_state) as NonNullable<AgentInspectorDetail["runtime_control"]>["runtime_state"],
+            observed_at: observedAt,
+            execution_generation_id: String(runtime.observer_execution_generation_id),
+            daemon_generation_id: String(runtime.daemon_generation_id),
+          };
+        }
+      } } catch {
+        // Control health is optional evidence. A missing/corrupt execution
+        // journal must not hide durable delivery history from the Inspector.
+      }
       const boundary = database.prepare("SELECT * FROM supervised_agent_history_boundaries WHERE agent_id=? AND room_id=?").get(agentId, roomId) as Row | undefined;
       // Work rows are newest-first so a reopened Inspector starts at current work.
       const items = (database.prepare(`SELECT i.inbox_item_id,i.source_message_id,i.source_message_json,i.state,i.attempt_count,i.updated_at,i.outcome,i.provider_turn_id,i.last_error,i.failure_code,i.terminal_reason,p.canonical_message_id
@@ -427,14 +480,14 @@ export class SupervisedAgentInboxStore {
         const pruned = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_pruned_sources WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const observed = sourceMessageId && database.prepare("SELECT 1 FROM supervised_agent_observed_messages WHERE agent_id=? AND room_id=? AND source_message_id=? LIMIT 1").get(agentId, roomId, sourceMessageId);
         const availability: AgentInspectorDetail["availability"] = pruned ? "pruned" : observed ? "not_loaded" : "not_loaded";
-        return { availability, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, uncertain_effects: uncertainEffects, history_boundary: history };
+        return { availability, runtime_control: runtimeControl, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null, continuation_repair: null, timeline: [], items, uncertain_effects: uncertainEffects, history_boundary: history };
       }
       const item = rowToItem(row);
       const events = (database.prepare("SELECT event_sequence,phase,observed_at,detail FROM supervised_agent_inbox_events WHERE inbox_item_id=? ORDER BY event_sequence LIMIT 100").all(item.inbox_item_id) as Row[]).map(rowToEvent);
       const terminal = database.prepare("SELECT outcome,normalized_text,evidence_source,observed_at FROM supervised_agent_terminal_results WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const publication = database.prepare("SELECT room_id,client_message_id,canonical_message_id FROM supervised_agent_publications WHERE inbox_item_id=?").get(item.inbox_item_id) as Row | undefined;
       const repair = database.prepare("SELECT * FROM provider_continuation_repairs WHERE inbox_item_id=? ORDER BY created_at DESC LIMIT 1").get(item.inbox_item_id) as Row | undefined;
-      return { availability: "available", entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
+      return { availability: "available", runtime_control: runtimeControl, entry_id: agentId, room_id: roomId, requested_source_message_id: sourceMessageId ?? null, inbox_item_id: item.inbox_item_id,
         recorded_execution: new ExecutionShadowStore(database).retainedMessageExecution(agentId, roomId, item.source_message_id),
         source_message: safeSource(item.source_message, item.source_message_id, roomId, item.activation),
         receipt: { state: item.state, attempt_count: item.attempt_count, provider_turn_id: item.provider_turn_id, outcome: safeOutcome(item.outcome), last_error: item.last_error, failure_code: item.failure_code, blocked_by_inbox_item_id: item.blocked_by_inbox_item_id, next_attempt_at_ms: item.next_attempt_at_ms, terminal_reason: item.terminal_reason },

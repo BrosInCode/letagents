@@ -487,11 +487,23 @@ test("mounted Overview retirement stays contextual and requires explicit confirm
       turnControl: null,
     },
   };
-  const mounted = mount(AgentInspectorSurface, {
-    projection,
+  const runtimeDetail = {
+    availability: "not_loaded", entry_id: "agent_a", room_id: "room_a", requested_source_message_id: null,
+    inbox_item_id: null, source_message: null, receipt: null, terminal: null, publication: null,
+    continuation_repair: null, timeline: [], items: [], uncertain_effects: [], history_boundary: null,
+    runtime_control: { control_state: "degraded", runtime_state: "ready", observed_at: "2026-08-29T00:00:01.000Z",
+      execution_generation_id: "generation_a", daemon_generation_id: "1" },
+  };
+  const projectionResource = Vue.ref(projection);
+  const workResource = Vue.ref<Record<string, unknown>>({
+    status: "ready",
+    detail: runtimeDetail,
+    error: null,
+    sourceMessageId: null,
+  });
+  const surfaceProps = {
     actionState: null,
     compact: false,
-    workResource: { status: "idle", detail: null, error: null, sourceMessageId: null },
     selectedWorkSourceMessageId: null,
     workArtifacts: [],
     settingsResource: readyResource,
@@ -502,10 +514,31 @@ test("mounted Overview retirement stays contextual and requires explicit confirm
     settingsConflict: false,
     liveFeed: { events: [], ended: false, droppedEvents: 0 },
     onAction: (intent: Record<string, unknown>) => actions.push(intent),
-  });
+  };
+  const Harness = {
+    setup: () => () => Vue.h(AgentInspectorSurface, {
+      ...surfaceProps,
+      projection: projectionResource.value,
+      workResource: workResource.value,
+    }),
+  };
+  const mounted = mount(Harness, {});
 
   assert.ok(descendants(mounted.root).some((node) => String(node.props.class).includes("agent-inspector-overview-retire")));
+  assert.match(textContent(mounted.root), /Provider check inconclusive/);
+  assert.match(textContent(mounted.root), /may still be working/);
+  assert.match(textContent(mounted.root), /Checked/);
   assert.equal(descendants(mounted.root).some((node) => node.props.role === "alert"), false);
+  projectionResource.value = { ...projection, entry: { ...projection.entry, providerPid: null } };
+  workResource.value = {
+    status: "error",
+    detail: { ...runtimeDetail, runtime_control: null },
+    error: "Provider refresh failed.",
+    sourceMessageId: null,
+  };
+  await nextTick();
+  assert.doesNotMatch(textContent(mounted.root), /Provider status|Provider check inconclusive|Checked/,
+    "failed reconciliation cannot leave health from an absent process birth visible");
   const retire = buttonByText(mounted.root, "Retire agent");
   retire.focus();
   (retire.props.onClick as () => void)();

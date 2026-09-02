@@ -30,6 +30,14 @@
         <p id="agent-inspector-context-title">Room and work</p>
       </div>
       <dl class="agent-inspector-context-list">
+        <div v-if="runtimeControl">
+          <dt>Provider status</dt>
+          <dd :data-state="runtimeControl.state" :title="runtimeControl.observedAt || undefined">
+            <strong>{{ runtimeControl.label }}</strong>
+            <span>{{ runtimeControl.detail }}</span>
+            <small v-if="runtimeControl.observedAt">Checked {{ formatFullTimestamp(runtimeControl.observedAt) }}</small>
+          </dd>
+        </div>
         <div><dt>Current room</dt><dd>{{ projection.roomId }}</dd></div>
         <div>
           <dt>Assigned work</dt>
@@ -48,13 +56,22 @@
 </template>
 
 <script setup lang="ts">
+import { computed } from "vue";
+import type { DesktopSupervisorAgentInspectorDetail } from "../../../../../../electron/ipc-types";
 import type { AgentInspectorProjection } from "../../../../domain/agent-inspector";
+import { describeAgentInspectorRuntimeControl } from "../../../../domain/agent-inspector-work";
+import { formatFullTimestamp } from "../../../../domain/time";
 import AgentInspectorDeliveryProgress from "./AgentInspectorDeliveryProgress.vue";
 import AgentInspectorNow from "./AgentInspectorNow.vue";
 import AgentInspectorContinuationRecovery from "./AgentInspectorContinuationRecovery.vue";
 import AgentInspectorTurnControl from "./AgentInspectorTurnControl.vue";
 
-defineProps<{ projection: AgentInspectorProjection; busy: boolean }>();
+const props = defineProps<{
+  projection: AgentInspectorProjection;
+  busy: boolean;
+  runtimeControl: DesktopSupervisorAgentInspectorDetail["runtime_control"] | null;
+}>();
+const runtimeControl = computed(() => describeAgentInspectorRuntimeControl(props.runtimeControl));
 const emit = defineEmits<{
   "stop-turn": [];
   "correct-turn": [correction: string];
