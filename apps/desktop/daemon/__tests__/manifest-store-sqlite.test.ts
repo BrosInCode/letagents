@@ -137,6 +137,115 @@ test("typed lifecycle effects apply once and restart supersedes work after struc
   }
 });
 
+test("typed hard-runtime failure applies from durable birth evidence after its live installation is gone", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "failed-birth" };
+  const agent: DaemonManifestEntry = {
+    ...entry, id: "failed-agent", room_id: "room", condition: "none", delivery_mode: "daemon_inbox",
+    config_revision: 2, runtime_configuration_revision: 2, turn_control: undefined,
+    work_attempt_id: "failed-workspace", observed_state: "working",
+    provider_ref: { work_attempt_id: "failed-workspace", execution_generation_id: "failed-generation",
+      provider_continuation_id: "failed-continuation", provider_connection: connection },
+  };
+  await store.write(0, [agent]);
+  seedTerminalExecution(env.databasePath, "failed-workspace", "failed-generation");
+  const database = new DatabaseSync(env.databasePath);
+  try {
+    database.exec(`PRAGMA foreign_keys=ON;
+      UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='failed-generation';
+      UPDATE agent_configurations SET config_revision=2,runtime_configuration_revision=2 WHERE agent_id='failed-agent'`);
+    const shadow = new ExecutionShadowStore(database);
+    const runtimeGenerationId = executionRuntimeStorageIdentity("failed-agent", "failed-generation",
+      connection.kind, connection.pid, connection.processIdentity);
+    shadow.registerRuntime({ agentId: "failed-agent", executionGenerationId: "failed-generation", runtimeGenerationId,
+      provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 });
+    const observer = shadow.bindObserver({ agentId: "failed-agent", subjectRuntimeGenerationId: runtimeGenerationId,
+      observerRuntimeGenerationId: runtimeGenerationId, sourceId: "failed-source", daemonGenerationId: "1",
+      expectedEpoch: 0, boundAtMs: 100 });
+    shadow.ingest("failed-source", observer, { factId: "runtime-exited", agentId: "failed-agent",
+      executionGenerationId: "failed-generation", runtimeGenerationId, observerEpoch: 1, sourceSequence: 1,
+      observedAtMs: 101, domain: "runtime", kind: "state_changed", state: "exited",
+      controlEvidence: "process_exit", sideEffects: "none" });
+    const [pending] = await store.listPendingTypedLifecycleEffects("failed-agent");
+    assert.equal(pending?.effectKind, "manifest_failed");
+    const applied = await store.applyTypedLifecycleEffect((await store.load()).generation, pending!, null, commit => commit());
+    assert.equal(applied.disposition, "applied");
+    assert.equal(applied.entry?.observed_state, "failed");
+    assert.deepEqual(applied.entry?.native_liveness, {
+      state: "terminal", observed_at: new Date(101).toISOString(), detail: "Provider runtime unavailable",
+    });
+    assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id='runtime-exited'").get()?.state, "applied");
+  } finally {
+    database.close(); await store.close(); await env.cleanup();
+  }
+});
+
+test("typed hard-runtime failure cannot overwrite a replacement or intentionally inactive agent", async () => {
+  const cases: Array<{ name: string; mutate: (agent: DaemonManifestEntry) => DaemonManifestEntry }> = [
+    { name: "successor birth", mutate: agent => ({ ...agent, provider_ref: {
+      ...agent.provider_ref!, execution_generation_id: "successor-generation",
+      provider_continuation_id: "successor-continuation", provider_connection: {
+        ...agent.provider_ref!.provider_connection, pid: 5311, processIdentity: "successor-birth",
+      },
+    } }) },
+    { name: "stopped agent", mutate: agent => ({ ...agent, desired_state: "stopped", observed_state: "stopped" }) },
+    { name: "quarantined agent", mutate: agent => ({ ...agent, condition: "quarantined" }) },
+    { name: "polling delivery", mutate: agent => ({ ...agent, delivery_mode: "mcp_polling" }) },
+    { name: "completed stop turn", mutate: agent => ({ ...agent, turn_control: {
+      action_id: "stop-action", action_sequence: 1, work_attempt_id: "fenced-workspace",
+      execution_generation_id: "fenced-generation", has_correction: false, status: "completed",
+      capability: "native_interrupt", interrupted: true, resumed: false, state: "idle",
+      stages: ["interrupting", "applied"], error: null,
+      recorded_at: "2026-09-02T00:00:00.000Z", updated_at: "2026-09-02T00:00:01.000Z",
+    }, last_turn_control_sequence: 1 }) },
+  ];
+  for (const [scenarioIndex, scenario] of cases.entries()) {
+    const env = await fixture(); const store = new ManifestStore(env.databasePath);
+    const connection = { kind: "codex_app_server" as const, url: "http://127.0.0.1:4311", pid: 4311, processIdentity: "fenced-birth" };
+    const agent: DaemonManifestEntry = {
+      ...entry, id: "fenced-agent", room_id: "room", condition: "none", delivery_mode: "daemon_inbox",
+      config_revision: 2, runtime_configuration_revision: 2, turn_control: undefined,
+      work_attempt_id: "fenced-workspace", observed_state: "working",
+      provider_ref: { work_attempt_id: "fenced-workspace", execution_generation_id: "fenced-generation",
+        provider_continuation_id: "fenced-continuation", provider_connection: connection },
+    };
+    try {
+      await store.write(0, [agent]);
+      seedTerminalExecution(env.databasePath, "fenced-workspace", "fenced-generation");
+      const database = new DatabaseSync(env.databasePath);
+      try {
+        database.exec(`PRAGMA foreign_keys=ON;
+          UPDATE work_attempt_executions SET terminal_json=NULL WHERE execution_generation_id='fenced-generation';
+          UPDATE agent_configurations SET config_revision=2,runtime_configuration_revision=2 WHERE agent_id='fenced-agent'`);
+        const shadow = new ExecutionShadowStore(database);
+        const runtimeGenerationId = executionRuntimeStorageIdentity("fenced-agent", "fenced-generation",
+          connection.kind, connection.pid, connection.processIdentity);
+        shadow.registerRuntime({ agentId: "fenced-agent", executionGenerationId: "fenced-generation", runtimeGenerationId,
+          provider: "codex", authorityMode: "typed", configRevision: 2, createdAtMs: 100 });
+        const observer = shadow.bindObserver({ agentId: "fenced-agent", subjectRuntimeGenerationId: runtimeGenerationId,
+          observerRuntimeGenerationId: runtimeGenerationId, sourceId: "fenced-source", daemonGenerationId: "1",
+          expectedEpoch: 0, boundAtMs: 100 });
+        shadow.ingest("fenced-source", observer, { factId: `runtime-exited-${scenarioIndex}`, agentId: "fenced-agent",
+          executionGenerationId: "fenced-generation", runtimeGenerationId, observerEpoch: 1, sourceSequence: 1,
+          observedAtMs: 101, domain: "runtime", kind: "state_changed", state: "exited",
+          controlEvidence: "process_exit", sideEffects: "none" });
+        const [pending] = await store.listPendingTypedLifecycleEffects("fenced-agent");
+        assert.ok(pending, scenario.name);
+        await store.write(1, [scenario.mutate(agent)]);
+        const before = await store.getEntry("fenced-agent");
+        const result = await store.applyTypedLifecycleEffect(2, pending, null, commit => commit());
+        assert.equal(result.disposition, "superseded", scenario.name);
+        assert.equal((await store.load()).generation, 2, `${scenario.name} must not advance the manifest`);
+        const after = await store.getEntry("fenced-agent");
+        assert.equal(after?.observed_state, before?.observed_state, scenario.name);
+        assert.deepEqual(after?.native_liveness, before?.native_liveness, scenario.name);
+        assert.equal(database.prepare("SELECT state FROM execution_lifecycle_effects WHERE fact_id=?")
+          .get(pending.factId)?.state, "superseded", scenario.name);
+      } finally { database.close(); }
+    } finally { await store.close(); await env.cleanup(); }
+  }
+});
+
 test("v29 lifecycle effect migration rolls back its journal and version markers together", async () => {
   const env = await fixture();
   const initialized = new ManifestStore(env.databasePath);

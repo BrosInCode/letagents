@@ -74,9 +74,16 @@ test("lifecycle facts receive atomic shadow or pending dispositions while tool f
     seed(shadow.store); const token = observer(shadow.store);
     shadow.store.ingest(token.sourceId, token, turnFact(1));
     shadow.store.ingest(token.sourceId, token, operationFact(2));
+    shadow.store.ingest(token.sourceId, token, {
+      ...fact(3), domain: "runtime", kind: "state_changed", state: "exited",
+      controlEvidence: "process_exit", sideEffects: "none",
+    });
     assert.deepEqual(shadow.db.prepare(`SELECT effect_kind,state,subject_authority_mode,observer_authority_mode
       FROM execution_lifecycle_effects ORDER BY fact_sequence`).all().map(row => ({ ...row })), [{
       effect_kind: "manifest_working", state: "shadowed",
+      subject_authority_mode: "typed_shadow", observer_authority_mode: "typed_shadow",
+    }, {
+      effect_kind: "manifest_failed", state: "shadowed",
       subject_authority_mode: "typed_shadow", observer_authority_mode: "typed_shadow",
     }]);
   } finally { shadow.db.close(); }
@@ -96,6 +103,15 @@ test("lifecycle facts receive atomic shadow or pending dispositions while tool f
     assert.equal(typed.db.prepare("SELECT COUNT(*) AS count FROM execution_facts").get()?.count, 1,
       "a fact cannot commit without its disposition");
     assert.equal(typed.db.prepare("SELECT last_source_sequence FROM execution_observers").get()?.last_source_sequence, 1);
+    typed.db.exec("DROP TRIGGER reject_lifecycle_effect");
+    assert.equal(typed.store.ingest(token.sourceId, token, {
+      ...fact(2), domain: "runtime", kind: "state_changed", state: "exited",
+      controlEvidence: "native_session_terminated", sideEffects: "none",
+    }).status, "accepted");
+    assert.deepEqual({ ...typed.db.prepare(`SELECT effect_kind,state,disposed_at_ms
+      FROM execution_lifecycle_effects WHERE fact_sequence=2`).get() }, {
+      effect_kind: "manifest_failed", state: "pending", disposed_at_ms: null,
+    });
   } finally { typed.db.close(); }
 });
 function countHistoryReads(t: TestContext, db: DatabaseSync): () => number {

@@ -77,6 +77,10 @@ export class ProviderExecutionObserver {
   /** Consume a source position that cannot be represented as a trusted fact. */
   markUnavailable(): void {
     this.sequence += 1;
+    // The next control observation must cross the consumed position even when
+    // it repeats the prior state; otherwise a malformed trailing event could
+    // remain invisible to a live subscriber.
+    this.lastControl = null;
   }
 
   private drain(subscription: Subscription): void {
