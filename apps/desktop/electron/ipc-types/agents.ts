@@ -486,6 +486,16 @@ export type DesktopSupervisorAgentConfigurationUpdateResult =
   | { outcome: "conflict"; configuration: DesktopSupervisorAgentConfiguration }
   | { outcome: "invalid"; error: string };
 
+export interface DesktopSupervisorAgentConfigurationApplyInput {
+  entryId: string;
+  daemonGeneration: number;
+  expectedConfigurationRevision: number;
+}
+
+export type DesktopSupervisorAgentConfigurationApplyResult = {
+  outcome: "already_applied" | "restarting" | "busy_active_turn" | "conflict" | "unsupported";
+};
+
 export type DesktopSupervisorRoomMovePhase = "prepared" | "waiting_for_current_turn" | "joining_destination" | "membership_committed" | "rotating_credentials" | "bootstrapping_destination_tail" | "active" | "failed" | "rollback_required";
 export interface DesktopSupervisorRoomMove {
   operationId: string;

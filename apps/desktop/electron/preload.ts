@@ -321,6 +321,7 @@ const api: DesktopApi = {
     getAgentInspectorDetail: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-inspector-detail", input),
     getAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:get-agent-configuration", input),
     updateAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:update-agent-configuration", input),
+    applyAgentConfiguration: (input) => ipcRenderer.invoke("desktop:supervisor:apply-agent-configuration", input),
     prepareRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:prepare-room-move", input),
     commitRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:commit-room-move", input),
     getRoomMove: (input) => ipcRenderer.invoke("desktop:supervisor:get-room-move", input),

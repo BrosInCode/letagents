@@ -26,7 +26,7 @@ const CLAUDE_CODE_PROFILES: DesktopManagedAgentPermissionProfile[] = [
   {
     id: "full_access",
     label: "Full access",
-    description: "Auto-allows non-blocked Claude Code tools for this local repo.",
+    description: "Auto-allows non-blocked Claude Code tools with broad local access on this host.",
     status: "available",
     risk: "high",
     detail: "LetAgents room, rental, and provisioning tools stay blocked.",

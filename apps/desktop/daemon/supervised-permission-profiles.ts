@@ -59,7 +59,7 @@ const claudeProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "full_access", label: "Full access",
-    description: "Lets Claude use broad local write and shell access in this trusted workspace.",
+    description: "Lets Claude use broad local write and shell access on this host.",
     status: "available", risk: "high",
     detail: "Maps to Claude permissionMode=bypassPermissions.", isDefault: false,
   },

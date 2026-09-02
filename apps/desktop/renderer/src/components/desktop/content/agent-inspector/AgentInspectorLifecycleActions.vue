@@ -95,6 +95,7 @@ const compactPriority: Record<AgentInspectorActionAvailability["kind"], number> 
   pause: 4,
   retire_agent: 5,
   save_settings: 6,
+  apply_settings: 6,
   move_room: 6,
   purge_agent: 7,
 };
