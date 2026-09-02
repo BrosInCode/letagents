@@ -313,7 +313,7 @@ export class ExecutionCaptureCoordinator {
     catch { return "unavailable"; }
     try {
       const durable = this.row(`SELECT o.observer_execution_generation_id,o.observer_runtime_generation_id,
-        o.daemon_generation_id,o.source_id,o.last_source_sequence,o.max_observed_sequence,
+        o.observer_epoch,o.daemon_generation_id,o.source_id,o.last_source_sequence,o.max_observed_sequence,
         observer.authority_mode,observer.runtime_state,subject.authority_mode AS subject_authority_mode,
         s.source_id AS admitted_source_id
         FROM execution_observers o
@@ -343,8 +343,48 @@ export class ExecutionCaptureCoordinator {
         && last >= 0 && maximum >= last && maximum <= position.latestSequence
         && last <= position.latestSequence
         && (position.latestSequence === last || position.firstRetainedSequence <= last + 1);
-      return exactObserver && validCursor ? "ready" : "unavailable";
+      const observerEpoch = Number(durable.observer_epoch);
+      if (!exactObserver || !validCursor || !Number.isSafeInteger(observerEpoch) || observerEpoch < 1) {
+        return "unavailable";
+      }
+      if (lane.installation.providerConnection.kind === "codex_app_server"
+        && last !== position.latestSequence) return "unavailable";
+      return this.hasUnreconstructedCodexTurn(lane, observerEpoch) ? "unavailable" : "ready";
     } catch { return "unavailable"; }
+  }
+
+  /** A bare attach cannot promote an unrelated latest transcript turn. */
+  private hasUnreconstructedCodexTurn(lane: Lane, observerEpoch: number): boolean {
+    if (lane.installation.providerConnection.kind !== "codex_app_server") return false;
+    return Boolean(this.row(`WITH expected(provider_turn_id) AS (
+        SELECT t.provider_turn_id FROM execution_turns t
+        JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id
+          AND g.agent_id=t.agent_id AND g.room_id=t.room_id
+          AND g.execution_generation_id=t.execution_generation_id
+        WHERE t.agent_id=? AND t.execution_generation_id=? AND t.runtime_generation_id=?
+          AND t.provider_continuation_id=? AND t.provider_turn_id IS NOT NULL
+          AND t.state IN ('none','active','lost') AND g.workspace_id=?
+        UNION
+        SELECT b.provider_turn_id FROM supervised_agent_provider_turn_bindings b
+        JOIN supervised_agent_inbox i ON i.inbox_item_id=b.inbox_item_id
+          AND i.agent_id=b.agent_id AND i.room_id=b.room_id
+        WHERE b.agent_id=? AND b.work_attempt_id=? AND b.origin_execution_generation_id=?
+          AND b.provider_continuation_id=?
+          AND i.state IN ('pending','dispatching','awaiting_result','result_recovery','retryable','blocked')
+      ) SELECT 1 FROM expected e WHERE NOT EXISTS (
+        SELECT 1 FROM execution_facts f JOIN execution_turns t
+          ON t.turn_id=f.turn_id AND t.agent_id=f.agent_id
+          AND t.execution_generation_id=f.execution_generation_id
+          AND t.runtime_generation_id=f.runtime_generation_id
+        WHERE f.agent_id=? AND f.observer_epoch=? AND f.domain='turn'
+          AND f.kind='state_changed' AND t.provider_continuation_id=?
+          AND t.provider_turn_id=e.provider_turn_id
+      ) LIMIT 1`,
+    lane.agentId, lane.generation, lane.observer!.runtimeGenerationId,
+    lane.installation.providerContinuationId, lane.installation.workAttemptId,
+    lane.agentId, lane.installation.workAttemptId, lane.generation,
+    lane.installation.providerContinuationId,
+    lane.agentId, observerEpoch, lane.installation.providerContinuationId));
   }
 
   /**

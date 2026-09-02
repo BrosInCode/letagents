@@ -278,6 +278,19 @@ function recordValue(value: unknown): Record<string, unknown> | null {
     : null;
 }
 
+function terminalTurnOutcome(
+  method: string,
+  turn: Record<string, unknown> | null,
+): "completed" | "failed" | "interrupted" | null {
+  const terminal = /^turn\/(completed|failed|interrupted|cancelled|stopped)$/i.exec(method)?.[1]?.toLowerCase();
+  if (!terminal) return null;
+  if (terminal === "failed") return "failed";
+  if (terminal !== "completed") return "interrupted";
+  const status = extractTurnStatus(turn)?.trim().toLowerCase() ?? null;
+  if (status === "completed" || status === "failed") return status;
+  return /^(?:interrupted|cancelled|stopped)$/.test(status ?? "") ? "interrupted" : null;
+}
+
 function transcriptLifecycleTurn(value: unknown): { id: unknown; status: unknown } | null {
   const turn = recordValue(value);
   return turn ? { id: turn.id, status: turn.status } : null;
@@ -1716,6 +1729,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       await requireLetAgentsWorkplace(client);
       let read: ThreadReadResult;
       let continuationMissing = false;
+      let exactEmptyFallback = false;
       try {
         read = await client.request<ThreadReadResult>("thread/read", {
           threadId: ref.providerContinuationId,
@@ -1738,6 +1752,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
             threadId: ref.providerContinuationId,
             includeTurns: false,
           });
+          exactEmptyFallback = true;
         }
       }
       if (read.thread?.id !== ref.providerContinuationId) {
@@ -1778,15 +1793,23 @@ export class CodexProviderAdapter implements ProviderAdapter {
       handle.setLiveState(continuationMissing ? "idle" : "working");
       this.handles.set(ref.workAttemptId, handle);
       this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
-      for (const notification of pendingNotifications.splice(0)) {
-        this.consumeNotification(handle, notification);
-      }
+      const queuedTurnLifecycle = pendingNotifications.some(notification =>
+        this.queuedTurnLifecycleIsAmbiguous(handle!, notification));
+      this.reconstructAttachedExecution(
+        handle,
+        continuationMissing ? null : read,
+        exactEmptyFallback,
+        queuedTurnLifecycle,
+      );
       if (!continuationMissing) {
         this.publishStream(handle, "thread/read", {
           threadId: handle.providerContinuationId,
           threadStatus: read.thread?.status,
           latestTurn: transcriptLifecycleTurn(read.thread?.turns?.at(-1)),
         }, "transcript_snapshot");
+      }
+      for (const notification of pendingNotifications.splice(0)) {
+        this.consumeNotification(handle, notification, false);
       }
       return handle;
     } catch (error) {
@@ -1818,11 +1841,119 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
+  /**
+   * Rebuild only the bounded native boundary returned by the exact attach
+   * read. The daemon still owns turn identity: it accepts this candidate only
+   * when it matches an already-durable provider-turn binding.
+   */
+  private reconstructAttachedExecution(
+    handle: CodexProviderHandle,
+    read: ThreadReadResult | null,
+    exactEmptyFallback: boolean,
+    queuedTurnLifecycle: boolean,
+  ): void {
+    this.emitNativeExecution(handle, {
+      domain: "runtime",
+      kind: "state_changed",
+      state: "ready",
+      sideEffects: "none",
+    });
+    if (queuedTurnLifecycle) {
+      // The app-server protocol gives notifications no ordering token relative
+      // to thread/read. Coexisting snapshot and lifecycle evidence is therefore
+      // ambiguous even when both shapes are individually readable.
+      handle.execution.markUnavailable();
+      return;
+    }
+    if (read === null) {
+      // A proven-missing continuation has no native turn to reconstruct. Keep
+      // this source recoverable: same-process continuation repair replaces the
+      // thread on this handle and must not inherit a permanent observation gap.
+      return;
+    }
+    if (exactEmptyFallback) return;
+    const turns = read.thread?.turns;
+    if (!Array.isArray(turns)) {
+      handle.execution.markUnavailable();
+      return;
+    }
+    const turn = turns.at(-1);
+    if (!turn) return;
+    const providerTurnId = turn?.id;
+    const status = extractTurnStatus(turn)?.trim().toLowerCase() ?? null;
+    if (!nativeExecutionId(providerTurnId) || !status) {
+      handle.execution.markUnavailable();
+      return;
+    }
+    const identity = {
+      providerContinuationId: handle.providerContinuationId,
+      providerTurnId,
+    };
+    if (isActiveCodexTurnStatus(status)) {
+      this.emitNativeExecution(handle, {
+        ...identity,
+        domain: "turn",
+        kind: "state_changed",
+        state: "active",
+        sideEffects: "none",
+      });
+      return;
+    }
+    const outcome = status === "completed" || status === "failed"
+      ? status
+      : /^(?:interrupted|cancelled|stopped)$/.test(status) ? "interrupted" : null;
+    if (!outcome) {
+      handle.execution.markUnavailable();
+      return;
+    }
+    this.emitNativeExecution(handle, {
+      ...identity,
+      domain: "turn",
+      kind: "state_changed",
+      state: "terminal",
+      turnOutcome: outcome,
+      sideEffects: "none",
+    });
+  }
+
+  private queuedTurnLifecycleIsAmbiguous(
+    handle: CodexProviderHandle,
+    notification: RpcNotification,
+  ): boolean {
+    if (!(notification.method === "turn/started"
+      || /^turn\/(?:completed|failed|interrupted|cancelled|stopped)$/i.test(notification.method))) return false;
+    const params = recordValue(notification.params);
+    if (!params || !nativeExecutionId(params.threadId)) return true;
+    return params.threadId === handle.providerContinuationId;
+  }
+
+  private emitNativeExecution(handle: CodexProviderHandle, fact: NativeExecutionFact): void {
+    if (fact.domain === "execution") {
+      const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId, fact.executionId]);
+      if (fact.kind === "completed") handle.nativeActiveOperations.delete(key);
+      else handle.nativeActiveOperations.set(key, fact);
+    } else if (fact.domain === "turn") {
+      const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId]);
+      if (fact.state === "active") {
+        handle.nativeActiveTurns.set(key, {
+          providerContinuationId: fact.providerContinuationId,
+          providerTurnId: fact.providerTurnId,
+        });
+      } else handle.nativeActiveTurns.delete(key);
+    }
+    handle.execution.emit(
+      fact,
+      handle.providerConnection.processIdentity ?? undefined,
+      handle.providerConnection.pid ?? undefined,
+    );
+  }
+
   private consumeNotification(
     handle: CodexProviderHandle,
     notification: RpcNotification,
+    correlateLifecycle = true,
   ): void {
-    const nativeLifecycle = this.observeNativeExecution(handle, notification);
+    const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
     handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
     const exactThreadId = notificationThreadId(notification.params);
@@ -1865,7 +1996,11 @@ export class CodexProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private observeNativeExecution(handle: CodexProviderHandle, notification: RpcNotification): NativeLifecycleCheckpoint | null {
+  private observeNativeExecution(
+    handle: CodexProviderHandle,
+    notification: RpcNotification,
+    correlateLifecycle = true,
+  ): NativeLifecycleCheckpoint | null {
     const params = recordValue(notification.params);
     if (!params || params.threadId !== handle.providerContinuationId || !nativeExecutionId(params.threadId)) return null;
     const turn = recordValue(params.turn);
@@ -1873,21 +2008,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const providerTurnId = params.turnId ?? turn?.id;
     if (!nativeExecutionId(providerTurnId)) return null;
     const identity = { providerContinuationId: params.threadId, providerTurnId };
-    const emit = (fact: NativeExecutionFact) => {
-      if (fact.domain === "execution") {
-        const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId, fact.executionId]);
-        if (fact.kind === "completed") handle.nativeActiveOperations.delete(key);
-        else handle.nativeActiveOperations.set(key, fact);
-      } else if (fact.domain === "turn") {
-        const key = JSON.stringify([fact.providerContinuationId, fact.providerTurnId]);
-        if (fact.state === "active") handle.nativeActiveTurns.set(key, identity);
-        else handle.nativeActiveTurns.delete(key);
-      }
-      handle.execution.emit(fact, handle.providerConnection.processIdentity ?? undefined,
-        handle.providerConnection.pid ?? undefined);
-    };
+    const emit = (fact: NativeExecutionFact) => this.emitNativeExecution(handle, fact);
     if (notification.method === "turn/started") {
-      const nativeLifecycle = nativeLifecycleCheckpoint({
+      const nativeLifecycle = correlateLifecycle ? nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
         phase: "turn_active",
@@ -1895,16 +2018,16 @@ export class CodexProviderAdapter implements ProviderAdapter {
         providerTurnId,
         nativeProcessPid: handle.providerConnection.pid ?? undefined,
         nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
-      });
+      }) : null;
       emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
       emit({ ...identity, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
-        nativeEventId: nativeLifecycle.nativeEventId });
+        ...(nativeLifecycle ? { nativeEventId: nativeLifecycle.nativeEventId } : {}) });
       return nativeLifecycle;
     }
-    if (notification.method === "turn/completed" || notification.method === "turn/failed") {
-      const outcome = notification.method === "turn/failed" ? "failed" : turn?.status;
-      if (outcome === "completed" || outcome === "failed" || outcome === "interrupted") {
-        const nativeLifecycle = nativeLifecycleCheckpoint({
+    if (/^turn\/(?:completed|failed|interrupted|cancelled|stopped)$/i.test(notification.method)) {
+      const outcome = terminalTurnOutcome(notification.method, turn);
+      if (outcome) {
+        const nativeLifecycle = correlateLifecycle ? nativeLifecycleCheckpoint({
           provider: this.id,
           workAttemptId: handle.workAttemptId,
           phase: "turn_terminal",
@@ -1913,9 +2036,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
           nativeProcessPid: handle.providerConnection.pid ?? undefined,
           nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
           terminalDiscriminator: outcome,
-        });
+        }) : null;
         emit({ ...identity, domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
-          sideEffects: "none", nativeEventId: nativeLifecycle.nativeEventId });
+          sideEffects: "none", ...(nativeLifecycle ? { nativeEventId: nativeLifecycle.nativeEventId } : {}) });
         return nativeLifecycle;
       }
       return null;
