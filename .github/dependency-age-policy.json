@@ -17,11 +17,6 @@
       "reason": "Exact patched release required to remediate GHSA-r4w5-6pfg-jxp5 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI. Remove after 2026-08-11 when the cooldown is naturally satisfied."
     },
     {
-      "name": "fast-uri",
-      "version": "3.1.5",
-      "reason": "Exact patched release required to remediate GHSA-7p8r-x3mc-p8w7 before the normal cooldown expires; registry signatures, dependency audit, and the full test suite are verified in CI."
-    },
-    {
       "name": "qs",
       "version": "6.16.0",
       "reason": "Exact patched release required to remediate GHSA-x5fp-wj9c-mxmx and GHSA-4mjr-xmp4-gh2g before the normal cooldown expires; registry signatures, dependency audits, and full test suites are verified in CI. Remove after 2026-09-06 when the cooldown is naturally satisfied."
