@@ -550,6 +550,9 @@ class ClaudeProviderHandle implements ProviderHandle {
   readonly roomTurnResults = new Map<string, ClaudeRoomTurnTerminal>();
   activeRoomTurnId: string | null = null;
   roomTurnOperationId: string | null = null;
+  pendingInterruptTurnId: string | null = null;
+  contextualInterruptTerminalTurnId: string | null = null;
+  readonly contextualInterruptResults = new WeakSet<ClaudeStreamMessage>();
   readonly execution: ProviderExecutionObserver;
   executionTurnId: string | null = null;
   executionTurnStarted = false;
@@ -700,11 +703,17 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           "not_applied",
         );
       }
-      handle.child.writeLine(JSON.stringify({
-        type: "control_request",
-        request_id: randomUUID(),
-        request: { subtype: "interrupt" },
-      }));
+      handle.pendingInterruptTurnId = activeTurnId!;
+      try {
+        handle.child.writeLine(JSON.stringify({
+          type: "control_request",
+          request_id: randomUUID(),
+          request: { subtype: "interrupt" },
+        }));
+      } catch (error) {
+        if (handle.pendingInterruptTurnId === activeTurnId) handle.pendingInterruptTurnId = null;
+        throw error;
+      }
       // A control_response acknowledgement is intentionally insufficient. The
       // subsequent result event is the only proof that the queued/live turn
       // actually reached an interrupted boundary.
@@ -713,15 +722,19 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       const resultTurnId = typeof result.user_message_uuid === "string"
         ? result.user_message_uuid.trim()
         : "";
+      const contextualInterrupt = handle.contextualInterruptResults.has(result);
       if (
-        subtype !== "interrupted"
-        || sessionIdOf(result) !== handle.providerContinuationId
-        || resultTurnId !== activeTurnId
+        !contextualInterrupt
+        && (subtype !== "interrupted"
+          || sessionIdOf(result) !== handle.providerContinuationId
+          || resultTurnId !== activeTurnId)
       ) {
-        const exactSessionTerminal = sessionIdOf(result) === handle.providerContinuationId;
+        const exactTargetTerminal = sessionIdOf(result) === handle.providerContinuationId
+          && resultTurnId === activeTurnId
+          && Boolean(exactClaudeStreamTerminal(result, activeTurnId!, handle.providerContinuationId));
         throw new ProviderTurnControlError(
           `Claude returned ${streamMethod(result)} instead of an exact-session interrupted boundary.`,
-          exactSessionTerminal ? "not_applied" : "uncertain",
+          exactTargetTerminal ? "not_applied" : "uncertain",
         );
       }
       handle.state = "idle";
@@ -751,6 +764,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
 
     const turnId = randomUUID();
     handle.roomTurnOperationId = turnId;
+    handle.contextualInterruptTerminalTurnId = null;
     let terminalPromise: Promise<ClaudeRoomTurnTerminal> | null = null;
     try {
       await options.beforeNativeDispatch?.();
@@ -1198,7 +1212,17 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       this.publishStream(handle, "stdout/raw", { line }, "provider_event");
       return;
     }
-    const nativeLifecycle = this.observeNativeExecution(handle, message);
+    const contextualInterruptTurnId = this.contextualInterruptTurnId(handle, message);
+    const contextualInterruptReplayTurnId = contextualInterruptTurnId
+      ? null
+      : this.contextualInterruptReplayTurnId(handle, message);
+    if (contextualInterruptTurnId) handle.contextualInterruptResults.add(message);
+    const nativeLifecycle = this.observeNativeExecution(
+      handle,
+      message,
+      contextualInterruptTurnId,
+      contextualInterruptReplayTurnId,
+    );
     this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message),
       nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
     const typedAuthority = handle.lifecycleAuthorityMode === "typed";
@@ -1209,25 +1233,28 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (type === "result") {
       const exactTurnId = typeof message.user_message_uuid === "string"
         ? message.user_message_uuid.trim()
-        : "";
+        : contextualInterruptTurnId ?? "";
       let exactTurnFailed = false;
       if (exactTurnId) {
-        const terminal = exactClaudeStreamTerminal(
-          message,
-          exactTurnId,
-          handle.providerContinuationId,
-        );
+        const terminal = contextualInterruptTurnId
+          ? { turnId: contextualInterruptTurnId, error: "Claude command ended interrupted." }
+          : exactClaudeStreamTerminal(message, exactTurnId, handle.providerContinuationId);
         if (terminal) {
           exactTurnFailed = "error" in terminal;
           handle.roomTurnResults.set(exactTurnId, terminal);
           if (handle.activeRoomTurnId === exactTurnId) handle.activeRoomTurnId = null;
+          if (handle.pendingInterruptTurnId === exactTurnId) handle.pendingInterruptTurnId = null;
+          if (contextualInterruptTurnId === exactTurnId) {
+            handle.contextualInterruptTerminalTurnId = exactTurnId;
+          }
           const exactWaiters = [...(handle.roomTurnWaiters.get(exactTurnId) ?? [])];
           for (const waiter of exactWaiters) waiter.resolve(terminal);
         }
       }
-      const exactInterrupted = typeof message.subtype === "string"
-        && message.subtype.toLowerCase() === "interrupted"
-        && sessionIdOf(message) === handle.providerContinuationId;
+      const exactInterrupted = Boolean(contextualInterruptTurnId || contextualInterruptReplayTurnId)
+        || (typeof message.subtype === "string"
+          && message.subtype.toLowerCase() === "interrupted"
+          && sessionIdOf(message) === handle.providerContinuationId);
       if (handle.turnResultWaiters.size) {
         const waiters = [...handle.turnResultWaiters];
         handle.turnResultWaiters.clear();
@@ -1283,11 +1310,52 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     }
   }
 
-  private observeNativeExecution(handle: ClaudeProviderHandle, message: ClaudeStreamMessage): NativeLifecycleCheckpoint | null {
+  private contextualInterruptTurnId(
+    handle: ClaudeProviderHandle,
+    message: ClaudeStreamMessage,
+  ): string | null {
+    const turnId = handle.pendingInterruptTurnId;
+    if (!turnId
+      || handle.activeRoomTurnId !== turnId
+      || handle.roomTurnOperationId !== turnId
+      || handle.executionTurnId !== turnId
+      || message.type !== "result"
+      || sessionIdOf(message) !== handle.providerContinuationId
+      || message.subtype !== "error_during_execution"
+      || message.is_error !== true
+      || message.terminal_reason !== "aborted_streaming"
+      || (message.user_message_uuid !== undefined && message.user_message_uuid !== null)) return null;
+    return turnId;
+  }
+
+  private contextualInterruptReplayTurnId(
+    handle: ClaudeProviderHandle,
+    message: ClaudeStreamMessage,
+  ): string | null {
+    const turnId = handle.contextualInterruptTerminalTurnId;
+    if (!turnId
+      || handle.activeRoomTurnId !== null
+      || handle.executionTurnId !== null
+      || message.type !== "result"
+      || sessionIdOf(message) !== handle.providerContinuationId
+      || message.subtype !== "error_during_execution"
+      || message.is_error !== true
+      || message.terminal_reason !== "aborted_streaming"
+      || (message.user_message_uuid !== undefined && message.user_message_uuid !== null)) return null;
+    return turnId;
+  }
+
+  private observeNativeExecution(
+    handle: ClaudeProviderHandle,
+    message: ClaudeStreamMessage,
+    contextualInterruptTurnId: string | null = null,
+    contextualInterruptReplayTurnId: string | null = null,
+  ): NativeLifecycleCheckpoint | null {
     const replay = handle.executionTerminalCheckpoint;
     if (message.type === "result" && replay
       && message.session_id === handle.providerContinuationId
-      && message.user_message_uuid === replay.providerTurnId
+      && (message.user_message_uuid === replay.providerTurnId
+        || contextualInterruptReplayTurnId === replay.providerTurnId)
       && claudeTerminalDiscriminator(message) === replay.terminalDiscriminator) {
       return replay.nativeLifecycle;
     }
@@ -1318,14 +1386,15 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           nativeEventId: nativeLifecycle.nativeEventId, ...turn });
       }
       return nativeLifecycle;
-    } else if (message.type === "result" && message.user_message_uuid === turnId) {
+    } else if (message.type === "result"
+      && (message.user_message_uuid === turnId || contextualInterruptTurnId === turnId)) {
       const hasLegacyTerminalShape = typeof message.subtype === "string" && Boolean(message.subtype)
         && (message.subtype === "success" ? message.is_error === false : message.is_error === true);
       if (handle.lifecycleAuthorityMode !== "typed" && !hasLegacyTerminalShape) return null;
       const terminalDiscriminator = claudeTerminalDiscriminator(message);
       const subtype = typeof message.subtype === "string" ? message.subtype.toLowerCase() : "";
-      const turnOutcome = subtype === "success" && message.is_error === false ? "completed"
-        : subtype === "interrupted" ? "interrupted" : "failed";
+      const turnOutcome = contextualInterruptTurnId === turnId || subtype === "interrupted" ? "interrupted"
+        : subtype === "success" && message.is_error === false ? "completed" : "failed";
       const nativeLifecycle = nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
@@ -1528,6 +1597,8 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     handle: ClaudeProviderHandle,
     exit: ProviderProcessExit,
   ): ProviderTerminalPayload {
+    handle.pendingInterruptTurnId = null;
+    handle.contextualInterruptTerminalTurnId = null;
     if (exit.type === "exit") {
       handle.executionExitObserved = true;
       const identity = handle.providerConnection.kind === "claude_cli" ? handle.providerConnection.processIdentity ?? undefined : undefined;

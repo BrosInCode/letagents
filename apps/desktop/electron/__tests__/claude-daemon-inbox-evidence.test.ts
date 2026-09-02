@@ -46,6 +46,14 @@ test("Claude stream evidence correlates lifecycle and terminal result to the cal
     user_message_uuid: "other-turn",
     session_id: sessionId,
   }, turnId, sessionId), null);
+  assert.equal(exactClaudeStreamTerminal({
+    type: "result",
+    subtype: "error_during_execution",
+    is_error: true,
+    terminal_reason: "aborted_streaming",
+    session_id: sessionId,
+  }, turnId, sessionId), null,
+  "the UUID-less CLI interrupt shape is exact only inside an armed adapter interrupt context");
 });
 
 test("Claude session recovery requires the exact user UUID and a terminal assistant boundary", () => {
