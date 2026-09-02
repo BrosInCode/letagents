@@ -10,8 +10,9 @@ import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } fro
 import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema,
   validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
+import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 32;
+export const DAEMON_STATE_SCHEMA_VERSION = 33;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -285,6 +286,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 31) {
     this.migrateLifecycleProjectionProviderSet(database);
+    return;
+  }
+  if (existingVersion === 32) {
+    this.migrateIncompatibleCodexRuntimeBirths(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1199,6 +1204,7 @@ private migrateRoomWorkPublicationStorage(database: DatabaseSync): void {
     applyRoomWorkPublicationSchema(database);
     applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     validateRoomWorkPublicationSchema(database);
     validateLifecycleProjectionLedgerSchema(database);
@@ -1220,6 +1226,7 @@ private migrateLifecycleProjectionStorage(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     applyLifecycleProjectionLedgerSchema(database);
     this.freezeLegacyActiveRuntimeBirths(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     validateLifecycleProjectionLedgerSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1240,6 +1247,7 @@ private migrateLegacyActiveRuntimeBirths(database: DatabaseSync): void {
     migrateExecutionStorageV22ToV23(database);
     this.freezeLegacyActiveRuntimeBirths(database);
     resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1258,6 +1266,7 @@ private migrateLifecycleEffectStorage(database: DatabaseSync): void {
     migrateExecutionStorageV21ToV22(database);
     migrateExecutionStorageV22ToV23(database);
     resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1275,6 +1284,23 @@ private migrateRuntimeFailureEffectStorage(database: DatabaseSync): void {
   try {
     migrateExecutionStorageV22ToV23(database);
     resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
+    this.schemaInitializationHook?.(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
+/** Retire exact Codex births that cannot satisfy typed lifecycle authority. */
+private migrateIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
     database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
@@ -1291,6 +1317,7 @@ private migrateLifecycleProjectionProviderSet(database: DatabaseSync): void {
   database.exec("BEGIN IMMEDIATE");
   try {
     resetLegacyLifecycleProjectionLedgerSchema(database);
+    this.retireIncompatibleCodexRuntimeBirths(database);
     this.schemaInitializationHook?.(database);
     validateLifecycleProjectionLedgerSchema(database);
     run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
@@ -1381,6 +1408,118 @@ private freezeLegacyActiveRuntimeBirths(database: DatabaseSync): void {
   }
 }
 
+/**
+ * A pre-typed Codex birth cannot be relabelled safely: its stream contract was
+ * fixed when the native process started. Fence it before daemon startup can
+ * attach, deliver, or restart work. Retirement keeps the manifest identity,
+ * inspector history, work attempt, and workspace; Electron's existing stopped
+ * entry reconciliation completes worker/grant revocation after the socket is up.
+ */
+private retireIncompatibleCodexRuntimeBirths(database: DatabaseSync): void {
+  const candidates = database.prepare(`SELECT
+      d.agent_id,
+      d.provider_execution_generation_id AS execution_generation_id,
+      d.provider_connection_kind AS connection_kind,
+      d.provider_connection_pid AS connection_pid,
+      d.provider_process_identity_present AS process_identity_present,
+      d.provider_process_identity AS process_identity,
+      c.delivery_mode,
+      c.runtime_configuration_revision AS config_revision
+    FROM runtime_deployments d
+    JOIN agent_configurations c USING(agent_id)
+    WHERE c.provider='codex' AND d.provider_ref_present=1
+      AND d.provider_work_attempt_id IS NOT NULL
+    ORDER BY d.agent_id`).all() as Row[];
+  const retiredAtMs = Date.now();
+  const retiredAt = new Date(retiredAtMs).toISOString();
+  for (const candidate of candidates) {
+    const agentId = String(candidate.agent_id);
+    const executionGenerationId = typeof candidate.execution_generation_id === "string"
+      && candidate.execution_generation_id.trim() ? candidate.execution_generation_id : null;
+    const connectionKind = candidate.connection_kind === "codex_app_server"
+      ? candidate.connection_kind : null;
+    const connectionPid = Number(candidate.connection_pid);
+    const processIdentity = Number(candidate.process_identity_present) === 1
+      && typeof candidate.process_identity === "string" && candidate.process_identity.trim()
+      ? candidate.process_identity : null;
+    const deliveryMode = candidate.delivery_mode;
+    if (deliveryMode !== "mcp_polling" && deliveryMode !== "desktop_events" && deliveryMode !== "daemon_inbox") {
+      throw new Error("Incompatible Codex birth has no valid durable delivery mode.");
+    }
+    const expectedAuthorityMode = lifecycleAuthorityModeForProvider("codex", deliveryMode);
+    const configRevision = Number(candidate.config_revision);
+    let compatible = false;
+    if (executionGenerationId && connectionKind && Number.isSafeInteger(connectionPid)
+      && connectionPid > 0 && processIdentity && Number.isSafeInteger(configRevision) && configRevision >= 1) {
+      const runtimeGenerationId = executionRuntimeStorageIdentity(
+        agentId,
+        executionGenerationId,
+        connectionKind,
+        connectionPid,
+        processIdentity,
+      );
+      const runtime = database.prepare(`SELECT provider,authority_mode,config_revision
+        FROM execution_runtime_generations
+        WHERE agent_id=? AND execution_generation_id=? AND runtime_generation_id=?`).get(
+        agentId,
+        executionGenerationId,
+        runtimeGenerationId,
+      ) as Row | undefined;
+      compatible = runtime?.provider === "codex"
+        && runtime.authority_mode === expectedAuthorityMode
+        && Number(runtime.config_revision) === configRevision;
+    }
+    if (compatible) continue;
+
+    const stopped = database.prepare("UPDATE agent_launch_intents SET desired_state='stopped' WHERE agent_id=?")
+      .run(agentId);
+    if (Number(stopped.changes) !== 1) {
+      throw new Error("Incompatible Codex birth has no durable launch intent to retire.");
+    }
+
+    database.prepare(`UPDATE execution_approval_decisions
+      SET dispatch_state='lost',
+        application_certainty=CASE WHEN dispatch_id IS NULL THEN 'impossible' ELSE 'unknown' END,
+        resolved_at_ms=MAX(decided_at_ms,?)
+      WHERE agent_id=? AND dispatch_state NOT IN ('acknowledged','lost')`).run(retiredAtMs, agentId);
+    database.prepare(`UPDATE execution_approval_requests
+      SET state='lost',application_certainty=COALESCE((
+        SELECT d.application_certainty FROM execution_approval_decisions d
+        WHERE d.request_id=execution_approval_requests.request_id
+          AND d.request_version=execution_approval_requests.request_version
+      ),'impossible')
+      WHERE agent_id=? AND state NOT IN ('resolved','superseded','lost')`).run(agentId);
+    database.prepare(`UPDATE execution_turns
+      SET state='lost',ended_at_ms=MAX(created_at_ms,?)
+      WHERE agent_id=? AND state='active'`).run(retiredAtMs, agentId);
+    database.prepare(`UPDATE execution_message_attempts
+      SET state='lost',conclusion='lost',settled_at_ms=MAX(created_at_ms,?)
+      WHERE agent_id=? AND state='active'`).run(retiredAtMs, agentId);
+    database.prepare(`INSERT INTO supervised_agent_inbox_events
+        (inbox_item_id,event_sequence,idempotency_key,phase,observed_at,detail)
+      SELECT i.inbox_item_id,
+        COALESCE((SELECT MAX(e.event_sequence) FROM supervised_agent_inbox_events e
+          WHERE e.inbox_item_id=i.inbox_item_id),0)+1,
+        'v33_incompatible_codex_birth_retired','no_reply',?,
+        'Upgrade retired an incompatible Codex runtime birth; provider work was not replayed.'
+      FROM supervised_agent_inbox i
+      WHERE i.agent_id=?
+        AND i.state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')
+        AND NOT EXISTS (SELECT 1 FROM supervised_agent_inbox_events e
+          WHERE e.inbox_item_id=i.inbox_item_id
+            AND e.idempotency_key='v33_incompatible_codex_birth_retired')`).run(retiredAt, agentId);
+    database.prepare(`UPDATE supervised_agent_inbox
+      SET state='acknowledged_no_reply',outcome=NULL,failure_code=NULL,
+        terminal_reason='upgrade_authority_unavailable',
+        last_error='Upgrade retired this Codex runtime because its frozen lifecycle authority is incompatible; provider work was not replayed.',
+        blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,
+        updated_at=?,acknowledged_at=COALESCE(acknowledged_at,?)
+      WHERE agent_id=?
+        AND state NOT IN ('acknowledged','acknowledged_no_reply','acknowledged_failed','cancelled_by_room_move','cancelled_by_user')`)
+      .run(retiredAt, retiredAt, agentId);
+  }
+}
+
 /** Every legacy caller advances directly to the current paired version. */
 private applyCurrentConfigurationShape(database: DatabaseSync): void {
   if (!this.tableColumns(database, "agent_configurations").has("polling_contract")) {
@@ -1403,6 +1542,7 @@ private applyCurrentConfigurationShape(database: DatabaseSync): void {
   applyRoomWorkPublicationSchema(database);
   applyLifecycleProjectionLedgerSchema(database);
   this.freezeLegacyActiveRuntimeBirths(database);
+  this.retireIncompatibleCodexRuntimeBirths(database);
 }
 
 private applyV20Shape(database: DatabaseSync): void {

@@ -169,6 +169,10 @@ function restoreV31Fixture(database: DatabaseSync): void {
   database.exec("UPDATE manifest_metadata SET schema_version=31 WHERE singleton=1; PRAGMA user_version=31");
 }
 
+function restoreV32Fixture(database: DatabaseSync): void {
+  database.exec("UPDATE manifest_metadata SET schema_version=32 WHERE singleton=1; PRAGMA user_version=32");
+}
+
 function seedLifecycleProjectionV1Evidence(database: DatabaseSync): void {
   const ledger = new LifecycleProjectionLedger(database, () => 100);
   const base = { agentId: "comparator-agent", provider: "codex" as const,
@@ -188,6 +192,7 @@ function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
   agentId: string;
   provider: "codex" | "claude-code" | "cursor" | "open-model";
   connectionKind: "codex_app_server" | "claude_cli" | "cursor_cli" | "opencode_server";
+  deliveryMode?: "mcp_polling" | "desktop_events" | "daemon_inbox";
   processIdentity?: string | null;
   pid?: number | null;
   terminal?: boolean;
@@ -205,7 +210,9 @@ function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
   database.prepare(`INSERT INTO agent_configurations
     (agent_id,provider,charter,delivery_mode,provider_launch_policy_present,provider_launch_policy_undefined,
      config_revision,runtime_configuration_revision)
-    VALUES(?,?,?,'daemon_inbox',0,0,7,3)`).run(input.agentId, input.provider, "test");
+    VALUES(?,?,?,?,0,0,7,3)`).run(input.agentId, input.provider, "test", input.deliveryMode ?? "daemon_inbox");
+  database.prepare("INSERT INTO agent_launch_intents(agent_id,desired_state,source_repo_path_present) VALUES(?,'running',0)")
+    .run(input.agentId);
   database.prepare(`INSERT INTO work_attempts
     (work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,workspace_remote_url,
      workspace_resolved_revision,workspace_bare_path,state,created_at)
@@ -242,6 +249,21 @@ function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
       "runtime", input.agentId, executionGenerationId, input.connectionKind, processIdentity,
     ),
   };
+}
+
+function seedRetirementInbox(database: DatabaseSync, agentId: string): void {
+  database.prepare(`INSERT INTO supervised_agent_inbox
+    (inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,
+     fifo_sequence,state,attempt_count,action_id,reply_client_message_id,created_at,updated_at)
+    VALUES(?,?, 'room',?, '{"text":"work"}', '{"decision":"activate"}',1,'pending',0,?,?,?,?)`).run(
+    `inbox-${agentId}`,
+    agentId,
+    `source-${agentId}`,
+    `action-${agentId}`,
+    `reply-${agentId}`,
+    now,
+    now,
+  );
 }
 
 function seedPollingActivations(database: DatabaseSync, phases: readonly ("complete" | "uncertain" | "active")[] = ["complete", "uncertain"]): void {
@@ -1484,6 +1506,198 @@ test("v32 refuses a corrupt three-provider comparator before WAL conversion or r
     assert.deepEqual(await readFile(env.path), before);
     assert.throws(() => new DaemonStateSchema().createSchema(env.database), /Lifecycle projection ledger/);
     assert.deepEqual(await readFile(env.path), before);
+  } finally { await env.cleanup(); }
+});
+
+test("v33 retires incompatible Codex births without replaying work or deleting history", async () => {
+  const env = await fixture();
+  try {
+    const legacy = seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-legacy", provider: "codex", connectionKind: "codex_app_server",
+    });
+    const shadow = seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-shadow", provider: "codex", connectionKind: "codex_app_server",
+    });
+    seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-missing", provider: "codex", connectionKind: "codex_app_server",
+    });
+    seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-birthless", provider: "codex", connectionKind: "codex_app_server",
+    });
+    env.database.prepare(`UPDATE runtime_deployments SET
+      provider_work_attempt_id=NULL,provider_continuation_id=NULL,provider_connection_kind=NULL,
+      provider_connection_url=NULL,provider_connection_pid=NULL,provider_process_identity_present=0,
+      provider_process_identity=NULL,provider_execution_generation_id=NULL
+      WHERE agent_id='codex-birthless'`).run();
+    const typed = seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-typed", provider: "codex", connectionKind: "codex_app_server",
+    });
+    const pollingShadow = seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-polling-shadow", provider: "codex", connectionKind: "codex_app_server",
+      deliveryMode: "mcp_polling",
+    });
+    const eventsShadow = seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-events-shadow", provider: "codex", connectionKind: "codex_app_server",
+      deliveryMode: "desktop_events",
+    });
+    const pollingTyped = seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-polling-typed", provider: "codex", connectionKind: "codex_app_server",
+      deliveryMode: "mcp_polling",
+    });
+    const claude = seedPreB1RuntimeBirth(env.database, {
+      agentId: "claude-legacy", provider: "claude-code", connectionKind: "claude_cli",
+    });
+    env.database.exec("BEGIN IMMEDIATE");
+    for (const [agentId, birth, provider, authorityMode] of [
+      ["codex-legacy", legacy, "codex", "legacy"],
+      ["codex-shadow", shadow, "codex", "typed_shadow"],
+      ["codex-typed", typed, "codex", "typed"],
+      ["codex-polling-shadow", pollingShadow, "codex", "typed_shadow"],
+      ["codex-events-shadow", eventsShadow, "codex", "typed_shadow"],
+      ["codex-polling-typed", pollingTyped, "codex", "typed"],
+      ["claude-legacy", claude, "claude-code", "legacy"],
+    ] as const) {
+      materializeRuntimeIdentity(env.database, {
+        agentId,
+        executionGenerationId: birth.executionGenerationId,
+        runtimeGenerationId: birth.runtimeGenerationId!,
+        provider,
+        authorityMode,
+        configRevision: 3,
+        createdAtMs: 100,
+      });
+    }
+    env.database.exec("COMMIT");
+    for (const agentId of ["codex-legacy", "codex-shadow", "codex-missing", "codex-birthless", "codex-typed",
+      "codex-polling-shadow", "codex-events-shadow", "codex-polling-typed", "claude-legacy"]) {
+      seedRetirementInbox(env.database, agentId);
+    }
+    env.database.exec(`INSERT INTO execution_message_attempts
+        (attempt_id,agent_id,room_id,source_message_id,state,created_at_ms)
+      VALUES('message-attempt','codex-legacy','room','source-codex-legacy','active',100);
+      INSERT INTO execution_attempt_generations
+        (attempt_id,agent_id,room_id,execution_generation_id,workspace_id,created_at_ms)
+      VALUES('message-attempt','codex-legacy','room','${legacy.executionGenerationId}','workspace-codex-legacy',100);
+      INSERT INTO execution_turns
+        (turn_id,attempt_id,agent_id,room_id,execution_generation_id,runtime_generation_id,
+         provider_continuation_id,provider_turn_id,state,side_effects,created_at_ms)
+      VALUES('turn-legacy','message-attempt','codex-legacy','room','${legacy.executionGenerationId}',
+        '${legacy.runtimeGenerationId}','continuation-codex-legacy','native-turn','active','possible',100);
+      INSERT INTO execution_approval_requests
+        (request_id,request_version,agent_id,room_id,execution_generation_id,runtime_generation_id,turn_id,
+         provider_continuation_id,provider_turn_id,connection_id,native_request_id_type,native_request_id,
+         kind,risk,delegatable,request_sha256,state,recovery_boundary,created_at_ms,expires_at_ms)
+      VALUES('approval',1,'codex-legacy','room','${legacy.executionGenerationId}','${legacy.runtimeGenerationId}',
+        'turn-legacy','continuation-codex-legacy','native-turn','connection','string','native-request',
+        'command','high',0,'${"a".repeat(64)}','requested','connection',100,1000);
+      INSERT INTO execution_approval_requests
+        (request_id,request_version,agent_id,room_id,execution_generation_id,runtime_generation_id,turn_id,
+         provider_continuation_id,provider_turn_id,connection_id,native_request_id_type,native_request_id,
+         kind,risk,delegatable,request_sha256,state,recovery_boundary,created_at_ms,expires_at_ms)
+      VALUES('approval-uncertain',1,'codex-legacy','room','${legacy.executionGenerationId}','${legacy.runtimeGenerationId}',
+        'turn-legacy','continuation-codex-legacy','native-turn','connection','string','native-request-uncertain',
+        'command','high',0,'${"b".repeat(64)}','dispatching','connection',100,1000);
+      INSERT INTO execution_approval_decisions
+        (decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,
+         request_delegatable,request_sha256,decision,source,actor_id,dispatch_state,dispatch_id,
+         decided_at_ms,dispatch_started_at_ms,projection_sha256)
+      VALUES('approval-decision','approval-uncertain',1,'codex-legacy','room','${legacy.executionGenerationId}',
+        'turn-legacy',0,'${"b".repeat(64)}','allow_once','host','owner','dispatching','approval-dispatch',
+        100,100,'${"c".repeat(64)}')`);
+    const preserved = {
+      workspace: env.database.prepare("SELECT * FROM work_attempts WHERE work_attempt_id='attempt-codex-legacy'").get(),
+      execution: env.database.prepare("SELECT * FROM work_attempt_executions WHERE execution_generation_id=?")
+        .get(legacy.executionGenerationId),
+    };
+    restoreV32Fixture(env.database);
+
+    new DaemonStateSchema().createSchema(env.database);
+
+    const desired = Object.fromEntries((env.database.prepare(`SELECT agent_id,desired_state
+      FROM agent_launch_intents ORDER BY agent_id`).all() as Row[])
+      .map((row) => [String(row.agent_id), row.desired_state]));
+    assert.deepEqual(desired, {
+      "claude-legacy": "running",
+      "codex-birthless": "running",
+      "codex-events-shadow": "running",
+      "codex-legacy": "stopped",
+      "codex-missing": "stopped",
+      "codex-polling-shadow": "running",
+      "codex-polling-typed": "stopped",
+      "codex-shadow": "stopped",
+      "codex-typed": "running",
+    });
+    assert.deepEqual(env.database.prepare(`SELECT agent_id,state,terminal_reason FROM supervised_agent_inbox
+      ORDER BY agent_id`).all().map((row) => ({ ...row })), [
+      { agent_id: "claude-legacy", state: "pending", terminal_reason: null },
+      { agent_id: "codex-birthless", state: "pending", terminal_reason: null },
+      { agent_id: "codex-events-shadow", state: "pending", terminal_reason: null },
+      { agent_id: "codex-legacy", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
+      { agent_id: "codex-missing", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
+      { agent_id: "codex-polling-shadow", state: "pending", terminal_reason: null },
+      { agent_id: "codex-polling-typed", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
+      { agent_id: "codex-shadow", state: "acknowledged_no_reply", terminal_reason: "upgrade_authority_unavailable" },
+      { agent_id: "codex-typed", state: "pending", terminal_reason: null },
+    ]);
+    assert.deepEqual({ ...env.database.prepare("SELECT state,conclusion FROM execution_message_attempts WHERE attempt_id='message-attempt'").get() },
+      { state: "lost", conclusion: "lost" });
+    assert.equal(env.database.prepare("SELECT state FROM execution_turns WHERE turn_id='turn-legacy'").get()!.state, "lost");
+    assert.deepEqual(env.database.prepare(`SELECT request_id,state,application_certainty
+      FROM execution_approval_requests WHERE request_id LIKE 'approval%' ORDER BY request_id`).all()
+      .map((row) => ({ ...row })), [
+      { request_id: "approval", state: "lost", application_certainty: "impossible" },
+      { request_id: "approval-uncertain", state: "lost", application_certainty: "unknown" },
+    ]);
+    const lostDecision = env.database.prepare(`SELECT dispatch_state,application_certainty,resolved_at_ms
+      FROM execution_approval_decisions WHERE decision_id='approval-decision'`).get() as Row;
+    assert.equal(lostDecision.dispatch_state, "lost");
+    assert.equal(lostDecision.application_certainty, "unknown");
+    assert.ok(Number(lostDecision.resolved_at_ms) >= 100);
+    assert.deepEqual(env.database.prepare("SELECT * FROM work_attempts WHERE work_attempt_id='attempt-codex-legacy'").get(), preserved.workspace);
+    assert.deepEqual(env.database.prepare("SELECT * FROM work_attempt_executions WHERE execution_generation_id=?")
+      .get(legacy.executionGenerationId), preserved.execution);
+    assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM supervised_agent_inbox_events WHERE idempotency_key='v33_incompatible_codex_birth_retired'").get()!.n, 4);
+    assert.deepEqual(versionPair(env.database).map((row) => ({ ...(row as Row) })), [
+      { user_version: DAEMON_STATE_SCHEMA_VERSION },
+      { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION },
+    ]);
+
+    const once = legacyRows(env.database);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual(legacyRows(env.database), once, "current-schema reopen cannot retire or settle the same birth twice");
+  } finally { await env.cleanup(); }
+});
+
+test("v33 Codex retirement and schema markers roll back atomically", async () => {
+  const env = await fixture();
+  try {
+    const birth = seedPreB1RuntimeBirth(env.database, {
+      agentId: "codex-rollback", provider: "codex", connectionKind: "codex_app_server",
+    });
+    env.database.exec("BEGIN IMMEDIATE");
+    materializeRuntimeIdentity(env.database, {
+      agentId: "codex-rollback",
+      executionGenerationId: birth.executionGenerationId,
+      runtimeGenerationId: birth.runtimeGenerationId!,
+      provider: "codex",
+      authorityMode: "legacy",
+      configRevision: 3,
+      createdAtMs: 100,
+    });
+    env.database.exec("COMMIT");
+    seedRetirementInbox(env.database, "codex-rollback");
+    restoreV32Fixture(env.database);
+    const before = { versions: versionPair(env.database), rows: legacyRows(env.database) };
+
+    assert.throws(() => new DaemonStateSchema((database) => {
+      assert.equal(database.prepare("SELECT desired_state FROM agent_launch_intents WHERE agent_id='codex-rollback'").get()!.desired_state, "stopped");
+      assert.equal(database.prepare("SELECT state FROM supervised_agent_inbox WHERE agent_id='codex-rollback'").get()!.state, "acknowledged_no_reply");
+      throw new Error("interrupt incompatible Codex retirement");
+    }).createSchema(env.database), /interrupt incompatible Codex retirement/);
+
+    assert.deepEqual({ versions: versionPair(env.database), rows: legacyRows(env.database) }, before);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.equal(env.database.prepare("SELECT desired_state FROM agent_launch_intents WHERE agent_id='codex-rollback'").get()!.desired_state, "stopped");
   } finally { await env.cleanup(); }
 });
 
