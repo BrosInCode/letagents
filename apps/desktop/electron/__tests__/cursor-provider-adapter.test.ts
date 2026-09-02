@@ -540,6 +540,7 @@ function spawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRe
 function daemonSpawnRequest(over: Partial<ProviderSpawnRequest> = {}): ProviderSpawnRequest {
   return spawnRequest({
     deliveryMode: "daemon_inbox",
+    workspaceKind: "git_worktree",
     launchPolicy: { mode: "ask", force: false },
     permissionProfileId: "read_only",
     reasoningEffort: null,
@@ -2681,13 +2682,14 @@ test("writable Cursor turns launch only in their private generation and retire i
   assert.deepEqual(terminalOrder, ["terminal"]);
 });
 
-test("room-only rental Cursor turns use their disposable workspace without Git generation", async () => {
+test("room scratch Cursor turns use their exact workspace without Git generation", async () => {
   const harness = createHarness();
   const adapter = supervisedAdapter(harness);
-  const rentalWorkspace = "/private/letagents-daemon/room-only/2bbffeb2-a7ad-4cf0-bdac-114c6b37cb39";
+  const scratchWorkspace = "/private/letagents-daemon/room-only/2bbffeb2-a7ad-4cf0-bdac-114c6b37cb39";
   const handle = await adapter.spawn(daemonSpawnRequest({
-    supervisorEntryId: "supervised_rental_session_1_attempt_1",
-    cwd: rentalWorkspace,
+    supervisorEntryId: "supervised_agent_1",
+    workspaceKind: "room_scratch",
+    cwd: scratchWorkspace,
     permissionProfileId: "sandboxed_write",
     launchPolicy: { force: true, sandbox: "enabled" },
   }));
@@ -2696,9 +2698,9 @@ test("room-only rental Cursor turns use their disposable workspace without Git g
   await flush();
 
   const launch = harness.launches[0]!;
-  assert.equal(argValue(launch.args, "--workspace"), rentalWorkspace);
+  assert.equal(argValue(launch.args, "--workspace"), scratchWorkspace);
   assert.equal(argValue(launch.args, "--sandbox"), "enabled");
-  assert.equal(launch.mcpRuntimeCwd, rentalWorkspace);
+  assert.equal(launch.mcpRuntimeCwd, scratchWorkspace);
   assert.equal(launch.workspaceGenerationManifestPath, undefined);
   assert.deepEqual(harness.workspaceGenerationEvents, []);
 

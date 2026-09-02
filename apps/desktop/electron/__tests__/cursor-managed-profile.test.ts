@@ -441,7 +441,7 @@ test("supervised Cursor accepts a validated Git submodule workspace", () => {
   assert.ok(profile.nativeAllowedWriteSubpaths?.includes(gitDirectory));
 });
 
-test("room-only rental Cursor profiles never inherit an ancestor Git repository", () => {
+test("exact scratch Cursor profiles never inherit an ancestor Git repository", () => {
   const sourceHome = join(tempDir, "source-home-room-only-rental");
   const providerHomeRepository = join(tempDir, "provider-home-repository");
   const workspace = join(
@@ -462,7 +462,7 @@ test("room-only rental Cursor profiles never inherit an ancestor Git repository"
     sourceHomeDir: sourceHome,
     profileRoot: join(tempDir, "supervised-profile-room-only-rental"),
     permissionProfileId: "sandboxed_write",
-    roomOnlyRental: true,
+    exactWorkspaceOnly: true,
     inspectionOnly: true,
   });
   const canonicalWorkspace = realpathSync(workspace);

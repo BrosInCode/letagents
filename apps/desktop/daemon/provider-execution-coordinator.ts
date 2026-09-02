@@ -3,7 +3,10 @@ import { randomUUID } from "node:crypto";
 import { supervisedProviderLabel } from "./cloud-http.js";
 import { devMcpServerEntryFromEnv } from "./dev-spawn-options.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
-import type { EphemeralWorkspaceProvisioner } from "./ephemeral-workspace-provisioner.js";
+import {
+  isEphemeralWorkspaceMarker,
+  type EphemeralWorkspaceProvisioner,
+} from "./ephemeral-workspace-provisioner.js";
 import { serializeDaemonDeploymentId } from "./manifest-entry-projection.js";
 import { ManifestConflictError } from "./manifest-store.js";
 import {
@@ -1347,6 +1350,11 @@ export class ProviderExecutionCoordinator {
       workAttemptId: attempt.work_attempt_id,
       roomId: entry.room_id,
       cwd: attempt.workspace_path,
+      // The validated work-attempt identity is the authority for the exact
+      // workspace being launched, including entries with legacy launch intent.
+      workspaceKind: isEphemeralWorkspaceMarker(attempt.workspace_identity)
+        ? "room_scratch"
+        : "git_worktree",
       launchPolicy: launchSnapshot.launchPolicy,
       provider: launchSnapshot.provider,
       model: launchSnapshot.model,
