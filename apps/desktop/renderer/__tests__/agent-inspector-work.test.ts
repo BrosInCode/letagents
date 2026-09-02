@@ -8,7 +8,9 @@ import { createServer } from "vite";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol";
 import {
   agentInspectorWorkArtifacts,
+  agentInspectorRuntimeControlMatchesFence,
   defaultAgentInspectorWorkSource,
+  describeAgentInspectorRuntimeControl,
   describeAgentInspectorUncertainEffect,
   describeRecordedOperation,
   humanizeRecordedTurn,
@@ -86,6 +88,28 @@ test("work labels present human language instead of raw causal enums", () => {
   );
   assert.match(describeAgentInspectorUncertainEffect("send_message"), /may have completed.*verify external state/i);
   assert.equal(humanizeAgentInspectorTimeline({ phase: "turn_started" } as any), "Work started");
+  assert.deepEqual(describeAgentInspectorRuntimeControl({
+    control_state: "degraded", runtime_state: "ready", observed_at: "now",
+    execution_generation_id: "generation", daemon_generation_id: "4",
+  }), {
+    state: "degraded",
+    label: "Provider check inconclusive",
+    detail: "LetAgents could not confirm the provider’s control connection. The agent may still be working; it has not been failed or restarted.",
+    observedAt: "now",
+  });
+  assert.match(describeAgentInspectorRuntimeControl({
+    control_state: "unprobeable", runtime_state: "ready", observed_at: null,
+    execution_generation_id: "generation", daemon_generation_id: "4",
+  })?.detail ?? "", /Silence is not treated as failure/);
+  assert.match(describeAgentInspectorRuntimeControl({
+    control_state: "responsive", runtime_state: "exited", observed_at: "now",
+    execution_generation_id: "generation", daemon_generation_id: "4",
+  })?.detail ?? "", /will not infer that unfinished work completed/);
+  const fenced = { control_state: "responsive", runtime_state: "ready", observed_at: "now",
+    execution_generation_id: "generation", daemon_generation_id: "4" } as const;
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 4), true);
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "replacement", 4), false);
+  assert.equal(agentInspectorRuntimeControlMatchesFence(fenced, "generation", 5), false);
 });
 
 test("shell keeps work loading dark, fenced, stale-safe, and routed through canonical reveal", () => {
@@ -97,6 +121,15 @@ test("shell keeps work loading dark, fenced, stale-safe, and routed through cano
   assert.match(shell, /agentInspectorWorkRequestStillCurrent/);
   assert.match(shell, /agentInspectorWorkResource\.value = \{ status: "loading", detail: null, error: null, sourceMessageId \}/);
   assert.match(shell, /void loadAgentInspectorWorkDetail\(sourceMessageId, true\)/);
+  assert.match(shell, /void loadAgentInspectorWorkDetail\(null, false, false\)/);
+  assert.match(shell, /followDefaultSource && sourceMessageId === null/);
+  assert.match(shell, /refreshOpenAgentInspectorRuntimeControl\(snapshot\)/);
+  assert.match(shell, /if \(detail\?\.runtime_control\) \{[\s\S]{0,240}runtime_control: null/,
+    "capture refresh drops process-birth health before an RPC can fail");
+  assert.match(shell, /detail\.runtime_control && !agentInspectorRuntimeControlMatchesFence\([\s\S]{0,180}\? \{ \.\.\.detail, runtime_control: null \} : detail/,
+    "fresh responses are still fenced to the captured execution and daemon");
+  assert.match(shell, /projection\?\.entry\.executionGenerationId === executionGenerationId/);
+  assert.match(shell, /supervisorStatus\.value\?\.generation === daemonGeneration/);
   assert.match(shell, /status: previous \? "refreshing" : "loading", detail: previous/);
   assert.match(shell, /activeTab\.value = "chat"[\s\S]{0,120}revealRoomMessage\(canonicalMessageId\)/);
   assert.match(surface, /role="tablist"/);

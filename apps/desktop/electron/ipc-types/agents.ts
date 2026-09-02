@@ -803,6 +803,14 @@ export interface DesktopSupervisorAgentInspectorDetail {
   availability: "available" | "pruned" | "not_loaded";
   /** Optional for older supervisors; recorded evidence, never live authority. */
   recorded_execution?: RetainedExecutionDetail;
+  /** Optional for older supervisors; exact current observer health, not work completion. */
+  runtime_control?: {
+    control_state: "connecting" | "responsive" | "degraded" | "lost" | "unprobeable";
+    runtime_state: "starting" | "ready" | "stopping" | "exited";
+    observed_at: string | null;
+    execution_generation_id: string;
+    daemon_generation_id: string;
+  } | null;
   entry_id: string; room_id: string; requested_source_message_id: string | null; inbox_item_id: string | null;
   source_message: { id: string; room_id: string; sender: string | null; text: string | null; created_at: string | null; reply_to: string | null; thread_root_id: string | null; activation: Record<string, unknown> | null } | null;
   receipt: { state: DesktopRoomAgentReceiptState; attempt_count: number; provider_turn_id: string | null; outcome: { kind?: string; text?: string | null; evidence?: string } | null; last_error: string | null; failure_code: "provider_continuation_missing" | null; terminal_reason: "upgrade_authority_unavailable" | null; blocked_by_inbox_item_id: string | null; next_attempt_at_ms: number | null } | null;
