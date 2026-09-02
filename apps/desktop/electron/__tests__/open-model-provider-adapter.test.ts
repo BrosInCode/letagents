@@ -57,6 +57,7 @@ function createHarness() {
   let transcriptWhileBusy = false;
   let transcriptFactories: TranscriptFactory[] | null = null;
   let streamEvents: Array<Record<string, unknown>> = [];
+  let promptFailure: Error | null = null;
   let observedProcessExit: Promise<ProviderProcessExit>;
   let messageReads = 0;
   let permissions: unknown = [];
@@ -145,6 +146,7 @@ function createHarness() {
       }
       const promptMatch = url.pathname.match(/^\/session\/([^/]+)\/prompt_async$/);
       if (promptMatch && init?.method === "POST") {
+        if (promptFailure) throw promptFailure;
         promptBodies.push(JSON.parse(String(init.body)) as Record<string, unknown>);
         return new Response(null, { status: 204 });
       }
@@ -221,6 +223,9 @@ function createHarness() {
     },
     setStreamEvents(events: Array<Record<string, unknown>>) {
       streamEvents = events;
+    },
+    setPromptFailure(error: Error) {
+      promptFailure = error;
     },
     setPermissions(value: unknown) {
       permissions = value;
@@ -445,7 +450,9 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
   const { adapter, handle, harness } = await spawnAdapter();
   const checkpoints: string[] = [];
   const stream: ProviderStreamEvent[] = [];
+  const observations: NativeExecutionObservation[] = [];
   adapter.onStream(handle, (event) => stream.push(event));
+  adapter.onExecution(handle, (event) => observations.push(event));
 
   const result = await adapter.runRoomTurn(handle, {
     inboxItemId: "inbox-open-model-1",
@@ -481,6 +488,31 @@ test("Open Model runs one bounded OpenCode prompt and returns the exact assistan
   ]);
   assert.ok(stream.some((event) => event.method === "reasoning/summaryTextDelta"));
   assert.ok(stream.some((event) => event.method === "item/agentMessage/delta"));
+  const lifecycleFrames = stream.filter((event) => event.lifecycleProjectionOnly);
+  assert.deepEqual(lifecycleFrames.map(({ method, nativeLifecyclePhase }) => ({ method, nativeLifecyclePhase })), [
+    { method: "turn/started", nativeLifecyclePhase: "turn_active" },
+    { method: "turn/completed", nativeLifecyclePhase: "turn_terminal" },
+  ]);
+  const lifecycleFacts = observations.filter(({ fact }) => fact.domain === "turn");
+  assert.deepEqual(lifecycleFrames.map((event) => event.nativeEventId),
+    lifecycleFacts.map((event) => event.fact.nativeEventId),
+    "typed and legacy shadow witnesses use the same exact native checkpoints");
+});
+
+test("Open Model does not mint lifecycle evidence when native prompt dispatch is rejected", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const stream: ProviderStreamEvent[] = [];
+  const observations: NativeExecutionObservation[] = [];
+  adapter.onStream(handle, (event) => stream.push(event));
+  adapter.onExecution(handle, (event) => observations.push(event));
+  harness.setPromptFailure(new Error("injected prompt rejection"));
+
+  await assert.rejects(
+    adapter.runRoomTurn(handle, { inboxItemId: "rejected", sourceMessage: {}, activation: {}, actionId: "rejected" }),
+    /injected prompt rejection/,
+  );
+  assert.equal(stream.some((event) => event.lifecycleProjectionOnly), false);
+  assert.equal(observations.some(({ fact }) => fact.domain === "turn"), false);
 });
 
 test("Open Model turn ids use OpenCode's ascending scheme so the native loop can exit", async () => {
@@ -1738,6 +1770,22 @@ test("Open Model typed turns preserve native model errors, next-turn reuse, and 
   assert.ok(observations.some(({ fact }) => fact.domain === "turn" && fact.providerTurnId === unreadable.turnId && fact.turnOutcome === "unreadable"));
   assert.equal(observations.some(({ fact }) => fact.domain === "runtime" && fact.state === "exited"), false);
   assert.equal(harness.launches.length, 1);
+});
+
+test("Open Model session errors do not invent an exact typed or legacy terminal", async () => {
+  const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  const stream: ProviderStreamEvent[] = [];
+  adapter.onExecution(handle, (event) => observations.push(event));
+  adapter.onStream(handle, (event) => stream.push(event));
+  harness.setTranscriptFactories([() => []]);
+  harness.setStreamEvents([{ type: "session.error", properties: { sessionID: handle.providerContinuationId } }]);
+
+  const result = await adapter.runRoomTurn(handle,
+    { inboxItemId: "session-error", sourceMessage: {}, activation: {}, actionId: "session-error" });
+  assert.equal(result.outcome, "unreadable");
+  assert.equal(observations.some(({ fact }) => fact.domain === "turn" && fact.state === "terminal"), false);
+  assert.equal(stream.some((event) => event.lifecycleProjectionOnly && event.nativeLifecyclePhase === "turn_terminal"), false);
 });
 
 test("Open Model does not invent a typed terminal from the legacy tool-child session fallback", async () => {

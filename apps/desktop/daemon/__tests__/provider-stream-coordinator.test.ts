@@ -18,7 +18,7 @@ import type { LifecycleProjectionObservation } from "../lifecycle-projection-led
 
 const cleanLifecycleProjection = () => ({
   available: true,
-  providers: Object.fromEntries(["codex", "claude-code", "cursor"].map((provider) => [provider, {
+  providers: Object.fromEntries(["codex", "claude-code", "cursor", "open-model"].map((provider) => [provider, {
     comparedSegments: 1,
     matched: 1,
     missingInTyped: 0,
@@ -26,7 +26,7 @@ const cleanLifecycleProjection = () => ({
     pairedButDifferent: 0,
     conflicts: 0,
     observationUnavailable: 0,
-  }])) as Record<"codex" | "claude-code" | "cursor", {
+  }])) as Record<"codex" | "claude-code" | "cursor" | "open-model", {
     comparedSegments: number; matched: number; missingInTyped: number; missingInLegacy: number;
     pairedButDifferent: number; conflicts: number; observationUnavailable: number;
   }>,
@@ -35,17 +35,18 @@ const captureAdmission = (status: "pending" | "ready" | "unavailable" = "ready")
   codex: status,
   "claude-code": status,
   cursor: status,
+  "open-model": status,
 });
 
 test("local lifecycle conformance requires present clean evidence and clean daemon-owned wait authority", () => {
   assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0, captureAdmission()), {
-    codex: true, "claude-code": true, cursor: true,
+    codex: true, "claude-code": true, cursor: true, "open-model": true,
   });
   assert.deepEqual(lifecycleLocalConformanceEligibility({ ...cleanLifecycleProjection(), available: false }, 0, captureAdmission()), {
-    codex: false, "claude-code": false, cursor: false,
+    codex: false, "claude-code": false, cursor: false, "open-model": false,
   });
   assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 1, captureAdmission()), {
-    codex: false, "claude-code": false, cursor: false,
+    codex: false, "claude-code": false, cursor: false, "open-model": false,
   });
   const empty = cleanLifecycleProjection();
   empty.providers.codex.comparedSegments = 0;
@@ -66,7 +67,7 @@ test("local lifecycle conformance requires present clean evidence and clean daem
     const projection = cleanLifecycleProjection();
     projection.providers.codex[field] = 1;
     assert.deepEqual(lifecycleLocalConformanceEligibility(projection, 0, captureAdmission()), {
-      codex: false, "claude-code": true, cursor: true,
+      codex: false, "claude-code": true, cursor: true, "open-model": true,
     }, `${field} blocks only its provider`);
   }
 
@@ -77,7 +78,7 @@ test("local lifecycle conformance requires present clean evidence and clean daem
   }
   for (const status of ["pending", "unavailable"] as const) {
     assert.deepEqual(lifecycleLocalConformanceEligibility(cleanLifecycleProjection(), 0, captureAdmission(status)), {
-      codex: false, "claude-code": false, cursor: false,
+      codex: false, "claude-code": false, cursor: false, "open-model": false,
     });
   }
 });
@@ -143,7 +144,7 @@ function coordinatorHarness(input: {
   observeExecution?: (installation: ProviderInstallationToken) => () => void;
   advanceExecution?: (installation: ProviderInstallationToken) => void;
   observeLegacyLifecycle?: (observation: LifecycleProjectionObservation) => void;
-  markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor") => void;
+  markLifecycleProjectionUnavailable?: (provider: "codex" | "claude-code" | "cursor" | "open-model") => void;
   lifecycleProjectionDiagnostics?: () => ReturnType<typeof cleanLifecycleProjection>;
   captureAdmission?: (installation: ProviderInstallationToken) => "pending" | "ready" | "unavailable";
   typedLifecycleAdmission?: (installation: ProviderInstallationToken) => "pending" | "ready" | "unavailable";
@@ -278,7 +279,7 @@ test("recovery diagnostics require every exact live provider lane to be capture-
   });
   await harness.coordinator.install("agent-1", handle, "generation-2");
   assert.deepEqual(harness.coordinator.recoveryDiagnostics().lifecycle_capture_admission, {
-    codex: "pending", "claude-code": "unavailable", cursor: "unavailable",
+    codex: "pending", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable",
   });
   assert.equal(harness.coordinator.recoveryDiagnostics().lifecycle_local_conformance_eligible.codex, false);
 
@@ -1288,6 +1289,78 @@ test("raw lifecycle shadow capture precedes daemon-inbox terminal rewriting and 
   }]);
   assert.equal(harness.stopCalls(), 0, "daemon-inbox still rewrites operational terminal to idle");
   assert.notEqual(harness.getManifest().observed_state, "failed");
+  await harness.coordinator.disposeAll();
+});
+
+test("Open Model projection-only frames feed comparison evidence and no operational path", async () => {
+  const observations: LifecycleProjectionObservation[] = [];
+  const unavailable: string[] = [];
+  const activity: string[] = [];
+  let activityOnly = 0;
+  let publications = 0;
+  let deliveries = 0;
+  let cutovers = 0;
+  const openModelHandle: ProviderActionHandle = {
+    ...handle,
+    providerConnection: { kind: "opencode_server", url: "http://127.0.0.1:4311", pid: 42,
+      processIdentity: "opencode:42", serverAuthPath: "/private/opencode-auth.json" },
+  };
+  const harness = coordinatorHarness({
+    observeLegacyLifecycle: observation => observations.push(observation),
+    markLifecycleProjectionUnavailable: provider => unavailable.push(provider),
+    appendActivity: async method => { activity.push(method); },
+    appendActivityOnly: async () => { activityOnly += 1; },
+    publishNativeActivity: async () => { publications += 1; },
+    startDelivery: async () => { deliveries += 1; },
+    startCutover: async () => { cutovers += 1; },
+  });
+  harness.setManifest({ ...entry(), provider: "open-model", provider_ref: {
+    ...entry().provider_ref!, provider_connection: { ...openModelHandle.providerConnection! },
+  } });
+  await harness.coordinator.install("agent-1", openModelHandle, "generation-2");
+  const baseline = { activity: activity.length, activityOnly, publications, deliveries, cutovers,
+    manifest: harness.getManifest(), stop: harness.stopCalls() };
+
+  await harness.coordinator.enqueue("agent-1", openModelHandle, {
+    ...streamEvent(1, "turn/completed"),
+    provider: "open-model",
+    kind: "turn_lifecycle",
+    nativeEventId: "open-model-terminal",
+    nativeLifecyclePhase: "turn_terminal",
+    lifecycleProjectionOnly: true,
+  });
+  assert.deepEqual(observations, [{
+    agentId: "agent-1", provider: "open-model", workAttemptId: "attempt-1",
+    executionGenerationId: "generation-2", nativeEventId: "open-model-terminal",
+    phase: "turn_terminal", state: "terminal",
+  }]);
+  assert.deepEqual({ activity: activity.length, activityOnly, publications, deliveries, cutovers,
+    manifest: harness.getManifest(), stop: harness.stopCalls() }, baseline,
+  "comparison evidence cannot mutate delivery, activity, manifest, or provider lifecycle");
+
+  await harness.coordinator.enqueue("agent-1", openModelHandle, {
+    ...streamEvent(2, "turn/completed"), provider: "open-model", kind: "turn_lifecycle",
+    nativeEventId: "malformed", nativeLifecyclePhase: "turn_active", lifecycleProjectionOnly: true,
+  });
+  assert.deepEqual(unavailable, ["open-model"]);
+  assert.equal(observations.length, 1);
+  assert.deepEqual({ activity: activity.length, activityOnly, publications, deliveries, cutovers,
+    manifest: harness.getManifest(), stop: harness.stopCalls() }, baseline,
+  "malformed comparison evidence is unavailable-only");
+
+  await harness.coordinator.enqueue("agent-1", { ...openModelHandle, pid: 99 }, {
+    ...streamEvent(3, "not-a-lifecycle-frame"), provider: "open-model", lifecycleProjectionOnly: true,
+  });
+  assert.deepEqual(unavailable, ["open-model", "open-model"],
+    "a stale malformed comparison frame still records unavailable evidence");
+  assert.deepEqual({ activity: activity.length, activityOnly, publications, deliveries, cutovers,
+    manifest: harness.getManifest(), stop: harness.stopCalls() }, baseline);
+
+  await harness.coordinator.enqueue("agent-1", openModelHandle, {
+    ...streamEvent(4, "item/agentMessage/delta"), provider: "open-model",
+  });
+  assert.deepEqual(activity, ["item/agentMessage/delta"],
+    "ordinary Open Model stream frames retain the existing operational path");
   await harness.coordinator.disposeAll();
 });
 

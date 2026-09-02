@@ -623,7 +623,7 @@ export class ExecutionShadowStore {
     if (fact.domain !== "turn" || fact.nativeEventId === undefined
       || (fact.state !== "active" && fact.state !== "terminal") || !retainedTurn || !retainedRuntime) return;
     const provider = String(retainedRuntime.provider);
-    if (!(["codex", "claude-code", "cursor"] as const).includes(provider as LifecycleProjectionProvider)) return;
+    if (!(["codex", "claude-code", "cursor", "open-model"] as const).includes(provider as LifecycleProjectionProvider)) return;
     const generation = this.required(`SELECT workspace_id FROM execution_attempt_generations
       WHERE attempt_id=? AND execution_generation_id=? AND agent_id=?`, retainedTurn.attempt_id,
     fact.executionGenerationId, fact.agentId);

@@ -697,7 +697,7 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
 
       const cleanProjection = {
         available: true,
-        providers: Object.fromEntries(["codex", "claude-code", "cursor"].map((provider) => [provider, {
+        providers: Object.fromEntries(["codex", "claude-code", "cursor", "open-model"].map((provider) => [provider, {
           comparedSegments: 1,
           matched: 1,
           missingInTyped: 0,
@@ -707,8 +707,8 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
           observationUnavailable: 0,
         }])),
       };
-      const eligibility = { codex: true, "claude-code": true, cursor: true };
-      const admissionReady = { codex: "ready", "claude-code": "ready", cursor: "ready" };
+      const eligibility = { codex: true, "claude-code": true, cursor: true, "open-model": true };
+      const admissionReady = { codex: "ready", "claude-code": "ready", cursor: "ready", "open-model": "ready" };
       wire.statusRecoveryDiagnostics.value = {
         daemon_inbox_wait_evidence_dependency: 0,
         lifecycle_projection: cleanProjection,
@@ -722,8 +722,8 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
         lifecycleLocalConformanceEligible: eligibility,
       });
       const unavailableProjection = { ...cleanProjection, available: false };
-      const unavailableEligibility = { codex: false, "claude-code": false, cursor: false };
-      const admissionUnavailable = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable" };
+      const unavailableEligibility = { codex: false, "claude-code": false, cursor: false, "open-model": false };
+      const admissionUnavailable = { codex: "unavailable", "claude-code": "unavailable", cursor: "unavailable", "open-model": "unavailable" };
       wire.statusRecoveryDiagnostics.value = {
         daemon_inbox_wait_evidence_dependency: 0,
         lifecycle_projection: unavailableProjection,
@@ -767,7 +767,7 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
             ...cleanProjection,
             providers: {
               ...cleanProjection.providers,
-              codex: { ...cleanProjection.providers.codex, comparedSegments: 0 },
+              "open-model": { ...cleanProjection.providers["open-model"], comparedSegments: 0 },
             },
           },
           lifecycle_capture_admission: admissionReady,
@@ -817,7 +817,8 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       for (const malformedEligibility of [
         undefined,
         { codex: true, "claude-code": true },
-        { codex: true, "claude-code": true, cursor: "true" },
+        { codex: true, "claude-code": true, cursor: true },
+        { codex: true, "claude-code": true, cursor: true, "open-model": "true" },
       ]) {
         wire.statusRecoveryDiagnostics.value = {
           daemon_inbox_wait_evidence_dependency: 0,
@@ -830,7 +831,8 @@ test("state subscriptions observe an existing daemon without spawning one", asyn
       for (const malformedAdmission of [
         undefined,
         { codex: "ready", "claude-code": "ready" },
-        { codex: "ready", "claude-code": "ready", cursor: "unknown" },
+        { codex: "ready", "claude-code": "ready", cursor: "ready" },
+        { codex: "ready", "claude-code": "ready", cursor: "ready", "open-model": "unknown" },
       ]) {
         wire.statusRecoveryDiagnostics.value = {
           daemon_inbox_wait_evidence_dependency: 0,

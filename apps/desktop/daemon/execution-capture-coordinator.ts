@@ -45,6 +45,7 @@ function lifecycleProvider(connection: ProviderActionConnectionRef | null | unde
   if (connection?.kind === "codex_app_server") return "codex";
   if (connection?.kind === "claude_cli") return "claude-code";
   if (connection?.kind === "cursor_cli") return "cursor";
+  if (connection?.kind === "opencode_server") return "open-model";
   return null;
 }
 
@@ -250,12 +251,14 @@ export class ExecutionCaptureCoordinator {
   recordLegacyLifecycle(value: LifecycleProjectionObservation): void {
     if (this.closed) return;
     const provider = value?.provider;
-    if (!(provider === "codex" || provider === "claude-code" || provider === "cursor")
+    if (!(provider === "codex" || provider === "claude-code" || provider === "cursor" || provider === "open-model")
       || ![value.agentId, value.workAttemptId, value.executionGenerationId, value.nativeEventId]
         .every(identity => executionIdentity.safeParse(identity).success)
       || !(value.phase === "turn_active" || value.phase === "turn_terminal")
       || !(value.state === "working" || value.state === "idle" || value.state === "terminal" || value.state === "failed")) {
-      if (provider === "codex" || provider === "claude-code" || provider === "cursor") this.markLifecycleProjectionUnavailable(provider);
+      if (provider === "codex" || provider === "claude-code" || provider === "cursor" || provider === "open-model") {
+        this.markLifecycleProjectionUnavailable(provider);
+      }
       return;
     }
     try {

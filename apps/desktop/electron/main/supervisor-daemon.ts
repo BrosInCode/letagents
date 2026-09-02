@@ -1803,7 +1803,7 @@ function mapStatus(value: Record<string, unknown>): DesktopSupervisorDaemonStatu
   };
 }
 
-const lifecycleProjectionProviders = ["codex", "claude-code", "cursor"] as const;
+const lifecycleProjectionProviders = ["codex", "claude-code", "cursor", "open-model"] as const;
 const lifecycleProjectionCounterKeys = [
   "comparedSegments",
   "matched",

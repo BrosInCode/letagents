@@ -10,7 +10,8 @@ import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import { RoomWorkPublicationStore, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
-import { validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
+import { LifecycleProjectionLedger, validateLegacyLifecycleProjectionLedgerSchema,
+  validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
 
 type Row = Record<string, unknown>;
@@ -135,15 +136,52 @@ function restoreV27Fixture(database: DatabaseSync): void {
 }
 
 function restoreV28Fixture(database: DatabaseSync): void {
+  restoreLifecycleProjectionV1Fixture(database);
   database.exec("DROP TABLE execution_lifecycle_effects; UPDATE manifest_metadata SET schema_version=28 WHERE singleton=1; PRAGMA user_version=28");
 }
 
 function restoreV30Fixture(database: DatabaseSync): void {
+  restoreLifecycleProjectionV1Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()!.count, 0);
   database.exec("DROP TABLE execution_lifecycle_effects");
   applyExecutionStorageSchema(database, 22);
   database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
   validateExecutionStorageSchema(database, 22);
+}
+
+function restoreLifecycleProjectionV1Fixture(database: DatabaseSync): void {
+  const noDelete = String(database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='lifecycle_projection_total_no_delete'",
+  ).get()!.sql);
+  database.exec(`DROP TRIGGER lifecycle_projection_total_no_delete;
+    DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
+    ${noDelete}`);
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
+    WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  validateLegacyLifecycleProjectionLedgerSchema(database);
+}
+
+function restoreV31Fixture(database: DatabaseSync): void {
+  restoreLifecycleProjectionV1Fixture(database);
+  database.exec("UPDATE manifest_metadata SET schema_version=31 WHERE singleton=1; PRAGMA user_version=31");
+}
+
+function seedLifecycleProjectionV1Evidence(database: DatabaseSync): void {
+  const ledger = new LifecycleProjectionLedger(database, () => 100);
+  const base = { agentId: "comparator-agent", provider: "codex" as const,
+    workAttemptId: "comparator-attempt", executionGenerationId: "comparator-generation" };
+  for (const observation of [
+    { ...base, nativeEventId: "comparator-active", phase: "turn_active" as const, state: "working" as const },
+    { ...base, nativeEventId: "comparator-terminal", phase: "turn_terminal" as const, state: "terminal" as const },
+  ]) {
+    database.exec("BEGIN IMMEDIATE");
+    try { ledger.recordTypedInCurrentTransaction(observation); database.exec("COMMIT"); }
+    catch (error) { try { database.exec("ROLLBACK"); } catch { /* transaction already closed */ } throw error; }
+    ledger.recordLegacy(observation);
+  }
 }
 
 function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
@@ -455,6 +493,7 @@ test("v30 marker recovery accepts only a complete exact-current lifecycle journa
       );
     }
     const before = env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all();
+    restoreLifecycleProjectionV1Fixture(env.database);
     env.database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all(), before);
@@ -1324,7 +1363,7 @@ test("v28 adds empty lifecycle comparison evidence without changing retained aut
     assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_lanes").all(), []);
     assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_pairs").all(), []);
     assert.deepEqual(env.database.prepare("SELECT provider FROM lifecycle_projection_totals ORDER BY provider")
-      .all().map((row) => row.provider), ["claude-code", "codex", "cursor"]);
+      .all().map((row) => row.provider), ["claude-code", "codex", "cursor", "open-model"]);
     assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, DAEMON_STATE_SCHEMA_VERSION);
   } finally { await env.cleanup(); }
@@ -1374,6 +1413,78 @@ test("v28 refuses malformed lifecycle comparison storage before WAL or initializ
       assert.deepEqual(await readFile(env.path), before);
     } finally { await env.cleanup(); }
   }
+});
+
+test("v32 starts a fresh four-provider comparator epoch without changing operational authority", async () => {
+  const env = await fixture();
+  try {
+    seedLegacyEvidence(env.database);
+    seedLifecycleProjectionV1Evidence(env.database);
+    restoreV31Fixture(env.database);
+    const retained = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
+    assert.equal(env.database.prepare("SELECT compared_segments FROM lifecycle_projection_totals WHERE provider='codex'")
+      .get()!.compared_segments, 1);
+
+    new DaemonStateSchema().createSchema(env.database);
+
+    assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, retained);
+    assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_lanes").all(), []);
+    assert.deepEqual(env.database.prepare("SELECT * FROM lifecycle_projection_pairs").all(), []);
+    assert.deepEqual(env.database.prepare(`SELECT provider,compared_segments,matched,missing_in_typed,
+      missing_in_legacy,paired_but_different,conflicts,observation_unavailable
+      FROM lifecycle_projection_totals ORDER BY provider`).all().map((row) => ({ ...row })), [
+      "claude-code", "codex", "cursor", "open-model",
+    ].map((provider) => ({ provider, compared_segments: 0, matched: 0, missing_in_typed: 0,
+      missing_in_legacy: 0, paired_but_different: 0, conflicts: 0, observation_unavailable: 0 })));
+    validateLifecycleProjectionLedgerSchema(env.database);
+    const reopened = await openDaemonStateDatabase(env.path, database => new DaemonStateSchema().createSchema(database));
+    try { assert.deepEqual(reopened.prepare("SELECT * FROM lifecycle_projection_pairs").all(), []); }
+    finally { reopened.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("v32 comparator epoch reset and version markers roll back together", async () => {
+  const env = await fixture();
+  try {
+    seedLifecycleProjectionV1Evidence(env.database);
+    restoreV31Fixture(env.database);
+    const before = {
+      versions: versionPair(env.database),
+      lanes: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_lanes ORDER BY rowid").all(),
+      pairs: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_pairs ORDER BY rowid").all(),
+      totals: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_totals ORDER BY rowid").all(),
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE name GLOB 'lifecycle_projection_*' ORDER BY type,name").all(),
+    };
+    assert.throws(() => new DaemonStateSchema((database) => {
+      validateLifecycleProjectionLedgerSchema(database);
+      throw new Error("interrupt comparator epoch reset");
+    }).createSchema(env.database), /interrupt comparator epoch reset/);
+    assert.deepEqual({
+      versions: versionPair(env.database),
+      lanes: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_lanes ORDER BY rowid").all(),
+      pairs: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_pairs ORDER BY rowid").all(),
+      totals: env.database.prepare("SELECT rowid,* FROM lifecycle_projection_totals ORDER BY rowid").all(),
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE name GLOB 'lifecycle_projection_*' ORDER BY type,name").all(),
+    }, before);
+    validateLegacyLifecycleProjectionLedgerSchema(env.database);
+  } finally { await env.cleanup(); }
+});
+
+test("v32 refuses a corrupt three-provider comparator before WAL conversion or reset", async () => {
+  const env = await fixture();
+  try {
+    restoreV31Fixture(env.database);
+    env.database.exec("DROP TRIGGER lifecycle_projection_pair_immutable; PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE");
+    const before = await readFile(env.path);
+    let initialized = false;
+
+    await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }),
+      /Lifecycle projection ledger/);
+    assert.equal(initialized, false);
+    assert.deepEqual(await readFile(env.path), before);
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database), /Lifecycle projection ledger/);
+    assert.deepEqual(await readFile(env.path), before);
+  } finally { await env.cleanup(); }
 });
 
 test("v29 freezes only exact active pre-B1 native births as legacy", async () => {
