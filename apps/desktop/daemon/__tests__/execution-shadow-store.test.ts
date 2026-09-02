@@ -208,11 +208,13 @@ test("runtime authority freezes on first exact materialization and successor bir
   } finally { db.close(); }
 });
 
-test("the closed release policy gives only daemon-owned Codex births typed authority", () => {
-  assert.equal(lifecycleAuthorityModeForProvider("codex", "daemon_inbox"), "typed");
-  assert.equal(lifecycleAuthorityModeForProvider("codex", "mcp_polling"), "typed_shadow");
-  assert.equal(lifecycleAuthorityModeForProvider("codex", "desktop_events"), "typed_shadow");
-  for (const provider of ["claude-code", "cursor", "open-model"] as const) {
+test("the closed release policy gives daemon-owned Codex and Open Model births typed authority", () => {
+  for (const provider of ["codex", "open-model"] as const) {
+    assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed");
+    assert.equal(lifecycleAuthorityModeForProvider(provider, "mcp_polling"), "typed_shadow");
+    assert.equal(lifecycleAuthorityModeForProvider(provider, "desktop_events"), "typed_shadow");
+  }
+  for (const provider of ["claude-code", "cursor"] as const) {
     assert.equal(lifecycleAuthorityModeForProvider(provider, "daemon_inbox"), "typed_shadow");
   }
 });

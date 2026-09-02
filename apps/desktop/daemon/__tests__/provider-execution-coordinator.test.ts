@@ -49,6 +49,17 @@ const returnedHandle: ProviderActionHandle = {
   observedState: "working",
 };
 
+const openModelHandle: ProviderActionHandle = {
+  ...returnedHandle,
+  providerConnection: {
+    kind: "opencode_server",
+    url: "http://127.0.0.1:4343",
+    pid: 4343,
+    processIdentity: "birth-4343",
+    serverAuthPath: "/tmp/opencode-auth.json",
+  },
+};
+
 function terminal(current: ProviderActionHandle): ProviderActionTerminal {
   return {
     endedAt: "2026-08-26T00:00:02.000Z",
@@ -119,11 +130,11 @@ function harness(input: {
       load: async () => ({ generation: manifestGeneration, entries: [manifestEntry] }),
       getEntry: async (entryId) => entryId === manifestEntry.id ? manifestEntry : undefined,
       getAgentConfiguration: async () => ({
-        provider: "codex",
-        model: null,
+        provider: manifestEntry.provider,
+        model: manifestEntry.model,
         reasoning_effort: null,
-        permission_profile_id: "full_access",
-        provider_launch_policy: {},
+        permission_profile_id: manifestEntry.permission_profile_id,
+        provider_launch_policy: manifestEntry.provider_launch_policy,
         config_revision: 1,
         runtime_configuration_revision: 1,
       }),
@@ -281,7 +292,9 @@ function harness(input: {
       bindMintedSession: async () => {},
       bearerNeedsRotation: async () => false,
       blockExpiredAuthority: async () => {},
-      currentOpenModelCredential: () => null,
+      currentOpenModelCredential: (entryId, daemonGeneration) => manifestEntry.provider === "open-model"
+        ? { entryId, apiKey: "test-key", baseUrl: "https://models.example.test/v1", model: "test-model", daemonGeneration }
+        : null,
       recordBindingRecoveryFailure: async () => {},
       clearSuccessfulRecovery: () => {},
     },
@@ -324,67 +337,85 @@ test("delivery handoff freezes convergence and draining never creates a successo
   }
 });
 
-test("new daemon-owned Codex births launch and freeze with typed authority", async () => {
-  let requestedAuthority: "legacy" | "typed_shadow" | "typed" | undefined;
-  const runtime = harness({
-    entry: { ...baseEntry(), delivery_mode: "daemon_inbox" },
-    provider: provider({
-      spawn: async request => {
-        requestedAuthority = request.lifecycleAuthorityMode;
-        return returnedHandle;
-      },
-    }),
+for (const { label, providerId, handle } of [
+  { label: "Codex", providerId: "codex", handle: returnedHandle },
+  { label: "Open Model", providerId: "open-model", handle: openModelHandle },
+] as const) {
+  test(`new daemon-owned ${label} births launch and freeze with typed authority`, async () => {
+    let requestedAuthority: "legacy" | "typed_shadow" | "typed" | undefined;
+    const runtime = harness({
+      entry: { ...baseEntry(), provider: providerId, delivery_mode: "daemon_inbox" },
+      provider: provider({
+        spawn: async request => {
+          requestedAuthority = request.lifecycleAuthorityMode;
+          return handle;
+        },
+      }),
+    });
+
+    await runtime.coordinator.converge("agent-1");
+
+    assert.equal(requestedAuthority, "typed");
+    assert.equal(runtime.installed.length, 1);
+    assert.equal(await runtime.options.store.readRuntimeLifecycleAuthority({
+      agentId: "agent-1",
+      executionGenerationId: "generation-1",
+      providerConnection: handle.providerConnection!,
+      configurationRevision: 1,
+    }), "typed", `the exact ${label} birth keeps the requested authority mode`);
   });
+}
 
-  await runtime.coordinator.converge("agent-1");
-
-  assert.equal(requestedAuthority, "typed");
-  assert.equal(runtime.installed.length, 1);
-  assert.equal(await runtime.options.store.readRuntimeLifecycleAuthority({
-    agentId: "agent-1",
-    executionGenerationId: "generation-1",
-    providerConnection: returnedHandle.providerConnection!,
-    configurationRevision: 1,
-  }), "typed", "the exact provider birth keeps the requested authority mode");
-});
-
-test("reattach passes the exact birth's frozen authority to Codex", async () => {
-  let attachedAuthority: "legacy" | "typed_shadow" | "typed" | undefined;
-  const current = {
-    ...baseEntry(),
-    delivery_mode: "daemon_inbox" as const,
-    observed_state: "recovering" as const,
-    provider_ref: {
-      work_attempt_id: "attempt-1",
+for (const { label, providerId, handle, frozenAuthorityMode } of [
+  { label: "Codex", providerId: "codex", handle: returnedHandle, frozenAuthorityMode: "typed" },
+  { label: "Open Model", providerId: "open-model", handle: openModelHandle, frozenAuthorityMode: "typed_shadow" },
+] as const) {
+  test(`${label} reattach preserves the exact birth's frozen authority`, async () => {
+    let attachedAuthority: "legacy" | "typed_shadow" | "typed" | undefined;
+    const current = {
+      ...baseEntry(),
+      provider: providerId,
+      delivery_mode: "daemon_inbox" as const,
+      observed_state: "recovering" as const,
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: handle.providerConnection,
+      },
+    };
+    const runtime = harness({
+      entry: current,
+      frozenAuthorityMode,
+      provider: provider({
+        attach: async ref => {
+          attachedAuthority = ref.lifecycleAuthorityMode;
+          return handle;
+        },
+      }),
+    });
+    runtime.executionGenerations.push({
       execution_generation_id: "generation-1",
-      provider_continuation_id: "continuation-1",
-      provider_connection: returnedHandle.providerConnection,
-    },
-  };
-  const runtime = harness({
-    entry: current,
-    frozenAuthorityMode: "typed",
-    provider: provider({
-      attach: async ref => {
-        attachedAuthority = ref.lifecycleAuthorityMode;
-        return returnedHandle;
-      },
-    }),
-  });
-  runtime.executionGenerations.push({
-    execution_generation_id: "generation-1",
-    work_attempt_id: "attempt-1",
-    started_at: "2026-08-26T00:00:00.000Z",
-    actor: "test",
-    generation: 1,
-    terminal: null,
-  });
+      work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z",
+      actor: "test",
+      generation: 1,
+      terminal: null,
+    });
 
-  await runtime.coordinator.converge("agent-1");
+    await runtime.coordinator.converge("agent-1");
 
-  assert.equal(attachedAuthority, "typed");
-  assert.equal(runtime.installed.length, 1);
-});
+    assert.equal(attachedAuthority, frozenAuthorityMode);
+    assert.equal(runtime.installed.length, 1);
+    assert.equal(runtime.executionGenerations.length, 1, "reattach cannot mint a successor generation");
+    assert.equal(await runtime.options.store.readRuntimeLifecycleAuthority({
+      agentId: "agent-1",
+      executionGenerationId: "generation-1",
+      providerConnection: handle.providerConnection!,
+      configurationRevision: 1,
+    }), frozenAuthorityMode, `the release cutover cannot relabel an existing ${label} birth`);
+  });
+}
 
 test("typed durable terminal authority fences a stale live handle without reopening delivery", async () => {
   let runtime!: ReturnType<typeof harness>;
