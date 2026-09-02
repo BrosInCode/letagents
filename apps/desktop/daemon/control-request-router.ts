@@ -80,6 +80,7 @@ export interface DaemonControlOperations {
   installHostGrant(input: {
     entry_id: string; room_id: string; agent_key: string; grant_id: string; supervisor_grant: string;
     grant_generation: number; api_url: string; host_id: string; installation_id: string;
+    owner_account_id: string | null; scope_key: string | null;
     grant_expires_at: string; daemon_generation: number; credential_only: boolean; recovery_only: boolean;
   }): unknown;
   installOpenModelCredential(input: {
@@ -584,6 +585,8 @@ export function createDaemonControlRequestHandler(
         grant_id: String(params.grant_id ?? ""), supervisor_grant: String(params.supervisor_grant ?? ""),
         grant_generation: Number(params.grant_generation ?? NaN), api_url: String(params.api_url ?? ""),
         host_id: String(params.host_id ?? ""), installation_id: String(params.installation_id ?? ""),
+        owner_account_id: typeof params.owner_account_id === "string" ? params.owner_account_id : null,
+        scope_key: typeof params.scope_key === "string" ? params.scope_key : null,
         grant_expires_at: String(params.grant_expires_at ?? ""),
         daemon_generation: Number(params.daemon_generation ?? NaN),
         credential_only: params.credential_only === true,

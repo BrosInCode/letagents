@@ -59,6 +59,7 @@ const metadata = (key: string, id = "grant_1", roomId = "room_1") => ({
   grantId: id, hostId: "host_1", installationId: "install_1", allowedRoomIds: [roomId],
   allowedAgentKeys: [key], generation: 1, expiresAt: "2099-01-01T00:00:00.000Z",
 });
+const authority = { ownerAccountId: "account_1", scopeKey: "owner" };
 
 function entry(id = "supervised_launch_1234567"): DesktopSupervisorManifestEntry {
   return {
@@ -76,7 +77,7 @@ function entry(id = "supervised_launch_1234567"): DesktopSupervisorManifestEntry
 function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) {
   const events: string[] = [];
   const bootstrapMessages: Array<string | undefined> = [];
-  const grants = new Map<string, { metadata: ReturnType<typeof metadata>; token: string; entryId: string; lastInstalledDaemonGeneration: number | null }>();
+  const grants = new Map<string, { metadata: ReturnType<typeof metadata>; authority?: typeof authority | null; token: string; entryId: string; lastInstalledDaemonGeneration: number | null }>();
   const daemon = {
     async ensureRunning() { events.push("ensure"); return { generation: 7 }; },
     async create(input: { roomIdentifier: string; charter?: string }) { events.push(`create:${input.roomIdentifier}`); return { ...entry(), roomId: input.roomIdentifier, charter: input.charter ?? entry().charter, desiredState: "paused" as const }; },
@@ -102,15 +103,19 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
     async resolveIdentity(input) { events.push(`identity:${input.entryId}`); return `owner/${input.entryId}`; },
     async provision(input) {
       events.push(`provision:${input.entryId}:${Boolean(input.forceReprovision)}`);
-      const result = { metadata: metadata(input.agentKey), token: "secret_provisioned", entryId: input.entryId, lastInstalledDaemonGeneration: null };
+      const result = { metadata: metadata(input.agentKey), authority, token: "secret_provisioned", entryId: input.entryId, lastInstalledDaemonGeneration: null };
       grants.set(input.agentKey, result);
       return result;
     },
     async readEntryAgentKey(id) { events.push(`read-key:${id}`); return `owner/${id}`; },
-    async readGrant(key) { events.push(`read-grant:${key}`); return grants.get(key) ?? null; },
+    async readGrant(key) {
+      events.push(`read-grant:${key}`);
+      const stored = grants.get(key);
+      return stored ? { ...stored, authority: stored.authority ?? null } : null;
+    },
     async replaceGrant(input) {
       events.push(`replace:${input.lastInstalledDaemonGeneration ?? "none"}`);
-      grants.set(input.agentKey, { metadata: input.metadata, token: input.token, entryId: input.entryId!, lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null });
+      grants.set(input.agentKey, { metadata: input.metadata, authority: input.authority ?? null, token: input.token, entryId: input.entryId!, lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null });
     },
     async revokeEntry(id, sessionId) { events.push(`revoke:${id}:${sessionId}`); },
     async revokeEntryWithoutWorkerSession(id) { events.push(`revoke-grant:${id}`); },
@@ -147,6 +152,7 @@ test("fresh rental launch queues its accepted task once while recovery paths omi
     agentKey: "renter/rental-agent",
     preparedGrant: {
       metadata: metadata("renter/rental-agent"),
+      authority: null,
       token: "secret_rental",
     },
   });
@@ -771,7 +777,7 @@ test("restart recovery repairs a lowercase mapping before provisioning and insta
     provision: async (input) => {
       provisionedKey = input.agentKey;
       return {
-        metadata: metadata(input.agentKey), token: "secret_repaired", entryId: input.entryId,
+        metadata: metadata(input.agentKey), authority, token: "secret_repaired", entryId: input.entryId,
         lastInstalledDaemonGeneration: null,
       };
     },
@@ -832,7 +838,7 @@ test("a successful login retries the exact grant after same-generation credentia
   t.mock.method(console, "warn", () => {});
   let authenticated = false;
   const key = "owner/supervised_launch_1234567";
-  const stored = { metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
+  const stored = { metadata: metadata(key), authority, token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
   const h = harness({
     readGrant: async () => {
       if (!authenticated) throw new Error("owner auth unavailable");
@@ -889,7 +895,7 @@ test("secure storage recovery wakes once after a startup failure even before a r
   const h = harness({
     readGrant: async () => {
       if (!available) throw new DesktopSecureStorageUnavailableError("storage unavailable");
-      return { metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
+      return { metadata: metadata(key), authority, token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
     },
   });
   await assert.rejects(h.coordinator.reconcileDesiredRunning(), DesktopSecureStorageUnavailableError);
@@ -914,7 +920,7 @@ test("successful native probes cannot repeatedly retry a credential-specific enc
   };
   const key = "owner/supervised_launch_1234567";
   const h = harness({
-    readGrant: async () => ({ metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 }),
+    readGrant: async () => ({ metadata: metadata(key), authority, token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 }),
     replaceGrant: async (input) => { encryptSupervisorGrantForStorage(input.token, storage); },
   });
   const probe = () => {
@@ -967,7 +973,7 @@ test("a stale installation after credential recovery never advances the durable 
   t.mock.method(console, "warn", () => {});
   const h = harness();
   const key = "owner/supervised_launch_1234567";
-  const stored = { metadata: metadata(key), token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
+  const stored = { metadata: metadata(key), authority, token: "secret_same", entryId: entry().id, lastInstalledDaemonGeneration: 7 };
   const c = new SupervisorGrantCoordinator({
     ...h.daemon,
     async installHostGrant() { h.events.push("install:stale"); return "stale"; },
@@ -1015,13 +1021,24 @@ test("daemon successor rotates then persists the replacement before exact-genera
   const request = (async () => ({
     grant_id: "grant_2", host_id: "host_1", installation_id: "install_1", allowed_room_ids: ["room_1"], allowed_agent_keys: [key],
     current_generation: 2, expires_at: "2099-01-01T00:00:00.000Z", supervisor_grant: "secret_successor",
+    owner_account_id: authority.ownerAccountId, scope_key: authority.scopeKey,
   })) as never;
   const replacementHarness = harness();
   replacementHarness.grants.set(key, { metadata: metadata(key), token: "secret_old", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 6 });
   const c = new SupervisorGrantCoordinator(replacementHarness.daemon as never, request, () => "host_1", {
     resolveIdentity: async () => key, provision: async () => { throw new Error("must not reprovision"); },
-    readEntryAgentKey: async () => key, readGrant: async () => replacementHarness.grants.get(key)!,
-    replaceGrant: async (input) => { replacementHarness.events.push(`replace:${input.lastInstalledDaemonGeneration ?? "none"}`); replacementHarness.grants.set(key, { metadata: input.metadata, token: input.token, entryId: input.entryId!, lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null }); },
+    readEntryAgentKey: async () => key,
+    readGrant: async () => ({ ...replacementHarness.grants.get(key)!, authority: replacementHarness.grants.get(key)?.authority ?? null }),
+    replaceGrant: async (input) => {
+      replacementHarness.events.push(`replace:${input.lastInstalledDaemonGeneration ?? "none"}`);
+      replacementHarness.grants.set(key, {
+        metadata: input.metadata,
+        authority: input.authority ?? null,
+        token: input.token,
+        entryId: input.entryId!,
+        lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+      });
+    },
     revokeEntry: async () => { throw new Error("no stopped entries expected"); },
     revokeEntryWithoutWorkerSession: async () => { throw new Error("no stopped entries expected"); },
   }, async () => "room_1");
@@ -1029,10 +1046,120 @@ test("daemon successor rotates then persists the replacement before exact-genera
   assert.deepEqual(replacementHarness.events.filter((event) => event.startsWith("replace") || event.startsWith("install")), ["replace:none", "install:7", "replace:7"]);
 });
 
+test("daemon successor preserves delegation-ineligible rental provenance", async () => {
+  const h = harness();
+  const key = "renter/rental-agent";
+  let stored: {
+    metadata: ReturnType<typeof metadata>;
+    authority: typeof authority | null;
+    token: string;
+    entryId: string;
+    lastInstalledDaemonGeneration: number | null;
+  } = {
+    metadata: metadata(key, "grant_rental"), authority: null, token: "secret_rental",
+    entryId: entry().id, lastInstalledDaemonGeneration: 6,
+  };
+  const installs: Array<{ ownerAccountId: string | null; scopeKey: string | null }> = [];
+  const request = (async () => ({
+    grant_id: "grant_rental_successor", host_id: "host_1", installation_id: "install_1",
+    allowed_room_ids: ["room_1"], allowed_agent_keys: [key], current_generation: 2,
+    expires_at: "2099-01-01T00:00:00.000Z", supervisor_grant: "secret_rental_successor",
+    owner_account_id: authority.ownerAccountId, scope_key: authority.scopeKey,
+  })) as never;
+  const coordinator = new SupervisorGrantCoordinator({
+    ...h.daemon,
+    async installHostGrant(input: { ownerAccountId: string | null; scopeKey: string | null }) {
+      installs.push(input);
+      return "installed" as const;
+    },
+  } as never, request, () => "host_1", {
+    ...h.operations,
+    readEntryAgentKey: async () => key,
+    readGrant: async () => stored,
+    provision: async () => { throw new Error("must hand off the rental grant"); },
+    replaceGrant: async (input) => {
+      stored = {
+        metadata: input.metadata,
+        authority: input.authority ?? null,
+        token: input.token,
+        entryId: input.entryId!,
+        lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null,
+      };
+    },
+  }, async () => "room_1");
+
+  await coordinator.reconcileDesiredRunning();
+
+  assert.equal(stored.authority, null, "handoff cannot make an unproven rental grant delegation-eligible");
+  assert.deepEqual(
+    installs.map(({ ownerAccountId, scopeKey }) => ({ ownerAccountId, scopeKey })),
+    [{ ownerAccountId: null, scopeKey: null }],
+  );
+});
+
+test("failed rental handoff never enters owner-authenticated reprovision", async () => {
+  const h = harness();
+  const key = "renter/rental-agent";
+  const stored = {
+    metadata: metadata(key, "grant_rental"), authority: null, token: "secret_rental",
+    entryId: entry().id, lastInstalledDaemonGeneration: 6,
+  };
+  let provisionCalls = 0;
+  const coordinator = new SupervisorGrantCoordinator(
+    h.daemon as never,
+    (async () => { throw new Error("rental handoff unavailable"); }) as never,
+    () => "host_1",
+    {
+      ...h.operations,
+      readEntryAgentKey: async () => key,
+      readGrant: async () => stored,
+      provision: async () => {
+        provisionCalls += 1;
+        throw new Error("rental grant must not use owner reprovision");
+      },
+    },
+    async () => "room_1",
+  );
+
+  await assert.rejects(coordinator.reconcileDesiredRunning(), /rental handoff unavailable/);
+  assert.equal(provisionCalls, 0);
+  assert.equal(stored.authority, null);
+});
+
+test("host identity drift cannot replace the saved grant during fallback", async () => {
+  const h = harness();
+  const key = "owner/supervised_launch_1234567";
+  const stored = {
+    metadata: { ...metadata(key), hostId: "host_previous" }, authority, token: "secret_previous",
+    entryId: entry().id, lastInstalledDaemonGeneration: 6,
+  };
+  let provisionCalls = 0;
+  const coordinator = new SupervisorGrantCoordinator(
+    h.daemon as never,
+    (async () => { throw new Error("handoff unavailable"); }) as never,
+    () => "host_1",
+    {
+      ...h.operations,
+      readEntryAgentKey: async () => key,
+      readGrant: async () => stored,
+      provision: async () => {
+        provisionCalls += 1;
+        throw new Error("must not provision for another host identity");
+      },
+    },
+    async () => "room_1",
+  );
+
+  await assert.rejects(coordinator.reconcileDesiredRunning(), /does not match this desktop host installation/);
+  assert.equal(provisionCalls, 0);
+  assert.equal(stored.metadata.hostId, "host_previous");
+  assert.deepEqual(stored.authority, authority);
+});
+
 test("stale or revoked handoff safely owner-reprovisions, and two entries stay independent", async () => {
   const h = harness({
     readEntryAgentKey: async (id) => `owner/${id}`,
-    readGrant: async () => ({ metadata: metadata("owner/key"), token: "secret_stale", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 1 }),
+    readGrant: async () => ({ metadata: metadata("owner/key"), authority, token: "secret_stale", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 1 }),
   });
   const request = (async () => { throw new Error("stale bearer"); }) as never;
   const c = new SupervisorGrantCoordinator(h.daemon as never, request, () => "host_1", h.operations, async () => "room_1");
@@ -1103,6 +1230,7 @@ test("room move rotates exact destination authority, acknowledges the source ses
       events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}:${input.sourceAgentSessionId ?? "none"}`);
       return {
         metadata: metadata(input.agentKey, "grant_destination", "room_2"),
+        authority,
         token: "secret_destination", entryId: input.entryId, lastInstalledDaemonGeneration: null,
       };
     },
@@ -1160,7 +1288,7 @@ test("room-move destination handshake recovers a lost acknowledgement response a
     async provision(input) {
       provisions += 1;
       assert.equal(input.sourceAgentSessionId, "session_1");
-      return h.grants.get(key)!;
+      return { ...h.grants.get(key)!, authority: h.grants.get(key)?.authority ?? null };
     },
   };
   const coordinator = new SupervisorGrantCoordinator(
@@ -1204,6 +1332,7 @@ test("room-move rollback force-restores a source-scoped grant before compensatio
       events.push(`provision:${input.roomScopes[0]?.canonicalRoomId}:${Boolean(input.forceReprovision)}:${input.sourceAgentSessionId ?? "none"}`);
       return {
         metadata: metadata(input.agentKey, "grant_source_recovered", "room_1"),
+        authority,
         token: "secret_source_recovered", entryId: input.entryId, lastInstalledDaemonGeneration: null,
       };
     },
@@ -1312,6 +1441,8 @@ test("generation reconciliation recovers a pending move before ordinary grant sc
         current_generation: 1,
         expires_at: "2099-01-01T00:00:00.000Z",
         supervisor_grant: "secret_destination_restart",
+        owner_account_id: authority.ownerAccountId,
+        scope_key: authority.scopeKey,
       } as T;
     }) as never;
     const actualOperations = storageOperations();
@@ -1402,6 +1533,8 @@ test("destination-save followed by acknowledgement failure rolls back through gr
         current_generation: 1,
         expires_at: "2099-01-01T00:00:00.000Z",
         supervisor_grant: `secret_${suffix}`,
+        owner_account_id: authority.ownerAccountId,
+        scope_key: authority.scopeKey,
       } as T;
     }) as never;
 

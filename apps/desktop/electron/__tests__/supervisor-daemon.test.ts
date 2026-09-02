@@ -1815,11 +1815,13 @@ test("host grant install carries renewal ownership and expiry metadata to the ex
       entryId: "entry-1", roomId: "room-1", agentKey: "owner/agent", grantId: "grant-1",
       supervisorGrant: "secret-parent", grantGeneration: 4, daemonGeneration: 39,
       hostId: "host-1", installationId: "installation-1", expiresAt: "2026-07-22T12:00:00.000Z",
+      ownerAccountId: "account-1", scopeKey: "owner",
     }), "installed");
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.install_host_grant")?.params, {
       entry_id: "entry-1", room_id: "room-1", agent_key: "owner/agent", grant_id: "grant-1",
       supervisor_grant: "secret-parent", grant_generation: 4,
-      host_id: "host-1", installation_id: "installation-1", grant_expires_at: "2026-07-22T12:00:00.000Z",
+      host_id: "host-1", installation_id: "installation-1", owner_account_id: "account-1", scope_key: "owner",
+      grant_expires_at: "2026-07-22T12:00:00.000Z",
       api_url: configuredApiUrl, daemon_generation: 39, credential_only: false,
     });
     assert.equal(await client.bootstrapRoomIngress("entry-1", 39, "join the room and say hi"), "bootstrapped");
@@ -2468,7 +2470,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.127");
+    assert.equal(status.implementationVersion, "2.0.128");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

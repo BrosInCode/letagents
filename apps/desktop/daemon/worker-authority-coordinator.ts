@@ -76,6 +76,8 @@ export type InstallHostGrantInput = {
   daemon_generation: number;
   host_id: string;
   installation_id: string;
+  owner_account_id: string | null;
+  scope_key: string | null;
   grant_expires_at: string;
   credential_only?: boolean;
   recovery_only?: boolean;
@@ -851,6 +853,13 @@ export class WorkerAuthorityCoordinator {
       for (const field of ["entry_id", "room_id", "agent_key", "grant_id", "supervisor_grant", "api_url", "host_id", "installation_id", "grant_expires_at"] as const) {
         if (!input[field].trim()) throw new Error(`Host grant ${field} is required.`);
       }
+      const ownerAccountId = input.owner_account_id?.trim() ?? "";
+      const scopeKey = input.scope_key?.trim() ?? "";
+      const hostId = input.host_id.trim();
+      const installationId = input.installation_id.trim();
+      if (Boolean(ownerAccountId) !== Boolean(scopeKey)) {
+        throw new Error("Host grant owner_account_id and scope_key must be installed together.");
+      }
       if (!Number.isSafeInteger(input.grant_generation) || input.grant_generation < 1
         || !await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
       const inputExpiry = Date.parse(input.grant_expires_at);
@@ -865,10 +874,23 @@ export class WorkerAuthorityCoordinator {
       if (!entry || !await this.requiresHostGrant(entry) || entry.room_id !== input.room_id) return { status: "stale" };
       if (!await this.ownsDaemonGeneration(input.daemon_generation)) return { status: "stale" };
       const currentGrant = this.currentHostGrant(entry);
+      const isSameGrant = currentGrant?.grantId === input.grant_id;
+      if (isSameGrant && currentGrant && (currentGrant.hostId !== hostId
+        || currentGrant.installationId !== installationId
+        || (ownerAccountId && currentGrant.ownerAccountId
+          && (currentGrant.ownerAccountId !== ownerAccountId || currentGrant.scopeKey !== scopeKey)))) {
+        throw new Error("Host grant stable authority provenance changed for the same grant.");
+      }
+      const installedOwnerAccountId = ownerAccountId || (isSameGrant ? currentGrant?.ownerAccountId : null) || null;
+      const installedScopeKey = scopeKey || (isSameGrant ? currentGrant?.scopeKey : null) || null;
       const currentGrantIsAtLeastInput = Boolean(currentGrant?.grantId === input.grant_id
         && (currentGrant.grantGeneration > input.grant_generation
           || (currentGrant.grantGeneration === input.grant_generation
-            && Date.parse(currentGrant.expiresAt) >= inputExpiry)));
+            && Date.parse(currentGrant.expiresAt) >= inputExpiry))
+        && currentGrant.ownerAccountId === installedOwnerAccountId
+        && currentGrant.scopeKey === installedScopeKey
+        && currentGrant.hostId === hostId
+        && currentGrant.installationId === installationId);
       const frozen = deliveryDrainBlocksRuntime(await this.options.store.unresolvedDeliveryDrain(entry.id));
       if (currentGrantIsAtLeastInput && currentGrant && !input.credential_only && !input.recovery_only) {
         if (!frozen && entry.desired_state === "running"
@@ -886,8 +908,10 @@ export class WorkerAuthorityCoordinator {
         grantGeneration: input.grant_generation,
         apiUrl,
         daemonGeneration: input.daemon_generation,
-        hostId: input.host_id,
-        installationId: input.installation_id,
+        hostId,
+        installationId,
+        ownerAccountId: installedOwnerAccountId,
+        scopeKey: installedScopeKey,
         expiresAt: input.grant_expires_at,
       };
       if (currentGrant && (currentGrant.grantId !== grant.grantId

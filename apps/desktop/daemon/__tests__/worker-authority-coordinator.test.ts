@@ -108,6 +108,8 @@ function hostGrant(overrides: Partial<InstalledHostGrant> = {}): InstalledHostGr
     daemonGeneration: 7,
     hostId: "host-1",
     installationId: "installation-1",
+    ownerAccountId: "account-1",
+    scopeKey: "owner",
     expiresAt: new Date(now + 2 * 60 * 60 * 1_000).toISOString(),
     ...overrides,
   };
@@ -534,7 +536,8 @@ test("dispatching and uncertain handoff deny worker mutation before effects", as
       entry_id: grant.entryId, room_id: grant.roomId, agent_key: grant.agentKey,
       grant_id: grant.grantId, supervisor_grant: grant.supervisorGrant, grant_generation: grant.grantGeneration,
       api_url: grant.apiUrl, daemon_generation: grant.daemonGeneration, host_id: grant.hostId,
-      installation_id: grant.installationId, grant_expires_at: grant.expiresAt, credential_only: true,
+      installation_id: grant.installationId, owner_account_id: grant.ownerAccountId,
+      scope_key: grant.scopeKey, grant_expires_at: grant.expiresAt, credential_only: true,
     }), { status: "installed" });
     assert.equal(harness.convergenceRequests, 0);
     assert.equal(harness.deliveryStarts, 0);
@@ -1146,6 +1149,8 @@ test("credential-only host install never retains a new grant when no exact provi
     daemon_generation: 7,
     host_id: "host-1",
     installation_id: "installation-1",
+    owner_account_id: "account-1",
+    scope_key: "owner",
     grant_expires_at: new Date(now + 60_000).toISOString(),
     credential_only: true,
   });
@@ -1168,11 +1173,15 @@ test("standard host install retains the current grant and converges only after d
     daemon_generation: 7,
     host_id: "host-1",
     installation_id: "installation-1",
+    owner_account_id: "account-1",
+    scope_key: "owner",
     grant_expires_at: new Date(now + 60_000).toISOString(),
   };
   const admitted = fixture({ handle: null });
   assert.deepEqual(await admitted.subject.installHostGrant(input), { status: "installed" });
   assert.equal(admitted.custody.hostGrant("agent-1")?.apiUrl, "https://letagents.test");
+  assert.equal(admitted.custody.hostGrant("agent-1")?.ownerAccountId, "account-1");
+  assert.equal(admitted.custody.hostGrant("agent-1")?.scopeKey, "owner");
   assert.equal(admitted.convergenceRequests, 1);
   assert.equal(admitted.events.includes("mint:begin-durable"), false);
 
@@ -1180,6 +1189,63 @@ test("standard host install retains the current grant and converges only after d
   assert.deepEqual(await cursorless.subject.installHostGrant(input), { status: "installed" });
   assert.equal(cursorless.custody.hostGrant("agent-1")?.grantId, "grant-standard");
   assert.equal(cursorless.convergenceRequests, 0);
+});
+
+test("host grant authority provenance is atomic and grant-scoped", async () => {
+  const harness = fixture({ handle: null });
+  const input = {
+    entry_id: "agent-1",
+    room_id: "room-1",
+    agent_key: "agent-key-1",
+    grant_id: "grant-provenance",
+    supervisor_grant: "secret",
+    grant_generation: 1,
+    api_url: "https://letagents.test/path",
+    daemon_generation: 7,
+    host_id: "host-1",
+    installation_id: "installation-1",
+    owner_account_id: "account-1",
+    scope_key: "owner",
+    grant_expires_at: new Date(now + 60_000).toISOString(),
+  };
+
+  assert.deepEqual(await harness.subject.installHostGrant(input), { status: "installed" });
+  await assert.rejects(
+    harness.subject.installHostGrant({ ...input, owner_account_id: null }),
+    /owner_account_id and scope_key must be installed together/,
+  );
+  await assert.rejects(
+    harness.subject.installHostGrant({ ...input, owner_account_id: "other-account" }),
+    /stable authority provenance changed/,
+  );
+  await assert.rejects(
+    harness.subject.installHostGrant({ ...input, host_id: "other-host" }),
+    /stable authority provenance changed/,
+  );
+  await assert.rejects(
+    harness.subject.installHostGrant({ ...input, installation_id: "other-installation" }),
+    /stable authority provenance changed/,
+  );
+
+  assert.deepEqual(await harness.subject.installHostGrant({
+    ...input,
+    grant_generation: 2,
+    owner_account_id: null,
+    scope_key: null,
+  }), { status: "installed" });
+  assert.equal(harness.custody.hostGrant("agent-1")?.ownerAccountId, "account-1");
+  assert.equal(harness.custody.hostGrant("agent-1")?.scopeKey, "owner");
+
+  assert.deepEqual(await harness.subject.installHostGrant({
+    ...input,
+    grant_id: "grant-replacement",
+    supervisor_grant: "replacement-secret",
+    grant_generation: 3,
+    owner_account_id: null,
+    scope_key: null,
+  }), { status: "installed" });
+  assert.equal(harness.custody.hostGrant("agent-1")?.ownerAccountId, null);
+  assert.equal(harness.custody.hostGrant("agent-1")?.scopeKey, null);
 });
 
 test("recovery-only host installation restores owner authority without touching the retained provider", async () => {
@@ -1195,6 +1261,8 @@ test("recovery-only host installation restores owner authority without touching 
     daemon_generation: 7,
     host_id: "host-1",
     installation_id: "installation-1",
+    owner_account_id: "account-1",
+    scope_key: "owner",
     grant_expires_at: new Date(now + 60_000).toISOString(),
     recovery_only: true,
   });
