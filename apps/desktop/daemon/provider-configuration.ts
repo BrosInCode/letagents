@@ -99,12 +99,23 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     scalarCliPolicy(policy, "Claude");
     const profile = resolveProfile(provider, input.permissionProfileId, "read_only", ["read_only", "ask_before_write", "full_access"]);
     const authority = profile === "read_only"
-      ? { permissionMode: "plan", dangerouslySkipPermissions: false }
+      ? {
+        permissionMode: "dontAsk",
+        dangerouslySkipPermissions: false,
+        // Own the complete low-risk native surface instead of trusting prompts
+        // to keep an unsandboxed CLI read-only. The strict daemon-owned MCP
+        // config is the boundary behind this wildcard: adding a tool there
+        // deliberately widens what a read-only Claude agent may do.
+        tools: ["Read", "Glob", "Grep"],
+        allowedTools: ["mcp__letagents__*"],
+        settingSources: "",
+      }
       : profile === "full_access"
         ? { permissionMode: "bypassPermissions", dangerouslySkipPermissions: true }
         : { permissionMode: "acceptEdits", dangerouslySkipPermissions: false };
-    requirePolicyMatch(policy, "permissionMode", authority.permissionMode, provider);
-    requirePolicyMatch(policy, "dangerouslySkipPermissions", authority.dangerouslySkipPermissions, provider);
+    for (const [key, value] of Object.entries(authority)) {
+      requirePolicyMatch(policy, key, value, provider);
+    }
     return {
       provider: "claude-code", model: normalizedModel, reasoningEffort: null, permissionProfileId: profile,
       launchPolicy: { ...policy, ...authority }, configurationRevision: input.configurationRevision,
@@ -169,7 +180,7 @@ export function deriveProviderConfigurationSnapshot(
   const provider = selection.provider.trim().toLowerCase();
   const permissionProfileId = assertSupervisedPermissionProfileAvailable(provider, selection.permissionProfileId);
   const existing = plainPolicy(currentTrustedLaunchPolicy, provider);
-  const stripped = stripProfileAuthority(provider, existing);
+  const stripped = stripProfileAuthority(provider, existing, permissionProfileId);
   return resolveProviderConfigurationSnapshot({
     ...selection,
     provider,
@@ -178,13 +189,25 @@ export function deriveProviderConfigurationSnapshot(
   });
 }
 
-function stripProfileAuthority(provider: string, policy: Record<string, unknown>): Record<string, unknown> {
+function stripProfileAuthority(
+  provider: string,
+  policy: Record<string, unknown>,
+  nextPermissionProfileId: string,
+): Record<string, unknown> {
+  const previousClaudeProfileWasReadOnly = (policy.permissionMode === "plan" || policy.permissionMode === "dontAsk")
+    && policy.dangerouslySkipPermissions === false;
   const authorityKeys = provider === "codex"
     ? ["approvalPolicy", "sandboxPolicy"]
     : provider === "open-model"
       ? ["permission"]
     : provider === "claude-code" || provider === "claude"
-      ? ["permissionMode", "dangerouslySkipPermissions"]
+      ? [
+        "permissionMode",
+        "dangerouslySkipPermissions",
+        ...(nextPermissionProfileId === "read_only" || previousClaudeProfileWasReadOnly
+          ? ["tools", "allowedTools", "settingSources"]
+          : []),
+      ]
       : provider === "cursor"
         ? ["mode", "force", "sandbox"]
         : [];

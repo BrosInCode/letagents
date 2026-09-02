@@ -37,12 +37,14 @@ test("provider configuration maps permission profiles to native launch authority
     model: "claude-next",
     reasoningEffort: null,
     permissionProfileId: "read_only",
-    launchPolicy: { allowedTools: ["Read", "Glob"] },
+    launchPolicy: {},
     configurationRevision: 3,
   }).launchPolicy, {
-    allowedTools: ["Read", "Glob"],
-    permissionMode: "plan",
+    permissionMode: "dontAsk",
     dangerouslySkipPermissions: false,
+    tools: ["Read", "Glob", "Grep"],
+    allowedTools: ["mcp__letagents__*"],
+    settingSources: "",
   });
 
   assert.equal(resolveProviderConfigurationSnapshot({
@@ -107,9 +109,9 @@ test("trusted profile selection replaces only native authority and preserves pro
   assert.deepEqual(deriveProviderConfigurationSnapshot({
     provider: "claude-code", model: "claude-next", reasoningEffort: null, permissionProfileId: "full_access", configurationRevision: 4,
   }, {
-    permissionMode: "plan", dangerouslySkipPermissions: false, allowedTools: ["Read", "Glob"], maxTurns: 6,
+    permissionMode: "plan", dangerouslySkipPermissions: false, allowedTools: ["Read", "Glob"], tools: ["Read"], settingSources: "user", maxTurns: 6,
   }).launchPolicy, {
-    allowedTools: ["Read", "Glob"], maxTurns: 6, permissionMode: "bypassPermissions", dangerouslySkipPermissions: true,
+    maxTurns: 6, permissionMode: "bypassPermissions", dangerouslySkipPermissions: true,
   });
 
   assert.deepEqual(deriveProviderConfigurationSnapshot({
@@ -130,7 +132,19 @@ test("trusted profile selection replaces only native authority and preserves pro
   }, {
     permissionMode: "bypassPermissions", dangerouslySkipPermissions: true, allowedTools: ["Read", "Glob"], maxTurns: 6,
   }).launchPolicy, {
-    allowedTools: ["Read", "Glob"], maxTurns: 6, permissionMode: "plan", dangerouslySkipPermissions: false,
+    maxTurns: 6, permissionMode: "dontAsk", dangerouslySkipPermissions: false,
+    allowedTools: ["mcp__letagents__*"],
+    tools: ["Read", "Glob", "Grep"], settingSources: "",
+  });
+
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "claude-code", model: "claude-next", reasoningEffort: null, permissionProfileId: "full_access", configurationRevision: 5,
+  }, {
+    permissionMode: "bypassPermissions", dangerouslySkipPermissions: true,
+    allowedTools: ["Read"], tools: ["Read"], settingSources: "user", maxTurns: 6,
+  }).launchPolicy, {
+    allowedTools: ["Read"], tools: ["Read"], settingSources: "user", maxTurns: 6,
+    permissionMode: "bypassPermissions", dangerouslySkipPermissions: true,
   });
 
   assert.deepEqual(deriveProviderConfigurationSnapshot({
@@ -152,6 +166,27 @@ test("trusted profile selection replaces only native authority and preserves pro
 });
 
 test("provider configuration rejects unsupported and conflicting native settings", () => {
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    provider: "claude-code",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "read_only",
+    launchPolicy: { tools: ["Bash"] },
+    configurationRevision: 1,
+  }), /conflicts with permission-profile authority at 'tools'/);
+
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    provider: "claude-code",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "read_only",
+    launchPolicy: {
+      tools: ["Read", "Glob", "Grep"],
+      allowedTools: [],
+    },
+    configurationRevision: 1,
+  }), /conflicts with permission-profile authority at 'allowedTools'/);
+
   assert.throws(() => resolveProviderConfigurationSnapshot({
     provider: "claude-code",
     model: null,
@@ -188,6 +223,7 @@ test("supervised profile contract gates Claude prompt approval without changing 
   const claude = supervisedPermissionProfilesForProvider("claude-code");
   assert.equal(claude.find((profile) => profile.id === "ask_before_write")?.status, "gated");
   assert.equal(claude.find((profile) => profile.id === "read_only")?.status, "available");
+  assert.match(claude.find((profile) => profile.id === "read_only")?.detail ?? "", /shell tools are unavailable/);
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "full_access")?.status, "available");

@@ -47,9 +47,9 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
 const claudeProfiles: readonly SupervisedPermissionProfile[] = [
   {
     id: "read_only", label: "Read-only",
-    description: "Lets Claude inspect and plan without broad workspace writes.",
+    description: "Lets Claude inspect with Read, Glob, and Grep while keeping daemon-mediated LetAgents room tools available.",
     status: "available", risk: "low",
-    detail: "Maps to Claude permissionMode=plan.", isDefault: true,
+    detail: "Write, edit, and shell tools are unavailable, and ambient Claude settings are disabled.", isDefault: true,
   },
   {
     id: "ask_before_write", label: "Ask before writes",
