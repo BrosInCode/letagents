@@ -2061,8 +2061,10 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
   });
-
   assertProviderHandle(attached);
+  const observations: NativeExecutionObservation[] = [];
+  const subscription = freshAdapter.onExecution(attached, (event) => observations.push(event));
+
   assert.equal(attached.providerContinuationId, first.providerContinuationId);
   assert.equal(attached.pid, first.pid);
   assert.equal(harness.launches.length, 1, "reattach must not create a second native writer");
@@ -2079,11 +2081,289 @@ test("fresh adapter reattaches the durable app-server endpoint without launching
     "oversized transcript items cannot erase the closed lifecycle metadata");
   assert.equal(providerStreamLifecycle(snapshot), "terminal",
     "the exact reattach payload keeps failed-turn evidence scoped to the native turn");
+  assert.equal(snapshot.nativeLifecyclePhase, undefined,
+    "reattach reconstruction does not feed the legacy lifecycle projection");
+  const terminal = observations.find((event) => event.fact.domain === "turn");
+  assert.ok(terminal?.fact.domain === "turn");
+  assert.deepEqual(terminal.fact, {
+    providerContinuationId: first.providerContinuationId,
+    providerTurnId: `turn-${first.providerContinuationId}`,
+    domain: "turn",
+    kind: "state_changed",
+    state: "terminal",
+    turnOutcome: "failed",
+    sideEffects: "none",
+  });
+  assert.equal(terminal.nativeProcessPid, first.providerConnection.pid);
+  assert.equal(terminal.nativeProcessIdentity, first.providerConnection.processIdentity);
+  assert.equal(observations[0]?.fact.domain, "runtime",
+    "late capture receives the reconstructed runtime boundary before the turn");
   assert.equal(await freshAdapter.attach({
     workAttemptId: request.workAttemptId,
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
   }), attached);
+  subscription.dispose();
+});
+
+test("fresh Codex attach reconstructs only a recognized latest native turn", async (t) => {
+  const cases = [
+    { name: "active", status: "inProgress", expected: { state: "active" } },
+    { name: "completed", status: "completed", expected: { state: "terminal", turnOutcome: "completed" } },
+    { name: "interrupted", status: "cancelled", expected: { state: "terminal", turnOutcome: "interrupted" } },
+    { name: "unknown", status: "futureStatus", expected: null },
+  ] as const;
+  for (const entry of cases) await t.test(entry.name, async () => {
+    const harness = createHarness();
+    const request = spawnRequest();
+    const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+    assert.ok(first.providerConnection);
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      client.turnStatus = entry.status;
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        const result = await request<T>(method, params);
+        if (method === "thread/read" && (params as { includeTurns?: boolean } | undefined)?.includeTurns === true) {
+          const turns = (result as { thread?: { turns?: Array<Record<string, unknown>> } }).thread?.turns;
+          if (turns) turns.unshift({ id: "historical-turn", status: "completed" });
+        }
+        return result;
+      };
+      return client;
+    };
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const attached = await adapter.attach({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: first.providerContinuationId!,
+      providerConnection: first.providerConnection,
+    });
+    assertProviderHandle(attached);
+    const observations: NativeExecutionObservation[] = [];
+    const subscription = adapter.onExecution(attached, (event) => observations.push(event));
+    const turns = observations.filter((event) => event.fact.domain === "turn");
+    assert.equal(turns.length, entry.expected === null ? 0 : 1,
+      "reattach reconstructs at most the single latest native turn");
+    const turn = turns[0];
+    if (entry.expected === null) assert.equal(turn, undefined);
+    else {
+      assert.ok(turn?.fact.domain === "turn");
+      assert.equal(turn.fact.state, entry.expected.state);
+      assert.equal("turnOutcome" in entry.expected ? turn.fact.turnOutcome : undefined,
+        "turnOutcome" in entry.expected ? entry.expected.turnOutcome : undefined);
+      assert.equal(turn.fact.providerContinuationId, first.providerContinuationId);
+      assert.equal(turn.fact.providerTurnId, `turn-${first.providerContinuationId}`);
+    }
+    assert.equal(observations.filter((event) => event.fact.domain === "runtime").length, 1);
+    assert.equal(observations.some((event) => event.fact.domain === "turn"
+      && event.fact.providerTurnId === "historical-turn"), false);
+    assert.equal(subscription.position().latestSequence, 2,
+      "recognized turns retain one fact while unreadable latest state leaves an explicit source gap");
+    assert.equal(harness.launches.length, 1);
+    assert.equal(harness.clients[1]!.requests.some((request) =>
+      request.method === "thread/start" || request.method === "turn/start" || request.method === "turn/interrupt"), false);
+    subscription.dispose();
+  });
+});
+
+test("fresh Codex attach never orders a snapshot against queued lifecycle evidence", async (t) => {
+  const cases: Array<{ name: string; expectedActive: boolean; expectedTerminal: boolean;
+    expectedLatestSequence: number;
+    emit(client: FakeRpc, threadId: string, turnId: string): void }> = [
+    { name: "typed terminal", expectedActive: false, expectedTerminal: true, expectedLatestSequence: 3,
+      emit: (client: FakeRpc, threadId: string, turnId: string) => client.emit({ method: "turn/completed",
+        params: { threadId, turnId, turn: { id: turnId, status: "completed" } } }) },
+    { name: "unreadable terminal", expectedActive: false, expectedTerminal: false, expectedLatestSequence: 2,
+      emit: (client: FakeRpc, threadId: string, turnId: string) => client.emit({ method: "turn/completed",
+        params: { threadId, turnId } }) },
+    { name: "malformed terminal identity", expectedActive: false, expectedTerminal: false, expectedLatestSequence: 2,
+      emit: (client: FakeRpc, threadId: string) => client.emit({ method: "turn/completed",
+        params: { threadId } }) },
+    { name: "mismatched terminal turn identities", expectedActive: false, expectedTerminal: false,
+      expectedLatestSequence: 2,
+      emit: (client: FakeRpc, threadId: string, turnId: string) => client.emit({ method: "turn/completed",
+        params: { threadId, turnId, turn: { id: `${turnId}-other`, status: "completed" } } }) },
+    { name: "terminal after queued start", expectedActive: true, expectedTerminal: true, expectedLatestSequence: 5,
+      emit: (client: FakeRpc, threadId: string, turnId: string) => {
+        client.emit({ method: "turn/started", params: { threadId, turnId, turn: { id: turnId, status: "inProgress" } } });
+        client.emit({ method: "turn/cancelled", params: { threadId, turnId } });
+      } },
+  ];
+  for (const entry of cases) await t.test(entry.name, async () => {
+    const harness = createHarness();
+    const request = spawnRequest();
+    const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+    assert.ok(first.providerConnection);
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      client.turnStatus = "inProgress";
+      const read = client.request.bind(client);
+      let queued = false;
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        const result = await read<T>(method, params);
+        if (!queued && method === "thread/read"
+          && (params as { includeTurns?: boolean } | undefined)?.includeTurns === true) {
+          queued = true;
+          const turnId = `turn-${first.providerContinuationId}`;
+          entry.emit(client, first.providerContinuationId!, turnId);
+        }
+        return result;
+      };
+      return client;
+    };
+    const stream: ProviderStreamEvent[] = [];
+    const adapter = new CodexProviderAdapter({
+      dependencies: harness.dependencies,
+      streamSink: event => stream.push(event),
+    });
+    const attached = await adapter.attach({
+      workAttemptId: request.workAttemptId,
+      providerContinuationId: first.providerContinuationId!,
+      providerConnection: first.providerConnection,
+    });
+    assertProviderHandle(attached);
+    const observations: NativeExecutionObservation[] = [];
+    const subscription = adapter.onExecution(attached, event => observations.push(event));
+    const activeTurns = observations.filter(event => event.fact.domain === "turn" && event.fact.state === "active");
+    assert.equal(activeTurns.length, entry.expectedActive ? 1 : 0,
+      "only an exact queued start may produce active state; the ambiguous snapshot never does");
+    if (entry.expectedActive) assert.equal(activeTurns[0]?.sequence, 4,
+      "the queued start remains behind the explicit ambiguity gap");
+    assert.equal(observations.filter(event => event.fact.domain === "turn").length,
+      (entry.expectedActive ? 1 : 0) + (entry.expectedTerminal ? 1 : 0));
+    assert.equal(subscription.position().latestSequence, entry.expectedLatestSequence);
+    assert.equal(observations.some(event => event.sequence === 2), false,
+      "snapshot/notification coexistence consumes an unavailable source position");
+    assert.equal(stream.filter(event => /^turn\/(?:completed|cancelled)$/.test(event.method)).length, 1,
+      "the raw sink receives the queued terminal exactly once, even without typed correlation");
+    assert.equal(stream.some(event => event.nativeEventId !== undefined), false,
+      "notifications consumed before the production raw listener exists are not correlated into shadow comparison");
+    assert.equal(observations.some(event => event.fact.nativeEventId !== undefined), false);
+    assert.equal(stream.find(event => event.method === "thread/read")?.nativeEventId, undefined,
+      "the stale snapshot is not correlated as a lifecycle checkpoint");
+    subscription.dispose();
+  });
+});
+
+test("Codex attach gaps a queued start that may precede a terminal snapshot", async () => {
+  const harness = createHarness();
+  const request = spawnRequest();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+  assert.ok(first.providerConnection);
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    client.turnStatus = "completed";
+    const read = client.request.bind(client);
+    let queued = false;
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+      if (!queued && method === "thread/read"
+        && (params as { includeTurns?: boolean } | undefined)?.includeTurns === true) {
+        queued = true;
+        const turnId = `turn-${first.providerContinuationId}`;
+        client.emit({ method: "turn/started", params: {
+          threadId: first.providerContinuationId,
+          turnId,
+          turn: { id: turnId, status: "inProgress" },
+        } });
+      }
+      return read<T>(method, params);
+    };
+    return client;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({ workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(attached);
+  const observations: NativeExecutionObservation[] = [];
+  const subscription = adapter.onExecution(attached, event => observations.push(event));
+  assert.deepEqual(observations.map(event => event.sequence), [1, 3, 4],
+    "the queued start remains retained but cannot erase the ambiguous response boundary");
+  assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 4 });
+  assert.deepEqual(observations.flatMap(event => event.fact.domain === "turn" ? [event.fact.state] : []), ["active"]);
+  subscription.dispose();
+});
+
+test("queued lifecycle cannot erase unreadable or contradictory Codex attach evidence", async (t) => {
+  await t.test("unknown snapshot plus typed start", async () => {
+    const harness = createHarness();
+    const request = spawnRequest();
+    const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+    assert.ok(first.providerConnection);
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      client.turnStatus = "futureStatus";
+      const read = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        const result = await read<T>(method, params);
+        if (method === "thread/read" && (params as { includeTurns?: boolean }).includeTurns === true) {
+          const turnId = `turn-${first.providerContinuationId}`;
+          client.emit({ method: "turn/started", params: {
+            threadId: first.providerContinuationId,
+            turnId,
+            turn: { id: turnId, status: "inProgress" },
+          } });
+        }
+        return result;
+      };
+      return client;
+    };
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const attached = await adapter.attach({ workAttemptId: request.workAttemptId,
+      providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+    assertProviderHandle(attached);
+    const observations: NativeExecutionObservation[] = [];
+    const subscription = adapter.onExecution(attached, event => observations.push(event));
+    assert.deepEqual(observations.map(event => event.sequence), [1, 3, 4],
+      "the queued typed facts remain behind the unreadable snapshot gap");
+    assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 4 });
+    subscription.dispose();
+  });
+
+  await t.test("explicit empty fallback plus unreadable terminal", async () => {
+    const harness = createHarness({ threadReadUnmaterialized: true });
+    const request = spawnRequest({ deliveryMode: "daemon_inbox" });
+    const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+    assert.ok(first.providerConnection);
+    const createRpcClient = harness.dependencies.createRpcClient;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      const read = client.request.bind(client);
+      let queued = false;
+      client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+        try { return await read<T>(method, params); }
+        catch (error) {
+          if (!queued && method === "thread/read" && (params as { includeTurns?: boolean }).includeTurns === true) {
+            queued = true;
+            client.emit({ method: "turn/completed", params: {
+              threadId: first.providerContinuationId,
+              turnId: `turn-${first.providerContinuationId}`,
+            } });
+          }
+          throw error;
+        }
+      };
+      return client;
+    };
+    const stream: ProviderStreamEvent[] = [];
+    const adapter = new CodexProviderAdapter({
+      dependencies: harness.dependencies,
+      streamSink: event => stream.push(event),
+    });
+    const attached = await adapter.attach({ workAttemptId: request.workAttemptId,
+      providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+    assertProviderHandle(attached);
+    const observations: NativeExecutionObservation[] = [];
+    const subscription = adapter.onExecution(attached, event => observations.push(event));
+    assert.deepEqual(observations.map(event => event.sequence), [1]);
+    assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 2 },
+      "the terminal contradiction dominates the otherwise exact empty fallback");
+    assert.equal(stream.filter(event => event.method === "turn/completed").length, 1);
+    subscription.dispose();
+  });
 });
 
 test("cached Codex attach requires the exact continuation and native connection identity", async () => {
@@ -2257,13 +2537,16 @@ test("fresh attach proves an empty unmaterialized daemon-inbox thread without la
   const request = spawnRequest({ deliveryMode: "daemon_inbox" });
   const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
 
-  const attached = await new CodexProviderAdapter({ dependencies: harness.dependencies }).attach({
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({
     workAttemptId: request.workAttemptId,
     providerContinuationId: first.providerContinuationId!,
     providerConnection: first.providerConnection,
   });
 
   assertProviderHandle(attached);
+  const observations: NativeExecutionObservation[] = [];
+  const subscription = adapter.onExecution(attached, event => observations.push(event));
   assert.equal(attached.providerContinuationId, first.providerContinuationId);
   assert.equal(harness.launches.length, 1, "the verified existing writer must be retained");
   assert.deepEqual(
@@ -2273,7 +2556,58 @@ test("fresh attach proves an empty unmaterialized daemon-inbox thread without la
     [true, false],
     "metadata-only proof is used only after the exact empty-thread response",
   );
+  assert.deepEqual(observations.map(event => event.fact.domain), ["runtime"]);
+  assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 1 },
+    "the explicit unmaterialized-empty proof is gap-free, not an unreadable snapshot");
   assert.deepEqual(harness.signals, []);
+  subscription.dispose();
+});
+
+test("missing-continuation attach remains gap-free across same-process repair", async () => {
+  const harness = createHarness();
+  const request = spawnRequest({ deliveryMode: "daemon_inbox" });
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies }).spawn(request);
+  assert.ok(first.providerConnection);
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    client.markThreadMissing(first.providerContinuationId!);
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+      if (method === "thread/read") throw new Error(`thread not found: ${first.providerContinuationId}`);
+      return request<T>(method, params);
+    };
+    return client;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({
+    workAttemptId: request.workAttemptId,
+    providerContinuationId: first.providerContinuationId!,
+    providerConnection: first.providerConnection,
+  });
+  assertProviderHandle(attached);
+  const observations: NativeExecutionObservation[] = [];
+  const subscription = adapter.onExecution(attached, event => observations.push(event));
+  assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 1 });
+  const repaired = await adapter.repairContinuation!(attached, {
+    workAttemptId: request.workAttemptId,
+    expectedProviderContinuationId: first.providerContinuationId!,
+    cwd: request.cwd,
+    launchPolicy: request.launchPolicy,
+  }, { checkpointReplacement: async () => {} });
+  assert.equal(repaired.outcome, "replaced");
+  const replacement = repaired.replacementProviderContinuationId;
+  harness.clients[1]!.emit({ method: "turn/started", params: {
+    threadId: replacement,
+    turnId: `turn-${replacement}`,
+    turn: { id: `turn-${replacement}`, status: "inProgress" },
+  } });
+  assert.deepEqual(subscription.position(), { firstRetainedSequence: 1, latestSequence: 3 },
+    "repair continues the original exact source without inheriting a permanent gap");
+  assert.equal(observations.some(event => event.fact.domain === "turn"
+    && event.fact.providerContinuationId === replacement), true);
+  assert.equal(harness.launches.length, 1);
+  subscription.dispose();
 });
 
 test("fresh attach returns terminal evidence when the recorded app-server is verifiably gone", async () => {

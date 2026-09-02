@@ -90,10 +90,11 @@ function fixture(kind: ProviderActionConnectionRef["kind"] = "codex_app_server",
   const emit = (fact: NativeExecutionFact, birth = "birth-secret", pid = 42) => observer.emit(fact, birth, pid);
   const facts = () => db.prepare("SELECT * FROM execution_facts ORDER BY sequence").all();
   const position = () => db.prepare("SELECT last_source_sequence,max_observed_sequence FROM execution_observers").get();
-  const bindTurn = (turn = "native-turn", source = "message") => {
+  const bindTurn = (turn = "native-turn", source = "message",
+    state: "pending" | "dispatching" | "awaiting_result" | "result_recovery" | "retryable" | "blocked" = "awaiting_result") => {
     db.prepare(`INSERT INTO supervised_agent_inbox(inbox_item_id,agent_id,room_id,source_message_id,source_message_json,activation_json,fifo_sequence,state,attempt_count,action_id,reply_client_message_id,provider_turn_id,created_at,updated_at)
-      VALUES(?,'agent','room',?,'{"text":"PRIVATE PROMPT"}','{}',?,'awaiting_result',1,?,?,?, ?,?)`)
-      .run(turn, source, Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1, `action-${turn}`, `reply-${turn}`, turn, now, now);
+      VALUES(?,'agent','room',?,'{"text":"PRIVATE PROMPT"}','{}',?,?,1,?,?,?, ?,?)`)
+      .run(turn, source, Number(db.prepare("SELECT COUNT(*) n FROM supervised_agent_inbox").get()!.n) + 1, state, `action-${turn}`, `reply-${turn}`, turn, now, now);
     db.prepare("INSERT INTO supervised_agent_provider_turn_bindings VALUES(?,'agent','room','workspace','generation','continuation',?)").run(turn, turn);
   };
   return { db, handle, handles, observer, capture, diagnostics, install, advance, admission, typedAdmission, tokenFor, emit, facts, position, bindTurn };
@@ -123,6 +124,49 @@ test("capture admission is exact, fail-closed, and never promoted by elapsed tim
     assert.equal(waiting.admission(), "pending",
       "an unresolved subscription stays pending without elapsed-time promotion");
   } finally { waiting.capture.close(); }
+});
+
+test("Codex reattach admission requires the exact durable outstanding turn", async () => {
+  const exact = fixture();
+  try {
+    exact.bindTurn();
+    await exact.install(); await flush();
+    assert.equal(exact.admission(), "unavailable",
+      "an empty reattach source cannot erase a durable outstanding turn");
+    exact.emit(ready); await flush();
+    assert.equal(exact.admission(), "unavailable",
+      "runtime readiness alone cannot prove the native turn boundary");
+    exact.emit(active); await flush();
+    assert.equal(exact.admission(), "ready");
+    assert.equal(exact.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'")
+      .get()?.observed_state, "working", "typed-shadow reconstruction cannot mutate legacy authority");
+  } finally { exact.capture.close(); }
+
+  const mismatched = fixture();
+  try {
+    mismatched.bindTurn();
+    mismatched.bindTurn("another-native-turn", "another-message");
+    await mismatched.install();
+    mismatched.emit(ready);
+    mismatched.emit({ ...active, providerTurnId: "another-native-turn" });
+    await flush();
+    assert.deepEqual({ ...mismatched.position() }, { last_source_sequence: 2, max_observed_sequence: 2 },
+      "the unrelated turn is durably mappable and the observer is fully caught up");
+    assert.deepEqual(mismatched.diagnostics, [],
+      "the rejection comes from the missing exact expected turn, not incidental identity failure");
+    assert.equal(mismatched.admission(), "unavailable",
+      "an unrelated latest transcript turn cannot satisfy the durable binding");
+  } finally { mismatched.capture.close(); }
+
+  for (const state of ["pending", "dispatching", "awaiting_result", "result_recovery", "retryable", "blocked"] as const) {
+    const retained = fixture();
+    try {
+      retained.bindTurn("native-turn", `message-${state}`, state);
+      await retained.install(); await flush();
+      assert.equal(retained.admission(), "unavailable",
+        `a ${state} inbox item retaining a provider-turn binding cannot be admitted from an empty reattach source`);
+    } finally { retained.capture.close(); }
+  }
 });
 
 test("typed lifecycle admission requires a caught-up source and fully disposed fact journal", async () => {
@@ -214,19 +258,23 @@ test("capture admission fails closed on durable reads and live source positions"
   } finally { readFailure.capture.close(); }
 
   const observer = new ProviderExecutionObserver(() => now);
-  let position: "valid" | "throws" | "malformed" | "null" = "valid";
+  let position: "valid" | "ahead" | "throws" | "malformed" | "null" = "valid";
   const sourcePosition = fixture("codex_app_server", (_handle, listener) => {
     const subscription = observer.subscribe(listener);
     return { ...subscription, position: () => {
       if (position === "throws") throw new Error("injected position failure");
       if (position === "malformed") return { firstRetainedSequence: 3, latestSequence: 0 };
       if (position === "null") return null as never;
-      return subscription.position();
+      const current = subscription.position();
+      return position === "ahead" ? { ...current, latestSequence: current.latestSequence + 1 } : current;
     } };
   });
   try {
     await sourcePosition.install(); observer.emit(ready, "birth-secret", 42); await flush();
     assert.equal(sourcePosition.admission(), "ready");
+    position = "ahead";
+    assert.equal(sourcePosition.admission(), "unavailable",
+      "Codex cannot admit while the live source is ahead of its durable cursor");
     position = "throws";
     assert.equal(sourcePosition.admission(), "unavailable");
     position = "malformed";
