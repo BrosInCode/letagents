@@ -37,11 +37,11 @@ import type { HostApprovalChallenge } from "../../shared/host-approval-auth.js";
 import type { DesktopHostApproval, DesktopHostApprovalSnapshot, HostApprovalCandidate, HostApprovalChoice, HostApprovalStatus } from "../../shared/host-approvals.js";
 import type { RetainedExecutionDetail } from "../../shared/execution-protocol.js";
 
-export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
+export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.127";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.128";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -1328,6 +1328,8 @@ export class SupervisorDaemonClient {
     daemonGeneration: number;
     hostId: string;
     installationId: string;
+    ownerAccountId: string | null;
+    scopeKey: string | null;
     expiresAt: string;
     apiUrl?: string;
     /** Rebind only an already-live exact provider generation; never converge. */
@@ -1352,6 +1354,8 @@ export class SupervisorDaemonClient {
       grant_generation: input.grantGeneration,
       host_id: input.hostId,
       installation_id: input.installationId,
+      owner_account_id: input.ownerAccountId,
+      scope_key: input.scopeKey,
       grant_expires_at: input.expiresAt,
       api_url: input.apiUrl ?? apiUrl,
       daemon_generation: input.daemonGeneration,
