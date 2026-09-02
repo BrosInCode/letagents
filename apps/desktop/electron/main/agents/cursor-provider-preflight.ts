@@ -153,28 +153,40 @@ export async function runDesktopCursorProviderPreflight(
       };
     }
   }
+  const roomOnlyReadOnly = supervised
+    && input.roomOnly === true
+    && !workspaceRoot
+    && permissionProfile.id === "read_only";
+  let preflightWorkspaceRoot = workspaceRoot;
   let managedProfile: CursorManagedProfile;
   let supervisedMcpRuntime: LetAgentsMcpRuntime | undefined;
-  const preflightProfileRoot = supervised && workspaceRoot
-    ? mkdtempSync(join(tmpdir(), "letagents-cursor-preflight-"))
-    : null;
-  const cleanupPreflightProfile = () => {
+  let preflightProfileRoot: string | null = null;
+  const cleanupPreflightDirectories = () => {
     if (preflightProfileRoot) rmSync(preflightProfileRoot, { recursive: true, force: true });
+    if (roomOnlyReadOnly && preflightWorkspaceRoot) {
+      rmSync(preflightWorkspaceRoot, { recursive: true, force: true });
+    }
   };
   try {
+    if (roomOnlyReadOnly) {
+      preflightWorkspaceRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-workspace-preflight-"));
+    }
+    if (supervised && preflightWorkspaceRoot) {
+      preflightProfileRoot = mkdtempSync(join(tmpdir(), "letagents-cursor-preflight-"));
+    }
     try {
-      supervisedMcpRuntime = supervised && workspaceRoot
+      supervisedMcpRuntime = supervised && preflightWorkspaceRoot
         ? options.mcpRuntime ?? resolveLetAgentsMcpRuntime({
           devEntryPath: process.env.LETAGENTS_DESKTOP_DEV_SERVER_URL?.trim()
             ? join(sourceWorkspaceRoot, "dist", "mcp", "server.js")
             : undefined,
         })
         : undefined;
-      managedProfile = supervised && workspaceRoot
+      managedProfile = supervised && preflightWorkspaceRoot
         ? prepareCursorSupervisedProfile({
-          workAttemptId: `preflight:${workspaceRoot}`,
+          workAttemptId: `preflight:${preflightWorkspaceRoot}`,
           apiBaseUrl: desktopApiUrl,
-          workspaceRoot,
+          workspaceRoot: preflightWorkspaceRoot,
           profileRoot: preflightProfileRoot!,
           mcpRuntime: supervisedMcpRuntime,
           identityAttestationOnly: true,
@@ -257,7 +269,7 @@ export async function runDesktopCursorProviderPreflight(
       }
     }
 
-    if (!workspaceRoot) {
+    if (!workspaceRoot && !roomOnlyReadOnly) {
       return {
         providerId: provider.id,
         status: "repo_required",
@@ -270,7 +282,7 @@ export async function runDesktopCursorProviderPreflight(
       };
     }
 
-    if (supervised && (permissionProfile.id === "sandboxed_write" || permissionProfile.id === "full_access")) {
+    if (supervised && workspaceRoot && (permissionProfile.id === "sandboxed_write" || permissionProfile.id === "full_access")) {
       try {
         await (options.workspaceGenerationSupportChecker ?? assertSupervisedWorkspaceGenerationSupported)(workspaceRoot);
       } catch (error) {
@@ -291,9 +303,9 @@ export async function runDesktopCursorProviderPreflight(
       if (!supervised || !preflightProfileRoot || !supervisedMcpRuntime) return null;
       try {
         managedProfile = prepareCursorSupervisedProfile({
-          workAttemptId: `preflight:${workspaceRoot}`,
+          workAttemptId: `preflight:${preflightWorkspaceRoot}`,
           apiBaseUrl: desktopApiUrl,
-          workspaceRoot,
+          workspaceRoot: preflightWorkspaceRoot!,
           permissionProfileId: permissionProfile.id,
           profileRoot: preflightProfileRoot,
           mcpRuntime: supervisedMcpRuntime,
@@ -329,9 +341,9 @@ export async function runDesktopCursorProviderPreflight(
       const authorityProfileRoot = join(preflightProfileRoot, "authority");
       try {
         const authorityProfile = prepareCursorSupervisedProfile({
-          workAttemptId: `preflight-authority:${workspaceRoot}`,
+          workAttemptId: `preflight-authority:${preflightWorkspaceRoot}`,
           apiBaseUrl: desktopApiUrl,
-          workspaceRoot,
+          workspaceRoot: preflightWorkspaceRoot!,
           profileRoot: authorityProfileRoot,
           includeAuth: false,
           mcpRuntime: supervisedMcpRuntime,
@@ -370,7 +382,7 @@ export async function runDesktopCursorProviderPreflight(
       // each turn. An authenticated `mcp list` is unsafe here: Cursor loads
       // account-managed plugin and team MCP definitions while merely listing.
       const mcpResult = await execFileWithTimeout(command, ["mcp", "list"], {
-        cwd: workspaceRoot,
+        cwd: workspaceRoot!,
         env: managedEnv,
         timeoutMs,
       });
@@ -429,7 +441,7 @@ export async function runDesktopCursorProviderPreflight(
       mcpStatus,
     };
   } finally {
-    cleanupPreflightProfile();
+    cleanupPreflightDirectories();
   }
 }
 

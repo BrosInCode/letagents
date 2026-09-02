@@ -288,6 +288,33 @@ test("Cursor supervised preflight gates writable generations without gating read
   }
 });
 
+test("Cursor supervised preflight admits repo-less read-only without relaxing the legacy repo gate", async () => {
+  let checks = 0;
+  const checker: NonNullable<DesktopCursorPreflightOptions["workspaceGenerationSupportChecker"]> = async () => {
+    checks += 1;
+    throw new Error("A repo-less read-only launch must not request a writable generation.");
+  };
+  setFakeCursorMcpMode("ready");
+  try {
+    const readOnly = await runPreflight({
+      repoRootPath: null,
+      roomOnly: true,
+      launchMode: "supervised",
+      permissionProfileId: "read_only",
+    }, checker);
+    assert.equal(readOnly.status, "ready");
+    assert.equal(readOnly.canStart, true);
+    assert.equal(readOnly.message, "Cursor Agent is ready to start supervised with Read-only.");
+    assert.equal(checks, 0);
+
+    const legacy = await runPreflight({ repoRootPath: null, roomOnly: true });
+    assert.equal(legacy.status, "repo_required");
+    assert.equal(legacy.canStart, false);
+  } finally {
+    setFakeCursorMcpMode(null);
+  }
+});
+
 test("Cursor supervised preflight does not traverse project files before launch", async () => {
   const workspace = workspaceFixture("supervised-no-project-file-walk");
   const outside = join(tempDir, "preflight-outside-hardlink.txt");
