@@ -39,6 +39,8 @@ import type {
   DesktopManagedAgentStopInput,
   DesktopSupervisorAttemptDetail,
   DesktopSupervisorAgentConfiguration,
+  DesktopSupervisorAgentConfigurationApplyInput,
+  DesktopSupervisorAgentConfigurationApplyResult,
   DesktopSupervisorAgentConfigurationUpdateInput,
   DesktopSupervisorAgentConfigurationUpdateResult,
   DesktopSupervisorRoomMove,
@@ -381,6 +383,7 @@ export interface DesktopApi {
     getAgentInspectorDetail: (input: import("./agents.js").DesktopSupervisorAgentInspectorDetailInput) => Promise<import("./agents.js").DesktopSupervisorAgentInspectorDetail>;
     getAgentConfiguration: (input: { entryId: string; daemonGeneration: number }) => Promise<DesktopSupervisorAgentConfiguration>;
     updateAgentConfiguration: (input: DesktopSupervisorAgentConfigurationUpdateInput) => Promise<DesktopSupervisorAgentConfigurationUpdateResult>;
+    applyAgentConfiguration: (input: DesktopSupervisorAgentConfigurationApplyInput) => Promise<DesktopSupervisorAgentConfigurationApplyResult>;
     prepareRoomMove: (input: DesktopSupervisorRoomMovePrepareInput) => Promise<DesktopSupervisorRoomMove>;
     commitRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;
     getRoomMove: (input: DesktopSupervisorRoomMoveOperationInput) => Promise<DesktopSupervisorRoomMove>;

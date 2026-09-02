@@ -306,7 +306,8 @@
       @settings-selected="openAgentInspectorSettings"
       @settings-patch="patchAgentInspectorSettings"
       @settings-save="saveAgentInspectorSettings"
-      @settings-reload="() => loadAgentInspectorSettings(true)"
+      @settings-apply="applyAgentInspectorSettings"
+      @settings-reload="reloadAgentInspectorSettings"
       @room-move-prepare="prepareAgentInspectorRoomMove"
       @room-move-commit="commitAgentInspectorRoomMove"
       @retire="retireAgentInspectorAgent"
@@ -413,6 +414,7 @@ import {
 import {
   agentInspectorSettingsFenceCurrent,
   configurationDraft,
+  configurationHasRuntimeLag,
   isStaleDaemonGenerationError,
   recoveredRoomMoveState,
   settleConfigurationConflict,
@@ -465,6 +467,7 @@ import {
 } from "./room-shell/preferences";
 import { exportRoomChat } from "./room-shell/roomExport";
 import type { RoomTab, RoomTabId } from "./room-shell/types";
+import { useAgentInspectorConfigurationApply } from "./room-shell/useAgentInspectorConfigurationApply";
 import { useDesktopReasoningInspector } from "./room-shell/useDesktopReasoningInspector";
 import type {
   AgentInspectorSelection,
@@ -647,6 +650,18 @@ const selectedAgentDetailProjection = computed(() => {
   const target = selectedAgentDetailTarget.value;
   if (target?.kind !== "supervised") return null;
   return agentInspectorProjections.value.find((projection) => projection.entryId === target.supervisorEntryId) ?? null;
+});
+const { applyAgentInspectorSettings } = useAgentInspectorConfigurationApply({
+  selectedProjection: selectedAgentDetailProjection,
+  configurationResource: agentInspectorConfigurationResource,
+  actionState: agentInspectorActionState,
+  refreshSupervisorStatus,
+  selectionCurrent: agentInspectorSettingsSelectionCurrent,
+  beginOperation: (message, daemonGeneration) =>
+    beginAgentInspectorOperation("apply_settings", message, daemonGeneration),
+  operationIdentityCurrent: agentInspectorOperationIdentityCurrent,
+  operationCurrent: agentInspectorOperationCurrent,
+  recoverGeneration: recoverAgentInspectorSettingsGeneration,
 });
 const selectedAgentInspectorActionState = computed(() => {
   const target = selectedAgentDetailTarget.value;
@@ -2071,6 +2086,15 @@ async function loadAgentInspectorSettings(force = false, retryOnStaleGeneration 
   }
 }
 
+async function reloadAgentInspectorSettings(): Promise<void> {
+  const action = agentInspectorActionState.value;
+  if (action?.kind === "apply_settings" && action.status === "success"
+    && selectedAgentDetailProjection.value?.entryId === action.entryId) {
+    agentInspectorActionState.value = null;
+  }
+  await loadAgentInspectorSettings(true);
+}
+
 function openAgentInspectorSettings(): void {
   void loadAgentInspectorSettings();
   void loadAgentInspectorRoomMove();
@@ -2906,6 +2930,7 @@ function actionProgressMessage(kind: AgentInspectorActionIntent["kind"]): string
     skip_message: "Skipping this blocked message…",
     retire_agent: "Retiring this saved agent…",
     save_settings: "Saving configuration…",
+    apply_settings: "Restarting with saved configuration…",
     move_room: "Moving room…",
     purge_agent: "Purging durable records…",
   } as const)[kind];
@@ -2927,6 +2952,7 @@ function actionSuccessMessage(kind: AgentInspectorActionIntent["kind"]): string 
     skip_message: "Message skipped. Later room work can continue.",
     retire_agent: "Agent retired. Its worktree is retained.",
     save_settings: "Configuration saved.",
+    apply_settings: "Saved configuration restart requested.",
     move_room: "Room move started.",
     purge_agent: "Durable records purged.",
   } as const)[kind];

@@ -16,7 +16,7 @@
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
-        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </div>
@@ -44,7 +44,7 @@
         @session-updated="emit('session-updated', $event)"
         @open-reasoning="emit('open-reasoning', $event)"
         @live-selected="emit('live-selected')" @live-dismissed="emit('live-dismissed')" @work-selected="emit('work-selected')" @work-retry="emit('work-retry')" @work-source-select="emit('work-source-select', $event)" @reveal-message="emit('reveal-message', $event)"
-        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
+        @settings-selected="emit('settings-selected')" @settings-patch="emit('settings-patch', $event)" @settings-save="emit('settings-save', $event)" @settings-apply="emit('settings-apply')" @settings-reload="emit('settings-reload')" @room-move-prepare="emit('room-move-prepare', $event)" @room-move-commit="emit('room-move-commit')" @retire="emit('retire')" @purge="emit('purge')"
       />
     </Transition>
   </Teleport>
@@ -118,6 +118,7 @@ const emit = defineEmits<{
   "settings-selected": [];
   "settings-patch": [patch: Partial<AgentInspectorConfigurationDraft>];
   "settings-save": [overwrite: boolean];
+  "settings-apply": [];
   "settings-reload": [];
   "room-move-prepare": [destination: string];
   "room-move-commit": [];
