@@ -11,7 +11,7 @@ import type {
   ProviderActionPort,
   ProviderActionTerminal,
 } from "../provider-action-port.js";
-import type { DaemonManifestEntry, ExecutionTerminalPayload } from "../types.js";
+import type { DaemonManifestEntry, ExecutionTerminalPayload, TaskWorkAttempt } from "../types.js";
 import type { WorkerSessionBinding } from "../worker-binding-store.js";
 import type { BoundWorkerAuthorization, InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { PollingActivationRecord } from "../custodial-polling-activation.js";
@@ -107,6 +107,7 @@ function harness(input: {
   controlEpoch?: number;
   frozenAuthorityMode?: "legacy" | "typed_shadow" | "typed" | null;
   currentInstallation?: (entryId: string) => ProviderInstallationToken | undefined;
+  workspaceIdentity?: TaskWorkAttempt["workspace_identity"];
 } = {}) {
   let manifestEntry = input.entry ?? baseEntry();
   let manifestGeneration = 1;
@@ -183,6 +184,12 @@ function harness(input: {
       getAttempt: async () => ({
         work_attempt_id: "attempt-1",
         workspace_path: "/tmp/work",
+        workspace_identity: input.workspaceIdentity ?? {
+          repo: "repo",
+          remote_url: "https://example.test/repo.git",
+          resolved_revision: "a".repeat(40),
+          bare_path: "/tmp/repo.git",
+        },
         execution_generations: executionGenerations,
         checkpoints,
       }) as never,
@@ -345,6 +352,60 @@ test("delivery handoff freezes convergence and draining never creates a successo
     assert.equal(runtime.executionGenerations.length, 0, phase);
   }
 });
+
+const repositoryWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
+  repo: "repo", remote_url: "https://example.test/repo.git",
+  resolved_revision: "a".repeat(40), bare_path: "/tmp/repo.git",
+};
+const scratchWorkspaceIdentity: TaskWorkAttempt["workspace_identity"] = {
+  repo: "room-only", remote_url: "letagents-ephemeral:scratch",
+  resolved_revision: "0".repeat(40), bare_path: "/tmp/work",
+};
+
+for (const { label, entryPatch, workspaceIdentity, expectedWorkspaceKind } of [
+  {
+    label: "explicit scratch",
+    entryPatch: { source_repo_path: null },
+    workspaceIdentity: scratchWorkspaceIdentity,
+    expectedWorkspaceKind: "room_scratch",
+  },
+  {
+    label: "explicit repository",
+    entryPatch: { source_repo_path: "/repo" },
+    workspaceIdentity: repositoryWorkspaceIdentity,
+    expectedWorkspaceKind: "git_worktree",
+  },
+  {
+    label: "legacy repository",
+    entryPatch: {},
+    workspaceIdentity: repositoryWorkspaceIdentity,
+    expectedWorkspaceKind: "git_worktree",
+  },
+  {
+    label: "legacy scratch",
+    entryPatch: {},
+    workspaceIdentity: scratchWorkspaceIdentity,
+    expectedWorkspaceKind: "room_scratch",
+  },
+] as const) {
+  test(`provider births declare the ${label} boundary as ${expectedWorkspaceKind}`, async () => {
+    let workspaceKind: "git_worktree" | "room_scratch" | undefined;
+    const runtime = harness({
+      entry: { ...baseEntry(), ...entryPatch },
+      workspaceIdentity,
+      provider: provider({
+        spawn: async request => {
+          workspaceKind = request.workspaceKind;
+          return returnedHandle;
+        },
+      }),
+    });
+
+    await runtime.coordinator.converge("agent-1");
+
+    assert.equal(workspaceKind, expectedWorkspaceKind);
+  });
+}
 
 for (const { label, providerId, handle } of [
   { label: "Codex", providerId: "codex", handle: returnedHandle },
