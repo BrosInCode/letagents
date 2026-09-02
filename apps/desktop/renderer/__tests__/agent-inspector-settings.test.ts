@@ -8,8 +8,10 @@ import {
   isStaleDaemonGenerationError,
   recoveredRoomMoveState,
   roomMovePresentation,
+  settleConfigurationAlreadyApplied,
   settleConfigurationConflict,
   settleConfigurationUpdate,
+  snapshotConfigurationApply,
   snapshotConfigurationSave,
   supervisorGenerationIsCurrent,
   type AgentInspectorConfigurationResource,
@@ -51,6 +53,29 @@ test("settings draft exposes only user-editable settings and makes saved/runtime
   assert.equal(agentInspectorProviderSupportsEffort("open-model"), false);
   assert.equal(agentInspectorProviderSupportsEffort("claude-code"), false);
   assert.equal(agentInspectorProviderSupportsEffort("cursor"), false);
+});
+
+test("configuration apply snapshots exact authority coordinates and preserves the local draft", () => {
+  const initial = resource();
+  initial.draft = { ...initial.draft!, charter: "Unsaved local edit." };
+  const snapshot = snapshotConfigurationApply(initial, "agent_a");
+  assert.deepEqual(snapshot, {
+    entryId: "agent_a",
+    daemonGeneration: 7,
+    expectedConfigurationRevision: 4,
+    preservedDraft: { ...initial.draft },
+  });
+  assert.equal(snapshotConfigurationApply(initial, "another_agent"), null);
+  assert.equal(snapshotConfigurationApply({ ...initial, status: "refreshing" }, "agent_a"), null);
+  assert.equal(snapshotConfigurationApply({
+    ...initial,
+    configuration: { ...configuration, runtimeConfigurationRevision: configuration.configRevision },
+  }, "agent_a"), null);
+
+  const settled = settleConfigurationAlreadyApplied(initial, 4);
+  assert.equal(settled.configuration?.runtimeConfigurationRevision, 4);
+  assert.equal(settled.draft?.charter, "Unsaved local edit.");
+  assert.equal(settleConfigurationAlreadyApplied(initial, 5), initial, "a response for another revision cannot settle this resource");
 });
 
 test("configuration CAS settlement never replaces a newer local draft with an older response", () => {

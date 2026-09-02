@@ -109,6 +109,7 @@ const expectedDirectChannels = [
   "desktop:supervisor-grant:get-storage-status",
   "desktop:supervisor-grant:provision",
   "desktop:supervisor-grant:revoke",
+  "desktop:supervisor:apply-agent-configuration",
   "desktop:supervisor:commit-room-move",
   "desktop:supervisor:control-turn",
   "desktop:supervisor:create-agent",

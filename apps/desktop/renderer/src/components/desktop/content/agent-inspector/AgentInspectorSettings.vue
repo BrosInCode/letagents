@@ -14,6 +14,10 @@
           <template v-if="runtimeLag">Saved revision {{ resource.configuration.configRevision }} is pending runtime application; the running provider has applied revision {{ resource.configuration.runtimeConfigurationRevision }}.</template>
           <template v-else>Runtime has applied saved revision {{ resource.configuration.runtimeConfigurationRevision }}.</template>
         </p>
+        <div v-if="runtimeLag && !retired" class="agent-inspector-settings-actions">
+          <button type="button" :disabled="busy || applyPending || !settingsEditable" @click="emit('apply')">{{ applyPending ? 'Restarting…' : 'Restart with saved revision' }}</button>
+          <span class="agent-inspector-settings-note">Draft edits are not included until saved.</span>
+        </div>
         <label class="agent-inspector-field"><span>Provider</span><input :value="resource.configuration.provider" readonly aria-readonly="true" /><small>Provider is fixed when this agent is created.</small></label>
         <label class="agent-inspector-field"><span>Model</span><input :value="resource.draft.model || ''" :disabled="busy || !settingsEditable || !canEditModel" placeholder="Provider default" @input="patch({ model: ($event.target as HTMLInputElement).value.trim() || null })" /><small v-if="!canEditModel">{{ provider ? 'This provider does not expose a managed model control.' : 'Provider capabilities are unavailable.' }}</small></label>
         <label v-if="canEditEffort" class="agent-inspector-field"><span>Reasoning effort</span><select :value="resource.draft.reasoningEffort || ''" :disabled="busy || !settingsEditable" @change="patch({ reasoningEffort: (($event.target as HTMLSelectElement).value || null) as any })"><option v-for="option in inspectorEffortOptions" :key="option.value" :value="option.value">{{ option.label }}</option></select></label>
@@ -94,8 +98,8 @@ import {
   type AgentInspectorConfigurationResource,
   type AgentInspectorRoomMoveResource,
 } from "../../../../domain/agent-inspector-settings";
-const props = defineProps<{ entryId: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; conflict: boolean }>();
-const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
+const props = defineProps<{ entryId: string; workspacePath: string | null; retired: boolean; resource: AgentInspectorConfigurationResource; move: AgentInspectorRoomMoveResource; moveAvailable: boolean; providers: readonly DesktopAgentProvider[]; destinations: readonly DesktopFocusRoomInfo[]; busy: boolean; applyPending: boolean; conflict: boolean }>();
+const emit = defineEmits<{ patch: [patch: Partial<AgentInspectorConfigurationDraft>]; save: [overwrite: boolean]; apply: []; reload: []; "prepare-move": [destination: string]; "commit-move": []; retire: []; purge: [] }>();
 const destination = ref(""); const purgeConfirmation = ref(""); const confirmRetire = ref(false);
 const provider = computed(() => props.providers.find((item) => item.id === props.resource.configuration?.provider) ?? null);
 const canEditModel = computed(() => Boolean(provider.value?.capabilities.includes("desktop_managed_runtime")));

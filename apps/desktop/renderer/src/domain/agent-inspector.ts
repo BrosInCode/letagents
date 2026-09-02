@@ -81,6 +81,7 @@ export type AgentInspectorActionKind =
   | "skip_message"
   | "retire_agent"
   | "save_settings"
+  | "apply_settings"
   | "move_room"
   | "purge_agent";
 

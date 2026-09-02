@@ -371,6 +371,10 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
     assertDesktopUpdateMutationAllowed();
     return supervisorDaemonClient.updateAgentConfiguration(input);
   });
+  targetIpcMain.handle("desktop:supervisor:apply-agent-configuration", async (_event, input: import("../../ipc-types.js").DesktopSupervisorAgentConfigurationApplyInput) => {
+    assertDesktopUpdateMutationAllowed();
+    return supervisorDaemonClient.applyAgentConfiguration(input);
+  });
   targetIpcMain.handle("desktop:supervisor:prepare-room-move", async (_event, input: import("../../ipc-types.js").DesktopSupervisorRoomMovePrepareInput) => {
     assertDesktopUpdateMutationAllowed();
     return supervisorDaemonClient.prepareRoomMove(input);

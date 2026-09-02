@@ -31,6 +31,13 @@ export interface AgentInspectorConfigurationSaveSnapshot {
   draftVersion: number;
 }
 
+export interface AgentInspectorConfigurationApplySnapshot {
+  entryId: string;
+  daemonGeneration: number;
+  expectedConfigurationRevision: number;
+  preservedDraft: AgentInspectorConfigurationDraft;
+}
+
 export interface AgentInspectorSettingsFence {
   entryId: string;
   roomId: string;
@@ -129,6 +136,37 @@ export function configurationDraft(configuration: DesktopSupervisorAgentConfigur
 
 export function configurationHasRuntimeLag(configuration: DesktopSupervisorAgentConfiguration | null): boolean {
   return Boolean(configuration && configuration.runtimeConfigurationRevision < configuration.configRevision);
+}
+
+export function snapshotConfigurationApply(
+  resource: AgentInspectorConfigurationResource,
+  entryId: string,
+): AgentInspectorConfigurationApplySnapshot | null {
+  const configuration = resource.configuration;
+  const draft = resource.draft;
+  if (resource.status !== "ready" || !configuration || !draft
+    || configuration.entryId !== entryId || !configurationHasRuntimeLag(configuration)) return null;
+  return {
+    entryId,
+    daemonGeneration: configuration.daemonGeneration,
+    expectedConfigurationRevision: configuration.configRevision,
+    preservedDraft: { ...draft },
+  };
+}
+
+export function settleConfigurationAlreadyApplied(
+  resource: AgentInspectorConfigurationResource,
+  expectedConfigurationRevision: number,
+): AgentInspectorConfigurationResource {
+  const configuration = resource.configuration;
+  if (!configuration || configuration.configRevision !== expectedConfigurationRevision) return resource;
+  return {
+    ...resource,
+    configuration: {
+      ...configuration,
+      runtimeConfigurationRevision: expectedConfigurationRevision,
+    },
+  };
 }
 
 export function agentInspectorProvider(

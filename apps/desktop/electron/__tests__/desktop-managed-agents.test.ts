@@ -531,6 +531,8 @@ test("managed agent permission profiles map provider-specific available and gate
   assert.equal(claudeProfiles.find((profile) => profile.id === "read_only")?.status, "available");
   assert.match(claudeProfiles.find((profile) => profile.id === "read_only")?.detail ?? "", /shell tools are unavailable/);
   assert.equal(claudeProfiles.find((profile) => profile.id === "full_access")?.status, "available");
+  assert.match(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /on this host/);
+  assert.doesNotMatch(claudeProfiles.find((profile) => profile.id === "full_access")?.description ?? "", /repo|workspace/i);
 
   const cursorProfiles = listManagedAgentPermissionProfiles("cursor");
   assert.equal(cursorProfiles.find((profile) => profile.id === "read_only")?.status, "available");

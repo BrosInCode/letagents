@@ -324,6 +324,7 @@ function settingsProps(overrides: Record<string, unknown> = {}): Record<string, 
     providers: [provider],
     destinations: [{ identifier: "room_b", displayName: "Room B" }],
     busy: false,
+    applyPending: false,
     conflict: false,
     ...overrides,
   };
@@ -616,6 +617,53 @@ test("mounted busy and refreshing settings prevent draft edits and overlapping s
   }));
   assert.equal(buttonByText(refreshing.root, "Save changes").props.disabled, true);
   refreshing.app.unmount();
+});
+
+test("mounted Settings offers an explicit, non-overlapping restart only for a saved runtime lag", () => {
+  let applies = 0;
+  const laggingConfiguration = { ...configuration, runtimeConfigurationRevision: 3 };
+  const laggingResource = { ...readyResource, configuration: laggingConfiguration };
+  const lagging = mount(AgentInspectorSettings, settingsProps({
+    resource: laggingResource,
+    onApply: () => { applies += 1; },
+  }));
+  const apply = buttonByText(lagging.root, "Restart with saved revision");
+  assert.equal(apply.props.disabled, false);
+  assert.match(textContent(lagging.root), /Draft edits are not included until saved/);
+  (apply.props.onClick as () => void)();
+  assert.equal(applies, 1);
+  lagging.app.unmount();
+
+  const current = mount(AgentInspectorSettings, settingsProps());
+  assert.equal(descendants(current.root).some((node) => node.type === "button" && textContent(node) === "Restart with saved revision"), false);
+  current.app.unmount();
+
+  const pending = mount(AgentInspectorSettings, settingsProps({ resource: laggingResource, applyPending: true }));
+  assert.equal(buttonByText(pending.root, "Restarting…").props.disabled, true);
+  pending.app.unmount();
+
+  const retired = mount(AgentInspectorSettings, settingsProps({ resource: laggingResource, retired: true }));
+  assert.equal(descendants(retired.root).some((node) => node.type === "button" && textContent(node) === "Restart with saved revision"), false);
+  retired.app.unmount();
+});
+
+test("Settings apply uses exact authority fences and explicit reload recovers an accepted restart", async () => {
+  const shell = await readFile(
+    fileURLToPath(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url)),
+    "utf8",
+  );
+  const apply = await readFile(
+    fileURLToPath(new URL("../src/components/desktop/content/room-shell/useAgentInspectorConfigurationApply.ts", import.meta.url)),
+    "utf8",
+  );
+  assert.match(shell, /@settings-reload="reloadAgentInspectorSettings"/);
+  assert.match(shell, /function reloadAgentInspectorSettings\(\)[\s\S]{0,500}action\?\.kind === "apply_settings"[\s\S]{0,250}agentInspectorActionState\.value = null;[\s\S]{0,180}loadAgentInspectorSettings\(true\)/);
+  assert.match(shell, /useAgentInspectorConfigurationApply\(/);
+  assert.match(apply, /snapshotConfigurationApply\(options\.configurationResource\.value, projection\.entryId\)/);
+  assert.match(apply, /entryId: snapshot\.entryId,[\s\S]{0,140}daemonGeneration: snapshot\.daemonGeneration,[\s\S]{0,140}expectedConfigurationRevision: snapshot\.expectedConfigurationRevision/);
+  assert.match(apply, /if \(!options\.operationIdentityCurrent\(operation\)\) return;/);
+  assert.match(apply, /options\.recoverGeneration\(operation, snapshot\.preservedDraft\)/);
+  assert.match(apply, /settleConfigurationAlreadyApplied/);
 });
 
 test("overflow Escape stops propagation, closes, and returns focus; outside and focus-out also dismiss", async () => {

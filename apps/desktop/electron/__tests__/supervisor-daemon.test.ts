@@ -968,6 +968,7 @@ async function startWireDaemon(
   runtimeEnvironmentFingerprint?: string,
   prepareHandoffResponseDelayMs = 0,
   retireResponseDelayMs = 0,
+  configurationApplyResponseDelayMs = 0,
 ) {
   const entries: Array<Record<string, any>> = [];
   const legacyOwners: Array<Record<string, any>> = [];
@@ -1039,6 +1040,9 @@ async function startWireDaemon(
         result = { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: null, reasoning_effort: null, charter: "help", permission_profile_id: null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: 1, runtime_configuration_revision: 1 };
       } else if (request.method === "supervisor.update_agent_configuration") {
         result = { outcome: "updated", configuration: { entry_id: request.params!.entry_id, daemon_generation: request.params!.daemon_generation, provider: "codex", model: request.params!.configuration?.model ?? null, reasoning_effort: request.params!.configuration?.reasoning_effort ?? null, charter: request.params!.configuration?.charter ?? "help", permission_profile_id: request.params!.configuration?.permission_profile_id ?? null, supervised_permission_profiles: [{ id: "full_access", label: "Full access", description: "Trusted local access.", status: "available", risk: "high", detail: null, isDefault: true }], provider_launch_policy: {}, config_revision: Number(request.params!.expected_revision) + 1, runtime_configuration_revision: 1 } };
+      } else if (request.method === "supervisor.apply_agent_configuration") {
+        responseDelayMs = configurationApplyResponseDelayMs;
+        result = { outcome: request.params!.entry_id === "agent_invalid" ? "invented" : "restarting" };
       } else if (request.method === "supervisor.retire_agent") {
         responseDelayMs = retireResponseDelayMs;
         result = request.params!.grant_revoked_without_worker_session === true || typeof request.params!.revoked_agent_session_id === "string"
@@ -1399,6 +1403,9 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
       // submit native flags through the public bridge.
       configuration: { model: null, reasoningEffort: null, charter: "help", permissionProfileId: "full_access", providerLaunchPolicy: { sandboxPolicy: "weakened" } } as never,
     });
+    assert.deepEqual(await client.applyAgentConfiguration({
+      entryId: "agent_1", daemonGeneration: 39, expectedConfigurationRevision: 2,
+    }), { outcome: "restarting" });
     const prepared = await client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: "request_1", daemonGeneration: 39 });
     assert.equal(prepared.phase, "prepared");
     const committed = await client.commitRoomMove({ operationId: prepared.operationId, entryId: "agent_1", daemonGeneration: 39 });
@@ -1417,8 +1424,47 @@ test("Inspector settings and room-move RPCs preserve strict typed coordinates", 
       entry_id: "agent_1", daemon_generation: 39, expected_revision: 1,
       configuration: { model: null, reasoning_effort: null, charter: "help", permission_profile_id: "full_access" },
     }, "the renderer bridge must never forward native provider policy");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.apply_agent_configuration")?.params, {
+      entry_id: "agent_1", daemon_generation: 39, expected_configuration_revision: 2,
+    });
     await assert.rejects(() => client.prepareRoomMove({ entryId: "agent_1", destinationRoomId: "room_2", requestId: undefined as unknown as string, daemonGeneration: 39 }), /exact typed/);
     await assert.rejects(() => client.getAgentConfiguration("agent_1", "39" as unknown as number), /exact typed/);
+    await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_1", daemonGeneration: 39, expectedConfigurationRevision: 0 }), /exact typed/);
+    await assert.rejects(() => client.applyAgentConfiguration({ entryId: "agent_invalid", daemonGeneration: 39, expectedConfigurationRevision: 2 }), /invalid configuration apply result/);
+  } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
+});
+
+test("configuration apply waits for the authority-bearing daemon result beyond the ordinary request deadline", async () => {
+  const env = await fixture(); const previous = process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = "1";
+  const wire = await startWireDaemon(
+    env.socketPath,
+    SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+    39,
+    undefined,
+    SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION,
+    0,
+    false,
+    true,
+    0,
+    undefined,
+    0,
+    0,
+    35,
+  );
+  try {
+    const client = new SupervisorDaemonClient({
+      socketPath: env.socketPath,
+      daemonScriptPath,
+      requestTimeoutMs: 5,
+      spawnDaemon: () => { throw new Error("healthy daemon must be reused"); },
+    });
+    const startedAt = Date.now();
+    assert.deepEqual(await client.applyAgentConfiguration({
+      entryId: "agent_1",
+      daemonGeneration: 39,
+      expectedConfigurationRevision: 2,
+    }), { outcome: "restarting" });
+    assert.ok(Date.now() - startedAt >= 30, "configuration apply waits beyond the injected ordinary request deadline");
   } finally { await closeServer(wire.server, env.socketPath); if (previous === undefined) delete process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON; else process.env.LETAGENTS_ALLOW_NON_DARWIN_DAEMON = previous; await env.cleanup(); }
 });
 

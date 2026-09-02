@@ -44,6 +44,10 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 2;
 export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.127";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
+// Once configuration application is admitted, the daemon may already be
+// stopping the current provider. Abandoning that authority-bearing request
+// would make a successful replacement look retryable to the renderer.
+const CONFIGURATION_APPLY_REQUEST_TIMEOUT_MS = 0;
 // Retirement can queue behind one already-admitted worker mint (3 x 10s) so
 // its background completion channel needs a deadline that covers that safety
 // fence. The renderer no longer waits on this request.
@@ -1078,6 +1082,34 @@ export class SupervisorDaemonClient {
     }
     if (result.outcome !== "updated" && result.outcome !== "conflict") throw new Error("Supervisor returned an invalid configuration update result.");
     return { outcome: result.outcome, configuration: mapAgentConfiguration(record(result.configuration) ?? {}, input.entryId, input.daemonGeneration) };
+  }
+
+  async applyAgentConfiguration(input: import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorAgentConfigurationApplyResult> {
+    if (!input || !nonEmptyString(input.entryId)
+      || !Number.isSafeInteger(input.daemonGeneration) || input.daemonGeneration < 1
+      || !Number.isSafeInteger(input.expectedConfigurationRevision) || input.expectedConfigurationRevision < 1) {
+      throw new Error("Agent configuration apply requires exact typed coordinates.");
+    }
+    const status = await this.ensureRunning();
+    if (!status.capabilities.agentInspectorSettings) throw new Error("This supervisor is too old for Inspector settings; rebuild the desktop daemon.");
+    const result = await this.request<Record<string, unknown>>(
+      "supervisor.apply_agent_configuration",
+      {
+        entry_id: input.entryId,
+        daemon_generation: input.daemonGeneration,
+        expected_configuration_revision: input.expectedConfigurationRevision,
+      },
+      SUPERVISOR_DAEMON_PROTOCOL_VERSION,
+      CONFIGURATION_APPLY_REQUEST_TIMEOUT_MS,
+    );
+    if (result.outcome !== "already_applied"
+      && result.outcome !== "restarting"
+      && result.outcome !== "busy_active_turn"
+      && result.outcome !== "conflict"
+      && result.outcome !== "unsupported") {
+      throw new Error("Supervisor returned an invalid configuration apply result.");
+    }
+    return { outcome: result.outcome };
   }
 
   async prepareRoomMove(input: import("../ipc-types/agents.js").DesktopSupervisorRoomMovePrepareInput): Promise<import("../ipc-types/agents.js").DesktopSupervisorRoomMove> {

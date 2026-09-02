@@ -117,8 +117,8 @@
         v-else-if="selectedTab === 'settings'" id="agent-inspector-settings-panel" role="tabpanel" aria-labelledby="agent-inspector-settings-tab"
         :entry-id="projection.entryId" :workspace-path="projection.entry.workspacePath" :retired="projection.overallState === 'retired'"
         :resource="settingsResource" :move="roomMoveResource" :move-available="roomMoveAvailable" :providers="providers" :destinations="destinations"
-        :busy="actionState?.status === 'running'" :conflict="settingsConflict"
-        @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @reload="emit('settings-reload')"
+        :busy="actionState?.status === 'running'" :apply-pending="actionState?.kind === 'apply_settings' && actionState.status === 'success' && configurationHasRuntimeLag(settingsResource.configuration)" :conflict="settingsConflict"
+        @patch="emit('settings-patch', $event)" @save="emit('settings-save', $event)" @apply="emit('settings-apply')" @reload="emit('settings-reload')"
         @prepare-move="emit('room-move-prepare', $event)" @commit-move="emit('room-move-commit')"
         @retire="emit('retire')" @purge="emit('purge')"
       />
@@ -143,7 +143,7 @@ import type { AgentInspectorWorkResource } from "../../../../domain/agent-inspec
 import type { RoomArtifactTimelineItem } from "../../../../domain/room-artifacts";
 import type { AgentInspectorConfigurationResource, AgentInspectorRoomMoveResource } from "../../../../domain/agent-inspector-settings";
 import type { DesktopAgentProvider, DesktopAgentStreamEvent, DesktopFocusRoomInfo } from "../../../../../../electron/ipc-types";
-import { AGENT_INSPECTOR_RETIRE_CONFIRMATION } from "../../../../domain/agent-inspector-settings";
+import { AGENT_INSPECTOR_RETIRE_CONFIRMATION, configurationHasRuntimeLag } from "../../../../domain/agent-inspector-settings";
 import ProviderBadge from "../desktop-chat-message/ProviderBadge.vue";
 import AgentInspectorLifecycleActions from "./AgentInspectorLifecycleActions.vue";
 import AgentInspectorOverview from "./AgentInspectorOverview.vue";
@@ -183,6 +183,7 @@ const emit = defineEmits<{
   "settings-selected": [];
   "settings-patch": [patch: Partial<import("../../../../domain/agent-inspector-settings").AgentInspectorConfigurationDraft>];
   "settings-save": [overwrite: boolean];
+  "settings-apply": [];
   "settings-reload": [];
   "room-move-prepare": [destination: string];
   "room-move-commit": [];

@@ -225,6 +225,8 @@ test("supervised profile contract gates Claude prompt approval without changing 
   assert.equal(claude.find((profile) => profile.id === "read_only")?.status, "available");
   assert.match(claude.find((profile) => profile.id === "read_only")?.detail ?? "", /shell tools are unavailable/);
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
+  assert.match(claude.find((profile) => profile.id === "full_access")?.description ?? "", /on this host/);
+  assert.doesNotMatch(claude.find((profile) => profile.id === "full_access")?.description ?? "", /repo|workspace/i);
   assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "full_access")?.status, "available");
   const cursor = supervisedPermissionProfilesForProvider("cursor");
