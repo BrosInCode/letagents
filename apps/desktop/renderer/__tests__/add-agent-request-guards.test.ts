@@ -210,6 +210,8 @@ test("configuration invalidation rejects a stale model-catalog response", async 
 test("Cursor keeps legacy read-only and supervised repo-write defaults independent", async () => {
   const configuration = useAddAgentConfiguration();
   const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("cursor");
+  const roomIdentifier = ref("room-1");
+  const repoRootPath = ref<string | null>("/repo");
   const profiles: DesktopAgentProvider["permissionProfiles"] = [
     {
       id: "read_only", label: "Read-only", description: "Inspect only.",
@@ -231,9 +233,9 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
   }));
   const actions = configuration.bind({
     open: () => true,
-    roomIdentifier: () => "room-1",
+    roomIdentifier: () => roomIdentifier.value,
     roomGitRoom: () => null,
-    repoRootPath: () => "/repo",
+    repoRootPath: () => repoRootPath.value,
     selectedProviderId,
     selectedProvider,
     selectedPermissionProfile: computed(() =>
@@ -262,6 +264,46 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
   assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
   configuration.launchMode.value = "supervised";
   assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+
+  repoRootPath.value = null;
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "read_only",
+    "a repo-backed broad selection never becomes the default authority in a repo-less room",
+  );
+
+  repoRootPath.value = "/repo";
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "full_access",
+    "returning to the repo restores its independent remembered authority",
+  );
+
+  repoRootPath.value = null;
+  profiles[0]!.status = "gated";
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "read_only");
+  assert.equal(
+    profiles.find((profile) => profile.id === configuration.selectedPermissionProfileId.value)?.status,
+    "gated",
+    "the existing start gate remains authoritative until the human chooses an available profile",
+  );
+  actions.selectPermissionProfile(profiles[2]!);
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+  actions.syncPermissionProfileSelection();
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "full_access",
+    "catalog refresh retains the explicit available repo-less choice",
+  );
+
+  roomIdentifier.value = "room-2";
+  actions.resetTransientState();
+  assert.equal(
+    configuration.selectedPermissionProfileId.value,
+    "read_only",
+    "a new repo-less room is safe before its provider refresh resolves",
+  );
 });
 
 test("closing the modal does not unlock a second Open Model write", async () => {
