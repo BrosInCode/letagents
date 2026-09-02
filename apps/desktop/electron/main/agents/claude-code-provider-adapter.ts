@@ -8,6 +8,7 @@ import { desktopRuntimeEnvironment } from "../desktop-shell-environment.js";
 
 import {
   synthesizeTerminalPayload,
+  sameProviderConnectionIdentity,
   type ProviderActivityEvent,
   type ProviderAdapter,
   type ProviderAdapterCapabilities,
@@ -246,6 +247,15 @@ function streamMethod(message: ClaudeStreamMessage): string {
 function sessionIdOf(message: ClaudeStreamMessage): string | null {
   const value = (message as { session_id?: unknown }).session_id;
   return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function claudeTerminalDiscriminator(message: ClaudeStreamMessage): string {
+  const subtype = typeof message.subtype === "string" && message.subtype.trim()
+    ? message.subtype.trim().toLowerCase()
+    : "unknown";
+  const errorState = message.is_error === true ? "error"
+    : message.is_error === false ? "ok" : "unknown";
+  return `${subtype}:${errorState}`;
 }
 
 function initMcpServerNames(message: ClaudeStreamMessage): string[] {
@@ -544,7 +554,7 @@ class ClaudeProviderHandle implements ProviderHandle {
   executionTurnId: string | null = null;
   executionTurnStarted = false;
   executionTerminalCheckpoint: {
-    providerTurnId: string; subtype: string; isError: boolean; nativeLifecycle: NativeLifecycleCheckpoint;
+    providerTurnId: string; terminalDiscriminator: string; nativeLifecycle: NativeLifecycleCheckpoint;
   } | null = null;
   readonly executionTools = new Map<string, { operation: Extract<NativeExecutionFact, { domain: "execution" }>["operation"]; completed: boolean }>();
   executionExitObserved = false;
@@ -553,6 +563,7 @@ class ClaudeProviderHandle implements ProviderHandle {
     readonly workAttemptId: string,
     readonly pid: number | null,
     readonly providerContinuationId: string,
+    readonly lifecycleAuthorityMode: "legacy" | "typed_shadow" | "typed",
     readonly providerConnection: ProviderConnectionRef,
     readonly child: ClaudeCliChild,
     readonly exitEvidence: Promise<ProviderProcessExit>,
@@ -573,7 +584,10 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
   private readonly initTimeoutMs: number;
   private readonly stopGraceMs: number;
   private readonly handles = new Map<string, ClaudeProviderHandle>();
-  private readonly pendingAttaches = new Map<string, Promise<ProviderHandle | ProviderAttachTerminal | null>>();
+  private readonly pendingAttaches = new Map<string, {
+    ref: ProviderContinuationRef;
+    promise: Promise<ProviderHandle | ProviderAttachTerminal | null>;
+  }>();
   private readonly exitPromises = new WeakMap<ClaudeProviderHandle, Promise<ProviderTerminalPayload>>();
 
   constructor(options: ClaudeCodeProviderAdapterOptions = {}) {
@@ -615,7 +629,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
    */
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
     const handle = this.handles.get(ref.workAttemptId);
-    if (handle && !handle.terminal && handle.providerContinuationId === ref.providerContinuationId) {
+    const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
+    if (handle && !handle.terminal
+      && handle.providerContinuationId === ref.providerContinuationId
+      && handle.lifecycleAuthorityMode === authorityMode
+      && sameProviderConnectionIdentity(handle.providerConnection, ref.providerConnection)) {
       return handle;
     }
     if (handle) return null;
@@ -623,13 +641,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (!connection || connection.kind !== "claude_cli") return null;
 
     const pending = this.pendingAttaches.get(ref.workAttemptId);
-    if (pending) return pending;
+    if (pending) {
+      if (pending.ref.providerContinuationId !== ref.providerContinuationId
+        || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
+        || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)) return null;
+      return pending.promise;
+    }
     const attaching = this.fenceRecordedChild(connection, ref.providerContinuationId).finally(() => {
-      if (this.pendingAttaches.get(ref.workAttemptId) === attaching) {
+      if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
         this.pendingAttaches.delete(ref.workAttemptId);
       }
     });
-    this.pendingAttaches.set(ref.workAttemptId, attaching);
+    this.pendingAttaches.set(ref.workAttemptId, { ref, promise: attaching });
     return attaching;
   }
 
@@ -736,7 +759,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       await options.checkpointTurnStarted?.(turnId);
       terminalPromise = this.waitForExactRoomTurn(handle, turnId, options.detachSignal);
       handle.activeRoomTurnId = turnId;
-      handle.state = "working";
+      if (handle.lifecycleAuthorityMode !== "typed") handle.state = "working";
       handle.executionTurnId = turnId;
       handle.executionTurnStarted = false;
       handle.executionTerminalCheckpoint = null;
@@ -902,6 +925,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (req.deliveryMode !== "daemon_inbox") {
       throw new Error("Claude room agents require daemon_inbox delivery.");
     }
+    const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
     const versionOutput = await this.deps.readVersion(this.claudeBin);
     requireSupportedClaudeCodeVersion(versionOutput);
 
@@ -1045,6 +1069,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         req.workAttemptId,
         child.pid,
         sessionId,
+        lifecycleAuthorityMode,
         { kind: "claude_cli", pid: child.pid, processIdentity },
         child,
         observeFencedExit(child, child.pid, processIdentity, child.exited, this.deps),
@@ -1069,6 +1094,11 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       }
       handle.roomTurnResults.delete(bootstrapTurnId);
       handle.state = "idle";
+      handle.execution.emit(
+        { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" },
+        processIdentity,
+        child.pid ?? undefined,
+      );
       return handle;
     } catch (error) {
       if (handle) {
@@ -1171,12 +1201,16 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     const nativeLifecycle = this.observeNativeExecution(handle, message);
     this.publishStream(handle, streamMethod(message), message, claudeStreamKind(message),
       nativeLifecycle?.nativeEventId ?? null, nativeLifecycle?.phase ?? null);
+    const typedAuthority = handle.lifecycleAuthorityMode === "typed";
+    if (typedAuthority && nativeLifecycle?.phase === "turn_active") handle.state = "working";
+    if (typedAuthority && nativeLifecycle?.phase === "turn_terminal") handle.state = "idle";
     const type = typeof message.type === "string" ? message.type : "";
     if (handle.state === "failed") return;
     if (type === "result") {
       const exactTurnId = typeof message.user_message_uuid === "string"
         ? message.user_message_uuid.trim()
         : "";
+      let exactTurnFailed = false;
       if (exactTurnId) {
         const terminal = exactClaudeStreamTerminal(
           message,
@@ -1184,6 +1218,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           handle.providerContinuationId,
         );
         if (terminal) {
+          exactTurnFailed = "error" in terminal;
           handle.roomTurnResults.set(exactTurnId, terminal);
           if (handle.activeRoomTurnId === exactTurnId) handle.activeRoomTurnId = null;
           const exactWaiters = [...(handle.roomTurnWaiters.get(exactTurnId) ?? [])];
@@ -1199,7 +1234,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         for (const resolve of waiters) resolve(message);
       }
       if (exactInterrupted) {
-        handle.state = "idle";
+        if (!typedAuthority) handle.state = "idle";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
@@ -1210,9 +1245,9 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         });
         return;
       }
-      if (isClaudeFailedResult(message)) {
+      if (isClaudeFailedResult(message) || (typedAuthority && exactTurnFailed)) {
         const turnLimited = isClaudeTurnLimitResult(message);
-        handle.state = turnLimited ? "idle" : "failed";
+        if (!typedAuthority) handle.state = turnLimited ? "idle" : "failed";
         this.publishActivity(handle, {
           source: "native_harness",
           method: streamMethod(message),
@@ -1223,7 +1258,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
         });
         return;
       }
-      handle.state = "idle";
+      if (!typedAuthority) handle.state = "idle";
       this.publishActivity(handle, {
         source: "native_harness",
         method: streamMethod(message),
@@ -1235,7 +1270,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       return;
     }
     if (type === "assistant" || type === "user" || type === "tool_use_summary") {
-      handle.state = "working";
+      if (!typedAuthority) handle.state = "working";
       const text = type === "assistant" ? assistantTextOf(message) : null;
       this.publishActivity(handle, {
         source: "native_harness",
@@ -1253,8 +1288,7 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
     if (message.type === "result" && replay
       && message.session_id === handle.providerContinuationId
       && message.user_message_uuid === replay.providerTurnId
-      && message.subtype === replay.subtype
-      && message.is_error === replay.isError) {
+      && claudeTerminalDiscriminator(message) === replay.terminalDiscriminator) {
       return replay.nativeLifecycle;
     }
     const turnId = handle.executionTurnId;
@@ -1280,14 +1314,18 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
       });
       if (!handle.executionTurnStarted) {
         handle.executionTurnStarted = true;
-        emit({ domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
         emit({ domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
           nativeEventId: nativeLifecycle.nativeEventId, ...turn });
       }
       return nativeLifecycle;
     } else if (message.type === "result" && message.user_message_uuid === turnId) {
-      if (typeof message.subtype !== "string" || !message.subtype
-        || (message.subtype === "success" ? message.is_error !== false : message.is_error !== true)) return null;
+      const hasLegacyTerminalShape = typeof message.subtype === "string" && Boolean(message.subtype)
+        && (message.subtype === "success" ? message.is_error === false : message.is_error === true);
+      if (handle.lifecycleAuthorityMode !== "typed" && !hasLegacyTerminalShape) return null;
+      const terminalDiscriminator = claudeTerminalDiscriminator(message);
+      const subtype = typeof message.subtype === "string" ? message.subtype.toLowerCase() : "";
+      const turnOutcome = subtype === "success" && message.is_error === false ? "completed"
+        : subtype === "interrupted" ? "interrupted" : "failed";
       const nativeLifecycle = nativeLifecycleCheckpoint({
         provider: this.id,
         workAttemptId: handle.workAttemptId,
@@ -1298,16 +1336,14 @@ export class ClaudeCodeProviderAdapter implements ProviderAdapter {
           ? handle.providerConnection.pid ?? undefined : undefined,
         nativeProcessIdentity: handle.providerConnection.kind === "claude_cli"
           ? handle.providerConnection.processIdentity ?? undefined : undefined,
-        terminalDiscriminator: `${message.subtype}:${message.is_error ? "error" : "ok"}`,
+        terminalDiscriminator,
       });
       emit({ domain: "turn", kind: "state_changed", state: "terminal", sideEffects: "none", ...turn,
         nativeEventId: nativeLifecycle.nativeEventId,
-        turnOutcome: message.subtype === "success" && message.is_error === false ? "completed"
-          : message.subtype === "interrupted" ? "interrupted" : "failed" });
+        turnOutcome });
       handle.executionTerminalCheckpoint = {
         providerTurnId: turnId,
-        subtype: message.subtype,
-        isError: message.is_error === true,
+        terminalDiscriminator,
         nativeLifecycle,
       };
       handle.executionTurnId = null;
