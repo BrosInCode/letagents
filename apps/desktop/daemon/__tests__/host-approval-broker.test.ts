@@ -336,6 +336,8 @@ async function verifyNativeApproval(scenario: "command" | "file_change" | "chang
     assert.ok(handle && !("state" in handle), "actual adapter must attach the exact local process and continuation");
     disposeStream = await provider.onStream(handle, event => streams.push(event));
     disposeFacts = (await provider.onExecution(handle, event => facts.push(event))).dispose;
+    assert.ok(facts.length > 0, "reattach establishes a nonempty typed lifecycle baseline");
+    const lifecycleFacts = structuredClone(facts);
     broker = new HostApprovalBroker({ store: f.store, inbox: f.inbox, provider, currentHandle: () => handle,
       isCurrent: () => true, exactAuthority: async () => true, fenceCommit: commit => commit(), nowMs: () => now + 10 });
     broker.install("agent", handle, "generation");
@@ -382,7 +384,9 @@ async function verifyNativeApproval(scenario: "command" | "file_change" | "chang
     assert.equal(await broker.decide(selected), "uncertain");
     assert.equal(frames.filter(frame => frame.id === 71 && !frame.method).length, scenario === "changed_file" ? 0 : 1);
     assert.equal(frames.some(frame => ["thread/start", "turn/start", "turn/interrupt"].includes(String(frame.method))), false);
-    assert.equal(handle.observedState, "working"); assert.deepEqual(facts, []);
+    assert.equal(handle.observedState, "working");
+    assert.deepEqual(facts, lifecycleFacts,
+      "approval payloads and decisions never add to the reconstructed execution evidence");
     assert.equal(streams.some(event => event.method.includes("requestApproval") || providerStreamLifecycle(event) === "failed"), false,
       "raw permission RPC requests are not legacy lifecycle authority");
     assert.doesNotMatch(JSON.stringify(f.db.prepare("SELECT * FROM execution_approval_requests").all()), /PRIVATE-APPROVAL-CONTENT|systemError/);

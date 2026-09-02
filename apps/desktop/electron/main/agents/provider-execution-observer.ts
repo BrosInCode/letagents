@@ -74,6 +74,11 @@ export class ProviderExecutionObserver {
     for (const subscription of this.listeners) this.drain(subscription);
   }
 
+  /** Consume a source position that cannot be represented as a trusted fact. */
+  markUnavailable(): void {
+    this.sequence += 1;
+  }
+
   private drain(subscription: Subscription): void {
     if (subscription.draining) return;
     subscription.draining = true;
