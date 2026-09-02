@@ -366,6 +366,8 @@ export interface ProviderStreamEvent {
   nativeProcessPid?: number;
   /** Structural boundary for the correlated lifecycle checkpoint; never provider-authored text. */
   nativeLifecyclePhase?: "turn_active" | "turn_terminal";
+  /** Shadow-comparison evidence only; consumers must not derive operational state from this frame. */
+  lifecycleProjectionOnly?: true;
   /** Provider-approved, human-readable progress. Raw private reasoning is never placed here. */
   summary?: string | null;
   payload: unknown;

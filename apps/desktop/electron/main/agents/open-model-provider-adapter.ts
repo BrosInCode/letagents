@@ -56,7 +56,7 @@ import {
   supervisedOpenCodeMcpEnvironment,
 } from "./opencode-launch-contract.js";
 import { resolveOpenCodeBinary } from "./opencode-runtime.js";
-import { nativeExecutionId, ProviderExecutionObserver } from "./provider-execution-observer.js";
+import { nativeExecutionId, nativeLifecycleCheckpoint, ProviderExecutionObserver } from "./provider-execution-observer.js";
 import type { ControlProbeResult, HardControlEvidence, NativeExecutionFact, NativeExecutionObservation, NativeExecutionSubscription, TurnOutcome } from "../../../shared/execution-protocol.js";
 import {
   assistantsFor,
@@ -704,8 +704,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     handle.activeRoomTurnId = turnId;
     handle.observedTurn = { id: turnId, terminal: null };
     this.emitExecution(handle, { domain: "runtime", kind: "state_changed", state: "ready", sideEffects: "none" });
-    this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
-      providerContinuationId: handle.providerContinuationId, providerTurnId: turnId });
+    this.emitTurnActive(handle, turnId);
     await options.checkpointTurnStarted?.(turnId);
     try {
       const result = await this.awaitExactTurn(handle, turnId, options.detachSignal);
@@ -734,6 +733,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const handle = this.required(rawHandle);
     handle.activeRoomTurnId = request.providerTurnId;
     if (handle.observedTurn?.id !== request.providerTurnId) handle.observedTurn = { id: request.providerTurnId, terminal: null };
+    this.emitTurnActive(handle, request.providerTurnId);
     try {
       const result = await this.awaitExactTurn(handle, request.providerTurnId, options.detachSignal, true);
       await options.checkpointTerminalResult?.(result);
@@ -1076,12 +1076,51 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.providerConnection.pid ?? undefined);
   }
 
+  private emitTurnActive(handle: OpenModelHandle, turnId: string): void {
+    if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)) return;
+    const checkpoint = nativeLifecycleCheckpoint({
+      provider: "open-model",
+      workAttemptId: handle.workAttemptId,
+      phase: "turn_active",
+      providerContinuationId: handle.providerContinuationId,
+      providerTurnId: turnId,
+      nativeProcessPid: handle.providerConnection.pid ?? undefined,
+      nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
+    });
+    this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
+      providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+      nativeEventId: checkpoint.nativeEventId });
+    this.emitLifecycleProjection(handle, "turn/started", checkpoint.nativeEventId, checkpoint.phase);
+  }
+
   private emitTurnTerminal(handle: OpenModelHandle, turnId: string, outcome: TurnOutcome): void {
     if (!nativeExecutionId(turnId) || !nativeExecutionId(handle.providerContinuationId)
       || (handle.observedTurn?.id === turnId && handle.observedTurn.terminal)) return;
     handle.observedTurn = { id: turnId, terminal: outcome };
+    const checkpoint = nativeLifecycleCheckpoint({
+      provider: "open-model",
+      workAttemptId: handle.workAttemptId,
+      phase: "turn_terminal",
+      providerContinuationId: handle.providerContinuationId,
+      providerTurnId: turnId,
+      nativeProcessPid: handle.providerConnection.pid ?? undefined,
+      nativeProcessIdentity: handle.providerConnection.processIdentity ?? undefined,
+      terminalDiscriminator: outcome,
+    });
     this.emitExecution(handle, { domain: "turn", kind: "state_changed", state: "terminal", turnOutcome: outcome,
-      sideEffects: "none", providerContinuationId: handle.providerContinuationId, providerTurnId: turnId });
+      sideEffects: "none", providerContinuationId: handle.providerContinuationId, providerTurnId: turnId,
+      nativeEventId: checkpoint.nativeEventId });
+    this.emitLifecycleProjection(handle, "turn/completed", checkpoint.nativeEventId, checkpoint.phase);
+  }
+
+  private emitLifecycleProjection(
+    handle: OpenModelHandle,
+    method: "turn/started" | "turn/completed",
+    nativeEventId: string,
+    nativeLifecyclePhase: "turn_active" | "turn_terminal",
+  ): void {
+    this.emitStream(handle, { kind: "turn_lifecycle", method, summary: null, payload: null,
+      nativeEventId, nativeLifecyclePhase, lifecycleProjectionOnly: true });
   }
 
   private required(handle: ProviderHandle): OpenModelHandle {
@@ -1435,7 +1474,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
 
   private emitStream(
     handle: OpenModelHandle,
-    input: Pick<ProviderStreamEvent, "kind" | "method"> & {
+    input: Pick<ProviderStreamEvent, "kind" | "method"> & Partial<Pick<ProviderStreamEvent,
+      "nativeEventId" | "nativeLifecyclePhase" | "lifecycleProjectionOnly">> & {
       summary: string | null;
       payload: unknown;
     },
@@ -1449,6 +1489,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       provider: "open-model",
       kind: input.kind,
       method: input.method,
+      ...(input.nativeEventId ? { nativeEventId: input.nativeEventId } : {}),
+      ...(input.nativeLifecyclePhase ? { nativeLifecyclePhase: input.nativeLifecyclePhase } : {}),
+      ...(input.lifecycleProjectionOnly ? { lifecycleProjectionOnly: true as const } : {}),
       summary: input.summary,
       payload: safe.payload,
       payloadTruncated: safe.payloadTruncated,

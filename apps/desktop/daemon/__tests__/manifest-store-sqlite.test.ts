@@ -20,12 +20,28 @@ import { executionRuntimeStorageIdentity, executionStorageIdentity, ExecutionSha
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
+import { validateLegacyLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 
 const TEST_PROVIDER_TURN_AUTHORITY = {
   work_attempt_id: "attempt_1",
   origin_execution_generation_id: "run_1",
   provider_continuation_id: "thread_1",
 } as const;
+
+function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync): void {
+  const noDelete = String(database.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='trigger' AND name='lifecycle_projection_total_no_delete'",
+  ).get()!.sql);
+  database.exec(`DROP TRIGGER lifecycle_projection_total_no_delete;
+    DELETE FROM lifecycle_projection_totals WHERE provider='open-model';
+    ${noDelete}`);
+  const schemaVersion = Number(database.prepare("PRAGMA schema_version").get()!.schema_version);
+  database.exec("PRAGMA writable_schema=ON");
+  database.prepare(`UPDATE sqlite_master SET sql=replace(sql, ?, '')
+    WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
+  database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+  validateLegacyLifecycleProjectionLedgerSchema(database);
+}
 
 test("provider birth collisions cannot relabel frozen lifecycle authority", async () => {
   const env = await fixture();
@@ -360,6 +376,7 @@ test("v29 lifecycle effect migration rolls back its journal and version markers 
     await initialized.load();
     await initialized.close();
     const historical = new DatabaseSync(env.databasePath);
+    restoreThreeProviderLifecycleProjectionFixture(historical);
     historical.exec(`DROP TABLE execution_lifecycle_effects;
       UPDATE manifest_metadata SET schema_version=29 WHERE singleton=1;
       PRAGMA user_version=29`);
@@ -396,6 +413,7 @@ test("v30 runtime-failure effect migration rolls back its schema and version mar
     await initialized.load();
     await initialized.close();
     const historical = new DatabaseSync(env.databasePath);
+    restoreThreeProviderLifecycleProjectionFixture(historical);
     historical.exec("DROP TABLE execution_lifecycle_effects");
     applyExecutionStorageSchema(historical, 22);
     historical.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");

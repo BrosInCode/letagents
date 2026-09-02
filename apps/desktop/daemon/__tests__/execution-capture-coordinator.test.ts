@@ -237,10 +237,22 @@ test("capture preserves a pre-existing birth mode and rejects policy mismatch", 
 test("Open Model births use the same closed typed-shadow release policy", async () => {
   const f = fixture("opencode_server");
   try {
-    await f.install(); f.emit(ready); await flush();
+    f.bindTurn();
+    await f.install();
+    f.emit(ready);
+    f.emit({ ...active, nativeEventId: "open-model-active" });
+    f.emit({ ...terminal, nativeEventId: "open-model-terminal" });
+    await flush();
     assert.deepEqual({ ...f.db.prepare("SELECT provider,authority_mode FROM execution_runtime_generations").get() },
       { provider: "open-model", authority_mode: "typed_shadow" });
     assert.equal(f.admission(), "ready");
+    assert.deepEqual(f.db.prepare(`SELECT native_event_id,typed_phase,typed_state FROM lifecycle_projection_pairs
+      ORDER BY typed_sequence`).all().map(row => ({ ...row })), [
+      { native_event_id: "open-model-active", typed_phase: "turn_active", typed_state: "working" },
+      { native_event_id: "open-model-terminal", typed_phase: "turn_terminal", typed_state: "terminal" },
+    ]);
+    assert.equal(f.db.prepare("SELECT observed_state FROM runtime_deployments WHERE agent_id='agent'").get()?.observed_state,
+      "working", "Open Model shadow capture cannot become operational authority");
   } finally { f.capture.close(); }
 });
 
