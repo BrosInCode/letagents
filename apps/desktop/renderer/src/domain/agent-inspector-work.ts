@@ -9,6 +9,67 @@ import { roomArtifactTimelineItems, type RoomArtifactTimelineItem } from "./room
 import type { RetainedExecutionDetail } from "../../../shared/execution-protocol";
 
 type RecordedTurn = Extract<RetainedExecutionDetail, { availability: "available" }>["turns"][number];
+type RuntimeControl = NonNullable<DesktopSupervisorAgentInspectorDetail["runtime_control"]>;
+
+export interface AgentInspectorRuntimeControlPresentation {
+  state: RuntimeControl["control_state"] | "stopping" | "exited";
+  label: string;
+  detail: string;
+  observedAt: string | null;
+}
+
+export function agentInspectorRuntimeControlMatchesFence(
+  control: RuntimeControl | null | undefined,
+  executionGenerationId: string | null,
+  daemonGeneration: number | null,
+): boolean {
+  return Boolean(control
+    && executionGenerationId
+    && control.execution_generation_id === executionGenerationId
+    && Number(control.daemon_generation_id) === daemonGeneration);
+}
+
+/** Control health explains reachability only; it never claims work succeeded or failed. */
+export function describeAgentInspectorRuntimeControl(
+  control: RuntimeControl | null | undefined,
+): AgentInspectorRuntimeControlPresentation | null {
+  if (!control) return null;
+  if (control.runtime_state === "exited") return {
+    state: "exited",
+    label: "Provider stopped",
+    detail: "The provider runtime exited. LetAgents will not infer that unfinished work completed.",
+    observedAt: control.observed_at,
+  };
+  if (control.runtime_state === "stopping") return {
+    state: "stopping",
+    label: "Provider stopping",
+    detail: "LetAgents is ending this provider runtime.",
+    observedAt: control.observed_at,
+  };
+  const presentation: Record<RuntimeControl["control_state"], Pick<AgentInspectorRuntimeControlPresentation, "label" | "detail">> = {
+    connecting: {
+      label: control.runtime_state === "starting" ? "Provider starting" : "Checking provider",
+      detail: "LetAgents is verifying the provider’s control connection.",
+    },
+    responsive: {
+      label: "Provider reachable at last check",
+      detail: "The latest control check completed.",
+    },
+    degraded: {
+      label: "Provider check inconclusive",
+      detail: "LetAgents could not confirm the provider’s control connection. The agent may still be working; it has not been failed or restarted.",
+    },
+    lost: {
+      label: "Provider connection lost",
+      detail: "Process or transport evidence shows that LetAgents can no longer control this provider runtime.",
+    },
+    unprobeable: {
+      label: "Live checks unavailable",
+      detail: "This provider has no safe control probe. Silence is not treated as failure.",
+    },
+  };
+  return { state: control.control_state, ...presentation[control.control_state], observedAt: control.observed_at };
+}
 
 /** Recorded native evidence is not a current running-state or delivery claim. */
 export function humanizeRecordedTurn(turn: RecordedTurn): string {

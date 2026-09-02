@@ -3,6 +3,7 @@ import {
   workplaceLivenessStaleAfterMs,
 } from "./cloud-http.js";
 import type { WorkDurabilityStore } from "./durability-store.js";
+import { executionRuntimeStorageIdentity } from "./execution-shadow-store.js";
 import type { ProviderActionHandle } from "./provider-action-port.js";
 import type { ProviderRecoveryDiagnostics } from "./provider-stream-coordinator.js";
 import {
@@ -100,7 +101,25 @@ export class DaemonReadModel {
     if (entry.room_id !== roomId) {
       throw new Error("The agent inspector room does not match the exact supervisor entry.");
     }
-    return this.ports.inbox.detail(entryId, roomId, sourceMessageId);
+    const providerRef = entry.provider_ref;
+    const connection = providerRef?.provider_connection;
+    let runtimeFence: Parameters<SupervisedAgentInboxStore["detail"]>[3] = null;
+    if (providerRef && connection?.pid && connection.processIdentity?.trim()) {
+      try {
+        runtimeFence = {
+          executionGenerationId: providerRef.execution_generation_id,
+          runtimeGenerationId: executionRuntimeStorageIdentity(
+            entry.id,
+            providerRef.execution_generation_id,
+            connection.kind,
+            connection.pid,
+            connection.processIdentity,
+          ),
+          daemonGenerationId: String(this.ports.currentDaemonGeneration()),
+        };
+      } catch { /* Unknown process birth cannot authorize present-tense health. */ }
+    }
+    return this.ports.inbox.detail(entryId, roomId, sourceMessageId, runtimeFence);
   }
 
   async entriesWithDerivedLiveness(

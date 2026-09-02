@@ -2070,6 +2070,7 @@ test("inspector detail isolates unavailable optional execution capture from oper
       messages: [{ source_message_id: "1", source_message: { id: "1", text: "retained message" }, activation: {} }] });
     const before = await store.detail("detail", "room", "1");
     assert.deepEqual(before.recorded_execution, { availability: "not_captured" });
+    assert.equal(before.runtime_control, null);
     assert.equal((await store.detail("detail", "room", "missing")).recorded_execution, undefined);
     const database = new DatabaseSync(env.database);
     try {
@@ -2084,12 +2085,36 @@ test("inspector detail isolates unavailable optional execution capture from oper
       capture.ingest("source", observer, { factId: "start", agentId: "detail", executionGenerationId: "generation", runtimeGenerationId: runtime,
         observerEpoch: 1, sourceSequence: 1, observedAtMs: 101, domain: "turn", kind: "state_changed", state: "active", sideEffects: "none",
         turnId: `captured-turn:${item!.inbox_item_id}`, providerContinuationId: "continuation", providerTurnId: "native-turn" });
-      const captured = await store.detail("detail", "room", "1");
+      capture.ingest("source", observer, { factId: "control", agentId: "detail", executionGenerationId: "generation", runtimeGenerationId: runtime,
+        observerEpoch: 1, sourceSequence: 2, observedAtMs: 102, domain: "control", kind: "state_changed", state: "responsive", sideEffects: "none" });
+      const captured = await store.detail("detail", "room", "1", {
+        executionGenerationId: "generation", runtimeGenerationId: runtime, daemonGenerationId: "daemon",
+      });
+      assert.deepEqual(captured.runtime_control, {
+        control_state: "responsive", runtime_state: "ready", observed_at: "1970-01-01T00:00:00.102Z",
+        execution_generation_id: "generation", daemon_generation_id: "daemon",
+      });
       assert.deepEqual(captured.recorded_execution, { availability: "available", truncated: false, evidenceIncomplete: false,
         turns: [{ turnId: `captured-turn:${item!.inbox_item_id}`, state: "active", outcome: null, operations: [] }] });
+      assert.equal((await store.detail("detail", "room", "1", {
+        executionGenerationId: "replacement", runtimeGenerationId: runtime, daemonGenerationId: "daemon",
+      })).runtime_control, null, "a replaced provider runtime cannot project historical control health");
+      assert.equal((await store.detail("detail", "room", "1", {
+        executionGenerationId: "generation", runtimeGenerationId: runtime, daemonGenerationId: "replacement-daemon",
+      })).runtime_control, null, "a prior daemon generation cannot project historical control health");
+      assert.equal((await store.detail("detail", "room", "1", null)).runtime_control, null,
+        "a manifest without a current provider birth cannot project historical control health");
+      database.prepare("UPDATE execution_observers SET max_observed_sequence=last_source_sequence+1 WHERE agent_id=?").run("detail");
+      assert.equal((await store.detail("detail", "room", "1", {
+        executionGenerationId: "generation", runtimeGenerationId: runtime, daemonGenerationId: "daemon",
+      })).runtime_control, null, "an observer with an uncommitted source frontier cannot project health");
+      database.prepare("UPDATE execution_observers SET max_observed_sequence=last_source_sequence WHERE agent_id=?").run("detail");
+      database.prepare("UPDATE execution_runtime_generations SET runtime_state='exited',ended_at_ms=created_at_ms+1 WHERE runtime_generation_id=?").run(runtime);
+      assert.equal((await store.detail("detail", "room", "1", null)).runtime_control, null,
+        "an idle provider with no current process does not expose its prior child exit as current health");
       database.exec("DROP TABLE execution_facts");
       const after = await store.detail("detail", "room", "1");
-      assert.deepEqual(after, { ...captured, recorded_execution: { availability: "unavailable" } });
+      assert.deepEqual(after, { ...captured, runtime_control: null, recorded_execution: { availability: "unavailable" } });
     } finally { database.close(); }
   } finally { await store.close(); await env.cleanup(); }
 });

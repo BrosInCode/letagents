@@ -2007,8 +2007,25 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
   if (requestedSourceId === null && availability !== "not_loaded") fail();
   const recorded = availability === "available" && value.recorded_execution !== undefined
     ? recordedExecutionSchema.safeParse(value.recorded_execution) : null;
+  let runtimeControl: Detail["runtime_control"] = undefined;
+  if (value.runtime_control !== undefined) {
+    runtimeControl = null;
+    const row = value.runtime_control === null ? null : record(value.runtime_control);
+    if (row) {
+      const controlState = enumValue(row.control_state, ["connecting", "responsive", "degraded", "lost", "unprobeable"] as const);
+      const runtimeState = enumValue(row.runtime_state, ["starting", "ready", "stopping", "exited"] as const);
+      const observedAt = nullableNonEmptyString(row.observed_at);
+      const executionGenerationId = nonEmptyString(row.execution_generation_id);
+      const daemonGenerationId = nonEmptyString(row.daemon_generation_id);
+      if (controlState && runtimeState && observedAt !== undefined && executionGenerationId && daemonGenerationId) {
+        runtimeControl = { control_state: controlState, runtime_state: runtimeState, observed_at: observedAt,
+          execution_generation_id: executionGenerationId, daemon_generation_id: daemonGenerationId };
+      }
+    }
+  }
   return { availability, entry_id: input.entryId, room_id: input.roomId, requested_source_message_id: requestedSourceMessageId, inbox_item_id: inboxItemId, source_message: source, receipt, terminal, publication, continuation_repair: repair, timeline, items, uncertain_effects: uncertainEffects, history_boundary: boundary,
-    ...(recorded ? { recorded_execution: recorded.success ? recorded.data : { availability: "unavailable" } } : {}) } as Detail;
+    ...(recorded ? { recorded_execution: recorded.success ? recorded.data : { availability: "unavailable" } } : {}),
+    ...(runtimeControl === undefined ? {} : { runtime_control: runtimeControl }) } as Detail;
 }
 
 /**
