@@ -17,6 +17,7 @@ import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPol
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
 
 import { executionRuntimeStorageIdentity, executionStorageIdentity, ExecutionShadowStore } from "../execution-shadow-store.js";
+import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { TypedLifecycleEffectCoordinator } from "../typed-lifecycle-effect-coordinator.js";
 import type { ProviderInstallationToken } from "../provider-stream-coordinator.js";
 
@@ -165,6 +166,43 @@ test("v29 lifecycle effect migration rolls back its journal and version markers 
     const inspection = new DatabaseSync(env.databasePath);
     assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.ok(inspection.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_lifecycle_effects'").get());
+    inspection.close();
+  } finally {
+    await initialized.close().catch(() => undefined);
+    await env.cleanup();
+  }
+});
+
+test("v30 runtime-failure effect migration rolls back its schema and version markers together", async () => {
+  const env = await fixture();
+  const initialized = new ManifestStore(env.databasePath);
+  try {
+    await initialized.load();
+    await initialized.close();
+    const historical = new DatabaseSync(env.databasePath);
+    historical.exec("DROP TABLE execution_lifecycle_effects");
+    applyExecutionStorageSchema(historical, 22);
+    historical.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
+    validateExecutionStorageSchema(historical, 22);
+    historical.close();
+
+    const interrupted = new ManifestStore(env.databasePath, undefined, undefined, () => {
+      throw new Error("interrupt v31 runtime-failure effect migration");
+    });
+    await assert.rejects(() => interrupted.load(), /interrupt v31/);
+    await interrupted.close();
+    const rolledBack = new DatabaseSync(env.databasePath);
+    assert.equal(rolledBack.prepare("PRAGMA user_version").get()?.user_version, 30);
+    assert.equal(rolledBack.prepare("SELECT schema_version FROM manifest_metadata WHERE singleton=1").get()?.schema_version, 30);
+    validateExecutionStorageSchema(rolledBack, 22);
+    rolledBack.close();
+
+    const migrated = new ManifestStore(env.databasePath);
+    await migrated.load();
+    await migrated.close();
+    const inspection = new DatabaseSync(env.databasePath);
+    assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    validateExecutionStorageSchema(inspection, 23);
     inspection.close();
   } finally {
     await initialized.close().catch(() => undefined);

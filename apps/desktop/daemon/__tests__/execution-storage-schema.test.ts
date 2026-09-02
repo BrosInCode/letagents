@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { applyExecutionStorageSchema, migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22,
-  validateExecutionStorageSchema } from "../execution-storage-schema.js";
+  migrateExecutionStorageV22ToV23, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Values = Record<string, string | number | null>;
 const digest = "a".repeat(64);
@@ -136,6 +136,69 @@ test("lifecycle dispositions are final, fact-owned, and historical migration nev
     assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()?.count, 0,
       "fact compaction cascades its disposition");
     validateExecutionStorageSchema(db, 22);
+  } finally { db.close(); }
+});
+
+test("runtime-failure effect storage migration preserves every prior disposition", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(db, 22);
+    seed(db);
+    for (const [index, state] of ["pending", "shadowed", "applied", "superseded"].entries()) {
+      const factId = `fact-${state}`;
+      insert(db, "execution_facts", {
+        fact_id: factId, agent_id: "agent", execution_generation_id: "generation",
+        runtime_generation_id: "runtime", observer_epoch: 1, source_sequence: index + 1, turn_id: "turn",
+        domain: "turn", kind: "state_changed", state: index % 2 ? "terminal" : "active",
+        side_effects: "none", observed_at_ms: 101 + index,
+      });
+      const factSequence = Number(db.prepare("SELECT sequence FROM execution_facts WHERE fact_id=?").get(factId)?.sequence);
+      insert(db, "execution_lifecycle_effects", {
+        fact_id: factId, fact_sequence: factSequence, agent_id: "agent",
+        observer_execution_generation_id: state === "pending" ? "generation" : null,
+        observer_runtime_generation_id: state === "pending" ? "runtime" : null,
+        observer_epoch: 1, subject_authority_mode: "typed",
+        observer_authority_mode: state === "pending" ? "typed" : null,
+        effect_kind: index % 2 ? "manifest_idle" : "manifest_working", state,
+        created_at_ms: 110 + index, disposed_at_ms: state === "pending" ? null : 120 + index,
+      });
+    }
+    const before = db.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all();
+    assert.throws(() => migrateExecutionStorageV22ToV23(db), /requires a transaction/);
+    db.exec("CREATE TRIGGER unexpected_lifecycle_extension AFTER INSERT ON execution_lifecycle_effects BEGIN SELECT 1; END; BEGIN IMMEDIATE");
+    assert.throws(() => migrateExecutionStorageV22ToV23(db), /Unexpected lifecycle effect storage dependency/);
+    db.exec("ROLLBACK; DROP TRIGGER unexpected_lifecycle_extension");
+    db.exec("BEGIN IMMEDIATE");
+    migrateExecutionStorageV22ToV23(db);
+    db.exec("COMMIT");
+    assert.deepEqual(db.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all(), before);
+    assert.match(String(db.prepare("SELECT sql FROM sqlite_master WHERE name='execution_lifecycle_effects'").get()?.sql), /'manifest_failed'/);
+    assert.deepEqual(db.prepare("PRAGMA foreign_key_check").all(), []);
+    db.exec("DELETE FROM execution_facts WHERE fact_id='fact-applied'");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects WHERE fact_id='fact-applied'").get()?.count, 0);
+    validateExecutionStorageSchema(db, 23);
+  } finally { db.close(); }
+});
+
+test("predecessor repair settles missing dispositions even when the physical journal is already current", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(db, 23);
+    seed(db);
+    insert(db, "execution_facts", {
+      fact_id: "unsettled-active", agent_id: "agent", execution_generation_id: "generation",
+      runtime_generation_id: "runtime", observer_epoch: 1, source_sequence: 1, turn_id: "turn",
+      domain: "turn", kind: "state_changed", state: "active", side_effects: "none", observed_at_ms: 101,
+    });
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()?.count, 0);
+    db.exec("BEGIN IMMEDIATE");
+    migrateExecutionStorageV21ToV22(db);
+    db.exec("COMMIT");
+    const effect = db.prepare("SELECT effect_kind,state FROM execution_lifecycle_effects WHERE fact_id='unsettled-active'").get();
+    assert.deepEqual({ ...effect }, { effect_kind: "manifest_working", state: "superseded" });
+    validateExecutionStorageSchema(db, 23);
   } finally { db.close(); }
 });
 

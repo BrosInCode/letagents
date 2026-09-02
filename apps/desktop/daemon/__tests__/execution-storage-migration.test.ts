@@ -138,6 +138,14 @@ function restoreV28Fixture(database: DatabaseSync): void {
   database.exec("DROP TABLE execution_lifecycle_effects; UPDATE manifest_metadata SET schema_version=28 WHERE singleton=1; PRAGMA user_version=28");
 }
 
+function restoreV30Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()!.count, 0);
+  database.exec("DROP TABLE execution_lifecycle_effects");
+  applyExecutionStorageSchema(database, 22);
+  database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
+  validateExecutionStorageSchema(database, 22);
+}
+
 function seedPreB1RuntimeBirth(database: DatabaseSync, input: {
   agentId: string;
   provider: "codex" | "claude-code" | "cursor" | "open-model";
@@ -372,12 +380,13 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
     (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture
       : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture : version === 24 ? restoreV24Fixture
-        : version === 25 ? restoreV25Fixture : version === 26 ? restoreV26Fixture : restoreV27Fixture)(env.database);
+        : version === 25 ? restoreV25Fixture : version === 26 ? restoreV26Fixture : version === 27 ? restoreV27Fixture
+          : restoreV30Fixture)(env.database);
     seedLegacyEvidence(env.database);
     if (version === 21) { seedV18Evidence(env.database); seedDormantCutovers(env.database); }
     const before = legacyRows(env.database);
@@ -397,6 +406,62 @@ for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27]) test(`a killed migra
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(legacyRows(env.database), before);
+  } finally { await env.cleanup(); }
+});
+
+test("v30 rejects unknown lifecycle-effect dependencies before WAL conversion", async () => {
+  const env = await fixture();
+  try {
+    restoreV30Fixture(env.database);
+    env.database.exec(`CREATE TRIGGER unexpected_lifecycle_extension AFTER INSERT ON execution_lifecycle_effects BEGIN SELECT 1; END;
+      PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
+    const before = await readFile(env.path); let initialized = false;
+    await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /Unexpected lifecycle effect storage dependency/);
+    assert.equal(initialized, false);
+    assert.deepEqual(await readFile(env.path), before);
+    assert.equal(String(env.database.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase(), "delete");
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 30);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 30);
+  } finally { await env.cleanup(); }
+});
+
+test("v30 rejects an exact old lifecycle journal with a missing disposition before WAL conversion", async () => {
+  const env = await fixture();
+  try {
+    restoreV30Fixture(env.database);
+    seedV18Evidence(env.database);
+    env.database.exec("PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE");
+    const before = await readFile(env.path); let initialized = false;
+    await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /missing a fact disposition/);
+    assert.equal(initialized, false);
+    assert.deepEqual(await readFile(env.path), before);
+    assert.equal(String(env.database.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase(), "delete");
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, 30);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version, 30);
+  } finally { await env.cleanup(); }
+});
+
+test("v30 marker recovery accepts only a complete exact-current lifecycle journal and preserves its rows", async () => {
+  const env = await fixture();
+  try {
+    seedV18Evidence(env.database);
+    for (const factId of ["terminal", "control-lost"]) {
+      const fact = env.database.prepare("SELECT sequence,agent_id,observer_epoch,observed_at_ms FROM execution_facts WHERE fact_id=?")
+        .get(factId) as Row;
+      env.database.prepare(`INSERT INTO execution_lifecycle_effects
+        (fact_id,fact_sequence,agent_id,observer_epoch,subject_authority_mode,effect_kind,state,created_at_ms,disposed_at_ms)
+        VALUES(?,?,?,?,?,'none','superseded',?,?)`).run(
+        factId, fact.sequence, fact.agent_id, fact.observer_epoch, "typed_shadow", fact.observed_at_ms, fact.observed_at_ms,
+      );
+    }
+    const before = env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all();
+    env.database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
+    new DaemonStateSchema().createSchema(env.database);
+    assert.deepEqual(env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all(), before);
+    assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
+    assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version,
+      DAEMON_STATE_SCHEMA_VERSION);
+    validateExecutionStorageSchema(env.database, 23);
   } finally { await env.cleanup(); }
 });
 
