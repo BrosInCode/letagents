@@ -1,3 +1,5 @@
+import { cursorNativeToolEnvelope } from "./cursor-native-tool.js";
+
 type CursorLiveDisplayProjection = {
   method: "item/agentMessage/delta" | "item/toolCall/updated";
   kind: "text_delta" | "tool_lifecycle";
@@ -49,19 +51,9 @@ export function cursorLiveDisplayProjections(
       }]
       : [];
   }
-  if (message.type !== "tool_call") return [];
-  if (message.subtype !== "started" && message.subtype !== "completed") return [];
-  if (typeof message.call_id !== "string" || !message.call_id.trim()) return [];
-  const toolCalls = record(message.tool_call);
-  if (!toolCalls) return [];
-  // Metadata may also be object-valued. Exactly one documented tool envelope
-  // is required so a new or malformed native variant cannot choose a card
-  // arbitrarily while typed execution evidence correctly remains unavailable.
-  const toolEntries = Object.entries(toolCalls)
-    .filter(([key, value]) => /ToolCall$/.test(key) && record(value));
-  if (toolEntries.length !== 1) return [];
-  const [tool, rawCall] = toolEntries[0]!;
-  const call = record(rawCall)!;
+  const nativeTool = cursorNativeToolEnvelope(message);
+  if (!nativeTool) return [];
+  const { executionId, tool, call } = nativeTool;
   const result = record(call.result);
   const failure = result && (Object.hasOwn(result, "error")
     ? result.error
@@ -75,7 +67,7 @@ export function cursorLiveDisplayProjections(
     method: "item/toolCall/updated",
     kind: "tool_lifecycle",
     payload: {
-      callID: `cursor:${exactTurnNamespace}:${message.call_id.trim()}`,
+      callID: `cursor:${exactTurnNamespace}:${executionId}`,
       tool,
       status: error ? "error" : completed ? "completed" : "running",
       input: call.args ?? null,

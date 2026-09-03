@@ -6985,6 +6985,11 @@ test("Cursor live display refuses a mismatched native tool terminal", async () =
     session_id: "sess-cursor-1",
   });
   child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-mismatch",
+    tool_call: { writeToolCall: { args: { path: "other.ts" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
     type: "tool_call", subtype: "completed", call_id: "tool-mismatch",
     tool_call: { writeToolCall: { result: { success: {} } } },
     session_id: "sess-cursor-1",
@@ -7108,6 +7113,18 @@ test("documented Cursor stream-json shapes project to namespaced response and to
     type: "tool_call", subtype: "started", call_id: "ambiguous-tool",
     tool_call: { readToolCall: { args: {} }, writeToolCall: { args: {} } },
   }, "turn-exact", "event-5"), [], "an ambiguous native envelope cannot choose an arbitrary tool card");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: " padded-id ",
+    tool_call: { readToolCall: { args: {} } },
+  }, "turn-exact", "event-6"), [], "display uses the exact typed execution-id grammar without trimming");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "unknown-tool",
+    tool_call: { browserToolCall: { args: {} } },
+  }, "turn-exact", "event-7"), [], "an unknown native tool remains raw diagnostic evidence");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "shadowed-tool",
+    tool_call: { readToolCall: { args: {} }, writeToolCall: null },
+  }, "turn-exact", "event-8"), [], "a second tool key invalidates the envelope even when its value is not an object");
 });
 
 test("Cursor typed observations fence each native child and exclude synthetic display completion", async () => {

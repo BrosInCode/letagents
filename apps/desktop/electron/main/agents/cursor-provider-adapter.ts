@@ -54,6 +54,7 @@ import {
 import { safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
 import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
+import { cursorNativeToolEnvelope } from "./cursor-native-tool.js";
 import {
   assertCursorPersonalIdentity,
   CursorIdentityAuthRequiredError,
@@ -467,7 +468,7 @@ interface LiveTurn {
   /** Writable turns own one private generation until its immutable tree is reconciled. */
   workspaceGeneration: SupervisedWorkspaceGenerationHandle | null;
   workspaceGenerationManifestPath: string | null;
-  liveDisplayTools: Map<string, { tool: string; input: unknown }>;
+  liveDisplayTools: Map<string, { tool: string; input: unknown; completed: boolean }>;
   executionTools: Map<string, { tool: string; completed: boolean }>;
   executionTurnFinished: boolean;
   executionRuntimeFinished: boolean;
@@ -2774,14 +2775,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
           const callId = typeof projection.payload.callID === "string" ? projection.payload.callID : null;
           if (callId) {
             if (projection.payload.status === "running") {
+              if (turn.liveDisplayTools.has(callId)) continue;
               turn.liveDisplayTools.set(callId, {
                 tool: typeof projection.payload.tool === "string" ? projection.payload.tool : "tool",
                 input: projection.payload.input ?? null,
+                completed: false,
               });
             } else {
               const active = turn.liveDisplayTools.get(callId);
-              if (!active || active.tool !== projection.payload.tool) continue;
-              turn.liveDisplayTools.delete(callId);
+              if (!active || active.completed || active.tool !== projection.payload.tool) continue;
+              active.completed = true;
             }
           }
         }
@@ -2812,6 +2815,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   private interruptLiveDisplayTools(handle: CursorProviderHandle, turn: LiveTurn): void {
     for (const [callID, tool] of turn.liveDisplayTools) {
+      if (tool.completed) continue;
       this.publishStream(handle, "item/toolCall/updated", {
         callID,
         tool: tool.tool,
@@ -2876,23 +2880,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
       };
       return nativeLifecycle;
     }
-    if (message.type !== "tool_call" || !nativeExecutionId(message.call_id)) return null;
-    const calls = cursorRecord(message.tool_call);
-    if (!calls) return null;
-    // Only exact native envelopes have defined operation semantics. Unknown
-    // variants remain diagnostics rather than inferring execution from text.
-    const operations = { shellToolCall: "command", readToolCall: "file_read", writeToolCall: "file_change" } as const;
-    const entries = Object.entries(operations).filter(([name]) => cursorRecord(calls[name]));
-    if (entries.length !== 1 || Object.keys(calls).filter((key) => key.endsWith("ToolCall")).length !== 1) return null;
-    const [tool, operation] = entries[0]!;
-    const call = cursorRecord(calls[tool])!;
-    const identity = { domain: "execution" as const, executionId: message.call_id, operation, ...nativeTurn };
+    const nativeTool = cursorNativeToolEnvelope(message as Record<string, unknown>);
+    if (!nativeTool) return null;
+    const { executionId, tool, operation, call } = nativeTool;
+    const identity = { domain: "execution" as const, executionId, operation, ...nativeTurn };
     const sideEffects = operation === "file_read" ? "none" as const : "possible" as const;
-    const prior = turn.executionTools.get(message.call_id);
+    const prior = turn.executionTools.get(executionId);
     if (message.subtype === "started" && !prior) {
       // Native toolCallStarted precedes permission/spawn outcomes. It proves
       // request identity, not that a process ran or a file was touched.
-      turn.executionTools.set(message.call_id, { tool, completed: false });
+      turn.executionTools.set(executionId, { tool, completed: false });
     } else if (message.subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
       const result = cursorRecord(call.result);
       if (!result) return null;
