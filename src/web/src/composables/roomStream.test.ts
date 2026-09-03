@@ -126,6 +126,9 @@ test('resource pointers negotiate once, advance inertly, and fail closed when ma
     room_id: 'room_pointer', resource: 'agent_work',
   }).status, 'supported')
   assert.equal(parseRoomResourceInvalidation({
+    room_id: 'room_pointer', resource: 'execution_delegation',
+  }).status, 'supported')
+  assert.equal(parseRoomResourceInvalidation({
     room_id: 'room_pointer', resource: 'future_resource',
   }).status, 'unsupported')
   assert.equal(parseRoomResourceInvalidation({
