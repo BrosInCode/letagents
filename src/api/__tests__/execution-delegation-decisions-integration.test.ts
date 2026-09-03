@@ -18,7 +18,6 @@ const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) process.env.DB_URL = testDatabaseUrl;
 else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "true";
-process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "true";
 
 const client = testDatabaseUrl ? await import("../db/client.js") : null;
 const db = testDatabaseUrl ? await import("../db.js") : null;
@@ -552,44 +551,5 @@ test("decision route loses a pre-read race to revocation and host reads stay exa
     )).status, 404);
   } finally {
     await close(readServer);
-  }
-});
-
-test("feature-off hides new decision writes while preserving host reconciliation reads", databaseOptions, async () => {
-  const seeded = await seed();
-  const admitted = await db!.admitExecutionDelegationDecision(decisionInput(seeded, {
-    client_request_id: "feature_off_read",
-  }));
-  const prior = process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
-  process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "false";
-  const app = express();
-  registerHttpMiddleware(app, { resolveRequestAuth });
-  registerExecutionDelegationDecisionRoutes(app, routeDeps({ value: "allow" }));
-  const server = await listen(app);
-  try {
-    const baseUrl = serverUrl(server);
-    const hiddenPath = `/execution-delegations/${seeded.delegation.delegation_instance_id}/decisions`;
-    const hidden = await fetch(baseUrl + hiddenPath, {
-      method: "POST",
-      headers: cookie(`decision_approver_session_${seeded.n}`),
-      body: JSON.stringify(decisionBody(seeded)),
-    });
-    const unknown = await fetch(baseUrl + "/route-that-does-not-exist", { method: "POST" });
-    assert.equal(hidden.status, unknown.status);
-    assert.equal(hidden.headers.get("content-type"), unknown.headers.get("content-type"));
-
-    const hostHeaders = {
-      authorization: `Bearer ${seeded.host.token}`,
-      "x-letagents-supervisor-generation": String(seeded.host.grant.current_generation),
-    };
-    const exact = await fetch(
-      `${baseUrl}/supervisor-host-grants/${seeded.host.grant.grant_id}/execution-delegation-decisions/${admitted.decision.decision_id}`,
-      { headers: hostHeaders },
-    );
-    assert.equal(exact.status, 200, "already-recorded intents remain host-reconcilable while admission is disabled");
-  } finally {
-    await close(server);
-    if (prior === undefined) delete process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
-    else process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = prior;
   }
 });

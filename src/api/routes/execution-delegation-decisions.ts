@@ -23,7 +23,6 @@ import {
   type ExecutionDelegationDecisionForHost,
 } from "../db.js";
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
-import { isExecutionDelegationFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import {
   queueAgentApprovalInvalidation,
   queueExecutionDelegationInvalidation,
@@ -202,8 +201,6 @@ export function registerExecutionDelegationDecisionRoutes(app: Express, deps: Ro
       res.json({ decision: hostDecision(decision) });
     },
   );
-
-  if (!isExecutionDelegationFeatureEnabled()) return;
 
   app.post(
     "/execution-delegations/:delegationInstanceId/decisions",
