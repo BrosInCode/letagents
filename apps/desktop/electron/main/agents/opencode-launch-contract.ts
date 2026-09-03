@@ -9,6 +9,15 @@ export const OPENCODE_SERVER_USERNAME = "opencode";
 export const SUPERVISED_OPEN_MODEL_OUTPUT_TOKEN_LIMIT = 8_192;
 
 export type OpenCodeConfig = Record<string, unknown>;
+export type SupervisedOpenCodePermissionProfileId = "full_access" | "ask_before_write";
+
+export function supervisedOpenCodePermissionPolicy(
+  profileId: SupervisedOpenCodePermissionProfileId,
+): Record<string, "allow" | "ask"> {
+  return profileId === "ask_before_write"
+    ? { "*": "allow", edit: "ask", bash: "ask" }
+    : { "*": "allow" };
+}
 
 const INHERITED_ENVIRONMENT_KEYS = [
   "PATH",
@@ -97,6 +106,7 @@ export function openCodeConfig(input: {
   cwd: string;
   mcpCommand: string[];
   mcpEnvironment: Record<string, string>;
+  permissionProfileId?: SupervisedOpenCodePermissionProfileId;
 }): OpenCodeConfig {
   return {
     $schema: "https://opencode.ai/config.json",
@@ -106,7 +116,7 @@ export function openCodeConfig(input: {
     lsp: false,
     model: `${OPEN_MODEL_OPENCODE_PROVIDER_ID}/${input.model}`,
     plugin: [input.pluginUrl],
-    permission: { "*": "allow" },
+    permission: supervisedOpenCodePermissionPolicy(input.permissionProfileId ?? "full_access"),
     provider: {
       [OPEN_MODEL_OPENCODE_PROVIDER_ID]: {
         id: OPEN_MODEL_OPENCODE_PROVIDER_ID,
