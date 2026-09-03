@@ -4,7 +4,8 @@ import { z } from "zod";
 import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../shared/execution-delegation-decision.mjs";
 import type { HostApprovalCandidate, HostApprovalDecision, HostApprovalPresentation, HostApprovalReference, HostApprovalStatus } from "../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
-import type { ApprovalAuthority, ExecutionApprovalRecord } from "./execution-approval-journal.js";
+import { ApprovalJournalError, type ApprovalAuthority, type ExecutionApprovalRecord } from "./execution-approval-journal.js";
+import type { ExecutionApprovalProjectionRecord } from "./execution-approval-projection-journal.js";
 import {
   ExecutionApprovalNativeApplicationCoordinator,
   NativeApprovalUnavailableError,
@@ -54,6 +55,7 @@ export function createHostApprovalBridge(options: Omit<Options, "exactAuthority"
     challenge: () => verifier?.challenge() ?? null,
     verify: (envelope: unknown) => verifier?.verify(envelope) ?? null,
     list: broker.list.bind(broker),
+    admitDelegatable: broker.admitDelegatable.bind(broker),
     decide: broker.decide.bind(broker),
     applyRecordedDecision: broker.applyRecordedDecision.bind(broker),
   };
@@ -63,6 +65,13 @@ type Lane = {
   agentId: string; generation: string; handle: ProviderActionHandle; connection: NonNullable<ProviderActionHandle["providerConnection"]>;
   controller: AbortController; revision: number; state: "pending" | "degraded" | "unavailable";
   connectionId: string | null; requests: readonly ProviderPermissionRequest[];
+};
+
+export type DelegatableApprovalAdmission = {
+  approval: ExecutionApprovalRecord;
+  projection: ExecutionApprovalProjectionRecord;
+  owned: ApprovalAuthority;
+  sourceMessageId: string;
 };
 type Options = {
   store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "validateExecutionApprovalAuthority">;
@@ -78,6 +87,7 @@ type Options = {
 const MAX_REQUESTS = 32;
 const MAX_PRESENTATION_BYTES = 24 * 1024;
 const CODEX_FILE_CHANGE_UNAVAILABLE = "Codex has requested file changes, but the actual edits are not available to inspect here. Decisions are disabled until those exact edits can be shown.";
+class ApprovalPreparationUnavailableError extends Error {}
 const id = z.string().min(1).max(256);
 const sha = z.string().regex(/^[a-f0-9]{64}$/);
 const decisionSchema = z.strictObject({
@@ -237,33 +247,33 @@ export class HostApprovalBroker {
       denyScope: native.provider === "open-model" ? "session_pending" : "request" };
   }
 
-  private async prepare(lane: Lane, native: ProviderPermissionRequest) {
+  private async prepareCore(lane: Lane, native: ProviderPermissionRequest) {
     const revision = lane.revision;
     const assertCurrent = () => {
-      if (!this.current(lane) || lane.state !== "pending" || lane.revision !== revision || !lane.requests.includes(native)) throw new Error("Approval request changed.");
+      if (!this.current(lane) || lane.state !== "pending" || lane.revision !== revision || !lane.requests.includes(native)) throw new ApprovalPreparationUnavailableError("Approval request changed.");
     };
     const assertAuthority = async (candidate?: DaemonManifestEntry) => {
       assertCurrent();
       const current = candidate ?? await this.options.store.getEntry(lane.agentId);
-      if (!current || !await this.options.exactAuthority(current, lane.handle, lane.generation)) throw new Error("Approval authority changed.");
+      if (!current || !await this.options.exactAuthority(current, lane.handle, lane.generation)) throw new ApprovalPreparationUnavailableError("Approval authority changed.");
       assertCurrent();
     };
-    if (!this.current(lane) || lane.state !== "pending" || !lane.connectionId || !lane.requests.includes(native)) throw new Error("Approval unavailable.");
-    if (Buffer.byteLength(literal(native.native)) > MAX_PRESENTATION_BYTES) throw new Error("Approval presentation exceeds its limit.");
+    if (!this.current(lane) || lane.state !== "pending" || !lane.connectionId || !lane.requests.includes(native)) throw new ApprovalPreparationUnavailableError("Approval unavailable.");
+    if (Buffer.byteLength(literal(native.native)) > MAX_PRESENTATION_BYTES) throw new ApprovalPreparationUnavailableError("Approval presentation exceeds its limit.");
     const entry = await this.options.store.getEntry(lane.agentId);
-    if (!entry) throw new Error("Approval authority changed.");
+    if (!entry) throw new ApprovalPreparationUnavailableError("Approval authority changed.");
     await assertAuthority(entry);
     const correlated = await this.options.provider!.correlatePermissionTurn!(lane.handle, native);
-    if (correlated.outcome !== "correlated") throw new Error("Approval turn is unproven.");
+    if (correlated.outcome !== "correlated") throw new ApprovalPreparationUnavailableError("Approval turn is unproven.");
     const requiresEdits = native.provider === "codex" && native.native.method === "item/fileChange/requestApproval";
     const fileChanges = requiresEdits ? correlated.fileChanges : undefined;
-    if (requiresEdits && !fileChanges?.length) throw new Error(CODEX_FILE_CHANGE_UNAVAILABLE);
+    if (requiresEdits && !fileChanges?.length) throw new ApprovalPreparationUnavailableError(CODEX_FILE_CHANGE_UNAVAILABLE);
     // The approved content includes the complete native proposal, not only
     // the RPC's IDs/grantRoot. Never approve a truncated presentation.
     const inspected = inspectedRequest(native, fileChanges);
-    if (Buffer.byteLength(literal(inspected)) > MAX_PRESENTATION_BYTES) throw new Error("Approval presentation exceeds its limit.");
+    if (Buffer.byteLength(literal(inspected)) > MAX_PRESENTATION_BYTES) throw new ApprovalPreparationUnavailableError("Approval presentation exceeds its limit.");
     const head = await this.options.inbox.head(lane.agentId);
-    if (!head || head.room_id !== entry.room_id || head.provider_turn_id !== correlated.providerTurnId) throw new Error("Approval turn changed.");
+    if (!head || head.room_id !== entry.room_id || head.provider_turn_id !== correlated.providerTurnId) throw new ApprovalPreparationUnavailableError("Approval turn changed.");
     const owned: ApprovalAuthority = { inboxItemId: head.inbox_item_id, workAttemptId: lane.handle.workAttemptId,
       executionGenerationId: lane.generation, provider: native.provider,
       providerConnection: lane.connection as ApprovalAuthority["providerConnection"],
@@ -301,15 +311,49 @@ export class HostApprovalBroker {
           authority: { ...owned, provider: "codex" as const }, projection: projection! }
       : { classification: "host_only" as const, request: { ...baseRequest, risk: "high" as const }, authority: owned };
     assertCurrent();
-    const { approval } = await this.options.store.admitExecutionApprovalPlan(admission, this.now, commit =>
+    const { approval, projection: admittedProjection } = await this.options.store.admitExecutionApprovalPlan(admission, this.now, commit =>
       this.options.fenceCommit(async () => { await assertAuthority(); await commit(); }));
     assertCurrent();
-    const presentation = this.presentation(entry, native, correlated.kind === "command" ? "Run a command" : "Change files", fileChanges);
-    const candidate: HostApprovalCandidate = { reference: reference(approval), presentation,
-      recordedDecision: recordedDecision(approval),
-      status: now >= approval.request.expiresAtMs ? "unavailable" : status(approval),
-      detail: now >= approval.request.expiresAtMs ? "This approval has expired. No new decision can be sent from this card." : null };
-    return { candidate, owned, approval, assertCurrent, fileChanges };
+    return { owned, approval, projection: admittedProjection, sourceMessageId: head.source_message_id,
+      assertCurrent, fileChanges, entry, now, kind: correlated.kind };
+  }
+
+  private async prepare(lane: Lane, native: ProviderPermissionRequest) {
+    const prepared = await this.prepareCore(lane, native);
+    const presentation = this.presentation(prepared.entry, native,
+      prepared.kind === "command" ? "Run a command" : "Change files", prepared.fileChanges);
+    const { entry: _entry, now, kind: _kind, ...result } = prepared;
+    const candidate: HostApprovalCandidate = { reference: reference(result.approval), presentation,
+      recordedDecision: recordedDecision(result.approval),
+      status: now >= result.approval.request.expiresAtMs ? "unavailable" : status(result.approval),
+      detail: now >= result.approval.request.expiresAtMs ? "This approval has expired. No new decision can be sent from this card." : null };
+    return { ...result, candidate };
+  }
+
+  /** Proactively journal only live, exact Codex file-change approvals. No UI presentation is consumed. */
+  async admitDelegatable(agentId: string): Promise<DelegatableApprovalAdmission[]> {
+    const lane = this.lanes.get(agentId);
+    if (!lane || !this.current(lane) || lane.state !== "pending") return [];
+    const requests = lane.requests.filter(request => request.provider === "codex"
+      && request.native.method === "item/fileChange/requestApproval").slice(0, MAX_REQUESTS);
+    const admitted: DelegatableApprovalAdmission[] = [];
+    for (const request of requests) {
+      try {
+        const prepared = await this.prepareCore(lane, request);
+        if (prepared.projection && prepared.approval.request.delegatable
+          && prepared.approval.request.state === "requested" && !prepared.approval.decision) {
+          admitted.push({ approval: prepared.approval, projection: prepared.projection,
+            owned: prepared.owned, sourceMessageId: prepared.sourceMessageId });
+        }
+      } catch (error) {
+        // One stale native request must not prevent peers, but storage/fence
+        // failures are lane-level loss of publication and must stay observable.
+        if (error instanceof ApprovalPreparationUnavailableError
+          || (error instanceof ApprovalJournalError && error.code === "expired")) continue;
+        throw error;
+      }
+    }
+    return admitted;
   }
 
   async decide(input: unknown): Promise<HostApprovalStatus> {

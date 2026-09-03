@@ -23,6 +23,7 @@ export const githubRoomEvents = createBridgedEmitter("github");
 export const reasoningEvents = createBridgedEmitter("reasoning");
 export const artifactEvents = createBridgedEmitter("artifacts");
 export const agentWorkEvents = createBridgedEmitter("agent-work");
+export const agentApprovalEvents = createBridgedEmitter("agent-approval");
 export const executionDelegationEvents = createBridgedEmitter("execution-delegation");
 
 const ROOM_INVALIDATION_COALESCE_MS = 100;
@@ -50,6 +51,15 @@ function createRoomInvalidationQueue(
 export const queueAgentWorkInvalidation = createRoomInvalidationQueue(
   agentWorkEvents,
   "agent_work:invalidated",
+);
+
+/**
+ * Coalesce approval mutations into a pointer-only room invalidation.
+ * Consumers repair through the separately authorized approval read path.
+ */
+export const queueAgentApprovalInvalidation = createRoomInvalidationQueue(
+  agentApprovalEvents,
+  "agent_approval:invalidated",
 );
 
 /**

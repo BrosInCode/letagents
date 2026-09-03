@@ -35,6 +35,7 @@ export type RoomEvent =
   | { kind: "rental_activity_created"; roomId: string; activity: ActivityEvent }
   | { kind: "message_info_updated"; roomId: string; messageIds: string[] | null }
   | { kind: "agent_work_invalidated"; roomId: string }
+  | { kind: "agent_approval_invalidated"; roomId: string }
   | { kind: "execution_delegation_invalidated"; roomId: string };
 
 export type RoomEventKind = RoomEvent["kind"];
@@ -108,6 +109,7 @@ interface EventSourceDeps {
   rentalActivityEvents: EventEmitter;
   messageInfoEvents: EventEmitter;
   agentWorkEvents?: EventEmitter;
+  agentApprovalEvents?: EventEmitter;
   executionDelegationEvents?: EventEmitter;
   bridgeLossEvents?: EventEmitter;
 }
@@ -256,6 +258,12 @@ export class RoomEventBroker {
       this.addSource(deps.agentWorkEvents, "agent_work:invalidated", (payload) => {
         const event = payload as { projectId: string };
         return { kind: "agent_work_invalidated", roomId: event.projectId };
+      });
+    }
+    if (deps.agentApprovalEvents) {
+      this.addSource(deps.agentApprovalEvents, "agent_approval:invalidated", (payload) => {
+        const event = payload as { projectId: string };
+        return { kind: "agent_approval_invalidated", roomId: event.projectId };
       });
     }
     if (deps.executionDelegationEvents) {

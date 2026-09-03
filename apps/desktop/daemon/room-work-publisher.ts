@@ -1,10 +1,11 @@
 import type { DatabaseSync } from "node:sqlite";
-import { hostGrantApiOrigin, publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
+import { publishRoomWork, type RoomWorkPublishInput, type RoomWorkPublishResult } from "./cloud-http.js";
 import { openDaemonStateObservationDatabase } from "./daemon-state-database.js";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
 import { RoomWorkPublicationStore, type RoomWorkOrigin, type RoomWorkPublication } from "./room-work-publication-store.js";
 import type { SupervisedIngressAgent } from "./supervised-agent-delivery.js";
 import type { WorkerRuntimeCustody } from "./worker-runtime-custody.js";
+import { currentWorkerPublicationAuthority, sameWorkerPublicationOrigin } from "./worker-publication-authority.js";
 
 type Options = {
   custody: Pick<WorkerRuntimeCustody, "hostGrant" | "workerAuthorization">;
@@ -108,34 +109,16 @@ export class RoomWorkPublisher {
   }
 
   private authority(agentId: string) {
-    if (this.unavailable()) return null;
-    // These are pure lookups. currentWorkerAuthorization/ensureHostGrantFresh
-    // deliberately do not belong here: they mutate operational custody.
-    const grant = this.options.custody.hostGrant(agentId);
-    const worker = this.options.custody.workerAuthorization(agentId);
-    const session = worker?.agentSession;
-    if (!grant || !worker || !session || grant.entryId !== agentId || worker.entryId !== agentId
-      || grant.daemonGeneration !== this.options.daemonGeneration() || worker.daemonGeneration !== grant.daemonGeneration
-      || !(Date.parse(grant.expiresAt) > this.now()) || worker.grantId !== grant.grantId
-      || worker.grantGeneration !== grant.grantGeneration || worker.roomId !== grant.roomId || worker.agentKey !== grant.agentKey
-      || worker.apiUrl !== grant.apiUrl || session.room_id !== grant.roomId || session.agent_key !== grant.agentKey
-      || session.session_id !== worker.agentSessionId || session.agent_instance_id !== `daemon:${agentId}`
-      || session.session_kind !== "worker" || session.ended_at !== null) return null;
-    try {
-      const apiOrigin = hostGrantApiOrigin(grant.apiUrl);
-      if (apiOrigin !== grant.apiUrl) return null;
-      const origin: RoomWorkOrigin = { agentId, roomId: grant.roomId, apiOrigin, agentKey: grant.agentKey,
-        agentInstanceId: session.agent_instance_id, hostId: grant.hostId, installationId: grant.installationId,
-        sourceSessionId: session.session_id };
-      return { grant, worker, origin };
-    } catch { return null; }
+    return this.unavailable() ? null : currentWorkerPublicationAuthority(
+      this.options.custody,
+      agentId,
+      this.options.daemonGeneration(),
+      this.now(),
+    );
   }
 
   private sameOrigin(left: RoomWorkOrigin, right: RoomWorkOrigin, requireOriginalSession = false): boolean {
-    return left.agentId === right.agentId && left.roomId === right.roomId && left.apiOrigin === right.apiOrigin
-      && left.agentKey === right.agentKey && left.agentInstanceId === right.agentInstanceId
-      && left.hostId === right.hostId && left.installationId === right.installationId
-      && (!requireOriginalSession || left.sourceSessionId === right.sourceSessionId);
+    return sameWorkerPublicationOrigin(left, right, requireOriginalSession);
   }
 
   /** Cheap, bounded change stamps avoid replaying every historical message on every output chunk. */
