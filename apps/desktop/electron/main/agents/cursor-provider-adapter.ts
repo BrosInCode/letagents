@@ -52,6 +52,8 @@ import {
   CURSOR_SESSION_ID_PATTERN,
 } from "./cursor-provider-constants.js";
 import { safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
+import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
+export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 import {
   assertCursorPersonalIdentity,
   CursorIdentityAuthRequiredError,
@@ -402,94 +404,10 @@ function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind
   return "provider_event";
 }
 
-type CursorLiveDisplayProjection = {
-  method: "item/agentMessage/delta" | "item/toolCall/updated";
-  kind: "text_delta" | "tool_lifecycle";
-  payload: Record<string, unknown>;
-};
-
 function cursorRecord(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-}
-
-function cursorToolError(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (value === null || value === undefined) return null;
-  try { return JSON.stringify(value, null, 2); }
-  catch { return "Cursor reported an unreadable tool error."; }
-}
-
-/**
- * Project an already-redacted/bounded Cursor event into the renderer's
- * provider-neutral display contract. Raw provider evidence is published
- * separately and remains untouched for daemon coordination.
- */
-export function cursorLiveDisplayProjections(
-  safeProviderPayload: unknown,
-  exactTurnNamespace: string,
-  eventNamespace: string,
-): CursorLiveDisplayProjection[] {
-  const message = cursorRecord(safeProviderPayload);
-  if (!message || !exactTurnNamespace) return [];
-  if (message.type === "assistant") {
-    const body = cursorRecord(message.message);
-    if (body?.role !== "assistant") return [];
-    const delta = typeof body.content === "string"
-      ? body.content
-      : Array.isArray(body.content)
-        ? body.content.flatMap((candidate) => {
-          const block = cursorRecord(candidate);
-          return block?.type === "text" && typeof block.text === "string" && block.text
-            ? [block.text]
-            : [];
-        }).join("")
-        : "";
-    return delta
-      ? [{
-        method: "item/agentMessage/delta" as const,
-        kind: "text_delta" as const,
-        payload: {
-          partId: `cursor:${exactTurnNamespace}:assistant:${eventNamespace}`,
-          delta,
-        },
-      }]
-      : [];
-  }
-  if (message.type !== "tool_call") return [];
-  if (message.subtype !== "started" && message.subtype !== "completed") return [];
-  if (typeof message.call_id !== "string" || !message.call_id.trim()) return [];
-  const toolCalls = cursorRecord(message.tool_call);
-  if (!toolCalls) return [];
-  // Cursor may include object-valued metadata before the actual tool envelope.
-  // Only documented `*ToolCall` keys name a callable operation; choosing the
-  // first object would turn metadata into a fake tool card.
-  const toolEntry = Object.entries(toolCalls).find(([key, value]) => /ToolCall$/.test(key) && cursorRecord(value));
-  if (!toolEntry) return [];
-  const [tool, rawCall] = toolEntry;
-  const call = cursorRecord(rawCall)!;
-  const result = cursorRecord(call.result);
-  const failure = result && (Object.hasOwn(result, "error")
-    ? result.error
-    : Object.hasOwn(result, "failure") ? result.failure : undefined);
-  const completed = message.subtype === "completed";
-  const error = completed ? cursorToolError(failure) : null;
-  const output = completed && result && Object.hasOwn(result, "success")
-    ? result.success
-    : completed && failure === undefined ? call.result ?? null : null;
-  return [{
-    method: "item/toolCall/updated",
-    kind: "tool_lifecycle",
-    payload: {
-      callID: `cursor:${exactTurnNamespace}:${message.call_id.trim()}`,
-      tool,
-      status: error ? "error" : completed ? "completed" : "running",
-      input: call.args ?? null,
-      output,
-      error,
-    },
-  }];
 }
 
 function streamMethod(message: CursorStreamMessage): string {
@@ -2861,6 +2779,8 @@ export class CursorProviderAdapter implements ProviderAdapter {
                 input: projection.payload.input ?? null,
               });
             } else {
+              const active = turn.liveDisplayTools.get(callId);
+              if (!active || active.tool !== projection.payload.tool) continue;
               turn.liveDisplayTools.delete(callId);
             }
           }

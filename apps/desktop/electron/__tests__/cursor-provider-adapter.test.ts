@@ -6967,6 +6967,49 @@ test("a Cursor result terminalizes any tool card that never emitted its own comp
   assert.deepEqual(toolStatuses, ["running", "interrupted"]);
 });
 
+test("Cursor live display refuses a mismatched native tool terminal", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const executionEvents: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => executionEvents.push(event));
+  const child = harness.children[0]!;
+
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-mismatch",
+    tool_call: { readToolCall: { args: { path: "README.md" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "tool-mismatch",
+    tool_call: { writeToolCall: { result: { success: {} } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "result", subtype: "success", is_error: false, result: "done",
+    session_id: "sess-cursor-1",
+  });
+  await flush();
+
+  const toolUpdates = streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => ({
+      tool: (event.payload as { tool?: unknown }).tool,
+      status: (event.payload as { status?: unknown }).status,
+    }));
+  assert.deepEqual(toolUpdates, [
+    { tool: "readToolCall", status: "running" },
+    { tool: "readToolCall", status: "interrupted" },
+  ], "an uncorrelated terminal cannot complete or erase the exact running tool card");
+  assert.equal(executionEvents.some(({ fact }) => fact.domain === "execution"
+    && fact.executionId === "tool-mismatch" && fact.kind === "completed"), false,
+  "the visual and typed projections both reject the mismatched terminal");
+});
+
 test("a Cursor turn that exits without result still terminalizes every running tool card", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
@@ -7061,6 +7104,10 @@ test("documented Cursor stream-json shapes project to namespaced response and to
   assert.deepEqual(cursorLiveDisplayProjections({
     type: "user", message: { role: "user", content: [{ type: "text", text: "prompt echo" }] },
   }, "turn-exact", "event-4"), [], "the user event is never misrendered as a tool");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "ambiguous-tool",
+    tool_call: { readToolCall: { args: {} }, writeToolCall: { args: {} } },
+  }, "turn-exact", "event-5"), [], "an ambiguous native envelope cannot choose an arbitrary tool card");
 });
 
 test("Cursor typed observations fence each native child and exclude synthetic display completion", async () => {
