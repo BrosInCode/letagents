@@ -595,7 +595,7 @@ test("Cursor runtime feeds desktop room tool results back into the runner", asyn
   assert.deepEqual(published, [{ text: "Artifact published in this local room.", eventId: "msg_1" }]);
 });
 
-test("Cursor runtime corrects mixed room-tool output before publishing public prose", async () => {
+test("Cursor runtime corrects an inline room-tool marker before publishing public prose", async () => {
   resetState();
   const roomIdentifier = "local_cursor_mixed_prose";
   const prompts: CursorTurnInput[] = [];
@@ -605,10 +605,7 @@ test("Cursor runtime corrects mixed room-tool output before publishing public pr
       if (prompts.length === 1) {
         return {
           sessionId: "cursor_session_mixed_prose",
-          text: [
-            "package.json uses npm and exposes a dev script.",
-            'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":51}}}',
-          ].join("\n"),
+          text: 'package.json uses npm and exposes a dev script. LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":51}}}',
           status: "success",
           error: null,
           recentItems: [],
@@ -702,6 +699,67 @@ test("Cursor runtime executes a room tool only after mixed output is corrected t
   assert.deepEqual(published, [{ text: "I found and published the pull request.", eventId: "msg_1" }]);
   assert.equal(artifacts.length, 1);
   assert.equal(artifacts[0]?.artifact_number, 52);
+});
+
+test("Cursor runtime does not replay a completed room tool when correcting its continuation", async () => {
+  resetState();
+  const roomIdentifier = "local_cursor_post_tool_mixed_request";
+  const prompts: CursorTurnInput[] = [];
+  const completedRequest = 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":54}}}';
+  const malformedNextRequest = 'LETAGENTS_ROOM_TOOL_REQUEST {"tool":"publish_room_artifact","arguments":{"artifact":{"provider":"github","kind":"pull_request","number":55}}}';
+  const { runtime, published } = createRuntimeHarness({
+    async runTurn(input: CursorTurnInput): Promise<CursorTurnResult> {
+      prompts.push(input);
+      assert.equal(input.cursorSessionId, prompts.length === 1 ? null : "cursor_session_post_tool");
+      if (prompts.length === 1) {
+        return {
+          sessionId: "cursor_session_post_tool",
+          text: completedRequest,
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      if (prompts.length === 2) {
+        assert.match(input.prompt, /Desktop room tool result/);
+        assert.match(input.prompt, /github:pull_request:number:54/);
+        return {
+          sessionId: "cursor_session_post_tool",
+          text: `The first artifact is published. ${malformedNextRequest}`,
+          status: "success",
+          error: null,
+          recentItems: [],
+        };
+      }
+      assert.match(input.prompt, /Correct the response formatting now/);
+      assert.match(input.prompt, /No room tool from that turn was executed/);
+      assert.doesNotMatch(input.prompt, /Desktop room tool result/);
+      return {
+        sessionId: "cursor_session_post_tool",
+        text: "The first artifact is published.",
+        status: "success",
+        error: null,
+        recentItems: [],
+      };
+    },
+  }, { storage: localStorageState(roomIdentifier) });
+  await runtime.start({
+    providerId: "cursor",
+    roomIdentifier,
+    repoRootPath: tempDir,
+    deliveryMode: "desktop_events",
+  });
+
+  runtime.dispatchRoomStreamEvent(messageEvent({ roomIdentifier }));
+  await runtime.waitForIdle();
+
+  const { getLocalRoomArtifacts } = await import("../main/rooms/artifacts/local-store.js");
+  const artifacts = (await getLocalRoomArtifacts(roomIdentifier)).artifacts ?? [];
+  assert.equal(prompts.length, 3);
+  assert.equal(prompts.filter(({ prompt }) => prompt.includes("Correct the response formatting now")).length, 1);
+  assert.deepEqual(published, [{ text: "The first artifact is published.", eventId: "msg_1" }]);
+  assert.equal(artifacts.length, 1, "the completed write is not replayed and the malformed request is not executed");
+  assert.equal(artifacts[0]?.artifact_number, 54);
 });
 
 test("Cursor runtime keeps the bridge-protocol error after one malformed correction", async () => {

@@ -53,7 +53,7 @@ import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
 import {
-  hasManagedAgentRoomToolRequestLine,
+  MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX,
   parseManagedAgentRoomToolRequest,
 } from "./managed-agent-room-tools-protocol.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
@@ -454,7 +454,7 @@ export function createDesktopCursorRuntime(
     if (
       input.turn.status === "error"
       || parseManagedAgentRoomToolRequest(input.turn.text)
-      || !hasManagedAgentRoomToolRequestLine(input.turn.text)
+      || !String(input.turn.text ?? "").includes(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX)
       || !input.cursorSessionId
     ) {
       return input.turn;
