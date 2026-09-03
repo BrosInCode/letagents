@@ -9,6 +9,7 @@ import {
   getExecutionDelegationGrantForAccount,
   getExecutionDelegationGrantForHost,
   getExecutionDelegationGrantForOwner,
+  listExecutionDelegationIdsForHost,
   revokeExecutionDelegationGrant,
   type ExecutionDelegationGrant,
 } from "../db.js";
@@ -18,6 +19,7 @@ import {
   requireCurrentSupervisorGrant,
   type RoomResolverDeps,
 } from "./supervisor-host-grants.js";
+import { queueExecutionDelegationInvalidation } from "../server/events.js";
 
 const ACCOUNT_MUTATION_KEYS = new Set([
   "supervisor_grant_id",
@@ -52,6 +54,35 @@ function mutationBody(req: AuthenticatedRequest, res: Response): Record<string, 
 function requiredString(body: Record<string, unknown>, key: string): string | null {
   const value = body[key];
   return typeof value === "string" && value.trim() === value && value.length > 0 ? value : null;
+}
+
+function inventoryQuery(
+  req: AuthenticatedRequest,
+  res: Response,
+): { room_id: string; agent_key: string; after: string | null } | null {
+  const query = req.query ?? {};
+  if (Object.keys(query).some((key) => !["room_id", "agent_key", "after"].includes(key))) {
+    res.status(400).json({ error: "Invalid execution delegation inventory request." });
+    return null;
+  }
+  const bounded = (value: unknown, required: boolean): string | null => {
+    if (value === undefined && !required) return null;
+    return typeof value === "string"
+      && value.length > 0
+      && value.length <= 512
+      && value.trim() === value
+      && !/[\u0000-\u001f\u007f]/.test(value)
+      ? value
+      : null;
+  };
+  const roomId = bounded(query.room_id, true);
+  const agentKey = bounded(query.agent_key, true);
+  const after = bounded(query.after, false);
+  if (!roomId || !agentKey || (query.after !== undefined && !after)) {
+    res.status(400).json({ error: "Invalid execution delegation inventory request." });
+    return null;
+  }
+  return { room_id: roomId, agent_key: agentKey, after };
 }
 
 function parseAdmission(body: Record<string, unknown>, revision: boolean) {
@@ -113,6 +144,14 @@ function notFound(res: Response): void {
   res.status(404).json({ error: "Execution delegation not found." });
 }
 
+function queueDelegationInvalidation(roomId: string): void {
+  try {
+    queueExecutionDelegationInvalidation(roomId);
+  } catch (error) {
+    console.error("[execution delegation] failed to queue room invalidation", error);
+  }
+}
+
 function respondMutationError(res: Response, error: unknown): void {
   if (error instanceof ExecutionDelegationIdempotencyConflictError
     || error instanceof ExecutionDelegationRevisionConflictError
@@ -142,12 +181,105 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
         notFound(res);
         return;
       }
+      queueDelegationInvalidation(revoked.room_id);
       res.setHeader("Cache-Control", "no-store");
       res.json({ delegation: publicGrant(revoked) });
     } catch (error) {
       respondWithInternalError(res, "execution-delegation.revoke", error, "Execution delegation could not be revoked.");
     }
   });
+
+  app.get("/execution-delegations/:delegationInstanceId", async (req: AuthenticatedRequest, res) => {
+    const requesterAccountId = accountId(req, res);
+    if (!requesterAccountId) return;
+    const grant = await getExecutionDelegationGrantForAccount({
+      account_id: requesterAccountId,
+      delegation_instance_id: String(req.params.delegationInstanceId ?? "").trim(),
+    });
+    if (!grant) {
+      notFound(res);
+      return;
+    }
+    if (requesterAccountId !== grant.owner_account_id) {
+      if (req.authKind !== "session") {
+        res.status(401).json({ error: "Approver visibility requires an authenticated browser session." });
+        return;
+      }
+      const roomId = await deps.resolveCanonicalRoomRequestId(grant.room_id);
+      const room = await deps.resolveRoomOrReply(roomId, res);
+      if (!room || !(await deps.requireParticipant(req, res, room, { freshCollaboratorCheck: true }))) return;
+    }
+    res.setHeader("Cache-Control", "no-store");
+    res.json({ delegation: publicGrant(grant) });
+  });
+
+  app.get(
+    "/supervisor-host-grants/:grantId/execution-delegations",
+    async (req: AuthenticatedRequest, res) => {
+      const query = inventoryQuery(req, res);
+      if (!query) return;
+      const current = await requireCurrentSupervisorGrant(req, res, deps, {
+        kind: "rooms",
+        room_ids: [query.room_id],
+      });
+      if (!current) return;
+      if (current.scope_key !== "owner" || current.rental_session_id) {
+        notFound(res);
+        return;
+      }
+      if (current.grant_id !== String(req.params.grantId ?? "").trim()) {
+        res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+        return;
+      }
+      if (!current.allowed_agent_keys.includes(query.agent_key)) {
+        notFound(res);
+        return;
+      }
+      const inventory = await listExecutionDelegationIdsForHost({
+        owner_account_id: current.owner_account_id,
+        host_id: current.host_id,
+        installation_id: current.installation_id,
+        room_id: query.room_id,
+        agent_key: query.agent_key,
+        after: query.after,
+      });
+      res.setHeader("Cache-Control", "no-store");
+      res.json(inventory);
+    },
+  );
+
+  app.get(
+    "/supervisor-host-grants/:grantId/execution-delegations/:delegationInstanceId",
+    async (req: AuthenticatedRequest, res) => {
+      const current = await requireCurrentSupervisorGrant(req, res, deps, { kind: "all" });
+      if (!current) return;
+      if (current.scope_key !== "owner" || current.rental_session_id) {
+        notFound(res);
+        return;
+      }
+      if (current.grant_id !== String(req.params.grantId ?? "").trim()) {
+        res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
+        return;
+      }
+      const grant = await getExecutionDelegationGrantForHost({
+        owner_account_id: current.owner_account_id,
+        host_id: current.host_id,
+        installation_id: current.installation_id,
+        delegation_instance_id: String(req.params.delegationInstanceId ?? "").trim(),
+      });
+      if (!grant) {
+        notFound(res);
+        return;
+      }
+      if (!current.allowed_room_ids.includes(grant.room_id)
+        || !current.allowed_agent_keys.includes(grant.agent_key)) {
+        notFound(res);
+        return;
+      }
+      res.setHeader("Cache-Control", "no-store");
+      res.json({ delegation: hostGrant(grant) });
+    },
+  );
 
   if (!isExecutionDelegationFeatureEnabled()) return;
 
@@ -166,6 +298,7 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
         ...parsed,
         owner_account_id: ownerAccountId,
       });
+      if (result.status !== "replayed") queueDelegationInvalidation(result.grant.room_id);
       res.status(result.status === "created" ? 201 : 200).json({
         status: result.status,
         delegation: publicGrant(result.grant),
@@ -200,66 +333,11 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
         owner_account_id: ownerAccountId,
         delegation_instance_id: delegationInstanceId,
       });
+      if (result.status !== "replayed") queueDelegationInvalidation(result.grant.room_id);
       res.json({ status: result.status, delegation: publicGrant(result.grant) });
     } catch (error) {
       respondMutationError(res, error);
     }
   });
 
-  app.get("/execution-delegations/:delegationInstanceId", async (req: AuthenticatedRequest, res) => {
-    const requesterAccountId = accountId(req, res);
-    if (!requesterAccountId) return;
-    const grant = await getExecutionDelegationGrantForAccount({
-      account_id: requesterAccountId,
-      delegation_instance_id: String(req.params.delegationInstanceId ?? "").trim(),
-    });
-    if (!grant) {
-      notFound(res);
-      return;
-    }
-    if (requesterAccountId !== grant.owner_account_id) {
-      if (req.authKind !== "session") {
-        res.status(401).json({ error: "Approver visibility requires an authenticated browser session." });
-        return;
-      }
-      const roomId = await deps.resolveCanonicalRoomRequestId(grant.room_id);
-      const room = await deps.resolveRoomOrReply(roomId, res);
-      if (!room || !(await deps.requireParticipant(req, res, room, { freshCollaboratorCheck: true }))) return;
-    }
-    res.setHeader("Cache-Control", "no-store");
-    res.json({ delegation: publicGrant(grant) });
-  });
-
-  app.get(
-    "/supervisor-host-grants/:grantId/execution-delegations/:delegationInstanceId",
-    async (req: AuthenticatedRequest, res) => {
-      const current = await requireCurrentSupervisorGrant(req, res, deps, { kind: "all" });
-      if (!current) return;
-      if (current.scope_key !== "owner" || current.rental_session_id) {
-        notFound(res);
-        return;
-      }
-      if (current.grant_id !== String(req.params.grantId ?? "").trim()) {
-        res.status(403).json({ error: "Supervisor grant does not match the requested grant." });
-        return;
-      }
-      const grant = await getExecutionDelegationGrantForHost({
-        owner_account_id: current.owner_account_id,
-        host_id: current.host_id,
-        installation_id: current.installation_id,
-        delegation_instance_id: String(req.params.delegationInstanceId ?? "").trim(),
-      });
-      if (!grant) {
-        notFound(res);
-        return;
-      }
-      if (!current.allowed_room_ids.includes(grant.room_id)
-        || !current.allowed_agent_keys.includes(grant.agent_key)) {
-        notFound(res);
-        return;
-      }
-      res.setHeader("Cache-Control", "no-store");
-      res.json({ delegation: hostGrant(grant) });
-    },
-  );
 }

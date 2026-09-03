@@ -83,6 +83,7 @@ export {
   getExecutionDelegationGrantForAccount,
   getExecutionDelegationGrantForHost,
   getExecutionDelegationGrantForOwner,
+  listExecutionDelegationIdsForHost,
   revokeExecutionDelegationGrant,
 } from "./db/execution-delegation-grants.js";
 export {

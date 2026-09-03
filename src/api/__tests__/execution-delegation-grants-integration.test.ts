@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import path from "node:path";
 import test from "node:test";
 
@@ -21,6 +22,7 @@ const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { registerHttpMiddleware } = await import("../http/middleware.js");
 const { resolveRequestAuth } = await import("../request/auth.js");
 const { registerExecutionDelegationRoutes } = await import("../routes/execution-delegations.js");
+const { executionDelegationEvents } = await import("../server/events.js");
 
 async function reset(): Promise<void> {
   if (!client) throw new Error("DB-backed delegation tests require TEST_DB_URL");
@@ -389,6 +391,59 @@ test("source grant rotation preserves scope while delegation revocation and expi
   }));
 });
 
+test("host inventory is paginated and includes revoked and expired latest rows", databaseOptions, async () => {
+  const seeded = await seed();
+  const ids = Array.from({ length: 101 }, (_, index) =>
+    `execution_delegation_inventory_${String(index).padStart(3, "0")}`
+  );
+  const createdAt = seeded.now.toISOString();
+  const expiresAt = new Date(seeded.now.getTime() + 60_000).toISOString();
+  const terminalAt = new Date(seeded.now.getTime() + 120_000).toISOString();
+  await client!.db.insert(schema!.execution_delegation_grants).values(ids.map((id, index) => ({
+    delegation_instance_id: id,
+    revision: 1,
+    owner_account_id: seeded.ownerId,
+    admission_supervisor_grant_id: seeded.grant.grant_id,
+    host_id: seeded.grant.host_id,
+    installation_id: seeded.grant.installation_id,
+    scope_key: "owner",
+    room_id: seeded.room.id,
+    agent_key: seeded.agent.canonical_key,
+    approver_account_id: seeded.approverId,
+    category: "file_change",
+    risk_ceiling: "low",
+    scope_sha256: "a".repeat(64),
+    client_request_id: `inventory_${index}`,
+    request_fingerprint: index.toString(16).padStart(64, "0"),
+    created_at: createdAt,
+    expires_at: expiresAt,
+    expired_at: index % 2 === 0 ? terminalAt : null,
+    retired_at: null,
+    retired_by_revision: null,
+    revoked_at: index % 2 === 1 ? terminalAt : null,
+  })));
+
+  const first = await db!.listExecutionDelegationIdsForHost({
+    owner_account_id: seeded.ownerId,
+    host_id: seeded.grant.host_id,
+    installation_id: seeded.grant.installation_id,
+    room_id: seeded.room.id,
+    agent_key: seeded.agent.canonical_key,
+  });
+  assert.equal(first.delegation_instance_ids.length, 100);
+  assert.equal(first.next_cursor, ids[99]);
+  const second = await db!.listExecutionDelegationIdsForHost({
+    owner_account_id: seeded.ownerId,
+    host_id: seeded.grant.host_id,
+    installation_id: seeded.grant.installation_id,
+    room_id: seeded.room.id,
+    agent_key: seeded.agent.canonical_key,
+    after: first.next_cursor,
+  });
+  assert.deepEqual([...first.delegation_instance_ids, ...second.delegation_instance_ids], ids);
+  assert.equal(second.next_cursor, null);
+});
+
 function delegationRouteDeps(sessionParticipants?: Set<string>, freshChecks?: boolean[]) {
   return {
     resolveCanonicalRoomRequestId: async (roomId: string) => roomId,
@@ -482,8 +537,10 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     assert.equal((await create(ownerHeaders, { ...createBody, owner_account_id: otherId })).status, 400);
     assert.equal((await create(approverOwnerHeaders, createBody)).status, 403,
       "a designated account cannot author an owner mutation by naming the owner grant");
+    const createdInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
     const createdResponse = await create(ownerHeaders, createBody);
     assert.equal(createdResponse.status, 201);
+    assert.deepEqual(await createdInvalidation, [{ projectId: seeded.room.id }]);
     const created = await createdResponse.json() as { delegation: Record<string, unknown> };
     const instanceId = String(created.delegation.delegation_instance_id);
     assert.equal(created.delegation.owner_account_id, seeded.ownerId);
@@ -527,10 +584,12 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     assert.equal((await fetch(reviseUrl, {
       method: "POST", headers: approverHeaders, body: JSON.stringify(reviseBody),
     })).status, 404);
+    const revisedInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
     const revisedResponse = await fetch(reviseUrl, {
       method: "POST", headers: ownerHeaders, body: JSON.stringify(reviseBody),
     });
     assert.equal(revisedResponse.status, 200);
+    assert.deepEqual(await revisedInvalidation, [{ projectId: seeded.room.id }]);
     assert.equal((await revisedResponse.json() as any).delegation.revision, 2);
     const exactServerGrant = await db!.getExecutionDelegationGrantForOwner({
       owner_account_id: seeded.ownerId,
@@ -538,16 +597,33 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     });
     assert.ok(exactServerGrant);
 
-    const hostUrl = `${baseUrl}/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/${instanceId}`;
-    const hostResponse = await fetch(hostUrl, { headers: {
+    const supervisorHeaders = {
       authorization: `Bearer ${seeded.grantToken}`,
       "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
-    } });
+    };
+    const hostUrl = `${baseUrl}/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/${instanceId}`;
+    const hostResponse = await fetch(hostUrl, { headers: supervisorHeaders });
     assert.equal(hostResponse.status, 200);
     const hostBody = await hostResponse.json() as any;
     assert.equal(hostBody.delegation.revision, 2);
     assert.equal(hostBody.delegation.scope_sha256, exactServerGrant.scope_sha256);
     assert.equal("admission_supervisor_grant_id" in hostBody.delegation, false);
+
+    const inventoryUrl = new URL(
+      `${baseUrl}/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations`,
+    );
+    inventoryUrl.searchParams.set("room_id", seeded.room.id);
+    inventoryUrl.searchParams.set("agent_key", seeded.agent.canonical_key);
+    const inventoryResponse = await fetch(inventoryUrl, { headers: supervisorHeaders });
+    assert.equal(inventoryResponse.status, 200);
+    assert.equal(inventoryResponse.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await inventoryResponse.json(), {
+      delegation_instance_ids: [instanceId],
+      next_cursor: null,
+    }, "the host inventory returns IDs only for its exact room and agent scope");
+    inventoryUrl.searchParams.set("extra", "rejected");
+    assert.equal((await fetch(inventoryUrl, { headers: supervisorHeaders })).status, 400);
+    inventoryUrl.searchParams.delete("extra");
 
     const foreignHost = await db!.createSupervisorHostGrant({
       owner_account_id: seeded.ownerId,
@@ -621,8 +697,10 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     const missingRevoke = await fetch(absentUrl, { method: "DELETE", headers: otherHeaders });
     assert.equal(foreignRevoke.status, 404);
     assert.deepEqual(await foreignRevoke.json(), await missingRevoke.json());
+    const revokedInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
     const revokedResponse = await fetch(accountUrl, { method: "DELETE", headers: ownerHeaders });
     assert.equal(revokedResponse.status, 200);
+    assert.deepEqual(await revokedInvalidation, [{ projectId: seeded.room.id }]);
     assert.equal((await revokedResponse.json() as any).delegation.status, "revoked");
     assert.equal((await (await fetch(accountUrl, { headers: approverHeaders })).json() as any).delegation.status, "revoked",
       "the designated approver keeps a transparency view after authority ends");
@@ -631,6 +709,10 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
       "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
     } })).json() as any)
       .delegation.status, "revoked", "the exact host can reconcile terminal authority");
+    assert.deepEqual(await (await fetch(inventoryUrl, { headers: supervisorHeaders })).json(), {
+      delegation_instance_ids: [instanceId],
+      next_cursor: null,
+    }, "revoked latest rows remain discoverable for terminal reconciliation");
 
     await db!.revokeSupervisorHostGrant({
       grant_id: seeded.grant.grant_id,
@@ -663,7 +745,7 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
   }
 });
 
-test("feature-off delegation routes match nonexistent account, supervisor, and preflight behavior", databaseOptions, async () => {
+test("feature-off stops admission while preserving transparency, revocation, and host reconciliation", databaseOptions, async () => {
   const seeded = await seed();
   const existing = await db!.admitExecutionDelegationGrantRevision(admissionInput(seeded, {
     client_request_id: "feature_off_revoke",
@@ -679,7 +761,6 @@ test("feature-off delegation routes match nonexistent account, supervisor, and p
     const baseUrl = serverUrl(server);
     const ownerHeaders = { authorization: "Bearer delegation_gate_owner" };
     const gatedAccountRequests = [
-      { method: "GET", path: `/execution-delegations/${existing.grant.delegation_instance_id}` },
       { method: "POST", path: "/execution-delegations" },
       { method: "POST", path: `/execution-delegations/${existing.grant.delegation_instance_id}/revisions` },
     ] as const;
@@ -692,18 +773,41 @@ test("feature-off delegation routes match nonexistent account, supervisor, and p
       assert.match(await hidden.text(), /^<!DOCTYPE html>/);
       assert.match(await unknown.text(), /^<!DOCTYPE html>/);
     }
+    const accountTarget = `/execution-delegations/${existing.grant.delegation_instance_id}`;
+    const visibleAccount = await fetch(baseUrl + accountTarget, { headers: ownerHeaders });
+    assert.equal(visibleAccount.status, 200, "issued authority remains visible after admission is disabled");
+    assert.equal((await visibleAccount.json() as any).delegation.status, "active");
+
+    const supervisorHeaders = {
+      authorization: `Bearer ${seeded.grantToken}`,
+      "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
+    };
+    const hostTarget = `/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/${existing.grant.delegation_instance_id}`;
+    assert.equal((await fetch(baseUrl + hostTarget, { headers: supervisorHeaders })).status, 200);
+    const inventoryTarget = new URL(
+      `${baseUrl}/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations`,
+    );
+    inventoryTarget.searchParams.set("room_id", seeded.room.id);
+    inventoryTarget.searchParams.set("agent_key", seeded.agent.canonical_key);
+    assert.deepEqual(await (await fetch(inventoryTarget, { headers: supervisorHeaders })).json(), {
+      delegation_instance_ids: [existing.grant.delegation_instance_id],
+      next_cursor: null,
+    });
+
     const revoked = await fetch(
-      `${baseUrl}/execution-delegations/${existing.grant.delegation_instance_id}`,
+      baseUrl + accountTarget,
       { method: "DELETE", headers: ownerHeaders },
     );
     assert.equal(revoked.status, 200, "feature-off keeps the owner kill switch available");
     assert.equal((await revoked.json() as any).delegation.status, "revoked");
-    const hostTarget = `/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/execution_delegation_hidden`;
-    const supervisorHeaders = { authorization: `Bearer ${seeded.grantToken}` };
-    const hiddenHost = await fetch(baseUrl + hostTarget, { headers: supervisorHeaders });
+    assert.equal((await (await fetch(baseUrl + hostTarget, { headers: supervisorHeaders })).json() as any)
+      .delegation.status, "revoked", "feature-off revocation remains host-reconcilable");
+
+    const missingHostTarget = `/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/execution_delegation_hidden`;
+    const hiddenHost = await fetch(baseUrl + missingHostTarget, { headers: supervisorHeaders });
     const unknownHost = await fetch(baseUrl + "/supervisor-route-that-does-not-exist", { headers: supervisorHeaders });
-    assert.equal(hiddenHost.status, 403);
-    assert.deepEqual(await hiddenHost.json(), await unknownHost.json());
+    assert.equal(hiddenHost.status, 404);
+    assert.equal(unknownHost.status, 403);
 
     for (const request of gatedAccountRequests) {
       const hiddenOptions = await fetch(baseUrl + request.path, { method: "OPTIONS", headers: ownerHeaders });

@@ -23,23 +23,43 @@ export const githubRoomEvents = createBridgedEmitter("github");
 export const reasoningEvents = createBridgedEmitter("reasoning");
 export const artifactEvents = createBridgedEmitter("artifacts");
 export const agentWorkEvents = createBridgedEmitter("agent-work");
+export const executionDelegationEvents = createBridgedEmitter("execution-delegation");
 
-const AGENT_WORK_INVALIDATION_COALESCE_MS = 100;
-const pendingAgentWorkInvalidations = new Map<string, ReturnType<typeof setTimeout>>();
+const ROOM_INVALIDATION_COALESCE_MS = 100;
+
+function createRoomInvalidationQueue(
+  emitter: ReturnType<typeof createBridgedEmitter>,
+  eventName: string,
+) {
+  const pending = new Map<string, ReturnType<typeof setTimeout>>();
+  return (projectId: string): void => {
+    if (pending.has(projectId)) return;
+    const timer = setTimeout(() => {
+      pending.delete(projectId);
+      emitter.emit(eventName, { projectId });
+    }, ROOM_INVALIDATION_COALESCE_MS);
+    timer.unref?.();
+    pending.set(projectId, timer);
+  };
+}
 
 /**
  * Coalesce retained-work mutations into a pointer-only room invalidation.
  * Consumers always repair through the authoritative agent-work poll endpoint.
  */
-export function queueAgentWorkInvalidation(projectId: string): void {
-  if (pendingAgentWorkInvalidations.has(projectId)) return;
-  const timer = setTimeout(() => {
-    pendingAgentWorkInvalidations.delete(projectId);
-    agentWorkEvents.emit("agent_work:invalidated", { projectId });
-  }, AGENT_WORK_INVALIDATION_COALESCE_MS);
-  timer.unref?.();
-  pendingAgentWorkInvalidations.set(projectId, timer);
-}
+export const queueAgentWorkInvalidation = createRoomInvalidationQueue(
+  agentWorkEvents,
+  "agent_work:invalidated",
+);
+
+/**
+ * Coalesce committed delegation mutations into a pointer-only room hint.
+ * Host authority is always repaired through the authenticated exact routes.
+ */
+export const queueExecutionDelegationInvalidation = createRoomInvalidationQueue(
+  executionDelegationEvents,
+  "execution_delegation:invalidated",
+);
 
 export async function emitProjectMessage(
   projectId: string,

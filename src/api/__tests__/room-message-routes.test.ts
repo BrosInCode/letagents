@@ -51,6 +51,7 @@ function createDeps() {
     rentalActivityEvents: new EventEmitter(),
     messageInfoEvents: new EventEmitter(),
     agentWorkEvents: new EventEmitter(),
+    executionDelegationEvents: new EventEmitter(),
   };
 
   return {
@@ -113,7 +114,7 @@ function createDeps() {
   };
 }
 
-test("room streams negotiate pointer-only agent-work invalidations without stranding legacy cursors", async () => {
+test("room streams negotiate pointer-only resource invalidations without stranding legacy cursors", async () => {
   const handlers = new Map<string, (req: unknown, res: unknown) => Promise<void>>();
   const app = {
     get(path: RegExp, handler: (req: unknown, res: unknown) => Promise<void>) {
@@ -181,6 +182,22 @@ test("room streams negotiate pointer-only agent-work invalidations without stran
   assert.match(legacyOutput, new RegExp(`id: ${negotiatedCursor}`));
   assert.match(legacyOutput, new RegExp(`"event_cursor":"${negotiatedCursor}"`));
   assert.match(legacyOutput, /"gap":false/);
+
+  negotiated.res.writes.length = 0;
+  legacy.res.writes.length = 0;
+  deps.executionDelegationEvents.emit("execution_delegation:invalidated", { projectId: "room_1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const delegationOutput = negotiated.res.writes.join("");
+  assert.match(delegationOutput, /event: resource_invalidation_v1/);
+  assert.match(delegationOutput, /"room_id":"room_1","resource":"execution_delegation"/);
+  assert.doesNotMatch(delegationOutput, /delegation_instance_id|agent_key|approver|revision|scope/);
+
+  const legacyDelegationOutput = legacy.res.writes.join("");
+  assert.doesNotMatch(legacyDelegationOutput, /resource_invalidation_v1|execution_delegation/);
+  assert.match(legacyDelegationOutput, /event: room_sync/);
+  assert.match(legacyDelegationOutput, /"gap":false/);
 
   negotiated.close();
   legacy.close();

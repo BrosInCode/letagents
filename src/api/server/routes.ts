@@ -170,6 +170,7 @@ import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js"
 import {
   artifactEvents,
   agentWorkEvents,
+  executionDelegationEvents,
   githubRoomEvents,
   messageEvents,
   reasoningEvents,
@@ -211,6 +212,7 @@ function getRoomEventBroker(): RoomEventBroker {
     reasoningEvents,
     artifactEvents,
     agentWorkEvents,
+    executionDelegationEvents,
     rentalActivityEvents,
     messageInfoEvents,
     bridgeLossEvents: roomEventBridgeLossEvents,

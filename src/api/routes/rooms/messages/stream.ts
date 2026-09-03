@@ -1,5 +1,9 @@
 import type { Express } from "express";
-import { ROOM_RESOURCE_INVALIDATION_CAPABILITY } from "../../../../../shared/room-resource-invalidation.mjs";
+import {
+  ROOM_RESOURCE_AGENT_WORK,
+  ROOM_RESOURCE_EXECUTION_DELEGATION,
+  ROOM_RESOURCE_INVALIDATION_CAPABILITY,
+} from "../../../../../shared/room-resource-invalidation.mjs";
 import {
   openSseConnection,
   type SseConnection,
@@ -278,10 +282,14 @@ export function registerMessageStreamRoute(
           })}\n\n`);
           return;
         case "agent_work_invalidated":
+        case "execution_delegation_invalidated": {
+          const resource = event.kind === "agent_work_invalidated"
+            ? ROOM_RESOURCE_AGENT_WORK
+            : ROOM_RESOURCE_EXECUTION_DELEGATION;
           if (supportsResourceInvalidation) {
             await writeEvent(`${eventId}event: ${ROOM_RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
               room_id: projectId,
-              resource: "agent_work",
+              resource,
             })}\n\n`);
           } else {
             // Preserve the broker cursor for older clients without exposing an
@@ -295,6 +303,7 @@ export function registerMessageStreamRoute(
             })}`);
           }
           return;
+        }
         case "rental_activity_created": {
           if (event.activity.visibility !== "rental_visible") return;
           const payload = rentalActivityPayload(projectId, event.activity);

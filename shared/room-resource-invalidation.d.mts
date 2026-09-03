@@ -1,6 +1,13 @@
 export const ROOM_RESOURCE_INVALIDATION_CAPABILITY: "resource_invalidation_v1";
+export const ROOM_RESOURCE_AGENT_WORK: "agent_work";
+export const ROOM_RESOURCE_AGENT_APPROVAL: "agent_approval";
+export const ROOM_RESOURCE_EXECUTION_DELEGATION: "execution_delegation";
 /** Protocol-known references; consumers independently choose what they render. */
-export const ROOM_RESOURCE_INVALIDATION_RESOURCES: readonly ["agent_work", "agent_approval"];
+export const ROOM_RESOURCE_INVALIDATION_RESOURCES: readonly [
+  "agent_work",
+  "agent_approval",
+  "execution_delegation",
+];
 
 export type RoomResourceInvalidationResource =
   typeof ROOM_RESOURCE_INVALIDATION_RESOURCES[number];

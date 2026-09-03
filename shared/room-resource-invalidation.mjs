@@ -1,7 +1,14 @@
 export const ROOM_RESOURCE_INVALIDATION_CAPABILITY = "resource_invalidation_v1";
+export const ROOM_RESOURCE_AGENT_WORK = "agent_work";
+export const ROOM_RESOURCE_AGENT_APPROVAL = "agent_approval";
+export const ROOM_RESOURCE_EXECUTION_DELEGATION = "execution_delegation";
 // Protocol-known references. Each consumer still decides which surfaces, if
 // any, react to a supported pointer.
-export const ROOM_RESOURCE_INVALIDATION_RESOURCES = ["agent_work", "agent_approval"];
+export const ROOM_RESOURCE_INVALIDATION_RESOURCES = [
+  ROOM_RESOURCE_AGENT_WORK,
+  ROOM_RESOURCE_AGENT_APPROVAL,
+  ROOM_RESOURCE_EXECUTION_DELEGATION,
+];
 
 function exactKeys(value, keys) {
   return !!value && typeof value === "object" && !Array.isArray(value)

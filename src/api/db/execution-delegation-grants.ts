@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
 
-import { and, desc, eq, isNull, or, sql } from "drizzle-orm";
+import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 
 import { db } from "./client.js";
 import {
@@ -16,6 +16,7 @@ import type {
 } from "./types.js";
 
 const EXECUTION_DELEGATION_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
+const EXECUTION_DELEGATION_HOST_INVENTORY_PAGE_SIZE = 100;
 
 export class ExecutionDelegationIdempotencyConflictError extends Error {
   readonly code = "execution_delegation_idempotency_conflict";
@@ -437,4 +438,44 @@ export async function getExecutionDelegationGrantForHost(input: {
     .orderBy(desc(execution_delegation_grants.revision))
     .limit(1);
   return latest ? toExecutionDelegationGrant(latest) : null;
+}
+
+/**
+ * Enumerate current delegation instances for one exact installed host scope.
+ * Terminal latest rows remain discoverable so a host can learn revocation or
+ * expiry; exact fetch remains the sole authority payload path.
+ */
+export async function listExecutionDelegationIdsForHost(input: {
+  owner_account_id: string;
+  host_id: string;
+  installation_id: string;
+  room_id: string;
+  agent_key: string;
+  after?: string | null;
+}): Promise<{ delegation_instance_ids: string[]; next_cursor: string | null }> {
+  const filters = [
+    eq(execution_delegation_grants.owner_account_id, input.owner_account_id),
+    eq(execution_delegation_grants.host_id, input.host_id),
+    eq(execution_delegation_grants.installation_id, input.installation_id),
+    eq(execution_delegation_grants.scope_key, "owner"),
+    eq(execution_delegation_grants.room_id, input.room_id),
+    eq(execution_delegation_grants.agent_key, input.agent_key),
+    isNull(execution_delegation_grants.retired_at),
+    ...(input.after
+      ? [gt(execution_delegation_grants.delegation_instance_id, input.after)]
+      : []),
+  ];
+  const rows = await db
+    .select({ delegation_instance_id: execution_delegation_grants.delegation_instance_id })
+    .from(execution_delegation_grants)
+    .where(and(...filters))
+    .orderBy(asc(execution_delegation_grants.delegation_instance_id))
+    .limit(EXECUTION_DELEGATION_HOST_INVENTORY_PAGE_SIZE + 1);
+  const page = rows.slice(0, EXECUTION_DELEGATION_HOST_INVENTORY_PAGE_SIZE);
+  return {
+    delegation_instance_ids: page.map((row) => row.delegation_instance_id),
+    next_cursor: rows.length > EXECUTION_DELEGATION_HOST_INVENTORY_PAGE_SIZE
+      ? page.at(-1)?.delegation_instance_id ?? null
+      : null,
+  };
 }
