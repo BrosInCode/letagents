@@ -54,7 +54,7 @@ type Lane = {
   connectionId: string | null; requests: readonly ProviderPermissionRequest[];
 };
 type Options = {
-  store: Pick<ManifestStore, "getEntry" | "admitExecutionApproval" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "validateExecutionApprovalAuthority">;
+  store: Pick<ManifestStore, "getEntry" | "prepareExecutionApprovalProjection" | "admitExecutionApprovalPlan" | "readLatestExecutionApproval" | "getExecutionApproval" | "listExecutionApprovals" | "selectHostApproval" | "beginExecutionApprovalDispatch" | "recordExecutionApprovalOutcome" | "validateExecutionApprovalAuthority">;
   inbox: Pick<SupervisedAgentInboxStore, "head">;
   provider: ProviderActionPort | undefined;
   currentHandle(agentId: string): ProviderActionHandle | undefined;
@@ -77,6 +77,9 @@ const decisionSchema = z.strictObject({
 
 function digest(value: unknown): string {
   return createHash("sha256").update(JSON.stringify(value)).digest("hex");
+}
+function approvalRequestId(agentId: string, connectionId: string, nativeRequestId: string | number): string {
+  return `approval-${digest([agentId, connectionId, typeof nativeRequestId, nativeRequestId])}`;
 }
 function reference(record: ExecutionApprovalRecord): HostApprovalReference {
   const r = record.request;
@@ -159,23 +162,33 @@ export class HostApprovalBroker {
   async list(roomId: string): Promise<HostApprovalCandidate[]> {
     if (!id.safeParse(roomId).success) throw new Error("An exact approval room is required.");
     const result: HostApprovalCandidate[] = [];
+    const durable = await this.options.store.listExecutionApprovals(roomId);
+    const recoverable = new Set(durable.filter(record =>
+      ["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state))
+      .map(record => record.request.requestId));
     for (const lane of this.lanes.values()) {
       const entry = await this.options.store.getEntry(lane.agentId);
       if (!entry || entry.room_id !== roomId || entry.delivery_mode !== "daemon_inbox") continue;
       for (const native of lane.requests) {
         if (result.length >= 64) break;
         try { result.push((await this.prepare(lane, native)).candidate); }
-        catch { result.push({ reference: null, recordedDecision: null, presentation: this.presentation(entry, native, "Approval unavailable"),
+        catch {
+          const requestId = lane.connectionId
+            ? approvalRequestId(lane.agentId, lane.connectionId, native.native.id)
+            : null;
+          if (requestId && recoverable.has(requestId)) continue;
+          result.push({ reference: null, recordedDecision: null, presentation: this.presentation(entry, native, "Approval unavailable"),
           status: "unavailable", detail: native.provider === "codex" && native.native.method === "item/fileChange/requestApproval"
             ? CODEX_FILE_CHANGE_UNAVAILABLE
-            : "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified." }); }
+            : "This request cannot currently be matched to an active room turn. Decisions are disabled until it can be verified." });
+        }
       }
     }
     // Native callbacks can disappear immediately after sending, including when
     // the response is lost. Keep structural uncertainty visible across reloads;
     // an absent pending request never proves that our decision was applied.
     const shown = new Set(result.flatMap(item => item.reference ? [item.reference.requestId] : []));
-    for (const record of await this.options.store.listExecutionApprovals(roomId)) {
+    for (const record of durable) {
       if (shown.has(record.request.requestId) || !["requested", "decision_recorded", "dispatching", "lost"].includes(record.request.state)) continue;
       const entry = await this.options.store.getEntry(record.request.agentId);
       if (!entry || entry.room_id !== roomId || !["codex", "open-model"].includes(entry.provider)) continue;
@@ -200,10 +213,20 @@ export class HostApprovalBroker {
 
   private async prepare(lane: Lane, native: ProviderPermissionRequest) {
     const revision = lane.revision;
+    const assertCurrent = () => {
+      if (!this.current(lane) || lane.state !== "pending" || lane.revision !== revision || !lane.requests.includes(native)) throw new Error("Approval request changed.");
+    };
+    const assertAuthority = async (candidate?: DaemonManifestEntry) => {
+      assertCurrent();
+      const current = candidate ?? await this.options.store.getEntry(lane.agentId);
+      if (!current || !await this.options.exactAuthority(current, lane.handle, lane.generation)) throw new Error("Approval authority changed.");
+      assertCurrent();
+    };
     if (!this.current(lane) || lane.state !== "pending" || !lane.connectionId || !lane.requests.includes(native)) throw new Error("Approval unavailable.");
     if (Buffer.byteLength(literal(native.native)) > MAX_PRESENTATION_BYTES) throw new Error("Approval presentation exceeds its limit.");
     const entry = await this.options.store.getEntry(lane.agentId);
-    if (!entry || !await this.options.exactAuthority(entry, lane.handle, lane.generation)) throw new Error("Approval authority changed.");
+    if (!entry) throw new Error("Approval authority changed.");
+    await assertAuthority(entry);
     const correlated = await this.options.provider!.correlatePermissionTurn!(lane.handle, native);
     if (correlated.outcome !== "correlated") throw new Error("Approval turn is unproven.");
     const requiresEdits = native.provider === "codex" && native.native.method === "item/fileChange/requestApproval";
@@ -219,23 +242,40 @@ export class HostApprovalBroker {
       executionGenerationId: lane.generation, provider: native.provider,
       providerConnection: lane.connection as ApprovalAuthority["providerConnection"],
       configurationRevision: entry.runtime_configuration_revision ?? 1 };
-    const requestId = `approval-${digest([lane.agentId, lane.connectionId, typeof native.native.id, native.native.id])}`;
+    const requestId = approvalRequestId(lane.agentId, lane.connectionId, native.native.id);
     const requestSha256 = digest(inspected);
     const prior = await this.options.store.readLatestExecutionApproval(requestId);
     const unchanged = prior?.request.requestSha256 === requestSha256;
     const now = this.now();
-    const admission = { request: { requestId, requestVersion: unchanged ? prior!.request.requestVersion : (prior?.request.requestVersion ?? 0) + 1,
+    const baseRequest = { requestId, requestVersion: unchanged ? prior!.request.requestVersion : (prior?.request.requestVersion ?? 0) + 1,
       requestSha256, agentId: lane.agentId, roomId: entry.room_id,
       providerContinuationId: correlated.providerContinuationId, providerTurnId: correlated.providerTurnId,
       connectionId: lane.connectionId, nativeRequestId: native.native.id,
-      kind: correlated.kind, risk: "high" as const, recoveryBoundary: native.provider === "codex" ? "connection" as const : "runtime" as const,
-      createdAtMs: unchanged ? prior!.request.createdAtMs : now, expiresAtMs: unchanged ? prior!.request.expiresAtMs : now + 24 * 60 * 60 * 1000 }, authority: owned };
-    const assertCurrent = () => {
-      if (!this.current(lane) || lane.state !== "pending" || lane.revision !== revision || !lane.requests.includes(native)) throw new Error("Approval request changed.");
-    };
+      kind: correlated.kind, recoveryBoundary: native.provider === "codex" ? "connection" as const : "runtime" as const,
+      createdAtMs: unchanged ? prior!.request.createdAtMs : now, expiresAtMs: unchanged ? prior!.request.expiresAtMs : now + 24 * 60 * 60 * 1000 };
+    let projection = null;
+    if (requiresEdits && (!unchanged || prior!.request.delegatable)) {
+      assertCurrent();
+      try {
+        projection = await this.options.store.prepareExecutionApprovalProjection(
+          { requestSha256, workAttemptId: owned.workAttemptId },
+          { request: native.native, changes: fileChanges! },
+        );
+      } catch (error) {
+        if (unchanged && prior!.request.delegatable) throw error;
+      }
+      assertCurrent();
+      await assertAuthority();
+    }
+    const delegatable = requiresEdits && (unchanged ? prior!.request.delegatable : projection !== null);
+    if (delegatable && owned.provider !== "codex") throw new Error("Only exact Codex file changes can be delegated.");
+    const admission = delegatable
+      ? { classification: "delegatable_file_change" as const, request: { ...baseRequest, kind: "file_change" as const, risk: "low" as const },
+          authority: { ...owned, provider: "codex" as const }, projection: projection! }
+      : { classification: "host_only" as const, request: { ...baseRequest, risk: "high" as const }, authority: owned };
     assertCurrent();
-    const { approval } = await this.options.store.admitExecutionApproval(admission, commit =>
-      this.options.fenceCommit(async () => { assertCurrent(); await commit(); }));
+    const { approval } = await this.options.store.admitExecutionApprovalPlan(admission, this.now, commit =>
+      this.options.fenceCommit(async () => { await assertAuthority(); await commit(); }));
     assertCurrent();
     const presentation = this.presentation(entry, native, correlated.kind === "command" ? "Run a command" : "Change files", fileChanges);
     const candidate: HostApprovalCandidate = { reference: reference(approval), presentation,

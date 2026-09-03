@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { once } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
@@ -20,7 +20,7 @@ import { CodexProviderAdapter } from "../../electron/main/agents/codex-provider-
 import { CodexRpcClient } from "../../electron/main/agents/codex-rpc-client.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import type { HostApprovalCandidate, HostApprovalDecision } from "../../shared/host-approvals.js";
-import type { ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
+import type { CodexPermissionFileChange, ProviderPermissionObservation, ProviderPermissionRequest } from "../../shared/provider-permissions.js";
 
 const secret = "PRIVATE-APPROVAL-CONTENT";
 const now = Date.parse("2026-08-31T00:00:00.000Z");
@@ -28,6 +28,8 @@ const hash = (value: unknown) => createHash("sha256").update(JSON.stringify(valu
 
 async function fixture(providerId: "codex" | "open-model" = "codex") {
   const root = await mkdtemp(join(tmpdir(), "letagents-approval-broker-"));
+  const workspace = join(root, "workspace");
+  await mkdir(workspace);
   const path = join(root, "daemon-state.sqlite");
   const store = new ManifestStore(path);
   const inbox = new SupervisedAgentInboxStore(path, () => new Date(now).toISOString());
@@ -43,7 +45,7 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
   const db = new DatabaseSync(path); db.exec("PRAGMA foreign_keys=ON");
   db.prepare(`INSERT INTO work_attempts(work_attempt_id,task_id,lease_id,current_lease_epoch,workspace_path,workspace_repo,
     workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
-    VALUES('workspace','task','lease',1,'/workspace','repo','remote','revision','/bare','active',?)`).run(entry.created_at);
+    VALUES('workspace','task','lease',1,?,'repo','remote','revision','/bare','active',?)`).run(workspace, entry.created_at);
   db.prepare("INSERT INTO work_attempt_executions VALUES('generation','workspace',?,'provider',1,NULL)").run(entry.created_at);
   const item = await inbox.enqueueInitialMessage({ agent_id: "agent", room_id: "room", source_message_id: "message",
     source_message: { id: "message", content: "Assess the project" }, activation: { kind: "deliver", reason: "direct_mention" } });
@@ -58,6 +60,8 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
     : { provider: "open-model", native: { id: "permission", sessionID: "continuation", permission: "bash", patterns: [secret],
       metadata: { command: secret }, always: [], tool: { messageID: "assistant-message", callID: "call" } } };
   const state = { current: true, owned: true, correlation: true, turnId: "native-turn", live: handle as ProviderActionHandle | undefined,
+    fileChanges: null as CodexPermissionFileChange[] | null,
+    authorityChecks: 0, authorityFailAt: null as number | null,
     failBefore: false, failAfter: false, afterBefore: null as (() => void | Promise<void>) | null };
   const sends: string[] = []; const order: string[] = [];
   let receive: ((event: ProviderPermissionObservation) => void) | null = null;
@@ -66,8 +70,11 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
     observePermissions: async (_handle: ProviderActionHandle, listener: (event: ProviderPermissionObservation) => void, abort: AbortSignal) => {
       receive = listener; signal = abort;
     },
-    correlatePermissionTurn: async () => state.correlation
-      ? { outcome: "correlated" as const, providerContinuationId: "continuation", providerTurnId: state.turnId, kind: "command" as const }
+    correlatePermissionTurn: async (_handle: ProviderActionHandle, request: ProviderPermissionRequest) => state.correlation
+      ? { outcome: "correlated" as const, providerContinuationId: "continuation", providerTurnId: state.turnId,
+          kind: request.provider === "codex" && request.native.method === "item/fileChange/requestApproval"
+            ? "file_change" as const : "command" as const,
+          ...(state.fileChanges ? { fileChanges: state.fileChanges } : {}) }
       : { outcome: "correlation_unproven" as const },
     replyPermission: async (_handle: ProviderActionHandle, _request: ProviderPermissionRequest, reply: "once" | "reject",
       options: Parameters<NonNullable<ProviderActionPort["replyPermission"]>>[3]) => {
@@ -86,7 +93,10 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
     },
   } as unknown as ProviderActionPort;
   const makeBroker = () => new HostApprovalBroker({ store, inbox, provider, currentHandle: () => state.live,
-    isCurrent: () => state.current, exactAuthority: async () => state.owned,
+    isCurrent: () => state.current, exactAuthority: async () => {
+      state.authorityChecks += 1;
+      return state.owned && state.authorityChecks !== state.authorityFailAt;
+    },
     fenceCommit: async commit => { if (!state.current) throw new Error("daemon generation changed"); await commit(); }, nowMs: () => now + 10 });
   let broker = makeBroker();
   const emit = (requests: ProviderPermissionRequest[] = [native]) => {
@@ -94,7 +104,7 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
     receive!({ type: "snapshot", connectionId: "connection", requests });
   };
   broker.install("agent", handle, "generation"); emit();
-  return { store, inbox, db, item, state, native, handle, sends, order, emit,
+  return { store, inbox, db, item, state, native, handle, workspace, sends, order, emit,
     get broker() { return broker; },
     reinstall() { broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation"); emit(); },
     async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await rm(root, { recursive: true, force: true }); } };
@@ -104,6 +114,13 @@ function decision(candidate: HostApprovalCandidate, changes: Partial<HostApprova
   assert.ok(candidate.reference, "a decision requires an exact journal reference");
   return { expected: candidate.reference, decisionId: "decision", actorId: "host-owner", decision: "allow_once",
     projectionSha256: hash(candidate.presentation), ...changes };
+}
+
+function fileChangeRequest(native: ProviderPermissionRequest, workspace: string): ProviderPermissionRequest {
+  assert.equal(native.provider, "codex");
+  return { provider: "codex", native: { ...native.native, method: "item/fileChange/requestApproval",
+    params: { threadId: "continuation", turnId: "native-turn", itemId: "edit-1",
+      grantRoot: workspace, reason: "Approve these edits" } } };
 }
 
 test("host approvals use exact operational turns without capture and commit selection and intent before native response", async () => {
@@ -153,6 +170,58 @@ test("Codex file-change approvals stay unavailable without exact native edit ins
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
     assert.deepEqual(f.sends, []);
   } finally { await f.close(); }
+});
+
+test("exact safe Codex file changes are delegatable while sensitive paths stay host-only", async () => {
+  for (const scenario of ["safe", "sensitive"] as const) {
+    const f = await fixture();
+    try {
+      const fileChange = fileChangeRequest(f.native, f.workspace);
+      f.state.fileChanges = [{ path: scenario === "safe" ? join(f.workspace, "src/app.ts") : join(f.workspace, ".env"),
+        kind: { type: "add" }, diff: "+value\n" }];
+      f.emit([fileChange]);
+      const [candidate] = await f.broker.list("room");
+      assert.ok(candidate?.reference); assert.equal(candidate.status, "pending");
+      const stored = await f.store.getExecutionApproval(candidate.reference);
+      assert.equal(stored!.request.risk, scenario === "safe" ? "low" : "high");
+      assert.equal(stored!.request.delegatable, scenario === "safe");
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n,
+        scenario === "safe" ? 1 : 0);
+      if (scenario === "safe") {
+        f.state.owned = false;
+        const unavailable = await f.broker.list("room");
+        assert.equal(unavailable.length, 1, "authority loss does not duplicate a live request and its durable recovery card");
+        assert.deepEqual(unavailable[0]!.reference, candidate.reference);
+        assert.equal(unavailable[0]!.status, "unavailable");
+        assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 1);
+        assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 1);
+        f.state.owned = true;
+        assert.equal(await f.broker.decide(decision(candidate)), "decision_sent",
+          "the owner path remains valid for a delegatable request");
+        f.reinstall(); f.emit([fileChange]);
+        const recovered = await f.broker.list("room");
+        assert.equal(recovered.length, 1, "one exact live card replaces the durable recovery fallback");
+        assert.deepEqual(recovered[0]!.reference, candidate.reference);
+        assert.equal(recovered[0]!.status, "uncertain");
+      }
+    } finally { await f.close(); }
+  }
+});
+
+test("file-change admission rechecks exact authority after projection and at commit", async () => {
+  for (const failAt of [2, 3]) {
+    const f = await fixture();
+    try {
+      const fileChange = fileChangeRequest(f.native, f.workspace);
+      f.state.fileChanges = [{ path: join(f.workspace, "src/app.ts"), kind: { type: "add" }, diff: "+value\n" }];
+      f.state.authorityFailAt = failAt;
+      f.emit([fileChange]);
+      const [unavailable] = await f.broker.list("room");
+      assert.equal(unavailable!.reference, null);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 0);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
+    } finally { await f.close(); }
+  }
 });
 
 test("host approval decisions serialize duplicates and conflicts to one native response", async () => {
@@ -243,21 +312,29 @@ test("host approval final synchronous native fence catches state changes after a
 });
 
 test("host approval retains an unsent chosen decision for exact recovery without manufacturing another choice", async () => {
-  const f = await fixture();
-  try {
-    const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
-    f.state.failBefore = true;
-    await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
-    assert.deepEqual(f.sends, []);
-    assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchId, null);
-    f.reinstall();
-    const [retained] = await f.broker.list("room"); assert.equal(retained!.status, "decision_recorded");
-    const { expected, ...recordedDecision } = selected;
-    assert.deepEqual(retained!.reference, expected);
-    assert.deepEqual(retained!.recordedDecision, recordedDecision);
-    f.state.failBefore = false;
-    assert.equal(await f.broker.decide(selected), "decision_sent"); assert.deepEqual(f.sends, ["once"]);
-  } finally { await f.close(); }
+  for (const kind of ["command", "file_change"] as const) {
+    const f = await fixture();
+    try {
+      const fileChange = fileChangeRequest(f.native, f.workspace);
+      if (kind === "file_change") {
+        f.state.fileChanges = [{ path: join(f.workspace, "src/app.ts"), kind: { type: "add" }, diff: "+value\n" }];
+        f.emit([fileChange]);
+      }
+      const [candidate] = await f.broker.list("room"); const selected = decision(candidate!);
+      f.state.failBefore = true;
+      await assert.rejects(f.broker.decide(selected), /recorded but could not be sent/);
+      assert.deepEqual(f.sends, []);
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchId, null);
+      f.reinstall();
+      if (kind === "file_change") f.emit([fileChange]);
+      const [retained] = await f.broker.list("room"); assert.equal(retained!.status, "decision_recorded");
+      const { expected, ...recordedDecision } = selected;
+      assert.deepEqual(retained!.reference, expected);
+      assert.deepEqual(retained!.recordedDecision, recordedDecision);
+      f.state.failBefore = false;
+      assert.equal(await f.broker.decide(selected), "decision_sent"); assert.deepEqual(f.sends, ["once"]);
+    } finally { await f.close(); }
+  }
 });
 
 for (const scenario of ["command", "file_change", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
@@ -267,7 +344,7 @@ for (const scenario of ["command", "file_change", "changed_file", "changed_prese
 async function verifyNativeApproval(scenario: "command" | "file_change" | "changed_file" | "changed_presentation" | "oversized_presentation") {
   const f = await fixture(); f.broker.close();
   const isFileChange = scenario !== "command";
-  const changes = [{ path: "/workspace/old.txt", kind: { type: "update", move_path: "/workspace/new.txt" }, diff: `@@ -1 +1 @@\n-old\n+${secret}` }];
+  const changes = [{ path: join(f.workspace, "old.txt"), kind: { type: "update", move_path: join(f.workspace, "new.txt") }, diff: `@@ -1 +1 @@\n-old\n+${secret}` }];
   if (scenario === "oversized_presentation") {
     // The edits alone fit the adapter's bound; the complete host presentation,
     // including its native request, must also fit without truncation.
