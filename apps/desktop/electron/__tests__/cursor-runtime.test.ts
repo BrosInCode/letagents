@@ -772,7 +772,7 @@ test("Cursor runtime keeps the bridge-protocol error after one malformed correct
       prompts.push(input);
       return {
         sessionId: "cursor_session_still_malformed",
-        text: `${prompts.length === 1 ? "Initial prose" : "Still malformed"}\n${request}`,
+        text: `${prompts.length === 1 ? "Initial prose\n" : "Still malformed "}${request}`,
         status: "success",
         error: null,
         recentItems: [],
