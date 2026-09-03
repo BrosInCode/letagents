@@ -22,14 +22,14 @@ test("supervisor list projects canonical agent keys for renderer mention routing
   assert.match(listHandler, /agentKey:/);
 });
 
-test("supervisor creation admits available Cursor profiles before claiming durable ownership", () => {
+test("supervisor creation admits supervised profiles before claiming durable ownership", () => {
   const createHandler = ipcSource.slice(
     ipcSource.indexOf('"desktop:supervisor:create-agent"'),
     ipcSource.indexOf('"desktop:supervisor:resume-ownership-transfer"'),
   );
   assert.match(createHandler, /provider !== "cursor"/);
   assert.doesNotMatch(createHandler, /provider === "cursor" && input\.permissionProfileId !== "read_only"/);
-  assert.match(createHandler, /assertManagedAgentPermissionProfileAvailable\(provider, input\.permissionProfileId\)/);
+  assert.match(createHandler, /assertManagedAgentPermissionProfileAvailable\(provider, input\.permissionProfileId, "supervised"\)/);
   assert.ok(
     createHandler.indexOf("assertManagedAgentPermissionProfileAvailable")
       < createHandler.indexOf("createPausedAndInstall"),

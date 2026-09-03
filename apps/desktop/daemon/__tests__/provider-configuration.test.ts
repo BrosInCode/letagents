@@ -33,6 +33,18 @@ test("provider configuration maps permission profiles to native launch authority
   });
 
   assert.deepEqual(resolveProviderConfigurationSnapshot({
+    provider: "codex",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: {},
+    configurationRevision: 8,
+  }).launchPolicy, {
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "readOnly", networkAccess: false },
+  });
+
+  assert.deepEqual(resolveProviderConfigurationSnapshot({
     provider: "claude-code",
     model: "claude-next",
     reasoningEffort: null,
@@ -104,6 +116,16 @@ test("trusted profile selection replaces only native authority and preserves pro
     approvalPolicy: "ask", sandboxPolicy: { type: "workspaceWrite" }, experimental: true,
   }).launchPolicy, {
     experimental: true, approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" },
+  });
+
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "codex", model: "gpt-next", reasoningEffort: "high", permissionProfileId: "ask_before_write", configurationRevision: 9,
+  }, {
+    approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" }, experimental: true,
+  }).launchPolicy, {
+    experimental: true,
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "readOnly", networkAccess: false },
   });
 
   assert.deepEqual(deriveProviderConfigurationSnapshot({
@@ -214,6 +236,24 @@ test("provider configuration rejects unsupported and conflicting native settings
     configurationRevision: 1,
   }), /unavailable for provider/);
 
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    provider: "codex",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { sandboxPolicy: { type: "dangerFullAccess" } },
+    configurationRevision: 1,
+  }), /conflicts with permission-profile authority/);
+
+  assert.throws(() => resolveProviderConfigurationSnapshot({
+    provider: "codex",
+    model: null,
+    reasoningEffort: null,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { sandbox: "danger-full-access" },
+    configurationRevision: 1,
+  }), /cannot override 'sandbox'/);
+
   assert.throws(() => deriveProviderConfigurationSnapshot({
     provider: "claude-code", model: null, reasoningEffort: null, permissionProfileId: "ask_before_write", configurationRevision: 1,
   }, {}), /Claude supervised prompt bridging is not available/);
@@ -227,7 +267,10 @@ test("supervised profile contract gates Claude prompt approval without changing 
   assert.equal(claude.find((profile) => profile.id === "full_access")?.status, "available");
   assert.match(claude.find((profile) => profile.id === "full_access")?.description ?? "", /on this host/);
   assert.doesNotMatch(claude.find((profile) => profile.id === "full_access")?.description ?? "", /repo|workspace/i);
-  assert.equal(supervisedPermissionProfilesForProvider("codex").find((profile) => profile.id === "full_access")?.status, "available");
+  const codex = supervisedPermissionProfilesForProvider("codex");
+  assert.equal(codex.find((profile) => profile.id === "full_access")?.status, "available");
+  assert.equal(codex.find((profile) => profile.id === "ask_before_write")?.status, "available");
+  assert.match(codex.find((profile) => profile.id === "ask_before_write")?.detail ?? "", /network-disabled sandbox/);
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "full_access")?.status, "available");
   const cursor = supervisedPermissionProfilesForProvider("cursor");
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.status, "available");

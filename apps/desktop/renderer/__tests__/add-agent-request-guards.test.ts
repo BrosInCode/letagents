@@ -180,6 +180,7 @@ test("configuration invalidation rejects a stale model-catalog response", async 
     repoRootPath: () => "/repo",
     selectedProviderId,
     selectedProvider,
+    selectedPermissionProfiles: computed(() => selectedProvider.value.permissionProfiles),
     selectedPermissionProfile: computed(() => null),
     showOpenModelConfig: computed(() => false),
     showModelSelector: computed(() => true),
@@ -238,6 +239,7 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
     repoRootPath: () => repoRootPath.value,
     selectedProviderId,
     selectedProvider,
+    selectedPermissionProfiles: computed(() => profiles),
     selectedPermissionProfile: computed(() =>
       profiles.find((profile) => profile.id === configuration.selectedPermissionProfileId.value) ?? null
     ),
@@ -306,6 +308,73 @@ test("Cursor keeps legacy read-only and supervised repo-write defaults independe
   );
 });
 
+test("Codex keeps legacy and supervised ask-before-write selections independent", () => {
+  const configuration = useAddAgentConfiguration();
+  const selectedProviderId = ref<DesktopAgentProvider["id"] | null>("codex");
+  const legacyProfiles: DesktopAgentProvider["permissionProfiles"] = [
+    {
+      id: "full_access", label: "Full access", description: "Trusted repo access.",
+      status: "available", risk: "high", detail: null, isDefault: true,
+    },
+    {
+      id: "ask_before_write", label: "Ask before writes", description: "Requires approval.",
+      status: "gated", risk: "medium", detail: "Supervised only.", isDefault: false,
+    },
+  ];
+  const selectedPermissionProfiles = computed(() => legacyProfiles.map((profile) =>
+    configuration.launchMode.value === "supervised" && profile.id === "ask_before_write"
+      ? { ...profile, status: "available" as const }
+      : profile
+  ));
+  const selectedProvider = computed<DesktopAgentProvider>(() => ({
+    ...provider("codex"),
+    permissionProfiles: legacyProfiles,
+    defaultPermissionProfileId: "full_access",
+  }));
+  const actions = configuration.bind({
+    open: () => true,
+    roomIdentifier: () => "room-1",
+    roomGitRoom: () => null,
+    repoRootPath: () => "/repo",
+    selectedProviderId,
+    selectedProvider,
+    selectedPermissionProfiles,
+    selectedPermissionProfile: computed(() =>
+      selectedPermissionProfiles.value.find(
+        (profile) => profile.id === configuration.selectedPermissionProfileId.value,
+      ) ?? null
+    ),
+    showOpenModelConfig: computed(() => false),
+    showModelSelector: computed(() => false),
+    showEffortSelector: computed(() => false),
+    providerModelOptions: computed(() => []),
+    selectedModel: computed(() => null),
+    selectedModelSource: computed(() => null),
+    requestPreflight: () => undefined,
+    runPreflight: async () => undefined,
+    onMessage: () => undefined,
+  });
+
+  actions.syncPermissionProfileSelection();
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+
+  configuration.launchMode.value = "supervised";
+  const supervisedAsk = selectedPermissionProfiles.value.find((profile) => profile.id === "ask_before_write");
+  assert.equal(supervisedAsk?.status, "available");
+  actions.selectPermissionProfile(supervisedAsk!);
+  assert.equal(configuration.selectedPermissionProfileId.value, "ask_before_write");
+
+  configuration.launchMode.value = "legacy";
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+  const legacyAsk = selectedPermissionProfiles.value.find((profile) => profile.id === "ask_before_write");
+  assert.equal(legacyAsk?.status, "gated");
+  actions.selectPermissionProfile(legacyAsk!);
+  assert.equal(configuration.selectedPermissionProfileId.value, "full_access");
+
+  configuration.launchMode.value = "supervised";
+  assert.equal(configuration.selectedPermissionProfileId.value, "ask_before_write");
+});
+
 test("closing the modal does not unlock a second Open Model write", async () => {
   const pendingSave = deferred<{
     baseUrl: string;
@@ -345,6 +414,7 @@ test("closing the modal does not unlock a second Open Model write", async () => 
     repoRootPath: () => "/repo",
     selectedProviderId,
     selectedProvider,
+    selectedPermissionProfiles: computed(() => selectedProvider.value.permissionProfiles),
     selectedPermissionProfile: computed(() => null),
     showOpenModelConfig: computed(() => true),
     showModelSelector: computed(() => false),

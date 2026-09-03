@@ -30,6 +30,7 @@ interface ConfigurationBindings {
   repoRootPath: () => string | null;
   selectedProviderId: Ref<DesktopAgentProviderId | null>;
   selectedProvider: ComputedRef<DesktopAgentProvider | null>;
+  selectedPermissionProfiles: ComputedRef<DesktopManagedAgentPermissionProfile[]>;
   selectedPermissionProfile: ComputedRef<DesktopManagedAgentPermissionProfile | null>;
   showOpenModelConfig: ComputedRef<boolean>;
   showModelSelector: ComputedRef<boolean>;
@@ -277,6 +278,7 @@ export function useAddAgentConfiguration() {
     }
     function syncPermissionProfileSelection(): void {
       const supervised = launchMode.value === "supervised";
+      const permissionProfiles = bindings.selectedPermissionProfiles.value;
       const selections = supervised
         ? selectedSupervisedPermissionProfileIdsByProvider.value
         : selectedPermissionProfileIdsByProvider.value;
@@ -290,7 +292,7 @@ export function useAddAgentConfiguration() {
         ? repoLessSupervisedSelections.get(repoLessSelectionKey)
         : null;
       const repoLessSaved = repoLessSavedId
-        ? bindings.selectedProvider.value?.permissionProfiles.find(
+        ? permissionProfiles.find(
           (profile) => profile.id === repoLessSavedId && profile.status === "available",
         )
         : null;
@@ -298,10 +300,12 @@ export function useAddAgentConfiguration() {
       // selected even when it is gated unless this room has an explicit choice;
       // repo-backed remembered authority remains isolated from this context.
       const readOnly = repoLess && !repoLessSaved
-        ? bindings.selectedProvider.value?.permissionProfiles.find((profile) => profile.id === "read_only")
+        ? permissionProfiles.find((profile) => profile.id === "read_only")
         : null;
       const nextId = repoLessSaved?.id ?? readOnly?.id ?? managedAgentPermissionProfileSelectionForProvider(
-          bindings.selectedProvider.value,
+          bindings.selectedProvider.value
+            ? { ...bindings.selectedProvider.value, permissionProfiles }
+            : null,
           selections,
           supervised && bindings.selectedProviderId.value === "cursor"
             ? "sandboxed_write"

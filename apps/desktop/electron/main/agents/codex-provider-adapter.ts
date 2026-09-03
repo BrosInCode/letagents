@@ -183,7 +183,7 @@ const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
   turnControl: "native_interrupt",
 };
 
-const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input"]);
+const RESERVED_POLICY_KEYS = new Set(["threadId", "cwd", "input", "sandbox"]);
 const PS_BIRTH_EVIDENCE = /^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)\s+(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)\s+([1-9]|[12]\d|3[01])\s+([01]\d|2[0-3]):[0-5]\d:[0-5]\d\s+\d{4}(?:\s|$)/;
 
 function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
@@ -196,10 +196,20 @@ function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
       throw new Error(`Codex launchPolicy cannot override reserved field '${key}'.`);
     }
   }
-  // Deliberately return the original values without mapping profile names or
-  // inventing LetAgents permission semantics. The Add Agent native policy is
-  // forwarded to app-server unchanged (plan v10 §4.8 / P0 cell h).
-  return policy;
+  const { sandboxPolicy, ...threadPolicy } = policy;
+  if (sandboxPolicy === undefined) return threadPolicy;
+  const sandbox = recordValue(sandboxPolicy);
+  if (sandbox?.type === "dangerFullAccess" && Object.keys(sandbox).length === 1) {
+    return { ...threadPolicy, sandbox: "danger-full-access" };
+  }
+  if (
+    sandbox?.type === "readOnly"
+    && sandbox.networkAccess === false
+    && Object.keys(sandbox).length === 2
+  ) {
+    return { ...threadPolicy, sandbox: "read-only" };
+  }
+  throw new Error("Codex launchPolicy contains an unsupported thread sandbox policy.");
 }
 
 /**

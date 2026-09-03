@@ -251,9 +251,11 @@ test("supervised creation presents the startup text as a one-time initial messag
   assert.match(actionBarSource, /Add an initial message before starting/);
 });
 
-test("supervised Cursor exposes the provider permission profiles instead of forcing read-only", () => {
+test("supervised providers expose their supervised permission presentation instead of forcing read-only", () => {
   assert.match(presentationSource, /const profiles = selectedProvider\.value\?\.permissionProfiles \?\? \[\]/);
-  assert.match(presentationSource, /profiles\.map\(supervisedCursorPermissionProfilePresentation\)/);
+  assert.match(presentationSource, /profiles\.map\(\(profile\) => supervisedPermissionProfilePresentation\(selectedProviderId\.value, profile\)\)/);
+  assert.match(configurationSource, /const permissionProfiles = bindings\.selectedPermissionProfiles\.value/);
+  assert.match(controllerSource, /selectedPermissionProfiles,[\s\S]*?selectedPermissionProfile,/);
   assert.doesNotMatch(presentationSource, /profiles\.filter\(\(profile\) => profile\.id === "read_only"\)/);
   assert.match(presentationSource, /private turn workspace/);
   assert.match(presentationSource, /Git history and ignored output are not persisted/);

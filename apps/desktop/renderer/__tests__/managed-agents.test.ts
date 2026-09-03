@@ -42,6 +42,7 @@ import {
   managedAgentPermissionProfileStatusLabel,
   managedAgentPermissionProfileSummary,
   supervisedCursorPermissionProfilePresentation,
+  supervisedPermissionProfilePresentation,
   managedAgentPermissionRequestTargetLabel,
   managedAgentDetailSelection,
   managedAgentProviderIdentityForTarget,
@@ -1580,6 +1581,22 @@ test("supervised Cursor permission copy describes workspace scope instead of mac
   });
   assert.equal(writable.label, "Workspace writes");
   assert.match(writable.description, /private turn workspace/i);
+});
+
+test("supervised Codex presents ask-before-write without changing the legacy catalog", () => {
+  const legacy = {
+    id: "ask_before_write" as const,
+    label: "Ask before writes",
+    description: "Not wired.",
+    status: "gated" as const,
+    risk: "medium" as const,
+    detail: "Requires an approval bridge.",
+    isDefault: false,
+  };
+  const supervised = supervisedPermissionProfilePresentation("codex", legacy);
+  assert.equal(legacy.status, "gated");
+  assert.equal(supervised.status, "available");
+  assert.match(supervised.detail ?? "", /read-only, network-disabled sandbox/);
 });
 
 test("managed permission profile selection is scoped by provider", () => {

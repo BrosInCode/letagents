@@ -711,7 +711,7 @@ test("Codex permission observation withdraws replaced/stopped bindings and dispo
   });
 });
 
-test("Codex adapter launches app-server, forwards native policy unchanged, and boots the MCP workplace", async () => {
+test("Codex adapter launches app-server, maps attested thread policy, and boots the MCP workplace", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({
     codexBin: "/usr/local/bin/codex",
@@ -747,7 +747,8 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
   const threadStart = requestByMethod(harness.clients[0]!, "thread/start");
   const threadParams = threadStart.params as Record<string, unknown>;
   assert.equal(threadParams.approvalPolicy, policy.approvalPolicy);
-  assert.equal(threadParams.sandboxPolicy, policy.sandboxPolicy, "native sandbox object was forwarded, not remapped");
+  assert.equal(threadParams.sandbox, "danger-full-access");
+  assert.equal(Object.hasOwn(threadParams, "sandboxPolicy"), false);
   assert.equal(threadParams.cwd, "/tmp/letagents-work-attempt");
   assert.equal(
     harness.clients[0]!.requests.some((entry) => entry.method === "thread/resume"),
@@ -782,6 +783,25 @@ test("Codex adapter launches app-server, forwards native policy unchanged, and b
     continuationRepair: "same_process",
   });
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
+});
+
+test("Codex supervised ask-before-write maps to the native read-only thread boundary", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  await adapter.spawn(spawnRequest({
+    deliveryMode: "daemon_inbox",
+    permissionProfileId: "ask_before_write",
+    configurationRevision: 1,
+    launchPolicy: {
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    },
+  }));
+
+  const params = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
+  assert.equal(params.approvalPolicy, "on-request");
+  assert.equal(params.sandbox, "read-only");
+  assert.equal(Object.hasOwn(params, "sandboxPolicy"), false);
 });
 
 test("Codex fresh spawn does not let a fatal placeholder resume probe block thread/start", async () => {
@@ -2010,7 +2030,7 @@ test("Codex resume reopens the exact native thread and preserves the same launch
   assert.ok(resume, "expected exact durable continuation resume request");
   const params = resume.params as Record<string, unknown>;
   assert.equal(params.threadId, continuation);
-  assert.deepEqual(params.sandboxPolicy, { type: "dangerFullAccess" });
+  assert.equal(params.sandbox, "danger-full-access");
   assert.equal(
     harness.clients[1]!.requests.filter((entry) => entry.method === "thread/start").length,
     0,

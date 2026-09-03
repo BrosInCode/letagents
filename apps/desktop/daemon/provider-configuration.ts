@@ -27,7 +27,7 @@ type ConfigurationInput = {
 export type ProviderConfigurationSelection = Omit<ConfigurationInput, "launchPolicy">;
 
 const efforts = new Set<Exclude<ProviderReasoningEffort, null>>(["low", "medium", "high", "xhigh", "max"]);
-const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort"]);
+const reservedCodexPolicy = new Set(["threadId", "cwd", "input", "model", "reasoningEffort", "sandbox"]);
 
 /**
  * Admission may share a room/provider lane only when every durable entry owns
@@ -68,12 +68,21 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
 
   if (provider === "codex") {
     for (const key of reservedCodexPolicy) if (Object.hasOwn(policy, key)) throw new Error(`Codex launch policy cannot override '${key}'.`);
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access"]);
-    requirePolicyMatch(policy, "approvalPolicy", "never", provider);
-    requirePolicyMatch(policy, "sandboxPolicy", { type: "dangerFullAccess" }, provider);
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write"]);
+    const authority = profile === "ask_before_write"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
+      : {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      };
+    requirePolicyMatch(policy, "approvalPolicy", authority.approvalPolicy, provider);
+    requirePolicyMatch(policy, "sandboxPolicy", authority.sandboxPolicy, provider);
     return {
       provider, model: normalizedModel, reasoningEffort: input.reasoningEffort, permissionProfileId: profile,
-      launchPolicy: { ...policy, approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } },
+      launchPolicy: { ...policy, ...authority },
       configurationRevision: input.configurationRevision,
     };
   }
