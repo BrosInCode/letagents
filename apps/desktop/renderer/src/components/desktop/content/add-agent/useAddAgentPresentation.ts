@@ -21,7 +21,7 @@ import {
   shouldShowDeliveryModeSelector,
   shouldShowManagedModelSelector,
   shouldShowOpenModelConfig,
-  supervisedCursorPermissionProfilePresentation,
+  supervisedPermissionProfilePresentation,
 } from "../../../../domain/managed-agents";
 import type { DesktopSelectOption } from "../../controls/DesktopSelectField.vue";
 import type { useAddAgentConfiguration } from "./useAddAgentConfiguration";
@@ -71,8 +71,8 @@ export function useAddAgentPresentation(
   );
   const selectedPermissionProfiles = computed(() => {
     const profiles = selectedProvider.value?.permissionProfiles ?? [];
-    return selectedProviderId.value === "cursor" && launchMode.value === "supervised"
-      ? profiles.map(supervisedCursorPermissionProfilePresentation)
+    return launchMode.value === "supervised"
+      ? profiles.map((profile) => supervisedPermissionProfilePresentation(selectedProviderId.value, profile))
       : profiles;
   });
   const selectedPermissionProfile = computed(() =>

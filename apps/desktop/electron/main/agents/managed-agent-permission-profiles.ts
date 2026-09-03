@@ -201,6 +201,7 @@ export function managedAgentPermissionProfileForProvider(
 export function assertManagedAgentPermissionProfileAvailable(
   providerId: DesktopAgentProviderId,
   requestedProfileId?: DesktopManagedAgentPermissionProfileId | null,
+  launchMode: "legacy" | "supervised" = "legacy",
 ): DesktopManagedAgentPermissionProfile {
   const requested = normalizeProfileId(requestedProfileId);
   const profiles = listManagedAgentPermissionProfiles(providerId);
@@ -208,6 +209,18 @@ export function assertManagedAgentPermissionProfileAvailable(
     throw new Error(`Unknown permission profile '${requested}' for ${providerId}.`);
   }
   const profile = managedAgentPermissionProfileForProvider(providerId, requestedProfileId);
+  if (
+    launchMode === "supervised"
+    && providerId === "codex"
+    && profile.id === "ask_before_write"
+  ) {
+    return {
+      ...profile,
+      status: "available",
+      description: "Requires approval before Codex can run write-capable commands or apply file changes.",
+      detail: "Maps to approvalPolicy=on-request and a read-only, network-disabled sandbox.",
+    };
+  }
   if (profile.status !== "available") {
     throw new Error(`${profile.label} is not available for ${providerId}: ${profile.detail || profile.description}`);
   }

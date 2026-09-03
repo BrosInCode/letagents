@@ -13,11 +13,24 @@ export function attestProviderSpawnPolicy(
   request: ProviderSpawnRequest,
 ): Record<string, unknown> {
   if (!request.permissionProfileId) return plainPolicy(request.launchPolicy, provider);
-  const profile = assertManagedAgentPermissionProfileAvailable(provider, request.permissionProfileId as never).id;
+  const profile = assertManagedAgentPermissionProfileAvailable(
+    provider,
+    request.permissionProfileId as never,
+    "supervised",
+  ).id;
   const policy = plainPolicy(request.launchPolicy, provider);
   if (provider === "codex") {
-    requireMatch(policy, "approvalPolicy", "never", provider);
-    requireMatch(policy, "sandboxPolicy", { type: "dangerFullAccess" }, provider);
+    const authority = profile === "ask_before_write"
+      ? {
+        approvalPolicy: "on-request",
+        sandboxPolicy: { type: "readOnly", networkAccess: false },
+      }
+      : {
+        approvalPolicy: "never",
+        sandboxPolicy: { type: "dangerFullAccess" },
+      };
+    requireMatch(policy, "approvalPolicy", authority.approvalPolicy, provider);
+    requireMatch(policy, "sandboxPolicy", authority.sandboxPolicy, provider);
   } else if (provider === "open-model") {
     requireMatch(policy, "permission", { "*": "allow" }, provider);
   } else if (provider === "claude-code") {

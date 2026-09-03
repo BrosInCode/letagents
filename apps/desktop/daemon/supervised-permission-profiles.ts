@@ -26,9 +26,9 @@ const codexProfiles: readonly SupervisedPermissionProfile[] = [
   },
   {
     id: "ask_before_write", label: "Ask before writes",
-    description: "Requires a provider approval bridge before a background agent can ask safely.",
-    status: "gated", risk: "medium",
-    detail: "Codex supervised approval bridging is not available yet.", isDefault: false,
+    description: "Requires approval before Codex can run write-capable commands or apply file changes.",
+    status: "available", risk: "medium",
+    detail: "Maps to approvalPolicy=on-request and a read-only, network-disabled sandbox.", isDefault: false,
   },
   {
     id: "sandboxed_write", label: "Sandboxed writes",
