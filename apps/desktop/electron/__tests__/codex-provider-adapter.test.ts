@@ -406,6 +406,69 @@ test("Codex file approval inspection requires exact full pending native edits", 
   assert.equal(client.permissionResponses.length, 0);
 });
 
+test("Codex file approval inspection uses the exact ephemeral proposal when the active turn omits its pending item", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!;
+  client.turnStatus = "inProgress";
+  const request = client.askPermission(approvalParams(), 3, "item/fileChange/requestApproval");
+  const changes = structuredClone(client.permissionChanges);
+  const original = client.request.bind(client);
+  client.request = async (method, params) => method === "thread/turns/list"
+    ? { data: [{ id: "turn-thread-1", status: "inProgress", itemsView: "full", items: [] }] } as never
+    : original(method, params);
+
+  assert.equal(await adapter.inspectPermissionFileChanges(handle, request), null);
+  client.emit({ method: "item/started", params: {
+    threadId: "thread-1",
+    turnId: "turn-thread-1",
+    item: { id: "item-1", type: "fileChange", status: "inProgress", changes },
+  } });
+  assert.deepEqual(await adapter.inspectPermissionFileChanges(handle, request), changes);
+  assert.deepEqual(await adapter.replyPermission(handle, request, "once", {
+    expectedFileChanges: changes,
+    beforeNativeDispatch: async () => {},
+  }), { outcome: "sent", scope: "request" });
+  assert.deepEqual(client.permissionResponses, [{ request, result: { decision: "accept" } }]);
+});
+
+test("Codex ephemeral file approval proposals expire on item, turn, or connection terminal evidence", async (t) => {
+  for (const terminal of ["item", "turn", "connection"] as const) await t.test(terminal, async () => {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!;
+    client.turnStatus = "inProgress";
+    const request = client.askPermission(approvalParams(), 3, "item/fileChange/requestApproval");
+    const changes = structuredClone(client.permissionChanges);
+    const original = client.request.bind(client);
+    client.request = async (method, params) => method === "thread/turns/list"
+      ? { data: [{ id: "turn-thread-1", status: "inProgress", itemsView: "full", items: [] }] } as never
+      : original(method, params);
+    client.emit({ method: "item/started", params: {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      item: { id: "item-1", type: "fileChange", status: "inProgress", changes },
+    } });
+    assert.deepEqual(await adapter.inspectPermissionFileChanges(handle, request), changes);
+
+    if (terminal === "item") client.emit({ method: "item/completed", params: {
+      threadId: "thread-1",
+      turnId: "turn-thread-1",
+      item: { id: "item-1", type: "fileChange", status: "declined" },
+    } });
+    if (terminal === "turn") client.emit({ method: "turn/completed", params: {
+      threadId: "thread-1",
+      turn: { id: "turn-thread-1", status: "completed" },
+    } });
+    if (terminal === "connection") client.disconnect();
+
+    assert.equal(await adapter.inspectPermissionFileChanges(handle, request), null);
+    assert.deepEqual(client.permissionResponses, []);
+  });
+});
+
 test("Codex file approval rechecks proposed edits after the broker hook and never sends changed edits", async () => {
   for (const changed of [false, true]) {
     const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
