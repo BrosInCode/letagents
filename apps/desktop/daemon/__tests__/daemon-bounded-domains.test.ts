@@ -71,6 +71,7 @@ const expectedControlMethods = [
   "supervisor.retry_room_delivery",
   "supervisor.rollback_room_move",
   "supervisor.skip_room_delivery",
+  "supervisor.sync_execution_delegations",
   "supervisor.update_agent_configuration",
   "supervisor.verify_worker_session",
   "supervisor.watch_agent_stream",
@@ -108,6 +109,7 @@ test("daemon policy and projection domains remain extracted", () => {
     "delivery-cutover-execution-coordinator",
     "desired-state-coordinator",
     "entry-concurrency-gate",
+    "execution-delegation-sync-coordinator",
     "legacy-lane-coordinator",
     "lifecycle-administration-coordinator",
     "manifest-administration-coordinator",
@@ -163,7 +165,9 @@ test("daemon policy and projection domains remain extracted", () => {
   // typed lifecycle effect consumer and its atomic activation seam. Policy stays extracted.
   // Raises must be reviewed, never blank-line-gamed.
   // 1531 -> 1550 for the isolated runtime-configuration apply coordinator.
-  assert.ok(mainSource.split("\n").length < 1_550, "main.ts must remain a thin composition root");
+  // 1550 -> 1575 for delegation-sync composition and shutdown wiring; paging,
+  // coalescing, exact reconciliation, and policy remain in the extracted coordinator.
+  assert.ok(mainSource.split("\n").length < 1_575, "main.ts must remain a thin composition root");
 });
 
 function read(relativePath: string): string {

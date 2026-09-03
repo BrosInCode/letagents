@@ -471,6 +471,8 @@ let localAccountAgentRoutingHydrator: LocalAccountAgentRoutingHydrator =
 type ManagedAgentRoomStreamDispatcher = typeof dispatchRoomStreamEventToManagedAgents;
 let managedAgentRoomStreamDispatcher: ManagedAgentRoomStreamDispatcher =
   dispatchRoomStreamEventToManagedAgents;
+type ExecutionDelegationInvalidationHandler = (roomId: string) => void | Promise<void>;
+let executionDelegationInvalidationHandler: ExecutionDelegationInvalidationHandler = () => undefined;
 
 export function setLocalAccountAgentRoutingHydratorForTest(
   hydrator: LocalAccountAgentRoutingHydrator | null,
@@ -482,6 +484,13 @@ export function setManagedAgentRoomStreamDispatcherForTest(
   dispatcher: ManagedAgentRoomStreamDispatcher | null,
 ): void {
   managedAgentRoomStreamDispatcher = dispatcher ?? dispatchRoomStreamEventToManagedAgents;
+}
+
+/** Main-process-only wake; pointer payloads never become renderer authority. */
+export function setExecutionDelegationInvalidationHandler(
+  handler: ExecutionDelegationInvalidationHandler | null,
+): void {
+  executionDelegationInvalidationHandler = handler ?? (() => undefined);
 }
 
 export function emitPersistedLocalRoomMessage(
@@ -945,6 +954,10 @@ function handleRoomStreamFrame(
         roomIdentifier: payloadRoomIdentifier,
         resource,
       }, { deliverToManagedAgents: false });
+    } else if (resource === "execution_delegation") {
+      void Promise.resolve(executionDelegationInvalidationHandler(payloadRoomIdentifier)).catch((error) => {
+        console.warn(`Execution delegation invalidation failed: ${error instanceof Error ? error.message : String(error)}`);
+      });
     }
     return;
   }

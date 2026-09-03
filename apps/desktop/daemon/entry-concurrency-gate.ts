@@ -19,18 +19,41 @@ export class EntryConcurrencyGate {
   constructor(private readonly options: EntryConcurrencyGateOptions) {}
 
   /** Serialize all authority-changing work for one manifest entry. */
-  async run<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
+  async run<T>(entryId: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    signal?.throwIfAborted();
     const previous = this.entryTicks.get(entryId) ?? Promise.resolve();
     let release!: () => void;
     const current = new Promise<void>((resolve) => { release = resolve; });
     const tail = previous.then(() => current);
     this.entryTicks.set(entryId, tail);
-    await previous;
+    let entered = false;
     try {
+      if (signal) {
+        let onAbort!: () => void;
+        const aborted = new Promise<never>((_resolve, reject) => {
+          onAbort = () => reject(signal.reason ?? new DOMException("aborted", "AbortError"));
+          signal.addEventListener("abort", onAbort, { once: true });
+        });
+        try {
+          await Promise.race([previous, aborted]);
+        } finally {
+          signal.removeEventListener("abort", onAbort);
+        }
+        signal.throwIfAborted();
+      } else {
+        await previous;
+      }
+      entered = true;
       return await operation();
     } finally {
       release();
-      if (this.entryTicks.get(entryId) === tail) this.entryTicks.delete(entryId);
+      if (entered) {
+        if (this.entryTicks.get(entryId) === tail) this.entryTicks.delete(entryId);
+      } else {
+        void tail.then(() => {
+          if (this.entryTicks.get(entryId) === tail) this.entryTicks.delete(entryId);
+        });
+      }
     }
   }
 

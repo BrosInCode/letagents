@@ -10,8 +10,10 @@ import {
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
 import {
+  listExecutionDelegationInstanceIds,
   reconcileExecutionDelegation,
   validateExecutionDelegation,
+  type ExecutionDelegationInventoryScope,
   type LocalExecutionDelegation,
   type ReconcileExecutionDelegation,
   type ValidateExecutionDelegation,
@@ -260,6 +262,10 @@ export class ManifestStore {
   async getEntry(agentId: string): Promise<DaemonManifestEntry | undefined> {
     const database = await this.getDatabase();
     return this.readEntryFromDatabase(database, agentId);
+  }
+
+  async listRoomEntries(roomId: string): Promise<DaemonManifestEntry[]> {
+    return (await this.load()).entries.filter((entry) => entry.room_id === roomId);
   }
 
   /**
@@ -523,6 +529,13 @@ export class ManifestStore {
       },
       commitFence,
     );
+  }
+
+  /** Discovery only; exact server reads remain mandatory before use. */
+  async listExecutionDelegationInstanceIds(
+    input: ExecutionDelegationInventoryScope,
+  ): Promise<string[]> {
+    return listExecutionDelegationInstanceIds(await this.getDatabase(), structuredClone(input));
   }
 
   /** Durable rows never suffice: callers must supply their current host-authority snapshot. */

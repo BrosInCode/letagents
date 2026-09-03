@@ -702,6 +702,30 @@ test("local delegation journal admits exact monotonic revisions and current gran
     );
     assert.equal(replayed.created, false);
     assert.equal(replayed.delegation.grantId, "host-grant-3", "stable grant rotation updates no delegation scope");
+    assert.deepEqual(await store.listExecutionDelegationInstanceIds({
+      agentId: "agent",
+      roomId: revision.roomId,
+      agentKey: revision.agentKey,
+      ownerAccountId: currentAuthority.ownerAccountId,
+      hostId: currentAuthority.hostId,
+      installationId: currentAuthority.installationId,
+    }), [revision.delegationInstanceId]);
+    assert.deepEqual(await store.listExecutionDelegationInstanceIds({
+      agentId: "agent",
+      roomId: revision.roomId,
+      agentKey: revision.agentKey,
+      ownerAccountId: currentAuthority.ownerAccountId,
+      hostId: currentAuthority.hostId,
+      installationId: "other-installation",
+    }), [], "local discovery never crosses host installations");
+    assert.deepEqual(await store.listExecutionDelegationInstanceIds({
+      agentId: "agent",
+      roomId: "other-room",
+      agentKey: revision.agentKey,
+      ownerAccountId: currentAuthority.ownerAccountId,
+      hostId: currentAuthority.hostId,
+      installationId: currentAuthority.installationId,
+    }), [], "local discovery never crosses the current grant's room scope");
     assert.deepEqual(await store.validateExecutionDelegation(localDelegationValidation(currentAuthority, {
       revision: 2,
       scopeSha256: secondRevision.scopeSha256,

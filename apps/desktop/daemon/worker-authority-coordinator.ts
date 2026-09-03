@@ -173,7 +173,7 @@ export type WorkerAuthorityCoordinatorOptions = {
     fenceCommit(commit: () => Promise<void>): Promise<void>;
   };
   concurrency: { currentControlEpoch(entryId: string): number };
-  serializeEntry<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
+  serializeEntry<T>(entryId: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T>;
   serializeCursorCheckpoint<T>(entryId: string, operation: () => Promise<T>): Promise<T>;
   manifest: {
     updateEntry(entryId: string, update: (entry: DaemonManifestEntry) => DaemonManifestEntry): Promise<DaemonManifestEntry>;
@@ -220,6 +220,7 @@ export type WorkerAuthorityCoordinatorOptions = {
 export type SyncInstalledExecutionDelegationInput = {
   entryId: string;
   delegationInstanceId: string;
+  signal?: AbortSignal;
 };
 
 export type ValidateInstalledExecutionDelegationInput = Omit<ValidateExecutionDelegation,
@@ -336,6 +337,7 @@ export class WorkerAuthorityCoordinator {
     delegation: LocalExecutionDelegation;
   }> {
     const source = await this.options.serializeEntry(input.entryId, async () => {
+      input.signal?.throwIfAborted();
       const entry = await this.options.store.getEntry(input.entryId);
       if (!entry || !await this.ownsDaemonGeneration(this.options.authority.currentGeneration())) {
         throw new ExecutionDelegationJournalError("authority_mismatch");
@@ -346,18 +348,20 @@ export class WorkerAuthorityCoordinator {
         throw new ExecutionDelegationJournalError("authority_mismatch");
       }
       return grant;
-    });
+    }, input.signal);
     const delegation = await this.options.supervisorGrantHttp.getExecutionDelegation({
       apiUrl: source.apiUrl,
       grantId: source.grantId,
       supervisorGrant: source.supervisorGrant,
       grantGeneration: source.grantGeneration,
       delegationInstanceId: input.delegationInstanceId,
+      signal: input.signal,
     });
     if (delegation.roomId !== source.roomId || delegation.agentKey !== source.agentKey) {
       throw new ExecutionDelegationJournalError("authority_mismatch");
     }
     return this.options.serializeEntry(input.entryId, async () => {
+      input.signal?.throwIfAborted();
       const entry = await this.options.store.getEntry(input.entryId);
       if (!entry || !await this.ownsDaemonGeneration(this.options.authority.currentGeneration())) {
         throw new ExecutionDelegationJournalError("authority_mismatch");
@@ -372,7 +376,7 @@ export class WorkerAuthorityCoordinator {
         captured.assertCurrent,
         commit => this.options.authority.fenceCommit(commit),
       );
-    });
+    }, input.signal);
   }
 
   /** Point-in-time only; a later decision effect must repeat this exact fence. */

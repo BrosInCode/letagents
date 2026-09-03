@@ -306,6 +306,40 @@ test("execution delegation read requires the exact host projection and normalize
   }
 });
 
+test("execution delegation inventory preserves exact host scope and cursor", async () => {
+  const observed: string[] = [];
+  const server = createHttpServer((request, response) => {
+    observed.push(request.url ?? "");
+    assert.equal(request.headers.authorization, "Bearer grant-secret");
+    assert.equal(request.headers["x-letagents-supervisor-generation"], "3");
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({
+      delegation_instance_ids: ["delegation-b", "delegation-c"],
+      next_cursor: "delegation-c",
+    }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const page = await productionSupervisorGrantHttp.listExecutionDelegationIds({
+      apiUrl: `http://127.0.0.1:${address.port}`,
+      grantId: "grant-exact",
+      supervisorGrant: "grant-secret",
+      grantGeneration: 3,
+      roomId: "room/exact",
+      agentKey: "owner/agent",
+      after: "delegation-a",
+    });
+    assert.deepEqual(page, {
+      delegationInstanceIds: ["delegation-b", "delegation-c"],
+      nextCursor: "delegation-c",
+    });
+    assert.equal(observed[0], "/supervisor-host-grants/grant-exact/execution-delegations?room_id=room%2Fexact&agent_key=owner%2Fagent&after=delegation-a");
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs(""), 210_000);
   assert.equal(workplaceLivenessStaleAfterMs("999"), 210_000);
@@ -5518,7 +5552,7 @@ test("recovery-only authority install retains the grant without touching the dea
     lockPath: join(env.root, "daemon.lock"), socketPath: join(env.root, "daemon.sock"),
     manifestPath: join(env.root, "daemon-state.sqlite"), auditPath: join(env.root, "audit.jsonl"),
   };
-  const calls = { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0 };
+  const calls = { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0, delegationSync: 0 };
   const port: ProviderActionPort = {
     capabilities: async () => ({ resume: true, midTurnInjection: false, transcriptAccess: true, permissionPromptBridging: false, survivesRestart: true }),
     spawn: async () => { calls.spawn += 1; throw new Error("authority preparation must not spawn"); },
@@ -5538,8 +5572,13 @@ test("recovery-only authority install retains the grant without touching the dea
     const internals = daemon as unknown as {
       workerRuntimeCustody: WorkerRuntimeCustody;
       requestConvergence: (entryId: string) => void;
+      executionDelegationSync: { request(entryId: string): Promise<void> };
     };
     internals.requestConvergence = () => { calls.converge += 1; };
+    internals.executionDelegationSync.request = async (entryId) => {
+      assert.equal(entryId, "recovery_authority_dead_provider");
+      calls.delegationSync += 1;
+    };
     await daemonRequest(paths.socketPath, "manifest.put", { entry: {
       ...entry, id: "recovery_authority_dead_provider", provider: "open-model", delivery_mode: "daemon_inbox",
       desired_state: "running", observed_state: "failed",
@@ -5555,7 +5594,7 @@ test("recovery-only authority install retains the grant without touching the dea
     assert.equal(result.ok, true, result.error);
     assert.deepEqual(result.result, { status: "installed" });
     assert.ok(internals.workerRuntimeCustody.hostGrant("recovery_authority_dead_provider"));
-    assert.deepEqual(calls, { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0 });
+    assert.deepEqual(calls, { attach: 0, spawn: 0, resume: 0, stop: 0, converge: 0, delegationSync: 1 });
   } finally {
     await daemon.stop().catch(() => undefined);
     await env.cleanup();

@@ -83,6 +83,7 @@ export interface DaemonControlOperations {
     owner_account_id: string | null; scope_key: string | null;
     grant_expires_at: string; daemon_generation: number; credential_only: boolean; recovery_only: boolean;
   }): unknown;
+  syncExecutionDelegations(input: { room_id: string; daemon_generation: number }): unknown;
   installOpenModelCredential(input: {
     entry_id: string; api_key: string | null; base_url: string; model: string; daemon_generation: number;
   }): unknown;
@@ -591,6 +592,13 @@ export function createDaemonControlRequestHandler(
         daemon_generation: Number(params.daemon_generation ?? NaN),
         credential_only: params.credential_only === true,
         recovery_only: params.recovery_only === true,
+      });
+    }
+    if (request.method === "supervisor.sync_execution_delegations") {
+      const params = paramsRecord(request.params);
+      return operations.syncExecutionDelegations({
+        room_id: requiredStringParam(params, "room_id", "Execution delegation sync requires a room."),
+        daemon_generation: positiveIntegerParam(params, "daemon_generation", "Execution delegation sync requires a daemon generation."),
       });
     }
     if (request.method === "supervisor.install_open_model_credential") {

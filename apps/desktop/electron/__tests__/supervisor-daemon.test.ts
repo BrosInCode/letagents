@@ -1097,6 +1097,8 @@ async function startWireDaemon(
         result = { accepted: true };
       } else if (request.method === "supervisor.install_host_grant") {
         result = { status: "installed" };
+      } else if (request.method === "supervisor.sync_execution_delegations") {
+        result = { status: "queued" };
       } else if (request.method === "supervisor.install_open_model_credential") {
         result = { status: "installed" };
       } else if (request.method === "supervisor.bootstrap_room_ingress") {
@@ -1824,6 +1826,10 @@ test("host grant install carries renewal ownership and expiry metadata to the ex
       grant_expires_at: "2026-07-22T12:00:00.000Z",
       api_url: configuredApiUrl, daemon_generation: 39, credential_only: false,
     });
+    assert.equal(await client.syncExecutionDelegations("room-1"), "queued");
+    assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.sync_execution_delegations")?.params, {
+      room_id: "room-1", daemon_generation: 39,
+    });
     assert.equal(await client.bootstrapRoomIngress("entry-1", 39, "join the room and say hi"), "bootstrapped");
     assert.deepEqual(wire.requests.find((request) => request.method === "supervisor.bootstrap_room_ingress")?.params, {
       entry_id: "entry-1", daemon_generation: 39, initial_message: "join the room and say hi",
@@ -2470,7 +2476,7 @@ test("desktop replaces the prior implementation and accepts only the new exact i
     assert.equal(handoffPrepared, true, "implementation mismatch must prepare the running generation for handoff");
     assert.equal(status.generation, 12);
     assert.equal(status.implementationVersion, SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION);
-    assert.equal(status.implementationVersion, "2.0.128");
+    assert.equal(status.implementationVersion, "2.0.129");
     assert.equal(spawnedCwd, stableCwd);
     assert.equal((await stat(stableCwd)).isDirectory(), true);
   } finally {

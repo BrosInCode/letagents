@@ -14,7 +14,10 @@ import {
   prepareDesktopNotifications,
 } from "./main/notifications.js";
 import { attachmentProtocolScheme, workspaceRoot } from "./main/paths.js";
-import { stopDesktopRoomStream } from "./main/room-stream.js";
+import {
+  setExecutionDelegationInvalidationHandler,
+  stopDesktopRoomStream,
+} from "./main/room-stream.js";
 import { configureDesktopSmokeEnvironment, seedDesktopSmokeState } from "./main/smoke.js";
 import { createWindow, hasOpenWindows } from "./main/window.js";
 import { supervisorDaemonClient } from "./main/supervisor-daemon.js";
@@ -39,6 +42,7 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 registerDesktopIpcHandlers();
+setExecutionDelegationInvalidationHandler(async (roomId) => { await supervisorDaemonClient.syncExecutionDelegations(roomId); });
 
 app.once("ready", async (_event, launchInfo) => {
   prepareDesktopNotificationLaunch(launchInfo);
