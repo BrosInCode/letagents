@@ -610,6 +610,13 @@
       "when": 1788386747000,
       "tag": "0086_execution_delegation_grants",
       "breakpoints": true
+    },
+    {
+      "idx": 87,
+      "version": "7",
+      "when": 1788476400000,
+      "tag": "0087_execution_delegation_decisions",
+      "breakpoints": true
     }
   ]
 }
