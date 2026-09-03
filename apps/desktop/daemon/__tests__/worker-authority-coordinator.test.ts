@@ -1095,6 +1095,29 @@ test("Cursor worker readiness rejects durable handle replacement during binding 
   assert.equal(harness.manifestUpdates.length, 0);
 });
 
+test("Cursor worker readiness rejects malformed child PIDs", async () => {
+  for (const pid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const harness = fixture({
+      handle: providerHandle({
+        pid,
+        providerConnection: { kind: "cursor_cli", pid, processIdentity: "wrapper-birth:1" },
+      }),
+      entry: manifestEntry({ provider: "cursor", provider_ref: {
+        work_attempt_id: "attempt-1", provider_continuation_id: "continuation-1",
+        provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null },
+        execution_generation_id: "execution-1",
+      } }),
+    });
+
+    await assert.rejects(harness.subject.bindWorkerSession({
+      entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+      agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+    }), /authority changed|binding changed/, String(pid));
+    assert.equal(harness.entry.condition, "coordination_blocked", String(pid));
+    assert.equal(harness.deliveryStarts, 0, String(pid));
+  }
+});
+
 test("bind and verify reject every mismatched durable or secret-bearing identity", async () => {
   const exact: BindWorkerSessionInput = {
     entry_id: "agent-1",

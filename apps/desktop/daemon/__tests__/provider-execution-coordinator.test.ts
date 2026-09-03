@@ -794,6 +794,36 @@ test("exact Cursor host binding remains current while its per-turn child is repl
   assert.equal(runtime.entry().observed_state, "working");
 });
 
+test("malformed Cursor child PIDs cannot satisfy the exact host-binding predicate", async () => {
+  for (const pid of [0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1]) {
+    const runtime = ownedRecoveryHarness();
+    runtime.binding.execution_generation_id = "generation-2";
+    runtime.setEntry({
+      ...runtime.entry(),
+      provider: "cursor",
+      observed_state: "idle",
+      condition: "none",
+      last_error: null,
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "generation-2",
+        provider_continuation_id: "continuation-1",
+        provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null },
+      },
+    });
+    runtime.liveHandles.set("agent-1", {
+      ...returnedHandle,
+      pid,
+      providerConnection: { kind: "cursor_cli", pid, processIdentity: "wrapper-birth:1" },
+    });
+
+    await runtime.coordinator.converge("agent-1");
+
+    assert.equal(runtime.mintCalls, 1, String(pid));
+    assert.equal(runtime.bindCalls, 1, String(pid));
+  }
+});
+
 test("daemon-owned reattach binds the current generation despite a still-present predecessor credential", async () => {
   const runtime = ownedRecoveryHarness();
   await runtime.coordinator.converge("agent-1");

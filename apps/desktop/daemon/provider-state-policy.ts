@@ -18,6 +18,8 @@ export function isLiveCursorConnection(
 ): connection is Extract<ProviderActionConnectionRef, { kind: "cursor_cli" }> {
   return connection?.kind === "cursor_cli"
     && connection.pid !== null
+    && Number.isSafeInteger(connection.pid)
+    && connection.pid > 0
     && Boolean(connection.processIdentity?.trim());
 }
 
