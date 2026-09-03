@@ -26,7 +26,10 @@ import {
   isManagedRoomStreamEvent,
   type ManagedRoomEvent,
 } from "./codex-managed-agent-dispatch.js";
-import { buildCursorDesktopEventPrompt } from "./cursor-event-prompt.js";
+import {
+  buildCursorDesktopEventPrompt,
+  buildCursorRoomToolFormattingCorrectionPrompt,
+} from "./cursor-event-prompt.js";
 import { normalizeCursorMcpPolicy, prepareCursorManagedProfile } from "./cursor-managed-profile.js";
 import {
   cursorLaunchOptionsForPermissionProfile,
@@ -49,6 +52,10 @@ import type {
 import {
   runManagedAgentRoomToolLoop,
 } from "./managed-agent-room-tool-loop.js";
+import {
+  hasManagedAgentRoomToolRequestLine,
+  parseManagedAgentRoomToolRequest,
+} from "./managed-agent-room-tools-protocol.js";
 import { cleanupAgentSessionAttachments } from "./managed-agent-attachments.js";
 import { createManagedAgentEventTurnEngine } from "./managed-agent-event-turn-engine.js";
 import {
@@ -375,9 +382,16 @@ export function createDesktopCursorRuntime(
     abortController: AbortController;
   }): Promise<CursorTurnResult> {
     let cursorSessionId = input.active.cursor_session_id ?? null;
-    const result = await runCursorTurnForDesktopEvent({
+    let result = await runCursorTurnForDesktopEvent({
       session: input.active,
       prompt: buildCursorDesktopEventPrompt(input.active, input.event),
+      cursorSessionId,
+      abortController: input.abortController,
+    });
+    cursorSessionId = result.sessionId ?? cursorSessionId;
+    result = await correctMalformedCursorRoomToolTurnOnce({
+      session: input.active,
+      turn: result,
       cursorSessionId,
       abortController: input.abortController,
     });
@@ -407,10 +421,16 @@ export function createDesktopCursorRuntime(
         return updated;
       },
       runContinuationTurn: async ({ prompt, session, continuationId }) => {
-        const turn = await runCursorTurnForDesktopEvent({
+        let turn = await runCursorTurnForDesktopEvent({
           session,
           prompt,
           cursorSessionId: continuationId,
+          abortController: input.abortController,
+        });
+        turn = await correctMalformedCursorRoomToolTurnOnce({
+          session,
+          turn,
+          cursorSessionId: turn.sessionId ?? continuationId,
           abortController: input.abortController,
         });
         return {
@@ -423,6 +443,29 @@ export function createDesktopCursorRuntime(
     });
 
     return { ...loop.turn, sessionId: loop.continuationId };
+  }
+
+  async function correctMalformedCursorRoomToolTurnOnce(input: {
+    session: DesktopCursorLiveSessionState;
+    turn: CursorTurnResult;
+    cursorSessionId: string | null;
+    abortController: AbortController;
+  }): Promise<CursorTurnResult> {
+    if (
+      input.turn.status === "error"
+      || parseManagedAgentRoomToolRequest(input.turn.text)
+      || !hasManagedAgentRoomToolRequestLine(input.turn.text)
+      || !input.cursorSessionId
+    ) {
+      return input.turn;
+    }
+
+    return await runCursorTurnForDesktopEvent({
+      session: input.session,
+      prompt: buildCursorRoomToolFormattingCorrectionPrompt(),
+      cursorSessionId: input.cursorSessionId,
+      abortController: input.abortController,
+    });
   }
 
   async function runCursorTurnForDesktopEvent(input: {
