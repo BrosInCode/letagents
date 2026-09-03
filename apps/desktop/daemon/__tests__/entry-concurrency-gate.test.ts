@@ -48,6 +48,34 @@ test("serializes one entry, permits sibling entries, and releases the lane after
   assert.equal(await gate.run("agent-a", async () => "after"), "after");
 });
 
+test("an aborted queued operation settles without bypassing the occupied lane", async () => {
+  const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
+  const blockerEntered = deferred();
+  const releaseBlocker = deferred();
+  let abortedRuns = 0;
+  let successorEntered = false;
+  const blocker = gate.run("agent-a", async () => {
+    blockerEntered.resolve();
+    await releaseBlocker.promise;
+  });
+  await blockerEntered.promise;
+
+  const controller = new AbortController();
+  const aborted = gate.run("agent-a", async () => { abortedRuns += 1; }, controller.signal);
+  await flushMicrotasks();
+  controller.abort();
+  await assert.rejects(aborted, (error) => error instanceof DOMException && error.name === "AbortError");
+  const successor = gate.run("agent-a", async () => { successorEntered = true; });
+  await flushMicrotasks();
+  assert.equal(abortedRuns, 0);
+  assert.equal(successorEntered, false);
+
+  releaseBlocker.resolve();
+  await blocker;
+  await successor;
+  assert.equal(successorEntered, true);
+});
+
 test("control epochs bump synchronously before delayed entry work can resume", async () => {
   const gate = new EntryConcurrencyGate({ isHandoffScheduled: () => false });
   const delayed = deferred();

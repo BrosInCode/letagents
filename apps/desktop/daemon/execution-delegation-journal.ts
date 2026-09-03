@@ -50,11 +50,20 @@ const validation = z.strictObject({
   authority,
   atMs: time,
 });
+const inventoryScope = z.strictObject({
+  agentId: executionIdentity,
+  roomId: executionIdentity,
+  agentKey: executionIdentity,
+  ownerAccountId: executionIdentity,
+  hostId: executionIdentity,
+  installationId: executionIdentity,
+});
 
 export type RemoteExecutionDelegationRevision = z.infer<typeof delegation>;
 export type ExecutionDelegationHostAuthority = z.infer<typeof authority>;
 export type ReconcileExecutionDelegation = z.infer<typeof reconciliation>;
 export type ValidateExecutionDelegation = z.infer<typeof validation>;
+export type ExecutionDelegationInventoryScope = z.infer<typeof inventoryScope>;
 
 export type LocalExecutionDelegation = {
   delegationInstanceId: string;
@@ -128,6 +137,29 @@ function exact(db: DatabaseSync, instanceId: string, revision: number): LocalExe
   const row = db.prepare(`SELECT * FROM execution_local_delegations
     WHERE delegation_instance_id=? AND revision=?`).get(instanceId, revision);
   return row ? fromRow(row) : null;
+}
+
+/**
+ * Return the delegation identities already known under one current host
+ * installation. The caller still has to exact-fetch every identity; these
+ * rows are discovery hints, never reusable authority.
+ */
+export function listExecutionDelegationInstanceIds(
+  db: DatabaseSync,
+  input: ExecutionDelegationInventoryScope,
+): string[] {
+  const scope = parse(inventoryScope, input);
+  return db.prepare(`SELECT DISTINCT delegation_instance_id FROM execution_local_delegations
+    WHERE agent_id=? AND room_id=? AND agent_key=? AND owner_id=?
+      AND host_id=? AND installation_id=? AND scope_key='owner'
+    ORDER BY delegation_instance_id ASC`).all(
+    scope.agentId,
+    scope.roomId,
+    scope.agentKey,
+    scope.ownerAccountId,
+    scope.hostId,
+    scope.installationId,
+  ).map((row) => String((row as Row).delegation_instance_id));
 }
 
 function assertFreshScopeAvailable(

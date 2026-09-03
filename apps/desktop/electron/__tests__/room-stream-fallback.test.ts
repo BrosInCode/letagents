@@ -58,6 +58,7 @@ const {
   stopDesktopRoomStream,
   getActiveRoomIdentifier,
   repairDesktopRoomStreamManagedDelivery,
+  setExecutionDelegationInvalidationHandler,
 } =
   await import("../main/room-stream.js");
 
@@ -1010,6 +1011,8 @@ for (const messageIds of [["msg_7"], null, []]) test(`message-info ${JSON.string
 
 test("resource invalidations advance the broker cursor while only supported resources render", async () => {
   const router = installFetchRouter();
+  const delegationRooms: string[] = [];
+  setExecutionDelegationInvalidationHandler((roomId) => { delegationRooms.push(roomId); });
   try {
     const canonicalRoom = `${ROOM}_canonical`;
     const initial = makeSse();
@@ -1045,6 +1048,17 @@ test("resource invalidations advance the broker cursor while only supported reso
     });
     assert.equal(managedEmitted.length, managedCount);
 
+    initial.pushRaw(
+      `id: broker_delegation\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
+        room_id: canonicalRoom,
+        resource: "execution_delegation",
+      })}\n\n`,
+    );
+    await waitUntil(() => delegationRooms.length === 1);
+    assert.deepEqual(delegationRooms, [canonicalRoom]);
+    assert.equal(emitted.length, emittedCount + 1, "delegation pointers stay main-process-only");
+    assert.equal(managedEmitted.length, managedCount);
+
     const afterAgentWorkCount = emitted.length;
     initial.pushRaw(
       `id: broker_future_resource\nevent: resource_invalidation_v1\ndata: ${JSON.stringify({
@@ -1076,6 +1090,7 @@ test("resource invalidations advance the broker cursor while only supported reso
     );
     reconnected.close();
   } finally {
+    setExecutionDelegationInvalidationHandler(null);
     await stopDesktopRoomStream();
     router.restore();
   }
