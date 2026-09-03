@@ -19,6 +19,7 @@ export const CURSOR_MCP_CONNECTOR_PARENT = "/tmp";
 export const CURSOR_SUPERVISED_AGENT_ENDPOINT = "https://api2.cursor.sh";
 export const CURSOR_SUPERVISED_CONTROL_PLANE_PATHS = [
   "/aiserver.v1.DashboardService/GetMe",
+  "/aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam",
   "/aiserver.v1.DashboardService/GetUserPrivacyMode",
   "/aiserver.v1.ServerConfigService/GetServerConfig",
   "/aiserver.v1.AiService/AvailableModels",
