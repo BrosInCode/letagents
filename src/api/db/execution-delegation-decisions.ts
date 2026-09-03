@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { and, asc, desc, eq, gt, sql } from "drizzle-orm";
 
 import {
+  EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS,
   isExecutionDelegationDecision,
   isExecutionDelegationDigest,
   isExecutionDelegationIdentity,
@@ -266,7 +267,11 @@ export async function listExecutionDelegationDecisionIdsForHost(input: {
   room_id: string;
   agent_key: string;
   after?: string | null;
+  now?: Date;
 }): Promise<{ decision_ids: string[]; next_cursor: string | null }> {
+  const applicableAfter = new Date(
+    (input.now ?? new Date()).getTime() - EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS,
+  ).toISOString();
   const rows = await db
     .select({ decision_id: execution_delegation_decisions.decision_id })
     .from(execution_delegation_decisions)
@@ -281,6 +286,7 @@ export async function listExecutionDelegationDecisionIdsForHost(input: {
       eq(execution_delegation_grants.scope_key, "owner"),
       eq(execution_delegation_grants.room_id, input.room_id),
       eq(execution_delegation_grants.agent_key, input.agent_key),
+      gt(execution_delegation_decisions.decided_at, applicableAfter),
       ...(input.after ? [gt(execution_delegation_decisions.decision_id, input.after)] : []),
     ))
     .orderBy(asc(execution_delegation_decisions.decision_id))

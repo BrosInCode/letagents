@@ -20,7 +20,7 @@ import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-executio
 import { schedulerErrorDetail } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
 import { ExecutionCaptureCoordinator } from "./execution-capture-coordinator.js";
-import { ExecutionDelegationSyncCoordinator } from "./execution-delegation-sync-coordinator.js";
+import { ExecutionDelegationCoordinator } from "./execution-delegation-coordinator.js";
 import { TypedLifecycleEffectCoordinator } from "./typed-lifecycle-effect-coordinator.js";
 import { unavailableLifecycleProjectionDiagnostics } from "./lifecycle-projection-ledger.js";
 import { DesiredStateCoordinator } from "./desired-state-coordinator.js";
@@ -118,7 +118,7 @@ export class SupervisorDaemon {
   private readonly workerBindings: WorkerBindingStore;
   private readonly nativeActivity: NativeActivityPublicationCoordinator;
   private readonly workerAuthority: WorkerAuthorityCoordinator;
-  private readonly executionDelegationSync: ExecutionDelegationSyncCoordinator;
+  private readonly executionDelegations: ExecutionDelegationCoordinator;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
   private readonly continuationRepairs: ContinuationRepairCoordinator;
@@ -359,13 +359,6 @@ export class SupervisorDaemon {
       nowMs: recoveryClock.nowMs ?? Date.now,
       setTimeout: recoveryClock.setTimeout ?? setTimeout,
       clearTimeout: recoveryClock.clearTimeout ?? clearTimeout,
-    });
-    this.executionDelegationSync = new ExecutionDelegationSyncCoordinator({
-      entries: this.store,
-      authority: this.workerAuthority,
-      remote: this.supervisorGrantHttp,
-      requestConvergence: (entryId) => this.requestConvergence(entryId),
-      diagnostic: (entryId, error) => console.warn("[execution_delegation_sync]", JSON.stringify({ entryId, error: String(error) })),
     });
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
@@ -828,6 +821,16 @@ export class SupervisorDaemon {
       currentHandle: entryId => this.liveHandles.get(entryId),
       isCurrent: () => !this.handoffScheduled,
       fenceCommit: commit => this.fenceDaemonCommit(commit),
+      onPermissionChanged: entryId => this.executionDelegations.requestDecisions(entryId),
+    });
+    this.executionDelegations = new ExecutionDelegationCoordinator({
+      entries: this.store,
+      authority: this.workerAuthority,
+      approvals: this.hostApprovals,
+      remote: this.supervisorGrantHttp,
+      requestConvergence: entryId => this.requestConvergence(entryId),
+      diagnostic: (domain, entryId, error) => console.warn(`[execution_delegation_${domain}_sync]`,
+        JSON.stringify({ entryId, error: String(error) })),
     });
     const controlOperations = {
       hostApprovals: this.hostApprovals,
@@ -858,8 +861,7 @@ export class SupervisorDaemon {
       getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
       installHostGrant: async (input) => {
         const status = await this.workerAuthority.installHostGrant(input);
-        if (status.status === "installed") void this.executionDelegationSync.request(input.entry_id)
-          .catch((error) => console.warn("[execution_delegation_sync]", JSON.stringify({ entryId: input.entry_id, error: String(error) })));
+        if (status.status === "installed") this.executionDelegations.request(input.entry_id);
         return status;
       },
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
@@ -885,8 +887,7 @@ export class SupervisorDaemon {
       status: this.status.bind(this),
       syncExecutionDelegations: (input) => {
         if (input.daemon_generation !== this.singleton.currentGeneration) return { status: "stale" };
-        void this.executionDelegationSync.requestRoom(input.room_id)
-          .catch((error) => console.warn("[execution_delegation_sync]", JSON.stringify({ roomId: input.room_id, error: String(error) })));
+        this.executionDelegations.requestRoom(input.room_id);
         return { status: "queued" };
       },
       updateAgentConfiguration: this.updateAgentConfiguration.bind(this),
@@ -973,7 +974,7 @@ export class SupervisorDaemon {
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
     this.hostApprovals.close();
-    const executionDelegationDrain = this.executionDelegationSync.fenceAndDrain();
+    const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
     this.roomWorkPublisher?.close();
     this.executionCapture?.close();
     this.supervisedDelivery?.fence();
@@ -1152,7 +1153,7 @@ export class SupervisorDaemon {
   private async prepareHandoff(): Promise<void> {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
-    const executionDelegationDrain = this.executionDelegationSync.fenceAndDrain();
+    const executionDelegationDrain = this.executionDelegations.fenceAndDrain();
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();
     this.executionCapture?.close();

@@ -5628,10 +5628,10 @@ test("recovery-only authority install retains the grant without touching the dea
     const internals = daemon as unknown as {
       workerRuntimeCustody: WorkerRuntimeCustody;
       requestConvergence: (entryId: string) => void;
-      executionDelegationSync: { request(entryId: string): Promise<void> };
+      executionDelegations: { request(entryId: string): void };
     };
     internals.requestConvergence = () => { calls.converge += 1; };
-    internals.executionDelegationSync.request = async (entryId) => {
+    internals.executionDelegations.request = (entryId) => {
       assert.equal(entryId, "recovery_authority_dead_provider");
       calls.delegationSync += 1;
     };
