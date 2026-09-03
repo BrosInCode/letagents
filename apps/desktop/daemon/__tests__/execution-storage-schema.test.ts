@@ -71,7 +71,7 @@ function request(db: DatabaseSync, extra: Values = {}): void {
 function delegation(db: DatabaseSync, extra: Values = {}): void {
   insert(db, "execution_local_delegations", {
     delegation_instance_id: "delegation", revision: 1, owner_id: "owner", host_id: "host", installation_id: "installation",
-    scope_key: "scope", agent_id: "agent", room_id: "room", approver_id: "delegate", category: "file_change", risk_ceiling: "low",
+    scope_key: "owner", agent_id: "agent", room_id: "room", agent_key: "owner/agent", approver_id: "delegate", category: "file_change", risk_ceiling: "low",
     grant_id: "transport-grant", scope_sha256: digest, created_at_ms: 100, expires_at_ms: 200, ...extra,
   });
 }
@@ -397,13 +397,16 @@ test("decision, dispatch uncertainty, and lost application certainty have distin
   } finally { db.close(); }
 });
 
-test("delegated decisions require exact locally recorded scope revision, room, approver and eligibility", () => {
+test("delegated decisions bind exact immutable scope identity while aliases remain presentation", () => {
   const db = fixture(); try {
     seed(db); request(db); delegation(db);
-    const remote = { source: "delegate", actor_id: "delegate", delegation_instance_id: "delegation", delegation_revision: 1 };
+    assert.throws(() => delegation(db, { delegation_instance_id: "wrong-scope", scope_key: "rental:session" }), /CHECK/);
+    const remote = { source: "delegate", actor_id: "delegate", delegation_instance_id: "delegation",
+      delegation_revision: 1, delegation_scope_sha256: digest };
     assert.throws(() => decision(db, { ...remote, actor_id: "server-invented-user" }), /FOREIGN KEY/);
     assert.throws(() => decision(db, { ...remote, delegation_revision: 2 }), /FOREIGN KEY/);
-    assert.throws(() => decision(db, { ...remote, room_id: "other-room" }), /FOREIGN KEY/);
+    assert.throws(() => decision(db, { ...remote, delegation_scope_sha256: "b".repeat(64) }), /FOREIGN KEY/);
+    db.exec("UPDATE execution_local_delegations SET room_id='renamed-room',agent_key='owner/renamed-agent'");
     decision(db, remote);
     db.exec("UPDATE execution_local_delegations SET grant_id='rotated-grant'");
     assert.equal(db.prepare("SELECT delegation_instance_id FROM execution_approval_decisions").get()?.delegation_instance_id, "delegation");
@@ -430,7 +433,7 @@ test("a same-room agent cannot borrow another agent's local delegation", () => {
     const otherDecision = {
       agent_id: other.agent_id, execution_generation_id: other.execution_generation_id,
       request_id: "other-request", turn_id: "other-turn", source: "delegate", actor_id: "delegate",
-      delegation_instance_id: "delegation", delegation_revision: 1,
+      delegation_instance_id: "delegation", delegation_revision: 1, delegation_scope_sha256: digest,
     };
     assert.throws(() => decision(db, otherDecision), /FOREIGN KEY/);
     assert.throws(() => db.exec("UPDATE execution_local_delegations SET agent_id='other-agent'"), /new revision/);
