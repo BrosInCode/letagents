@@ -7,7 +7,10 @@ import { setTimeout as delay } from "node:timers/promises";
 import { migrate } from "drizzle-orm/node-postgres/migrator";
 import express, { type Response } from "express";
 
-import { parseExecutionDelegationDecisionIntent } from "../../../shared/execution-delegation-decision.mjs";
+import {
+  EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS,
+  parseExecutionDelegationDecisionIntent,
+} from "../../../shared/execution-delegation-decision.mjs";
 import type { AuthenticatedRequest } from "../http/helpers.js";
 
 const testDatabaseUrl = process.env.TEST_DB_URL;
@@ -290,6 +293,40 @@ test("host decision inventory is deterministic and paginated", databaseOptions, 
   assert.equal(first.next_cursor, "paged_decision_099");
   const second = await db!.listExecutionDelegationDecisionIdsForHost({ ...scope, after: first.next_cursor });
   assert.deepEqual(second, { decision_ids: ["paged_decision_100"], next_cursor: null });
+});
+
+test("host decision inventory contains only choices that could still apply", databaseOptions, async () => {
+  const seeded = await seed();
+  const now = new Date("2026-09-03T12:00:00.000Z");
+  const day = EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS;
+  await client!.pool.query(`
+    INSERT INTO execution_delegation_decisions
+      (decision_id, delegation_instance_id, delegation_revision, actor_account_id, request_id,
+       request_version, request_sha256, projection_sha256, decision, client_request_id,
+       request_fingerprint, decided_at)
+    SELECT 'historical_decision_' || lpad(ordinal::text, 5, '0'), $1, $2, $3,
+      'historical_request_' || ordinal, 1, repeat('a', 64), repeat('b', 64), 'deny',
+      'historical_client_' || ordinal, repeat('c', 64), $4
+    FROM generate_series(0, 10000) AS ordinal
+  `, [seeded.delegation.delegation_instance_id, seeded.delegation.revision, seeded.approverId,
+    new Date(now.getTime() - day).toISOString()]);
+  await client!.db.insert(schema!.execution_delegation_decisions).values({
+    decision_id: "applicable_decision", delegation_instance_id: seeded.delegation.delegation_instance_id,
+    delegation_revision: seeded.delegation.revision, actor_account_id: seeded.approverId,
+    request_id: "applicable_request", request_version: 1, request_sha256: "a".repeat(64),
+    projection_sha256: "b".repeat(64), decision: "deny", client_request_id: "applicable_client",
+    request_fingerprint: "d".repeat(64), decided_at: new Date(now.getTime() - day + 1).toISOString(),
+  });
+  const scope = { owner_account_id: seeded.ownerId, host_id: seeded.host.grant.host_id,
+    installation_id: seeded.host.grant.installation_id, room_id: seeded.room.id,
+    agent_key: seeded.agent.canonical_key, now };
+  assert.deepEqual(await db!.listExecutionDelegationDecisionIdsForHost(scope), {
+    decision_ids: ["applicable_decision"], next_cursor: null,
+  });
+  assert.ok(await db!.getExecutionDelegationDecisionForHost({
+    owner_account_id: seeded.ownerId, host_id: seeded.host.grant.host_id,
+    installation_id: seeded.host.grant.installation_id, decision_id: "historical_decision_00000",
+  }), "the applicability window narrows inventory without rewriting immutable history");
 });
 
 type MembershipMode = "allow" | "deny" | "indeterminate";

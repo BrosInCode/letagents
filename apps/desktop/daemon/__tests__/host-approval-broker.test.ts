@@ -9,6 +9,7 @@ import test from "node:test";
 import { WebSocketServer } from "ws";
 
 import { HostApprovalBroker } from "../host-approval-broker.js";
+import type { RecordedApprovalDecision } from "../execution-approval-native-application.js";
 import { ManifestStore } from "../manifest-store.js";
 import { ProviderActionPortRouter, type NativeProviderAdapter } from "../provider-action-port-router.js";
 import { systemProcessIdentity } from "../process-identity.js";
@@ -64,6 +65,7 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
     authorityChecks: 0, authorityFailAt: null as number | null,
     failBefore: false, failAfter: false, afterBefore: null as (() => void | Promise<void>) | null };
   const sends: string[] = []; const order: string[] = [];
+  let permissionChanges = 0;
   let receive: ((event: ProviderPermissionObservation) => void) | null = null;
   let signal: AbortSignal | null = null;
   const provider = {
@@ -97,7 +99,8 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
       state.authorityChecks += 1;
       return state.owned && state.authorityChecks !== state.authorityFailAt;
     },
-    fenceCommit: async commit => { if (!state.current) throw new Error("daemon generation changed"); await commit(); }, nowMs: () => now + 10 });
+    fenceCommit: async commit => { if (!state.current) throw new Error("daemon generation changed"); await commit(); },
+    onPermissionChanged: () => { permissionChanges += 1; }, nowMs: () => now + 10 });
   let broker = makeBroker();
   const emit = (requests: ProviderPermissionRequest[] = [native]) => {
     assert.ok(receive, "broker must subscribe before the fixture emits"); assert.equal(signal?.aborted, false);
@@ -105,10 +108,17 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
   };
   broker.install("agent", handle, "generation"); emit();
   return { store, inbox, db, item, state, native, handle, workspace, sends, order, emit,
+    get permissionChanges() { return permissionChanges; },
     get broker() { return broker; },
     reinstall() { broker.close(); broker = makeBroker(); broker.install("agent", handle, "generation"); emit(); },
     async close() { broker.close(); db.close(); await inbox.close(); await store.close(); await rm(root, { recursive: true, force: true }); } };
 }
+
+test("native permission observations wake delegated decision reconciliation", async () => {
+  const f = await fixture();
+  try { assert.equal(f.permissionChanges, 1); }
+  finally { await f.close(); }
+});
 
 function decision(candidate: HostApprovalCandidate, changes: Partial<HostApprovalDecision> = {}): HostApprovalDecision {
   assert.ok(candidate.reference, "a decision requires an exact journal reference");
@@ -234,6 +244,49 @@ test("host approval decisions serialize duplicates and conflicts to one native r
     assert.equal(results.filter(result => result.status === "rejected").length, 1);
     assert.deepEqual(f.sends, ["once"]);
     assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 1);
+  } finally { await f.close(); }
+});
+
+test("host and delegated selections share one request serializer and one native write", async () => {
+  const f = await fixture();
+  try {
+    const fileChange = fileChangeRequest(f.native, f.workspace);
+    f.state.fileChanges = [{ path: join(f.workspace, "src/app.ts"), kind: { type: "add" }, diff: "+value\n" }];
+    f.emit([fileChange]);
+    const [candidate] = await f.broker.list("room");
+    assert.ok(candidate?.reference);
+    const projection = await f.store.readExecutionApprovalProjection(candidate.reference);
+    assert.ok(projection);
+    const delegated: RecordedApprovalDecision = {
+      agentId: candidate.reference.agentId,
+      requestId: candidate.reference.requestId,
+      requestVersion: candidate.reference.requestVersion,
+      requestSha256: candidate.reference.requestSha256,
+      decisionId: "delegate-decision",
+      actorId: "delegate",
+      decision: "allow_once",
+      projectionSha256: projection.sha256,
+    };
+    const delegatedApply = f.broker.applyRecordedDecision(delegated, async (prepared) => {
+      prepared.assertCurrent();
+      return f.store.selectHostApproval({
+        expected: prepared.expected,
+        authority: prepared.approvalAuthority,
+        decisionId: delegated.decisionId,
+        actorId: delegated.actorId,
+        decision: delegated.decision,
+        projectionSha256: delegated.projectionSha256,
+        atMs: now + 10,
+      }, async (commit) => { prepared.assertCurrent(); await commit(); });
+    });
+    const hostApply = f.broker.decide(decision(candidate));
+    const [delegateResult, hostResult] = await Promise.allSettled([delegatedApply, hostApply]);
+    assert.equal(delegateResult.status, "fulfilled");
+    assert.equal(hostResult.status, "rejected");
+    assert.deepEqual(f.sends, ["once"]);
+    const stored = await f.store.getExecutionApproval(candidate.reference);
+    assert.equal(stored?.decision?.decisionId, delegated.decisionId);
+    assert.ok(stored?.decision?.dispatchId);
   } finally { await f.close(); }
 });
 

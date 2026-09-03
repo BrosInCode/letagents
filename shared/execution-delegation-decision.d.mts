@@ -1,4 +1,5 @@
 export const EXECUTION_DELEGATION_DECISIONS: readonly ["allow_once", "deny"];
+export const EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS: number;
 
 export type ExecutionDelegationDecisionChoice =
   typeof EXECUTION_DELEGATION_DECISIONS[number];

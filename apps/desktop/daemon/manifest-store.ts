@@ -21,6 +21,10 @@ import {
   type PreparedExecutionApprovalProjection,
 } from "./execution-approval-projection.js";
 import {
+  readExecutionApprovalProjection,
+  type ExecutionApprovalProjectionRecord,
+} from "./execution-approval-projection-journal.js";
+import {
   listExecutionDelegationInstanceIds,
   reconcileExecutionDelegation,
   validateExecutionDelegation,
@@ -500,6 +504,11 @@ export class ManifestStore {
   async getExecutionApproval(input: ApprovalReference): Promise<ExecutionApprovalRecord | null> {
     const snapshot = structuredClone(input);
     return getExecutionApproval(await this.getDatabase(), snapshot);
+  }
+
+  async readExecutionApprovalProjection(input: ApprovalReference): Promise<ExecutionApprovalProjectionRecord | null> {
+    const snapshot = structuredClone(input);
+    return readExecutionApprovalProjection(await this.getDatabase(), snapshot);
   }
 
   async readLatestExecutionApproval(requestId: string): Promise<ExecutionApprovalRecord | null> {

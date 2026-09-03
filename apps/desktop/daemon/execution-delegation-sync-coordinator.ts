@@ -1,10 +1,8 @@
 import type { SupervisorGrantHttp } from "./cloud-http.js";
+import { collectBoundedInventory } from "./bounded-inventory.js";
 import type { ExecutionDelegationInventoryScope } from "./execution-delegation-journal.js";
 import type { DaemonManifestEntry } from "./types.js";
 import type { InstalledHostGrant } from "./worker-runtime-custody.js";
-
-const MAX_INVENTORY_PAGES_PER_PASS = 100;
-const MAX_INVENTORY_IDENTITIES_PER_PASS = 10_000;
 
 type SyncLane = {
   controller: AbortController;
@@ -30,6 +28,7 @@ export type ExecutionDelegationSyncOptions = {
     }): Promise<unknown>;
   };
   remote: Pick<SupervisorGrantHttp, "listExecutionDelegationIds">;
+  entryObserved?(entryId: string): void;
   requestConvergence(entryId: string): void;
   diagnostic(entryId: string, error: unknown): void;
 };
@@ -100,6 +99,7 @@ export class ExecutionDelegationSyncCoordinator {
     this.roomLanes.set(roomId, lane);
     lane.promise = Promise.resolve().then(async () => {
       const entries = await this.options.entries.listRoomEntries(roomId);
+      for (const entry of entries) this.options.entryObserved?.(entry.id);
       await Promise.all(entries.map((entry) => this.request(entry.id)));
     }).finally(() => {
       if (this.roomLanes.get(roomId) === lane) this.roomLanes.delete(roomId);
@@ -129,14 +129,7 @@ export class ExecutionDelegationSyncCoordinator {
       hostId: grant.hostId,
       installationId: grant.installationId,
     });
-    if (localIds.length > MAX_INVENTORY_IDENTITIES_PER_PASS) {
-      throw new Error(`Execution delegation inventory exceeded ${MAX_INVENTORY_IDENTITIES_PER_PASS} identities.`);
-    }
-    const ids = new Set(localIds);
-    const seenCursors = new Set<string>();
-    let after: string | null = null;
-    let pageCount = 0;
-    do {
+    const ids = await collectBoundedInventory(async (after) => {
       const page = await this.options.remote.listExecutionDelegationIds({
         apiUrl: grant.apiUrl,
         grantId: grant.grantId,
@@ -147,24 +140,12 @@ export class ExecutionDelegationSyncCoordinator {
         after,
         signal,
       });
-      pageCount += 1;
-      for (const id of page.delegationInstanceIds) ids.add(id);
-      if (ids.size > MAX_INVENTORY_IDENTITIES_PER_PASS) {
-        throw new Error(`Execution delegation inventory exceeded ${MAX_INVENTORY_IDENTITIES_PER_PASS} identities.`);
-      }
-      if (page.nextCursor !== null && (page.nextCursor === after || seenCursors.has(page.nextCursor))) {
-        throw new Error("Execution delegation inventory cursor did not advance.");
-      }
-      if (page.nextCursor !== null && pageCount >= MAX_INVENTORY_PAGES_PER_PASS) {
-        throw new Error(`Execution delegation inventory exceeded ${MAX_INVENTORY_PAGES_PER_PASS} pages.`);
-      }
-      after = page.nextCursor;
-      if (after !== null) seenCursors.add(after);
-    } while (after !== null);
+      return { ids: page.delegationInstanceIds, nextCursor: page.nextCursor };
+    }, "Execution delegation inventory", localIds);
 
     let reconciledAny = false;
     try {
-      for (const delegationInstanceId of [...ids].sort()) {
+      for (const delegationInstanceId of ids) {
         await this.options.authority.syncExecutionDelegation({ entryId, delegationInstanceId, signal });
         reconciledAny = true;
       }

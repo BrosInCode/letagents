@@ -1,4 +1,5 @@
 export const EXECUTION_DELEGATION_DECISIONS = ["allow_once", "deny"];
+export const EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS = 24 * 60 * 60 * 1000;
 
 export function isExecutionDelegationDecision(value) {
   return EXECUTION_DELEGATION_DECISIONS.includes(value);

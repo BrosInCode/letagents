@@ -134,6 +134,8 @@ export const execution_delegation_decisions = pgTable(
       ),
     grant_idx: index("execution_delegation_decisions_grant_idx")
       .on(table.delegation_instance_id, table.delegation_revision, table.decision_id),
+    applicable_idx: index("execution_delegation_decisions_applicable_idx")
+      .on(table.delegation_instance_id, table.delegation_revision, table.decided_at, table.decision_id),
     revision_check: check("execution_delegation_decisions_revision_check", sql`${table.delegation_revision} >= 1`),
     request_version_check: check("execution_delegation_decisions_request_version_check", sql`${table.request_version} >= 1`),
     request_digest_check: check(

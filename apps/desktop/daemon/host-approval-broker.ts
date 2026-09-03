@@ -1,9 +1,19 @@
-import { createHash, randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import { z } from "zod";
+import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../shared/execution-delegation-decision.mjs";
 import type { HostApprovalCandidate, HostApprovalDecision, HostApprovalPresentation, HostApprovalReference, HostApprovalStatus } from "../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
 import type { ApprovalAuthority, ExecutionApprovalRecord } from "./execution-approval-journal.js";
+import {
+  ExecutionApprovalNativeApplicationCoordinator,
+  NativeApprovalUnavailableError,
+  type RecordedApprovalDecision,
+  type RecordedApprovalSelection,
+} from "./execution-approval-native-application.js";
+import {
+  ExecutionApprovalNativeDispatcher,
+} from "./execution-approval-native-dispatch.js";
 import type { ManifestStore } from "./manifest-store.js";
 import { sameProviderActionConnectionIdentity, type ProviderActionHandle, type ProviderActionPort } from "./provider-action-port.js";
 import type { SupervisedAgentInboxStore } from "./supervised-agent-inbox-store.js";
@@ -45,6 +55,7 @@ export function createHostApprovalBridge(options: Omit<Options, "exactAuthority"
     verify: (envelope: unknown) => verifier?.verify(envelope) ?? null,
     list: broker.list.bind(broker),
     decide: broker.decide.bind(broker),
+    applyRecordedDecision: broker.applyRecordedDecision.bind(broker),
   };
 }
 
@@ -61,6 +72,7 @@ type Options = {
   isCurrent(): boolean;
   exactAuthority(entry: DaemonManifestEntry, handle: ProviderActionHandle, generation: string): Promise<boolean>;
   fenceCommit(commit: () => Promise<void>): Promise<void>;
+  onPermissionChanged?(entryId: string): void;
   nowMs?: () => number;
 };
 const MAX_REQUESTS = 32;
@@ -114,9 +126,22 @@ function inspectedRequest(native: ProviderPermissionRequest, fileChanges?: reado
 /** Native payloads live only in this process. Optional execution capture is not consulted. */
 export class HostApprovalBroker {
   private readonly lanes = new Map<string, Lane>();
-  private readonly decisions = new Map<string, Promise<HostApprovalStatus>>();
   private readonly now: () => number;
-  constructor(private readonly options: Options) { this.now = options.nowMs ?? Date.now; }
+  private readonly nativeApplication: ExecutionApprovalNativeApplicationCoordinator;
+  constructor(private readonly options: Options) {
+    this.now = options.nowMs ?? Date.now;
+    const dispatcher = new ExecutionApprovalNativeDispatcher({
+      store: options.store,
+      provider: options.provider,
+      exactAuthority: options.exactAuthority,
+      fenceCommit: options.fenceCommit,
+      nowMs: this.now,
+    });
+    this.nativeApplication = new ExecutionApprovalNativeApplicationCoordinator({
+      readLatest: requestId => options.store.readLatestExecutionApproval(requestId),
+      dispatcher,
+    });
+  }
 
   install(agentId: string, handle: ProviderActionHandle, generation: string): () => void {
     this.lanes.get(agentId)?.controller.abort();
@@ -141,6 +166,7 @@ export class HostApprovalBroker {
         lane.revision += 1;
         lane.state = event.type === "unavailable" ? "unavailable" : "degraded";
       }
+      this.options.onPermissionChanged?.(lane.agentId);
     };
     void provider.observePermissions(handle, receive, lane.controller.signal).catch(() => receive({ type: "degraded" }));
     return () => {
@@ -252,7 +278,8 @@ export class HostApprovalBroker {
       providerContinuationId: correlated.providerContinuationId, providerTurnId: correlated.providerTurnId,
       connectionId: lane.connectionId, nativeRequestId: native.native.id,
       kind: correlated.kind, recoveryBoundary: native.provider === "codex" ? "connection" as const : "runtime" as const,
-      createdAtMs: unchanged ? prior!.request.createdAtMs : now, expiresAtMs: unchanged ? prior!.request.expiresAtMs : now + 24 * 60 * 60 * 1000 };
+      createdAtMs: unchanged ? prior!.request.createdAtMs : now,
+      expiresAtMs: unchanged ? prior!.request.expiresAtMs : now + EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS };
     let projection = null;
     if (requiresEdits && (!unchanged || prior!.request.delegatable)) {
       assertCurrent();
@@ -289,64 +316,55 @@ export class HostApprovalBroker {
     const parsed = decisionSchema.safeParse(input);
     if (!parsed.success) throw new Error("Approval decision is invalid.");
     const value = parsed.data;
-    const previous = this.decisions.get(value.expected.requestId);
-    // Serialize native dispatch only per request, never hold the delivery lane
-    // while it waits for the human who is meant to release it.
-    const operation = (previous?.catch(() => undefined) ?? Promise.resolve()).then(() => this.decideOnce(value));
-    this.decisions.set(value.expected.requestId, operation);
-    try { return await operation; }
-    finally { if (this.decisions.get(value.expected.requestId) === operation) this.decisions.delete(value.expected.requestId); }
+    return this.applyRecordedDecision({
+      agentId: value.expected.agentId,
+      requestId: value.expected.requestId,
+      requestVersion: value.expected.requestVersion,
+      requestSha256: value.expected.requestSha256,
+      decisionId: value.decisionId,
+      actorId: value.actorId,
+      decision: value.decision,
+      projectionSha256: value.projectionSha256,
+    }, async (prepared) => {
+      if (!isDeepStrictEqual(prepared.expected, value.expected)
+        || digest(prepared.presentation) !== value.projectionSha256) {
+        throw new Error("The displayed approval request has changed.");
+      }
+      const fence = (commit: () => Promise<void>) => this.options.fenceCommit(async () => {
+        prepared.assertCurrent();
+        await commit();
+      });
+      return this.options.store.selectHostApproval({
+        ...value,
+        authority: prepared.approvalAuthority,
+        atMs: this.now(),
+      }, fence);
+    });
   }
 
-  private async decideOnce(input: HostApprovalDecision): Promise<HostApprovalStatus> {
-    const prior = await this.options.store.getExecutionApproval(input.expected);
-    if (prior?.decision) {
-      const decision = prior.decision;
-      if (decision.decisionId !== input.decisionId || decision.actorId !== input.actorId
-        || decision.decision !== input.decision || decision.projectionSha256 !== input.projectionSha256) throw new Error("An approval decision is already recorded.");
-      if (decision.dispatchId) return status(prior); // A lost response never authorizes another send.
-    }
-    const lane = this.lanes.get(input.expected.agentId);
-    const native = lane?.requests.find(request => request.native.id === input.expected.nativeRequestId);
-    if (!lane || !native) throw new Error("The native approval request is unavailable.");
-    const prepared = await this.prepare(lane, native);
-    if (!isDeepStrictEqual(prepared.candidate.reference, input.expected)
-      || digest(prepared.candidate.presentation) !== input.projectionSha256) throw new Error("The displayed approval request has changed.");
-    const fence = (commit: () => Promise<void>) => this.options.fenceCommit(async () => { prepared.assertCurrent(); await commit(); });
-    await this.options.store.selectHostApproval({ ...input, authority: prepared.owned, atMs: this.now() }, fence);
-    const dispatchId = randomUUID();
-    let dispatchStarted = false;
-    let assertOperationalAuthority: (() => void) | null = null;
-    try {
-      const result = await this.options.provider!.replyPermission!(lane.handle, native, input.decision === "allow_once" ? "once" : "reject", {
+  async applyRecordedDecision(
+    input: RecordedApprovalDecision,
+    select: (prepared: RecordedApprovalSelection) => Promise<ExecutionApprovalRecord>,
+  ): Promise<HostApprovalStatus> {
+    return this.nativeApplication.apply(input, async () => {
+      const lane = this.lanes.get(input.agentId);
+      const native = lane?.connectionId
+        ? lane.requests.find(request => approvalRequestId(input.agentId, lane.connectionId!, request.native.id) === input.requestId)
+        : undefined;
+      if (!lane || !native) throw new NativeApprovalUnavailableError();
+      const prepared = await this.prepare(lane, native);
+      if (!prepared.candidate.reference) throw new NativeApprovalUnavailableError();
+      return {
+        expected: prepared.candidate.reference,
+        presentation: prepared.candidate.presentation,
+        approvalAuthority: prepared.owned,
+        approval: prepared.approval,
+        handle: lane.handle,
+        native,
+        executionGenerationId: lane.generation,
         expectedFileChanges: prepared.fileChanges,
-        beforeNativeDispatch: async () => {
-          prepared.assertCurrent();
-          const entry = await this.options.store.getEntry(lane.agentId);
-          if (!entry || !await this.options.exactAuthority(entry, lane.handle, lane.generation)) throw new Error("Approval authority changed.");
-          const permit = await this.options.store.beginExecutionApprovalDispatch({ expected: input.expected, authority: prepared.owned,
-            decisionId: input.decisionId, dispatchId, projectionSha256: input.projectionSha256, atMs: this.now() }, fence);
-          if (!permit.dispatch) throw new Error("This approval dispatch was already recorded.");
-          dispatchStarted = true;
-          assertOperationalAuthority = await this.options.store.validateExecutionApprovalAuthority(input.expected, prepared.owned);
-          prepared.assertCurrent();
-        },
-        assertNativeDispatch: () => {
-          prepared.assertCurrent();
-          if (!assertOperationalAuthority || this.now() >= prepared.approval.request.expiresAtMs) throw new Error("Approval authority is unavailable.");
-          assertOperationalAuthority();
-        },
-      });
-      await this.options.store.recordExecutionApprovalOutcome({ expected: input.expected, decisionId: input.decisionId, dispatchId,
-        evidence: result.outcome, atMs: this.now() }, this.options.fenceCommit);
-      return result.outcome === "native_processed" ? "resolved" : "decision_sent";
-    } catch {
-      if (dispatchStarted) {
-        await this.options.store.recordExecutionApprovalOutcome({ expected: input.expected, decisionId: input.decisionId, dispatchId,
-          evidence: "dispatch_uncertain", atMs: this.now() }, this.options.fenceCommit).catch(() => undefined);
-        return "uncertain";
-      }
-      throw new Error("The decision was recorded but could not be sent. Refresh the request before trying again.");
-    }
+        assertCurrent: prepared.assertCurrent,
+      };
+    }, select);
   }
 }
