@@ -54,7 +54,10 @@ import {
 import { safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
 import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
 export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
-import { cursorNativeToolEnvelope } from "./cursor-native-tool.js";
+import {
+  cursorNativeToolEnvelope,
+  cursorNativeToolTerminalResult,
+} from "./cursor-native-tool.js";
 import {
   assertCursorPersonalIdentity,
   CursorIdentityAuthRequiredError,
@@ -403,12 +406,6 @@ function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind
   if (type === "system") return "provider_event";
   if (/error/i.test(type)) return "error";
   return "provider_event";
-}
-
-function cursorRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
 }
 
 function streamMethod(message: CursorStreamMessage): string {
@@ -2882,42 +2879,24 @@ export class CursorProviderAdapter implements ProviderAdapter {
     }
     const nativeTool = cursorNativeToolEnvelope(message as Record<string, unknown>);
     if (!nativeTool) return null;
-    const { executionId, tool, operation, call } = nativeTool;
+    const { executionId, subtype, tool, operation } = nativeTool;
     const identity = { domain: "execution" as const, executionId, operation, ...nativeTurn };
-    const sideEffects = operation === "file_read" ? "none" as const : "possible" as const;
     const prior = turn.executionTools.get(executionId);
-    if (message.subtype === "started" && !prior) {
+    if (subtype === "started" && !prior) {
       // Native toolCallStarted precedes permission/spawn outcomes. It proves
       // request identity, not that a process ran or a file was touched.
       turn.executionTools.set(executionId, { tool, completed: false });
-    } else if (message.subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
-      const result = cursorRecord(call.result);
-      if (!result) return null;
-      const variants = (operation === "command"
-        ? ["success", "failure", "timeout", "rejected", "permissionDenied", "spawnError"]
-        : ["success", "error", "failure"]).filter((key) => Object.hasOwn(result, key));
-      if (variants.length !== 1 || !cursorRecord(result[variants[0]!])) return null;
-      const variant = variants[0]!;
-      let exitCode: number | undefined;
-      if (operation === "command") {
-        // Cursor 2026.07.09's ShellResult uses foreground success/failure
-        // records with an int32 exitCode (protobuf JSON emits default zero).
-        // A background handoff is not command completion.
-        if (result.isBackground !== undefined && typeof result.isBackground !== "boolean") return null;
-        if (result.isBackground === true || variant === "timeout") return null;
-        if (variant === "rejected" || variant === "permissionDenied" || variant === "spawnError") {
-          prior.completed = true;
-          emit({ ...identity, kind: "completed", outcome: variant === "spawnError" ? "failed" : "denied_before_start", sideEffects: "none" });
-          return null;
-        }
-        const terminal = cursorRecord(result[variant])!;
-        if (!Number.isInteger(terminal.exitCode)
-          || (terminal.exitCode as number) < -2_147_483_648 || (terminal.exitCode as number) > 2_147_483_647) return null;
-        exitCode = terminal.exitCode as number;
-      }
+    } else if (subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
+      const terminal = cursorNativeToolTerminalResult(nativeTool);
+      if (!terminal) return null;
       prior.completed = true;
-      emit({ ...identity, kind: "completed", outcome: variant === "success" && (exitCode === undefined || exitCode === 0)
-        ? "succeeded" : "failed", ...(exitCode === undefined ? {} : { exitCode }), sideEffects });
+      emit({
+        ...identity,
+        kind: "completed",
+        outcome: terminal.outcome,
+        ...(terminal.exitCode === undefined ? {} : { exitCode: terminal.exitCode }),
+        sideEffects: terminal.sideEffects,
+      });
     }
     return null;
   }

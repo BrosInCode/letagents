@@ -1,4 +1,7 @@
-import { cursorNativeToolEnvelope } from "./cursor-native-tool.js";
+import {
+  cursorNativeToolEnvelope,
+  cursorNativeToolTerminalResult,
+} from "./cursor-native-tool.js";
 
 type CursorLiveDisplayProjection = {
   method: "item/agentMessage/delta" | "item/toolCall/updated";
@@ -53,23 +56,23 @@ export function cursorLiveDisplayProjections(
   }
   const nativeTool = cursorNativeToolEnvelope(message);
   if (!nativeTool) return [];
-  const { executionId, tool, call } = nativeTool;
-  const result = record(call.result);
-  const failure = result && (Object.hasOwn(result, "error")
-    ? result.error
-    : Object.hasOwn(result, "failure") ? result.failure : undefined);
-  const completed = message.subtype === "completed";
-  const error = completed ? toolError(failure) : null;
-  const output = completed && result && Object.hasOwn(result, "success")
-    ? result.success
-    : completed && failure === undefined ? call.result ?? null : null;
+  const { executionId, subtype, tool, call } = nativeTool;
+  const terminal = subtype === "completed" ? cursorNativeToolTerminalResult(nativeTool) : null;
+  if (subtype === "completed" && !terminal) return [];
+  const failure = terminal && (terminal.variant === "error" || terminal.variant === "failure")
+    ? terminal.detail
+    : undefined;
+  const error = terminal ? toolError(failure) : null;
+  const output = terminal?.variant === "success"
+    ? terminal.detail
+    : terminal && failure === undefined ? call.result ?? null : null;
   return [{
     method: "item/toolCall/updated",
     kind: "tool_lifecycle",
     payload: {
       callID: `cursor:${exactTurnNamespace}:${executionId}`,
       tool,
-      status: error ? "error" : completed ? "completed" : "running",
+      status: error ? "error" : terminal ? "completed" : "running",
       input: call.args ?? null,
       output,
       error,

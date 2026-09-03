@@ -7015,6 +7015,55 @@ test("Cursor live display refuses a mismatched native tool terminal", async () =
   "the visual and typed projections both reject the mismatched terminal");
 });
 
+test("Cursor live display leaves invalid native terminals open until the turn result interrupts them", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const executionEvents: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => executionEvents.push(event));
+  const child = harness.children[0]!;
+  const session_id = "sess-cursor-1";
+
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "contradictory-read", session_id,
+    tool_call: { readToolCall: { args: { path: "README.md" } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "contradictory-read", session_id,
+    tool_call: { readToolCall: { result: { success: {}, failure: { errorMessage: "boom" } } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "background-shell", session_id,
+    tool_call: { shellToolCall: { args: { command: "long-running-command" } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "background-shell", session_id,
+    tool_call: { shellToolCall: { result: { success: { exitCode: 0, shellId: 7 }, isBackground: true } } },
+  });
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
+  await flush();
+
+  assert.deepEqual(streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => ({
+      tool: (event.payload as { tool?: unknown }).tool,
+      status: (event.payload as { status?: unknown }).status,
+    })), [
+    { tool: "readToolCall", status: "running" },
+    { tool: "shellToolCall", status: "running" },
+    { tool: "readToolCall", status: "interrupted" },
+    { tool: "shellToolCall", status: "interrupted" },
+  ], "invalid terminals cannot visually complete a card that typed execution keeps open");
+  assert.equal(executionEvents.some(({ fact }) => fact.domain === "execution"
+    && ["contradictory-read", "background-shell"].includes(fact.executionId)
+    && fact.kind === "completed"), false,
+  "the same shared terminal contract rejects both typed completions");
+});
+
 test("a Cursor turn that exits without result still terminalizes every running tool card", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
@@ -7125,6 +7174,20 @@ test("documented Cursor stream-json shapes project to namespaced response and to
     type: "tool_call", subtype: "started", call_id: "shadowed-tool",
     tool_call: { readToolCall: { args: {} }, writeToolCall: null },
   }, "turn-exact", "event-8"), [], "a second tool key invalidates the envelope even when its value is not an object");
+  for (const [label, toolCall] of [
+    ["contradictory variants", { readToolCall: { result: { success: {}, failure: { errorMessage: "boom" } } } }],
+    ["missing variant", { readToolCall: { result: {} } }],
+    ["malformed variant", { readToolCall: { result: { success: null } } }],
+    ["command timeout", { shellToolCall: { result: { timeout: {} } } }],
+    ["invalid exit code", { shellToolCall: { result: { success: { exitCode: "0" } } } }],
+    ["background handoff", { shellToolCall: { result: { success: { exitCode: 0 }, isBackground: true } } }],
+    ["invalid background flag", { shellToolCall: { result: { success: { exitCode: 0 }, isBackground: "false" } } }],
+  ] as const) {
+    assert.deepEqual(cursorLiveDisplayProjections({
+      type: "tool_call", subtype: "completed", call_id: `invalid-${label.replaceAll(" ", "-")}`,
+      tool_call: toolCall,
+    }, "turn-exact", `event-invalid-${label}`), [], `${label} cannot visually complete a rejected typed terminal`);
+  }
 });
 
 test("Cursor typed observations fence each native child and exclude synthetic display completion", async () => {
