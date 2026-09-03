@@ -1,5 +1,7 @@
 import { execFile } from "node:child_process";
+import { isAbsolute } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { z } from "zod";
 import type { CodexPermissionFileChange, ProviderPermissionDispatchOptions } from "../../../shared/provider-permissions.js";
 import {
   launchCodexAppServer,
@@ -167,7 +169,7 @@ export interface CodexProviderAdapterOptions {
 const BASE_CODEX_CAPABILITIES: ProviderAdapterCapabilities = {
   execution: {
     controlProbe: "rpc",
-    approvals: { kinds: ["command", "file_change"], recovery: "connection_only", denyScope: "request" },
+    approvals: { kinds: ["command", "file_change", "network"], recovery: "connection_only", denyScope: "request" },
   },
   deliveryModes: ["mcp_polling", "daemon_inbox"],
   // P0 task_28 did not prove native mid-turn injection or approval bridging.
@@ -306,12 +308,51 @@ function transcriptLifecycleTurn(value: unknown): { id: unknown; status: unknown
   return turn ? { id: turn.id, status: turn.status } : null;
 }
 
+const permissionString = z.string().max(4096);
+const permissionSpecialPath = z.discriminatedUnion("kind", [
+  z.strictObject({ kind: z.literal("root") }),
+  z.strictObject({ kind: z.literal("minimal") }),
+  z.strictObject({ kind: z.literal("project_roots"), subpath: permissionString.nullable().optional() }),
+  z.strictObject({ kind: z.literal("tmpdir") }),
+  z.strictObject({ kind: z.literal("slash_tmp") }),
+  z.strictObject({ kind: z.literal("unknown"), path: permissionString, subpath: permissionString.nullable().optional() }),
+]);
+const permissionPath = z.discriminatedUnion("type", [
+  z.strictObject({ type: z.literal("path"), path: permissionString }),
+  z.strictObject({ type: z.literal("glob_pattern"), pattern: permissionString }),
+  z.strictObject({ type: z.literal("special"), value: permissionSpecialPath }),
+]);
+const permissionFileSystem = z.strictObject({
+  entries: z.array(z.strictObject({ access: z.enum(["read", "write", "deny"]), path: permissionPath })).max(128).nullable().optional(),
+  globScanMaxDepth: z.number().int().positive().max(4096).nullable().optional(),
+  read: z.array(permissionString).max(128).nullable().optional(),
+  write: z.array(permissionString).max(128).nullable().optional(),
+});
+const permissionProfileSchema = z.strictObject({
+  fileSystem: permissionFileSystem.nullable().optional(),
+  network: z.strictObject({ enabled: z.boolean().nullable().optional() }).nullable().optional(),
+});
+
+function permissionProfile(value: unknown): Record<string, unknown> | null {
+  if (!permissionProfileSchema.safeParse(value).success) return null;
+  try {
+    return Buffer.byteLength(JSON.stringify(value)) <= 24 * 1024 ? value as Record<string, unknown> : null;
+  } catch { return null; }
+}
+
 function permissionParams(request: RpcServerRequest): Record<string, unknown> | null {
-  if (request.method !== "item/commandExecution/requestApproval" && request.method !== "item/fileChange/requestApproval") return null;
+  if (!["item/commandExecution/requestApproval", "item/fileChange/requestApproval", "item/permissions/requestApproval"]
+    .includes(request.method)) return null;
   const params = recordValue(request.params);
-  return params && nativeExecutionId(params.threadId) && nativeExecutionId(params.turnId)
-    && nativeExecutionId(params.itemId) && Number.isSafeInteger(params.startedAtMs)
-    && (params.startedAtMs as number) >= 0 ? params : null;
+  if (!params || !nativeExecutionId(params.threadId) || !nativeExecutionId(params.turnId)
+    || !nativeExecutionId(params.itemId) || !Number.isSafeInteger(params.startedAtMs)
+    || (params.startedAtMs as number) < 0) return null;
+  if (request.method !== "item/permissions/requestApproval") return params;
+  return typeof params.cwd === "string" && params.cwd.length <= 4096 && isAbsolute(params.cwd)
+    && permissionProfile(params.permissions)
+    && (params.reason == null || (typeof params.reason === "string" && params.reason.length <= 8192))
+    && (params.environmentId == null || (typeof params.environmentId === "string" && params.environmentId.length <= 512))
+    ? params : null;
 }
 
 function permissionFileChanges(value: unknown): CodexPermissionFileChange[] | null {
@@ -728,6 +769,21 @@ export class CodexProviderAdapter implements ProviderAdapter {
     } catch { return null; }
   }
 
+  async inspectPermissionProfile(rawHandle: ProviderHandle, request: RpcServerRequest): Promise<Record<string, unknown> | null> {
+    const handle = this.handles.get(rawHandle.workAttemptId);
+    const continuation = handle?.providerContinuationId;
+    const connection = handle ? { ...handle.providerConnection } : null;
+    const rpcConnection = handle?.client.currentConnectionId() ?? null;
+    const params = request?.method === "item/permissions/requestApproval" ? permissionParams(request) : null;
+    const profile = params ? permissionProfile(params.permissions) : null;
+    if (!handle || handle !== rawHandle || !continuation || !connection || !rpcConnection || !params || !profile
+      || params.threadId !== continuation || request.connectionId !== rpcConnection
+      || !handle.client.listPendingRequests().includes(request)
+      || handle.terminalTurns.has(exactTurnKey(continuation, params.turnId as string))
+      || this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") return null;
+    return structuredClone(profile);
+  }
+
   /** Host-only dispatch. A successful WebSocket send is NOT evidence that Codex applied the decision. */
   async replyPermission(rawHandle: ProviderHandle, expectedRequest: RpcServerRequest, reply: "once" | "reject",
     options?: ProviderPermissionDispatchOptions):
@@ -739,9 +795,12 @@ export class CodexProviderAdapter implements ProviderAdapter {
     const rpcConnection = handle.client.currentConnectionId();
     const params = expectedRequest && permissionParams(expectedRequest);
     const fileChange = expectedRequest?.method === "item/fileChange/requestApproval";
+    const genericPermission = expectedRequest?.method === "item/permissions/requestApproval";
     const expectedChanges = fileChange ? permissionFileChanges(options?.expectedFileChanges) : null;
+    const requestedPermissions = genericPermission ? structuredClone(permissionProfile(params?.permissions)) : null;
     const decision = reply === "once" ? "accept" : reply === "reject" ? "decline" : null;
     if (!params || params.threadId !== continuation || !decision || (fileChange && !expectedChanges)
+      || (genericPermission && !requestedPermissions)
       || (decision === "accept" && expectedRequest.method === "item/fileChange/requestApproval" && params.grantRoot != null)
       || (params.availableDecisions != null && (!Array.isArray(params.availableDecisions) || !params.availableDecisions.includes(decision)))) {
       throw new CodexPermissionReplyError("not_dispatched");
@@ -768,10 +827,18 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (fileChange && !isDeepStrictEqual(await this.inspectPermissionFileChanges(handle, expectedRequest), expectedChanges)) {
       throw new CodexPermissionReplyError("not_dispatched");
     }
+    if (genericPermission && !isDeepStrictEqual(permissionProfile(params.permissions), requestedPermissions)) {
+      throw new CodexPermissionReplyError("not_dispatched");
+    }
     // No await or observer callback between the final fence and native response.
     assertCurrent();
     options?.assertNativeDispatch?.();
-    try { handle.client.respond(expectedRequest, { decision }); }
+    const result = genericPermission
+      ? reply === "once"
+        ? { permissions: requestedPermissions, scope: "turn", strictAutoReview: true }
+        : { permissions: {}, scope: "turn" }
+      : { decision };
+    try { handle.client.respond(expectedRequest, result); }
     catch { throw new CodexPermissionReplyError("uncertain"); }
     if (this.permissionAuthority(handle, continuation, connection, rpcConnection) !== "current") {
       throw new CodexPermissionReplyError("uncertain");

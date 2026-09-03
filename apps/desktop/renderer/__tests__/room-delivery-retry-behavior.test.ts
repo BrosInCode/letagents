@@ -216,6 +216,22 @@ test("composer presents literal host-only native requests and sends only the sel
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
+test("composer labels a generic Codex grant as turn-scoped", async () => {
+  const approval = hostApproval();
+  approval.presentation = { ...approval.presentation, provider: "codex", title: "Grant for this turn", denyScope: "request" };
+  const requests: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [approval], error: null }),
+    decideHostApproval: async (input: unknown) => { requests.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    await (buttonByText(root, "Grant for this turn").props.onClick as () => Promise<void>)();
+    assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
 test("composer retries only the recorded choice and disables stale cards during a connection failure", async () => {
   const approval = hostApproval(); approval.status = "decision_recorded"; approval.retryDecision = "deny";
   let snapshot: DesktopHostApprovalSnapshot = { available: true, approvals: [approval], error: null };

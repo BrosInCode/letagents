@@ -366,6 +366,15 @@ const approvalParams = (overrides: Record<string, unknown> = {}) => ({
   command: "npm test", ...overrides,
 });
 
+const genericPermissionParams = (overrides: Record<string, unknown> = {}) => ({
+  threadId: "thread-1", turnId: "turn-thread-1", itemId: "item-1", startedAtMs: 1,
+  cwd: "/repo", permissions: {
+    network: { enabled: true },
+    fileSystem: { entries: [{ access: "write", path: { type: "special", value: { kind: "tmpdir" } } }] },
+  },
+  reason: "Run the local development server", ...overrides,
+});
+
 test("Codex file approval inspection requires exact full pending native edits", async () => {
   const harness = createHarness(); const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
@@ -508,13 +517,58 @@ test("Codex permission replies target exact pending requests and report sent, ne
   subscription.dispose();
 });
 
+test("Codex generic permission replies grant only the exact requested profile for the current turn", async () => {
+  for (const reply of ["once", "reject"] as const) {
+    const harness = createHarness();
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const client = harness.clients[0]!; client.turnStatus = "inProgress";
+    const request = client.askPermission(genericPermissionParams(), 41, "item/permissions/requestApproval");
+    assert.deepEqual(await adapter.replyPermission(handle, request, reply, {
+      beforeNativeDispatch: async () => {}, assertNativeDispatch: () => {},
+    }), { outcome: "sent", scope: "request" });
+    const requested = (request.params as { permissions: Record<string, unknown> }).permissions;
+    assert.deepEqual(client.permissionResponses, [{ request, result: reply === "once"
+      ? { permissions: requested, scope: "turn", strictAutoReview: true }
+      : { permissions: {}, scope: "turn" } }]);
+    assert.equal(JSON.stringify(client.permissionResponses).includes('"session"'), false);
+  }
+});
+
+test("Codex generic permission dispatch refuses a changed or malformed requested profile", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const client = harness.clients[0]!; client.turnStatus = "inProgress";
+  const request = client.askPermission(genericPermissionParams(), 41, "item/permissions/requestApproval");
+  await assert.rejects(adapter.replyPermission(handle, request, "once", {
+    beforeNativeDispatch: async () => {
+      ((request.params as { permissions: { network: { enabled: boolean } } }).permissions.network).enabled = false;
+    },
+    assertNativeDispatch: () => assert.fail("a changed request cannot cross the native dispatch fence"),
+  }), { outcome: "not_dispatched" });
+  assert.deepEqual(client.permissionResponses, []);
+
+  for (const params of [
+    genericPermissionParams({ cwd: "relative/path" }),
+    genericPermissionParams({ permissions: { network: { enabled: true, unexpected: true } } }),
+    genericPermissionParams({ permissions: { fileSystem: { entries: [{ access: "execute", path: { type: "special", value: { kind: "tmpdir" } } }] } } }),
+    genericPermissionParams({ permissions: { network: { enabled: true }, extra: true } }),
+  ]) {
+    const candidate = client.askPermission(params, 42, "item/permissions/requestApproval");
+    await assert.rejects(adapter.replyPermission(handle, candidate, "once"), { outcome: "not_dispatched" });
+    client.pendingPermissions.delete(candidate.id);
+  }
+  assert.deepEqual(client.permissionResponses, []);
+});
+
 test("Codex rejects unsupported, stale, malformed, or broader-than-once approval decisions before dispatch", async (t) => {
   const cases: Array<{ name: string; params?: Record<string, unknown>; method?: string; reply?: "once" | "reject"; clone?: boolean }> = [
     { name: "foreign thread", params: { threadId: "foreign" } },
     { name: "foreign turn", params: { turnId: "foreign" } },
     { name: "missing item", params: { itemId: undefined } },
     { name: "invalid start time", params: { startedAtMs: "1" } },
-    { name: "unknown method", method: "item/permissions/requestApproval" },
+    { name: "generic permission missing profile", method: "item/permissions/requestApproval" },
     { name: "file grantRoot cannot mean once", method: "item/fileChange/requestApproval", params: { grantRoot: "/repo" } },
     { name: "session-only choices", params: { availableDecisions: ["acceptForSession", "cancel"] } },
     { name: "amendment-only choices", params: { availableDecisions: [{ acceptWithExecpolicyAmendment: { execpolicy_amendment: ["npm"] } }] } },
@@ -771,7 +825,7 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
   }), handle);
 
   assert.deepEqual(adapter.capabilities(), {
-    execution: { controlProbe: "rpc", approvals: { kinds: ["command", "file_change"], recovery: "connection_only", denyScope: "request" } },
+    execution: { controlProbe: "rpc", approvals: { kinds: ["command", "file_change", "network"], recovery: "connection_only", denyScope: "request" } },
     deliveryModes: ["mcp_polling", "daemon_inbox"],
     resume: true,
     midTurnInjection: false,
