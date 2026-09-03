@@ -15,6 +15,7 @@ import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, Leg
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
+import type { ExecutionApprovalAdmissionPlan } from "../execution-approval-admission.js";
 import type {
   ExecutionDelegationHostAuthority,
   RemoteExecutionDelegationRevision,
@@ -576,9 +577,13 @@ async function seedApprovalJournalTurn(env: Awaited<ReturnType<typeof fixture>>,
 }
 
 function admitApproval(store: ManifestStore, input: AdmitExecutionApproval, authority: ApprovalAuthority,
-  fence: Parameters<ManifestStore["admitExecutionApproval"]>[1]) {
+  fence: (commit: () => Promise<void>) => Promise<void>) {
   const { executionGenerationId: _generation, runtimeGenerationId: _runtime, turnId: _turn, ...request } = input;
-  return store.admitExecutionApproval({ request, authority }, fence);
+  return store.admitExecutionApprovalPlan(
+    { classification: "host_only", request: { ...request, risk: "high" }, authority },
+    () => input.createdAtMs,
+    fence,
+  );
 }
 
 function approvalJournalRequest(requestId = "request", nativeRequestId: string | number = 1, provider: "codex" | "open-model" = "codex"): { expected: ApprovalReference; input: AdmitExecutionApproval } {
@@ -1166,8 +1171,64 @@ test("approval journal requires ownership fences and rolls back both tables with
     assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 1);
     database.exec("DROP TRIGGER fail_approval_request");
     assert.equal((await store.beginExecutionApprovalDispatch(dispatch, async commit => commit())).dispatch, true);
+
+    const workspace = join(env.root, "approval-workspace");
+    await mkdir(workspace);
+    database.prepare("UPDATE work_attempts SET workspace_path=? WHERE work_attempt_id=?")
+      .run(workspace, authority.workAttemptId);
+    const source = { request: { id: 2 }, changes: [
+      { path: "src/new.ts", kind: { type: "add" as const }, diff: "+export const value = 1;\n" },
+    ] };
+    const requestSha256 = createHash("sha256").update(JSON.stringify(source)).digest("hex");
+    const projected = approvalJournalRequest("projected", 2);
+    const projectedExpected = { ...projected.expected, requestSha256 };
+    const { executionGenerationId: _generation, runtimeGenerationId: _runtime, turnId: _turn, ...projectedRequest } = {
+      ...projected.input, ...projectedExpected, kind: "file_change" as const, risk: "low" as const,
+    };
+    const projection = await store.prepareExecutionApprovalProjection(
+      { requestSha256, workAttemptId: authority.workAttemptId }, source,
+    );
+    database.exec("CREATE TRIGGER fail_approval_projection BEFORE INSERT ON execution_approval_projections BEGIN SELECT RAISE(ABORT,'projection rollback'); END");
+    await assert.rejects(store.admitExecutionApprovalPlan({
+      classification: "delegatable_file_change", request: projectedRequest, authority, projection,
+    }, () => 110, async commit => commit()), /projection rollback/);
+    assert.equal(await store.getExecutionApproval(projectedExpected), null,
+      "projection failure rolls back the request classification in the same transaction");
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
+    database.exec("DROP TRIGGER fail_approval_projection");
     assert.equal((await store.load()).generation, 1);
     assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
+test("delegatable approval admission rejects OpenCode below the broker boundary", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    const authority = await seedApprovalJournalTurn(env, store, database, "open-model");
+    const workspace = join(env.root, "opencode-approval-workspace");
+    await mkdir(workspace);
+    database.prepare("UPDATE work_attempts SET workspace_path=? WHERE work_attempt_id=?")
+      .run(workspace, authority.workAttemptId);
+    const source = { request: { id: 3 }, changes: [
+      { path: "src/new.ts", kind: { type: "add" as const }, diff: "+export const value = 1;\n" },
+    ] };
+    const requestSha256 = createHash("sha256").update(JSON.stringify(source)).digest("hex");
+    const request = approvalJournalRequest("opencode-projected", 3, "open-model");
+    const { executionGenerationId: _generation, runtimeGenerationId: _runtime, turnId: _turn, ...admissionRequest } = {
+      ...request.input, ...request.expected, requestSha256, kind: "file_change" as const, risk: "low" as const,
+    };
+    const projection = await store.prepareExecutionApprovalProjection(
+      { requestSha256, workAttemptId: authority.workAttemptId }, source,
+    );
+    const invalidPlan = {
+      classification: "delegatable_file_change", request: admissionRequest, authority, projection,
+    } as unknown as ExecutionApprovalAdmissionPlan;
+    await assert.rejects(store.admitExecutionApprovalPlan(
+      invalidPlan, () => 110, async commit => commit(),
+    ), { code: "invalid_input" });
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_requests").get()!.n, 0);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
   } finally { database.close(); await store.close(); await env.cleanup(); }
 });
 
