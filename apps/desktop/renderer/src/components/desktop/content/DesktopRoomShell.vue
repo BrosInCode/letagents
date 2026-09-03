@@ -680,6 +680,7 @@ const deliveryReceiptsByMessage = computed(() => {
     agentName: string;
     state: string;
     blockedByMessageId: string | null;
+    error: string | null;
     failureCode: string | null;
     terminalReason: string | null;
     attemptCount: number;
@@ -691,6 +692,7 @@ const deliveryReceiptsByMessage = computed(() => {
       agentName: supervisedAgentDisplayLabel(entry.displayName, entry.id),
       state: receipt.state,
       blockedByMessageId: receipt.blockedByMessageId,
+      error: receipt.error,
       failureCode: receipt.failureCode,
       terminalReason: receipt.terminalReason,
       attemptCount: receipt.attemptCount,

@@ -318,7 +318,7 @@ const props = withDefaults(defineProps<{
   context?: "timeline" | "thread-root" | "thread-reply";
   threadMessageId?: string;
   testId?: string;
-  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
+  deliveryReceipts?: Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }>;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;
@@ -382,33 +382,39 @@ function receiptNeedsAttention(state: string): boolean {
   return state === "blocked" || state === "queued_behind_blocked";
 }
 
-function receiptStateLabel(receipt: { state: string; terminalReason: string | null }): string {
+function receiptErrorLabel(error: string | null): string | null {
+  const normalized = error?.replace(/\s+/g, " ").trim();
+  if (!normalized) return null;
+  return normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized;
+}
+
+function receiptStateLabel(receipt: { state: string; terminalReason: string | null; error: string | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return "Retired during safety upgrade";
   const state = receipt.state;
   if (state === "retryable") return "Retrying";
   if (state === "result_recovery") return "Recovering reply";
   if (state === "restoring_conversation") return "Restoring conversation";
-  if (state === "blocked") return "Needs attention";
+  if (state === "blocked") return receiptErrorLabel(receipt.error) || "Needs attention";
   if (state === "queued_behind_blocked") return "Queued behind an issue";
   if (state === "acknowledged_no_reply") return "Read · no reply";
-  if (state === "acknowledged_failed") return "Work did not finish";
+  if (state === "acknowledged_failed") return receiptErrorLabel(receipt.error) || "Work did not finish";
   if (state === "cancelled_by_room_move") return "Moved rooms";
   if (state === "cancelled_by_user") return "Skipped";
   return "";
 }
 
-function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null }): string {
+function receiptLabel(receipt: { agentName: string; state: string; blockedByMessageId: string | null; terminalReason: string | null; error: string | null }): string {
   if (receipt.terminalReason === "upgrade_authority_unavailable") return `A safety upgrade retired this legacy turn for ${receipt.agentName}; its exact authority could not be reconstructed`;
   if (receipt.state === "dispatching" || receipt.state === "awaiting_result") return `${receipt.agentName} is responding`;
   if (receipt.state === "publishing") return `${receipt.agentName} is sending a reply`;
   if (receipt.state === "pending") return `${receipt.agentName} is queued to respond`;
   if (receipt.state === "acknowledged") return `${receipt.agentName} replied`;
   if (receipt.state === "acknowledged_no_reply") return `${receipt.agentName} saw this and chose not to reply`;
-  if (receipt.state === "acknowledged_failed") return `${receipt.agentName}: Work did not finish`;
+  if (receipt.state === "acknowledged_failed") return `${receipt.agentName}: ${receiptErrorLabel(receipt.error) || "Work did not finish"}`;
   if (receipt.state === "retryable") return `${receipt.agentName} couldn’t finish; retrying`;
   if (receipt.state === "result_recovery") return `${receipt.agentName} answered, but LetAgents is re-reading the completed result`;
   if (receipt.state === "restoring_conversation") return `${receipt.agentName} is restoring its private conversation`;
-  if (receipt.state === "blocked") return `${receipt.agentName} needs attention`;
+  if (receipt.state === "blocked") return `${receipt.agentName}: ${receiptErrorLabel(receipt.error) || "Needs attention"}`;
   if (receipt.state === "cancelled_by_room_move") return `${receipt.agentName} moved to another room before handling this`;
   if (receipt.state === "cancelled_by_user") return `You skipped this message for ${receipt.agentName}`;
   if (receipt.state === "queued_behind_blocked") return `Waiting — ${receipt.agentName} needs attention on ${receipt.blockedByMessageId || "an earlier message"}`;

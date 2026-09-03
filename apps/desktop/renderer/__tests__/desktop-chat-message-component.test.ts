@@ -133,10 +133,11 @@ test("one room message groups delivery receipts for every activated agent", asyn
       highlightQuery: "",
       searchActive: false,
       deliveryReceipts: [
-        { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null },
-        { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked" },
-        { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null },
-        { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null },
+        { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null, error: null },
+        { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked", error: null },
+        { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null, error: null },
+        { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null,
+          error: "Open Model request failed (HTTP 404): configured model is no longer available." },
       ],
     }),
   });
@@ -153,8 +154,8 @@ test("one room message groups delivery receipts for every activated agent", asyn
   assert.match(html, /Retry will be available when delivery recovery is connected/);
   const failedReceipt = html.match(/<li[^>]*data-state="acknowledged_failed"[\s\S]*?<\/li>/)?.[0];
   assert.ok(failedReceipt);
-  assert.match(failedReceipt, /aria-label="Ash: Work did not finish"/);
-  assert.match(failedReceipt, /Work did not finish<\/small>/);
+  assert.match(failedReceipt, /aria-label="Ash: Open Model request failed \(HTTP 404\): configured model is no longer available\."/);
+  assert.match(failedReceipt, /Open Model request failed \(HTTP 404\): configured model is no longer available\.<\/small>/);
   assert.doesNotMatch(failedReceipt, /<button|delivery-dots|Needs attention|replied|lucide-check/);
 });
 
