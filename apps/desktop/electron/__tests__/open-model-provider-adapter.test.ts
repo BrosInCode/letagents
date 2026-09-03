@@ -16,7 +16,10 @@ import {
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
 } from "../main/agents/provider-adapter.js";
-import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import {
+  terminateFreshLaunch,
+  type ProviderProcessExit,
+} from "../main/agents/provider-evidence.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   OpenCodePermissionReplyError,
@@ -1171,6 +1174,7 @@ test("Open Model terminates and retries a fresh server when session creation tim
   let exitLaunch!: (exit: ProviderProcessExit) => void;
   const launchExited = new Promise<ProviderProcessExit>((resolve) => { exitLaunch = resolve; });
   const signals: Array<NodeJS.Signals> = [];
+  let identityChecks = 0;
   const adapter = new OpenModelProviderAdapter({
     binary: "/opt/letagents/opencode",
     runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-session-timeout-")),
@@ -1181,7 +1185,10 @@ test("Open Model terminates and retries a fresh server when session creation tim
         Object.assign(child, { pid: 6103, unref() {} });
         return { child, exited: launchExited };
       },
-      getProcessIdentity: (pid) => (pid === 6103 ? "opencode-birth-6103" : null),
+      getProcessIdentity: (pid) => {
+        identityChecks += 1;
+        return pid === 6103 ? "opencode-birth-6103" : null;
+      },
       signalProcess(_pid, signal) {
         signals.push(signal);
         exitLaunch({ type: "exit", code: null, signal });
@@ -1212,6 +1219,58 @@ test("Open Model terminates and retries a fresh server when session creation tim
     },
   );
   assert.deepEqual(signals, ["SIGTERM"], "the ambiguous fresh runtime is fenced before retry");
+  assert.equal(identityChecks, 2, "cleanup re-verifies the captured process birth before signaling");
+});
+
+test("fresh launch cleanup never signals a recycled or unverifiable pid", async () => {
+  const exited = new Promise<ProviderProcessExit>(() => {});
+  const signals: Array<NodeJS.Signals> = [];
+  const dependencies = {
+    getProcessIdentity: () => "replacement-birth",
+    signalProcess: (_pid: number, signal: NodeJS.Signals) => { signals.push(signal); },
+  };
+
+  await terminateFreshLaunch(
+    { pid: 6103, exited, processIdentity: "opencode-birth-6103" },
+    dependencies,
+    1,
+  );
+  assert.deepEqual(signals, [], "a recycled pid is treated as the original process already being gone");
+
+  await assert.rejects(
+    terminateFreshLaunch(
+      { pid: 6103, exited, processIdentity: "opencode-birth-6103" },
+      { ...dependencies, getProcessIdentity: () => undefined },
+      1,
+    ),
+    /process identity could not be verified during cleanup/,
+  );
+  assert.deepEqual(signals, [], "an unverifiable pid remains ambiguous and is never signaled");
+});
+
+test("fresh launch cleanup rechecks process birth before kill escalation", async () => {
+  const exited = new Promise<ProviderProcessExit>(() => {});
+  const signals: Array<NodeJS.Signals> = [];
+  let identity = "opencode-birth-6103";
+  const keepAlive = setInterval(() => undefined, 25);
+
+  try {
+    await terminateFreshLaunch(
+      { pid: 6103, exited, processIdentity: "opencode-birth-6103" },
+      {
+        getProcessIdentity: () => identity,
+        signalProcess: (_pid, signal) => {
+          signals.push(signal);
+          if (signal === "SIGTERM") identity = "replacement-birth";
+        },
+      },
+      1,
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
+
+  assert.deepEqual(signals, ["SIGTERM"], "a recycled pid is not killed after the grace period");
 });
 
 test("Open Model bounded turns time out without polling transcript history", async () => {

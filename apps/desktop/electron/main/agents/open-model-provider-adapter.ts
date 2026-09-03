@@ -513,7 +513,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     const client = new OpenCodeServerClient(url, auth, this.deps.fetch);
     const ready = await this.waitForHealth(client, launch.exited);
     if (!ready) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
+      await terminateFreshLaunch({ pid, exited: launch.exited, processIdentity: identity }, this.deps, this.stopGraceMs);
       throw new OpenCodeStartTimeoutError();
     }
     let sessionId: string;
@@ -539,7 +539,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
         connection: { url, pid, processIdentity: identity },
       });
     } catch (error) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
+      await terminateFreshLaunch({ pid, exited: launch.exited, processIdentity: identity }, this.deps, this.stopGraceMs);
       if (error instanceof Error && error.name === "TimeoutError") {
         throw new OpenCodeStartTimeoutError();
       }
