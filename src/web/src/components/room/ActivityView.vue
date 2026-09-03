@@ -21,6 +21,19 @@
       :cleared-live-count="clearedLiveCount"
     />
 
+    <ActivityApprovalEvidence
+      v-if="activeView === 'live'"
+      :entries="approvalEntries"
+      :loading="approvalLoading"
+      :loading-more="approvalLoadingMore"
+      :error="approvalError"
+      :has-more="approvalHasMore"
+      @refresh="refreshApprovals"
+      @load-more="loadMoreApprovals"
+      @review="loadApprovalEvidence"
+      @decide="decideApproval"
+    />
+
     <ActivityArtifactsPanel
       :artifacts="props.roomArtifacts"
       :tasks="props.tasks"
@@ -84,7 +97,10 @@
 </template>
 
 <script setup lang="ts">
+import { toRef } from 'vue'
+import { useRoomAgentApprovals } from '@/composables/roomAgentApprovals'
 import ReasoningTraceModal from './ReasoningTraceModal.vue'
+import ActivityApprovalEvidence from './activity/ActivityApprovalEvidence.vue'
 import ActivityArtifactsPanel from './activity/ActivityArtifactsPanel.vue'
 import ActivityHistoryView from './activity/ActivityHistoryView.vue'
 import ActivityLiveView from './activity/ActivityLiveView.vue'
@@ -94,6 +110,18 @@ import type { ActivityViewProps } from './activity/types'
 import { useActivityViewModel } from './activity/useActivityViewModel'
 
 const props = defineProps<ActivityViewProps>()
+
+const {
+  entries: approvalEntries,
+  loading: approvalLoading,
+  loadingMore: approvalLoadingMore,
+  error: approvalError,
+  hasMore: approvalHasMore,
+  refresh: refreshApprovals,
+  loadMore: loadMoreApprovals,
+  loadEvidence: loadApprovalEvidence,
+  decide: decideApproval,
+} = useRoomAgentApprovals(toRef(props, 'roomIdentifier'))
 
 const {
   activeView,
