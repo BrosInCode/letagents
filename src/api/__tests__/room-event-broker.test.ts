@@ -18,6 +18,7 @@ function createSources() {
     rentalActivityEvents: new EventEmitter(),
     messageInfoEvents: new EventEmitter(),
     agentWorkEvents: new EventEmitter(),
+    agentApprovalEvents: new EventEmitter(),
     executionDelegationEvents: new EventEmitter(),
   };
 }
@@ -37,6 +38,7 @@ test("one source listener fans out only to subscribers in the affected room", as
   assert.equal(sources.rentalActivityEvents.listenerCount("activity:created"), 1);
   assert.equal(sources.messageInfoEvents.listenerCount("message_info:updated"), 1);
   assert.equal(sources.agentWorkEvents.listenerCount("agent_work:invalidated"), 1);
+  assert.equal(sources.agentApprovalEvents.listenerCount("agent_approval:invalidated"), 1);
   assert.equal(sources.executionDelegationEvents.listenerCount("execution_delegation:invalidated"), 1);
 
   sources.taskEvents.emit("task:updated", { projectId: "room_a", task: { id: "task_1" } });
@@ -64,6 +66,7 @@ test("one source listener fans out only to subscribers in the affected room", as
   assert.equal(sources.rentalActivityEvents.listenerCount("activity:created"), 0);
   assert.equal(sources.messageInfoEvents.listenerCount("message_info:updated"), 0);
   assert.equal(sources.agentWorkEvents.listenerCount("agent_work:invalidated"), 0);
+  assert.equal(sources.agentApprovalEvents.listenerCount("agent_approval:invalidated"), 0);
   assert.equal(sources.executionDelegationEvents.listenerCount("execution_delegation:invalidated"), 0);
 });
 
@@ -79,6 +82,27 @@ test("agent-work invalidations remain pointer-only broker events", async () => {
     assert.deepEqual(delivery.envelope.event, {
       kind: "agent_work_invalidated",
       roomId: "room_work",
+    });
+  }
+
+  subscription.close();
+  broker.close();
+});
+
+test("agent-approval invalidations remain pointer-only broker events", async () => {
+  const sources = createSources();
+  const broker = createRoomEventBroker(sources, { instanceId: "broker" });
+  const subscription = broker.subscribe("room_approval");
+
+  sources.agentApprovalEvents.emit("agent_approval:invalidated", {
+    projectId: "room_approval",
+  });
+  const delivery = await subscription.next();
+  assert.equal(delivery?.type, "event");
+  if (delivery?.type === "event") {
+    assert.deepEqual(delivery.envelope.event, {
+      kind: "agent_approval_invalidated",
+      roomId: "room_approval",
     });
   }
 

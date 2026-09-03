@@ -1,5 +1,8 @@
 export const ROOM_RESOURCE_INVALIDATION_CAPABILITY = "resource_invalidation_v1";
 export const ROOM_RESOURCE_AGENT_WORK = "agent_work";
+// Content-free hint emitted when an approval projection is published or its
+// decision-relevant room state changes. Consumers repair through separately
+// authorized exact reads; the pointer never carries approval content.
 export const ROOM_RESOURCE_AGENT_APPROVAL = "agent_approval";
 export const ROOM_RESOURCE_EXECUTION_DELEGATION = "execution_delegation";
 // Protocol-known references. Each consumer still decides which surfaces, if

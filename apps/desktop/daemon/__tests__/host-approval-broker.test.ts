@@ -48,8 +48,8 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
     workspace_remote_url,workspace_resolved_revision,workspace_bare_path,state,created_at)
     VALUES('workspace','task','lease',1,?,'repo','remote','revision','/bare','active',?)`).run(workspace, entry.created_at);
   db.prepare("INSERT INTO work_attempt_executions VALUES('generation','workspace',?,'provider',1,NULL)").run(entry.created_at);
-  const item = await inbox.enqueueInitialMessage({ agent_id: "agent", room_id: "room", source_message_id: "message",
-    source_message: { id: "message", content: "Assess the project" }, activation: { kind: "deliver", reason: "direct_mention" } });
+  const item = await inbox.enqueueInitialMessage({ agent_id: "agent", room_id: "room", source_message_id: "msg_1",
+    source_message: { id: "msg_1", content: "Assess the project" }, activation: { kind: "deliver", reason: "direct_mention" } });
   await inbox.claimHead("agent");
   await inbox.checkpointTurnStarted(item.inbox_item_id, "native-turn", { work_attempt_id: "workspace",
     origin_execution_generation_id: "generation", provider_continuation_id: "continuation" });
@@ -190,6 +190,13 @@ test("exact safe Codex file changes are delegatable while sensitive paths stay h
       f.state.fileChanges = [{ path: scenario === "safe" ? join(f.workspace, "src/app.ts") : join(f.workspace, ".env"),
         kind: { type: "add" }, diff: "+value\n" }];
       f.emit([fileChange]);
+      const admissions = await f.broker.admitDelegatable("agent");
+      assert.equal(admissions.length, scenario === "safe" ? 1 : 0);
+      if (scenario === "safe") {
+        assert.equal(admissions[0]!.sourceMessageId, "msg_1");
+        assert.equal(admissions[0]!.owned.inboxItemId, f.item.inbox_item_id);
+        assert.equal(admissions[0]!.projection.requestSha256, admissions[0]!.approval.request.requestSha256);
+      }
       const [candidate] = await f.broker.list("room");
       assert.ok(candidate?.reference); assert.equal(candidate.status, "pending");
       const stored = await f.store.getExecutionApproval(candidate.reference);
@@ -216,6 +223,24 @@ test("exact safe Codex file changes are delegatable while sensitive paths stay h
       }
     } finally { await f.close(); }
   }
+});
+
+test("proactive admission skips stale peers but surfaces unexpected journal failure", async t => {
+  const f = await fixture();
+  try {
+    const first = fileChangeRequest(f.native, f.workspace);
+    assert.equal(first.provider, "codex");
+    const second: ProviderPermissionRequest = { provider: "codex", native: { ...first.native, id: 2 } };
+    f.state.fileChanges = [{ path: join(f.workspace, "src/app.ts"), kind: { type: "add" }, diff: "+value\n" }];
+    f.state.authorityChecks = 0; f.state.authorityFailAt = 1;
+    f.emit([first, second]);
+    const admitted = await f.broker.admitDelegatable("agent");
+    assert.equal(admitted.length, 1, "a stale request does not hide a safe peer");
+
+    f.state.authorityFailAt = null;
+    t.mock.method(f.store, "admitExecutionApprovalPlan", async () => { throw new Error("storage corrupt"); });
+    await assert.rejects(f.broker.admitDelegatable("agent"), /storage corrupt/);
+  } finally { await f.close(); }
 });
 
 test("file-change admission rechecks exact authority after projection and at commit", async () => {

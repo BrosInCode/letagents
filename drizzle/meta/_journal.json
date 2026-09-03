@@ -624,6 +624,13 @@
       "when": 1788562800000,
       "tag": "0088_execution_delegation_decision_inventory",
       "breakpoints": true
+    },
+    {
+      "idx": 89,
+      "version": "7",
+      "when": 1788649200000,
+      "tag": "0089_execution_approval_publications",
+      "breakpoints": true
     }
   ]
 }

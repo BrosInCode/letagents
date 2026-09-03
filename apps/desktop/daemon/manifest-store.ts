@@ -26,9 +26,11 @@ import {
 } from "./execution-approval-projection-journal.js";
 import {
   listExecutionDelegationInstanceIds,
+  listExecutionDelegationsForApprovalPublication,
   reconcileExecutionDelegation,
   validateExecutionDelegation,
   type ExecutionDelegationInventoryScope,
+  type ExecutionApprovalPublicationDelegationScope,
   type LocalExecutionDelegation,
   type ReconcileExecutionDelegation,
   type ValidateExecutionDelegation,
@@ -579,6 +581,13 @@ export class ManifestStore {
     input: ExecutionDelegationInventoryScope,
   ): Promise<string[]> {
     return listExecutionDelegationInstanceIds(await this.getDatabase(), structuredClone(input));
+  }
+
+  /** Current local delegation discovery only; publishers still exact-revalidate before upload. */
+  async listExecutionDelegationsForApprovalPublication(
+    input: ExecutionApprovalPublicationDelegationScope,
+  ): Promise<LocalExecutionDelegation[]> {
+    return listExecutionDelegationsForApprovalPublication(await this.getDatabase(), structuredClone(input));
   }
 
   /** Durable rows never suffice: callers must supply their current host-authority snapshot. */

@@ -97,12 +97,21 @@ export {
   ExecutionDelegationDecisionAuthorityError,
   ExecutionDelegationDecisionConflictError,
   ExecutionDelegationDecisionIdempotencyConflictError,
+  ExecutionDelegationDecisionPublicationClosedError,
   ExecutionDelegationDecisionRevisionConflictError,
   ExecutionDelegationDecisionTerminalError,
   admitExecutionDelegationDecision,
   getExecutionDelegationDecisionForHost,
   listExecutionDelegationDecisionIdsForHost,
 } from "./db/execution-delegation-decisions.js";
+export {
+  closeExecutionApprovalPublication,
+  ExecutionApprovalPublicationError,
+  getExecutionApprovalPublicationForApprover,
+  listExecutionApprovalPublicationsForApprover,
+  pruneExpiredExecutionApprovalPublications,
+  publishExecutionApprovalPublication,
+} from "./db/execution-approval-publications.js";
 export {
   assertConsumeBoardIntentApproval,
   BoardIntentApprovalConsumptionError,

@@ -20,6 +20,7 @@ import {
   listLivenessAnnouncementCandidates,
   markAgentOfflineAnnounced,
   markAgentRecoveryAnnounced,
+  pruneExpiredExecutionApprovalPublications,
   pruneStaleRoomAgentDeliveryInstances,
   markBoardIntentAutoApprovedTx,
   promoteBoardManagerTx,
@@ -445,6 +446,11 @@ export function startLivenessSweep(): void {
       await pruneStaleRoomAgentDeliveryInstances();
       } catch (error) {
       console.error("Delivery instance cleanup failed:", error);
+      }
+      try {
+      await pruneExpiredExecutionApprovalPublications();
+      } catch (error) {
+      console.error("Execution approval publication cleanup failed:", error);
       }
       try {
       await livenessSweeper.sweepOnce();

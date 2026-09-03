@@ -8,12 +8,13 @@ import { applyExecutionStorageSchema, migrateExecutionStorageV18ToV19, migrateEx
 import { readDurableNativeFailure } from "./supervised-agent-history-retention.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, migratePollingOffersV25ToV26, validatePollingActivationSchema, validatePollingOfferSchema } from "./custodial-polling-activation.js";
 import { applyRoomWorkPublicationSchema, validateRoomWorkPublicationSchema } from "./room-work-publication-store.js";
+import { applyExecutionApprovalPublicationSchema, validateExecutionApprovalPublicationSchema } from "./execution-approval-publication-store.js";
 import { applyLifecycleProjectionLedgerSchema, resetLegacyLifecycleProjectionLedgerSchema,
   validateLegacyLifecycleProjectionLedgerSchema, validateLifecycleProjectionLedgerSchema } from "./lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, materializeRuntimeIdentity } from "./execution-shadow-store.js";
 import { lifecycleAuthorityModeForProvider } from "./lifecycle-authority-mode.js";
 
-export const DAEMON_STATE_SCHEMA_VERSION = 35;
+export const DAEMON_STATE_SCHEMA_VERSION = 36;
 const SCHEMA_VERSION = DAEMON_STATE_SCHEMA_VERSION;
 const INBOX_STATES_V17 = "'pending','dispatching','awaiting_result','result_recovery','publishing','retryable','blocked','acknowledged','acknowledged_no_reply','cancelled_by_room_move','cancelled_by_user'";
 const INBOX_STATE_CONSTRAINT = /state\s+TEXT\s+NOT\s+NULL\s+CHECK\s*\(\s*state\s+IN\s*\(([^)]+)\)\s*\)/i;
@@ -127,6 +128,7 @@ export function assertDaemonStateVersionSupported(database: DatabaseSync): numbe
   if (existingVersion !== 0 && metadataVersion !== existingVersion) {
     throw new Error(`Daemon state version pair is inconsistent: user_version=${existingVersion}, metadata schema_version=${metadataVersion ?? "missing"}.`);
   }
+  if (existingVersion >= 36) validateExecutionApprovalPublicationSchema(database);
   if (existingVersion >= 27) validateRoomWorkPublicationSchema(database);
   if (existingVersion >= 28) {
     if (existingVersion < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
@@ -299,6 +301,10 @@ createSchema(database: DatabaseSync): void {
   }
   if (existingVersion === 34) {
     this.migrateExecutionApprovalProjectionStorage(database);
+    return;
+  }
+  if (existingVersion === 35) {
+    this.migrateExecutionApprovalPublicationStorage(database);
     return;
   }
   if (existingVersion !== 0 && existingVersion !== SCHEMA_VERSION) {
@@ -1399,6 +1405,23 @@ private migrateExecutionApprovalProjectionStorage(database: DatabaseSync): void 
   }
 }
 
+/** Add an empty receipt journal; prior approval projections are never pinned retroactively. */
+private migrateExecutionApprovalPublicationStorage(database: DatabaseSync): void {
+  this.repairAndValidateCurrentShape(database, 25);
+  database.exec("BEGIN IMMEDIATE");
+  try {
+    applyExecutionApprovalPublicationSchema(database);
+    this.schemaInitializationHook?.(database);
+    validateExecutionApprovalPublicationSchema(database);
+    run(database.prepare("UPDATE manifest_metadata SET schema_version = ? WHERE singleton = 1"), SCHEMA_VERSION);
+    database.exec(`PRAGMA user_version = ${SCHEMA_VERSION}`);
+    database.exec("COMMIT");
+  } catch (error) {
+    try { database.exec("ROLLBACK"); } catch { /* Transaction may already be closed. */ }
+    throw error;
+  }
+}
+
 /** Caller owns the migration transaction and has already installed current execution/configuration shape. */
 private freezeLegacyActiveRuntimeBirths(database: DatabaseSync): void {
   const candidates = database.prepare(`SELECT
@@ -1610,6 +1633,7 @@ private applyCurrentConfigurationShape(database: DatabaseSync): void {
     applyPollingOfferSchema(database);
   }
   applyRoomWorkPublicationSchema(database);
+  applyExecutionApprovalPublicationSchema(database);
   applyLifecycleProjectionLedgerSchema(database);
   this.freezeLegacyActiveRuntimeBirths(database);
   this.retireIncompatibleCodexRuntimeBirths(database);
@@ -2936,6 +2960,7 @@ private validateV18Shape(database: DatabaseSync, executionStorageVersion: Execut
 repairAndValidateCurrentShape(database: DatabaseSync, executionStorageVersion?: 19 | 20 | 21 | 22 | 23 | 24 | 25): void {
   const version = Number((database.prepare("PRAGMA user_version").get() as Row).user_version);
   const storageVersion = executionStorageVersion ?? (version >= 35 ? 25 : version >= 34 ? 24 : version >= 31 ? 23 : version >= 30 ? 22 : 21);
+  if (version >= 36) validateExecutionApprovalPublicationSchema(database);
   if (version >= 28) {
     if (version < 32) validateLegacyLifecycleProjectionLedgerSchema(database);
     else validateLifecycleProjectionLedgerSchema(database);

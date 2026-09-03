@@ -12,6 +12,7 @@ import {
 
 import { db } from "./client.js";
 import {
+  execution_approval_publications,
   execution_delegation_decisions,
   execution_delegation_grants,
 } from "./schema.js";
@@ -66,6 +67,15 @@ export class ExecutionDelegationDecisionTerminalError extends Error {
   constructor() {
     super("The execution delegation is no longer active.");
     this.name = "ExecutionDelegationDecisionTerminalError";
+  }
+}
+
+export class ExecutionDelegationDecisionPublicationClosedError extends Error {
+  readonly code = "execution_delegation_decision_publication_closed";
+
+  constructor() {
+    super("The host no longer considers this approval publication actionable.");
+    this.name = "ExecutionDelegationDecisionPublicationClosedError";
   }
 }
 
@@ -170,6 +180,26 @@ export async function admitExecutionDelegationDecision(
       ))
       .limit(1);
     if (priorDecision) throw new ExecutionDelegationDecisionConflictError();
+
+    const [publication] = await tx
+      .select({
+        closed_at: execution_approval_publications.closed_at,
+        request_sha256: execution_approval_publications.request_sha256,
+        projection_sha256: execution_approval_publications.projection_sha256,
+      })
+      .from(execution_approval_publications)
+      .where(and(
+        eq(execution_approval_publications.delegation_instance_id, input.delegation_instance_id),
+        eq(execution_approval_publications.delegation_revision, input.expected_revision),
+        eq(execution_approval_publications.request_id, input.request_id),
+        eq(execution_approval_publications.request_version, input.request_version),
+      ))
+      .limit(1);
+    if (publication?.closed_at) throw new ExecutionDelegationDecisionPublicationClosedError();
+    if (publication && (publication.request_sha256 !== input.request_sha256
+      || publication.projection_sha256 !== input.projection_sha256)) {
+      throw new ExecutionDelegationDecisionConflictError();
+    }
 
     // Capture wall time only after every contended authority lock. A request
     // that waited past grant expiry must not commit against a stale timestamp.

@@ -13,6 +13,7 @@ import {
   ExecutionDelegationDecisionAuthorityError,
   ExecutionDelegationDecisionConflictError,
   ExecutionDelegationDecisionIdempotencyConflictError,
+  ExecutionDelegationDecisionPublicationClosedError,
   ExecutionDelegationDecisionRevisionConflictError,
   ExecutionDelegationDecisionTerminalError,
   getExecutionDelegationDecisionForHost,
@@ -23,7 +24,10 @@ import {
 } from "../db.js";
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
 import { isExecutionDelegationFeatureEnabled } from "../../shared/agent-session-bearer.js";
-import { queueExecutionDelegationInvalidation } from "../server/events.js";
+import {
+  queueAgentApprovalInvalidation,
+  queueExecutionDelegationInvalidation,
+} from "../server/events.js";
 import {
   executionDelegationInventoryQuery,
   requiredExecutionDelegationString,
@@ -121,6 +125,7 @@ function notFound(res: Response): void {
 function respondMutationError(res: Response, error: unknown): void {
   if (error instanceof ExecutionDelegationDecisionIdempotencyConflictError
     || error instanceof ExecutionDelegationDecisionConflictError
+    || error instanceof ExecutionDelegationDecisionPublicationClosedError
     || error instanceof ExecutionDelegationDecisionRevisionConflictError
     || error instanceof ExecutionDelegationDecisionTerminalError) {
     res.status(409).json({ error: "Execution delegation decision was not recorded.", code: error.code });
@@ -242,7 +247,8 @@ export function registerExecutionDelegationDecisionRoutes(app: Express, deps: Ro
           actor_account_id: actorAccountId,
           delegation_instance_id: delegationInstanceId,
         });
-        if (result.status === "created") queueExecutionDelegationInvalidation(result.room_id);
+        queueExecutionDelegationInvalidation(result.room_id);
+        queueAgentApprovalInvalidation(result.room_id);
         res.status(result.status === "created" ? 201 : 200).json({
           status: result.status,
           decision: publicDecision(result.decision),

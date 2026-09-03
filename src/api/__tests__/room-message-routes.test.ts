@@ -51,6 +51,7 @@ function createDeps() {
     rentalActivityEvents: new EventEmitter(),
     messageInfoEvents: new EventEmitter(),
     agentWorkEvents: new EventEmitter(),
+    agentApprovalEvents: new EventEmitter(),
     executionDelegationEvents: new EventEmitter(),
   };
 
@@ -182,6 +183,22 @@ test("room streams negotiate pointer-only resource invalidations without strandi
   assert.match(legacyOutput, new RegExp(`id: ${negotiatedCursor}`));
   assert.match(legacyOutput, new RegExp(`"event_cursor":"${negotiatedCursor}"`));
   assert.match(legacyOutput, /"gap":false/);
+
+  negotiated.res.writes.length = 0;
+  legacy.res.writes.length = 0;
+  deps.agentApprovalEvents.emit("agent_approval:invalidated", { projectId: "room_1" });
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const approvalOutput = negotiated.res.writes.join("");
+  assert.match(approvalOutput, /event: resource_invalidation_v1/);
+  assert.match(approvalOutput, /"room_id":"room_1","resource":"agent_approval"/);
+  assert.doesNotMatch(approvalOutput, /request_id|projection|decision|agent_key|revision/);
+
+  const legacyApprovalOutput = legacy.res.writes.join("");
+  assert.doesNotMatch(legacyApprovalOutput, /resource_invalidation_v1|agent_approval/);
+  assert.match(legacyApprovalOutput, /event: room_sync/);
+  assert.match(legacyApprovalOutput, /"gap":false/);
 
   negotiated.res.writes.length = 0;
   legacy.res.writes.length = 0;
