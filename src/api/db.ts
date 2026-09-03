@@ -15,7 +15,14 @@ export type { ReasoningSession, ReasoningSessionUpdate, Message, MessageAccountA
 export type { TaskLeaseKind, TaskLeaseStatus, TaskLockScope, TaskLockReason, CoordinationDecision, Task, TaskStalePromptState, TaskLease, TaskWorkLeaseCreationInput } from "./db/types.js";
 export type { TaskLock, StaleTaskPromptMute, CoordinationEvent, TaskOwnershipState, TaskWorkLeaseActionConflict, GitHubRoomEvent, GitHubRoomEventMetadata, TaskGitHubArtifactStatus } from "./db/types.js";
 export type { WorkflowEffect, WorkflowEffectKind, WorkflowEffectRow, WorkflowEffectState } from "./db/types.js";
-export type { ExecutionDelegationCategory, ExecutionDelegationGrant, ExecutionDelegationRiskCeiling } from "./db/types.js";
+export type {
+  ExecutionDelegationCategory,
+  ExecutionDelegationDecision,
+  ExecutionDelegationDecisionChoice,
+  ExecutionDelegationDecisionForHost,
+  ExecutionDelegationGrant,
+  ExecutionDelegationRiskCeiling,
+} from "./db/types.js";
 export { createProject, createProjectWithName, getOrCreateProjectByName, getOrCreateCanonicalRoom, getOrCreateGitChildRoom, getGitChildRoom, getProjectByName, getAllProjects, getProjectByCode, getRoomAlias } from "./db/rooms.js";
 export { getProjectById, rotateProjectCode, updateProjectDisplayName, createRoomAlias } from "./db/rooms.js";
 export { getFocusRoomsForParent, getActiveFocusRoomForTask, getFocusRoomByKey, activateFocusRoom, archiveFocusRoom, claimGitRefFocusRoomLifecycleEvent, concludeFocusRoom, updateFocusRoomSettings, createFocusRoomFromIntent, createFocusRoomForTask } from "./db/focus-rooms.js";
@@ -86,6 +93,16 @@ export {
   listExecutionDelegationIdsForHost,
   revokeExecutionDelegationGrant,
 } from "./db/execution-delegation-grants.js";
+export {
+  ExecutionDelegationDecisionAuthorityError,
+  ExecutionDelegationDecisionConflictError,
+  ExecutionDelegationDecisionIdempotencyConflictError,
+  ExecutionDelegationDecisionRevisionConflictError,
+  ExecutionDelegationDecisionTerminalError,
+  admitExecutionDelegationDecision,
+  getExecutionDelegationDecisionForHost,
+  listExecutionDelegationDecisionIdsForHost,
+} from "./db/execution-delegation-decisions.js";
 export {
   assertConsumeBoardIntentApproval,
   BoardIntentApprovalConsumptionError,
