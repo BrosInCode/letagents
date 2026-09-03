@@ -20,6 +20,7 @@ import { DeliveryCutoverExecutionCoordinator } from "./delivery-cutover-executio
 import { schedulerErrorDetail } from "./daemon-error-policy.js";
 import { DaemonStateWatch } from "./daemon-state-watch.js";
 import { ExecutionCaptureCoordinator } from "./execution-capture-coordinator.js";
+import { ExecutionDelegationSyncCoordinator } from "./execution-delegation-sync-coordinator.js";
 import { TypedLifecycleEffectCoordinator } from "./typed-lifecycle-effect-coordinator.js";
 import { unavailableLifecycleProjectionDiagnostics } from "./lifecycle-projection-ledger.js";
 import { DesiredStateCoordinator } from "./desired-state-coordinator.js";
@@ -117,6 +118,7 @@ export class SupervisorDaemon {
   private readonly workerBindings: WorkerBindingStore;
   private readonly nativeActivity: NativeActivityPublicationCoordinator;
   private readonly workerAuthority: WorkerAuthorityCoordinator;
+  private readonly executionDelegationSync: ExecutionDelegationSyncCoordinator;
   /** Shares the daemon's SQLite durability path; delivery orchestration owns no secrets. */
   private readonly supervisedInbox: SupervisedAgentInboxStore;
   private readonly continuationRepairs: ContinuationRepairCoordinator;
@@ -327,7 +329,7 @@ export class SupervisorDaemon {
       deliveryHttp: this.supervisedDeliveryHttp,
       authority: daemonAuthority,
       concurrency: this.entryConcurrency,
-      serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
+      serializeEntry: (entryId, operation, signal) => this.serializeEntryTick(entryId, operation, signal),
       serializeCursorCheckpoint: (entryId, operation) => this.serializeCursorCheckpoint(entryId, operation),
       manifest: {
         updateEntry: (entryId, update) => this.updateManifestEntry(entryId, update),
@@ -357,6 +359,13 @@ export class SupervisorDaemon {
       nowMs: recoveryClock.nowMs ?? Date.now,
       setTimeout: recoveryClock.setTimeout ?? setTimeout,
       clearTimeout: recoveryClock.clearTimeout ?? clearTimeout,
+    });
+    this.executionDelegationSync = new ExecutionDelegationSyncCoordinator({
+      entries: this.store,
+      authority: this.workerAuthority,
+      remote: this.supervisorGrantHttp,
+      requestConvergence: (entryId) => this.requestConvergence(entryId),
+      diagnostic: (entryId, error) => console.warn("[execution_delegation_sync]", JSON.stringify({ entryId, error: String(error) })),
     });
     this.providerStreams = new ProviderStreamCoordinator({
       liveHandles: this.liveHandles,
@@ -847,7 +856,12 @@ export class SupervisorDaemon {
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
       getCurrentInspectorRoomMove: (input) => this.roomMoves.getCurrentInspector(input),
       getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
-      installHostGrant: this.workerAuthority.installHostGrant.bind(this.workerAuthority),
+      installHostGrant: async (input) => {
+        const status = await this.workerAuthority.installHostGrant(input);
+        if (status.status === "installed") void this.executionDelegationSync.request(input.entry_id)
+          .catch((error) => console.warn("[execution_delegation_sync]", JSON.stringify({ entryId: input.entry_id, error: String(error) })));
+        return status;
+      },
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
@@ -869,6 +883,12 @@ export class SupervisorDaemon {
       setDisplayName: this.setDisplayName.bind(this),
       skipRoomDelivery: this.skipRoomDelivery.bind(this),
       status: this.status.bind(this),
+      syncExecutionDelegations: (input) => {
+        if (input.daemon_generation !== this.singleton.currentGeneration) return { status: "stale" };
+        void this.executionDelegationSync.requestRoom(input.room_id)
+          .catch((error) => console.warn("[execution_delegation_sync]", JSON.stringify({ roomId: input.room_id, error: String(error) })));
+        return { status: "queued" };
+      },
       updateAgentConfiguration: this.updateAgentConfiguration.bind(this),
       updateWorkplaceLiveness: this.updateWorkplaceLiveness.bind(this),
       verifyWorkerSession: this.workerAuthority.verifyWorkerSession.bind(this.workerAuthority),
@@ -953,6 +973,7 @@ export class SupervisorDaemon {
     // or SQLite handle after the caller has observed shutdown.
     this.handoffScheduled = true;
     this.hostApprovals.close();
+    const executionDelegationDrain = this.executionDelegationSync.fenceAndDrain();
     this.roomWorkPublisher?.close();
     this.executionCapture?.close();
     this.supervisedDelivery?.fence();
@@ -960,6 +981,7 @@ export class SupervisorDaemon {
     this.wakeRoomMoveReconciliationWaiters();
     this.notifyStateChanged();
     this.workerRuntimeCustody.destroyAllCredentials();
+    await executionDelegationDrain;
     await this.deliveryCutovers.fenceAndDrain();
     await this.supervisedDelivery?.fenceAndDrain();
     await this.fenceAndDrainRoomMoveReconciliations();
@@ -1130,6 +1152,7 @@ export class SupervisorDaemon {
   private async prepareHandoff(): Promise<void> {
     if (this.handoffTeardownScheduled) return;
     if (!this.handoffScheduled) this.handoffScheduled = true;
+    const executionDelegationDrain = this.executionDelegationSync.fenceAndDrain();
     this.hostApprovals.close();
     this.roomWorkPublisher?.close();
     this.executionCapture?.close();
@@ -1147,6 +1170,7 @@ export class SupervisorDaemon {
       if (bootstrap.phase === "observing") bootstrap.controller.abort();
     }
     await Promise.allSettled([...this.bootstrapOperations].map((bootstrap) => bootstrap.operation));
+    await executionDelegationDrain;
     await this.fenceAndDrainRoomMoveReconciliations();
     // Retire secret custody synchronously with the public handoff fence. The
     // dispatch preflight then proves every native return is journaled before
@@ -1428,8 +1452,8 @@ export class SupervisorDaemon {
     return coordinator.reconcile(entryId, input, watchdogThresholdMs, actor);
   }
 
-  private async serializeEntryTick<T>(entryId: string, operation: () => Promise<T>): Promise<T> {
-    return this.entryConcurrency.run(entryId, operation);
+  private async serializeEntryTick<T>(entryId: string, operation: () => Promise<T>, signal?: AbortSignal): Promise<T> {
+    return this.entryConcurrency.run(entryId, operation, signal);
   }
 
   /** Provider terminal callback: records an actual exit edge before the next tick. */

@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.128";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.129";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -1364,6 +1364,16 @@ export class SupervisorDaemonClient {
     }, SUPERVISOR_DAEMON_PROTOCOL_VERSION, INSTALL_HOST_GRANT_REQUEST_TIMEOUT_MS);
     if (result.status === "installed" || result.status === "provider_unavailable") return result.status;
     return "stale";
+  }
+
+  /** Queue exact host-side delegation discovery; no authority crosses IPC. */
+  async syncExecutionDelegations(roomId: string): Promise<"queued" | "stale"> {
+    const status = await this.ensureRunning();
+    const result = await this.request<{ status?: unknown }>("supervisor.sync_execution_delegations", {
+      room_id: roomId,
+      daemon_generation: status.generation,
+    });
+    return result.status === "queued" ? "queued" : "stale";
   }
 
   /** Establish a daemon-inbox entry's one-time durable room boundary. */

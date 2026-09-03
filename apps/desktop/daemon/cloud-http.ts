@@ -8,6 +8,7 @@ const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const LIVENESS_GRACE_MS = 30_000;
 export const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
 const CLOUD_REQUEST_TIMEOUT_MS = 20_000;
+const EXECUTION_DELEGATION_INVENTORY_PAGE_SIZE = 100;
 
 export interface SupervisorGrantHttp {
   createWorkerSession(input: {
@@ -29,6 +30,10 @@ export interface SupervisorGrantHttp {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
     delegationInstanceId: string; signal?: AbortSignal;
   }): Promise<RemoteExecutionDelegationRevision>;
+  listExecutionDelegationIds(input: {
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
+    roomId: string; agentKey: string; after: string | null; signal?: AbortSignal;
+  }): Promise<{ delegationInstanceIds: string[]; nextCursor: string | null }>;
 }
 
 export class SupervisorGrantRequestError extends Error {
@@ -129,6 +134,25 @@ function parseExecutionDelegationResponse(
     expiresAtMs: timestamp("expires_at")!,
     revokedAtMs: timestamp("revoked_at", true),
   };
+}
+
+function parseExecutionDelegationInventory(
+  value: unknown,
+): { delegationInstanceIds: string[]; nextCursor: string | null } {
+  const body = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const ids = body?.delegation_instance_ids;
+  const nextCursor = body?.next_cursor;
+  if (!Array.isArray(ids) || ids.length > EXECUTION_DELEGATION_INVENTORY_PAGE_SIZE
+    || ids.some((id) => typeof id !== "string" || !id.trim() || id !== id.trim() || id.length > 512)
+    || new Set(ids).size !== ids.length
+    || ids.some((id, index) => index > 0 && id <= ids[index - 1]!)
+    || (nextCursor !== null && (typeof nextCursor !== "string" || !nextCursor.trim()))
+    || (nextCursor !== null && nextCursor !== ids.at(-1))) {
+    throw new Error("Execution delegation inventory returned an invalid page.");
+  }
+  return { delegationInstanceIds: ids as string[], nextCursor: nextCursor as string | null };
 }
 
 export type RoomWorkPublishInput = {
@@ -315,6 +339,23 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp = {
     );
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Execution delegation read");
     return parseExecutionDelegationResponse(await response.json(), input.delegationInstanceId);
+  },
+  async listExecutionDelegationIds(input) {
+    const apiOrigin = hostGrantApiOrigin(input.apiUrl);
+    const query = new URLSearchParams({ room_id: input.roomId, agent_key: input.agentKey });
+    if (input.after) query.set("after", input.after);
+    const response = await fetch(
+      `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegations?${query}`,
+      {
+        headers: {
+          authorization: `Bearer ${input.supervisorGrant}`,
+          "x-letagents-supervisor-generation": String(input.grantGeneration),
+        },
+        signal: boundedCloudSignal(input.signal),
+      },
+    );
+    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Execution delegation inventory");
+    return parseExecutionDelegationInventory(await response.json());
   },
 };
 
