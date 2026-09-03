@@ -1,5 +1,6 @@
 import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef, type ProviderActionHandle, type ProviderActionPort, type ProviderRoomTurnCheckpointDisposition, type ProviderRoomTurnResult } from "./provider-action-port.js";
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
+import { redactCredentialText } from "./credential-redaction.js";
 
 export type SupervisedIngressAgent = {
   agentId: string;
@@ -1522,7 +1523,9 @@ export class SupervisedAgentDelivery {
       if (turnController.signal.aborted) return;
       if (await this.inbox.nativeFailure(current.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
-        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed");
+        await this.inbox.transition(item.inbox_item_id, "acknowledged_failed", {
+          last_error: redactCredentialText(message, 1_024).value,
+        });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;
       }

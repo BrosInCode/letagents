@@ -1593,10 +1593,13 @@ test("exact native failures settle without replay and preserve terminal winners 
         await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, outcome: "reply", text: "late reply" }), /already accepted/);
         await assert.rejects(() => store.transition(item!.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "spoof" }) }), /overwritten/);
         await assert.rejects(() => store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind: "no_reply" })), /overwritten/);
+        await assert.rejects(() => store.transition(item!.inbox_item_id, "acknowledged_failed", { last_error: null }), /unchanged exact native terminal/);
         if (winner === "stop") {
           assert.equal((await store.cancelInterruptedTurn(item!.inbox_item_id))?.state, "acknowledged_failed");
         } else if (winner === "transition") {
-          assert.equal((await store.transition(item!.inbox_item_id, "acknowledged_failed"))?.state, "acknowledged_failed");
+          const settled = await store.transition(item!.inbox_item_id, "acknowledged_failed", { last_error: "Provider rejected this turn." });
+          assert.equal(settled.state, "acknowledged_failed");
+          assert.equal(settled.last_error, "Provider rejected this turn.");
         }
         await store.close(); store = new SupervisedAgentInboxStore(env.database);
         await store.normalizeStartupRecovery("native");

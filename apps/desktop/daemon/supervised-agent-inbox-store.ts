@@ -515,7 +515,12 @@ export class SupervisedAgentInboxStore {
       }
       if (next === "acknowledged_failed") {
         this.assertCurrentHead(database, item);
-        if (Object.keys(patch).length || !nativeFailure) {
+        const patchKeys = Object.keys(patch);
+        const hasOnlyFailureDetail = patchKeys.length === 1
+          && patchKeys[0] === "last_error"
+          && typeof patch.last_error === "string"
+          && patch.last_error.trim().length > 0;
+        if ((patchKeys.length > 0 && !hasOnlyFailureDetail) || !nativeFailure) {
           throw new Error("Failed settlement requires unchanged exact native terminal evidence.");
         }
       }

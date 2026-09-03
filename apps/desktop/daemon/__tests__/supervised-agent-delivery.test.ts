@@ -3701,7 +3701,7 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
           evidence: "transcript",
         });
         throw Object.assign(
-          new Error("Open Model request failed at the model provider (HTTP 404): expired model."),
+          new Error("Open Model request failed at the model provider (HTTP 404): expired model. token=super-secret-provider-token"),
           { roomTurnRecoveryOutcome: "terminal_failure" as const },
         );
       }, async () => {
@@ -3734,6 +3734,11 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
       text: null,
       evidence: "transcript",
     });
+    assert.equal(
+      receipts[0]!.last_error,
+      "Open Model request failed at the model provider (HTTP 404): expired model. token=[REDACTED]",
+      "the failed receipt retains an actionable, redacted provider explanation",
+    );
     assert.equal(
       receipts[0]?.timeline.some((event) => event.phase === "retry_scheduled"),
       false,
