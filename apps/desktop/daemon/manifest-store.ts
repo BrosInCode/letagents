@@ -9,6 +9,13 @@ import {
   type AdmitOperationalExecutionApproval, type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
+import {
+  reconcileExecutionDelegation,
+  validateExecutionDelegation,
+  type LocalExecutionDelegation,
+  type ReconcileExecutionDelegation,
+  type ValidateExecutionDelegation,
+} from "./execution-delegation-journal.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -497,6 +504,32 @@ export class ManifestStore {
     if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
     const snapshot = structuredClone(input);
     return this.writeOperationalJournal(db => loseExecutionApproval(db, snapshot), commitFence);
+  }
+
+  /** Persist one server revision only while exact process-held host authority remains current. */
+  async reconcileExecutionDelegation(
+    input: ReconcileExecutionDelegation,
+    assertCurrent: () => void,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<{ created: boolean; delegation: LocalExecutionDelegation }> {
+    if (typeof assertCurrent !== "function" || typeof commitFence !== "function") {
+      throw new Error("Execution delegation journal requires current host authority and a daemon ownership commit fence.");
+    }
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal(
+      (db) => {
+        assertCurrent();
+        return reconcileExecutionDelegation(db, snapshot, this.readEntryFromDatabase(db, snapshot.authority.agentId));
+      },
+      commitFence,
+    );
+  }
+
+  /** Durable rows never suffice: callers must supply their current host-authority snapshot. */
+  async validateExecutionDelegation(input: ValidateExecutionDelegation): Promise<LocalExecutionDelegation> {
+    const snapshot = structuredClone(input);
+    const db = await this.getDatabase();
+    return validateExecutionDelegation(db, snapshot, this.readEntryFromDatabase(db, snapshot.agentId));
   }
 
   /** Internal drain admission only. This does not switch modes or interrupt a provider. */

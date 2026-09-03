@@ -109,6 +109,36 @@ function restoreV24Fixture(database: DatabaseSync): void {
   database.exec("DROP TABLE custodial_polling_offers; UPDATE manifest_metadata SET schema_version=24 WHERE singleton=1; PRAGMA user_version=24");
 }
 
+function restoreExecutionDelegationV23Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_local_delegations").get()!.count, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_approval_decisions WHERE source='delegate'").get()!.count, 0);
+  const previous = new DatabaseSync(":memory:");
+  try {
+    previous.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(previous, 23);
+    const definitions = previous.prepare(`SELECT type,sql FROM sqlite_master
+      WHERE tbl_name IN ('execution_local_delegations','execution_approval_decisions') AND sql IS NOT NULL
+      ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END,name`).all();
+    database.exec(`CREATE TEMP TABLE execution_approval_decision_v23_fixture AS
+      SELECT rowid AS original_rowid,* FROM execution_approval_decisions;
+      DROP TABLE execution_approval_decisions;
+      DROP TABLE execution_local_delegations`);
+    for (const row of definitions) database.exec(String(row.sql));
+    database.exec(`INSERT INTO execution_approval_decisions(
+      rowid,decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,
+      request_delegatable,request_sha256,decision,source,actor_id,delegation_instance_id,
+      delegation_revision,dispatch_state,dispatch_id,application_certainty,decided_at_ms,
+      dispatch_started_at_ms,resolved_at_ms,projection_sha256)
+    SELECT original_rowid,decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,
+      request_delegatable,request_sha256,decision,source,actor_id,delegation_instance_id,
+      delegation_revision,dispatch_state,dispatch_id,application_certainty,decided_at_ms,
+      dispatch_started_at_ms,resolved_at_ms,projection_sha256
+    FROM execution_approval_decision_v23_fixture;
+    DROP TABLE execution_approval_decision_v23_fixture`);
+  } finally { previous.close(); }
+  validateExecutionStorageSchema(database, 23);
+}
+
 function restoreV25Fixture(database: DatabaseSync): void {
   restoreV26Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM custodial_polling_activations").get()!.count, 0);
@@ -126,6 +156,7 @@ function restoreV26Fixture(database: DatabaseSync): void {
 }
 
 function restoreV27Fixture(database: DatabaseSync): void {
+  restoreExecutionDelegationV23Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM lifecycle_projection_pairs").get()!.count, 0);
   database.exec(`DROP TABLE lifecycle_projection_pairs;
     DROP TABLE lifecycle_projection_lanes;
@@ -136,11 +167,13 @@ function restoreV27Fixture(database: DatabaseSync): void {
 }
 
 function restoreV28Fixture(database: DatabaseSync): void {
+  restoreExecutionDelegationV23Fixture(database);
   restoreLifecycleProjectionV1Fixture(database);
   database.exec("DROP TABLE execution_lifecycle_effects; UPDATE manifest_metadata SET schema_version=28 WHERE singleton=1; PRAGMA user_version=28");
 }
 
 function restoreV30Fixture(database: DatabaseSync): void {
+  restoreExecutionDelegationV23Fixture(database);
   restoreLifecycleProjectionV1Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_lifecycle_effects").get()!.count, 0);
   database.exec("DROP TABLE execution_lifecycle_effects");
@@ -165,12 +198,19 @@ function restoreLifecycleProjectionV1Fixture(database: DatabaseSync): void {
 }
 
 function restoreV31Fixture(database: DatabaseSync): void {
+  restoreExecutionDelegationV23Fixture(database);
   restoreLifecycleProjectionV1Fixture(database);
   database.exec("UPDATE manifest_metadata SET schema_version=31 WHERE singleton=1; PRAGMA user_version=31");
 }
 
 function restoreV32Fixture(database: DatabaseSync): void {
+  restoreExecutionDelegationV23Fixture(database);
   database.exec("UPDATE manifest_metadata SET schema_version=32 WHERE singleton=1; PRAGMA user_version=32");
+}
+
+function restoreV33Fixture(database: DatabaseSync): void {
+  restoreExecutionDelegationV23Fixture(database);
+  database.exec("UPDATE manifest_metadata SET schema_version=33 WHERE singleton=1; PRAGMA user_version=33");
 }
 
 function seedLifecycleProjectionV1Evidence(database: DatabaseSync): void {
@@ -320,7 +360,9 @@ function typedRows(database: DatabaseSync): Record<string, unknown> {
   return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name NOT IN ('execution_observers','execution_observer_sources','execution_lifecycle_effects') ORDER BY name").all() as Row[])
     .map(({ name }) => {
       const columns = (database.prepare(`PRAGMA table_info(${name})`).all() as Row[])
-        .map((column) => String(column.name)).filter((column) => !["turn_outcome", "control_evidence", "projection_sha256"].includes(column));
+        .map((column) => String(column.name)).filter((column) => ![
+          "turn_outcome", "control_evidence", "projection_sha256", "delegation_scope_sha256",
+        ].includes(column));
       return [String(name), database.prepare(`SELECT ${columns.join(",")} FROM ${name} ORDER BY rowid`).all()];
     }));
 }
@@ -440,13 +482,13 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
     (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture
       : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture : version === 24 ? restoreV24Fixture
         : version === 25 ? restoreV25Fixture : version === 26 ? restoreV26Fixture : version === 27 ? restoreV27Fixture
-          : restoreV30Fixture)(env.database);
+          : version === 30 ? restoreV30Fixture : restoreV33Fixture)(env.database);
     seedLegacyEvidence(env.database);
     if (version === 21) { seedV18Evidence(env.database); seedDormantCutovers(env.database); }
     const before = legacyRows(env.database);
@@ -515,6 +557,7 @@ test("v30 marker recovery accepts only a complete exact-current lifecycle journa
       );
     }
     const before = env.database.prepare("SELECT rowid,* FROM execution_lifecycle_effects ORDER BY rowid").all();
+    restoreExecutionDelegationV23Fixture(env.database);
     restoreLifecycleProjectionV1Fixture(env.database);
     env.database.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
     new DaemonStateSchema().createSchema(env.database);
@@ -522,7 +565,7 @@ test("v30 marker recovery accepts only a complete exact-current lifecycle journa
     assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.equal(env.database.prepare("SELECT schema_version FROM manifest_metadata").get()!.schema_version,
       DAEMON_STATE_SCHEMA_VERSION);
-    validateExecutionStorageSchema(env.database, 23);
+    validateExecutionStorageSchema(env.database, 24);
   } finally { await env.cleanup(); }
 });
 
@@ -806,7 +849,7 @@ test("v19 upgrade preserves old outcomes, identity and rowids while advancing te
       INSERT INTO supervised_agent_terminal_results VALUES('unreadable','agent','generation','turn-unreadable','unreadable',NULL,'none','{ "original": "unreadable" }','then','now')`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const retainedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','supervised_agent_terminal_results','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','supervised_agent_terminal_results','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
     const unrelatedSchema = retainedSchema();
     const rowids = env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all();
     new DaemonStateSchema().createSchema(env.database);
@@ -906,7 +949,7 @@ test("v21 adds unknown source provenance without resetting cursors or rebuilding
     const observer = env.database.prepare("SELECT rowid,* FROM execution_observers").get();
     const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='execution_observers'").get();
     const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
     const schema = unrelatedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
@@ -964,7 +1007,7 @@ test("v22 preserves dormant cutover rows, rowids and legacy uncertainty without 
     const rows = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
     const oldColumns = Object.keys(rows[0]!);
     const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_cutover_v2','execution_lifecycle_effects','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
     const schema = unrelatedSchema();
     new DaemonStateSchema().createSchema(env.database);
     const migrated = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
@@ -1020,7 +1063,7 @@ test("v23 adds nullable polling custody without reinterpreting modes, cutovers o
     restoreV22Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedDormantCutovers(env.database);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const configurations = env.database.prepare("SELECT rowid,* FROM agent_configurations ORDER BY rowid").all();
-    const unrelatedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_lifecycle_effects','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const unrelatedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = unrelatedSchema();
     const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='agent_configurations'").get();
     new DaemonStateSchema().createSchema(env.database);
@@ -1032,7 +1075,7 @@ test("v23 adds nullable polling custody without reinterpreting modes, cutovers o
     assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.deepEqual({ ...env.database.prepare("SELECT generation,schema_version FROM manifest_metadata").get() },
       { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION });
-    validateExecutionStorageSchema(env.database, 21);
+    validateExecutionStorageSchema(env.database);
     assert.throws(() => env.database.exec("UPDATE agent_configurations SET polling_contract='custodial_polling_v1' WHERE agent_id='agent'"), /CHECK/);
     assert.throws(() => env.database.exec("UPDATE agent_configurations SET polling_contract='invented' WHERE agent_id='dispatching-agent'"), /CHECK/);
     env.database.exec("UPDATE agent_configurations SET polling_contract='custodial_polling_v1' WHERE agent_id='dispatching-agent'");
@@ -1097,7 +1140,7 @@ test("v24 creates an empty activation journal and nullable launch receipt withou
       (agent_id,observed_state,workspace_path_present,work_attempt_id_present,provider_ref_present,provider_process_identity_present,
        workplace_liveness_present,native_liveness_present,activity_present) VALUES('agent','stopped',0,0,0,0,0,0,0)`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','custodial_polling_activations','custodial_polling_offers','runtime_deployments','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','runtime_deployments','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = retainedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
@@ -1105,7 +1148,7 @@ test("v24 creates an empty activation journal and nullable launch receipt withou
     assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM custodial_polling_activations").get()!.n, 0);
     assert.equal(env.database.prepare("SELECT COUNT(*) AS n FROM runtime_deployments WHERE custodial_launch_agent_session_id IS NOT NULL").get()!.n, 0);
     assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    validateExecutionStorageSchema(env.database, 21); validatePollingActivationSchema(env.database);
+    validateExecutionStorageSchema(env.database); validatePollingActivationSchema(env.database);
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_list(custodial_polling_activations)").all(), [],
       "the journal cannot be erased by compatibility manifest replacement");
     const columns = env.database.prepare("PRAGMA table_info(custodial_polling_activations)").all().map(row => String(row.name));
@@ -1181,7 +1224,7 @@ test("v25 adds empty offer storage without manufacturing coverage for old activa
     seedPollingActivations(env.database);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database),
       activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all() };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = retainedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database),
@@ -1192,7 +1235,7 @@ test("v25 adds empty offer storage without manufacturing coverage for old activa
     assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
     assert.deepEqual({ ...env.database.prepare("SELECT generation,schema_version FROM manifest_metadata").get() },
       { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION });
-    validatePollingOfferSchema(env.database); validatePollingActivationSchema(env.database); validateExecutionStorageSchema(env.database, 21);
+    validatePollingOfferSchema(env.database); validatePollingActivationSchema(env.database); validateExecutionStorageSchema(env.database);
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
     const columns = env.database.prepare("PRAGMA table_info(custodial_polling_offers)").all().map(row => String(row.name));
     assert.ok(columns.every(column => !/token|bearer|secret|output|prompt/.test(column)));
@@ -1284,7 +1327,7 @@ for (const interrupted of [false, true]) test(`v26 preserves every v25 offer, AC
     const activations = env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all();
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
       schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = retainedSchema();
     const activationRoot = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='custodial_polling_activations'").get();
     if (interrupted) {
@@ -1330,11 +1373,11 @@ test("v27 adds empty room publication provenance without changing retained autho
     const retained = () => ({ legacy: legacyRows(env.database), typed: typedRows(env.database),
       activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(),
       offers: env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all() });
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all() });
     const before = retained();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(retained(), before);
-    validateRoomWorkPublicationSchema(env.database); validateExecutionStorageSchema(env.database, 21);
+    validateRoomWorkPublicationSchema(env.database); validateExecutionStorageSchema(env.database);
     assert.deepEqual(env.database.prepare("SELECT * FROM room_work_publications").all(), [], "migration never infers publisher custody for old work");
     assert.deepEqual(env.database.prepare("PRAGMA foreign_key_list(room_work_publications)").all(), [], "publication provenance must outlive operational graph replacement");
     assert.equal(env.database.prepare("PRAGMA user_version").get()!.user_version, DAEMON_STATE_SCHEMA_VERSION);
@@ -1375,7 +1418,7 @@ test("v28 adds empty lifecycle comparison evidence without changing retained aut
       offers: env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(),
       publications: env.database.prepare("SELECT rowid,* FROM room_work_publications ORDER BY rowid").all(),
       schema: env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-        WHERE tbl_name NOT IN ('execution_lifecycle_effects','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals')
+        WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals')
         ORDER BY type,name`).all(),
     });
     const before = retained();
@@ -1698,6 +1741,92 @@ test("v33 Codex retirement and schema markers roll back atomically", async () =>
     assert.deepEqual({ versions: versionPair(env.database), rows: legacyRows(env.database) }, before);
     new DaemonStateSchema().createSchema(env.database);
     assert.equal(env.database.prepare("SELECT desired_state FROM agent_launch_intents WHERE agent_id='codex-rollback'").get()!.desired_state, "stopped");
+  } finally { await env.cleanup(); }
+});
+
+test("v34 preserves host decisions while rebuilding dormant delegation authority", async () => {
+  const env = await fixture();
+  try {
+    seedV18Evidence(env.database);
+    restoreV33Fixture(env.database);
+    const before = env.database.prepare(`SELECT rowid,* FROM execution_approval_decisions
+      ORDER BY rowid`).all();
+
+    new DaemonStateSchema().createSchema(env.database);
+
+    assert.deepEqual(env.database.prepare(`SELECT rowid,decision_id,request_id,request_version,agent_id,room_id,
+      execution_generation_id,turn_id,request_delegatable,request_sha256,decision,source,actor_id,
+      delegation_instance_id,delegation_revision,dispatch_state,dispatch_id,application_certainty,
+      decided_at_ms,dispatch_started_at_ms,resolved_at_ms,projection_sha256
+      FROM execution_approval_decisions ORDER BY rowid`).all(), before);
+    assert.equal(env.database.prepare("SELECT delegation_scope_sha256 FROM execution_approval_decisions").get()!
+      .delegation_scope_sha256, null);
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    validateExecutionStorageSchema(env.database);
+    assert.deepEqual(versionPair(env.database).map((row) => ({ ...(row as Row) })), [
+      { user_version: DAEMON_STATE_SCHEMA_VERSION },
+      { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION },
+    ]);
+  } finally { await env.cleanup(); }
+});
+
+test("v34 refuses unverifiable dormant delegation authority and rolls back the whole migration", async () => {
+  const env = await fixture();
+  try {
+    restoreV33Fixture(env.database);
+    env.database.prepare(`INSERT INTO execution_local_delegations(
+      delegation_instance_id,revision,owner_id,host_id,installation_id,scope_key,agent_id,room_id,
+      approver_id,category,risk_ceiling,grant_id,scope_sha256,created_at_ms,expires_at_ms)
+      VALUES('delegation',1,'owner','host','installation','scope','agent','old-room','approver',
+        'file_change','low','grant',?,100,200)`).run("a".repeat(64));
+    const before = {
+      versions: versionPair(env.database),
+      rows: env.database.prepare("SELECT rowid,* FROM execution_local_delegations").all(),
+      schema: env.database.prepare(`SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master
+        ORDER BY type,name`).all(),
+    };
+
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database),
+      /Unverifiable dormant execution delegation authority/);
+
+    assert.deepEqual({
+      versions: versionPair(env.database),
+      rows: env.database.prepare("SELECT rowid,* FROM execution_local_delegations").all(),
+      schema: env.database.prepare(`SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master
+        ORDER BY type,name`).all(),
+    }, before);
+    validateExecutionStorageSchema(env.database, 23);
+  } finally { await env.cleanup(); }
+});
+
+test("v34 refuses unknown dependencies on the rebuilt delegation graph", async () => {
+  const env = await fixture();
+  try {
+    restoreV33Fixture(env.database);
+    env.database.exec(`CREATE TABLE unexpected_delegation_reference(
+      delegation_instance_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      agent_id TEXT NOT NULL,
+      room_id TEXT NOT NULL,
+      approver_id TEXT NOT NULL,
+      FOREIGN KEY(delegation_instance_id,revision,agent_id,room_id,approver_id)
+        REFERENCES execution_local_delegations(delegation_instance_id,revision,agent_id,room_id,approver_id)
+    ) STRICT`);
+    const before = {
+      versions: versionPair(env.database),
+      schema: env.database.prepare(`SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master
+        ORDER BY type,name`).all(),
+    };
+
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database),
+      /Unexpected execution delegation storage dependency/);
+
+    assert.deepEqual({
+      versions: versionPair(env.database),
+      schema: env.database.prepare(`SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master
+        ORDER BY type,name`).all(),
+    }, before);
+    validateExecutionStorageSchema(env.database, 23);
   } finally { await env.cleanup(); }
 });
 

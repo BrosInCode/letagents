@@ -15,6 +15,11 @@ import type { DaemonManifest, DaemonManifestEntry, DaemonProviderConnection, Leg
 import { WorkerBindingStore } from "../worker-binding-store.js";
 import { matchesPollingActivationRuntime, POLLING_OFFER_REPLAY_WINDOW, recordPollingOffer, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import type { AdmitExecutionApproval, ApprovalAuthority, ApprovalReference } from "../execution-approval-journal.js";
+import type {
+  ExecutionDelegationHostAuthority,
+  RemoteExecutionDelegationRevision,
+  ValidateExecutionDelegation,
+} from "../execution-delegation-journal.js";
 
 import { executionRuntimeStorageIdentity, executionStorageIdentity, ExecutionShadowStore } from "../execution-shadow-store.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
@@ -41,6 +46,21 @@ function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync):
     WHERE type='table' AND name IN ('lifecycle_projection_lanes','lifecycle_projection_totals')`).run(",'open-model'");
   database.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
   validateLegacyLifecycleProjectionLedgerSchema(database);
+}
+
+function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 0);
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
+  const previous = new DatabaseSync(":memory:");
+  try {
+    applyExecutionStorageSchema(previous, 23);
+    const definitions = previous.prepare(`SELECT sql FROM sqlite_master
+      WHERE tbl_name IN ('execution_local_delegations','execution_approval_decisions') AND sql IS NOT NULL
+      ORDER BY CASE type WHEN 'table' THEN 0 WHEN 'index' THEN 1 ELSE 2 END,name`).all();
+    database.exec("DROP TABLE execution_approval_decisions; DROP TABLE execution_local_delegations");
+    for (const row of definitions) database.exec(String(row.sql));
+  } finally { previous.close(); }
+  validateExecutionStorageSchema(database, 23);
 }
 
 test("provider birth collisions cannot relabel frozen lifecycle authority", async () => {
@@ -462,6 +482,7 @@ test("v29 lifecycle effect migration rolls back its journal and version markers 
     await initialized.close();
     const historical = new DatabaseSync(env.databasePath);
     restoreThreeProviderLifecycleProjectionFixture(historical);
+    restoreEmptyExecutionDelegationV23Fixture(historical);
     historical.exec(`DROP TABLE execution_lifecycle_effects;
       UPDATE manifest_metadata SET schema_version=29 WHERE singleton=1;
       PRAGMA user_version=29`);
@@ -499,6 +520,7 @@ test("v30 runtime-failure effect migration rolls back its schema and version mar
     await initialized.close();
     const historical = new DatabaseSync(env.databasePath);
     restoreThreeProviderLifecycleProjectionFixture(historical);
+    restoreEmptyExecutionDelegationV23Fixture(historical);
     historical.exec("DROP TABLE execution_lifecycle_effects");
     applyExecutionStorageSchema(historical, 22);
     historical.exec("UPDATE manifest_metadata SET schema_version=30 WHERE singleton=1; PRAGMA user_version=30");
@@ -521,7 +543,7 @@ test("v30 runtime-failure effect migration rolls back its schema and version mar
     await migrated.close();
     const inspection = new DatabaseSync(env.databasePath);
     assert.equal(inspection.prepare("PRAGMA user_version").get()?.user_version, DAEMON_STATE_SCHEMA_VERSION);
-    validateExecutionStorageSchema(inspection, 23);
+    validateExecutionStorageSchema(inspection);
     inspection.close();
   } finally {
     await initialized.close().catch(() => undefined);
@@ -567,6 +589,399 @@ function approvalJournalRequest(requestId = "request", nativeRequestId: string |
   };
   return { expected, input: { ...expected, kind: "command", risk: "high", recoveryBoundary: "connection", createdAtMs: 100, expiresAtMs: 200 } };
 }
+
+function localDelegationAuthority(overrides: Partial<ExecutionDelegationHostAuthority> = {}): ExecutionDelegationHostAuthority {
+  return {
+    agentId: "agent",
+    roomId: "room",
+    agentKey: "EmmyMay/agent",
+    grantId: "host-grant-1",
+    grantGeneration: 1,
+    daemonGeneration: 1,
+    controlEpoch: 0,
+    hostId: "host-1",
+    installationId: "installation-1",
+    ownerAccountId: "owner-1",
+    scopeKey: "owner",
+    expiresAtMs: 1_000,
+    ...overrides,
+  };
+}
+
+function localDelegationRevision(overrides: Partial<RemoteExecutionDelegationRevision> = {}): RemoteExecutionDelegationRevision {
+  return {
+    delegationInstanceId: "delegation-1",
+    revision: 1,
+    ownerAccountId: "owner-1",
+    roomId: "room",
+    agentKey: "EmmyMay/agent",
+    approverAccountId: "approver-1",
+    category: "file_change",
+    riskCeiling: "low",
+    scopeSha256: "a".repeat(64),
+    createdAtMs: 100,
+    expiresAtMs: 300,
+    revokedAtMs: null,
+    ...overrides,
+  };
+}
+
+function localDelegationInput(
+  delegation: RemoteExecutionDelegationRevision,
+  authority: ExecutionDelegationHostAuthority,
+  atMs: number,
+) {
+  return { delegation, authority, atMs };
+}
+
+function localDelegationValidation(
+  authority: ExecutionDelegationHostAuthority,
+  overrides: Partial<ValidateExecutionDelegation> = {},
+): ValidateExecutionDelegation {
+  return {
+    delegationInstanceId: "delegation-1",
+    revision: 1,
+    agentId: "agent",
+    approverAccountId: "approver-1",
+    category: "file_change",
+    risk: "low",
+    scopeSha256: "a".repeat(64),
+    authority,
+    atMs: 150,
+    ...overrides,
+  };
+}
+
+async function seedLocalDelegationManifest(store: ManifestStore): Promise<void> {
+  await store.write(0, [{
+    ...entry,
+    id: "agent",
+    room_id: "room",
+    condition: "none",
+    turn_control: undefined,
+    reconciliation: undefined,
+    reconciliation_notices: undefined,
+  }]);
+}
+
+test("local delegation journal admits exact monotonic revisions and current grant rotation", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath); const other = new ManifestStore(env.databasePath);
+  try {
+    await seedLocalDelegationManifest(store); await other.load();
+    const authority = localDelegationAuthority();
+    const revision = localDelegationRevision();
+    const input = localDelegationInput(revision, authority, 120);
+    const competing = await Promise.all([
+      store.reconcileExecutionDelegation(input, () => {}, async commit => commit()),
+      other.reconcileExecutionDelegation(input, () => {}, async commit => commit()),
+    ]);
+    assert.deepEqual(competing.map(result => result.created).sort(), [false, true]);
+    assert.deepEqual(competing[0]!.delegation, competing[1]!.delegation);
+
+    const secondAuthority = localDelegationAuthority({ grantId: "host-grant-2" });
+    const secondRevision = localDelegationRevision({
+      revision: 2,
+      scopeSha256: "b".repeat(64),
+      createdAtMs: 160,
+      expiresAtMs: 500,
+    });
+    const revised = await store.reconcileExecutionDelegation(
+      localDelegationInput(secondRevision, secondAuthority, 170),
+      () => {},
+      async commit => commit(),
+    );
+    assert.equal(revised.created, true);
+    assert.equal(revised.delegation.grantId, "host-grant-2");
+    assert.equal(revised.delegation.scopeSha256, secondRevision.scopeSha256);
+
+    const currentAuthority = localDelegationAuthority({ grantId: "host-grant-3" });
+    const replayed = await store.reconcileExecutionDelegation(
+      localDelegationInput(secondRevision, currentAuthority, 180),
+      () => {},
+      async commit => commit(),
+    );
+    assert.equal(replayed.created, false);
+    assert.equal(replayed.delegation.grantId, "host-grant-3", "stable grant rotation updates no delegation scope");
+    assert.deepEqual(await store.validateExecutionDelegation(localDelegationValidation(currentAuthority, {
+      revision: 2,
+      scopeSha256: secondRevision.scopeSha256,
+      atMs: 190,
+    })), replayed.delegation);
+    await assert.rejects(
+      store.validateExecutionDelegation(localDelegationValidation(currentAuthority, { revision: 1, atMs: 190 })),
+      { code: "revision_conflict" },
+    );
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput(revision, currentAuthority, 190),
+      () => {},
+      async commit => commit(),
+    ), { code: "revision_conflict" });
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput({ ...revision, revokedAtMs: 190 }, currentAuthority, 190),
+      () => {},
+      async commit => commit(),
+    ), { code: "revision_conflict" });
+
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 2);
+      assert.equal(database.prepare("SELECT grant_id FROM execution_local_delegations WHERE revision=1").get()!.grant_id, "host-grant-1");
+      assert.deepEqual(database.prepare("PRAGMA foreign_key_check").all(), []);
+    } finally { database.close(); }
+  } finally { await other.close(); await store.close(); await env.cleanup(); }
+});
+
+test("local delegation journal refreshes mutable server aliases without changing admitted authority", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  try {
+    await seedLocalDelegationManifest(store);
+    const authority = localDelegationAuthority();
+    const revision = localDelegationRevision();
+    await store.reconcileExecutionDelegation(
+      localDelegationInput(revision, authority, 120),
+      () => {},
+      async commit => commit(),
+    );
+
+    const renamedAuthority = authority;
+    const renamedRevision = {
+      ...revision,
+      roomId: "renamed-room",
+      agentKey: "EmmyMay/renamed-agent",
+    };
+    const replayed = await store.reconcileExecutionDelegation(
+      localDelegationInput(renamedRevision, renamedAuthority, 130),
+      () => {},
+      async commit => commit(),
+    );
+
+    assert.equal(replayed.created, false);
+    assert.equal(replayed.delegation.roomId, "renamed-room");
+    assert.equal(replayed.delegation.agentKey, "EmmyMay/renamed-agent");
+    assert.equal(replayed.delegation.scopeSha256, revision.scopeSha256);
+    assert.deepEqual(await store.validateExecutionDelegation(localDelegationValidation(renamedAuthority, {
+      atMs: 140,
+    })), replayed.delegation);
+    await assert.rejects(store.validateExecutionDelegation(localDelegationValidation(renamedAuthority, {
+      scopeSha256: "b".repeat(64),
+      atMs: 140,
+    })), { code: "authority_mismatch" });
+
+    const database = new DatabaseSync(env.databasePath);
+    try {
+      assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 1);
+      assert.deepEqual({ ...database.prepare(`SELECT room_id,agent_key,scope_sha256
+        FROM execution_local_delegations`).get() }, {
+        room_id: "renamed-room",
+        agent_key: "EmmyMay/renamed-agent",
+        scope_sha256: revision.scopeSha256,
+      });
+    } finally { database.close(); }
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("local delegation journal checkpoints exact latest revisions across offline gaps", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  try {
+    await seedLocalDelegationManifest(store);
+    const authority = localDelegationAuthority();
+    const initialLatest = localDelegationRevision({
+      delegationInstanceId: "initial-gap",
+      revision: 3,
+      approverAccountId: "approver-gap-1",
+      createdAtMs: 120,
+      expiresAtMs: 300,
+    });
+    assert.equal((await store.reconcileExecutionDelegation(
+      localDelegationInput(initialLatest, authority, 130),
+      () => {},
+      async commit => commit(),
+    )).created, true);
+
+    const first = localDelegationRevision({
+      delegationInstanceId: "later-gap",
+      approverAccountId: "approver-gap-2",
+      expiresAtMs: 140,
+    });
+    await store.reconcileExecutionDelegation(
+      localDelegationInput(first, authority, 120),
+      () => {},
+      async commit => commit(),
+    );
+    const terminalLatest = {
+      ...first,
+      revision: 3,
+      createdAtMs: 180,
+      expiresAtMs: 400,
+      revokedAtMs: 190,
+    };
+    assert.equal((await store.reconcileExecutionDelegation(
+      localDelegationInput(terminalLatest, authority, 200),
+      () => {},
+      async commit => commit(),
+    )).created, true, "the exact current terminal revision settles skipped retired history");
+    await assert.rejects(store.validateExecutionDelegation(localDelegationValidation(authority, {
+      delegationInstanceId: "later-gap",
+      revision: 3,
+      approverAccountId: "approver-gap-2",
+      atMs: 200,
+    })), { code: "terminal" });
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput({ ...terminalLatest, revision: 2 }, authority, 200),
+      () => {},
+      async commit => commit(),
+    ), { code: "revision_conflict" });
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput({ ...terminalLatest, expiresAtMs: 401 }, authority, 200),
+      () => {},
+      async commit => commit(),
+    ), { code: "revision_conflict" });
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("local delegation journal rejects remote authority, scope, and exact-decision mismatches", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  try {
+    await seedLocalDelegationManifest(store);
+    const authority = localDelegationAuthority();
+    const revision = localDelegationRevision();
+    await store.reconcileExecutionDelegation(localDelegationInput(revision, authority, 120), () => {}, async commit => commit());
+
+    const foreignOwner = { ...revision, revision: 2, createdAtMs: 160, ownerAccountId: "other-owner" };
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput(foreignOwner, authority, 170),
+      () => {},
+      async commit => commit(),
+    ), { code: "authority_mismatch" });
+
+    for (const changedAuthority of [
+      localDelegationAuthority({ hostId: "other-host" }),
+      localDelegationAuthority({ installationId: "other-installation" }),
+    ]) {
+      const changedRevision = { ...revision, revision: 2, createdAtMs: 160, expiresAtMs: 400 };
+      await assert.rejects(store.reconcileExecutionDelegation(
+        localDelegationInput(changedRevision, changedAuthority, 170),
+        () => {},
+        async commit => commit(),
+      ), { code: "revision_conflict" });
+    }
+
+    await assert.rejects(store.reconcileExecutionDelegation(localDelegationInput(
+      revision,
+      localDelegationAuthority({ expiresAtMs: 120 }),
+      120,
+    ), () => {}, async commit => commit()), { code: "authority_mismatch" });
+    await assert.rejects(store.reconcileExecutionDelegation(localDelegationInput(
+      { ...revision, expiresAtMs: 120 + 30 * 24 * 60 * 60 * 1_000 + 1 },
+      authority,
+      120,
+    ), () => {}, async commit => commit()), { code: "authority_mismatch" });
+    const day = 24 * 60 * 60 * 1_000;
+    await assert.rejects(store.reconcileExecutionDelegation(localDelegationInput(
+      localDelegationRevision({
+        delegationInstanceId: "aged-long-lifetime",
+        approverAccountId: "approver-long-lifetime",
+        createdAtMs: 0,
+        expiresAtMs: 40 * day,
+      }),
+      localDelegationAuthority({ expiresAtMs: 50 * day }),
+      20 * day,
+    ), () => {}, async commit => commit()), { code: "authority_mismatch" });
+    await assert.rejects(store.reconcileExecutionDelegation({
+      delegation: revision,
+      authority: { ...authority, supervisorGrant: "must-not-enter-the-journal" } as never,
+      atMs: 120,
+    }, () => {}, async commit => commit()), { code: "invalid_input" });
+    await assert.rejects(store.validateExecutionDelegation(localDelegationValidation(authority, {
+      approverAccountId: "other-approver",
+    })), { code: "authority_mismatch" });
+    await assert.rejects(store.validateExecutionDelegation(localDelegationValidation(
+      localDelegationAuthority({ grantId: "unreconciled-rotation" }),
+    )), { code: "authority_mismatch" });
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("local delegation journal makes revocation and chronological expiry terminal without blocking a fresh instance", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  try {
+    await seedLocalDelegationManifest(store);
+    const authority = localDelegationAuthority();
+    const revision = localDelegationRevision({ expiresAtMs: 200 });
+    await store.reconcileExecutionDelegation(localDelegationInput(revision, authority, 120), () => {}, async commit => commit());
+    const overlapping = localDelegationRevision({ delegationInstanceId: "overlapping-instance", createdAtMs: 130, expiresAtMs: 300 });
+    await assert.rejects(store.reconcileExecutionDelegation({
+      ...localDelegationInput(overlapping, authority, 140),
+    }, () => {}, async commit => commit()), { code: "revision_conflict" });
+    const revokedRevision = { ...revision, revokedAtMs: 140 };
+    const revoked = await store.reconcileExecutionDelegation({
+      ...localDelegationInput(revokedRevision, authority, 150),
+    }, () => {}, async commit => commit());
+    assert.equal(revoked.delegation.revokedAtMs, 140);
+    await assert.rejects(store.validateExecutionDelegation(localDelegationValidation(authority, { atMs: 160 })), { code: "terminal" });
+    const afterRevocation = { ...revision, revision: 2, createdAtMs: 160, expiresAtMs: 300, revokedAtMs: null };
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput(afterRevocation, authority, 170),
+      () => {},
+      async commit => commit(),
+    ), { code: "terminal" });
+
+    const expired = localDelegationRevision({ delegationInstanceId: "expired-instance", createdAtMs: 140, expiresAtMs: 150 });
+    await store.reconcileExecutionDelegation(localDelegationInput(expired, authority, 160), () => {}, async commit => commit());
+    await assert.rejects(store.validateExecutionDelegation(localDelegationValidation(authority, {
+      delegationInstanceId: "expired-instance",
+      atMs: 160,
+    })), { code: "expired" });
+    const afterExpiry = { ...expired, revision: 2, createdAtMs: 150, expiresAtMs: 300 };
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput(afterExpiry, authority, 160),
+      () => {},
+      async commit => commit(),
+    ), { code: "terminal" });
+
+    const fresh = localDelegationRevision({ delegationInstanceId: "fresh-instance", createdAtMs: 160, expiresAtMs: 300 });
+    assert.equal((await store.reconcileExecutionDelegation(
+      localDelegationInput(fresh, authority, 170),
+      () => {},
+      async commit => commit(),
+    )).created, true);
+  } finally { await store.close(); await env.cleanup(); }
+});
+
+test("local delegation journal fences competing writers and rolls back failed ownership commits", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath); const other = new ManifestStore(env.databasePath);
+  try {
+    await seedLocalDelegationManifest(store); await other.load();
+    const authority = localDelegationAuthority();
+    const revision = localDelegationRevision();
+    await assert.rejects(store.reconcileExecutionDelegation(localDelegationInput(revision, authority, 120), undefined as never, async commit => commit()), /current host authority/i);
+    await assert.rejects(store.reconcileExecutionDelegation(localDelegationInput(revision, authority, 120), () => {}, undefined as never), /current host authority/i);
+    await assert.rejects(store.reconcileExecutionDelegation(localDelegationInput(revision, authority, 120), () => {}, async () => {}), /without committing/i);
+
+    const database = new DatabaseSync(env.databasePath);
+    database.exec("CREATE TRIGGER fail_delegation_admission AFTER INSERT ON execution_local_delegations BEGIN SELECT RAISE(ABORT,'delegation rollback'); END");
+    await assert.rejects(store.reconcileExecutionDelegation(
+      localDelegationInput(revision, authority, 120),
+      () => {},
+      async commit => commit(),
+    ), /delegation rollback/);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 0);
+    database.exec("DROP TRIGGER fail_delegation_admission");
+
+    const conflicting = await Promise.allSettled([
+      store.reconcileExecutionDelegation(localDelegationInput(revision, authority, 120), () => {}, async commit => commit()),
+      other.reconcileExecutionDelegation(localDelegationInput(
+        { ...revision, expiresAtMs: 400 },
+        authority,
+        120,
+      ), () => {}, async commit => commit()),
+    ]);
+    assert.equal(conflicting.filter(result => result.status === "fulfilled").length, 1);
+    assert.equal(conflicting.filter(result => result.status === "rejected"
+      && result.reason?.code === "revision_conflict").length, 1);
+    assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 1);
+    database.close();
+  } finally { await other.close(); await store.close(); await env.cleanup(); }
+});
 
 test("approval journal versions preserve typed native identity and only supersede undispatched requests", async () => {
   const env = await fixture(); const store = new ManifestStore(env.databasePath);
@@ -5964,6 +6379,7 @@ test("v6 repair adds bounded delivery columns without shifting exact turn or cut
     const database = (store as unknown as { database: DatabaseSync }).database;
     // Only a predecessor may rebuild missing ingress configuration. Current
     // custody authority must instead fail closed if its column disappears.
+    restoreEmptyExecutionDelegationV23Fixture(database);
     database.exec("ALTER TABLE agent_configurations DROP COLUMN polling_contract; UPDATE manifest_metadata SET schema_version=22; PRAGMA user_version=22");
     database.exec("ALTER TABLE agent_configurations DROP COLUMN delivery_mode; ALTER TABLE agent_configurations DROP COLUMN delivery_cutover_json; ALTER TABLE turn_control_journals DROP COLUMN provider_turn_id; ALTER TABLE turn_control_journals DROP COLUMN inbox_item_id; ALTER TABLE turn_control_journals DROP COLUMN correction_text; ALTER TABLE turn_control_journals DROP COLUMN correction_strategy; ALTER TABLE turn_control_journals DROP COLUMN operator_resolution");
     await store.close();
