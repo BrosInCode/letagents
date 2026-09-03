@@ -11,7 +11,7 @@ import { executionApprovalProjectionPathsAreSafe } from "./execution-approval-pr
 import { ApprovalJournalError, getExecutionApproval, type ApprovalReference } from "./execution-approval-journal.js";
 import {
   ExecutionApprovalProjectionError,
-  type ProducedExecutionApprovalProjection,
+  type PreparedExecutionApprovalProjection,
 } from "./execution-approval-projection.js";
 
 type Row = Record<string, unknown>;
@@ -35,11 +35,6 @@ function reject(code: ExecutionApprovalProjectionError["code"]): never {
 
 function sha256(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
-}
-
-function sameReference(left: ApprovalReference, right: ApprovalReference): boolean {
-  return Object.entries(left).every(([key, value]) => right[key as keyof ApprovalReference] === value)
-    && Object.keys(left).length === Object.keys(right).length;
 }
 
 function recordFromRow(row: Row): ExecutionApprovalProjectionRecord {
@@ -84,13 +79,20 @@ export function readExecutionApprovalProjection(
 /** Record one immutable projection inside the caller's fenced transaction. */
 export function recordExecutionApprovalProjection(
   database: DatabaseSync,
-  input: { expected: ApprovalReference; projection: ProducedExecutionApprovalProjection; producedAtMs: number },
+  input: { expected: ApprovalReference; projection: PreparedExecutionApprovalProjection; producedAtMs: number },
 ): { created: boolean; projection: ExecutionApprovalProjectionRecord } {
   if (!database.isTransaction || !Number.isSafeInteger(input.producedAtMs) || input.producedAtMs < 0) reject("invalid_input");
   const approval = getExecutionApproval(database, input.expected);
   if (!approval || approval.request.kind !== "file_change" || approval.request.risk !== "low"
-    || !approval.request.delegatable || approval.request.state !== "requested" || approval.decision) reject("not_eligible");
-  if (!sameReference(input.projection.expected, input.expected)) reject("conflict");
+    || !approval.request.delegatable) reject("not_eligible");
+  const workspace = database.prepare(`SELECT g.workspace_id FROM execution_approval_requests r
+    JOIN execution_turns t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
+      AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
+    JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
+      AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id
+    WHERE r.request_id=? AND r.request_version=?`).get(input.expected.requestId, input.expected.requestVersion) as Row | undefined;
+  if (input.projection.requestSha256 !== input.expected.requestSha256
+    || workspace?.workspace_id !== input.projection.workAttemptId) reject("conflict");
   const parsed = parseExecutionApprovalProjectionV1(input.projection.value);
   const canonical = parsed && serializeExecutionApprovalProjectionV1(parsed);
   const paths = parsed?.changes.flatMap(change => change.move_path === null ? [change.path] : [change.path, change.move_path]);
@@ -101,6 +103,7 @@ export function recordExecutionApprovalProjection(
     if (prior.json !== canonical || prior.sha256 !== input.projection.sha256) reject("conflict");
     return { created: false, projection: prior };
   }
+  if (approval.request.state !== "requested" || approval.decision) reject("not_eligible");
   if (input.producedAtMs < approval.request.createdAtMs || input.producedAtMs >= approval.request.expiresAtMs) reject("expired");
   const request = approval.request;
   database.prepare(`INSERT INTO execution_approval_projections(

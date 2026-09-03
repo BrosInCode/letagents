@@ -14,7 +14,7 @@ import {
 } from "../execution-approval-projection-journal.js";
 import {
   ExecutionApprovalProjectionError,
-  produceExecutionApprovalProjection,
+  prepareExecutionApprovalProjection,
 } from "../execution-approval-projection.js";
 import type { ApprovalReference } from "../execution-approval-journal.js";
 import type { ExecutionApprovalProjectionSource } from "../execution-approval-projection.js";
@@ -66,6 +66,17 @@ async function fixture() {
 
 function code(error: unknown): string | undefined {
   return error instanceof ExecutionApprovalProjectionError ? error.code : undefined;
+}
+
+function produceExecutionApprovalProjection(
+  database: DatabaseSync,
+  expected: ApprovalReference,
+  source: ExecutionApprovalProjectionSource,
+) {
+  return prepareExecutionApprovalProjection(database, {
+    requestSha256: expected.requestSha256,
+    workAttemptId: "workspace",
+  }, source);
 }
 
 function admitRequest(database: DatabaseSync, source: ExecutionApprovalProjectionSource,

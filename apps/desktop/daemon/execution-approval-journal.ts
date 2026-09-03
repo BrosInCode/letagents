@@ -107,7 +107,7 @@ function read(db: DatabaseSync, id: string, version: number): ExecutionApprovalR
   if (!row) return null;
   const decision = db.prepare("SELECT * FROM execution_approval_decisions WHERE request_id=? AND request_version=?").get(id, version);
   if (decision && !(
-    (decision.source === "host" && decision.request_delegatable === 0
+    (decision.source === "host" && [0, 1].includes(Number(decision.request_delegatable))
       && decision.delegation_instance_id === null && decision.delegation_revision === null
       && decision.delegation_scope_sha256 === null)
     || (decision.source === "delegate" && decision.request_delegatable === 1
@@ -209,15 +209,19 @@ export function listExecutionApprovals(db: DatabaseSync, roomId: string, limit =
 }
 
 export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperationalExecutionApproval,
-  current: DaemonManifestEntry | undefined): { created: boolean; approval: ExecutionApprovalRecord } {
+  current: DaemonManifestEntry | undefined, delegatable: boolean): { created: boolean; approval: ExecutionApprovalRecord } {
+  if (typeof delegatable !== "boolean") reject("invalid_input");
   const parsed = parse(operationalAdmission, input);
+  if (delegatable && parsed.authority.provider !== "codex") reject("invalid_input");
   const prior = read(db, parsed.request.requestId, parsed.request.requestVersion);
   if (prior) {
-    if (Object.entries(parsed.request).some(([key, item]) => prior.request[key as keyof AdmitExecutionApproval] !== item)) reject("identity_mismatch");
+    if (prior.request.delegatable !== delegatable
+      || Object.entries(parsed.request).some(([key, item]) => prior.request[key as keyof AdmitExecutionApproval] !== item)) reject("identity_mismatch");
     return { created: false, approval: prior }; // Receipt only; never reopens a request.
   }
   const turn = eligibleTurn(db, parsed.request, parsed.authority, current);
   const value = parse(admission, { ...parsed.request, executionGenerationId: turn.generation, runtimeGenerationId: turn.runtimeId, turnId: turn.turnId });
+  if (delegatable && (value.kind !== "file_change" || value.risk !== "low")) reject("invalid_input");
   // A caller cannot alias one native callback under another logical request ID.
   // The existing unique key has no occurrence/turn component: sequential reuse
   // of a native ID in this connection is conservatively unsupported here.
@@ -253,10 +257,10 @@ export function admitExecutionApproval(db: DatabaseSync, input: AdmitOperational
   db.prepare(`INSERT INTO execution_approval_requests
     (request_id,request_version,agent_id,room_id,execution_generation_id,runtime_generation_id,turn_id,provider_continuation_id,provider_turn_id,
       connection_id,native_request_id_type,native_request_id,kind,risk,delegatable,request_sha256,state,recovery_boundary,created_at_ms,expires_at_ms)
-    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,0,?,'requested',?,?,?)`).run(
+    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,'requested',?,?,?)`).run(
     value.requestId, value.requestVersion, value.agentId, value.roomId, value.executionGenerationId, value.runtimeGenerationId, value.turnId,
     value.providerContinuationId, value.providerTurnId, value.connectionId, typeof value.nativeRequestId, String(value.nativeRequestId),
-    value.kind, value.risk, value.requestSha256, value.recoveryBoundary, value.createdAtMs, value.expiresAtMs);
+    value.kind, value.risk, Number(delegatable), value.requestSha256, value.recoveryBoundary, value.createdAtMs, value.expiresAtMs);
   return { created: true, approval: read(db, value.requestId, value.requestVersion)! };
 }
 
@@ -274,9 +278,9 @@ export function selectHostApproval(db: DatabaseSync, input: SelectHostApproval, 
   db.prepare(`INSERT INTO execution_approval_decisions
     (decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256,
       decision,source,actor_id,dispatch_state,decided_at_ms,projection_sha256)
-    VALUES(?,?,?,?,?,?,?,0,?,?,'host',?,'not_dispatched',?,?)`).run(
+    VALUES(?,?,?,?,?,?,?,?,?,?,'host',?,'not_dispatched',?,?)`).run(
     value.decisionId, r.requestId, r.requestVersion, r.agentId, r.roomId, r.executionGenerationId, r.turnId,
-    r.requestSha256, value.decision, value.actorId, value.atMs, value.projectionSha256);
+    Number(r.delegatable), r.requestSha256, value.decision, value.actorId, value.atMs, value.projectionSha256);
   db.prepare("UPDATE execution_approval_requests SET state='decision_recorded' WHERE request_id=? AND request_version=?")
     .run(r.requestId, r.requestVersion);
   return exact(db, value.expected);

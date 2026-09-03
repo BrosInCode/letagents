@@ -11,18 +11,18 @@ import {
 } from "../../../shared/execution-approval-projection.mjs";
 import type { CodexPermissionFileChange } from "../shared/provider-permissions.js";
 import { executionApprovalProjectionPathsAreSafe } from "./execution-approval-projection-policy.js";
-import {
-  getExecutionApproval,
-  type ApprovalReference,
-} from "./execution-approval-journal.js";
 
-type Row = Record<string, unknown>;
-export type ProducedExecutionApprovalProjection = {
-  expected: ApprovalReference;
+export type PreparedExecutionApprovalProjection = {
+  requestSha256: string;
+  workAttemptId: string;
   value: ExecutionApprovalProjectionV1;
   json: string;
   sha256: string;
 };
+export type ExecutionApprovalProjectionPreparation = Readonly<{
+  requestSha256: string;
+  workAttemptId: string;
+}>;
 export type ExecutionApprovalProjectionSource = Readonly<{
   request: unknown;
   changes: readonly CodexPermissionFileChange[];
@@ -112,35 +112,30 @@ function diffCounts(diff: string): { added_lines: number; removed_lines: number;
   return { added_lines, removed_lines, diff_bytes: Buffer.byteLength(diff, "utf8") };
 }
 
-function workspacePathForRequest(database: DatabaseSync, expected: ApprovalReference): string {
-  const row = database.prepare(`SELECT w.workspace_path FROM execution_approval_requests r
-    JOIN execution_turns t ON t.turn_id=r.turn_id AND t.agent_id=r.agent_id AND t.room_id=r.room_id
-      AND t.execution_generation_id=r.execution_generation_id AND t.runtime_generation_id=r.runtime_generation_id
-    JOIN execution_attempt_generations g ON g.attempt_id=t.attempt_id AND g.agent_id=t.agent_id
-      AND g.room_id=t.room_id AND g.execution_generation_id=t.execution_generation_id
-    JOIN work_attempts w ON w.work_attempt_id=g.workspace_id
-    WHERE r.request_id=? AND r.request_version=?`).get(expected.requestId, expected.requestVersion) as Row | undefined;
+function workspacePathForAttempt(database: DatabaseSync, workAttemptId: string): string {
+  const row = database.prepare("SELECT workspace_path FROM work_attempts WHERE work_attempt_id=?")
+    .get(workAttemptId) as { workspace_path?: unknown } | undefined;
   if (!row || typeof row.workspace_path !== "string" || !isAbsolute(row.workspace_path)) reject("invalid_input");
   return row.workspace_path;
 }
 
-/** Produce the exact bounded bytes a remote delegate may later be shown. */
-export async function produceExecutionApprovalProjection(
+/** Prepare the exact bounded bytes a remote delegate may later be shown. */
+export async function prepareExecutionApprovalProjection(
   database: DatabaseSync,
-  expected: ApprovalReference,
+  input: ExecutionApprovalProjectionPreparation,
   source: ExecutionApprovalProjectionSource,
-): Promise<ProducedExecutionApprovalProjection> {
-  const approval = getExecutionApproval(database, expected);
-  if (!approval || approval.request.kind !== "file_change" || approval.request.risk !== "low"
-    || !approval.request.delegatable || approval.request.state !== "requested" || approval.decision) reject("not_eligible");
+): Promise<PreparedExecutionApprovalProjection> {
+  if (!input || typeof input !== "object" || Array.isArray(input)
+    || Object.keys(input).length !== 2 || !/^[a-f0-9]{64}$/.test(input.requestSha256)
+    || typeof input.workAttemptId !== "string" || !input.workAttemptId) reject("invalid_input");
   if (!source || typeof source !== "object" || Array.isArray(source)
     || Object.keys(source).length !== 2 || !Object.hasOwn(source, "request") || !Object.hasOwn(source, "changes")) reject("invalid_input");
   let requestJson: string | undefined;
   try { requestJson = JSON.stringify(source); } catch { reject("invalid_input"); }
-  if (!requestJson || sha256(requestJson) !== approval.request.requestSha256) reject("invalid_input");
+  if (!requestJson || sha256(requestJson) !== input.requestSha256) reject("invalid_input");
   const fileChanges = source.changes;
   if (!Array.isArray(fileChanges) || fileChanges.length < 1 || fileChanges.length > 128) reject("invalid_input");
-  const logicalRoot = resolve(workspacePathForRequest(database, expected));
+  const logicalRoot = resolve(workspacePathForAttempt(database, input.workAttemptId));
   const canonicalRoot = await realpath(logicalRoot);
   const resolvedChanges = await Promise.all(fileChanges.map(async (change) => {
     if (!change || typeof change.path !== "string" || typeof change.diff !== "string") reject("invalid_input");
@@ -184,7 +179,8 @@ export async function produceExecutionApprovalProjection(
   });
   if (!json) reject("invalid_input");
   return {
-    expected: { ...expected },
+    requestSha256: input.requestSha256,
+    workAttemptId: input.workAttemptId,
     value: parseExecutionApprovalProjectionV1(JSON.parse(json))!,
     json,
     sha256: sha256(json),

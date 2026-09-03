@@ -4,11 +4,22 @@ import { chmod, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
 import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import {
-  admitExecutionApproval, beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
+  beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
   recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
-  type AdmitOperationalExecutionApproval, type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
+  type ApprovalAuthority, type ApprovalReference, type DispatchExecutionApproval, type ExecutionApprovalRecord,
   type LoseExecutionApproval, type RecordExecutionApprovalOutcome, type SelectHostApproval,
 } from "./execution-approval-journal.js";
+import {
+  admitExecutionApprovalPlan,
+  type ExecutionApprovalAdmission,
+  type ExecutionApprovalAdmissionPlan,
+} from "./execution-approval-admission.js";
+import {
+  prepareExecutionApprovalProjection,
+  type ExecutionApprovalProjectionPreparation,
+  type ExecutionApprovalProjectionSource,
+  type PreparedExecutionApprovalProjection,
+} from "./execution-approval-projection.js";
 import {
   listExecutionDelegationInstanceIds,
   reconcileExecutionDelegation,
@@ -460,11 +471,30 @@ export class ManifestStore {
     }, commitFence);
   }
 
-  /** Host-only operational admission; native pendingness is independently fenced by the broker. */
-  async admitExecutionApproval(input: AdmitOperationalExecutionApproval, commitFence: (commit: () => Promise<void>) => Promise<void>): Promise<{ created: boolean; approval: ExecutionApprovalRecord }> {
+  /** Filesystem preparation only; exact authority is revalidated at admission. */
+  async prepareExecutionApprovalProjection(
+    input: ExecutionApprovalProjectionPreparation,
+    source: ExecutionApprovalProjectionSource,
+  ): Promise<PreparedExecutionApprovalProjection> {
+    const snapshot = structuredClone({ input, source });
+    return prepareExecutionApprovalProjection(await this.getDatabase(), snapshot.input, snapshot.source);
+  }
+
+  /** Immutable classification and required projection settle in one fenced transaction. */
+  async admitExecutionApprovalPlan(
+    input: ExecutionApprovalAdmissionPlan,
+    nowMs: () => number,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<ExecutionApprovalAdmission> {
+    if (typeof nowMs !== "function") throw new Error("Approval journal requires a transaction clock.");
     if (typeof commitFence !== "function") throw new Error("Approval journal requires a daemon ownership commit fence.");
     const snapshot = structuredClone(input);
-    return this.writeOperationalJournal(db => admitExecutionApproval(db, snapshot, this.readEntryFromDatabase(db, snapshot.request.agentId)), commitFence);
+    return this.writeOperationalJournal(db => admitExecutionApprovalPlan(
+      db,
+      snapshot,
+      this.readEntryFromDatabase(db, snapshot.request.agentId),
+      nowMs(),
+    ), commitFence);
   }
 
   async getExecutionApproval(input: ApprovalReference): Promise<ExecutionApprovalRecord | null> {
