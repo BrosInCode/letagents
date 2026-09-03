@@ -49,6 +49,8 @@ function restoreThreeProviderLifecycleProjectionFixture(database: DatabaseSync):
 }
 
 function restoreEmptyExecutionDelegationV23Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
+  database.exec("DROP TRIGGER execution_approval_projection_immutable; DROP TABLE execution_approval_projections");
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_local_delegations").get()!.n, 0);
   assert.equal(database.prepare("SELECT COUNT(*) AS n FROM execution_approval_decisions").get()!.n, 0);
   const previous = new DatabaseSync(":memory:");

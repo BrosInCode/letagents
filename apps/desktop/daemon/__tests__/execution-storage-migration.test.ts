@@ -109,7 +109,15 @@ function restoreV24Fixture(database: DatabaseSync): void {
   database.exec("DROP TABLE custodial_polling_offers; UPDATE manifest_metadata SET schema_version=24 WHERE singleton=1; PRAGMA user_version=24");
 }
 
+function restoreExecutionApprovalProjectionV24Fixture(database: DatabaseSync): void {
+  assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_approval_projections").get()!.count, 0);
+  database.exec(`DROP TRIGGER execution_approval_projection_immutable;
+    DROP TABLE execution_approval_projections`);
+  validateExecutionStorageSchema(database, 24);
+}
+
 function restoreExecutionDelegationV23Fixture(database: DatabaseSync): void {
+  restoreExecutionApprovalProjectionV24Fixture(database);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_local_delegations").get()!.count, 0);
   assert.equal(database.prepare("SELECT COUNT(*) AS count FROM execution_approval_decisions WHERE source='delegate'").get()!.count, 0);
   const previous = new DatabaseSync(":memory:");
@@ -211,6 +219,11 @@ function restoreV32Fixture(database: DatabaseSync): void {
 function restoreV33Fixture(database: DatabaseSync): void {
   restoreExecutionDelegationV23Fixture(database);
   database.exec("UPDATE manifest_metadata SET schema_version=33 WHERE singleton=1; PRAGMA user_version=33");
+}
+
+function restoreV34Fixture(database: DatabaseSync): void {
+  restoreExecutionApprovalProjectionV24Fixture(database);
+  database.exec("UPDATE manifest_metadata SET schema_version=34 WHERE singleton=1; PRAGMA user_version=34");
 }
 
 function seedLifecycleProjectionV1Evidence(database: DatabaseSync): void {
@@ -357,7 +370,7 @@ function typedRows(database: DatabaseSync): Record<string, unknown> {
   // Pre-v30 preservation assertions cover authority that existed before the
   // lifecycle-effect outbox. Its required historical dispositions are tested
   // directly by the v30 migration cases below.
-  return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name NOT IN ('execution_observers','execution_observer_sources','execution_lifecycle_effects') ORDER BY name").all() as Row[])
+  return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name NOT IN ('execution_observers','execution_observer_sources','execution_lifecycle_effects','execution_approval_projections') ORDER BY name").all() as Row[])
     .map(({ name }) => {
       const columns = (database.prepare(`PRAGMA table_info(${name})`).all() as Row[])
         .map((column) => String(column.name)).filter((column) => ![
@@ -482,13 +495,13 @@ test("v18 rebuild and journals roll back together before either version advances
   } finally { await env.cleanup(); }
 });
 
-for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
+for (const version of [17, 19, 20, 21, 22, 24, 25, 26, 27, 30, 33, 34]) test(`a killed migrator leaves the complete v${version} graph recoverable from WAL`, async () => {
   const env = await fixture();
   try {
     (version === 17 ? restoreV17Fixture : version === 19 ? restoreV19Fixture : version === 20 ? restoreV20Fixture
       : version === 21 ? restoreV21Fixture : version === 22 ? restoreV22Fixture : version === 24 ? restoreV24Fixture
         : version === 25 ? restoreV25Fixture : version === 26 ? restoreV26Fixture : version === 27 ? restoreV27Fixture
-          : version === 30 ? restoreV30Fixture : restoreV33Fixture)(env.database);
+          : version === 30 ? restoreV30Fixture : version === 33 ? restoreV33Fixture : restoreV34Fixture)(env.database);
     seedLegacyEvidence(env.database);
     if (version === 21) { seedV18Evidence(env.database); seedDormantCutovers(env.database); }
     const before = legacyRows(env.database);
@@ -849,7 +862,7 @@ test("v19 upgrade preserves old outcomes, identity and rowids while advancing te
       INSERT INTO supervised_agent_terminal_results VALUES('unreadable','agent','generation','turn-unreadable','unreadable',NULL,'none','{ "original": "unreadable" }','then','now')`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const retainedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','supervised_agent_terminal_results','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','supervised_agent_terminal_results','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
     const unrelatedSchema = retainedSchema();
     const rowids = env.database.prepare("SELECT rowid,* FROM supervised_agent_terminal_results ORDER BY rowid").all();
     new DaemonStateSchema().createSchema(env.database);
@@ -949,7 +962,7 @@ test("v21 adds unknown source provenance without resetting cursors or rebuilding
     const observer = env.database.prepare("SELECT rowid,* FROM execution_observers").get();
     const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='execution_observers'").get();
     const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_observers','execution_observer_sources','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
     const schema = unrelatedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
@@ -1007,7 +1020,7 @@ test("v22 preserves dormant cutover rows, rowids and legacy uncertainty without 
     const rows = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
     const oldColumns = Object.keys(rows[0]!);
     const unrelatedSchema = () => env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
+      WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_cutover_v2','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name`).all();
     const schema = unrelatedSchema();
     new DaemonStateSchema().createSchema(env.database);
     const migrated = env.database.prepare("SELECT rowid,* FROM execution_cutover_v2 ORDER BY rowid").all();
@@ -1063,7 +1076,7 @@ test("v23 adds nullable polling custody without reinterpreting modes, cutovers o
     restoreV22Fixture(env.database); seedLegacyEvidence(env.database); seedV18Evidence(env.database); seedDormantCutovers(env.database);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
     const configurations = env.database.prepare("SELECT rowid,* FROM agent_configurations ORDER BY rowid").all();
-    const unrelatedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const unrelatedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('agent_configurations','runtime_deployments','execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','custodial_polling_activations','custodial_polling_offers','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = unrelatedSchema();
     const rootpage = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='agent_configurations'").get();
     new DaemonStateSchema().createSchema(env.database);
@@ -1140,7 +1153,7 @@ test("v24 creates an empty activation journal and nullable launch receipt withou
       (agent_id,observed_state,workspace_path_present,work_attempt_id_present,provider_ref_present,provider_process_identity_present,
        workplace_liveness_present,native_liveness_present,activity_present) VALUES('agent','stopped',0,0,0,0,0,0,0)`);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database) };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_activations','custodial_polling_offers','runtime_deployments','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','custodial_polling_activations','custodial_polling_offers','runtime_deployments','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = retainedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database) }, before);
@@ -1224,7 +1237,7 @@ test("v25 adds empty offer storage without manufacturing coverage for old activa
     seedPollingActivations(env.database);
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database),
       activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all() };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = retainedSchema();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual({ legacy: legacyRows(env.database), typed: typedRows(env.database),
@@ -1327,7 +1340,7 @@ for (const interrupted of [false, true]) test(`v26 preserves every v25 offer, AC
     const activations = env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all();
     const before = { legacy: legacyRows(env.database), typed: typedRows(env.database), versions: versionPair(env.database),
       schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master ORDER BY type,name").all() };
-    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
+    const retainedSchema = () => env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','custodial_polling_offers','custodial_polling_activations','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all();
     const schema = retainedSchema();
     const activationRoot = env.database.prepare("SELECT rootpage FROM sqlite_master WHERE name='custodial_polling_activations'").get();
     if (interrupted) {
@@ -1373,7 +1386,7 @@ test("v27 adds empty room publication provenance without changing retained autho
     const retained = () => ({ legacy: legacyRows(env.database), typed: typedRows(env.database),
       activations: env.database.prepare("SELECT rowid,* FROM custodial_polling_activations ORDER BY rowid").all(),
       offers: env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(),
-      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all() });
+      schema: env.database.prepare("SELECT type,name,rootpage,sql FROM sqlite_master WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','room_work_publications','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals') ORDER BY type,name").all() });
     const before = retained();
     new DaemonStateSchema().createSchema(env.database);
     assert.deepEqual(retained(), before);
@@ -1418,7 +1431,7 @@ test("v28 adds empty lifecycle comparison evidence without changing retained aut
       offers: env.database.prepare("SELECT rowid,* FROM custodial_polling_offers ORDER BY rowid").all(),
       publications: env.database.prepare("SELECT rowid,* FROM room_work_publications ORDER BY rowid").all(),
       schema: env.database.prepare(`SELECT type,name,rootpage,sql FROM sqlite_master
-        WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals')
+        WHERE tbl_name NOT IN ('execution_lifecycle_effects','execution_local_delegations','execution_approval_decisions','execution_approval_projections','lifecycle_projection_lanes','lifecycle_projection_pairs','lifecycle_projection_totals')
         ORDER BY type,name`).all(),
     });
     const before = retained();
@@ -1827,6 +1840,51 @@ test("v34 refuses unknown dependencies on the rebuilt delegation graph", async (
         ORDER BY type,name`).all(),
     }, before);
     validateExecutionStorageSchema(env.database, 23);
+  } finally { await env.cleanup(); }
+});
+
+test("v35 adds an empty approval projection journal without rewriting approval authority", async () => {
+  const env = await fixture();
+  try {
+    seedV18Evidence(env.database);
+    const approvals = env.database.prepare(`SELECT rowid,* FROM execution_approval_requests ORDER BY rowid`).all();
+    const decisions = env.database.prepare(`SELECT rowid,* FROM execution_approval_decisions ORDER BY rowid`).all();
+    restoreV34Fixture(env.database);
+
+    new DaemonStateSchema().createSchema(env.database);
+
+    assert.deepEqual(env.database.prepare(`SELECT rowid,* FROM execution_approval_requests ORDER BY rowid`).all(), approvals);
+    assert.deepEqual(env.database.prepare(`SELECT rowid,* FROM execution_approval_decisions ORDER BY rowid`).all(), decisions);
+    assert.equal(env.database.prepare("SELECT COUNT(*) AS count FROM execution_approval_projections").get()!.count, 0);
+    assert.deepEqual(env.database.prepare("PRAGMA foreign_key_check").all(), []);
+    validateExecutionStorageSchema(env.database, 25);
+    assert.deepEqual(versionPair(env.database).map((row) => ({ ...(row as Row) })), [
+      { user_version: DAEMON_STATE_SCHEMA_VERSION },
+      { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION },
+    ]);
+  } finally { await env.cleanup(); }
+});
+
+test("v35 projection journal and schema markers roll back atomically", async () => {
+  const env = await fixture();
+  try {
+    restoreV34Fixture(env.database);
+    const before = {
+      versions: versionPair(env.database),
+      schema: env.database.prepare(`SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master ORDER BY type,name`).all(),
+    };
+
+    assert.throws(() => new DaemonStateSchema((database) => {
+      assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='execution_approval_projections'").get());
+      throw new Error("interrupt v35 before markers");
+    }).createSchema(env.database), /interrupt v35 before markers/);
+
+    assert.deepEqual({
+      versions: versionPair(env.database),
+      schema: env.database.prepare(`SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master ORDER BY type,name`).all(),
+    }, before);
+    assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='execution_approval_projections'").get(), undefined);
+    validateExecutionStorageSchema(env.database, 24);
   } finally { await env.cleanup(); }
 });
 

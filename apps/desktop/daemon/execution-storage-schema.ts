@@ -2,8 +2,10 @@ import { DatabaseSync } from "node:sqlite";
 
 /**
  * Dormant, structural storage for transparent execution. No provider output,
- * command, path, approval reason, diff, credential, or arbitrary JSON belongs
- * here: content persistence must wait for the separately reviewed sanitizer.
+ * command, absolute path, approval reason, diff, credential, or arbitrary JSON
+ * belongs here. V25 reserves one bounded projection JSON slot; its sole writer
+ * enforces the reviewed contract and reads revalidate it. Native payloads
+ * remain forbidden.
  *
  * These journals intentionally have no foreign key to manifest projections or
  * the legacy inbox. Manifest updates delete/reinsert their projection graph;
@@ -321,6 +323,32 @@ const executionApprovalDecisionsV24 = `CREATE TABLE execution_approval_decisions
     REFERENCES execution_local_delegations(delegation_instance_id,revision,scope_sha256,agent_id,approver_id)
 ) STRICT`;
 
+const executionApprovalProjectionsV25 = `CREATE TABLE execution_approval_projections (
+  request_id TEXT NOT NULL,
+  request_version INTEGER NOT NULL CHECK(request_version >= 1),
+  agent_id TEXT NOT NULL,
+  room_id TEXT NOT NULL,
+  execution_generation_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  request_delegatable INTEGER NOT NULL CHECK(request_delegatable=1),
+  request_sha256 TEXT NOT NULL CHECK(length(request_sha256)=64 AND request_sha256 NOT GLOB '*[^0-9a-f]*'),
+  projection_version INTEGER NOT NULL CHECK(projection_version=1),
+  projection_json TEXT NOT NULL CHECK(json_valid(projection_json) AND json_type(projection_json)='object'
+    AND length(CAST(projection_json AS BLOB)) <= 24576),
+  projection_sha256 TEXT NOT NULL CHECK(length(projection_sha256)=64 AND projection_sha256 NOT GLOB '*[^0-9a-f]*'),
+  produced_at_ms INTEGER NOT NULL CHECK(produced_at_ms >= 0),
+  PRIMARY KEY(request_id,request_version),
+  FOREIGN KEY(request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256)
+    REFERENCES execution_approval_requests(request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,delegatable,request_sha256)
+    ON DELETE CASCADE
+) STRICT`;
+
+const executionApprovalProjectionTriggersV25 = {
+  execution_approval_projection_immutable: `CREATE TRIGGER execution_approval_projection_immutable
+    BEFORE UPDATE ON execution_approval_projections
+    BEGIN SELECT RAISE(ABORT,'Approval projections are immutable.'); END`,
+};
+
 // `sequence` is daemon journal order. The source tuple is independent: future
 // ingestion validates observer freshness, increasing source order and gaps;
 // storage prevents the same observer position being journaled twice. Native
@@ -518,7 +546,7 @@ const cutoverNativeTriggers = {
     BEGIN SELECT RAISE(ABORT,'Cutover native target cannot be replaced.'); END`,
 };
 
-export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22 | 23 | 24;
+export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22 | 23 | 24 | 25;
 
 function schemaFor(version: ExecutionStorageSchemaVersion): {
   tables: Record<string, string>; indexes: Record<string, string>; triggers: Record<string, string>;
@@ -551,11 +579,15 @@ function schemaFor(version: ExecutionStorageSchemaVersion): {
     schema.tables.execution_approval_decisions = executionApprovalDecisionsV24;
     Object.assign(schema.triggers, delegationTriggersV24);
   }
+  if (version >= 25) {
+    schema.tables.execution_approval_projections = executionApprovalProjectionsV25;
+    Object.assign(schema.triggers, executionApprovalProjectionTriggersV25);
+  }
   return schema;
 }
 
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 24): void {
+export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 25): void {
   const schema = schemaFor(version);
   for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   for (const statement of Object.values(schema.indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
@@ -775,6 +807,15 @@ export function migrateExecutionStorageV23ToV24(database: DatabaseSync): void {
   }
 }
 
+/** Add only the immutable, bounded delegate-display projection journal. */
+export function migrateExecutionStorageV24ToV25(database: DatabaseSync): void {
+  if (!database.isTransaction) throw new Error("Execution approval projection migration requires a transaction.");
+  validateExecutionStorageSchema(database, 24);
+  database.exec(executionApprovalProjectionsV25);
+  database.exec(executionApprovalProjectionTriggersV25.execution_approval_projection_immutable);
+  validateExecutionStorageSchema(database, 25);
+}
+
 function normalizedSchema(sql: string): string {
   // SQL keywords/spacing are insensitive, but quoted CHECK values are not.
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map((part) => part.startsWith("'") ? part
@@ -782,7 +823,7 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 24): void {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 25): void {
   const schema = schemaFor(version);
   for (const [name, statement] of Object.entries({ ...schema.tables, ...schema.indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;
