@@ -3,7 +3,7 @@ import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
 import { applyExecutionStorageSchema, migrateExecutionStorageV20ToV21, migrateExecutionStorageV21ToV22,
-  migrateExecutionStorageV22ToV23, validateExecutionStorageSchema } from "../execution-storage-schema.js";
+  migrateExecutionStorageV22ToV23, migrateExecutionStorageV24ToV25, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 
 type Values = Record<string, string | number | null>;
 const digest = "a".repeat(64);
@@ -90,7 +90,7 @@ function cutover(db: DatabaseSync, extra: Values = {}): void {
   });
 }
 
-test("schema is additive, empty, idempotent, content-free, and does not own version/transaction policy", () => {
+test("schema is additive, empty, idempotent, and reserves only the bounded projection JSON slot", () => {
   const db = fixture();
   try {
     db.exec("PRAGMA user_version=17; BEGIN IMMEDIATE");
@@ -98,17 +98,49 @@ test("schema is additive, empty, idempotent, content-free, and does not own vers
     validateExecutionStorageSchema(db);
     assert.equal((db.prepare("PRAGMA user_version").get() as { user_version: number }).user_version, 17);
     const tables = db.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'execution_%'").all() as Array<{ name: string }>;
-    assert.equal(tables.length, 15);
+    assert.equal(tables.length, 16);
     for (const { name } of tables) {
       assert.equal((db.prepare(`SELECT COUNT(*) AS count FROM ${name}`).get() as { count: number }).count, 0);
       const columns = db.prepare(`PRAGMA table_info(${name})`).all() as Array<{ name: string }>;
-      assert.ok(columns.every(({ name }) => !/payload|output_text|command_text|reason|path|token|secret|_json$/.test(name) || name === "reason"), name);
+      assert.ok(columns.every(({ name }) => !/payload|output_text|command_text|reason|path|token|secret|_json$/.test(name)
+        || name === "reason" || (name === "projection_json" && name.includes("projection"))), name);
       const foreign = db.prepare(`PRAGMA foreign_key_list(${name})`).all() as Array<{ table: string }>;
       assert.ok(foreign.every(({ table }) => table.startsWith("execution_")), name);
     }
     runtime(db);
     db.exec("ROLLBACK");
     assert.equal((db.prepare("SELECT COUNT(*) AS count FROM execution_runtime_generations").get() as { count: number }).count, 0);
+  } finally { db.close(); }
+});
+
+test("approval projection storage is additive, exact-request-owned, immutable, and cascading", () => {
+  const db = new DatabaseSync(":memory:");
+  try {
+    db.exec("PRAGMA foreign_keys=ON");
+    applyExecutionStorageSchema(db, 24);
+    seed(db); request(db);
+    assert.throws(() => migrateExecutionStorageV24ToV25(db), /requires a transaction/);
+    db.exec("BEGIN IMMEDIATE");
+    migrateExecutionStorageV24ToV25(db);
+    db.exec("COMMIT");
+    const projection = JSON.stringify({ version: 1, category: "file_change", path_scope: "workspace_relative", changes: [],
+      totals: { file_count: 0, added_lines: 0, removed_lines: 0, diff_bytes: 0 } });
+    insert(db, "execution_approval_projections", {
+      request_id: "request", request_version: 1, agent_id: "agent", room_id: "room",
+      execution_generation_id: "generation", turn_id: "turn", request_delegatable: 1,
+      request_sha256: digest, projection_version: 1, projection_json: projection,
+      projection_sha256: digest, produced_at_ms: 110,
+    });
+    assert.throws(() => db.exec("UPDATE execution_approval_projections SET produced_at_ms=111"), /immutable/);
+    assert.throws(() => insert(db, "execution_approval_projections", {
+      request_id: "other", request_version: 1, agent_id: "agent", room_id: "room",
+      execution_generation_id: "generation", turn_id: "turn", request_delegatable: 1,
+      request_sha256: digest, projection_version: 1, projection_json: "not-json",
+      projection_sha256: digest, produced_at_ms: 110,
+    }), /CHECK/);
+    db.exec("DELETE FROM execution_approval_requests WHERE request_id='request'");
+    assert.equal(db.prepare("SELECT COUNT(*) AS count FROM execution_approval_projections").get()?.count, 0);
+    validateExecutionStorageSchema(db, 25);
   } finally { db.close(); }
 });
 
