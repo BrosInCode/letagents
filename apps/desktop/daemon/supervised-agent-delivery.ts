@@ -2,6 +2,15 @@ import { sameProviderActionConnectionSnapshot, type ProviderActionConnectionRef,
 import { structuredRoomTurnCompletion, SupervisedAgentInboxStore, type InboxActivation, type IngressMessage, type SupervisedInboxItem } from "./supervised-agent-inbox-store.js";
 import { redactCredentialText } from "./credential-redaction.js";
 
+function providerFailureDisplayText(message: string): string {
+  const normalized = message
+    .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\t\n\r ]+/g, " ")
+    .trim();
+  return redactCredentialText(normalized, 1_024).value;
+}
+
 export type SupervisedIngressAgent = {
   agentId: string;
   roomId: string;
@@ -1257,6 +1266,13 @@ export class SupervisedAgentDelivery {
         admittedProviderTurnId = publicationResult.turnId;
         this.bindInterruptReservationProviderTurn(agent, invocationId, item.inbox_item_id, publicationResult.turnId);
         const evidence = publicationResult.evidence ?? (publicationResult.outcome === "unreadable" ? "none" : "transcript");
+        const failureDetail = (publicationResult.outcome === "failed" || publicationResult.outcome === "interrupted")
+          && publicationResult.error?.trim()
+          ? providerFailureDisplayText(publicationResult.error)
+          : null;
+        const terminalEvidence = publicationResult.outcome === "failed" || publicationResult.outcome === "interrupted"
+          ? { ...publicationResult, error: failureDetail || undefined }
+          : publicationResult;
         const checkpointed = await this.inbox.checkpointNormalizedTerminal({
           inbox_item_id: item.inbox_item_id,
           agent_id: agent.agentId,
@@ -1265,7 +1281,8 @@ export class SupervisedAgentDelivery {
           outcome: publicationResult.outcome,
           text: publicationResult.text?.trim() || null,
           evidence,
-          terminal_evidence: publicationResult,
+          failure_detail: failureDetail,
+          terminal_evidence: terminalEvidence,
         });
         // A late failure or unreadable re-read cannot replace a definitive
         // checkpoint. Return the durable winner to the adapter and caller.
@@ -1282,7 +1299,8 @@ export class SupervisedAgentDelivery {
             throw new Error("Native failure lost its durable terminal proof.");
           }
           acceptedResult = { turnId: publicationResult.turnId, providerContinuationId,
-            outcome: saved.kind, text: null, evidence: saved.evidence };
+            outcome: saved.kind, text: null, evidence: saved.evidence,
+            ...(checkpointed.last_error?.trim() ? { error: checkpointed.last_error } : {}) };
         }
         return {
           acceptedResult,
@@ -1524,7 +1542,7 @@ export class SupervisedAgentDelivery {
       if (await this.inbox.nativeFailure(current.inbox_item_id)) {
         if (!await this.hasLaneAuthority(agent, controller)) return;
         await this.inbox.transition(item.inbox_item_id, "acknowledged_failed", {
-          last_error: redactCredentialText(message, 1_024).value,
+          last_error: current.last_error?.trim() || providerFailureDisplayText(message),
         });
         await this.commitPreparedRoomMove?.({ agent, inboxItemId: item.inbox_item_id });
         return;

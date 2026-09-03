@@ -1338,6 +1338,7 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
           outcome: "failed" as const,
           text: null,
           evidence: "transcript" as const,
+          error: terminalError,
         } : null;
         if (terminalResult) this.emitTurnTerminal(handle, turnId, "failed");
         throw new OpenCodeTerminalTurnError(terminalError, terminalResult);

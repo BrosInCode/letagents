@@ -884,6 +884,7 @@ test("Open Model checkpoints an exact terminal provider rejection before surfaci
     outcome: "failed",
     text: null,
     evidence: "transcript",
+    error: "Open Model request was rejected because the model provider account could not cover this turn's output budget (HTTP 402). Add provider credit or choose another model, then send a new message.",
   });
   const terminal = observations.find(({ fact }) =>
     fact.domain === "turn" && fact.kind === "state_changed" && fact.state === "terminal");

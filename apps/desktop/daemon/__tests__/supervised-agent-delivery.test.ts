@@ -3699,9 +3699,10 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
           outcome: "failed",
           text: null,
           evidence: "transcript",
+          error: "\u001b[31mOpen Model request failed\u001b[0m at the model provider (HTTP 404):\u0000 expired model. \u202etoken=super-secret-provider-token",
         });
         throw Object.assign(
-          new Error("Open Model request failed at the model provider (HTTP 404): expired model. token=super-secret-provider-token"),
+          new Error("The provider completed, but its final answer could not be read."),
           { roomTurnRecoveryOutcome: "terminal_failure" as const },
         );
       }, async () => {
@@ -3737,8 +3738,20 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
     assert.equal(
       receipts[0]!.last_error,
       "Open Model request failed at the model provider (HTTP 404): expired model. token=[REDACTED]",
-      "the failed receipt retains an actionable, redacted provider explanation",
+      "the failed receipt retains an actionable provider explanation without credentials or display controls",
     );
+    const inspection = new DatabaseSync(join(root, "daemon.sqlite"));
+    try {
+      const persisted = inspection.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(receipts[0]!.inbox_item_id) as { terminal_evidence_json: string };
+      assert.equal(
+        (JSON.parse(persisted.terminal_evidence_json) as { error?: string }).error,
+        "Open Model request failed at the model provider (HTTP 404): expired model. token=[REDACTED]",
+        "durable terminal evidence contains only the same safe display text",
+      );
+    } finally {
+      inspection.close();
+    }
     assert.equal(
       receipts[0]?.timeline.some((event) => event.phase === "retry_scheduled"),
       false,
