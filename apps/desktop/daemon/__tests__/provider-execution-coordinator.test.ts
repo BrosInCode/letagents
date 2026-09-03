@@ -703,6 +703,7 @@ function ownedRecoveryHarness() {
   };
   let credential = "old-secret";
   let mintCalls = 0;
+  let bindCalls = 0;
   let deliveryStarts = 0;
   let waitStages = 0;
   const failures: unknown[] = [];
@@ -725,6 +726,7 @@ function ownedRecoveryHarness() {
       };
     },
     bindMintedSession: async (_entryId, minted) => {
+      bindCalls += 1;
       binding = {
         ...binding, entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
         execution_generation_id: minted.executionGenerationId, agent_session_id: minted.agentSessionId,
@@ -741,11 +743,56 @@ function ownedRecoveryHarness() {
     ...runtime, failures,
     get binding() { return binding; },
     get mintCalls() { return mintCalls; },
+    get bindCalls() { return bindCalls; },
     get deliveryStarts() { return deliveryStarts; },
     get waitStages() { return waitStages; },
     replaceGrant: () => { grant = { ...grant, grantId: "grant-2" }; },
   };
 }
+
+test("exact Cursor host binding remains current while its per-turn child is replaced", async () => {
+  const runtime = ownedRecoveryHarness();
+  const cursorHandle: ProviderActionHandle = {
+    ...returnedHandle,
+    pid: 81_001,
+    providerConnection: { kind: "cursor_cli", pid: 81_001, processIdentity: "wrapper-birth:1" },
+  };
+  runtime.binding.execution_generation_id = "generation-2";
+  runtime.setEntry({
+    ...runtime.entry(),
+    provider: "cursor",
+    observed_state: "idle",
+    condition: "none",
+    last_error: null,
+    provider_ref: {
+      work_attempt_id: "attempt-1",
+      execution_generation_id: "generation-2",
+      provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null },
+    },
+  });
+  runtime.liveHandles.set("agent-1", cursorHandle);
+  const getBinding = runtime.options.bindings.get;
+  let bindingReads = 0;
+  runtime.options.bindings.get = async (entryId) => {
+    const current = await getBinding(entryId);
+    if (bindingReads++ === 0) {
+      cursorHandle.pid = 81_002;
+      cursorHandle.providerConnection = {
+        kind: "cursor_cli", pid: 81_002, processIdentity: "wrapper-birth:2",
+      };
+    }
+    return current;
+  };
+
+  await runtime.coordinator.converge("agent-1");
+
+  assert.equal(runtime.mintCalls, 0);
+  assert.equal(runtime.bindCalls, 0);
+  assert.equal(runtime.deliveryStarts, 1);
+  assert.equal(runtime.entry().condition, "none");
+  assert.equal(runtime.entry().observed_state, "working");
+});
 
 test("daemon-owned reattach binds the current generation despite a still-present predecessor credential", async () => {
   const runtime = ownedRecoveryHarness();

@@ -1034,22 +1034,55 @@ test("worker readiness fails closed when authority changes during the binding pu
   }
 });
 
-test("Cursor worker readiness rejects a child replaced during binding publication", async () => {
-  const cursorHandle = providerHandle({
-    pid: 81_001,
-    providerConnection: { kind: "cursor_cli", pid: 81_001, processIdentity: "wrapper-birth:1" },
-  });
+test("Cursor worker readiness tolerates per-turn child retirement or replacement during binding publication", async () => {
+  for (const nextChild of [
+    { pid: null, providerConnection: { kind: "cursor_cli" as const, pid: null, processIdentity: null } },
+    { pid: 81_002, providerConnection: { kind: "cursor_cli" as const, pid: 81_002, processIdentity: "wrapper-birth:2" } },
+  ]) {
+    const cursorHandle = providerHandle({
+      pid: 81_001,
+      providerConnection: { kind: "cursor_cli", pid: 81_001, processIdentity: "wrapper-birth:1" },
+    });
+    const harness = fixture({
+      handle: cursorHandle,
+      entry: manifestEntry({ provider: "cursor", provider_ref: {
+        work_attempt_id: "attempt-1", provider_continuation_id: "continuation-1",
+        provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null },
+        execution_generation_id: "execution-1",
+      } }),
+      publishNative: async () => {
+        cursorHandle.pid = nextChild.pid;
+        cursorHandle.providerConnection = nextChild.providerConnection;
+      },
+    });
+
+    await harness.subject.bindWorkerSession({
+      entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+      agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+    });
+    assert.equal(harness.events.filter((event) => event === "binding:bind").length, 0);
+    assert.equal(harness.entry.condition, "none");
+    assert.equal(harness.deliveryStarts, 1);
+  }
+});
+
+test("Cursor worker readiness rejects durable handle replacement during binding publication", async () => {
   let harness!: ReturnType<typeof fixture>;
   harness = fixture({
-    handle: cursorHandle,
+    handle: providerHandle({
+      pid: 81_001,
+      providerConnection: { kind: "cursor_cli", pid: 81_001, processIdentity: "wrapper-birth:1" },
+    }),
     entry: manifestEntry({ provider: "cursor", provider_ref: {
       work_attempt_id: "attempt-1", provider_continuation_id: "continuation-1",
       provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null },
       execution_generation_id: "execution-1",
     } }),
     publishNative: async () => {
-      cursorHandle.pid = 81_002;
-      cursorHandle.providerConnection = { kind: "cursor_cli", pid: 81_002, processIdentity: "wrapper-birth:2" };
+      harness.setHandle(providerHandle({
+        pid: 81_002,
+        providerConnection: { kind: "cursor_cli", pid: 81_002, processIdentity: "wrapper-birth:2" },
+      }));
     },
   });
 
