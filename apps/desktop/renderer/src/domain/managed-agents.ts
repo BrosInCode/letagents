@@ -1177,6 +1177,20 @@ export function supervisedCursorPermissionProfilePresentation(
   return profile;
 }
 
+export function supervisedPermissionProfilePresentation(
+  providerId: DesktopAgentProviderId | null | undefined,
+  profile: DesktopManagedAgentPermissionProfile,
+): DesktopManagedAgentPermissionProfile {
+  if (providerId === "cursor") return supervisedCursorPermissionProfilePresentation(profile);
+  if (providerId !== "codex" || profile.id !== "ask_before_write") return profile;
+  return {
+    ...profile,
+    status: "available",
+    description: "Requires approval before Codex can run write-capable commands or apply file changes.",
+    detail: "Codex runs with native on-request approvals inside a read-only, network-disabled sandbox.",
+  };
+}
+
 export type ManagedAgentPermissionProfileSelections =
   Partial<Record<DesktopAgentProviderId, DesktopManagedAgentPermissionProfileId>>;
 

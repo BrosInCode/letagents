@@ -252,6 +252,7 @@ const {
   repoRootPath: () => props.repoRootPath,
   selectedProviderId,
   selectedProvider,
+  selectedPermissionProfiles,
   selectedPermissionProfile,
   showOpenModelConfig,
   showModelSelector,

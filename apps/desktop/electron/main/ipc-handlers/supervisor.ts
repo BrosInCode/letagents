@@ -143,7 +143,7 @@ export function registerDesktopSupervisorIpcHandlers(targetIpcMain: IpcMain): vo
           throw new LaunchBlockedError("Supervised Claude Code cannot use Ask before writes yet: native permission prompts are not bridged. Choose Read-only or Full access.", "retry");
         }
         try {
-          assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId);
+          assertManagedAgentPermissionProfileAvailable(provider, input.permissionProfileId, "supervised");
         } catch (error) {
           throw new LaunchBlockedError(
             error instanceof Error ? error.message : "The selected permission profile is unavailable.",

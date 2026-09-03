@@ -544,6 +544,14 @@ test("managed agent permission profiles map provider-specific available and gate
   const codexProfiles = listManagedAgentPermissionProfiles("codex");
   assert.equal(codexProfiles.find((profile) => profile.id === "full_access")?.status, "available");
   assert.equal(codexProfiles.find((profile) => profile.id === "ask_before_write")?.status, "gated");
+  assert.throws(
+    () => assertManagedAgentPermissionProfileAvailable("codex", "ask_before_write"),
+    /not available for codex/,
+  );
+  assert.equal(
+    assertManagedAgentPermissionProfileAvailable("codex", "ask_before_write", "supervised").status,
+    "available",
+  );
 
   assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "read_only");
   assert.equal(managedAgentPermissionProfileForProvider("cursor", null).id, "read_only");

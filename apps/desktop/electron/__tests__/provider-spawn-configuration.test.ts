@@ -27,6 +27,18 @@ test("managed provider spawn attestation preserves the resolved native authority
     sandboxPolicy: { type: "dangerFullAccess" },
   });
 
+  assert.deepEqual(attestProviderSpawnPolicy("codex", {
+    ...request,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: {
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "readOnly", networkAccess: false },
+    },
+  }), {
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "readOnly", networkAccess: false },
+  });
+
   assert.deepEqual(attestProviderSpawnPolicy("claude-code", {
     ...request,
     permissionProfileId: "read_only",
@@ -63,6 +75,15 @@ test("managed provider spawn attestation rejects downgraded or unsupported autho
       sandboxPolicy: { type: "dangerFullAccess" },
     },
   }), /approvalPolicy/);
+
+  assert.throws(() => attestProviderSpawnPolicy("codex", {
+    ...request,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: {
+      approvalPolicy: "on-request",
+      sandboxPolicy: { type: "dangerFullAccess" },
+    },
+  }), /sandboxPolicy/);
 
   assert.throws(() => attestProviderSpawnPolicy("claude-code", {
     ...request,
