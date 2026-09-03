@@ -18,6 +18,10 @@ import {
   type ReconcileExecutionDelegation,
   type ValidateExecutionDelegation,
 } from "./execution-delegation-journal.js";
+import {
+  selectDelegatedApproval,
+  type SelectDelegatedApproval,
+} from "./execution-delegated-approval.js";
 import { sameProviderActionConnectionSnapshot } from "./provider-action-port.js";
 import {
   assertNoPollingActivation, cancelPollingActivation, checkpointPollingActivationTurn, completePollingActivation,
@@ -543,6 +547,23 @@ export class ManifestStore {
     const snapshot = structuredClone(input);
     const db = await this.getDatabase();
     return validateExecutionDelegation(db, snapshot, this.readEntryFromDatabase(db, snapshot.agentId));
+  }
+
+  /** Record only; provider dispatch remains a separate, later authority edge. */
+  async selectDelegatedApproval(
+    input: Omit<SelectDelegatedApproval, "atMs">,
+    nowMs: () => number,
+    assertCurrent: () => void,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<ExecutionApprovalRecord> {
+    if (typeof nowMs !== "function" || typeof assertCurrent !== "function" || typeof commitFence !== "function") {
+      throw new Error("Delegated approval selection requires current host/native authority and a daemon ownership commit fence.");
+    }
+    const snapshot = structuredClone(input);
+    return this.writeOperationalJournal((db) => {
+      assertCurrent();
+      return selectDelegatedApproval(db, { ...snapshot, atMs: nowMs() }, this.readEntryFromDatabase(db, snapshot.expected.agentId));
+    }, commitFence);
   }
 
   /** Internal drain admission only. This does not switch modes or interrupt a provider. */

@@ -13,6 +13,9 @@ import {
   type RemoteExecutionDelegationRevision,
   type ValidateExecutionDelegation,
 } from "./execution-delegation-journal.js";
+import type { ApprovalAuthority, ApprovalReference, ExecutionApprovalRecord } from "./execution-approval-journal.js";
+import type { ExecutionDelegationDecisionIntent } from "../../../shared/execution-delegation-decision.mjs";
+import type { SelectDelegatedApproval } from "./execution-delegated-approval.js";
 import { matchesPollingActivationRuntime, type PollingActivationRecord } from "./custodial-polling-activation.js";
 import type { ManifestStore } from "./manifest-store.js";
 import {
@@ -102,6 +105,12 @@ type WorkerAuthorityStore = Pick<ManifestStore, "acknowledgePollingOffer" | "rec
     commitFence: (commit: () => Promise<void>) => Promise<void>,
   ): Promise<{ created: boolean; delegation: LocalExecutionDelegation }>;
   validateExecutionDelegation(input: ValidateExecutionDelegation): Promise<LocalExecutionDelegation>;
+  selectDelegatedApproval(
+    input: Omit<SelectDelegatedApproval, "atMs">,
+    nowMs: () => number,
+    assertCurrent: () => void,
+    commitFence: (commit: () => Promise<void>) => Promise<void>,
+  ): Promise<ExecutionApprovalRecord>;
 };
 
 type WorkerAuthorityDurability = {
@@ -226,6 +235,15 @@ export type SyncInstalledExecutionDelegationInput = {
 export type ValidateInstalledExecutionDelegationInput = Omit<ValidateExecutionDelegation,
   "authority" | "agentId" | "atMs"
 > & { entryId: string };
+
+export type RecordDelegatedApprovalInput = {
+  entryId: string;
+  intent: ExecutionDelegationDecisionIntent;
+  expected: ApprovalReference;
+  locallyWitnessedProjectionSha256: string;
+  approvalAuthority: ApprovalAuthority;
+  assertApprovalCurrent(): void;
+};
 
 /** Owns process-memory worker credentials and every fence governing their use. */
 export class WorkerAuthorityCoordinator {
@@ -397,6 +415,34 @@ export class WorkerAuthorityCoordinator {
       });
       captured.assertCurrent();
       return delegation;
+    });
+  }
+
+  /**
+   * The decision was exact-fetched by the reconciliation lane. Revalidate its
+   * current host grant and the caller's local request/projection witnesses
+   * inside the same BEGIN IMMEDIATE transaction that records source=delegate.
+   * The resulting decision is admission-complete, never a dispatch permit.
+   */
+  async recordDelegatedApproval(input: RecordDelegatedApprovalInput): Promise<ExecutionApprovalRecord> {
+    return this.options.serializeEntry(input.entryId, async () => {
+      input.assertApprovalCurrent();
+      const entry = await this.options.store.getEntry(input.entryId);
+      if (!entry || !await this.ownsDaemonGeneration(this.options.authority.currentGeneration())) {
+        throw new ExecutionDelegationJournalError("authority_mismatch");
+      }
+      const captured = this.captureExecutionDelegationAuthority(entry, this.options.nowMs());
+      const assertCurrent = () => {
+        captured.assertCurrent();
+        input.assertApprovalCurrent();
+      };
+      return this.options.store.selectDelegatedApproval({
+        intent: input.intent,
+        expected: input.expected,
+        locallyWitnessedProjectionSha256: input.locallyWitnessedProjectionSha256,
+        approvalAuthority: input.approvalAuthority,
+        authority: captured.authority,
+      }, this.options.nowMs, assertCurrent, commit => this.options.authority.fenceCommit(commit));
     });
   }
 

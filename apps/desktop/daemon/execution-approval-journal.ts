@@ -61,9 +61,11 @@ export type RecordExecutionApprovalOutcome = z.infer<typeof outcome>;
 export type LoseExecutionApproval = z.infer<typeof loss>;
 type Certainty = "impossible" | "unknown" | null;
 export type ExecutionApprovalRecord = {
-  request: AdmitExecutionApproval & { state: ApprovalState; applicationCertainty: Certainty };
+  request: AdmitExecutionApproval & { delegatable: boolean; state: ApprovalState; applicationCertainty: Certainty };
   decision: null | {
     decisionId: string; actorId: string; decision: "allow_once" | "deny"; projectionSha256: string | null;
+    source: "host" | "delegate"; delegationInstanceId: string | null; delegationRevision: number | null;
+    delegationScopeSha256: string | null;
     dispatchState: "not_dispatched" | "dispatching" | "uncertain" | "acknowledged" | "lost";
     dispatchId: string | null; applicationCertainty: Certainty;
     decidedAtMs: number; dispatchStartedAtMs: number | null; resolvedAtMs: number | null;
@@ -85,7 +87,8 @@ function requireForeignKeys(db: DatabaseSync): void {
   if (db.prepare("PRAGMA foreign_keys").get()?.foreign_keys !== 1) reject("missing_turn");
 }
 function requestFromRow(row: Row): ExecutionApprovalRecord["request"] {
-  if (row.delegatable !== 0 || (row.kind !== "command" && row.kind !== "file_change")) reject("identity_mismatch");
+  if (![0, 1].includes(Number(row.delegatable)) || (row.kind !== "command" && row.kind !== "file_change")
+    || (row.delegatable === 1 && (row.kind !== "file_change" || row.risk !== "low"))) reject("identity_mismatch");
   return {
     requestId: String(row.request_id), requestVersion: Number(row.request_version), requestSha256: String(row.request_sha256),
     agentId: String(row.agent_id), roomId: String(row.room_id), executionGenerationId: String(row.execution_generation_id),
@@ -95,6 +98,7 @@ function requestFromRow(row: Row): ExecutionApprovalRecord["request"] {
     kind: row.kind as AdmitExecutionApproval["kind"], risk: row.risk as AdmitExecutionApproval["risk"],
     recoveryBoundary: row.recovery_boundary as AdmitExecutionApproval["recoveryBoundary"],
     createdAtMs: Number(row.created_at_ms), expiresAtMs: Number(row.expires_at_ms),
+    delegatable: row.delegatable === 1,
     state: row.state as ApprovalState, applicationCertainty: row.application_certainty as Certainty,
   };
 }
@@ -102,9 +106,19 @@ function read(db: DatabaseSync, id: string, version: number): ExecutionApprovalR
   const row = db.prepare("SELECT * FROM execution_approval_requests WHERE request_id=? AND request_version=?").get(id, version);
   if (!row) return null;
   const decision = db.prepare("SELECT * FROM execution_approval_decisions WHERE request_id=? AND request_version=?").get(id, version);
-  if (decision && (decision.source !== "host" || decision.request_delegatable !== 0)) reject("identity_mismatch");
+  if (decision && !(
+    (decision.source === "host" && decision.request_delegatable === 0
+      && decision.delegation_instance_id === null && decision.delegation_revision === null
+      && decision.delegation_scope_sha256 === null)
+    || (decision.source === "delegate" && decision.request_delegatable === 1
+      && typeof decision.delegation_instance_id === "string" && Number.isSafeInteger(decision.delegation_revision)
+      && typeof decision.delegation_scope_sha256 === "string")
+  )) reject("identity_mismatch");
   return { request: requestFromRow(row), decision: decision ? {
     decisionId: String(decision.decision_id), actorId: String(decision.actor_id), decision: decision.decision as "allow_once" | "deny",
+    source: decision.source as "host" | "delegate", delegationInstanceId: decision.delegation_instance_id as string | null,
+    delegationRevision: decision.delegation_revision as number | null,
+    delegationScopeSha256: decision.delegation_scope_sha256 as string | null,
     projectionSha256: decision.projection_sha256 as string | null, dispatchState: decision.dispatch_state as NonNullable<ExecutionApprovalRecord["decision"]>["dispatchState"],
     dispatchId: decision.dispatch_id as string | null, applicationCertainty: decision.application_certainty as Certainty,
     decidedAtMs: Number(decision.decided_at_ms), dispatchStartedAtMs: decision.dispatch_started_at_ms as number | null,

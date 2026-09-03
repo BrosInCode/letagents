@@ -340,6 +340,62 @@ test("execution delegation inventory preserves exact host scope and cursor", asy
   }
 });
 
+test("execution delegation decision inventory and exact read preserve the frozen host contract", async () => {
+  const observed: string[] = [];
+  const server = createHttpServer((request, response) => {
+    observed.push(request.url ?? "");
+    assert.equal(request.headers.authorization, "Bearer grant-secret");
+    assert.equal(request.headers["x-letagents-supervisor-generation"], "3");
+    response.writeHead(200, { "content-type": "application/json" });
+    if (request.url?.includes("?")) {
+      response.end(JSON.stringify({ decision_ids: ["decision-b", "decision-c"], next_cursor: "decision-c" }));
+      return;
+    }
+    const decisionId = request.url?.split("/").at(-1);
+    response.end(JSON.stringify({ decision: {
+      decision_id: decisionId === "decision-mismatch" ? "other-decision" : decisionId,
+      delegation_instance_id: "delegation", delegation_revision: 4,
+      actor_account_id: "approver", request_id: "request", request_version: 2,
+      request_sha256: "a".repeat(64), projection_sha256: "b".repeat(64), decision: "allow_once",
+      decided_at: "2026-08-14T00:00:00.000Z", owner_account_id: "owner", room_id: "room/exact",
+      agent_key: "owner/agent", approver_account_id: decisionId === "decision-bad" ? "someone-else" : "approver",
+      category: "file_change", risk_ceiling: "low",
+      scope_sha256: "c".repeat(64),
+    } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const common = { apiUrl: `http://127.0.0.1:${address.port}`, grantId: "grant-exact",
+      supervisorGrant: "grant-secret", grantGeneration: 3 };
+    const page = await productionSupervisorGrantHttp.listExecutionDelegationDecisionIds({
+      ...common, roomId: "room/exact", agentKey: "owner/agent", after: "decision-a",
+    });
+    assert.deepEqual(page, { decisionIds: ["decision-b", "decision-c"], nextCursor: "decision-c" });
+    const decision = await productionSupervisorGrantHttp.getExecutionDelegationDecision({
+      ...common, decisionId: "decision-c",
+    });
+    assert.equal(decision.decision_id, "decision-c");
+    assert.equal(decision.actor_account_id, decision.approver_account_id);
+    await assert.rejects(
+      productionSupervisorGrantHttp.getExecutionDelegationDecision({ ...common, decisionId: "decision-bad" }),
+      /different intent/,
+    );
+    await assert.rejects(
+      productionSupervisorGrantHttp.getExecutionDelegationDecision({ ...common, decisionId: "decision-mismatch" }),
+      /different intent/,
+    );
+    assert.deepEqual(observed, [
+      "/supervisor-host-grants/grant-exact/execution-delegation-decisions?room_id=room%2Fexact&agent_key=owner%2Fagent&after=decision-a",
+      "/supervisor-host-grants/grant-exact/execution-delegation-decisions/decision-c",
+      "/supervisor-host-grants/grant-exact/execution-delegation-decisions/decision-bad",
+      "/supervisor-host-grants/grant-exact/execution-delegation-decisions/decision-mismatch",
+    ]);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs(""), 210_000);
   assert.equal(workplaceLivenessStaleAfterMs("999"), 210_000);

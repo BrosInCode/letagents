@@ -162,7 +162,7 @@ type HarnessOptions = {
   fireMintTimeout?: boolean;
   boundedContextError?: Error;
   publishNative?: () => Promise<void>;
-  delegationCommitMutation?: "generation" | "control" | "grant" | "clock";
+  delegationCommitMutation?: "generation" | "control" | "grant" | "clock" | "native" | "request_expiry";
 };
 
 function fixture(options: HarnessOptions = {}) {
@@ -338,6 +338,27 @@ function fixture(options: HarnessOptions = {}) {
           revokedAtMs: null,
         };
       },
+      selectDelegatedApproval: async (_input, nowMs, assertCurrent, fence) => {
+        let result!: Awaited<ReturnType<WorkerAuthorityCoordinator["recordDelegatedApproval"]>>;
+        await fence(async () => {
+          if (options.delegationCommitMutation === "generation") generation += 1;
+          if (options.delegationCommitMutation === "control") controlEpoch += 1;
+          if (options.delegationCommitMutation === "grant") {
+            custody.installHostGrant(hostGrant({ grantId: "replacement-grant" }));
+          }
+          if (options.delegationCommitMutation === "clock") currentTime = now + 2 * 60 * 60 * 1_000;
+          if (options.delegationCommitMutation === "request_expiry") currentTime = now + 60_000;
+          if (options.delegationCommitMutation === "native" && handle?.providerConnection) {
+            handle = { ...handle, providerConnection: { ...handle.providerConnection, processIdentity: "successor" } };
+          }
+          assertCurrent();
+          if (options.delegationCommitMutation === "request_expiry" && nowMs() >= now + 60_000) {
+            throw new Error("approval expired");
+          }
+          result = {} as typeof result;
+        });
+        return result;
+      },
     },
     durability: {
       getAttempt: async () => ({ execution_generations: [execution(options.terminal)], checkpoints }),
@@ -457,6 +478,7 @@ function fixture(options: HarnessOptions = {}) {
     get destroyed() { return destroyed; },
     get deliveryStarts() { return deliveryStarts; },
     get deliveryStops() { return deliveryStops; },
+    get handle() { return handle; },
     get convergenceRequests() { return convergenceRequests; },
     scheduled,
     manifestUpdates,
@@ -1403,6 +1425,62 @@ test("execution delegation commit refuses daemon, control, grant, and expiry wit
       entryId: "agent-1",
       delegationInstanceId: "delegation-1",
     }), { code: "authority_mismatch" }, mutation);
+  }
+});
+
+test("delegated approval recording repeats host, native, and expiry witnesses inside its commit fence", async () => {
+  const connection = {
+    kind: "codex_app_server" as const,
+    url: "http://127.0.0.1:4311",
+    pid: 4311,
+    processIdentity: "native-birth",
+  };
+  for (const mutation of ["generation", "control", "grant", "clock", "native", "request_expiry"] as const) {
+    const harness = fixture({
+      delegationCommitMutation: mutation,
+      entry: manifestEntry({
+        provider_ref: {
+          work_attempt_id: "attempt-1",
+          execution_generation_id: "execution-1",
+          provider_continuation_id: "continuation-1",
+          provider_connection: connection,
+        },
+      }),
+      handle: providerHandle({ providerConnection: connection }),
+    });
+    harness.custody.installHostGrant(hostGrant());
+    const reference = {
+      requestId: "approval-1", requestVersion: 1, requestSha256: "b".repeat(64),
+      agentId: "agent-1", roomId: "room-1", executionGenerationId: "execution-1",
+      runtimeGenerationId: "runtime-1", turnId: "turn-1", providerContinuationId: "continuation-1",
+      providerTurnId: "provider-turn-1", connectionId: "connection-1", nativeRequestId: 1,
+    };
+    const operation = harness.subject.recordDelegatedApproval({
+      entryId: "agent-1",
+      intent: {
+        decision_id: "decision-1", delegation_instance_id: "delegation-1", delegation_revision: 3,
+        actor_account_id: "approver-1", request_id: "approval-1",
+        request_version: 1, request_sha256: "b".repeat(64),
+        projection_sha256: "c".repeat(64), decision: "allow_once",
+        decided_at: "2026-08-26T12:00:00.000Z", owner_account_id: "account-1",
+        room_id: "room-1", agent_key: "agent-key-1", approver_account_id: "approver-1",
+        category: "file_change", risk_ceiling: "low", scope_sha256: "a".repeat(64),
+      },
+      expected: reference,
+      locallyWitnessedProjectionSha256: "c".repeat(64),
+      approvalAuthority: {
+        inboxItemId: "inbox-1", workAttemptId: "attempt-1", executionGenerationId: "execution-1",
+        provider: "codex", configurationRevision: 1, providerConnection: connection,
+      },
+      assertApprovalCurrent: () => {
+        if (harness.handle?.providerConnection?.processIdentity !== "native-birth") {
+          throw new Error("native approval changed");
+        }
+      },
+    });
+    if (mutation === "native") await assert.rejects(operation, /native approval changed/, mutation);
+    else if (mutation === "request_expiry") await assert.rejects(operation, /approval expired/, mutation);
+    else await assert.rejects(operation, { code: "authority_mismatch" }, mutation);
   }
 });
 

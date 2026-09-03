@@ -1274,7 +1274,12 @@ test("approval journal snapshots caller inputs before awaiting the ownership fen
       input.roomId = "other-room"; input.nativeRequestId = "other-native-id";
       await Promise.resolve(); await commit();
     });
-    assert.deepEqual(admission.approval.request, { ...original, state: "requested", applicationCertainty: null });
+    assert.deepEqual(admission.approval.request, {
+      ...original,
+      delegatable: false,
+      state: "requested",
+      applicationCertainty: null,
+    });
     const selection = { authority, expected: { ...expected }, decisionId: "decision", actorId: "owner", decision: "allow_once" as const, projectionSha256: "b".repeat(64), atMs: 110 };
     const selected = await store.selectHostApproval(selection, async commit => {
       selection.expected.connectionId = "replacement"; selection.actorId = "other"; selection.projectionSha256 = "c".repeat(64);

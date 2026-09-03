@@ -1,6 +1,10 @@
 import type { SupervisedDeliveryHttp, SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
 import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
+import {
+  parseExecutionDelegationDecisionIntent,
+  type ExecutionDelegationDecisionIntent,
+} from "../../../shared/execution-delegation-decision.mjs";
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
@@ -34,6 +38,14 @@ export interface SupervisorGrantHttp {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
     roomId: string; agentKey: string; after: string | null; signal?: AbortSignal;
   }): Promise<{ delegationInstanceIds: string[]; nextCursor: string | null }>;
+  getExecutionDelegationDecision?(input: {
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
+    decisionId: string; signal?: AbortSignal;
+  }): Promise<ExecutionDelegationDecisionIntent>;
+  listExecutionDelegationDecisionIds?(input: {
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
+    roomId: string; agentKey: string; after: string | null; signal?: AbortSignal;
+  }): Promise<{ decisionIds: string[]; nextCursor: string | null }>;
 }
 
 export class SupervisorGrantRequestError extends Error {
@@ -136,13 +148,14 @@ function parseExecutionDelegationResponse(
   };
 }
 
-function parseExecutionDelegationInventory(
+function parseExecutionDelegationInventoryPage(
   value: unknown,
-): { delegationInstanceIds: string[]; nextCursor: string | null } {
+  key: "delegation_instance_ids" | "decision_ids",
+): { ids: string[]; nextCursor: string | null } {
   const body = value && typeof value === "object" && !Array.isArray(value)
     ? value as Record<string, unknown>
     : null;
-  const ids = body?.delegation_instance_ids;
+  const ids = body?.[key];
   const nextCursor = body?.next_cursor;
   if (!Array.isArray(ids) || ids.length > EXECUTION_DELEGATION_INVENTORY_PAGE_SIZE
     || ids.some((id) => typeof id !== "string" || !id.trim() || id !== id.trim() || id.length > 512)
@@ -152,7 +165,7 @@ function parseExecutionDelegationInventory(
     || (nextCursor !== null && nextCursor !== ids.at(-1))) {
     throw new Error("Execution delegation inventory returned an invalid page.");
   }
-  return { delegationInstanceIds: ids as string[], nextCursor: nextCursor as string | null };
+  return { ids: ids as string[], nextCursor: nextCursor as string | null };
 }
 
 export type RoomWorkPublishInput = {
@@ -244,7 +257,8 @@ export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
 };
 
 /** Host grants and worker bearers are process-memory values, never daemon state. */
-export const productionSupervisorGrantHttp: SupervisorGrantHttp = {
+export const productionSupervisorGrantHttp: SupervisorGrantHttp & Required<Pick<SupervisorGrantHttp,
+  "getExecutionDelegationDecision" | "listExecutionDelegationDecisionIds">> = {
   async createWorkerSession(input) {
     const ideLabel = supervisedProviderLabel(input.provider);
     const response = await fetch(`${input.apiUrl}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/worker-sessions`, {
@@ -355,7 +369,50 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp = {
       },
     );
     if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Execution delegation inventory");
-    return parseExecutionDelegationInventory(await response.json());
+    const page = parseExecutionDelegationInventoryPage(await response.json(), "delegation_instance_ids");
+    return { delegationInstanceIds: page.ids, nextCursor: page.nextCursor };
+  },
+  async getExecutionDelegationDecision(input) {
+    const apiOrigin = hostGrantApiOrigin(input.apiUrl);
+    const response = await fetch(
+      `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegation-decisions/${encodeURIComponent(input.decisionId)}`,
+      {
+        headers: {
+          authorization: `Bearer ${input.supervisorGrant}`,
+          "x-letagents-supervisor-generation": String(input.grantGeneration),
+        },
+        signal: boundedCloudSignal(input.signal),
+      },
+    );
+    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Execution delegation decision read");
+    const body = await response.json() as Record<string, unknown>;
+    if (!body || typeof body !== "object" || Array.isArray(body)
+      || Object.keys(body).length !== 1 || !Object.hasOwn(body, "decision")) {
+      throw new Error("Execution delegation decision response returned an invalid wrapper.");
+    }
+    const decision = parseExecutionDelegationDecisionIntent(body.decision);
+    if (!decision || decision.decision_id !== input.decisionId) {
+      throw new Error("Execution delegation decision response returned a different intent.");
+    }
+    return decision;
+  },
+  async listExecutionDelegationDecisionIds(input) {
+    const apiOrigin = hostGrantApiOrigin(input.apiUrl);
+    const query = new URLSearchParams({ room_id: input.roomId, agent_key: input.agentKey });
+    if (input.after) query.set("after", input.after);
+    const response = await fetch(
+      `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegation-decisions?${query}`,
+      {
+        headers: {
+          authorization: `Bearer ${input.supervisorGrant}`,
+          "x-letagents-supervisor-generation": String(input.grantGeneration),
+        },
+        signal: boundedCloudSignal(input.signal),
+      },
+    );
+    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Execution delegation decision inventory");
+    const page = parseExecutionDelegationInventoryPage(await response.json(), "decision_ids");
+    return { decisionIds: page.ids, nextCursor: page.nextCursor };
   },
 };
 
