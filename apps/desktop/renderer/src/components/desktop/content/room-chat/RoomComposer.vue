@@ -1,6 +1,6 @@
 <template>
   <form class="desktop-composer" data-testid="desktop-composer" @submit.prevent="submitMessage">
-    <section v-for="approval in hostApprovals" :key="approval.id" class="desktop-composer-permission-tray desktop-host-approval"
+    <section v-for="approval in visibleHostApprovals" :key="approval.id" class="desktop-composer-permission-tray desktop-host-approval"
       data-testid="desktop-host-approval" aria-live="polite">
       <div class="desktop-composer-permission-main">
         <span class="desktop-composer-permission-dot" aria-hidden="true"></span>
@@ -9,6 +9,11 @@
           <span>{{ approval.presentation.title }}</span>
         </div>
       </div>
+      <button type="button" class="desktop-host-approval-dismiss"
+        :aria-label="`Dismiss approval from ${approval.presentation.displayName}`"
+        @click="dismissHostApproval(approval.id)">
+        <X :size="15" aria-hidden="true" />
+      </button>
       <details class="desktop-host-approval-details">
         <summary>Review the request · visible only on this computer</summary>
         <pre>{{ approval.presentation.details }}</pre>
@@ -27,7 +32,7 @@
           @click="decideHostApproval(approval.id, approval.retryDecision)">Retry recorded {{ approval.retryDecision === 'deny' ? 'denial' : 'approval' }}</button>
       </div>
     </section>
-    <p v-if="hostApprovalError && hostApprovals.length" class="desktop-composer-permission-error" role="status">
+    <p v-if="hostApprovalError && visibleHostApprovals.length" class="desktop-composer-permission-error" role="status">
       {{ hostApprovalError }} <button type="button" :disabled="hostApprovalLoading" @click="refreshHostApprovals">Refresh approvals</button>
     </p>
     <div
@@ -191,7 +196,7 @@
 
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from "vue";
-import { ArrowUp, LoaderCircle, Plus } from "@lucide/vue";
+import { ArrowUp, LoaderCircle, Plus, X } from "@lucide/vue";
 import type {
   DesktopManagedAgentPermissionDecisionBehavior,
   DesktopParticipantSummary,
@@ -253,6 +258,7 @@ const textareaElement = ref<HTMLTextAreaElement | null>(null);
 const mentionQuery = ref<string | null>(null);
 const activeMentionIndex = ref(0);
 const hostApprovals = ref<DesktopHostApproval[]>([]);
+const dismissedHostApprovalIds = ref(new Set<string>());
 const hostApprovalError = ref<string | null>(null);
 const hostApprovalBusy = ref<string | null>(null);
 const hostApprovalLoading = ref(false);
@@ -265,6 +271,14 @@ function hostApprovalStatus(status: HostApprovalStatus): string {
     uncertain: "Decision could not be confirmed", resolved: "Decision applied", unavailable: "Approval unavailable" }[status];
 }
 
+const visibleHostApprovals = computed(() => hostApprovals.value.filter(approval =>
+  (approval.status === "pending" || approval.status === "decision_recorded")
+  && !dismissedHostApprovalIds.value.has(approval.id)));
+
+function dismissHostApproval(id: string): void {
+  dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value, id]);
+}
+
 async function refreshHostApprovals(): Promise<void> {
   const epoch = approvalEpoch;
   const mutation = approvalMutation;
@@ -275,7 +289,11 @@ async function refreshHostApprovals(): Promise<void> {
   try {
     const snapshot = await read(room);
     if (epoch !== approvalEpoch || mutation !== approvalMutation) return;
-    if (snapshot.available) hostApprovals.value = snapshot.approvals;
+    if (snapshot.available) {
+      hostApprovals.value = snapshot.approvals;
+      const present = new Set(snapshot.approvals.map(approval => approval.id));
+      dismissedHostApprovalIds.value = new Set([...dismissedHostApprovalIds.value].filter(id => present.has(id)));
+    }
     hostApprovalError.value = snapshot.available ? snapshot.error
       : snapshot.error ?? "Host approvals are unavailable. Decisions are disabled until the service reconnects.";
   } catch {
@@ -332,6 +350,7 @@ watch(
   () => {
     approvalEpoch += 1;
     hostApprovals.value = [];
+    dismissedHostApprovalIds.value = new Set();
     hostApprovalError.value = null;
     void refreshHostApprovals();
     draft.value = props.initialDraft || "";

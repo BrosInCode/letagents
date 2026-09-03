@@ -415,13 +415,13 @@ test("host approval retains an unsent chosen decision for exact recovery without
   }
 });
 
-for (const scenario of ["command", "file_change", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
+for (const scenario of ["command", "command_applied", "command_denied", "file_change", "file_change_applied", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
   test(`host approval reaches the real Codex adapter through an offline native server: ${scenario}`, { timeout: 10_000 }, () => verifyNativeApproval(scenario));
 }
 
-async function verifyNativeApproval(scenario: "command" | "file_change" | "changed_file" | "changed_presentation" | "oversized_presentation") {
+async function verifyNativeApproval(scenario: "command" | "command_applied" | "command_denied" | "file_change" | "file_change_applied" | "changed_file" | "changed_presentation" | "oversized_presentation") {
   const f = await fixture(); f.broker.close();
-  const isFileChange = scenario !== "command";
+  const isFileChange = !["command", "command_applied", "command_denied"].includes(scenario);
   const changes = [{ path: join(f.workspace, "old.txt"), kind: { type: "update", move_path: join(f.workspace, "new.txt") }, diff: `@@ -1 +1 @@\n-old\n+${secret}` }];
   if (scenario === "oversized_presentation") {
     // The edits alone fit the adapter's bound; the complete host presentation,
@@ -504,6 +504,12 @@ async function verifyNativeApproval(scenario: "command" | "file_change" | "chang
       params: { threadId: "continuation", turnId: "native-turn", itemId: "item-1", startedAtMs: now,
         ...(isFileChange ? {} : { command: `printf '${secret}'` }), reason: "failed systemError is untrusted permission text" } }));
     await pending;
+    if (scenario === "command_applied") {
+      server.clients.values().next().value!.send(JSON.stringify({ method: "item/started",
+        params: { threadId: "continuation", turnId: "native-turn",
+          item: { id: "item-1", type: "commandExecution", status: "inProgress", processId: "sandbox-attempt" } } }));
+      await new Promise(resolve => setImmediate(resolve));
+    }
     const [candidate] = await broker.list("room");
     if (scenario === "oversized_presentation") {
       assert.equal(candidate!.status, "unavailable"); assert.equal(candidate!.reference, null);
@@ -519,7 +525,7 @@ async function verifyNativeApproval(scenario: "command" | "file_change" | "chang
       assert.deepEqual(JSON.parse(candidate.presentation.details).changes, changes);
       assert.equal(candidate.reference.requestSha256, hash({ request: rpc.listPendingRequests()[0], changes }));
     }
-    selected = decision(candidate);
+    selected = decision(candidate, scenario === "command_denied" ? { decision: "deny" } : {});
     if (scenario === "changed_presentation") {
       changes[0]!.diff += "\n+different before the host chooses";
       await assert.rejects(broker.decide(selected), /displayed approval request has changed/);
@@ -532,16 +538,74 @@ async function verifyNativeApproval(scenario: "command" | "file_change" | "chang
       assert.deepEqual(order, ["decision_committed", "post_intent_inspection"]);
     } else {
       assert.equal(await broker.decide(selected), "decision_sent");
-      assert.deepEqual(await responseFrame, { id: 71, result: { decision: "accept" } });
+      assert.deepEqual(await responseFrame, { id: 71,
+        result: { decision: scenario === "command_denied" ? "decline" : "accept" } });
       assert.deepEqual(order, ["decision_committed", ...(isFileChange ? ["post_intent_inspection"] : []), "intent_committed", "native_write"]);
     }
     assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain");
-    assert.equal(await broker.decide(selected), "uncertain");
+    if (scenario === "command_applied") {
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain",
+        "same-item evidence observed before the native response cannot acknowledge a later decision");
+      const socket = server.clients.values().next().value!;
+      socket.send(JSON.stringify({ method: "item/completed", params: { threadId: "continuation", turnId: "native-turn",
+        item: { id: "item-1", type: "fileChange", status: "completed" } } }));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain",
+        "a same-key operation of another kind cannot acknowledge the decision");
+      socket.send(JSON.stringify({ method: "item/started", params: { threadId: "continuation", turnId: "native-turn",
+        item: { id: "unrelated-item", type: "commandExecution", status: "inProgress", processId: "native-process-other" } } }));
+      await new Promise(resolve => setImmediate(resolve));
+      assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain",
+        "an unrelated native execution cannot acknowledge the decision");
+      socket.send(JSON.stringify({ method: "item/started", params: { threadId: "continuation", turnId: "native-turn",
+        item: { id: "item-1", type: "commandExecution", status: "inProgress", processId: "native-process-1" } } }));
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const resolved = (await f.store.getExecutionApproval(selected.expected))!;
+      assert.equal(resolved.request.state, "resolved");
+      assert.equal(resolved.decision!.dispatchState, "acknowledged");
+      assert.deepEqual(await broker.list("room"), [], "native application removes the approval from the live host tray");
+    } else if (scenario === "command_denied") {
+      server.clients.values().next().value!.send(JSON.stringify({ method: "item/completed",
+        params: { threadId: "continuation", turnId: "native-turn",
+          item: { id: "item-1", type: "commandExecution", status: "declined" } } }));
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const resolved = (await f.store.getExecutionApproval(selected.expected))!;
+      assert.equal(resolved.request.state, "resolved");
+      assert.equal(resolved.decision!.dispatchState, "acknowledged");
+    } else if (scenario === "file_change_applied") {
+      server.clients.values().next().value!.send(JSON.stringify({ method: "item/completed",
+        params: { threadId: "continuation", turnId: "native-turn",
+          item: { id: "item-1", type: "fileChange", status: "completed" } } }));
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        if ((await f.store.getExecutionApproval(selected.expected))!.request.state === "resolved") break;
+        await new Promise(resolve => setImmediate(resolve));
+      }
+      const resolved = (await f.store.getExecutionApproval(selected.expected))!;
+      assert.equal(resolved.request.state, "resolved");
+      assert.equal(resolved.decision!.dispatchState, "acknowledged");
+    }
+    if (!scenario.endsWith("applied") && scenario !== "command_denied") assert.equal(await broker.decide(selected), "uncertain");
     assert.equal(frames.filter(frame => frame.id === 71 && !frame.method).length, scenario === "changed_file" ? 0 : 1);
     assert.equal(frames.some(frame => ["thread/start", "turn/start", "turn/interrupt"].includes(String(frame.method))), false);
     assert.equal(handle.observedState, "working");
-    assert.deepEqual(facts, lifecycleFacts,
-      "approval payloads and decisions never add to the reconstructed execution evidence");
+    if (scenario === "command_applied") {
+      assert.equal(facts.length, lifecycleFacts.length + 4,
+        "only the four native operation starts add execution evidence");
+    } else if (scenario === "command_denied") {
+      assert.equal(facts.length, lifecycleFacts.length + 1, "the exact denial adds one terminal execution fact");
+    } else if (scenario === "file_change_applied") {
+      assert.equal(facts.length, lifecycleFacts.length + 1, "the exact file-change completion adds one terminal execution fact");
+    } else {
+      assert.deepEqual(facts, lifecycleFacts,
+        "approval payloads and decisions never add to the reconstructed execution evidence");
+    }
     assert.equal(streams.some(event => event.method.includes("requestApproval") || providerStreamLifecycle(event) === "failed"), false,
       "raw permission RPC requests are not legacy lifecycle authority");
     assert.doesNotMatch(JSON.stringify(f.db.prepare("SELECT * FROM execution_approval_requests").all()), /PRIVATE-APPROVAL-CONTENT|systemError/);
