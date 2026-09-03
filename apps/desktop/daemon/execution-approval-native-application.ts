@@ -32,6 +32,7 @@ export type NativeApprovalApplication = RecordedApprovalSelection & {
   native: ProviderPermissionRequest;
   executionGenerationId: string;
   expectedFileChanges?: readonly CodexPermissionFileChange[];
+  markNativeDispatch?(): void;
 };
 
 export class NativeApprovalUnavailableError extends Error {
@@ -114,6 +115,7 @@ export class ExecutionApprovalNativeApplicationCoordinator {
       executionGenerationId: prepared.executionGenerationId,
       expectedFileChanges: prepared.expectedFileChanges,
       assertCurrent: prepared.assertCurrent,
+      markNativeDispatch: prepared.markNativeDispatch,
     });
   }
 }

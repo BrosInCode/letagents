@@ -23,6 +23,7 @@ export type NativeApprovalDispatchInput = {
   executionGenerationId: string;
   expectedFileChanges?: readonly CodexPermissionFileChange[];
   assertCurrent(): void;
+  markNativeDispatch?(): void;
 };
 
 type Options = {
@@ -40,7 +41,7 @@ type Options = {
       expected: ApprovalReference;
       decisionId: string;
       dispatchId: string;
-      evidence: "sent_unacknowledged" | "dispatch_uncertain" | "native_processed";
+      evidence: "sent_unacknowledged" | "dispatch_uncertain" | "native_processed" | "exact_native_execution";
       atMs: number;
     }, fence: (commit: () => Promise<void>) => Promise<void>): Promise<ExecutionApprovalRecord>;
     validateExecutionApprovalAuthority(expected: ApprovalReference, authority: ApprovalAuthority): Promise<() => void>;
@@ -100,6 +101,7 @@ export class ExecutionApprovalNativeDispatcher {
               throw new Error("Approval authority is unavailable.");
             }
             assertOperationalAuthority();
+            input.markNativeDispatch?.();
           },
         },
       );

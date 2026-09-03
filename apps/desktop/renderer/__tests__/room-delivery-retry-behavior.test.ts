@@ -211,7 +211,8 @@ test("composer presents literal host-only native requests and sends only the sel
     await nextTick();
     assert.deepEqual(requests, [{ id: "presentation-1", decision: "allow_once" }]);
     assert.equal(buttons(root).some(node => descendants(node).some(child => child.text === "Allow once")), false);
-    assert.ok(descendants(root).some(node => node.text.includes("will not be sent again automatically")));
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false,
+      "a sent decision leaves the composer instead of becoming permanent status chrome");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 
@@ -277,7 +278,28 @@ test("composer rejects stale refreshes and removes retry controls after an uncer
     resolveRefresh({ available: true, approvals: [hostApproval()], error: null });
     await flushHostApprovals();
     assert.equal(buttons(root).some(node => descendants(node).some(child => /^(Allow once|Retry recorded approval)$/.test(child.text))), false);
-    assert.ok(descendants(root).some(node => node.text.includes("Decision could not be confirmed")));
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+  } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
+});
+
+test("composer hides non-actionable approval history and lets the user dismiss actionable cards locally", async () => {
+  const pending = hostApproval();
+  const unavailable = { ...hostApproval(), id: "presentation-2", status: "unavailable" as const };
+  const decisions: unknown[] = [];
+  Object.assign(window, { letagentsDesktop: { supervisor: {
+    listHostApprovals: async () => ({ available: true, approvals: [pending, unavailable], error: null }),
+    decideHostApproval: async (input: unknown) => { decisions.push(input); return "decision_sent"; },
+  } } });
+  const { root, app } = mount(RoomComposer, composerProps());
+  try {
+    await flushHostApprovals();
+    assert.equal(descendants(root).filter(node => node.props["data-testid"] === "desktop-host-approval").length, 1);
+    const dismiss = descendants(root).find(node => node.props["aria-label"] === "Dismiss approval from GardenPoint");
+    assert.ok(dismiss?.props.onClick);
+    (dismiss.props.onClick as () => void)();
+    await nextTick();
+    assert.equal(descendants(root).some(node => node.props["data-testid"] === "desktop-host-approval"), false);
+    assert.deepEqual(decisions, [], "dismissal is local presentation state and never changes the recorded approval");
   } finally { app.unmount(); delete (window as unknown as Record<string, unknown>).letagentsDesktop; }
 });
 

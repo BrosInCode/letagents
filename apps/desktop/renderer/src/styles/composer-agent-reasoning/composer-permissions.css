@@ -119,6 +119,29 @@
   font-size: 0.75rem;
 }
 
+.desktop-host-approval {
+  position: relative;
+  padding-right: 40px;
+}
+
+.desktop-host-approval-dismiss {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: grid;
+  width: 28px;
+  height: 28px;
+  place-items: center;
+  border-radius: 8px;
+  color: var(--text-tertiary);
+  background: transparent;
+}
+
+.desktop-host-approval-dismiss:hover {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.075);
+}
+
 .desktop-host-approval-details summary {
   cursor: pointer;
   color: var(--text-secondary);
