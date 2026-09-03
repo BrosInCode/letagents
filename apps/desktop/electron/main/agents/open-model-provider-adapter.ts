@@ -516,26 +516,35 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
       throw new OpenCodeStartTimeoutError();
     }
-    const session = await client.createSession(
-      req.agentDisplayName?.trim() || "LetAgents Open Model",
-    );
-    const sessionId = typeof session.id === "string" ? session.id : "";
-    if (!sessionId) {
+    let sessionId: string;
+    let connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>;
+    try {
+      const session = await client.createSession(
+        req.agentDisplayName?.trim() || "LetAgents Open Model",
+      );
+      sessionId = typeof session.id === "string" ? session.id : "";
+      if (!sessionId) {
+        throw new Error("OpenCode did not return a session id.");
+      }
+      connection = {
+        kind: "opencode_server",
+        url,
+        pid,
+        processIdentity: identity,
+        serverAuthPath: authPath,
+      };
+      await writeRuntimeControl(authPath, {
+        ...auth,
+        lifecycleAuthorityMode,
+        connection: { url, pid, processIdentity: identity },
+      });
+    } catch (error) {
       await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
-      throw new Error("OpenCode did not return a session id.");
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new OpenCodeStartTimeoutError();
+      }
+      throw error;
     }
-    const connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }> = {
-      kind: "opencode_server",
-      url,
-      pid,
-      processIdentity: identity,
-      serverAuthPath: authPath,
-    };
-    await writeRuntimeControl(authPath, {
-      ...auth,
-      lifecycleAuthorityMode,
-      connection: { url, pid, processIdentity: identity },
-    });
     const handle = new OpenModelHandle(
       req.workAttemptId,
       pid,

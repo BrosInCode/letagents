@@ -1165,6 +1165,55 @@ test("Open Model launch honors its startup budget even when a health request han
   assert.ok(signals.length > 0, "the unhealthy launch is terminated");
 });
 
+test("Open Model terminates and retries a fresh server when session creation times out", async () => {
+  const harness = createHarness();
+  const baseFetch = harness.dependencies.fetch;
+  let exitLaunch!: (exit: ProviderProcessExit) => void;
+  const launchExited = new Promise<ProviderProcessExit>((resolve) => { exitLaunch = resolve; });
+  const signals: Array<NodeJS.Signals> = [];
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-session-timeout-")),
+    dependencies: {
+      ...harness.dependencies,
+      launch() {
+        const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+        Object.assign(child, { pid: 6103, unref() {} });
+        return { child, exited: launchExited };
+      },
+      getProcessIdentity: (pid) => (pid === 6103 ? "opencode-birth-6103" : null),
+      signalProcess(_pid, signal) {
+        signals.push(signal);
+        exitLaunch({ type: "exit", code: null, signal });
+      },
+      async fetch(input, init) {
+        const url = new URL(input);
+        if (url.pathname === "/session" && init?.method === "POST") {
+          throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        }
+        return baseFetch(input, init);
+      },
+    },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  await assert.rejects(
+    adapter.spawn(spawnRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(
+        (error as Error & { transientProviderStart?: boolean }).transientProviderStart,
+        true,
+        "a session-control timeout must be retried as a clean provider start",
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(signals, ["SIGTERM"], "the ambiguous fresh runtime is fenced before retry");
+});
+
 test("Open Model bounded turns time out without polling transcript history", async () => {
   const harness = createHarness();
   harness.holdTurnOpen();
