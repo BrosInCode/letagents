@@ -49,8 +49,11 @@ jobs:
       - name: Verify dependency signatures
         run: npm audit signatures
 
+      - name: Install pinned dependency audit client
+        run: npm install -g npm@11.6.2
+
       - name: Audit dependency advisories
-        run: npm audit --audit-level=low --package-lock-only
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
@@ -74,7 +77,7 @@ jobs:
         run: cd src/web && npm audit signatures
 
       - name: Audit Vue dependency advisories
-        run: cd src/web && npm audit --audit-level=low --package-lock-only
+        run: node scripts/verify-dependency-advisories.mjs src/web
 
       - name: Run verified Vue dependency lifecycle scripts
         run: cd src/web && npm rebuild
@@ -98,7 +101,7 @@ jobs:
         run: npm audit signatures --prefix apps/desktop
 
       - name: Audit desktop dependency advisories
-        run: npm audit --audit-level=low --package-lock-only --prefix apps/desktop
+        run: node scripts/verify-dependency-advisories.mjs apps/desktop
 
       - name: Run verified desktop dependency lifecycle scripts
         run: npm rebuild --prefix apps/desktop
@@ -162,8 +165,11 @@ jobs:
       - name: Verify dependency signatures
         run: npm audit signatures
 
+      - name: Install pinned dependency audit client
+        run: npm install -g npm@11.6.2
+
       - name: Audit dependency advisories
-        run: npm audit --audit-level=low --package-lock-only
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
@@ -392,7 +398,7 @@ jobs:
 
       - name: Audit dependency advisories
         if: steps.version.outputs.publish == 'true'
-        run: npm audit --audit-level=low --package-lock-only
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         if: steps.version.outputs.publish == 'true'
