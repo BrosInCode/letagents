@@ -13,6 +13,7 @@ import {
   ExecutionDelegationDecisionCoordinator,
   type ExecutionDelegationDecisionCoordinatorOptions,
 } from "../execution-delegation-decision-coordinator.js";
+import { ExecutionApprovalPublisher } from "../execution-approval-publisher.js";
 import { ExecutionDelegationCoordinator } from "../execution-delegation-coordinator.js";
 import { NativeApprovalUnavailableError } from "../execution-approval-native-application.js";
 import type { DaemonManifestEntry } from "../types.js";
@@ -306,21 +307,71 @@ test("shutdown waits for an admitted decision application to settle", async () =
   assert.equal(drained, true);
 });
 
+test("delegation lifecycle eagerly starts, wakes, and fences approval publication", async t => {
+  const events: string[] = [];
+  const publisher = {
+    changed: (entryId: string) => { events.push(`publication:changed:${entryId}`); },
+    close: () => { events.push("publication:closed"); },
+  };
+  t.mock.method(ExecutionApprovalPublisher, "open", () => {
+    events.push("publication:opened");
+    return publisher as unknown as ExecutionApprovalPublisher;
+  });
+  const coordinator = new ExecutionDelegationCoordinator({
+    entries: {
+      getEntry: async () => entry, getExecutionApproval: async () => null, listRoomEntries: async () => [entry],
+      listExecutionDelegationInstanceIds: async () => [], listExecutionDelegationsForApprovalPublication: async () => [],
+      readExecutionApprovalProjection: async () => projection(),
+    },
+    authority: {
+      currentHostGrant: () => grant, installHostGrant: async () => ({ status: "installed" as const }),
+      syncExecutionDelegation: async () => {}, recordDelegatedApproval: async ({ intent: selected }) => approval(selected),
+      validateExecutionDelegation: async () => {},
+    },
+    approvals: { admitDelegatable: async () => [], applyRecordedDecision: async () => {} },
+    remote: {
+      listExecutionDelegationIds: async () => ({ delegationInstanceIds: [], nextCursor: null }),
+      listExecutionDelegationDecisionIds: async () => ({ decisionIds: [], nextCursor: null }),
+      getExecutionDelegationDecision: async () => null,
+    },
+    approvalPublication: {
+      path: "state.sqlite", custody: { hostGrant: () => null, workerAuthorization: () => null },
+      inbox: { get: async () => null }, daemonGeneration: () => 7, isClosing: () => false, assertCurrent: async () => {},
+    },
+    requestConvergence: () => {}, diagnostic: () => {},
+  });
+
+  coordinator.start(); coordinator.start();
+  assert.equal(events.filter(event => event === "publication:opened").length, 1);
+  coordinator.requestDecisions(entry.id);
+  assert.equal(events.filter(event => event === `publication:changed:${entry.id}`).length, 1);
+  await coordinator.fenceAndDrain();
+  assert.equal(events.filter(event => event === "publication:closed").length, 1);
+  coordinator.start(); coordinator.requestDecisions(entry.id);
+  assert.equal(events.filter(event => event === "publication:opened").length, 1);
+  assert.equal(events.filter(event => event === `publication:changed:${entry.id}`).length, 1);
+});
+
 test("room wakes reconcile decisions even when grant inventory fails", async () => {
   const events: string[] = [];
   const coordinator = new ExecutionDelegationCoordinator({
     entries: {
       getEntry: async () => entry,
+      getExecutionApproval: async () => null,
       listRoomEntries: async () => [entry],
       listExecutionDelegationInstanceIds: async () => [],
+      listExecutionDelegationsForApprovalPublication: async () => [],
       readExecutionApprovalProjection: async () => projection(),
     },
     authority: {
       currentHostGrant: () => grant,
+      installHostGrant: async () => ({ status: "installed" as const }),
       syncExecutionDelegation: async () => { events.push("decision:delegation-refreshed"); },
       recordDelegatedApproval: async ({ intent: selected }) => approval(selected),
+      validateExecutionDelegation: async () => {},
     },
     approvals: {
+      admitDelegatable: async () => [],
       applyRecordedDecision: async (_input, select) => {
         await select({ expected, presentation: { agentId: entry.id, displayName: "Agent", provider: "codex",
           title: "Change files", details: "details", denyScope: "request" }, approvalAuthority,

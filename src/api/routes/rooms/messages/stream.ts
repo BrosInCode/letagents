@@ -1,5 +1,6 @@
 import type { Express } from "express";
 import {
+  ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_AGENT_WORK,
   ROOM_RESOURCE_EXECUTION_DELEGATION,
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
@@ -282,10 +283,13 @@ export function registerMessageStreamRoute(
           })}\n\n`);
           return;
         case "agent_work_invalidated":
+        case "agent_approval_invalidated":
         case "execution_delegation_invalidated": {
           const resource = event.kind === "agent_work_invalidated"
             ? ROOM_RESOURCE_AGENT_WORK
-            : ROOM_RESOURCE_EXECUTION_DELEGATION;
+            : event.kind === "agent_approval_invalidated"
+              ? ROOM_RESOURCE_AGENT_APPROVAL
+              : ROOM_RESOURCE_EXECUTION_DELEGATION;
           if (supportsResourceInvalidation) {
             await writeEvent(`${eventId}event: ${ROOM_RESOURCE_INVALIDATION_CAPABILITY}\ndata: ${JSON.stringify({
               room_id: projectId,

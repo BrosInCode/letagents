@@ -26,7 +26,7 @@ const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { registerHttpMiddleware } = await import("../http/middleware.js");
 const { resolveRequestAuth } = await import("../request/auth.js");
 const { registerExecutionDelegationDecisionRoutes } = await import("../routes/execution-delegation-decisions.js");
-const { executionDelegationEvents } = await import("../server/events.js");
+const { agentApprovalEvents, executionDelegationEvents } = await import("../server/events.js");
 
 async function reset(): Promise<void> {
   if (!client) throw new Error("DB-backed delegation tests require TEST_DB_URL");
@@ -423,10 +423,14 @@ test("decision route binds authorship to a fresh session membership check and em
 
     mode.value = "allow";
     let invalidations = 0;
+    let approvalInvalidations = 0;
     const listener = () => { invalidations += 1; };
+    const approvalListener = () => { approvalInvalidations += 1; };
     executionDelegationEvents.on("execution_delegation:invalidated", listener);
+    agentApprovalEvents.on("agent_approval:invalidated", approvalListener);
     try {
       const createdInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
+      const createdApprovalInvalidation = once(agentApprovalEvents, "agent_approval:invalidated");
       const created = await post(cookie(`decision_approver_session_${seeded.n}`), body);
       assert.equal(created.status, 201);
       const createdBody = await created.json() as any;
@@ -435,15 +439,22 @@ test("decision route binds authorship to a fresh session membership check and em
       assert.equal("client_request_id" in createdBody.decision, false);
       assert.equal("request_fingerprint" in createdBody.decision, false);
       await createdInvalidation;
+      await createdApprovalInvalidation;
       assert.equal(invalidations, 1);
+      assert.equal(approvalInvalidations, 1);
 
+      const replayInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
+      const replayApprovalInvalidation = once(agentApprovalEvents, "agent_approval:invalidated");
       const replay = await post(cookie(`decision_approver_session_${seeded.n}`), body);
       assert.equal(replay.status, 200);
       assert.equal((await replay.json() as any).status, "replayed");
-      await new Promise<void>((resolve) => setImmediate(resolve));
-      assert.equal(invalidations, 1, "an idempotent replay emits no second pointer");
+      await replayInvalidation;
+      await replayApprovalInvalidation;
+      assert.equal(invalidations, 2, "an idempotent replay repairs a lost delegation pointer");
+      assert.equal(approvalInvalidations, 2, "an idempotent replay repairs a lost approval pointer");
     } finally {
       executionDelegationEvents.off("execution_delegation:invalidated", listener);
+      agentApprovalEvents.off("agent_approval:invalidated", approvalListener);
     }
   } finally {
     await close(server);

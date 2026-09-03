@@ -144,6 +144,7 @@ import {
 import { registerSupervisorHostGrantRoutes } from "../routes/supervisor-host-grants.js";
 import { registerExecutionDelegationRoutes } from "../routes/execution-delegations.js";
 import { registerExecutionDelegationDecisionRoutes } from "../routes/execution-delegation-decisions.js";
+import { registerExecutionApprovalPublicationRoutes } from "../routes/execution-approval-publications.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import {
@@ -170,6 +171,7 @@ import { handleGitHubWebhookEvent } from "../github/webhook-handler.js";
 import { ensureTaskGitRoomForActiveWorkLease } from "../github/task-git-room.js";
 import {
   artifactEvents,
+  agentApprovalEvents,
   agentWorkEvents,
   executionDelegationEvents,
   githubRoomEvents,
@@ -212,6 +214,7 @@ function getRoomEventBroker(): RoomEventBroker {
     githubRoomEvents,
     reasoningEvents,
     artifactEvents,
+    agentApprovalEvents,
     agentWorkEvents,
     executionDelegationEvents,
     rentalActivityEvents,
@@ -493,6 +496,10 @@ export function registerApiRoutes(app: Express): void {
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
   registerExecutionDelegationRoutes(app, roomPresenceRouteDeps);
   registerExecutionDelegationDecisionRoutes(app, roomPresenceRouteDeps);
+  registerExecutionApprovalPublicationRoutes(app, {
+    ...roomPresenceRouteDeps,
+    getProjectById,
+  });
   registerRoomAgentWorkRoutes(app, roomMessageRouteDeps, roomPresenceRouteDeps);
   registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
   registerRoomFocusRoutes(app, roomFocusRouteDeps);

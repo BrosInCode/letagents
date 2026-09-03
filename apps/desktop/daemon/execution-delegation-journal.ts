@@ -58,12 +58,17 @@ const inventoryScope = z.strictObject({
   hostId: executionIdentity,
   installationId: executionIdentity,
 });
+const publicationScope = inventoryScope.extend({
+  grantId: executionIdentity,
+  atMs: time,
+});
 
 export type RemoteExecutionDelegationRevision = z.infer<typeof delegation>;
 export type ExecutionDelegationHostAuthority = z.infer<typeof authority>;
 export type ReconcileExecutionDelegation = z.infer<typeof reconciliation>;
 export type ValidateExecutionDelegation = z.infer<typeof validation>;
 export type ExecutionDelegationInventoryScope = z.infer<typeof inventoryScope>;
+export type ExecutionApprovalPublicationDelegationScope = z.infer<typeof publicationScope>;
 
 export type LocalExecutionDelegation = {
   delegationInstanceId: string;
@@ -160,6 +165,32 @@ export function listExecutionDelegationInstanceIds(
     scope.hostId,
     scope.installationId,
   ).map((row) => String((row as Row).delegation_instance_id));
+}
+
+/** Bounded current local revisions eligible to receive one freshly admitted approval projection. */
+export function listExecutionDelegationsForApprovalPublication(
+  db: DatabaseSync,
+  input: ExecutionApprovalPublicationDelegationScope,
+): LocalExecutionDelegation[] {
+  const scope = parse(publicationScope, input);
+  const rows = db.prepare(`SELECT candidate.* FROM execution_local_delegations candidate
+    WHERE candidate.agent_id=? AND candidate.room_id=? AND candidate.agent_key=? AND candidate.owner_id=?
+      AND candidate.host_id=? AND candidate.installation_id=? AND candidate.grant_id=? AND candidate.scope_key='owner'
+      AND candidate.revoked_at_ms IS NULL AND candidate.expires_at_ms>?
+      AND NOT EXISTS (SELECT 1 FROM execution_local_delegations newer
+        WHERE newer.delegation_instance_id=candidate.delegation_instance_id AND newer.revision>candidate.revision)
+    ORDER BY candidate.delegation_instance_id LIMIT 65`).all(
+    scope.agentId,
+    scope.roomId,
+    scope.agentKey,
+    scope.ownerAccountId,
+    scope.hostId,
+    scope.installationId,
+    scope.grantId,
+    scope.atMs,
+  );
+  if (rows.length > 64) reject("authority_mismatch");
+  return rows.map(fromRow);
 }
 
 function assertFreshScopeAvailable(

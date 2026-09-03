@@ -22,7 +22,7 @@ const schema = testDatabaseUrl ? await import("../db/schema.js") : null;
 const { registerHttpMiddleware } = await import("../http/middleware.js");
 const { resolveRequestAuth } = await import("../request/auth.js");
 const { registerExecutionDelegationRoutes } = await import("../routes/execution-delegations.js");
-const { executionDelegationEvents } = await import("../server/events.js");
+const { agentApprovalEvents, executionDelegationEvents } = await import("../server/events.js");
 
 async function reset(): Promise<void> {
   if (!client) throw new Error("DB-backed delegation tests require TEST_DB_URL");
@@ -550,6 +550,12 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     assert.equal("admission_supervisor_grant_id" in created.delegation, false);
     assert.equal("scope_sha256" in created.delegation, false,
       "the account projection does not expose host admission evidence");
+    const createReplayInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
+    const replayedCreate = await create(ownerHeaders, createBody);
+    assert.equal(replayedCreate.status, 200);
+    assert.equal((await replayedCreate.json() as any).status, "replayed");
+    assert.deepEqual(await createReplayInvalidation, [{ projectId: seeded.room.id }],
+      "create replay repairs a delegation pointer lost after commit");
 
     const accountUrl = `${baseUrl}/execution-delegations/${instanceId}`;
     for (const headers of [ownerHeaders, approverHeaders]) {
@@ -585,12 +591,24 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
       method: "POST", headers: approverHeaders, body: JSON.stringify(reviseBody),
     })).status, 404);
     const revisedInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
+    const revisedApprovalInvalidation = once(agentApprovalEvents, "agent_approval:invalidated");
     const revisedResponse = await fetch(reviseUrl, {
       method: "POST", headers: ownerHeaders, body: JSON.stringify(reviseBody),
     });
     assert.equal(revisedResponse.status, 200);
     assert.deepEqual(await revisedInvalidation, [{ projectId: seeded.room.id }]);
+    assert.deepEqual(await revisedApprovalInvalidation, [{ projectId: seeded.room.id }]);
     assert.equal((await revisedResponse.json() as any).delegation.revision, 2);
+    const replayedRevisionInvalidation = once(executionDelegationEvents, "execution_delegation:invalidated");
+    const replayedRevisionApprovalInvalidation = once(agentApprovalEvents, "agent_approval:invalidated");
+    const replayedRevision = await fetch(reviseUrl, {
+      method: "POST", headers: ownerHeaders, body: JSON.stringify(reviseBody),
+    });
+    assert.equal(replayedRevision.status, 200);
+    assert.equal((await replayedRevision.json() as any).status, "replayed");
+    assert.deepEqual(await replayedRevisionInvalidation, [{ projectId: seeded.room.id }]);
+    assert.deepEqual(await replayedRevisionApprovalInvalidation, [{ projectId: seeded.room.id }],
+      "revision replay repairs a lost approval pointer");
     const exactServerGrant = await db!.getExecutionDelegationGrantForOwner({
       owner_account_id: seeded.ownerId,
       delegation_instance_id: instanceId,

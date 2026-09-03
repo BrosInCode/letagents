@@ -10,6 +10,7 @@ import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import { RoomWorkPublicationStore, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
+import { validateExecutionApprovalPublicationSchema } from "../execution-approval-publication-store.js";
 import { LifecycleProjectionLedger, validateLegacyLifecycleProjectionLedgerSchema,
   validateLifecycleProjectionLedgerSchema } from "../lifecycle-projection-ledger.js";
 import { executionRuntimeStorageIdentity, executionStorageIdentity, materializeRuntimeIdentity } from "../execution-shadow-store.js";
@@ -370,7 +371,7 @@ function typedRows(database: DatabaseSync): Record<string, unknown> {
   // Pre-v30 preservation assertions cover authority that existed before the
   // lifecycle-effect outbox. Its required historical dispositions are tested
   // directly by the v30 migration cases below.
-  return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name NOT IN ('execution_observers','execution_observer_sources','execution_lifecycle_effects','execution_approval_projections') ORDER BY name").all() as Row[])
+  return Object.fromEntries((database.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name GLOB 'execution_*' AND name NOT IN ('execution_observers','execution_observer_sources','execution_lifecycle_effects','execution_approval_projections','execution_approval_publications') ORDER BY name").all() as Row[])
     .map(({ name }) => {
       const columns = (database.prepare(`PRAGMA table_info(${name})`).all() as Row[])
         .map((column) => String(column.name)).filter((column) => ![
@@ -1885,6 +1886,66 @@ test("v35 projection journal and schema markers roll back atomically", async () 
     }, before);
     assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='execution_approval_projections'").get(), undefined);
     validateExecutionStorageSchema(env.database, 24);
+  } finally { await env.cleanup(); }
+});
+
+function restoreV35PublicationFixture(database: DatabaseSync): void {
+  database.exec(`DROP TABLE execution_approval_publications;
+    UPDATE manifest_metadata SET schema_version=35 WHERE singleton=1;
+    PRAGMA user_version=35`);
+}
+
+test("v36 adds an empty approval publication receipt journal and reopens read-only", async () => {
+  const env = await fixture();
+  try {
+    restoreV35PublicationFixture(env.database);
+    new DaemonStateSchema().createSchema(env.database);
+    assert.equal(env.database.prepare("SELECT COUNT(*) AS count FROM execution_approval_publications").get()!.count, 0,
+      "upgrade never infers publication pins from historical approvals or projections");
+    validateExecutionApprovalPublicationSchema(env.database);
+    assert.deepEqual(versionPair(env.database).map(row => ({ ...(row as Row) })), [
+      { user_version: DAEMON_STATE_SCHEMA_VERSION },
+      { generation: 0, schema_version: DAEMON_STATE_SCHEMA_VERSION },
+    ]);
+    const reopened = openDaemonStateObservationDatabase(env.path);
+    try {
+      assert.equal(reopened.prepare("SELECT COUNT(*) AS count FROM execution_approval_publications").get()!.count, 0);
+      validateExecutionApprovalPublicationSchema(reopened);
+    } finally { reopened.close(); }
+  } finally { await env.cleanup(); }
+});
+
+test("v36 publication receipt journal and paired markers roll back atomically", async () => {
+  const env = await fixture();
+  try {
+    restoreV35PublicationFixture(env.database);
+    const before = {
+      versions: versionPair(env.database),
+      schema: env.database.prepare("SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(),
+    };
+    assert.throws(() => new DaemonStateSchema(database => {
+      assert.ok(database.prepare("SELECT 1 FROM sqlite_master WHERE name='execution_approval_publications'").get());
+      throw new Error("interrupt v36 before markers");
+    }).createSchema(env.database), /interrupt v36 before markers/);
+    assert.deepEqual({
+      versions: versionPair(env.database),
+      schema: env.database.prepare("SELECT type,name,tbl_name,rootpage,sql FROM sqlite_master ORDER BY type,name").all(),
+    }, before);
+    assert.equal(env.database.prepare("SELECT 1 FROM sqlite_master WHERE name='execution_approval_publications'").get(), undefined);
+  } finally { await env.cleanup(); }
+});
+
+test("v36 refuses a weakened publication receipt journal before WAL or initializer writes", async () => {
+  const env = await fixture();
+  try {
+    env.database.exec(`DROP TRIGGER execution_approval_publication_immutable;
+      PRAGMA wal_checkpoint(TRUNCATE); PRAGMA journal_mode=DELETE`);
+    const before = await readFile(env.path); let initialized = false;
+    await assert.rejects(openDaemonStateDatabase(env.path, () => { initialized = true; }), /publication journal/);
+    assert.equal(initialized, false);
+    assert.deepEqual(await readFile(env.path), before);
+    assert.throws(() => new DaemonStateSchema().createSchema(env.database), /publication journal/);
+    assert.deepEqual(await readFile(env.path), before);
   } finally { await env.cleanup(); }
 });
 

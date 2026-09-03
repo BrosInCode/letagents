@@ -19,7 +19,10 @@ import {
   requireCurrentSupervisorGrant,
   type RoomResolverDeps,
 } from "./supervisor-host-grants.js";
-import { queueExecutionDelegationInvalidation } from "../server/events.js";
+import {
+  queueAgentApprovalInvalidation,
+  queueExecutionDelegationInvalidation,
+} from "../server/events.js";
 import {
   executionDelegationInventoryQuery,
   requiredExecutionDelegationString,
@@ -115,9 +118,10 @@ function notFound(res: Response): void {
   res.status(404).json({ error: "Execution delegation not found." });
 }
 
-function queueDelegationInvalidation(roomId: string): void {
+function queueDelegationInvalidation(roomId: string, includeApprovals = false): void {
   try {
     queueExecutionDelegationInvalidation(roomId);
+    if (includeApprovals) queueAgentApprovalInvalidation(roomId);
   } catch (error) {
     console.error("[execution delegation] failed to queue room invalidation", error);
   }
@@ -152,7 +156,7 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
         notFound(res);
         return;
       }
-      queueDelegationInvalidation(revoked.room_id);
+      queueDelegationInvalidation(revoked.room_id, true);
       res.setHeader("Cache-Control", "no-store");
       res.json({ delegation: publicGrant(revoked) });
     } catch (error) {
@@ -264,7 +268,7 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
         ...parsed,
         owner_account_id: ownerAccountId,
       });
-      if (result.status !== "replayed") queueDelegationInvalidation(result.grant.room_id);
+      queueDelegationInvalidation(result.grant.room_id);
       res.status(result.status === "created" ? 201 : 200).json({
         status: result.status,
         delegation: publicGrant(result.grant),
@@ -299,7 +303,7 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
         owner_account_id: ownerAccountId,
         delegation_instance_id: delegationInstanceId,
       });
-      if (result.status !== "replayed") queueDelegationInvalidation(result.grant.room_id);
+      queueDelegationInvalidation(result.grant.room_id, true);
       res.json({ status: result.status, delegation: publicGrant(result.grant) });
     } catch (error) {
       respondMutationError(res, error);

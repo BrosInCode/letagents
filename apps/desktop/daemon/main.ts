@@ -828,6 +828,9 @@ export class SupervisorDaemon {
       authority: this.workerAuthority,
       approvals: this.hostApprovals,
       remote: this.supervisorGrantHttp,
+      approvalPublication: { path: this.stateDatabasePath, custody: this.workerRuntimeCustody,
+        inbox: this.supervisedInbox, daemonGeneration: () => this.singleton.currentGeneration, isClosing: () => this.handoffScheduled,
+        assertCurrent: () => this.singleton.assertCurrent(), now: () => this.nowMs() },
       requestConvergence: entryId => this.requestConvergence(entryId),
       diagnostic: (domain, entryId, error) => console.warn(`[execution_delegation_${domain}_sync]`,
         JSON.stringify({ entryId, error: String(error) })),
@@ -859,11 +862,7 @@ export class SupervisorDaemon {
       getAgentInspectorDetail: this.getAgentInspectorDetail.bind(this),
       getCurrentInspectorRoomMove: (input) => this.roomMoves.getCurrentInspector(input),
       getInspectorRoomMove: (input) => this.roomMoves.getInspector(input),
-      installHostGrant: async (input) => {
-        const status = await this.workerAuthority.installHostGrant(input);
-        if (status.status === "installed") this.executionDelegations.request(input.entry_id);
-        return status;
-      },
+      installHostGrant: this.executionDelegations.installHostGrant.bind(this.executionDelegations),
       installOpenModelCredential: this.workerAuthority.installOpenModelCredential.bind(this.workerAuthority),
       installWorkerCredential: this.workerAuthority.installWorkerCredential.bind(this.workerAuthority),
       listManifest: async () => this.entriesWithDerivedLiveness((await this.store.load()).entries),
@@ -948,6 +947,7 @@ export class SupervisorDaemon {
         currentHandle: (entryId) => this.liveHandles.get(entryId), daemonGeneration: () => this.singleton.currentGeneration,
         changed: (agentId) => (this.roomWorkPublisher?.changed(agentId), this.typedLifecycleEffects?.changed(agentId), this.stateWatch.notify()),
       });
+      this.executionDelegations.start();
     }
     await this.supervisedInbox.normalizeInterruptedEffects();
     await this.quarantineDuplicateSupervisedLaneOwners();
