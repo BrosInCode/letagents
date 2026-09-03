@@ -135,7 +135,8 @@ test("one room message groups delivery receipts for every activated agent", asyn
       deliveryReceipts: [
         { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null, error: null },
         { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked", error: null },
-        { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null, error: null },
+        { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null,
+          error: "The provider control path is unavailable." },
         { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null,
           error: "Open Model request failed (HTTP 404): configured model is no longer available." },
       ],
@@ -149,6 +150,10 @@ test("one room message groups delivery receipts for every activated agent", asyn
   assert.match(html, /aria-label="Waiting — DawnPeak needs attention on msg_blocked"/);
   assert.match(html, /Queued behind an issue/);
   assert.match(html, /View earlier message/);
+  const blockedReceipt = html.match(/<li[^>]*data-state="blocked"[\s\S]*?<\/li>/)?.[0];
+  assert.ok(blockedReceipt);
+  assert.match(blockedReceipt, /aria-label="Oak: The provider control path is unavailable\."/);
+  assert.match(blockedReceipt, /The provider control path is unavailable\.<\/small>/);
   assert.match(html, /disabled aria-label="Retry delivery for Oak is unavailable"/);
   assert.match(html, />Retry unavailable<\/button>/);
   assert.match(html, /Retry will be available when delivery recovery is connected/);
