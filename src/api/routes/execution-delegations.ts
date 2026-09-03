@@ -102,6 +102,13 @@ function publicGrant(grant: ExecutionDelegationGrant) {
   };
 }
 
+function hostGrant(grant: ExecutionDelegationGrant) {
+  return {
+    ...publicGrant(grant),
+    scope_sha256: grant.scope_sha256,
+  };
+}
+
 function notFound(res: Response): void {
   res.status(404).json({ error: "Execution delegation not found." });
 }
@@ -246,8 +253,13 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
         notFound(res);
         return;
       }
+      if (!current.allowed_room_ids.includes(grant.room_id)
+        || !current.allowed_agent_keys.includes(grant.agent_key)) {
+        notFound(res);
+        return;
+      }
       res.setHeader("Cache-Control", "no-store");
-      res.json({ delegation: publicGrant(grant) });
+      res.json({ delegation: hostGrant(grant) });
     },
   );
 }
