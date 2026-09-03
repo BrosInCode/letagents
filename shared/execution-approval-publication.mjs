@@ -4,6 +4,19 @@ import {
   parseExecutionApprovalProjectionV1,
   serializeExecutionApprovalProjectionV1,
 } from "./execution-approval-projection.mjs";
+import {
+  isExecutionApprovalPublicationDigest,
+  isExecutionApprovalPublicationIdentity,
+  isExecutionApprovalPublicationVersion,
+  parseExecutionApprovalPublicationItem,
+} from "./execution-approval-publication-item.mjs";
+
+export {
+  isExecutionApprovalPublicationDigest,
+  isExecutionApprovalPublicationIdentity,
+  isExecutionApprovalPublicationVersion,
+  parseExecutionApprovalPublicationItem,
+} from "./execution-approval-publication-item.mjs";
 
 export const EXECUTION_APPROVAL_PUBLICATION_VERSION = 1;
 export const EXECUTION_APPROVAL_PUBLICATION_MAX_JSON_BYTES = 24 * 1024;
@@ -22,19 +35,6 @@ const INPUT_KEYS = [
   "produced_at",
   "expires_at",
 ];
-const ITEM_KEYS = [
-  "publication_id",
-  "room_id",
-  "agent_key",
-  "delegation_instance_id",
-  "delegation_revision",
-  "request_id",
-  "request_version",
-  "request_sha256",
-  "projection_sha256",
-  "published_at",
-  "expires_at",
-];
 const RECEIPT_KEYS = ["status", "publication_digest", "publication"];
 const CLOSE_INPUT_KEYS = ["publication_digest"];
 const CLOSE_RECEIPT_KEYS = ["status", "publication_id", "publication_digest", "closed_at"];
@@ -43,22 +43,6 @@ function exactKeys(value, keys) {
   return !!value && typeof value === "object" && !Array.isArray(value)
     && Object.keys(value).length === keys.length
     && keys.every((key) => Object.hasOwn(value, key));
-}
-
-export function isExecutionApprovalPublicationIdentity(value) {
-  return typeof value === "string"
-    && value.length > 0
-    && value.length <= 512
-    && value.trim() === value
-    && !/[\u0000-\u001f\u007f]/.test(value);
-}
-
-export function isExecutionApprovalPublicationDigest(value) {
-  return typeof value === "string" && /^[0-9a-f]{64}$/.test(value);
-}
-
-export function isExecutionApprovalPublicationVersion(value) {
-  return Number.isSafeInteger(value) && value >= 1 && value <= 2_147_483_647;
 }
 
 function canonicalTimestamp(value) {
@@ -101,23 +85,6 @@ export function parseExecutionApprovalPublicationInput(value) {
   const expiresAt = canonicalTimestamp(value.expires_at);
   if (producedAt === null || expiresAt === null || expiresAt <= producedAt) return null;
   return Object.fromEntries(INPUT_KEYS.map((key) => [key, value[key]]));
-}
-
-export function parseExecutionApprovalPublicationItem(value) {
-  if (!exactKeys(value, ITEM_KEYS)
-    || !isExecutionApprovalPublicationIdentity(value.publication_id)
-    || !isExecutionApprovalPublicationIdentity(value.room_id)
-    || !isExecutionApprovalPublicationIdentity(value.agent_key)
-    || !isExecutionApprovalPublicationIdentity(value.delegation_instance_id)
-    || !isExecutionApprovalPublicationVersion(value.delegation_revision)
-    || !isExecutionApprovalPublicationIdentity(value.request_id)
-    || !isExecutionApprovalPublicationVersion(value.request_version)
-    || !isExecutionApprovalPublicationDigest(value.request_sha256)
-    || !isExecutionApprovalPublicationDigest(value.projection_sha256)) return null;
-  const publishedAt = canonicalTimestamp(value.published_at);
-  const expiresAt = canonicalTimestamp(value.expires_at);
-  if (publishedAt === null || expiresAt === null || expiresAt <= publishedAt) return null;
-  return Object.fromEntries(ITEM_KEYS.map((key) => [key, value[key]]));
 }
 
 export function parseExecutionApprovalPublicationReceipt(value) {

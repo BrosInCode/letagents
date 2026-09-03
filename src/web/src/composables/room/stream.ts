@@ -1,8 +1,10 @@
 import {
+  ROOM_RESOURCE_AGENT_APPROVAL,
   ROOM_RESOURCE_INVALIDATION_CAPABILITY,
   parseRoomResourceInvalidation,
 } from '../../../../../shared/room-resource-invalidation.mjs'
 import { publishMessageInfoInvalidation } from '../../components/room/messageInfoInvalidation'
+import { publishAgentApprovalInvalidation } from '../roomAgentApprovalInvalidation'
 import { roomPath } from './api'
 import { isVisibleRoomMessage } from './identity'
 import { playNotificationSound } from './sound'
@@ -263,6 +265,7 @@ export function createRoomStream(
             && streamGeneration === passStreamGeneration
             && passGeneration === fullReconcileRequestedGeneration
           ) {
+            publishAgentApprovalInvalidation(passRoom)
             if (replayBufferedGapEvents(passRoom)) {
               clearGapRepairRetry()
               commitPendingGapCursor(passRoom)
@@ -627,9 +630,15 @@ export function createRoomStream(
           repairMalformedTypedEvent(roomIdentifier, event)
           return
         }
-        // Resource snapshots are fetched by their owning surfaces. Until a
-        // surface opts in, a valid pointer is deliberately cursor-only.
         rememberEventCursor(roomIdentifier, event)
+        if (
+          result.status === 'supported'
+          && result.pointer.resource === ROOM_RESOURCE_AGENT_APPROVAL
+        ) {
+          bufferOrApplyRoomEvent(roomIdentifier, () => {
+            publishAgentApprovalInvalidation(roomIdentifier)
+          }, streamEventBytes(event))
+        }
       } catch {
         repairMalformedTypedEvent(roomIdentifier, event)
       }
