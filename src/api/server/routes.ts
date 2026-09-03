@@ -143,6 +143,7 @@ import {
 } from "../routes/rooms/tasks/index.js";
 import { registerSupervisorHostGrantRoutes } from "../routes/supervisor-host-grants.js";
 import { registerExecutionDelegationRoutes } from "../routes/execution-delegations.js";
+import { registerExecutionDelegationDecisionRoutes } from "../routes/execution-delegation-decisions.js";
 import { registerRoomAgentWorkRoutes } from "../routes/rooms/agent-work.js";
 import { registerWebRoutes } from "../routes/web/index.js";
 import {
@@ -491,6 +492,7 @@ export function registerApiRoutes(app: Express): void {
   registerRoomPresenceRoutes(app, roomPresenceRouteDeps);
   registerSupervisorHostGrantRoutes(app, roomPresenceRouteDeps);
   registerExecutionDelegationRoutes(app, roomPresenceRouteDeps);
+  registerExecutionDelegationDecisionRoutes(app, roomPresenceRouteDeps);
   registerRoomAgentWorkRoutes(app, roomMessageRouteDeps, roomPresenceRouteDeps);
   registerRoomReasoningRoutes(app, roomReasoningRouteDeps);
   registerRoomFocusRoutes(app, roomFocusRouteDeps);

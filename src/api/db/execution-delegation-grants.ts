@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 import { and, asc, desc, eq, gt, isNull, or, sql } from "drizzle-orm";
 
@@ -14,6 +14,7 @@ import type {
   ExecutionDelegationGrant,
   ExecutionDelegationRiskCeiling,
 } from "./types.js";
+import { executionDelegationSha256 } from "./execution-delegation-digests.js";
 
 const EXECUTION_DELEGATION_MAX_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const EXECUTION_DELEGATION_HOST_INVENTORY_PAGE_SIZE = 100;
@@ -52,21 +53,6 @@ export class ExecutionDelegationRevisionConflictError extends Error {
     super("The delegation scope changed before this revision could be admitted.");
     this.name = "ExecutionDelegationRevisionConflictError";
   }
-}
-
-function stableJson(value: unknown): string {
-  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
-  if (value && typeof value === "object") {
-    return `{${Object.entries(value as Record<string, unknown>)
-      .sort(([left], [right]) => left.localeCompare(right))
-      .map(([key, entry]) => `${JSON.stringify(key)}:${stableJson(entry)}`)
-      .join(",")}}`;
-  }
-  return JSON.stringify(value);
-}
-
-function sha256(value: unknown): string {
-  return createHash("sha256").update(stableJson(value)).digest("hex");
 }
 
 function toExecutionDelegationGrant(
@@ -133,7 +119,7 @@ export async function admitExecutionDelegationGrantRevision(
     throw new ExecutionDelegationAuthorityError();
   }
 
-  const requestFingerprint = sha256({
+  const requestFingerprint = executionDelegationSha256({
     owner_account_id: input.owner_account_id,
     supervisor_grant_id: input.supervisor_grant_id,
     room_id: input.room_id,
@@ -205,7 +191,7 @@ export async function admitExecutionDelegationGrantRevision(
       category: input.category,
       risk_ceiling: input.risk_ceiling,
     };
-    const scopeSha256 = sha256(scope);
+    const scopeSha256 = executionDelegationSha256(scope);
     await tx.execute(sql`SELECT pg_advisory_xact_lock(hashtextextended(${`execution_delegation_scope:${scopeSha256}`}, 0))`);
 
     const matchesScope = (row: typeof execution_delegation_grants.$inferSelect) => (

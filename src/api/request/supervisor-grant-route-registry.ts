@@ -14,6 +14,8 @@ const SUPERVISOR_GRANT_ROUTE_PATTERNS: ReadonlyArray<{ method: string; pattern: 
   // delegation can still be observed and revoked after admission is disabled.
   { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegations$/ },
   { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegations\/[^/]+$/ },
+  { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegation-decisions$/ },
+  { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegation-decisions\/[^/]+$/ },
 ];
 
 export function isSupervisorGrantRouteAllowed(method: string, path: string): boolean {

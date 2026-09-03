@@ -295,6 +295,13 @@ jobs:
           --test
           src/api/__tests__/execution-delegation-grants-integration.test.ts
 
+      - name: Run execution delegation decision tests
+        run: >-
+          node
+          --import ./node_modules/tsx/dist/loader.mjs
+          --test
+          src/api/__tests__/execution-delegation-decisions-integration.test.ts
+
       - name: Run task lease rebind tests
         run: >-
           node

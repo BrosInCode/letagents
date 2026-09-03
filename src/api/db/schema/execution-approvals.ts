@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { check, foreignKey, index, integer, pgTable, primaryKey, text, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
 
 import { agents } from "./auth.js";
 import { accounts, rooms } from "./core.js";
@@ -92,6 +92,65 @@ export const execution_delegation_grants = pgTable(
         AND (${table.retired_at} IS NULL OR ${table.retired_at} >= ${table.created_at})
         AND (${table.expired_at} IS NULL OR ${table.expired_at} >= ${table.expires_at})
         AND (${table.revoked_at} IS NULL OR ${table.revoked_at} >= ${table.created_at})`,
+    ),
+  }),
+);
+
+export const execution_delegation_decisions = pgTable(
+  "execution_delegation_decisions",
+  {
+    decision_id: text("decision_id").primaryKey(),
+    delegation_instance_id: text("delegation_instance_id").notNull(),
+    delegation_revision: integer("delegation_revision").notNull(),
+    actor_account_id: text("actor_account_id")
+      .notNull()
+      .references(() => accounts.id, { onDelete: "cascade" }),
+    request_id: text("request_id").notNull(),
+    request_version: integer("request_version").notNull(),
+    request_sha256: text("request_sha256").notNull(),
+    projection_sha256: text("projection_sha256").notNull(),
+    decision: text("decision").notNull(),
+    client_request_id: text("client_request_id").notNull(),
+    request_fingerprint: text("request_fingerprint").notNull(),
+    decided_at: timestamp("decided_at", { mode: "string", withTimezone: true }).notNull(),
+  },
+  (table) => ({
+    grant_fk: foreignKey({
+      name: "execution_delegation_decisions_grant_fk",
+      columns: [table.delegation_instance_id, table.delegation_revision],
+      foreignColumns: [
+        execution_delegation_grants.delegation_instance_id,
+        execution_delegation_grants.revision,
+      ],
+    }).onDelete("cascade"),
+    actor_request_unique: uniqueIndex("execution_delegation_decisions_actor_request_uq")
+      .on(table.actor_account_id, table.client_request_id),
+    approval_unique: uniqueIndex("execution_delegation_decisions_approval_uq")
+      .on(
+        table.delegation_instance_id,
+        table.delegation_revision,
+        table.request_id,
+        table.request_version,
+      ),
+    grant_idx: index("execution_delegation_decisions_grant_idx")
+      .on(table.delegation_instance_id, table.delegation_revision, table.decision_id),
+    revision_check: check("execution_delegation_decisions_revision_check", sql`${table.delegation_revision} >= 1`),
+    request_version_check: check("execution_delegation_decisions_request_version_check", sql`${table.request_version} >= 1`),
+    request_digest_check: check(
+      "execution_delegation_decisions_request_digest_check",
+      sql`${table.request_sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    projection_digest_check: check(
+      "execution_delegation_decisions_projection_digest_check",
+      sql`${table.projection_sha256} ~ '^[0-9a-f]{64}$'`,
+    ),
+    fingerprint_check: check(
+      "execution_delegation_decisions_fingerprint_check",
+      sql`${table.request_fingerprint} ~ '^[0-9a-f]{64}$'`,
+    ),
+    decision_check: check(
+      "execution_delegation_decisions_decision_check",
+      sql`${table.decision} IN ('allow_once', 'deny')`,
     ),
   }),
 );
