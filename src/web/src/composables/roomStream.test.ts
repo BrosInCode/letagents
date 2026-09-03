@@ -71,6 +71,7 @@ function assertStreamUrl(
 
 const { createRoomStream } = await import('./room/stream.js')
 const { lastMessageInfoInvalidation, invalidationCoversMessage } = await import('../components/room/messageInfoInvalidation.js')
+const { lastAgentApprovalInvalidation } = await import('./roomAgentApprovalInvalidation.js')
 
 test('message-info null preserves room scope, refresh signaling, and the subscribed cursor without a gap', () => {
   let reconciles = 0
@@ -122,6 +123,7 @@ test('message-info null preserves room scope, refresh signaling, and the subscri
 })
 
 test('resource pointers negotiate once, advance inertly, and fail closed when malformed', async () => {
+  const previousApprovalInvalidation = lastAgentApprovalInvalidation.value
   assert.equal(parseRoomResourceInvalidation({
     room_id: 'room_pointer', resource: 'agent_work',
   }).status, 'supported')
@@ -172,6 +174,8 @@ test('resource pointers negotiate once, advance inertly, and fail closed when ma
       room_id: 'room_pointer', resource,
     }, cursor)
   }
+  assert.equal(lastAgentApprovalInvalidation.value?.roomId, 'room_pointer')
+  assert.notEqual(lastAgentApprovalInvalidation.value, previousApprovalInvalidation)
   assert.equal(renders, 0, 'pointer negotiation must not invent a rendering surface')
   assert.equal(reconciles, 0, 'supported and future resources are valid cursor no-ops')
 
@@ -195,6 +199,7 @@ test('resource pointers negotiate once, advance inertly, and fail closed when ma
   stream.start('room_pointer')
   assertStreamUrl(FakeEventSource.instances.at(-1)!, 'room_pointer', 'broker_future')
   stream.stop()
+  lastAgentApprovalInvalidation.value = null
 })
 
 test('room stream forwards typed GitHub event invalidations', () => {
@@ -553,6 +558,7 @@ test('room stream retries a gap until both repair lanes recover', async () => {
 
 test('room stream subscribes before bootstrap and replays every typed resource over the snapshot', async () => {
   const previousInvalidation = lastMessageInfoInvalidation.value
+  const previousApprovalInvalidation = lastAgentApprovalInvalidation.value
   const applied: string[] = []
   const stream = createRoomStream({
     setConnectionState: () => {},
@@ -585,6 +591,7 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   }, 'broker_7')
   assert.deepEqual(applied, [], 'typed resources remain behind the startup snapshot boundary')
   assert.equal(lastMessageInfoInvalidation.value, previousInvalidation, 'info refresh also waits for the installed snapshot')
+  assert.equal(lastAgentApprovalInvalidation.value, previousApprovalInvalidation, 'approval refresh also waits for the installed snapshot')
 
   source.dispatch('room_sync', { gap: false, event_cursor: 'broker_7' })
   await barrier
@@ -592,6 +599,7 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   stream.finishBootstrap('room_bootstrap', true)
   assert.equal(lastMessageInfoInvalidation.value?.roomId, 'room_bootstrap')
   assert.equal(lastMessageInfoInvalidation.value?.messageIds, null)
+  assert.equal(lastAgentApprovalInvalidation.value?.roomId, 'room_bootstrap')
   assert.deepEqual(applied, [
     'snapshot',
     'task', 'artifact', 'artifact', 'reasoning', 'github', 'message', 'presence',
@@ -603,6 +611,7 @@ test('room stream subscribes before bootstrap and replays every typed resource o
   assertStreamUrl(resumed, 'room_bootstrap', 'broker_7')
   stream.stop()
   lastMessageInfoInvalidation.value = null
+  lastAgentApprovalInvalidation.value = null
 })
 
 test('room bootstrap byte overflow releases bodies and forces one authoritative repair', async () => {

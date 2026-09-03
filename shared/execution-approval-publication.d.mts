@@ -1,4 +1,13 @@
 import type { ExecutionApprovalProjectionV1 } from "./execution-approval-projection.mjs";
+import type { ExecutionApprovalPublicationItem } from "./execution-approval-publication-item.mjs";
+
+export {
+  isExecutionApprovalPublicationDigest,
+  isExecutionApprovalPublicationIdentity,
+  isExecutionApprovalPublicationVersion,
+  parseExecutionApprovalPublicationItem,
+} from "./execution-approval-publication-item.mjs";
+export type { ExecutionApprovalPublicationItem } from "./execution-approval-publication-item.mjs";
 
 export const EXECUTION_APPROVAL_PUBLICATION_VERSION: 1;
 export const EXECUTION_APPROVAL_PUBLICATION_MAX_JSON_BYTES: number;
@@ -15,20 +24,6 @@ export type ExecutionApprovalPublicationInput = {
   projection_sha256: string;
   projection_json: string;
   produced_at: string;
-  expires_at: string;
-};
-
-export type ExecutionApprovalPublicationItem = {
-  publication_id: string;
-  room_id: string;
-  agent_key: string;
-  delegation_instance_id: string;
-  delegation_revision: number;
-  request_id: string;
-  request_version: number;
-  request_sha256: string;
-  projection_sha256: string;
-  published_at: string;
   expires_at: string;
 };
 
@@ -49,11 +44,7 @@ export type ExecutionApprovalPublicationCloseReceipt = {
   closed_at: string;
 };
 
-export function isExecutionApprovalPublicationIdentity(value: unknown): value is string;
-export function isExecutionApprovalPublicationDigest(value: unknown): value is string;
-export function isExecutionApprovalPublicationVersion(value: unknown): value is number;
 export function parseExecutionApprovalPublicationInput(value: unknown): ExecutionApprovalPublicationInput | null;
-export function parseExecutionApprovalPublicationItem(value: unknown): ExecutionApprovalPublicationItem | null;
 export function parseExecutionApprovalPublicationReceipt(value: unknown): ExecutionApprovalPublicationReceipt | null;
 export function parseExecutionApprovalPublicationCloseInput(value: unknown): ExecutionApprovalPublicationCloseInput | null;
 export function parseExecutionApprovalPublicationCloseReceipt(value: unknown): ExecutionApprovalPublicationCloseReceipt | null;
