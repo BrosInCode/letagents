@@ -3679,22 +3679,34 @@ test("failed Cursor idle compensation spends only recovery budget and retains ex
   } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("a terminal provider rejection blocks once without result recovery or model rerun", async () => {
+test("a checkpointed terminal provider rejection settles failed and advances FIFO without replay", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-terminal-provider-failure-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    await ingest(store);
     let turns = 0;
+    let recoveries = 0;
     const delivery = new SupervisedAgentDelivery(
       store,
       provider(async (_handle, _request, options) => {
         turns += 1;
         await options?.beforeNativeDispatch?.();
-        await options?.checkpointTurnStarted?.("turn-provider-rejected");
+        const turnId = `turn-${turns}`;
+        await options?.checkpointTurnStarted?.(turnId);
+        if (turns > 1) return { turnId, outcome: "no_reply", text: null };
+        await options?.checkpointTerminalResult?.({
+          turnId,
+          providerContinuationId: "thread",
+          outcome: "failed",
+          text: null,
+          evidence: "transcript",
+        });
         throw Object.assign(
-          new Error("Open Model request was rejected because the provider account has insufficient credit."),
+          new Error("Open Model request failed at the model provider (HTTP 404): expired model."),
           { roomTurnRecoveryOutcome: "terminal_failure" as const },
         );
+      }, async () => {
+        recoveries += 1;
+        throw new Error("must not recover a checkpointed terminal provider rejection");
       }),
       {
         poll: async () => ({}),
@@ -3704,14 +3716,26 @@ test("a terminal provider rejection blocks once without result recovery or model
       0,
     );
 
-    await delivery.pump(agent);
+    const openModelAgent = { ...agent, provider: "open-model" };
+    await delivery.pump(openModelAgent);
+    await ingest(store, "1");
+    await ingest(store, "2");
+    await delivery.pump(openModelAgent);
 
-    const receipt = (await store.receipts(agent.agentId))[0];
-    assert.equal(turns, 1);
-    assert.equal(receipt?.state, "blocked");
-    assert.match(receipt?.last_error ?? "", /insufficient credit/);
+    const receipts = await store.receipts(agent.agentId);
+    assert.equal(turns, 2);
+    assert.equal(recoveries, 0);
+    assert.deepEqual(receipts.map((receipt) => receipt.state), [
+      "acknowledged_failed",
+      "acknowledged_no_reply",
+    ]);
+    assert.deepEqual(JSON.parse(receipts[0]!.outcome!), {
+      kind: "failed",
+      text: null,
+      evidence: "transcript",
+    });
     assert.equal(
-      receipt?.timeline.some((event) => event.phase === "retry_scheduled"),
+      receipts[0]?.timeline.some((event) => event.phase === "retry_scheduled"),
       false,
     );
     await store.close();
