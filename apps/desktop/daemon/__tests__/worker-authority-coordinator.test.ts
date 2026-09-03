@@ -154,6 +154,7 @@ type HarnessOptions = {
   cursor?: string | null;
   checkpoints?: WorkAttemptCheckpoint[];
   createWorkerSession?: WorkerAuthorityCoordinatorOptions["supervisorGrantHttp"]["createWorkerSession"];
+  getExecutionDelegation?: WorkerAuthorityCoordinatorOptions["supervisorGrantHttp"]["getExecutionDelegation"];
   renewHostGrant?: NonNullable<WorkerAuthorityCoordinatorOptions["supervisorGrantHttp"]["renewHostGrant"]>;
   latest?: NonNullable<WorkerAuthorityCoordinatorOptions["deliveryHttp"]["latest"]>;
   terminal?: ExecutionGeneration["terminal"];
@@ -367,6 +368,10 @@ function fixture(options: HarnessOptions = {}) {
           bearerId: "bearer-id-minted",
           expiresAt: new Date(now + 5 * 60_000).toISOString(),
         };
+      }),
+      getExecutionDelegation: options.getExecutionDelegation ?? (async () => {
+        events.push("http:delegation");
+        return delegationRevision();
       }),
       ...(options.renewHostGrant ? { renewHostGrant: options.renewHostGrant } : {}),
     },
@@ -1339,16 +1344,17 @@ test("host grant authority provenance is atomic and grant-scoped", async () => {
   assert.equal(harness.custody.hostGrant("agent-1")?.scopeKey, null);
 });
 
-test("execution delegation journal derives only the exact current installed host witness", async () => {
+test("execution delegation sync fetches through the exact current installed host witness", async () => {
   const harness = fixture();
   const grant = hostGrant();
   harness.custody.installHostGrant(grant);
 
-  const result = await harness.subject.reconcileExecutionDelegation({
+  const result = await harness.subject.syncExecutionDelegation({
     entryId: "agent-1",
-    delegation: delegationRevision(),
+    delegationInstanceId: "delegation-1",
   });
   assert.equal(result.created, true);
+  assert.equal(harness.events.includes("http:delegation"), true);
   assert.deepEqual(harness.delegationAuthorities, [{
     agentId: "agent-1",
     roomId: "room-1",
@@ -1383,9 +1389,9 @@ test("execution delegation journal derives only the exact current installed host
 
   const expired = fixture();
   expired.custody.installHostGrant(hostGrant({ expiresAt: new Date(now).toISOString() }));
-  await assert.rejects(expired.subject.reconcileExecutionDelegation({
+  await assert.rejects(expired.subject.syncExecutionDelegation({
     entryId: "agent-1",
-    delegation: delegationRevision(),
+    delegationInstanceId: "delegation-1",
   }), { code: "authority_mismatch" });
 });
 
@@ -1393,10 +1399,42 @@ test("execution delegation commit refuses daemon, control, grant, and expiry wit
   for (const mutation of ["generation", "control", "grant", "clock"] as const) {
     const harness = fixture({ delegationCommitMutation: mutation });
     harness.custody.installHostGrant(hostGrant());
-    await assert.rejects(harness.subject.reconcileExecutionDelegation({
+    await assert.rejects(harness.subject.syncExecutionDelegation({
       entryId: "agent-1",
-      delegation: delegationRevision(),
+      delegationInstanceId: "delegation-1",
     }), { code: "authority_mismatch" }, mutation);
+  }
+});
+
+test("execution delegation sync refuses a host grant replaced during the remote read", async () => {
+  const harness = fixture({
+    getExecutionDelegation: async () => {
+      harness.custody.installHostGrant(hostGrant({ grantId: "replacement-grant" }));
+      return delegationRevision();
+    },
+  });
+  harness.custody.installHostGrant(hostGrant());
+
+  await assert.rejects(harness.subject.syncExecutionDelegation({
+    entryId: "agent-1",
+    delegationInstanceId: "delegation-1",
+  }), { code: "authority_mismatch" });
+  assert.deepEqual(harness.delegationAuthorities, []);
+});
+
+test("execution delegation sync refuses a different room or agent scope", async () => {
+  for (const delegation of [
+    delegationRevision({ roomId: "other-room" }),
+    delegationRevision({ agentKey: "other-agent" }),
+  ]) {
+    const harness = fixture({ getExecutionDelegation: async () => delegation });
+    harness.custody.installHostGrant(hostGrant());
+
+    await assert.rejects(harness.subject.syncExecutionDelegation({
+      entryId: "agent-1",
+      delegationInstanceId: "delegation-1",
+    }), { code: "authority_mismatch" });
+    assert.deepEqual(harness.delegationAuthorities, []);
   }
 });
 

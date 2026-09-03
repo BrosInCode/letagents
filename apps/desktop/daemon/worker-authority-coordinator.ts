@@ -217,9 +217,9 @@ export type WorkerAuthorityCoordinatorOptions = {
   clearTimeout: typeof clearTimeout;
 };
 
-export type ReconcileInstalledExecutionDelegationInput = {
+export type SyncInstalledExecutionDelegationInput = {
   entryId: string;
-  delegation: RemoteExecutionDelegationRevision;
+  delegationInstanceId: string;
 };
 
 export type ValidateInstalledExecutionDelegationInput = Omit<ValidateExecutionDelegation,
@@ -326,23 +326,49 @@ export class WorkerAuthorityCoordinator {
   }
 
   /**
-   * Mirror one exact server revision under the current process-held witness.
-   * The store invokes assertCurrent synchronously after BEGIN IMMEDIATE, so a
-   * grant replacement or control edge cannot race the journal mutation.
+   * Read one exact server revision through the installed host grant, then
+   * mirror it under that same process-held witness. The store invokes
+   * assertCurrent synchronously after BEGIN IMMEDIATE, so a grant replacement
+   * or control edge cannot race the journal mutation.
    */
-  async reconcileExecutionDelegation(input: ReconcileInstalledExecutionDelegationInput): Promise<{
+  async syncExecutionDelegation(input: SyncInstalledExecutionDelegationInput): Promise<{
     created: boolean;
     delegation: LocalExecutionDelegation;
   }> {
+    const source = await this.options.serializeEntry(input.entryId, async () => {
+      const entry = await this.options.store.getEntry(input.entryId);
+      if (!entry || !await this.ownsDaemonGeneration(this.options.authority.currentGeneration())) {
+        throw new ExecutionDelegationJournalError("authority_mismatch");
+      }
+      const grant = this.currentHostGrant(entry);
+      if (!grant || grant.ownerAccountId === null || grant.scopeKey !== "owner"
+        || Date.parse(grant.expiresAt) <= this.options.nowMs()) {
+        throw new ExecutionDelegationJournalError("authority_mismatch");
+      }
+      return grant;
+    });
+    const delegation = await this.options.supervisorGrantHttp.getExecutionDelegation({
+      apiUrl: source.apiUrl,
+      grantId: source.grantId,
+      supervisorGrant: source.supervisorGrant,
+      grantGeneration: source.grantGeneration,
+      delegationInstanceId: input.delegationInstanceId,
+    });
+    if (delegation.roomId !== source.roomId || delegation.agentKey !== source.agentKey) {
+      throw new ExecutionDelegationJournalError("authority_mismatch");
+    }
     return this.options.serializeEntry(input.entryId, async () => {
       const entry = await this.options.store.getEntry(input.entryId);
       if (!entry || !await this.ownsDaemonGeneration(this.options.authority.currentGeneration())) {
         throw new ExecutionDelegationJournalError("authority_mismatch");
       }
+      if (!this.options.custody.hostGrantIsCurrent(entry.id, source)) {
+        throw new ExecutionDelegationJournalError("authority_mismatch");
+      }
       const atMs = this.options.nowMs();
       const captured = this.captureExecutionDelegationAuthority(entry, atMs);
       return this.options.store.reconcileExecutionDelegation(
-        { delegation: input.delegation, authority: captured.authority, atMs },
+        { delegation, authority: captured.authority, atMs },
         captured.assertCurrent,
         commit => this.options.authority.fenceCommit(commit),
       );

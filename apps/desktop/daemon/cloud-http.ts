@@ -1,5 +1,6 @@
 import type { SupervisedDeliveryHttp, SupervisedPollResponse } from "./supervised-agent-delivery.js";
 import type { DaemonToolAgentSession } from "./supervised-tool-runtime.js";
+import type { RemoteExecutionDelegationRevision } from "./execution-delegation-journal.js";
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
@@ -24,6 +25,10 @@ export interface SupervisorGrantHttp {
     apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
     hostId: string; installationId: string; ttlMs: number;
   }): Promise<{ grantId: string; supervisorGrant: string; grantGeneration: number; expiresAt: string }>;
+  getExecutionDelegation(input: {
+    apiUrl: string; grantId: string; supervisorGrant: string; grantGeneration: number;
+    delegationInstanceId: string; signal?: AbortSignal;
+  }): Promise<RemoteExecutionDelegationRevision>;
 }
 
 export class SupervisorGrantRequestError extends Error {
@@ -72,6 +77,58 @@ export function lastRoomMessageId(messages: readonly Record<string, unknown>[]):
 function boundedCloudSignal(signal?: AbortSignal, timeoutMs = CLOUD_REQUEST_TIMEOUT_MS): AbortSignal {
   const deadline = AbortSignal.timeout(timeoutMs);
   return signal ? AbortSignal.any([signal, deadline]) : deadline;
+}
+
+function parseExecutionDelegationResponse(
+  value: unknown,
+  expectedInstanceId: string,
+): RemoteExecutionDelegationRevision {
+  const body = value && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+  const raw = body?.delegation;
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw new Error("Execution delegation response omitted its delegation.");
+  }
+  const record = raw as Record<string, unknown>;
+  const requiredString = (name: string): string => {
+    const item = record[name];
+    if (typeof item !== "string" || !item.trim() || item.trim() !== item) {
+      throw new Error(`Execution delegation response omitted ${name}.`);
+    }
+    return item;
+  };
+  const timestamp = (name: string, nullable = false): number | null => {
+    if (nullable && record[name] === null) return null;
+    const parsed = Date.parse(requiredString(name));
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      throw new Error(`Execution delegation response returned invalid ${name}.`);
+    }
+    return parsed;
+  };
+  const delegationInstanceId = requiredString("delegation_instance_id");
+  const revision = Number(record.revision);
+  const scopeSha256 = requiredString("scope_sha256");
+  if (delegationInstanceId !== expectedInstanceId
+    || !Number.isSafeInteger(revision) || revision < 1
+    || record.category !== "file_change" || record.risk_ceiling !== "low"
+    || !/^[0-9a-f]{64}$/.test(scopeSha256)) {
+    throw new Error("Execution delegation response returned a different authority identity.");
+  }
+  return {
+    delegationInstanceId,
+    revision,
+    ownerAccountId: requiredString("owner_account_id"),
+    roomId: requiredString("room_id"),
+    agentKey: requiredString("agent_key"),
+    approverAccountId: requiredString("approver_account_id"),
+    category: "file_change",
+    riskCeiling: "low",
+    scopeSha256,
+    createdAtMs: timestamp("created_at")!,
+    expiresAtMs: timestamp("expires_at")!,
+    revokedAtMs: timestamp("revoked_at", true),
+  };
 }
 
 export type RoomWorkPublishInput = {
@@ -243,6 +300,21 @@ export const productionSupervisorGrantHttp: SupervisorGrantHttp = {
       grantId: requireString("grant_id"), supervisorGrant: requireString("supervisor_grant"),
       grantGeneration: generation, expiresAt: requireString("expires_at"),
     };
+  },
+  async getExecutionDelegation(input) {
+    const apiOrigin = hostGrantApiOrigin(input.apiUrl);
+    const response = await fetch(
+      `${apiOrigin}/supervisor-host-grants/${encodeURIComponent(input.grantId)}/execution-delegations/${encodeURIComponent(input.delegationInstanceId)}`,
+      {
+        headers: {
+          authorization: `Bearer ${input.supervisorGrant}`,
+          "x-letagents-supervisor-generation": String(input.grantGeneration),
+        },
+        signal: boundedCloudSignal(input.signal),
+      },
+    );
+    if (!response.ok) throw new SupervisorGrantRequestError(response.status, "Execution delegation read");
+    return parseExecutionDelegationResponse(await response.json(), input.delegationInstanceId);
   },
 };
 

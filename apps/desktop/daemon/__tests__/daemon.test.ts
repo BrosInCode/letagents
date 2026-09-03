@@ -235,6 +235,77 @@ test("worker mint preserves the exact server-issued identity paired with its bea
   }
 });
 
+test("execution delegation read requires the exact host projection and normalizes timestamps", async () => {
+  const observed: Array<{ url: string; authorization?: string; generation?: string }> = [];
+  const server = createHttpServer((request, response) => {
+    observed.push({
+      url: request.url ?? "",
+      authorization: request.headers.authorization,
+      generation: request.headers["x-letagents-supervisor-generation"] as string | undefined,
+    });
+    response.writeHead(200, { "content-type": "application/json" });
+    const missingDigest = request.url?.endsWith("/missing-digest");
+    response.end(JSON.stringify({ delegation: {
+      delegation_instance_id: missingDigest ? "missing-digest" : "delegation-exact",
+      revision: 4,
+      owner_account_id: "owner-exact",
+      room_id: "room-exact",
+      agent_key: "owner/agent",
+      approver_account_id: "approver-exact",
+      category: "file_change",
+      risk_ceiling: "low",
+      ...(!missingDigest ? { scope_sha256: "a".repeat(64) } : {}),
+      created_at: "2026-08-14T00:00:00.000Z",
+      expires_at: "2026-08-15T00:00:00.000Z",
+      revoked_at: null,
+      status: "active",
+    } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address() as AddressInfo;
+    const apiUrl = `http://127.0.0.1:${address.port}`;
+    const delegation = await productionSupervisorGrantHttp.getExecutionDelegation({
+      apiUrl,
+      grantId: "grant-exact",
+      supervisorGrant: "grant-secret",
+      grantGeneration: 3,
+      delegationInstanceId: "delegation-exact",
+    });
+    assert.deepEqual(delegation, {
+      delegationInstanceId: "delegation-exact",
+      revision: 4,
+      ownerAccountId: "owner-exact",
+      roomId: "room-exact",
+      agentKey: "owner/agent",
+      approverAccountId: "approver-exact",
+      category: "file_change",
+      riskCeiling: "low",
+      scopeSha256: "a".repeat(64),
+      createdAtMs: Date.parse("2026-08-14T00:00:00.000Z"),
+      expiresAtMs: Date.parse("2026-08-15T00:00:00.000Z"),
+      revokedAtMs: null,
+    });
+    assert.deepEqual(observed[0], {
+      url: "/supervisor-host-grants/grant-exact/execution-delegations/delegation-exact",
+      authorization: "Bearer grant-secret",
+      generation: "3",
+    });
+    await assert.rejects(
+      productionSupervisorGrantHttp.getExecutionDelegation({
+        apiUrl,
+        grantId: "grant-exact",
+        supervisorGrant: "grant-secret",
+        grantGeneration: 3,
+        delegationInstanceId: "missing-digest",
+      }),
+      /scope_sha256/,
+    );
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs(""), 210_000);
   assert.equal(workplaceLivenessStaleAfterMs("999"), 210_000);

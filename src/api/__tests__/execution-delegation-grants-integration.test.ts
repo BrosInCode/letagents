@@ -491,13 +491,17 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     assert.equal(created.delegation.status, "active");
     assert.equal("request_fingerprint" in created.delegation, false);
     assert.equal("admission_supervisor_grant_id" in created.delegation, false);
+    assert.equal("scope_sha256" in created.delegation, false,
+      "the account projection does not expose host admission evidence");
 
     const accountUrl = `${baseUrl}/execution-delegations/${instanceId}`;
     for (const headers of [ownerHeaders, approverHeaders]) {
       const response = await fetch(accountUrl, { headers });
       assert.equal(response.status, 200);
       assert.equal(response.headers.get("cache-control"), "no-store");
-      assert.equal((await response.json() as any).delegation.delegation_instance_id, instanceId);
+      const body = await response.json() as any;
+      assert.equal(body.delegation.delegation_instance_id, instanceId);
+      assert.equal("scope_sha256" in body.delegation, false);
     }
     assert.deepEqual(freshChecks, [true], "approver visibility reaches the fresh Git Room membership check");
     assert.equal((await fetch(accountUrl, { headers: approverOwnerHeaders })).status, 401,
@@ -528,6 +532,11 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     });
     assert.equal(revisedResponse.status, 200);
     assert.equal((await revisedResponse.json() as any).delegation.revision, 2);
+    const exactServerGrant = await db!.getExecutionDelegationGrantForOwner({
+      owner_account_id: seeded.ownerId,
+      delegation_instance_id: instanceId,
+    });
+    assert.ok(exactServerGrant);
 
     const hostUrl = `${baseUrl}/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/${instanceId}`;
     const hostResponse = await fetch(hostUrl, { headers: {
@@ -535,7 +544,10 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
       "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
     } });
     assert.equal(hostResponse.status, 200);
-    assert.equal((await hostResponse.json() as any).delegation.revision, 2);
+    const hostBody = await hostResponse.json() as any;
+    assert.equal(hostBody.delegation.revision, 2);
+    assert.equal(hostBody.delegation.scope_sha256, exactServerGrant.scope_sha256);
+    assert.equal("admission_supervisor_grant_id" in hostBody.delegation, false);
 
     const foreignHost = await db!.createSupervisorHostGrant({
       owner_account_id: seeded.ownerId,
@@ -619,6 +631,33 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
       "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
     } })).json() as any)
       .delegation.status, "revoked", "the exact host can reconcile terminal authority");
+
+    await db!.revokeSupervisorHostGrant({
+      grant_id: seeded.grant.grant_id,
+      owner_account_id: seeded.ownerId,
+    });
+    const narrowerRoom = await db!.createProjectWithName(`narrower-room-${++ordinal}`);
+    const narrowerAgent = await db!.registerAgentIdentity({
+      owner_account_id: seeded.ownerId,
+      owner_login: seeded.ownerId,
+      owner_label: seeded.ownerId,
+      name: `narrower-agent-${ordinal}`,
+    });
+    const narrowerHost = await db!.createSupervisorHostGrant({
+      owner_account_id: seeded.ownerId,
+      host_id: seeded.grant.host_id,
+      installation_id: seeded.grant.installation_id,
+      allowed_room_ids: [narrowerRoom.id],
+      allowed_agent_keys: [narrowerAgent.canonical_key],
+      expires_at: new Date(seeded.now.getTime() + 60 * 60_000).toISOString(),
+    });
+    const narrowerHostUrl = `${baseUrl}/supervisor-host-grants/${narrowerHost.grant.grant_id}/execution-delegations/${instanceId}`;
+    assert.equal((await fetch(narrowerHostUrl, {
+      headers: {
+        authorization: `Bearer ${narrowerHost.token}`,
+        "x-letagents-supervisor-generation": String(narrowerHost.grant.current_generation),
+      },
+    })).status, 404, "a same-host replacement cannot widen its narrower room and agent scope");
   } finally {
     await close(server);
   }
