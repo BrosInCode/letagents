@@ -5,10 +5,7 @@ import {
   parseExecutionApprovalPublicationCloseInput,
   parseExecutionApprovalPublicationInput,
 } from "../../../shared/execution-approval-publication.mjs";
-import {
-  isExecutionDelegationFeatureEnabled,
-  isSupervisorHostGrantFeatureEnabled,
-} from "../../shared/agent-session-bearer.js";
+import { isSupervisorHostGrantFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import {
   ExecutionApprovalPublicationError,
   closeExecutionApprovalPublication,
@@ -170,51 +167,49 @@ export function registerExecutionApprovalPublicationRoutes(
 
   if (!isSupervisorHostGrantFeatureEnabled()) return;
 
-  if (isExecutionDelegationFeatureEnabled()) {
-    app.post(
-      "/supervisor-host-grants/:grantId/worker-sessions/:sessionId/execution-approval-publications",
-      async (req: AuthenticatedRequest, res) => {
-        if (req.authKind !== "supervisor_grant" || req.supervisorGrant?.grant_id !== req.params.grantId) {
-          res.status(403).json({ error: "A current supervisor grant is required." });
+  app.post(
+    "/supervisor-host-grants/:grantId/worker-sessions/:sessionId/execution-approval-publications",
+    async (req: AuthenticatedRequest, res) => {
+      if (req.authKind !== "supervisor_grant" || req.supervisorGrant?.grant_id !== req.params.grantId) {
+        res.status(403).json({ error: "A current supervisor grant is required." });
+        return;
+      }
+      const parsed = parseExecutionApprovalPublicationInput(req.body);
+      if (!parsed) {
+        res.status(400).json({ error: "Invalid execution approval publication." });
+        return;
+      }
+      try {
+        const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(parsed.room_id));
+        if (roomId !== parsed.room_id) {
+          res.status(400).json({
+            error: "Execution approval publication must use the canonical room id.",
+            code: "noncanonical_room_id",
+          });
           return;
         }
-        const parsed = parseExecutionApprovalPublicationInput(req.body);
-        if (!parsed) {
-          res.status(400).json({ error: "Invalid execution approval publication." });
-          return;
-        }
-        try {
-          const roomId = await deps.resolveCanonicalRoomRequestId(normalizeRoomId(parsed.room_id));
-          if (roomId !== parsed.room_id) {
-            res.status(400).json({
-              error: "Execution approval publication must use the canonical room id.",
-              code: "noncanonical_room_id",
-            });
-            return;
-          }
-          const current = await requireCurrentSupervisorGrant(req, res, deps, {
-            kind: "rooms",
-            room_ids: [roomId],
-          });
-          if (!current) return;
-          const result = await publishExecutionApprovalPublication({
-            fence: {
-              grant_id: current.grant_id,
-              generation: current.current_generation,
-              token_version: current.token_version,
-            },
-            session_id: String(req.params.sessionId ?? ""),
-            publication: parsed,
-          });
-          queueAgentApprovalInvalidation(roomId);
-          res.setHeader("Cache-Control", "no-store");
-          res.status(result.status === "created" ? 201 : 200).json(result);
-        } catch (error) {
-          publicationError(res, error);
-        }
-      },
-    );
-  }
+        const current = await requireCurrentSupervisorGrant(req, res, deps, {
+          kind: "rooms",
+          room_ids: [roomId],
+        });
+        if (!current) return;
+        const result = await publishExecutionApprovalPublication({
+          fence: {
+            grant_id: current.grant_id,
+            generation: current.current_generation,
+            token_version: current.token_version,
+          },
+          session_id: String(req.params.sessionId ?? ""),
+          publication: parsed,
+        });
+        queueAgentApprovalInvalidation(roomId);
+        res.setHeader("Cache-Control", "no-store");
+        res.status(result.status === "created" ? 201 : 200).json(result);
+      } catch (error) {
+        publicationError(res, error);
+      }
+    },
+  );
 
   app.post(
     "/supervisor-host-grants/:grantId/worker-sessions/:sessionId/execution-approval-publications/:publicationId/close",
