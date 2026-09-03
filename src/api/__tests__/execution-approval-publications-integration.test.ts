@@ -21,7 +21,6 @@ if (testDatabaseUrl) process.env.DB_URL = testDatabaseUrl;
 else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "true";
 process.env.LETAGENTS_AGENT_SESSION_BEARER_ENABLED = "true";
-process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "true";
 
 const client = testDatabaseUrl ? await import("../db/client.js") : null;
 const db = testDatabaseUrl ? await import("../db.js") : null;
@@ -218,40 +217,6 @@ function serverUrl(server: ReturnType<express.Express["listen"]>): string {
   assert.ok(address && typeof address === "object");
   return `http://127.0.0.1:${address.port}`;
 }
-
-test("feature-off blocks new publications but preserves host closure", async (t) => {
-  const prior = process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
-  process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "false";
-  const app = express();
-  registerHttpMiddleware(app, { resolveRequestAuth });
-  registerExecutionApprovalPublicationRoutes(app, {
-    resolveCanonicalRoomRequestId: async () => { throw new Error("not reached"); },
-    resolveRoomOrReply: async () => { throw new Error("not reached"); },
-    requireParticipant: async () => { throw new Error("not reached"); },
-    getProjectById: async () => { throw new Error("not reached"); },
-  });
-  const server = await listen(app);
-  t.after(async () => {
-    await close(server);
-    if (prior === undefined) delete process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
-    else process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = prior;
-  });
-  const origin = serverUrl(server);
-  const headers = { "content-type": "application/json" };
-
-  const admission = await fetch(
-    `${origin}/supervisor-host-grants/grant_1/worker-sessions/session_1/execution-approval-publications`,
-    { method: "POST", headers, body: "{}" },
-  );
-  assert.equal(admission.status, 404, "feature-off does not register new publication admission");
-
-  const closure = await fetch(
-    `${origin}/supervisor-host-grants/grant_1/worker-sessions/session_1/`
-      + `execution-approval-publications/publication_1/close`,
-    { method: "POST", headers, body: "{}" },
-  );
-  assert.equal(closure.status, 403, "feature-off still reaches the authenticated closure handler");
-});
 
 test("publication is one-shot, daemon-verifiable, and preserves exact delegate bytes", databaseOptions, async (t) => {
   const seeded = await seed();

@@ -12,8 +12,8 @@ const SUPERVISOR_GRANT_ROUTE_PATTERNS: ReadonlyArray<{ method: string; pattern: 
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/worker-sessions\/[^/]+\/execution-approval-publications\/[^/]+\/close$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/leases\/[^/]+\/attestation$/ },
   { method: "POST", pattern: /^\/supervisor-host-grants\/[^/]+\/leases\/[^/]+\/rebind$/ },
-  // Reconciliation reads outlive the admission rollout flag so an issued
-  // delegation can still be observed and revoked after admission is disabled.
+  // Reconciliation reads are explicit grant capabilities, not generic
+  // account-less fallthrough routes.
   { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegations$/ },
   { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegations\/[^/]+$/ },
   { method: "GET", pattern: /^\/supervisor-host-grants\/[^/]+\/execution-delegation-decisions$/ },

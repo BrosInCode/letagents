@@ -14,7 +14,6 @@ const requiresDatabase = !testDatabaseUrl;
 if (testDatabaseUrl) process.env.DB_URL = testDatabaseUrl;
 else process.env.DB_URL ??= "postgresql://test:test@127.0.0.1:1/test";
 process.env.LETAGENTS_SUPERVISOR_HOST_GRANT_ENABLED = "true";
-process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "true";
 
 const client = testDatabaseUrl ? await import("../db/client.js") : null;
 const db = testDatabaseUrl ? await import("../db.js") : null;
@@ -760,83 +759,5 @@ test("HTTP routes bind authorship to auth and expose exact owner, approver, and 
     })).status, 404, "a same-host replacement cannot widen its narrower room and agent scope");
   } finally {
     await close(server);
-  }
-});
-
-test("feature-off stops admission while preserving transparency, revocation, and host reconciliation", databaseOptions, async () => {
-  const seeded = await seed();
-  const existing = await db!.admitExecutionDelegationGrantRevision(admissionInput(seeded, {
-    client_request_id: "feature_off_revoke",
-  }));
-  await db!.createOwnerToken({ accountId: seeded.ownerId, githubUserId: seeded.ownerId, token: "delegation_gate_owner" });
-  const prior = process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
-  process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = "false";
-  const app = express();
-  registerHttpMiddleware(app, { resolveRequestAuth });
-  registerExecutionDelegationRoutes(app, delegationRouteDeps());
-  const server = await listen(app);
-  try {
-    const baseUrl = serverUrl(server);
-    const ownerHeaders = { authorization: "Bearer delegation_gate_owner" };
-    const gatedAccountRequests = [
-      { method: "POST", path: "/execution-delegations" },
-      { method: "POST", path: `/execution-delegations/${existing.grant.delegation_instance_id}/revisions` },
-    ] as const;
-    for (const request of gatedAccountRequests) {
-      const options = { method: request.method, headers: ownerHeaders };
-      const hidden = await fetch(baseUrl + request.path, options);
-      const unknown = await fetch(baseUrl + "/route-that-does-not-exist", options);
-      assert.equal(hidden.status, unknown.status);
-      assert.equal(hidden.headers.get("content-type"), unknown.headers.get("content-type"));
-      assert.match(await hidden.text(), /^<!DOCTYPE html>/);
-      assert.match(await unknown.text(), /^<!DOCTYPE html>/);
-    }
-    const accountTarget = `/execution-delegations/${existing.grant.delegation_instance_id}`;
-    const visibleAccount = await fetch(baseUrl + accountTarget, { headers: ownerHeaders });
-    assert.equal(visibleAccount.status, 200, "issued authority remains visible after admission is disabled");
-    assert.equal((await visibleAccount.json() as any).delegation.status, "active");
-
-    const supervisorHeaders = {
-      authorization: `Bearer ${seeded.grantToken}`,
-      "x-letagents-supervisor-generation": String(seeded.grant.current_generation),
-    };
-    const hostTarget = `/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/${existing.grant.delegation_instance_id}`;
-    assert.equal((await fetch(baseUrl + hostTarget, { headers: supervisorHeaders })).status, 200);
-    const inventoryTarget = new URL(
-      `${baseUrl}/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations`,
-    );
-    inventoryTarget.searchParams.set("room_id", seeded.room.id);
-    inventoryTarget.searchParams.set("agent_key", seeded.agent.canonical_key);
-    assert.deepEqual(await (await fetch(inventoryTarget, { headers: supervisorHeaders })).json(), {
-      delegation_instance_ids: [existing.grant.delegation_instance_id],
-      next_cursor: null,
-    });
-
-    const revoked = await fetch(
-      baseUrl + accountTarget,
-      { method: "DELETE", headers: ownerHeaders },
-    );
-    assert.equal(revoked.status, 200, "feature-off keeps the owner kill switch available");
-    assert.equal((await revoked.json() as any).delegation.status, "revoked");
-    assert.equal((await (await fetch(baseUrl + hostTarget, { headers: supervisorHeaders })).json() as any)
-      .delegation.status, "revoked", "feature-off revocation remains host-reconcilable");
-
-    const missingHostTarget = `/supervisor-host-grants/${seeded.grant.grant_id}/execution-delegations/execution_delegation_hidden`;
-    const hiddenHost = await fetch(baseUrl + missingHostTarget, { headers: supervisorHeaders });
-    const unknownHost = await fetch(baseUrl + "/supervisor-route-that-does-not-exist", { headers: supervisorHeaders });
-    assert.equal(hiddenHost.status, 404);
-    assert.equal(unknownHost.status, 403);
-
-    for (const request of gatedAccountRequests) {
-      const hiddenOptions = await fetch(baseUrl + request.path, { method: "OPTIONS", headers: ownerHeaders });
-      const unknownOptions = await fetch(baseUrl + "/route-that-does-not-exist", { method: "OPTIONS", headers: ownerHeaders });
-      assert.equal(hiddenOptions.status, 204);
-      assert.equal(hiddenOptions.status, unknownOptions.status);
-      assert.equal(await hiddenOptions.text(), await unknownOptions.text());
-    }
-  } finally {
-    await close(server);
-    if (prior === undefined) delete process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED;
-    else process.env.LETAGENTS_EXECUTION_DELEGATION_ENABLED = prior;
   }
 });

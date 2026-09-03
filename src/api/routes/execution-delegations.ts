@@ -14,7 +14,6 @@ import {
   type ExecutionDelegationGrant,
 } from "../db.js";
 import { respondWithInternalError, type AuthenticatedRequest } from "../http/helpers.js";
-import { isExecutionDelegationFeatureEnabled } from "../../shared/agent-session-bearer.js";
 import {
   requireCurrentSupervisorGrant,
   type RoomResolverDeps,
@@ -142,8 +141,8 @@ function respondMutationError(res: Response, error: unknown): void {
 }
 
 export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolverDeps): void {
-  // Revocation is a safety control, not a rollout surface. Keep it available
-  // after admission is disabled so already-issued authority can always end.
+  // Revocation is the independently authenticated owner kill switch for
+  // already-issued authority.
   app.delete("/execution-delegations/:delegationInstanceId", async (req: AuthenticatedRequest, res) => {
     const ownerAccountId = accountId(req, res);
     if (!ownerAccountId) return;
@@ -250,8 +249,6 @@ export function registerExecutionDelegationRoutes(app: Express, deps: RoomResolv
       res.json({ delegation: hostGrant(grant) });
     },
   );
-
-  if (!isExecutionDelegationFeatureEnabled()) return;
 
   app.post("/execution-delegations", async (req: AuthenticatedRequest, res) => {
     const ownerAccountId = accountId(req, res);
