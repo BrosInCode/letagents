@@ -931,6 +931,63 @@ test("binding adopts a provided credential reference even when the worker bearer
     "same-reference and legacy unspecified-reference confirmations remain idempotent");
 });
 
+test("sequential Cursor children confirm one durable worker binding across per-turn process births", async () => {
+  const idleConnection = { kind: "cursor_cli" as const, pid: null, processIdentity: null };
+  const handle = providerHandle({
+    pid: 81_001,
+    providerConnection: { kind: "cursor_cli", pid: 81_001, processIdentity: "wrapper-birth:1" },
+  });
+  const harness = fixture({
+    handle,
+    entry: manifestEntry({
+      provider: "cursor",
+      observed_state: "idle",
+      condition: "none",
+      last_error: null,
+      provider_ref: {
+        work_attempt_id: "attempt-1",
+        provider_continuation_id: "continuation-1",
+        provider_connection: idleConnection,
+        execution_generation_id: "execution-1",
+      },
+      workplace_liveness: {
+        state: "reachable",
+        observed_at: "2026-08-26T00:00:00.000Z",
+        detail: "exact supervised worker session binding confirmed",
+      },
+      last_worker_binding: {
+        agent_session_id: "session-1",
+        work_attempt_id: "attempt-1",
+        execution_generation_id: "execution-1",
+        updated_at: "2026-08-26T00:00:00.000Z",
+      },
+    }),
+  });
+  const input: BindWorkerSessionInput = {
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1",
+    execution_generation_id: "execution-1", agent_session_id: "session-1",
+    agent_session_token: "worker-secret", api_url: "https://letagents.test",
+  };
+
+  await harness.subject.bindWorkerSession(input);
+  handle.pid = 81_002;
+  handle.providerConnection = { kind: "cursor_cli", pid: 81_002, processIdentity: "wrapper-birth:2" };
+  harness.setEntry({
+    ...harness.entry,
+    observed_state: "idle",
+    provider_ref: { ...harness.entry.provider_ref!, provider_connection: idleConnection },
+  });
+  await harness.subject.bindWorkerSession(input);
+
+  assert.equal(harness.events.filter((event) => event === "binding:bind").length, 0);
+  assert.equal(harness.events.filter((event) => event.startsWith("mint:")).length, 0);
+  assert.equal(harness.binding?.agent_session_id, "session-1");
+  assert.equal(harness.binding?.execution_generation_id, "execution-1");
+  assert.equal(harness.entry.condition, "none");
+  assert.equal(harness.entry.last_error, null);
+  assert.equal(harness.deliveryStarts, 2);
+});
+
 test("a minted worker stays fenced to its original room, attempt, daemon, and installed grant object", async () => {
   for (const mismatch of ["room", "attempt", "daemon", "grant"] as const) {
     const harness = fixture();
@@ -975,6 +1032,34 @@ test("worker readiness fails closed when authority changes during the binding pu
     assert.equal(harness.deliveryStarts, 0, mismatch);
     assert.equal(harness.manifestUpdates.length, 0, mismatch);
   }
+});
+
+test("Cursor worker readiness rejects a child replaced during binding publication", async () => {
+  const cursorHandle = providerHandle({
+    pid: 81_001,
+    providerConnection: { kind: "cursor_cli", pid: 81_001, processIdentity: "wrapper-birth:1" },
+  });
+  let harness!: ReturnType<typeof fixture>;
+  harness = fixture({
+    handle: cursorHandle,
+    entry: manifestEntry({ provider: "cursor", provider_ref: {
+      work_attempt_id: "attempt-1", provider_continuation_id: "continuation-1",
+      provider_connection: { kind: "cursor_cli", pid: null, processIdentity: null },
+      execution_generation_id: "execution-1",
+    } }),
+    publishNative: async () => {
+      cursorHandle.pid = 81_002;
+      cursorHandle.providerConnection = { kind: "cursor_cli", pid: 81_002, processIdentity: "wrapper-birth:2" };
+    },
+  });
+
+  await assert.rejects(harness.subject.bindWorkerSession({
+    entry_id: "agent-1", room_id: "room-1", work_attempt_id: "attempt-1", execution_generation_id: "execution-1",
+    agent_session_id: "session-1", agent_session_token: "worker-secret", api_url: "https://letagents.test",
+  }), /authority changed|binding changed/);
+  assert.equal(harness.entry.condition, "coordination_blocked");
+  assert.equal(harness.deliveryStarts, 0);
+  assert.equal(harness.manifestUpdates.length, 0);
 });
 
 test("bind and verify reject every mismatched durable or secret-bearing identity", async () => {
