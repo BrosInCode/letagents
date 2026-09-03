@@ -1299,6 +1299,37 @@ test("approval journal accepts exact OpenCode processing evidence without decidi
   } finally { database.close(); await store.close(); await env.cleanup(); }
 });
 
+test("approval journal accepts exact Codex execution evidence but never a socket send as acknowledgement", async () => {
+  const env = await fixture(); const store = new ManifestStore(env.databasePath);
+  await store.load(); const database = new DatabaseSync(env.databasePath);
+  try {
+    const authority = await seedApprovalJournalTurn(env, store, database);
+    const { input, expected } = approvalJournalRequest();
+    await admitApproval(store, input, authority, async commit => commit());
+    const selection = { authority, expected, decisionId: "decision", actorId: "owner", decision: "allow_once" as const,
+      projectionSha256: "b".repeat(64), atMs: 110 };
+    await store.selectHostApproval(selection, async commit => commit());
+    const dispatch = { authority, expected, decisionId: "decision", dispatchId: "dispatch",
+      projectionSha256: selection.projectionSha256, atMs: 120 };
+    await store.beginExecutionApprovalDispatch(dispatch, async commit => commit());
+    const outcome = { expected, decisionId: "decision", dispatchId: "dispatch", atMs: 130 };
+    await store.recordExecutionApprovalOutcome({ ...outcome, evidence: "sent_unacknowledged" }, async commit => commit());
+    await assert.rejects(
+      store.recordExecutionApprovalOutcome({ ...outcome, evidence: "native_processed" }, async commit => commit()),
+      { code: "invalid_transition" },
+    );
+    const resolved = await store.recordExecutionApprovalOutcome(
+      { ...outcome, evidence: "exact_native_execution" }, async commit => commit(),
+    );
+    assert.equal(resolved.request.state, "resolved");
+    assert.equal(resolved.decision!.dispatchState, "acknowledged");
+    assert.deepEqual(
+      await store.recordExecutionApprovalOutcome({ ...outcome, evidence: "exact_native_execution" }, async commit => commit()),
+      resolved,
+    );
+  } finally { database.close(); await store.close(); await env.cleanup(); }
+});
+
 test("approval journal records impossible pre-dispatch loss and refuses expiry without silently denying", async () => {
   const env = await fixture(); const store = new ManifestStore(env.databasePath);
   await store.load(); const database = new DatabaseSync(env.databasePath);

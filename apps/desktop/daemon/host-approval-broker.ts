@@ -4,6 +4,7 @@ import { z } from "zod";
 import { EXECUTION_DELEGATION_DECISION_APPLICABILITY_MS } from "../../../shared/execution-delegation-decision.mjs";
 import type { HostApprovalCandidate, HostApprovalDecision, HostApprovalPresentation, HostApprovalReference, HostApprovalStatus } from "../shared/host-approvals.js";
 import type { CodexPermissionFileChange, ProviderPermissionRequest, ProviderPermissionObservation } from "../shared/provider-permissions.js";
+import { CodexApprovalExecutionReconciler } from "./codex-approval-execution-reconciler.js";
 import { ApprovalJournalError, type ApprovalAuthority, type ExecutionApprovalRecord } from "./execution-approval-journal.js";
 import type { ExecutionApprovalProjectionRecord } from "./execution-approval-projection-journal.js";
 import {
@@ -65,6 +66,7 @@ type Lane = {
   agentId: string; generation: string; handle: ProviderActionHandle; connection: NonNullable<ProviderActionHandle["providerConnection"]>;
   controller: AbortController; revision: number; state: "pending" | "degraded" | "unavailable";
   connectionId: string | null; requests: readonly ProviderPermissionRequest[];
+  approvalExecutions: CodexApprovalExecutionReconciler | null;
 };
 
 export type DelegatableApprovalAdmission = {
@@ -154,13 +156,23 @@ export class HostApprovalBroker {
   }
 
   install(agentId: string, handle: ProviderActionHandle, generation: string): () => void {
-    this.lanes.get(agentId)?.controller.abort();
+    const previous = this.lanes.get(agentId);
+    previous?.controller.abort();
+    previous?.approvalExecutions?.close();
+    if (previous) previous.requests = [];
     const provider = this.options.provider;
     if (!provider?.observePermissions || !handle.providerConnection
       || !["codex_app_server", "opencode_server"].includes(handle.providerConnection.kind)) return () => {};
     const lane: Lane = { agentId, generation, handle, connection: { ...handle.providerConnection },
-      controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [] };
+      controller: new AbortController(), revision: 0, state: "degraded", connectionId: null, requests: [],
+      approvalExecutions: null };
     this.lanes.set(agentId, lane);
+    if (handle.providerConnection.kind === "codex_app_server") {
+      lane.approvalExecutions = new CodexApprovalExecutionReconciler({ provider, handle, store: this.options.store,
+        isCurrent: () => this.current(lane), fenceCommit: this.options.fenceCommit,
+        onChanged: () => this.options.onPermissionChanged?.(lane.agentId), nowMs: this.now });
+      lane.approvalExecutions.start();
+    }
     const receive = (event: ProviderPermissionObservation) => {
       if (!this.current(lane)) return;
       if (event.type === "snapshot" && event.requests.length <= MAX_REQUESTS) {
@@ -181,12 +193,14 @@ export class HostApprovalBroker {
     void provider.observePermissions(handle, receive, lane.controller.signal).catch(() => receive({ type: "degraded" }));
     return () => {
       lane.controller.abort();
+      lane.approvalExecutions?.close();
       lane.requests = [];
       if (this.lanes.get(agentId) === lane) this.lanes.delete(agentId);
     };
   }
 
-  close(): void { for (const lane of this.lanes.values()) { lane.controller.abort(); lane.requests = []; } this.lanes.clear(); }
+  close(): void { for (const lane of this.lanes.values()) { lane.controller.abort(); lane.approvalExecutions?.close();
+    lane.requests = []; } this.lanes.clear(); }
 
   private current(lane: Lane): boolean {
     return this.options.isCurrent() && !lane.controller.signal.aborted && this.lanes.get(lane.agentId) === lane
@@ -390,25 +404,42 @@ export class HostApprovalBroker {
     input: RecordedApprovalDecision,
     select: (prepared: RecordedApprovalSelection) => Promise<ExecutionApprovalRecord>,
   ): Promise<HostApprovalStatus> {
-    return this.nativeApplication.apply(input, async () => {
-      const lane = this.lanes.get(input.agentId);
-      const native = lane?.connectionId
-        ? lane.requests.find(request => approvalRequestId(input.agentId, lane.connectionId!, request.native.id) === input.requestId)
-        : undefined;
-      if (!lane || !native) throw new NativeApprovalUnavailableError();
-      const prepared = await this.prepare(lane, native);
-      if (!prepared.candidate.reference) throw new NativeApprovalUnavailableError();
-      return {
-        expected: prepared.candidate.reference,
-        presentation: prepared.candidate.presentation,
-        approvalAuthority: prepared.owned,
-        approval: prepared.approval,
-        handle: lane.handle,
-        native,
-        executionGenerationId: lane.generation,
+    const reconciliation: {
+      reconciler: CodexApprovalExecutionReconciler | null;
+      pending: ReturnType<CodexApprovalExecutionReconciler["prepare"]>;
+    } = { reconciler: null, pending: null };
+    try {
+      const result = await this.nativeApplication.apply(input, async () => {
+        const lane = this.lanes.get(input.agentId);
+        const native = lane?.connectionId
+          ? lane.requests.find(request => approvalRequestId(input.agentId, lane.connectionId!, request.native.id) === input.requestId)
+          : undefined;
+        if (!lane || !native) throw new NativeApprovalUnavailableError();
+        const prepared = await this.prepare(lane, native);
+        if (!prepared.candidate.reference) throw new NativeApprovalUnavailableError();
+        reconciliation.reconciler = lane.approvalExecutions;
+        reconciliation.pending = reconciliation.reconciler?.prepare(native, prepared.candidate.reference,
+          input.decisionId, input.decision) ?? null;
+        return {
+          expected: prepared.candidate.reference,
+          presentation: prepared.candidate.presentation,
+          approvalAuthority: prepared.owned,
+          approval: prepared.approval,
+          handle: lane.handle,
+          native,
+          executionGenerationId: lane.generation,
         expectedFileChanges: prepared.fileChanges,
         assertCurrent: prepared.assertCurrent,
+        markNativeDispatch: () => {
+          if (reconciliation.pending) reconciliation.reconciler?.markNativeDispatch(reconciliation.pending);
+        },
       };
-    }, select);
+      }, select);
+      if (reconciliation.pending) reconciliation.reconciler?.arm(reconciliation.pending);
+      return result;
+    } catch (error) {
+      if (reconciliation.pending) reconciliation.reconciler?.discard(reconciliation.pending);
+      throw error;
+    }
   }
 }

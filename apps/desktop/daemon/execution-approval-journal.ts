@@ -48,7 +48,7 @@ const dispatch = z.strictObject({
 });
 const outcome = z.strictObject({
   expected: reference, decisionId: executionIdentity, dispatchId: executionIdentity,
-  evidence: z.enum(["sent_unacknowledged", "dispatch_uncertain", "native_processed"]), atMs: time,
+  evidence: z.enum(["sent_unacknowledged", "dispatch_uncertain", "native_processed", "exact_native_execution"]), atMs: time,
 });
 const loss = z.strictObject({ expected: reference, atMs: time });
 export type ApprovalReference = z.infer<typeof reference>;
@@ -308,16 +308,18 @@ export function recordExecutionApprovalOutcome(db: DatabaseSync, input: RecordEx
   const value = parse(outcome, input); const current = exact(db, value.expected); const d = current.decision;
   if (!d || d.decisionId !== value.decisionId || d.dispatchId !== value.dispatchId || d.dispatchStartedAtMs === null) reject("identity_mismatch");
   if (value.atMs < d.dispatchStartedAtMs) reject("invalid_input");
-  if (value.evidence === "native_processed") {
-    // Only the OpenCode endpoint confirms processing of our exact decision.
-    // A Codex socket send or serverRequest/resolved proves no chosen decision.
+  if (value.evidence === "native_processed" || value.evidence === "exact_native_execution") {
+    // OpenCode confirms processing in its reply endpoint. Codex requires a
+    // later exact item execution fact; a socket send or serverRequest/resolved
+    // alone still proves no chosen decision.
     const provider = db.prepare("SELECT provider FROM execution_runtime_generations WHERE runtime_generation_id=? AND agent_id=? AND execution_generation_id=?")
       .get(value.expected.runtimeGenerationId, value.expected.agentId, value.expected.executionGenerationId)?.provider;
-    if (provider !== "open-model") reject("invalid_transition");
+    if ((value.evidence === "native_processed" && provider !== "open-model")
+      || (value.evidence === "exact_native_execution" && provider !== "codex")) reject("invalid_transition");
     if (current.request.state === "resolved" && d.dispatchState === "acknowledged") return current;
   }
   if (current.request.state !== "dispatching" || !["dispatching", "uncertain"].includes(d.dispatchState)) reject("invalid_transition");
-  if (value.evidence === "native_processed") {
+  if (value.evidence === "native_processed" || value.evidence === "exact_native_execution") {
     db.prepare("UPDATE execution_approval_decisions SET dispatch_state='acknowledged',resolved_at_ms=? WHERE decision_id=?").run(value.atMs, d.decisionId);
     db.prepare("UPDATE execution_approval_requests SET state='resolved' WHERE request_id=? AND request_version=?")
       .run(value.expected.requestId, value.expected.requestVersion);
