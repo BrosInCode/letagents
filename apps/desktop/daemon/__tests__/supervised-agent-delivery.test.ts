@@ -3683,6 +3683,20 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-terminal-provider-failure-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
+    const bidiControls = [
+      "\u061c", "\u200e", "\u200f",
+      "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+      "\u2066", "\u2067", "\u2068", "\u2069",
+    ];
+    const disguisedCredentials = bidiControls.map((control, index) => (
+      index % 2 === 0
+        ? `to${control}ken=secret-${index}-value`
+        : `api_${control}key=secret-${index}-value`
+    )).join(" ");
+    const redactedCredentials = bidiControls.map((_control, index) => (
+      index % 2 === 0 ? "token=[REDACTED]" : "api_key=[REDACTED]"
+    )).join(" ");
+    const expectedProviderError = `Open Model request failed at the model provider (HTTP 404): expired model. ${redactedCredentials}`;
     let turns = 0;
     let recoveries = 0;
     const delivery = new SupervisedAgentDelivery(
@@ -3699,7 +3713,7 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
           outcome: "failed",
           text: null,
           evidence: "transcript",
-          error: "\u001b[31mOpen Model request failed\u001b[0m at the model provider (HTTP 404):\u0000 expired model. \u202etoken=super-secret-provider-token",
+          error: `\u001b[31mOpen Model request failed\u001b[0m at the model provider (HTTP 404):\u0000 expired model. ${disguisedCredentials}`,
         });
         throw Object.assign(
           new Error("The provider completed, but its final answer could not be read."),
@@ -3737,7 +3751,7 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
     });
     assert.equal(
       receipts[0]!.last_error,
-      "Open Model request failed at the model provider (HTTP 404): expired model. token=[REDACTED]",
+      expectedProviderError,
       "the failed receipt retains an actionable provider explanation without credentials or display controls",
     );
     const inspection = new DatabaseSync(join(root, "daemon.sqlite"));
@@ -3746,7 +3760,7 @@ test("a checkpointed terminal provider rejection settles failed and advances FIF
         .get(receipts[0]!.inbox_item_id) as { terminal_evidence_json: string };
       assert.equal(
         (JSON.parse(persisted.terminal_evidence_json) as { error?: string }).error,
-        "Open Model request failed at the model provider (HTTP 404): expired model. token=[REDACTED]",
+        expectedProviderError,
         "durable terminal evidence contains only the same safe display text",
       );
     } finally {

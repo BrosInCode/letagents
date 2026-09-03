@@ -5,7 +5,7 @@ import { redactCredentialText } from "./credential-redaction.js";
 function providerFailureDisplayText(message: string): string {
   const normalized = message
     .replace(/\u001b\[[0-?]*[ -/]*[@-~]/g, "")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u202a-\u202e\u2066-\u2069]/g, "")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, "")
     .replace(/[\t\n\r ]+/g, " ")
     .trim();
   return redactCredentialText(normalized, 1_024).value;
