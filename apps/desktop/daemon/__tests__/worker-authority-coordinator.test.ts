@@ -14,6 +14,11 @@ import type { DaemonManifestEntry, ExecutionGeneration, WorkAttemptCheckpoint } 
 import type { SupervisedWorkerSession, WorkerSessionBinding } from "../worker-binding-store.js";
 import { WorkerRuntimeCustody, type InstalledHostGrant } from "../worker-runtime-custody.js";
 import type { PollingActivationRecord } from "../custodial-polling-activation.js";
+import type {
+  ExecutionDelegationHostAuthority,
+  LocalExecutionDelegation,
+  RemoteExecutionDelegationRevision,
+} from "../execution-delegation-journal.js";
 
 const now = Date.parse("2026-08-26T12:00:00.000Z");
 
@@ -115,6 +120,24 @@ function hostGrant(overrides: Partial<InstalledHostGrant> = {}): InstalledHostGr
   };
 }
 
+function delegationRevision(overrides: Partial<RemoteExecutionDelegationRevision> = {}): RemoteExecutionDelegationRevision {
+  return {
+    delegationInstanceId: "delegation-1",
+    revision: 3,
+    ownerAccountId: "account-1",
+    roomId: "room-1",
+    agentKey: "agent-key-1",
+    approverAccountId: "approver-1",
+    category: "file_change",
+    riskCeiling: "low",
+    scopeSha256: "a".repeat(64),
+    createdAtMs: now - 1_000,
+    expiresAtMs: now + 60_000,
+    revokedAtMs: null,
+    ...overrides,
+  };
+}
+
 type HarnessOptions = {
   acknowledgePollingOffer?: WorkerAuthorityCoordinatorOptions["store"]["acknowledgePollingOffer"];
   recordPollingOffer?: WorkerAuthorityCoordinatorOptions["store"]["recordPollingOffer"];
@@ -138,12 +161,15 @@ type HarnessOptions = {
   fireMintTimeout?: boolean;
   boundedContextError?: Error;
   publishNative?: () => Promise<void>;
+  delegationCommitMutation?: "generation" | "control" | "grant" | "clock";
 };
 
 function fixture(options: HarnessOptions = {}) {
   const events: string[] = [];
   let entry = options.entry ?? manifestEntry();
   let generation = options.generation ?? 7;
+  let controlEpoch = 0;
+  let currentTime = now;
   let handoff = options.handoff ?? false;
   let handle = options.handle === undefined ? providerHandle() : options.handle ?? undefined;
   let binding = options.binding === undefined ? workerBinding() : options.binding;
@@ -167,6 +193,8 @@ function fixture(options: HarnessOptions = {}) {
   const scheduled: number[] = [];
   const manifestUpdates: DaemonManifestEntry[] = [];
   const durableCheckpoints: Array<{ room_cursor: string | null; provider_continuation_id: string | null }> = [];
+  const delegationAuthorities: ExecutionDelegationHostAuthority[] = [];
+  const delegationClocks: number[] = [];
   const timerDelays: number[] = [];
   let clearedTimers = 0;
   const custody = new WorkerRuntimeCustody();
@@ -252,6 +280,63 @@ function fixture(options: HarnessOptions = {}) {
       unresolvedPollingActivation: async () => options.activation ?? null,
       load: async () => ({ entries: [entry] }),
       getEntry: async (entryId) => entry.id === entryId ? entry : null,
+      reconcileExecutionDelegation: async (input, assertCurrent, fence) => {
+        delegationAuthorities.push(input.authority);
+        delegationClocks.push(input.atMs);
+        let result!: { created: boolean; delegation: LocalExecutionDelegation };
+        await fence(async () => {
+          if (options.delegationCommitMutation === "generation") generation += 1;
+          if (options.delegationCommitMutation === "control") controlEpoch += 1;
+          if (options.delegationCommitMutation === "grant") {
+            custody.installHostGrant(hostGrant({ grantId: "replacement-grant" }));
+          }
+          if (options.delegationCommitMutation === "clock") currentTime = now + 2 * 60 * 60 * 1_000;
+          assertCurrent();
+          result = { created: true, delegation: {
+            delegationInstanceId: input.delegation.delegationInstanceId,
+            revision: input.delegation.revision,
+            ownerAccountId: input.authority.ownerAccountId,
+            hostId: input.authority.hostId,
+            installationId: input.authority.installationId,
+            scopeKey: "owner",
+            agentId: input.authority.agentId,
+            roomId: input.delegation.roomId,
+            agentKey: input.delegation.agentKey,
+            approverAccountId: input.delegation.approverAccountId,
+            category: "file_change",
+            riskCeiling: "low",
+            grantId: input.authority.grantId,
+            scopeSha256: input.delegation.scopeSha256,
+            createdAtMs: input.delegation.createdAtMs,
+            expiresAtMs: input.delegation.expiresAtMs,
+            revokedAtMs: input.delegation.revokedAtMs,
+          } };
+        });
+        return result;
+      },
+      validateExecutionDelegation: async (input) => {
+        delegationAuthorities.push(input.authority);
+        delegationClocks.push(input.atMs);
+        return {
+          delegationInstanceId: input.delegationInstanceId,
+          revision: input.revision,
+          ownerAccountId: input.authority.ownerAccountId,
+          hostId: input.authority.hostId,
+          installationId: input.authority.installationId,
+          scopeKey: "owner",
+          agentId: input.agentId,
+          roomId: input.authority.roomId,
+          agentKey: input.authority.agentKey,
+          approverAccountId: input.approverAccountId,
+          category: input.category,
+          riskCeiling: input.risk,
+          grantId: input.authority.grantId,
+          scopeSha256: input.scopeSha256,
+          createdAtMs: now - 1_000,
+          expiresAtMs: now + 60_000,
+          revokedAtMs: null,
+        };
+      },
     },
     durability: {
       getAttempt: async () => ({ execution_generations: [execution(options.terminal)], checkpoints }),
@@ -298,6 +383,9 @@ function fixture(options: HarnessOptions = {}) {
         if (asserted === 1 && options.loseAuthorityAfterFirstAssert === "handoff") handoff = true;
       },
     },
+    concurrency: {
+      currentControlEpoch: () => controlEpoch,
+    },
     serializeEntry: async (_entryId, operation) => {
       events.push("serialize:entry");
       return operation();
@@ -339,7 +427,7 @@ function fixture(options: HarnessOptions = {}) {
       events.push("bounded:verify");
       if (options.boundedContextError) throw options.boundedContextError;
     },
-    nowMs: () => now,
+    nowMs: () => currentTime,
     setTimeout: ((callback: (...args: unknown[]) => void, delay?: number) => {
       timerDelays.push(delay ?? 0);
       if (delay === 100 || (delay === 10_000 && options.fireMintTimeout)) queueMicrotask(callback);
@@ -368,9 +456,12 @@ function fixture(options: HarnessOptions = {}) {
     scheduled,
     manifestUpdates,
     durableCheckpoints,
+    delegationAuthorities,
+    delegationClocks,
     timerDelays,
     get clearedTimers() { return clearedTimers; },
     setGeneration(value: number) { generation = value; },
+    setControlEpoch(value: number) { controlEpoch = value; },
     setHandoff(value: boolean) { handoff = value; },
     setCursor(value: string | null) { cursor = value; },
     setEntry(value: DaemonManifestEntry) { entry = value; },
@@ -1246,6 +1337,67 @@ test("host grant authority provenance is atomic and grant-scoped", async () => {
   }), { status: "installed" });
   assert.equal(harness.custody.hostGrant("agent-1")?.ownerAccountId, null);
   assert.equal(harness.custody.hostGrant("agent-1")?.scopeKey, null);
+});
+
+test("execution delegation journal derives only the exact current installed host witness", async () => {
+  const harness = fixture();
+  const grant = hostGrant();
+  harness.custody.installHostGrant(grant);
+
+  const result = await harness.subject.reconcileExecutionDelegation({
+    entryId: "agent-1",
+    delegation: delegationRevision(),
+  });
+  assert.equal(result.created, true);
+  assert.deepEqual(harness.delegationAuthorities, [{
+    agentId: "agent-1",
+    roomId: "room-1",
+    agentKey: "agent-key-1",
+    grantId: "grant-1",
+    grantGeneration: 1,
+    daemonGeneration: 7,
+    controlEpoch: 0,
+    hostId: "host-1",
+    installationId: "installation-1",
+    ownerAccountId: "account-1",
+    scopeKey: "owner",
+    expiresAtMs: Date.parse(grant.expiresAt),
+  }]);
+  assert.deepEqual(harness.delegationClocks, [now]);
+  assert.equal(JSON.stringify(harness.delegationAuthorities).includes("supervisor-secret"), false);
+  assert.equal(harness.deliveryStarts, 0);
+  assert.equal(harness.convergenceRequests, 0);
+  assert.deepEqual(harness.manifestUpdates, []);
+
+  await harness.subject.validateExecutionDelegation({
+    entryId: "agent-1",
+    delegationInstanceId: "delegation-1",
+    revision: 3,
+    approverAccountId: "approver-1",
+    category: "file_change",
+    risk: "low",
+    scopeSha256: "a".repeat(64),
+  });
+  assert.equal(harness.delegationAuthorities.length, 2);
+  assert.deepEqual(harness.delegationClocks, [now, now]);
+
+  const expired = fixture();
+  expired.custody.installHostGrant(hostGrant({ expiresAt: new Date(now).toISOString() }));
+  await assert.rejects(expired.subject.reconcileExecutionDelegation({
+    entryId: "agent-1",
+    delegation: delegationRevision(),
+  }), { code: "authority_mismatch" });
+});
+
+test("execution delegation commit refuses daemon, control, grant, and expiry witness races", async () => {
+  for (const mutation of ["generation", "control", "grant", "clock"] as const) {
+    const harness = fixture({ delegationCommitMutation: mutation });
+    harness.custody.installHostGrant(hostGrant());
+    await assert.rejects(harness.subject.reconcileExecutionDelegation({
+      entryId: "agent-1",
+      delegation: delegationRevision(),
+    }), { code: "authority_mismatch" }, mutation);
+  }
 });
 
 test("recovery-only host installation restores owner authority without touching the retained provider", async () => {

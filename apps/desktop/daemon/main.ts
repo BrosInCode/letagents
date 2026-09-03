@@ -326,6 +326,7 @@ export class SupervisorDaemon {
       supervisorGrantHttp: this.supervisorGrantHttp,
       deliveryHttp: this.supervisedDeliveryHttp,
       authority: daemonAuthority,
+      concurrency: this.entryConcurrency,
       serializeEntry: (entryId, operation) => this.serializeEntryTick(entryId, operation),
       serializeCursorCheckpoint: (entryId, operation) => this.serializeCursorCheckpoint(entryId, operation),
       manifest: {

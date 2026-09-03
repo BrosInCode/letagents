@@ -256,6 +256,71 @@ const tables: Record<string, string> = {
   ) STRICT`,
 };
 
+// V24 removes mutable canonical aliases from delegation authority. The server
+// digest and immutable provenance identify the admitted revision; room/agent
+// names remain current presentation only. Decisions may retain their room
+// snapshot for audit, but bind authority through the exact admitted digest.
+const executionLocalDelegationsV24 = `CREATE TABLE execution_local_delegations (
+  delegation_instance_id TEXT NOT NULL,
+  revision INTEGER NOT NULL CHECK(revision >= 1),
+  owner_id TEXT NOT NULL,
+  host_id TEXT NOT NULL,
+  installation_id TEXT NOT NULL,
+  scope_key TEXT NOT NULL CHECK(scope_key='owner'),
+  agent_id TEXT NOT NULL,
+  room_id TEXT NOT NULL,
+  agent_key TEXT NOT NULL,
+  approver_id TEXT NOT NULL,
+  category TEXT NOT NULL CHECK(category='file_change'),
+  risk_ceiling TEXT NOT NULL CHECK(risk_ceiling='low'),
+  grant_id TEXT NOT NULL,
+  scope_sha256 TEXT NOT NULL CHECK(length(scope_sha256)=64 AND scope_sha256 NOT GLOB '*[^0-9a-f]*'),
+  created_at_ms INTEGER NOT NULL CHECK(created_at_ms >= 0),
+  expires_at_ms INTEGER NOT NULL CHECK(expires_at_ms > created_at_ms),
+  revoked_at_ms INTEGER CHECK(revoked_at_ms >= created_at_ms),
+  PRIMARY KEY(delegation_instance_id,revision),
+  UNIQUE(delegation_instance_id,revision,scope_sha256,agent_id,approver_id)
+) STRICT`;
+
+const executionApprovalDecisionsV24 = `CREATE TABLE execution_approval_decisions (
+  decision_id TEXT PRIMARY KEY,
+  request_id TEXT NOT NULL,
+  request_version INTEGER NOT NULL,
+  agent_id TEXT NOT NULL,
+  room_id TEXT NOT NULL,
+  execution_generation_id TEXT NOT NULL,
+  turn_id TEXT NOT NULL,
+  request_delegatable INTEGER NOT NULL CHECK(request_delegatable IN (0,1)),
+  request_sha256 TEXT NOT NULL,
+  decision TEXT NOT NULL CHECK(decision IN ('allow_once','deny')),
+  source TEXT NOT NULL CHECK(source IN ('host','delegate')),
+  actor_id TEXT NOT NULL,
+  delegation_instance_id TEXT,
+  delegation_revision INTEGER,
+  delegation_scope_sha256 TEXT CHECK(delegation_scope_sha256 IS NULL OR (length(delegation_scope_sha256)=64 AND delegation_scope_sha256 NOT GLOB '*[^0-9a-f]*')),
+  dispatch_state TEXT NOT NULL CHECK(dispatch_state IN ('not_dispatched','dispatching','uncertain','acknowledged','lost')),
+  dispatch_id TEXT UNIQUE,
+  application_certainty TEXT CHECK(application_certainty IN ('impossible','unknown')),
+  decided_at_ms INTEGER NOT NULL CHECK(decided_at_ms >= 0),
+  dispatch_started_at_ms INTEGER CHECK(dispatch_started_at_ms >= decided_at_ms),
+  resolved_at_ms INTEGER CHECK(resolved_at_ms >= decided_at_ms),
+  projection_sha256 TEXT CHECK(length(projection_sha256)=64 AND projection_sha256 NOT GLOB '*[^0-9a-f]*'),
+  CHECK((source='host' AND delegation_instance_id IS NULL AND delegation_revision IS NULL AND delegation_scope_sha256 IS NULL)
+    OR (source='delegate' AND request_delegatable=1 AND delegation_instance_id IS NOT NULL
+      AND delegation_revision IS NOT NULL AND delegation_scope_sha256 IS NOT NULL)),
+  CHECK((dispatch_state='not_dispatched' AND dispatch_id IS NULL AND dispatch_started_at_ms IS NULL)
+    OR (dispatch_state IN ('dispatching','uncertain','acknowledged') AND dispatch_id IS NOT NULL AND dispatch_started_at_ms IS NOT NULL)
+    OR dispatch_state='lost'),
+  CHECK((dispatch_id IS NULL) = (dispatch_started_at_ms IS NULL)),
+  CHECK((dispatch_state IN ('acknowledged','lost')) = (resolved_at_ms IS NOT NULL)),
+  CHECK((dispatch_state='lost') = (application_certainty IS NOT NULL)),
+  UNIQUE(request_id,request_version),
+  FOREIGN KEY(request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256)
+    REFERENCES execution_approval_requests(request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,delegatable,request_sha256),
+  FOREIGN KEY(delegation_instance_id,delegation_revision,delegation_scope_sha256,agent_id,actor_id)
+    REFERENCES execution_local_delegations(delegation_instance_id,revision,scope_sha256,agent_id,approver_id)
+) STRICT`;
+
 // `sequence` is daemon journal order. The source tuple is independent: future
 // ingestion validates observer freshness, increasing source order and gaps;
 // storage prevents the same observer position being journaled twice. Native
@@ -294,6 +359,17 @@ const triggers: Record<string, string> = {
     BEGIN SELECT RAISE(ABORT,'Approval request changes require a new version.'); END`,
   execution_approval_decision_immutable: `CREATE TRIGGER execution_approval_decision_immutable
     BEFORE UPDATE OF decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256,decision,source,actor_id,delegation_instance_id,delegation_revision,decided_at_ms
+    ON execution_approval_decisions
+    BEGIN SELECT RAISE(ABORT,'Approval decisions are immutable.'); END`,
+};
+
+const delegationTriggersV24 = {
+  execution_delegation_scope_immutable: `CREATE TRIGGER execution_delegation_scope_immutable
+    BEFORE UPDATE OF delegation_instance_id,revision,owner_id,host_id,installation_id,scope_key,agent_id,approver_id,category,risk_ceiling,scope_sha256,created_at_ms,expires_at_ms
+    ON execution_local_delegations
+    BEGIN SELECT RAISE(ABORT,'Delegation scope requires a new revision.'); END`,
+  execution_approval_decision_immutable: `CREATE TRIGGER execution_approval_decision_immutable
+    BEFORE UPDATE OF decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,request_delegatable,request_sha256,projection_sha256,decision,source,actor_id,delegation_instance_id,delegation_revision,delegation_scope_sha256,decided_at_ms
     ON execution_approval_decisions
     BEGIN SELECT RAISE(ABORT,'Approval decisions are immutable.'); END`,
 };
@@ -442,13 +518,15 @@ const cutoverNativeTriggers = {
     BEGIN SELECT RAISE(ABORT,'Cutover native target cannot be replaced.'); END`,
 };
 
-export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22 | 23;
+export type ExecutionStorageSchemaVersion = 18 | 19 | 20 | 21 | 22 | 23 | 24;
 
 function schemaFor(version: ExecutionStorageSchemaVersion): {
   tables: Record<string, string>; indexes: Record<string, string>; triggers: Record<string, string>;
 } {
   if (version === 18) return { tables, indexes, triggers };
-  return {
+  const schema: {
+    tables: Record<string, string>; indexes: Record<string, string>; triggers: Record<string, string>;
+  } = {
     tables: {
       ...Object.fromEntries(Object.entries(tables).map(([name, sql]) => [name, v19Columns[name]
         ? sql.replace("\n    CHECK(", `\n    ${v19Columns[name].join(",\n    ")},\n    CHECK(`) : sql])),
@@ -468,10 +546,16 @@ function schemaFor(version: ExecutionStorageSchemaVersion): {
       ...(version >= 22 ? lifecycleEffectTriggers : {}),
     },
   };
+  if (version >= 24) {
+    schema.tables.execution_local_delegations = executionLocalDelegationsV24;
+    schema.tables.execution_approval_decisions = executionApprovalDecisionsV24;
+    Object.assign(schema.triggers, delegationTriggersV24);
+  }
+  return schema;
 }
 
 /** Caller owns the migration transaction. Existing evidence is never rewritten. */
-export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 23): void {
+export function applyExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 24): void {
   const schema = schemaFor(version);
   for (const statement of Object.values(schema.tables)) database.exec(statement.replace("CREATE TABLE ", "CREATE TABLE IF NOT EXISTS "));
   for (const statement of Object.values(schema.indexes)) database.exec(statement.replace(/CREATE (UNIQUE )?INDEX /, "CREATE $1INDEX IF NOT EXISTS "));
@@ -625,6 +709,72 @@ export function migrateExecutionStorageV22ToV23(database: DatabaseSync): void {
   validateExecutionStorageSchema(database, 23);
 }
 
+function validateDelegationV24MigrationDependencies(database: DatabaseSync): void {
+  const allowedObjects = new Map<string, Set<string>>([
+    ["execution_local_delegations", new Set([
+      "execution_delegation_scope_immutable",
+      "execution_delegation_revocation_final",
+    ])],
+    ["execution_approval_decisions", new Set(["execution_approval_decision_immutable"])],
+  ]);
+  for (const [table, allowed] of allowedObjects) {
+    const extra = (database.prepare(`SELECT name FROM sqlite_master
+      WHERE tbl_name=? AND type IN ('index','trigger') AND sql IS NOT NULL`).all(table))
+      .find((row) => !allowed.has(String(row.name)));
+    if (extra) throw new Error("Unexpected execution delegation storage dependency.");
+  }
+  for (const row of database.prepare(`SELECT name FROM sqlite_master
+    WHERE type='table' AND name NOT IN ('execution_local_delegations','execution_approval_decisions')`).all()) {
+    const name = String(row.name).replaceAll('"', '""');
+    const referencesRebuiltTable = database.prepare(`PRAGMA foreign_key_list("${name}")`).all()
+      .some((key) => key.table === "execution_local_delegations" || key.table === "execution_approval_decisions");
+    if (referencesRebuiltTable) throw new Error("Unexpected execution delegation storage dependency.");
+  }
+}
+
+/**
+ * Remove mutable aliases from the local authority key. V23 delegation rows
+ * cannot be upgraded honestly: they lack the agent alias and no shipped
+ * reconciliation lane proved their digest came from the server. The lane was
+ * dormant before V24, so any such row is refused instead of blessed.
+ */
+export function migrateExecutionStorageV23ToV24(database: DatabaseSync): void {
+  if (!database.isTransaction) throw new Error("Execution delegation storage migration requires a transaction.");
+  validateExecutionStorageSchema(database, 23);
+  validateDelegationV24MigrationDependencies(database);
+  if (database.prepare("SELECT 1 FROM execution_local_delegations LIMIT 1").get()
+    || database.prepare("SELECT 1 FROM execution_approval_decisions WHERE source='delegate' LIMIT 1").get()) {
+    throw new Error("Unverifiable dormant execution delegation authority cannot be migrated.");
+  }
+  database.exec(`
+    PRAGMA defer_foreign_keys=ON;
+    CREATE TEMP TABLE execution_approval_decision_v24_migration AS
+      SELECT rowid AS original_rowid,* FROM execution_approval_decisions;
+    DROP TABLE execution_approval_decisions;
+    DROP TABLE execution_local_delegations;
+    ${executionLocalDelegationsV24};
+    ${executionApprovalDecisionsV24};
+    INSERT INTO execution_approval_decisions(
+      rowid,decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,
+      request_delegatable,request_sha256,decision,source,actor_id,delegation_instance_id,
+      delegation_revision,delegation_scope_sha256,dispatch_state,dispatch_id,application_certainty,
+      decided_at_ms,dispatch_started_at_ms,resolved_at_ms,projection_sha256)
+    SELECT original_rowid,decision_id,request_id,request_version,agent_id,room_id,execution_generation_id,turn_id,
+      request_delegatable,request_sha256,decision,source,actor_id,delegation_instance_id,
+      delegation_revision,NULL,dispatch_state,dispatch_id,application_certainty,
+      decided_at_ms,dispatch_started_at_ms,resolved_at_ms,projection_sha256
+    FROM execution_approval_decision_v24_migration;
+    DROP TABLE execution_approval_decision_v24_migration;
+    ${delegationTriggersV24.execution_delegation_scope_immutable};
+    ${triggers.execution_delegation_revocation_final};
+    ${delegationTriggersV24.execution_approval_decision_immutable};
+  `);
+  validateExecutionStorageSchema(database, 24);
+  if (database.prepare("PRAGMA foreign_key_check").get()) {
+    throw new Error("Execution delegation storage migration broke ownership.");
+  }
+}
+
 function normalizedSchema(sql: string): string {
   // SQL keywords/spacing are insensitive, but quoted CHECK values are not.
   return (sql.match(/'(?:''|[^'])*'|[^']+/g) ?? []).map((part) => part.startsWith("'") ? part
@@ -632,7 +782,7 @@ function normalizedSchema(sql: string): string {
 }
 
 /** Fail closed on weakened CHECKs, ownership FKs, indexes, or incompatible DDL. */
-export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 23): void {
+export function validateExecutionStorageSchema(database: DatabaseSync, version: ExecutionStorageSchemaVersion = 24): void {
   const schema = schemaFor(version);
   for (const [name, statement] of Object.entries({ ...schema.tables, ...schema.indexes, ...schema.triggers })) {
     const row = database.prepare("SELECT sql FROM sqlite_master WHERE name=? AND type IN ('table','index','trigger')").get(name) as { sql: string } | undefined;
