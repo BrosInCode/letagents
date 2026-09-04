@@ -389,6 +389,10 @@ function exactTurnKey(threadId: string, turnId: string): string {
   return `${threadId}\u0000${turnId}`;
 }
 
+function exactPermissionItemKey(threadId: string, turnId: string, itemId: string): string {
+  return JSON.stringify([threadId, turnId, itemId]);
+}
+
 function boundedRoomTurnPrompt(request: ProviderRoomTurnRequest): string {
   return [
     "You are handling one daemon-owned room inbox item in an exact bounded turn.",
@@ -495,6 +499,13 @@ class CodexProviderHandle implements ProviderHandle {
   readonly activityListeners = new Set<(event: ProviderActivityEvent) => void>();
   readonly streamListeners = new Set<(event: ProviderStreamEvent) => void>();
   readonly permissionInvalidationListeners = new Set<() => void>();
+  /** Exact native proposals only; never persisted or projected outside this host process. */
+  readonly permissionFileChangeProposals = new Map<string, {
+    connectionId: string;
+    threadId: string;
+    turnId: string;
+    changes: readonly CodexPermissionFileChange[];
+  }>();
   streamSequence = 0;
   /** At most one terminal fact per recent native turn; never infer a latest turn. */
   readonly terminalTurns = new Map<string, string>();
@@ -515,6 +526,7 @@ class CodexProviderHandle implements ProviderHandle {
     this.providerContinuationId = providerContinuationId;
     this.execution = new ProviderExecutionObserver(now);
     client.onDisconnect(() => {
+      this.permissionFileChangeProposals.clear();
       if (this.nativeRuntimeUnavailable) return;
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
         providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined);
@@ -541,6 +553,7 @@ class CodexProviderHandle implements ProviderHandle {
   }
 
   invalidatePermissions(): void {
+    this.permissionFileChangeProposals.clear();
     for (const listener of this.permissionInvalidationListeners) {
       try { listener(); } catch { /* Observation never controls native work. */ }
     }
@@ -722,6 +735,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
       const turn = recordValue(response.data[0]);
       if (!turn || turn.id !== params.turnId || turn.status !== "inProgress" || turn.itemsView !== "full" || !Array.isArray(turn.items)) return null;
       const matches = turn.items.filter(item => recordValue(item)?.id === params.itemId);
+      if (matches.length === 0) {
+        const cached = handle.permissionFileChangeProposals.get(exactPermissionItemKey(
+          continuation,
+          params.turnId as string,
+          params.itemId as string,
+        ));
+        return cached?.connectionId === rpcConnection ? permissionFileChanges(cached.changes) : null;
+      }
       const item = recordValue(matches[0]);
       if (matches.length !== 1 || !item || item.type !== "fileChange" || item.status !== "inProgress") return null;
       return permissionFileChanges(item.changes);
@@ -2002,6 +2023,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     notification: RpcNotification,
     correlateLifecycle = true,
   ): void {
+    this.observePermissionFileChangeProposal(handle, notification);
     const nativeLifecycle = this.observeNativeExecution(handle, notification, correlateLifecycle);
     handle.roomTurnResults.observe(notification.method, notification.params);
     const exactTurnId = notificationTurnId(notification.params);
@@ -2046,6 +2068,40 @@ export class CodexProviderAdapter implements ProviderAdapter {
     if (/^(turn\/completed|item\/completed)$/.test(notification.method)) {
       void this.emitTranscriptTail(handle);
     }
+  }
+
+  private observePermissionFileChangeProposal(
+    handle: CodexProviderHandle,
+    notification: RpcNotification,
+  ): void {
+    const params = recordValue(notification.params);
+    const threadId = notificationThreadId(params);
+    const turnId = notificationTurnId(params);
+    if (!params || threadId !== handle.providerContinuationId || !turnId) return;
+    if (/^turn\/(?:completed|interrupted|failed|cancelled|stopped)$/i.test(notification.method)) {
+      for (const [key, proposal] of handle.permissionFileChangeProposals) {
+        if (proposal.threadId === threadId && proposal.turnId === turnId) {
+          handle.permissionFileChangeProposals.delete(key);
+        }
+      }
+      return;
+    }
+    if (notification.method !== "item/started" && notification.method !== "item/completed") return;
+    const item = recordValue(params.item);
+    if (!item || !nativeExecutionId(item.id)) return;
+    const key = exactPermissionItemKey(threadId, turnId, item.id);
+    if (notification.method === "item/completed") {
+      handle.permissionFileChangeProposals.delete(key);
+      return;
+    }
+    const connectionId = handle.client.currentConnectionId();
+    const changes = item.type === "fileChange" && item.status === "inProgress"
+      ? permissionFileChanges(item.changes)
+      : null;
+    if (connectionId && changes) {
+      handle.permissionFileChangeProposals.set(key, { connectionId, threadId, turnId, changes });
+    }
+    else handle.permissionFileChangeProposals.delete(key);
   }
 
   private observeNativeExecution(
@@ -2157,6 +2213,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): void {
     if (handle.nativeRuntimeUnavailable) return;
     handle.nativeRuntimeUnavailable = controlEvidence;
+    handle.permissionFileChangeProposals.clear();
     handle.state = "failed";
     const emit = (fact: NativeExecutionFact) => handle.execution.emit(fact,
       handle.providerConnection.processIdentity ?? undefined, handle.providerConnection.pid ?? undefined);
@@ -2399,6 +2456,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     handle.turnWaiters.clear();
     handle.terminalTurns.clear();
     handle.roomTurnResults.clearAll();
+    handle.permissionFileChangeProposals.clear();
     if (this.handles.get(handle.workAttemptId) === handle) {
       this.handles.delete(handle.workAttemptId);
     }
