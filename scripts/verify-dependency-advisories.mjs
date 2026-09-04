@@ -21,7 +21,6 @@ const transientFailurePattern = new RegExp(
     "socket hang up",
     "network timeout",
     "fetch failed",
-    "audit endpoint returned an error",
     "HTTP(?:\\s+error)?\\s+(?:408|429|500|502|503|504)\\b",
     "(?:408|429|500|502|503|504)\\s+(?:Bad Gateway|Gateway Timeout|Internal Server Error|Service Unavailable|Too Many Requests)",
   ].join("|"),

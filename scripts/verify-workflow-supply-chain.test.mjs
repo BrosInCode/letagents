@@ -34,13 +34,21 @@ test("dependency advisory checks use the pinned supported audit client", () => {
 
   assert.equal(
     (ciWorkflow.match(/npm install -g npm@11\.6\.2/g) ?? []).length,
-    3,
-    "each CI job that audits advisories must install the pinned npm client",
+    1,
+    "only the publishing job should globally replace npm",
   );
   assert.equal(
-    (releaseWorkflow.match(/npm install -g npm@11\.6\.2/g) ?? []).length,
+    (ciWorkflow.match(/--prefix "\$\{RUNNER_TEMP\}\/dependency-audit-npm" npm@11\.6\.2/g) ?? [])
+      .length,
+    2,
+    "build and integration jobs must install isolated pinned audit clients",
+  );
+  assert.equal(
+    (releaseWorkflow.match(
+      /--prefix "\$\{RUNNER_TEMP\}\/dependency-audit-npm" npm@11\.6\.2/g,
+    ) ?? []).length,
     1,
-    "the release build must install the pinned npm client",
+    "the release build must install an isolated pinned audit client",
   );
 
   const expectedCiAudits = [

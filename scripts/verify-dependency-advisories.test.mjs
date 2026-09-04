@@ -48,6 +48,11 @@ if (${JSON.stringify(mode)} === "vulnerability") {
   console.error("1 low severity vulnerability");
   process.exit(1);
 }
+if (${JSON.stringify(mode)}.startsWith("http-")) {
+  const status = ${JSON.stringify(mode)}.slice(5);
+  console.error("npm error " + status + " permanent audit endpoint failure");
+  process.exit(1);
+}
 console.log("found 0 vulnerabilities");
 `,
   );
@@ -94,3 +99,14 @@ test("fails closed after exhausting transient registry retries", async () => {
   assert.equal(await readFile(fixture.countPath, "utf8"), "3");
   assert.match(result.stderr, /Dependency advisory audit/);
 });
+
+for (const status of [400, 401, 403]) {
+  test(`does not retry permanent HTTP ${status} failures`, async () => {
+    const fixture = await createAuditFixture(`http-${status}`);
+    const result = runFixture(fixture);
+
+    assert.equal(result.status, 1);
+    assert.equal(await readFile(fixture.countPath, "utf8"), "1");
+    assert.doesNotMatch(result.stderr, /Temporary registry failure/);
+  });
+}
