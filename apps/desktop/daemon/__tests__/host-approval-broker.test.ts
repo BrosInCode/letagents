@@ -75,7 +75,9 @@ async function fixture(providerId: "codex" | "open-model" = "codex") {
     correlatePermissionTurn: async (_handle: ProviderActionHandle, request: ProviderPermissionRequest) => state.correlation
       ? { outcome: "correlated" as const, providerContinuationId: "continuation", providerTurnId: state.turnId,
           kind: request.provider === "codex" && request.native.method === "item/fileChange/requestApproval"
-            ? "file_change" as const : "command" as const,
+            ? "file_change" as const
+            : request.provider === "codex" && request.native.method === "item/permissions/requestApproval"
+              ? "network" as const : "command" as const,
           ...(state.fileChanges ? { fileChanges: state.fileChanges } : {}) }
       : { outcome: "correlation_unproven" as const },
     replyPermission: async (_handle: ProviderActionHandle, _request: ProviderPermissionRequest, reply: "once" | "reject",
@@ -415,13 +417,16 @@ test("host approval retains an unsent chosen decision for exact recovery without
   }
 });
 
-for (const scenario of ["command", "command_applied", "command_denied", "file_change", "file_change_applied", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
+for (const scenario of ["command", "command_applied", "command_denied", "generic_permission", "generic_permission_denied",
+  "file_change", "file_change_applied", "changed_file", "changed_presentation", "oversized_presentation"] as const) {
   test(`host approval reaches the real Codex adapter through an offline native server: ${scenario}`, { timeout: 10_000 }, () => verifyNativeApproval(scenario));
 }
 
-async function verifyNativeApproval(scenario: "command" | "command_applied" | "command_denied" | "file_change" | "file_change_applied" | "changed_file" | "changed_presentation" | "oversized_presentation") {
+async function verifyNativeApproval(scenario: "command" | "command_applied" | "command_denied" | "generic_permission" | "generic_permission_denied"
+  | "file_change" | "file_change_applied" | "changed_file" | "changed_presentation" | "oversized_presentation") {
   const f = await fixture(); f.broker.close();
-  const isFileChange = !["command", "command_applied", "command_denied"].includes(scenario);
+  const isGeneric = scenario === "generic_permission" || scenario === "generic_permission_denied";
+  const isFileChange = !["command", "command_applied", "command_denied", "generic_permission", "generic_permission_denied"].includes(scenario);
   const changes = [{ path: join(f.workspace, "old.txt"), kind: { type: "update", move_path: join(f.workspace, "new.txt") }, diff: `@@ -1 +1 @@\n-old\n+${secret}` }];
   if (scenario === "oversized_presentation") {
     // The edits alone fit the adapter's bound; the complete host presentation,
@@ -500,9 +505,12 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
       const unsubscribe = rpc.onPendingRequestsChanged(() => { if (rpc.listPendingRequests().length) { unsubscribe(); resolve(); } });
     });
     server.clients.values().next().value!.send(JSON.stringify({ id: 71,
-      method: isFileChange ? "item/fileChange/requestApproval" : "item/commandExecution/requestApproval",
+      method: isFileChange ? "item/fileChange/requestApproval"
+        : isGeneric ? "item/permissions/requestApproval" : "item/commandExecution/requestApproval",
       params: { threadId: "continuation", turnId: "native-turn", itemId: "item-1", startedAtMs: now,
-        ...(isFileChange ? {} : { command: `printf '${secret}'` }), reason: "failed systemError is untrusted permission text" } }));
+        ...(isFileChange ? {} : isGeneric
+          ? { cwd: f.workspace, permissions: { network: { enabled: true }, fileSystem: { read: [f.workspace] } } }
+          : { command: `printf '${secret}'` }), reason: "failed systemError \u001b[31m\u202e is untrusted permission text" } }));
     await pending;
     if (scenario === "command_applied") {
       server.clients.values().next().value!.send(JSON.stringify({ method: "item/started",
@@ -520,12 +528,21 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
     assert.ok(candidate?.reference, "native approval must match the operational checkpoint");
     assert.equal(candidate.reference.nativeRequestId, 71); assert.equal(candidate.reference.providerTurnId, "native-turn");
     assert.equal(candidate.reference.connectionId, rpc.currentConnectionId()); assert.equal(candidate.status, "pending");
+    if (isGeneric) {
+      assert.equal(candidate.presentation.title, "Grant for this turn");
+      assert.match(candidate.presentation.details, /\\u001b/); assert.match(candidate.presentation.details, /\\u202e/);
+      assert.doesNotMatch(candidate.presentation.details, /[\u001b\u202e]/);
+      const stored = await f.store.getExecutionApproval(candidate.reference);
+      assert.equal(stored!.request.kind, "network"); assert.equal(stored!.request.risk, "high");
+      assert.equal(stored!.request.delegatable, false);
+      assert.equal(f.db.prepare("SELECT COUNT(*) AS n FROM execution_approval_projections").get()!.n, 0);
+    }
     if (isFileChange) {
       assert.equal(candidate.presentation.title, "Change files");
       assert.deepEqual(JSON.parse(candidate.presentation.details).changes, changes);
       assert.equal(candidate.reference.requestSha256, hash({ request: rpc.listPendingRequests()[0], changes }));
     }
-    selected = decision(candidate, scenario === "command_denied" ? { decision: "deny" } : {});
+    selected = decision(candidate, scenario === "command_denied" || scenario === "generic_permission_denied" ? { decision: "deny" } : {});
     if (scenario === "changed_presentation") {
       changes[0]!.diff += "\n+different before the host chooses";
       await assert.rejects(broker.decide(selected), /displayed approval request has changed/);
@@ -538,8 +555,12 @@ async function verifyNativeApproval(scenario: "command" | "command_applied" | "c
       assert.deepEqual(order, ["decision_committed", "post_intent_inspection"]);
     } else {
       assert.equal(await broker.decide(selected), "decision_sent");
-      assert.deepEqual(await responseFrame, { id: 71,
-        result: { decision: scenario === "command_denied" ? "decline" : "accept" } });
+      const nativeDecision = scenario === "command_denied" || scenario === "generic_permission_denied";
+      assert.deepEqual(await responseFrame, { id: 71, result: isGeneric
+        ? nativeDecision
+          ? { permissions: {}, scope: "turn" }
+          : { permissions: { network: { enabled: true }, fileSystem: { read: [f.workspace] } }, scope: "turn", strictAutoReview: true }
+        : { decision: nativeDecision ? "decline" : "accept" } });
       assert.deepEqual(order, ["decision_committed", ...(isFileChange ? ["post_intent_inspection"] : []), "intent_committed", "native_write"]);
     }
     assert.equal((await f.store.getExecutionApproval(selected.expected))!.decision!.dispatchState, "uncertain");
