@@ -3834,6 +3834,31 @@ test("a writable generation reconciles only after its exact durable containment 
 
 test("the production supervised wrapper blocks remote Cursor authority and retires its loopback proxy", async () => {
   const root = mkdtempSync(join(tmpdir(), "letagents-cursor-remote-authority-"));
+  const controlRequests: Array<{ method: string; path: string; authorization: string; body: string }> = [];
+  const controlUpstream = createHttpServer((request, response) => {
+    const chunks: Buffer[] = [];
+    request.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+    request.once("end", () => {
+      controlRequests.push({
+        method: request.method ?? "",
+        path: request.url ?? "",
+        authorization: String(request.headers.authorization ?? ""),
+        body: Buffer.concat(chunks).toString("utf8"),
+      });
+      response.writeHead(200, { "content-type": "application/proto", "content-length": "0" });
+      response.end();
+    });
+  });
+  await new Promise<void>((resolveListen, rejectListen) => {
+    controlUpstream.once("error", rejectListen);
+    controlUpstream.listen(0, "127.0.0.1", () => {
+      controlUpstream.removeListener("error", rejectListen);
+      resolveListen();
+    });
+  });
+  const controlAddress = controlUpstream.address();
+  assert.ok(controlAddress && typeof controlAddress !== "string");
+  const testControlPlaneUpstreamEndpoint = `http://127.0.0.1:${controlAddress.port}`;
   try {
     const configDir = join(root, "config");
     const homeDir = join(root, "home");
@@ -3866,9 +3891,25 @@ const blockedPaths = [
 ];
 function expectBlocked(path) {
   return new Promise((resolve, reject) => {
-    const request = http.request(new URL(path, endpoint), { method: "POST", headers: { "content-length": "0" } }, (response) => {
+    const request = http.request(new URL(path, endpoint), {
+      method: "POST",
+      headers: { "content-length": "0", "authorization": "Bearer " + value("--auth-token") },
+    }, (response) => {
       response.resume();
       response.once("end", () => response.statusCode === 503 ? resolve() : reject(new Error("unexpected status")));
+    });
+    request.once("error", reject);
+    request.end();
+  });
+}
+function expectAllowed(path) {
+  return new Promise((resolve, reject) => {
+    const request = http.request(new URL(path, endpoint), {
+      method: "POST",
+      headers: { "content-length": "0", "authorization": "Bearer " + value("--auth-token") },
+    }, (response) => {
+      response.resume();
+      response.once("end", () => response.statusCode === 200 ? resolve() : reject(new Error("allowed request was rejected")));
     });
     request.once("error", reject);
     request.end();
@@ -3877,7 +3918,8 @@ function expectBlocked(path) {
 function expectChunkedBlocked() {
   return new Promise((resolve, reject) => {
     const request = http.request(new URL("/aiserver.v1.DashboardService/GetMe", endpoint), {
-      method: "POST", headers: { "transfer-encoding": "chunked" },
+      method: "POST",
+      headers: { "transfer-encoding": "chunked", "authorization": "Bearer " + value("--auth-token") },
     }, (response) => {
       response.resume();
       response.once("end", () => response.statusCode === 503 ? resolve() : reject(new Error("chunked request was accepted")));
@@ -3886,7 +3928,11 @@ function expectChunkedBlocked() {
     request.end("x");
   });
 }
-Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then(() => {
+Promise.all([
+  expectAllowed("/aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam"),
+  ...blockedPaths.map(expectBlocked),
+  expectChunkedBlocked(),
+]).then(() => {
     process.stdout.write(JSON.stringify({ type: "system", subtype: "init", session_id: "sess-remote-authority" }) + "\\n");
     process.stdout.write(JSON.stringify({ type: "result", subtype: "success", is_error: false, result: endpoint, session_id: "sess-remote-authority" }) + "\\n");
 }).catch(() => process.exit(9));
@@ -3894,7 +3940,12 @@ Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then((
     chmodSync(executable, 0o700);
     const adapter = new CursorProviderAdapter({
       cursorBin: executable,
-      dependencies: productionPersonalIdentityDependencies,
+      dependencies: {
+        ...productionPersonalIdentityDependencies,
+        launchTurn(input) {
+          return defaultLaunchTurn({ ...input, testControlPlaneUpstreamEndpoint });
+        },
+      },
       supervisedProfileFactory: () => ({
         homeDir,
         configDir,
@@ -3907,6 +3958,12 @@ Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then((
     const handle = await adapter.spawn(daemonSpawnRequest({ cwd: root }));
     const result = await withLoopAlive(adapter.runRoomTurn(handle, roomTurnRequest()));
     assert.match(result.text ?? "", /^http:\/\/127\.0\.0\.1:\d+$/);
+    assert.deepEqual(controlRequests, [{
+      method: "POST",
+      path: "/aiserver.v1.DashboardService/GetTeamReposOrEmptyIfNotInTeam",
+      authorization: "Bearer test-provider-authorization",
+      body: "",
+    }]);
     const proxyUrl = new URL(result.text!);
     await new Promise<void>((resolveRequest, rejectRequest) => {
       const request = httpRequest(proxyUrl, { method: "POST" });
@@ -3915,6 +3972,7 @@ Promise.all([...blockedPaths.map(expectBlocked), expectChunkedBlocked()]).then((
       request.end();
     });
   } finally {
+    await new Promise<void>((resolveClose) => controlUpstream.close(() => resolveClose()));
     rmSync(root, { recursive: true, force: true });
   }
 });
