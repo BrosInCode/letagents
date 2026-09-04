@@ -10,6 +10,7 @@ const EXPECTED_NPM_VERSION = "11.6.2";
 const MAX_ATTEMPTS = 3;
 const DEFAULT_TIMEOUT_MS = 90_000;
 const DEFAULT_RETRY_DELAY_MS = 1_000;
+const FORCE_KILL_GRACE_MS = 5_000;
 
 const transientFailurePattern = new RegExp(
   [
@@ -43,6 +44,7 @@ function runCommand(command, args, { cwd, timeoutMs }) {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
+    let forceKillTimeout;
 
     child.stdout.on("data", (chunk) => {
       stdout += chunk;
@@ -52,18 +54,46 @@ function runCommand(command, args, { cwd, timeoutMs }) {
       stderr += chunk;
       process.stderr.write(chunk);
     });
-    child.once("error", reject);
-
     const timeout = setTimeout(() => {
       timedOut = true;
       child.kill("SIGTERM");
+      forceKillTimeout = setTimeout(() => child.kill("SIGKILL"), FORCE_KILL_GRACE_MS);
     }, timeoutMs);
+
+    child.once("error", (error) => {
+      clearTimeout(timeout);
+      clearTimeout(forceKillTimeout);
+      reject(error);
+    });
 
     child.once("close", (code, signal) => {
       clearTimeout(timeout);
+      clearTimeout(forceKillTimeout);
       resolve({ code, signal, stdout, stderr, timedOut });
     });
   });
+}
+
+function parseAuditJson(stdout) {
+  try {
+    return JSON.parse(stdout);
+  } catch {
+    return null;
+  }
+}
+
+function reportedVulnerabilityCount(auditJson) {
+  const total = auditJson?.metadata?.vulnerabilities?.total;
+  return typeof total === "number" && Number.isFinite(total) ? total : 0;
+}
+
+function transientDiagnosticText(result, auditJson) {
+  const npmDiagnostics = `${result.stdout}\n${result.stderr}`
+    .split(/\r?\n/)
+    .filter((line) => /^\s*npm (?:error|warn)\b/i.test(line))
+    .join("\n");
+  const structuredError = auditJson?.error ? JSON.stringify(auditJson.error) : "";
+  return `${npmDiagnostics}\n${structuredError}`;
 }
 
 async function requirePinnedNpm(npmCommand, timeoutMs) {
@@ -91,6 +121,7 @@ async function auditTarget(npmCommand, target, { timeoutMs, retryDelayMs }) {
         "audit",
         "--audit-level=low",
         "--package-lock-only",
+        "--json",
         "--fetch-retries=0",
         "--fetch-timeout=30000",
       ],
@@ -101,7 +132,11 @@ async function auditTarget(npmCommand, target, { timeoutMs, retryDelayMs }) {
       return;
     }
 
-    const retryable = result.timedOut || transientFailurePattern.test(`${result.stdout}\n${result.stderr}`);
+    const auditJson = parseAuditJson(result.stdout);
+    const hasVulnerabilities = reportedVulnerabilityCount(auditJson) > 0;
+    const retryable =
+      !hasVulnerabilities &&
+      (result.timedOut || transientFailurePattern.test(transientDiagnosticText(result, auditJson)));
     if (!retryable || attempt === MAX_ATTEMPTS) {
       const reason = result.timedOut
         ? `timed out after ${timeoutMs}ms`

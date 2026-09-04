@@ -27,6 +27,7 @@ if (JSON.stringify(args) !== JSON.stringify([
   "audit",
   "--audit-level=low",
   "--package-lock-only",
+  "--json",
   "--fetch-retries=0",
   "--fetch-timeout=30000",
 ])) {
@@ -44,8 +45,12 @@ if (
   console.error("npm error 503 Service Unavailable - POST audit endpoint returned an error");
   process.exit(1);
 }
-if (${JSON.stringify(mode)} === "vulnerability") {
+if (["vulnerability", "vulnerability-with-transient-text"].includes(${JSON.stringify(mode)})) {
+  console.log(JSON.stringify({ metadata: { vulnerabilities: { low: 1, total: 1 } } }));
   console.error("1 low severity vulnerability");
+  if (${JSON.stringify(mode)} === "vulnerability-with-transient-text") {
+    console.error("npm error 503 Service Unavailable");
+  }
   process.exit(1);
 }
 if (${JSON.stringify(mode)}.startsWith("http-")) {
@@ -88,6 +93,16 @@ test("fails closed without retrying an advisory finding", async () => {
   assert.equal(result.status, 1);
   assert.equal(await readFile(fixture.countPath, "utf8"), "1");
   assert.match(result.stderr, /1 low severity vulnerability/);
+  assert.doesNotMatch(result.stderr, /Temporary registry failure/);
+});
+
+test("does not retry a vulnerability report containing transient-looking text", async () => {
+  const fixture = await createAuditFixture("vulnerability-with-transient-text");
+  const result = runFixture(fixture);
+
+  assert.equal(result.status, 1);
+  assert.equal(await readFile(fixture.countPath, "utf8"), "1");
+  assert.match(result.stderr, /503 Service Unavailable/);
   assert.doesNotMatch(result.stderr, /Temporary registry failure/);
 });
 
