@@ -71,10 +71,13 @@ jobs:
           npm audit signatures
           npm audit signatures --prefix apps/desktop
 
-      - name: Audit dependency advisories
+      - name: Install pinned dependency audit client
         run: |
-          npm audit --audit-level=low
-          npm audit --audit-level=low --prefix apps/desktop
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
+      - name: Audit dependency advisories
+        run: node scripts/verify-dependency-advisories.mjs . apps/desktop
 
       - name: Run verified dependency lifecycle scripts
         run: |
