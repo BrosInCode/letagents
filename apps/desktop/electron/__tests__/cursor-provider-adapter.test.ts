@@ -6967,6 +6967,103 @@ test("a Cursor result terminalizes any tool card that never emitted its own comp
   assert.deepEqual(toolStatuses, ["running", "interrupted"]);
 });
 
+test("Cursor live display refuses a mismatched native tool terminal", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const executionEvents: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => executionEvents.push(event));
+  const child = harness.children[0]!;
+
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-mismatch",
+    tool_call: { readToolCall: { args: { path: "README.md" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "tool-mismatch",
+    tool_call: { writeToolCall: { args: { path: "other.ts" } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "tool-mismatch",
+    tool_call: { writeToolCall: { result: { success: {} } } },
+    session_id: "sess-cursor-1",
+  });
+  child.emit({
+    type: "result", subtype: "success", is_error: false, result: "done",
+    session_id: "sess-cursor-1",
+  });
+  await flush();
+
+  const toolUpdates = streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => ({
+      tool: (event.payload as { tool?: unknown }).tool,
+      status: (event.payload as { status?: unknown }).status,
+    }));
+  assert.deepEqual(toolUpdates, [
+    { tool: "readToolCall", status: "running" },
+    { tool: "readToolCall", status: "interrupted" },
+  ], "an uncorrelated terminal cannot complete or erase the exact running tool card");
+  assert.equal(executionEvents.some(({ fact }) => fact.domain === "execution"
+    && fact.executionId === "tool-mismatch" && fact.kind === "completed"), false,
+  "the visual and typed projections both reject the mismatched terminal");
+});
+
+test("Cursor live display leaves invalid native terminals open until the turn result interrupts them", async () => {
+  const harness = createHarness();
+  const streamEvents: ProviderStreamEvent[] = [];
+  const adapter = new CursorProviderAdapter({
+    dependencies: harness.dependencies,
+    streamSink: (event) => streamEvents.push(event),
+  });
+  const handle = await adapter.spawn(spawnRequest());
+  const executionEvents: NativeExecutionObservation[] = [];
+  adapter.onExecution(handle, (event) => executionEvents.push(event));
+  const child = harness.children[0]!;
+  const session_id = "sess-cursor-1";
+
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "contradictory-read", session_id,
+    tool_call: { readToolCall: { args: { path: "README.md" } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "contradictory-read", session_id,
+    tool_call: { readToolCall: { result: { success: {}, failure: { errorMessage: "boom" } } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "started", call_id: "background-shell", session_id,
+    tool_call: { shellToolCall: { args: { command: "long-running-command" } } },
+  });
+  child.emit({
+    type: "tool_call", subtype: "completed", call_id: "background-shell", session_id,
+    tool_call: { shellToolCall: { result: { success: { exitCode: 0, shellId: 7 }, isBackground: true } } },
+  });
+  child.emit({ type: "result", subtype: "success", is_error: false, result: "done", session_id });
+  await flush();
+
+  assert.deepEqual(streamEvents
+    .filter((event) => event.method === "item/toolCall/updated")
+    .map((event) => ({
+      tool: (event.payload as { tool?: unknown }).tool,
+      status: (event.payload as { status?: unknown }).status,
+    })), [
+    { tool: "readToolCall", status: "running" },
+    { tool: "shellToolCall", status: "running" },
+    { tool: "readToolCall", status: "interrupted" },
+    { tool: "shellToolCall", status: "interrupted" },
+  ], "invalid terminals cannot visually complete a card that typed execution keeps open");
+  assert.equal(executionEvents.some(({ fact }) => fact.domain === "execution"
+    && ["contradictory-read", "background-shell"].includes(fact.executionId)
+    && fact.kind === "completed"), false,
+  "the same shared terminal contract rejects both typed completions");
+});
+
 test("a Cursor turn that exits without result still terminalizes every running tool card", async () => {
   const harness = createHarness();
   const streamEvents: ProviderStreamEvent[] = [];
@@ -7058,9 +7155,56 @@ test("documented Cursor stream-json shapes project to namespaced response and to
       input: { path: "README.md" }, output: { totalLines: 54 }, error: null,
     },
   }]);
+  for (const [callId, result, detail] of [
+    ["rejected", { rejected: { reason: "not approved" } }, { reason: "not approved" }],
+    ["permission-denied", { permissionDenied: { error: "permission denied" } }, { error: "permission denied" }],
+    ["spawn-error", { spawnError: { error: "spawn failed" } }, { error: "spawn failed" }],
+    ["nonzero-exit", { success: { exitCode: 1 } }, { exitCode: 1 }],
+  ] as const) {
+    assert.deepEqual(cursorLiveDisplayProjections({
+      type: "tool_call", subtype: "completed", call_id: callId,
+      tool_call: { shellToolCall: { args: { command: "false" }, result } },
+      session_id: "session-exact",
+    }, "turn-exact", `event-${callId}`), [{
+      method: "item/toolCall/updated", kind: "tool_lifecycle", payload: {
+        callID: `cursor:turn-exact:${callId}`, tool: "shellToolCall", status: "error",
+        input: { command: "false" }, output: null, error: JSON.stringify(detail, null, 2),
+      },
+    }], `${callId} uses the shared typed outcome instead of visually completing`);
+  }
   assert.deepEqual(cursorLiveDisplayProjections({
     type: "user", message: { role: "user", content: [{ type: "text", text: "prompt echo" }] },
   }, "turn-exact", "event-4"), [], "the user event is never misrendered as a tool");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "ambiguous-tool",
+    tool_call: { readToolCall: { args: {} }, writeToolCall: { args: {} } },
+  }, "turn-exact", "event-5"), [], "an ambiguous native envelope cannot choose an arbitrary tool card");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: " padded-id ",
+    tool_call: { readToolCall: { args: {} } },
+  }, "turn-exact", "event-6"), [], "display uses the exact typed execution-id grammar without trimming");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "unknown-tool",
+    tool_call: { browserToolCall: { args: {} } },
+  }, "turn-exact", "event-7"), [], "an unknown native tool remains raw diagnostic evidence");
+  assert.deepEqual(cursorLiveDisplayProjections({
+    type: "tool_call", subtype: "started", call_id: "shadowed-tool",
+    tool_call: { readToolCall: { args: {} }, writeToolCall: null },
+  }, "turn-exact", "event-8"), [], "a second tool key invalidates the envelope even when its value is not an object");
+  for (const [label, toolCall] of [
+    ["contradictory variants", { readToolCall: { result: { success: {}, failure: { errorMessage: "boom" } } } }],
+    ["missing variant", { readToolCall: { result: {} } }],
+    ["malformed variant", { readToolCall: { result: { success: null } } }],
+    ["command timeout", { shellToolCall: { result: { timeout: {} } } }],
+    ["invalid exit code", { shellToolCall: { result: { success: { exitCode: "0" } } } }],
+    ["background handoff", { shellToolCall: { result: { success: { exitCode: 0 }, isBackground: true } } }],
+    ["invalid background flag", { shellToolCall: { result: { success: { exitCode: 0 }, isBackground: "false" } } }],
+  ] as const) {
+    assert.deepEqual(cursorLiveDisplayProjections({
+      type: "tool_call", subtype: "completed", call_id: `invalid-${label.replaceAll(" ", "-")}`,
+      tool_call: toolCall,
+    }, "turn-exact", `event-invalid-${label}`), [], `${label} cannot visually complete a rejected typed terminal`);
+  }
 });
 
 test("Cursor typed observations fence each native child and exclude synthetic display completion", async () => {
