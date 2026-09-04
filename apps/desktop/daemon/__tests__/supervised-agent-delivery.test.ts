@@ -3679,22 +3679,49 @@ test("failed Cursor idle compensation spends only recovery budget and retains ex
   } finally { await store.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test("a terminal provider rejection blocks once without result recovery or model rerun", async () => {
+test("a checkpointed terminal provider rejection settles failed and advances FIFO without replay", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-delivery-terminal-provider-failure-"));
   try {
     const store = new SupervisedAgentInboxStore(join(root, "daemon.sqlite"));
-    await ingest(store);
+    const bidiControls = [
+      "\u061c", "\u200e", "\u200f",
+      "\u202a", "\u202b", "\u202c", "\u202d", "\u202e",
+      "\u2066", "\u2067", "\u2068", "\u2069",
+    ];
+    const disguisedCredentials = bidiControls.map((control, index) => (
+      index % 2 === 0
+        ? `to${control}ken=secret-${index}-value`
+        : `api_${control}key=secret-${index}-value`
+    )).join(" ");
+    const redactedCredentials = bidiControls.map((_control, index) => (
+      index % 2 === 0 ? "token=[REDACTED]" : "api_key=[REDACTED]"
+    )).join(" ");
+    const expectedProviderError = `Open Model request failed at the model provider (HTTP 404): expired model. ${redactedCredentials}`;
     let turns = 0;
+    let recoveries = 0;
     const delivery = new SupervisedAgentDelivery(
       store,
       provider(async (_handle, _request, options) => {
         turns += 1;
         await options?.beforeNativeDispatch?.();
-        await options?.checkpointTurnStarted?.("turn-provider-rejected");
+        const turnId = `turn-${turns}`;
+        await options?.checkpointTurnStarted?.(turnId);
+        if (turns > 1) return { turnId, outcome: "no_reply", text: null };
+        await options?.checkpointTerminalResult?.({
+          turnId,
+          providerContinuationId: "thread",
+          outcome: "failed",
+          text: null,
+          evidence: "transcript",
+          error: `\u001b[31mOpen Model request failed\u001b[0m at the model provider (HTTP 404):\u0000 expired model. ${disguisedCredentials}`,
+        });
         throw Object.assign(
-          new Error("Open Model request was rejected because the provider account has insufficient credit."),
+          new Error("The provider completed, but its final answer could not be read."),
           { roomTurnRecoveryOutcome: "terminal_failure" as const },
         );
+      }, async () => {
+        recoveries += 1;
+        throw new Error("must not recover a checkpointed terminal provider rejection");
       }),
       {
         poll: async () => ({}),
@@ -3704,14 +3731,43 @@ test("a terminal provider rejection blocks once without result recovery or model
       0,
     );
 
-    await delivery.pump(agent);
+    const openModelAgent = { ...agent, provider: "open-model" };
+    await delivery.pump(openModelAgent);
+    await ingest(store, "1");
+    await ingest(store, "2");
+    await delivery.pump(openModelAgent);
 
-    const receipt = (await store.receipts(agent.agentId))[0];
-    assert.equal(turns, 1);
-    assert.equal(receipt?.state, "blocked");
-    assert.match(receipt?.last_error ?? "", /insufficient credit/);
+    const receipts = await store.receipts(agent.agentId);
+    assert.equal(turns, 2);
+    assert.equal(recoveries, 0);
+    assert.deepEqual(receipts.map((receipt) => receipt.state), [
+      "acknowledged_failed",
+      "acknowledged_no_reply",
+    ]);
+    assert.deepEqual(JSON.parse(receipts[0]!.outcome!), {
+      kind: "failed",
+      text: null,
+      evidence: "transcript",
+    });
     assert.equal(
-      receipt?.timeline.some((event) => event.phase === "retry_scheduled"),
+      receipts[0]!.last_error,
+      expectedProviderError,
+      "the failed receipt retains an actionable provider explanation without credentials or display controls",
+    );
+    const inspection = new DatabaseSync(join(root, "daemon.sqlite"));
+    try {
+      const persisted = inspection.prepare("SELECT terminal_evidence_json FROM supervised_agent_terminal_results WHERE inbox_item_id=?")
+        .get(receipts[0]!.inbox_item_id) as { terminal_evidence_json: string };
+      assert.equal(
+        (JSON.parse(persisted.terminal_evidence_json) as { error?: string }).error,
+        expectedProviderError,
+        "durable terminal evidence contains only the same safe display text",
+      );
+    } finally {
+      inspection.close();
+    }
+    assert.equal(
+      receipts[0]?.timeline.some((event) => event.phase === "retry_scheduled"),
       false,
     );
     await store.close();
