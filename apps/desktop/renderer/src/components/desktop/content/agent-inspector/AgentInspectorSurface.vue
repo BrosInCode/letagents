@@ -158,6 +158,8 @@ const AgentInspectorLive = defineAsyncComponent(() => import("./AgentInspectorLi
 
 const props = defineProps<{
   projection: AgentInspectorProjection;
+  initialTab?: "overview" | "work";
+  requestVersion?: number;
   actionState: AgentInspectorActionState | null;
   compact: boolean;
   workResource: AgentInspectorWorkResource;
@@ -196,7 +198,7 @@ const closeButton = ref<HTMLButtonElement | null>(null);
 const overviewTab = ref<HTMLButtonElement | null>(null);
 const retireButton = ref<HTMLButtonElement | null>(null);
 const keepAgentButton = ref<HTMLButtonElement | null>(null);
-const selectedTab = ref<InspectorTab>("overview");
+const selectedTab = ref<InspectorTab>(props.initialTab ?? "overview");
 const providerModelLabel = computed(() => [props.projection.provider, props.projection.model].filter(Boolean).join(" · "));
 const liveSupportsReasoning = computed(() => {
   const provider = props.providers.find((candidate) => candidate.id === props.projection.provider);
@@ -249,8 +251,8 @@ function containsFocus(): boolean {
 
 defineExpose({ focusInitial, containsFocus });
 
-watch(() => props.projection.entryId, () => {
-  selectedTab.value = "overview";
+watch(() => [props.projection.entryId, props.requestVersion, props.initialTab], () => {
+  selectedTab.value = props.initialTab ?? "overview";
   confirmRetire.value = false;
 });
 

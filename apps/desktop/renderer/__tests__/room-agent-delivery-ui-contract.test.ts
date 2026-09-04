@@ -24,6 +24,43 @@ async function source(relativePath: string): Promise<string> {
 }
 
 describe("durable room delivery UI contracts", () => {
+  it("opens synthetic startup blockers in exact retained work and keeps real-message reveal", async () => {
+    const shell = await source("src/components/desktop/content/DesktopRoomShell.vue");
+    const handler = shell.slice(shell.indexOf("async function revealRoomMessage("), shell.indexOf("async function revealRecordedWorkMessage("))
+      .replace("(messageId: string): Promise<void>", "(messageId)");
+    const opened: Array<{ supervisorEntryId: string }> = [];
+    const selected: string[] = [];
+    const revealed: string[] = [];
+    const unavailable: string[] = [];
+    const initialTab = { value: "overview" };
+    const revealedMessageId = { value: null as string | null };
+    const reveal = new Function("supervisorEntries", "props", "emit", "openAgentDetailRequest",
+      "agentInspectorInitialTab", "selectAgentInspectorWorkSource", "revealMessage", "revealedMessageId", "nextTick",
+      `${handler}; return revealRoomMessage;`)(
+      { value: [{ id: "agent-a", roomId: "room-a", displayName: "CedarRidge" },
+        { id: "agent-b", roomId: "room-b", displayName: "CedarRidge" }] },
+      { room: { identifier: "room-a" } }, (_event: string, id: string) => unavailable.push(id),
+      (request: { supervisorEntryId: string }) => opened.push(request), initialTab,
+      (id: string) => selected.push(id), async (id: string) => { revealed.push(id); return true; },
+      revealedMessageId, async () => undefined,
+    ) as (id: string) => Promise<void>;
+    await reveal("desktop-initial-message:agent-a");
+    assert.equal(opened[0]?.supervisorEntryId, "agent-a");
+    assert.equal(initialTab.value, "work");
+    assert.deepEqual(selected, ["desktop-initial-message:agent-a"]);
+    assert.deepEqual(revealed, []);
+    await reveal("desktop-initial-message:agent-b");
+    assert.equal(opened.length, 1, "another room's agent cannot be opened");
+    assert.deepEqual(unavailable, ["desktop-initial-message:agent-b"]);
+    await reveal("message-real");
+    assert.deepEqual(revealed, ["message-real"]);
+    assert.equal(revealedMessageId.value, "message-real");
+    const host = await source("src/components/desktop/content/agent-inspector/AgentInspectorHost.vue");
+    const surface = await source("src/components/desktop/content/agent-inspector/AgentInspectorSurface.vue");
+    assert.match(host, /initialTab: props.initialTab/);
+    assert.match(surface, /selectedTab.value = props.initialTab \?\? "overview"/);
+  });
+
   it("classifies connection, inbox, and turn facts without inferring work from connection", () => {
     const state = (
       connection: DesktopRoomAgentConnectionState,
