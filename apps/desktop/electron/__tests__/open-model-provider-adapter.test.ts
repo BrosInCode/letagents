@@ -13,6 +13,7 @@ import {
 import {
   ProviderTurnControlError,
   type ProviderHandle,
+  type ProviderRoomTurnResult,
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
 } from "../main/agents/provider-adapter.js";
@@ -842,8 +843,11 @@ test("Open Model classifies the exact no-reply sentinel and unreadable completio
   assert.equal(unreadable.harness.promptBodies.length, 1);
 });
 
-test("Open Model surfaces a terminal provider rejection instead of misclassifying it as unreadable", async () => {
+test("Open Model checkpoints an exact terminal provider rejection before surfacing it", async () => {
   const { adapter, handle, harness } = await spawnAdapter();
+  const observations: NativeExecutionObservation[] = [];
+  let checkpointed: ProviderRoomTurnResult | null = null;
+  adapter.onExecution(handle, (event) => observations.push(event));
   harness.setTranscriptFactories([
     (turnId) => [{
       info: {
@@ -869,6 +873,8 @@ test("Open Model surfaces a terminal provider rejection instead of misclassifyin
       sourceMessage: { text: "say hi" },
       activation: { decision: "activate" },
       actionId: "provider-error",
+    }, {
+      checkpointTerminalResult: async (result) => { checkpointed = result; },
     }),
     (error: unknown) => {
       assert.ok(error instanceof Error);
@@ -881,6 +887,21 @@ test("Open Model surfaces a terminal provider rejection instead of misclassifyin
       return true;
     },
   );
+  const turnId = String(harness.promptBodies[0]?.messageID);
+  assert.deepEqual(checkpointed, {
+    turnId,
+    providerContinuationId: handle.providerContinuationId,
+    outcome: "failed",
+    text: null,
+    evidence: "transcript",
+    error: "Open Model request was rejected because the model provider account could not cover this turn's output budget (HTTP 402). Add provider credit or choose another model, then send a new message.",
+  });
+  const terminal = observations.find(({ fact }) =>
+    fact.domain === "turn" && fact.kind === "state_changed" && fact.state === "terminal");
+  assert.ok(terminal?.fact.domain === "turn");
+  assert.equal(terminal.fact.sideEffects, "none");
+  assert.equal(terminal.fact.providerTurnId, turnId);
+  assert.equal(terminal.fact.providerContinuationId, handle.providerContinuationId);
   assert.equal(harness.promptBodies.length, 1);
 });
 
