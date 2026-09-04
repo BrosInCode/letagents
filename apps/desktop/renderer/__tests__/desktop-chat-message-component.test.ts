@@ -136,7 +136,7 @@ test("one room message groups delivery receipts for every activated agent", asyn
         { agentId: "stone", agentName: "StoneRidge", state: "dispatching", blockedByMessageId: null, error: null },
         { agentId: "dawn", agentName: "DawnPeak", state: "queued_behind_blocked", blockedByMessageId: "msg_blocked", error: null },
         { agentId: "oak", agentName: "Oak", state: "blocked", blockedByMessageId: null,
-          error: "The provider rejected Be\u202earer super-secret-token-123456789, so delivery stopped." },
+          error: "The provider rejected Authori\u200bzation: Be\u202earer super\u2060-secret\u00ad-token-123456789, so delivery stopped." },
         { agentId: "ash", agentName: "Ash", state: "acknowledged_failed", blockedByMessageId: null,
           error: "Open Model request failed (HTTP 404): configured model is no longer available." },
       ],
@@ -152,9 +152,9 @@ test("one room message groups delivery receipts for every activated agent", asyn
   assert.match(html, /View earlier message/);
   const blockedReceipt = html.match(/<li[^>]*data-state="blocked"[\s\S]*?<\/li>/)?.[0];
   assert.ok(blockedReceipt);
-  assert.match(blockedReceipt, /aria-label="Oak: The provider rejected Bearer \[redacted\], so delivery stopped\."/);
-  assert.match(blockedReceipt, /The provider rejected Bearer \[redacted\], so delivery stopped\.<\/small>/);
-  assert.doesNotMatch(blockedReceipt, /super-secret-token|\u202e/);
+  assert.match(blockedReceipt, /aria-label="Oak: The provider rejected Authorization:\[redacted\], so delivery stopped\."/);
+  assert.match(blockedReceipt, /The provider rejected Authorization:\[redacted\], so delivery stopped\.<\/small>/);
+  assert.doesNotMatch(blockedReceipt, /super-secret-token|\u200b|\u2060|\u00ad|\u202e/);
   assert.match(html, /disabled aria-label="Retry delivery for Oak is unavailable"/);
   assert.match(html, />Retry unavailable<\/button>/);
   assert.match(html, /Retry will be available when delivery recovery is connected/);
