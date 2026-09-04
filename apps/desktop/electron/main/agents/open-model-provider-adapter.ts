@@ -491,7 +491,8 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       username: OPENCODE_SERVER_USERNAME,
       password: randomBytes(32).toString("base64url"),
     };
-    await writeRuntimeControl(authPath, { ...auth, lifecycleAuthorityMode });
+    const initialControl: OpenCodeRuntimeControl = { ...auth, lifecycleAuthorityMode };
+    await writeRuntimeControl(authPath, initialControl);
     const pluginPath = join(runtimeRoot, "credential-boundary.mjs");
     await writeFile(pluginPath, credentialBoundaryPluginSource(), {
       encoding: "utf8",
@@ -532,11 +533,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
     });
-    await writeRuntimeControl(authPath, {
-      ...auth,
-      lifecycleAuthorityMode,
+    const intentControl: OpenCodeRuntimeControl = {
+      ...initialControl,
       startupIntent: { url },
-    });
+    };
+    await writeRuntimeControl(authPath, intentControl);
     const launch = this.deps.launch({
       binary: this.binary,
       args: ["serve", "--hostname", "127.0.0.1", "--port", String(port)],
@@ -545,6 +546,23 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
     if (launch.child.pid === undefined || launch.child.pid === null) {
       await launch.exited;
+      try {
+        const currentControl = await readRuntimeControl(authPath);
+        if (currentControl.username !== intentControl.username
+          || currentControl.password !== intentControl.password
+          || currentControl.lifecycleAuthorityMode !== intentControl.lifecycleAuthorityMode
+          || currentControl.startupIntent?.url !== intentControl.startupIntent?.url
+          || currentControl.startupProcess
+          || currentControl.connection) {
+          throw new Error("The durable startup intent no longer matches this launch.");
+        }
+        await writeRuntimeControl(authPath, initialControl);
+      } catch (error) {
+        throw new Error(
+          "OpenCode launch failed without a process id, but its startup intent could not be safely cleared; automatic recovery remains blocked.",
+          { cause: error },
+        );
+      }
       throw new Error("OpenCode launch did not expose a process id.");
     }
     const pid = launch.child.pid;
@@ -1764,7 +1782,6 @@ async function writeRuntimeControl(path: string, value: OpenCodeRuntimeControl):
   });
   await chmod(temporaryPath, 0o600);
   await rename(temporaryPath, path);
-  await chmod(path, 0o600);
 }
 
 function terminalFromExit(

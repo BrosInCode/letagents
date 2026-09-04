@@ -1268,6 +1268,45 @@ test("Open Model durably fences the crash window between detached launch and PID
   assert.equal(launches, 1, "intent-only recovery must not launch a replacement");
 });
 
+test("Open Model clears its exact intent after a real no-pid launch failure", async (t) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-no-pid-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const request = spawnRequest({ cwd: runtimeRoot });
+  const missingBinaryAdapter = new OpenModelProviderAdapter({
+    binary: join(runtimeRoot, "missing-opencode"),
+    runtimeRoot,
+    dependencies: { allocatePort: async () => 43821 },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(
+    missingBinaryAdapter.spawn(request),
+    /OpenCode launch did not expose a process id/,
+  );
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  const clearedControl = JSON.parse(await readFile(authPath, "utf8")) as {
+    startupIntent?: unknown;
+    startupProcess?: unknown;
+    connection?: unknown;
+  };
+  assert.equal(clearedControl.startupIntent, undefined);
+  assert.equal(clearedControl.startupProcess, undefined);
+  assert.equal(clearedControl.connection, undefined);
+
+  const harness = createHarness();
+  const recoveredAdapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+  const handle = await recoveredAdapter.spawn(request);
+  assert.equal(handle.pid, 6101);
+  assert.equal(harness.launches.length, 1, "a fixed environment can retry after conclusive no-pid failure");
+});
+
 test("Open Model persists an ambiguous startup birth and fences replacement until it is gone", async (t) => {
   const harness = createHarness();
   const baseFetch = harness.dependencies.fetch;
