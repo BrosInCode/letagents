@@ -1186,6 +1186,58 @@ test("Codex bounded room turn waits for its exact terminal event and publishes o
   assert.equal(handle.providerContinuationId, "thread-1", "the bounded delivery retains the original app-server thread");
 });
 
+test("Codex bounded room turn verifies its exact terminal state when thread idle arrives without a turn terminal event", async () => {
+  const harness = createHarness();
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const handle = await adapter.spawn(spawnRequest());
+  const client = harness.clients[0]!;
+  const originalRequest = client.request.bind(client);
+  let boundedStatus = "inProgress";
+  let settled = false;
+  client.request = async <T>(method: string, params?: unknown): Promise<T> => {
+    if (method === "turn/start") return { turn: { id: "turn-idle-reconcile" } } as T;
+    if (method === "thread/read") return { thread: {
+      id: handle.providerContinuationId,
+      turns: [{ id: "turn-idle-reconcile", status: boundedStatus, items: [
+        { type: "agentMessage", phase: "final", text: "Verified after idle." },
+      ] }],
+    } } as T;
+    return originalRequest<T>(method, params);
+  };
+
+  const pending = adapter.runRoomTurn!(handle, {
+    inboxItemId: "inbox-idle-reconcile",
+    actionId: "action-idle-reconcile",
+    sourceMessage: {},
+    activation: {},
+  }, { beforeNativeDispatch: async () => {}, checkpointTurnStarted: async () => {} });
+  void pending.then(() => { settled = true; });
+  await flush();
+
+  client.emit({ method: "thread/status/changed", params: {
+    threadId: "other-thread", status: { type: "idle" },
+  } });
+  await flush();
+  assert.equal(settled, false, "another thread becoming idle cannot settle the bounded turn");
+
+  client.emit({ method: "thread/status/changed", params: {
+    threadId: handle.providerContinuationId, status: { type: "idle" },
+  } });
+  await flush();
+  assert.equal(settled, false, "idle alone cannot be treated as successful terminal evidence");
+
+  boundedStatus = "completed";
+  client.emit({ method: "thread/status/changed", params: {
+    threadId: handle.providerContinuationId, status: { type: "idle" },
+  } });
+  assert.deepEqual(await pending, {
+    turnId: "turn-idle-reconcile",
+    outcome: "reply",
+    text: "Verified after idle.",
+    evidence: "transcript",
+  });
+});
+
 test("a failed Codex room turn leaves the same runtime available for its successor", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
