@@ -211,14 +211,19 @@ export function assertManagedAgentPermissionProfileAvailable(
   const profile = managedAgentPermissionProfileForProvider(providerId, requestedProfileId);
   if (
     launchMode === "supervised"
-    && providerId === "codex"
+    && (providerId === "codex" || providerId === "open-model")
     && profile.id === "ask_before_write"
   ) {
+    const openModel = providerId === "open-model";
     return {
       ...profile,
       status: "available",
-      description: "Requires approval before Codex can run write-capable commands or apply file changes.",
-      detail: "Maps to approvalPolicy=on-request and a read-only, network-disabled sandbox.",
+      description: openModel
+        ? "Requires approval before OpenCode can run shell commands or change files."
+        : "Requires approval before Codex can run write-capable commands or apply file changes.",
+      detail: openModel
+        ? "Maps to OpenCode bash=ask and edit=ask; read and daemon-mediated room tools remain available."
+        : "Maps to approvalPolicy=on-request and a read-only, network-disabled sandbox.",
     };
   }
   if (profile.status !== "available") {
