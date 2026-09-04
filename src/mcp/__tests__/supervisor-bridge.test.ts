@@ -865,7 +865,7 @@ test("worktree context cannot redirect a freshly minted worker credential to an 
   }
 });
 
-test("supervisor bridge binds only the exact worker session credential over the daemon socket", async () => {
+test("supervisor bridge accepts the current daemon protocol and binds only the exact worker session credential", async () => {
   const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-"));
   const socketPath = join(root, "daemon.sock");
   const requests: any[] = [];
@@ -877,8 +877,8 @@ test("supervisor bridge binds only the exact worker session credential over the 
       if (!buffer.includes("\n")) return;
       const request = JSON.parse(buffer.slice(0, buffer.indexOf("\n")));
       requests.push(request);
-      const result = request.method === "daemon.negotiate" ? { protocol_version: 2 } : { bound: true };
-      socket.end(`${JSON.stringify({ version: 2, id: request.id, ok: true, result })}\n`);
+      const result = request.method === "daemon.negotiate" ? { protocol_version: 3 } : { bound: true };
+      socket.end(`${JSON.stringify({ version: 3, id: request.id, ok: true, result })}\n`);
     });
   });
   try {
@@ -893,7 +893,7 @@ test("supervisor bridge binds only the exact worker session credential over the 
     assert.equal(requests.length, 2);
     assert.equal(requests[0].version, 1);
     assert.equal(requests[0].method, "daemon.negotiate");
-    assert.equal(requests[1].version, 2);
+    assert.equal(requests[1].version, 3);
     assert.equal(requests[1].method, "supervisor.bind_worker_session");
     assert.deepEqual(requests[1].params, {
       entry_id: "manifest_exact",
@@ -1142,7 +1142,7 @@ test("scheduled cursor checkpoints retry transient failures and keep the newest 
 test("supervisor bridge fails closed when protocol negotiation is malformed or unsupported", async () => {
   for (const { protocolVersion, responseVersion } of [
     { protocolVersion: "2", responseVersion: 2 },
-    { protocolVersion: 999, responseVersion: 2 },
+    { protocolVersion: 4, responseVersion: 4 },
     { protocolVersion: 2, responseVersion: 1 },
   ]) {
     const root = await mkdtemp(join(tmpdir(), "letagents-supervisor-bridge-invalid-"));
