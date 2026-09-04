@@ -551,6 +551,9 @@ class CodexProviderHandle implements ProviderHandle {
   /** At most one terminal fact per recent native turn; never infer a latest turn. */
   readonly terminalTurns = new Map<string, string>();
   readonly turnWaiters = new Map<string, { owner: symbol; resolve: (status: string) => void; reject: (error: Error) => void }>();
+  threadIdleEpoch = 0;
+  threadIdleReconciledEpoch = 0;
+  threadIdleReconciliation: Promise<void> | null = null;
   readonly roomTurnResults = new CodexTurnResultAccumulator();
   providerContinuationId: string;
 
@@ -2106,6 +2109,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
         : terminalMatch[1]!.toLowerCase();
       this.noteExactTurnTerminal(handle, exactTurnKey(exactThreadId, exactTurnId), terminalStatus);
     }
+    const threadStatus = recordValue(recordValue(notification.params)?.status)?.type
+      ?? recordValue(notification.params)?.status;
+    if (notification.method === "thread/status/changed"
+      && exactThreadId === handle.providerContinuationId
+      && String(threadStatus ?? "").toLowerCase() === "idle") {
+      handle.threadIdleEpoch += 1;
+      this.reconcileExactTurnTerminalsAfterIdle(handle);
+    }
     // Build the readable summary once and attach the same value to both the
     // ordered stream and the compact activity event. In particular, Codex's
     // approved summaryTextDelta stream is accumulated here; raw reasoning
@@ -2415,7 +2426,42 @@ export class CodexProviderAdapter implements ProviderAdapter {
       };
       handle.turnWaiters.set(key, waiter);
       detachSignal?.addEventListener("abort", onDetach, { once: true });
+      this.reconcileExactTurnTerminalsAfterIdle(handle);
     });
+  }
+
+  private reconcileExactTurnTerminalsAfterIdle(handle: CodexProviderHandle): void {
+    if (!handle.turnWaiters.size
+      || handle.threadIdleReconciliation
+      || handle.threadIdleEpoch <= handle.threadIdleReconciledEpoch) return;
+    const observedEpoch = handle.threadIdleEpoch;
+    handle.threadIdleReconciliation = (async () => {
+      try {
+        const read = await handle.client.request<ThreadReadResult>("thread/read", {
+          threadId: handle.providerContinuationId,
+          includeTurns: true,
+        });
+        if (handle.terminal
+          || this.handles.get(handle.workAttemptId) !== handle
+          || read.thread?.id !== handle.providerContinuationId) return;
+        for (const turn of read.thread.turns ?? []) {
+          if (!turn.id) continue;
+          const key = exactTurnKey(handle.providerContinuationId, turn.id);
+          if (!handle.turnWaiters.has(key)) continue;
+          const status = String(extractTurnStatus(turn) ?? "").toLowerCase();
+          if (/^(?:completed|interrupted|failed|cancelled|stopped)$/.test(status)) {
+            this.noteExactTurnTerminal(handle, key, status);
+          }
+        }
+      } catch {
+        // Thread-idle is only an invalidation signal. A failed read proves
+        // nothing about the exact turn, so keep waiting for native evidence.
+      } finally {
+        handle.threadIdleReconciledEpoch = Math.max(handle.threadIdleReconciledEpoch, observedEpoch);
+        handle.threadIdleReconciliation = null;
+        if (handle.threadIdleEpoch > observedEpoch) this.reconcileExactTurnTerminalsAfterIdle(handle);
+      }
+    })();
   }
 
   private noteExactTurnTerminal(handle: CodexProviderHandle, key: string, status: string): void {
