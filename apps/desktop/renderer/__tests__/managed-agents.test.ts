@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import type {
@@ -1869,6 +1870,62 @@ test("supervisor reachability preserves server-owned attribution while replacing
   assert.equal(participants[0]?.ideLabel, "Codex");
   assert.equal(participants[0]?.activityState, "active");
   assert.deepEqual(participants[0]?.sourceFlags, ["messages", "delivery", "presence"]);
+});
+
+test("presence restores message-history identity before supervisor rows are projected", () => {
+  const shell = readFileSync(new URL("../src/components/desktop/content/DesktopRoomShell.vue", import.meta.url), "utf8");
+  assert.match(shell, /const roomParticipants = computed\(\(\) =>\s*mergeDesktopSupervisorAgentParticipants\(\s*mergeDesktopManagedAgentParticipants\(\s*(?:\/\/[^\n]*\n\s*)*mergeReachableAgentPresenceParticipants\(props\.participants,/);
+  const history = [participant({
+    participantKey: "agent:dawnhaven | emmymay's agent | codex",
+    displayName: "DawnHaven",
+    actorLabel: "DawnHaven | EmmyMay's agent | Codex",
+    agentKey: null,
+    ownerLabel: "EmmyMay",
+  })];
+  const live = [presence({
+    displayName: "DawnHaven",
+    actorLabel: history[0].actorLabel,
+    agentKey: "EmmyMay/desktop-codex-dawn",
+    ownerLabel: "EmmyMay",
+    freshness: "active",
+    activityState: "active",
+    sourceFlags: ["delivery", "presence"],
+  })];
+  const entries = [supervisorEntry({
+    displayName: "DawnHaven",
+    agentKey: live[0].agentKey,
+    roomAgentState: {
+      connection: { state: "connected", detail: null },
+      inbox: { state: "idle", pendingCount: 0, blockedByMessageId: null, detail: null },
+      turn: { state: "idle", inboxItemId: null, sourceMessageId: null, providerTurnId: null, detail: null },
+      task: { state: "none", taskId: null, title: null },
+    },
+  })];
+  const participants = mergeDesktopSupervisorAgentParticipants(
+    mergeDesktopManagedAgentParticipants(
+      mergeReachableAgentPresenceParticipants(history, live, "room_1"),
+      [],
+      "room_1",
+    ),
+    entries,
+    "room_1",
+  );
+
+  assert.equal(participants.length, 1);
+  assert.equal(participants[0].agentKey, live[0].agentKey);
+  assert.equal(participants[0].participantKey, "desktop-supervisor-agent:supervised_1");
+  assert.equal(participants[0].ownerLabel, "EmmyMay");
+  assert.deepEqual(participants[0].sourceFlags, ["messages", "delivery", "presence"]);
+  assert.equal(roomMentionCandidates(participants, "dawn")[0]?.insertText, "DawnHaven");
+
+  const differentAgent = mergeDesktopSupervisorAgentParticipants(participants, [
+    { ...entries[0], id: "supervised_other", agentKey: "OtherOwner/desktop-codex-dawn" },
+  ], "room_1");
+  assert.equal(differentAgent.length, 2);
+  assert.deepEqual(roomMentionCandidates(differentAgent, "dawn").map((item) => item.insertText), [
+    "agent:EmmyMay/desktop-codex-dawn",
+    "agent:OtherOwner/desktop-codex-dawn",
+  ]);
 });
 
 test("Open Model supervisor participants use the product provider label", () => {

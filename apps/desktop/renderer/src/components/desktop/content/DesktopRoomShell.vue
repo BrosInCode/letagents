@@ -884,13 +884,15 @@ const roomPresence = computed(() =>
   mergeDesktopManagedAgentPresence(props.presence, roomManagedAgentSessions.value, props.room.identifier)
 );
 const roomParticipants = computed(() =>
-  mergeReachableAgentPresenceParticipants(
-    mergeDesktopSupervisorAgentParticipants(
-      mergeDesktopManagedAgentParticipants(props.participants, roomManagedAgentSessions.value, props.room.identifier),
-      supervisorEntries.value,
+  mergeDesktopSupervisorAgentParticipants(
+    mergeDesktopManagedAgentParticipants(
+      // Message history can lack canonical agent keys. Enrich its identities
+      // before adding local projections, otherwise one agent becomes two rows.
+      mergeReachableAgentPresenceParticipants(props.participants, roomPresence.value, props.room.identifier),
+      roomManagedAgentSessions.value,
       props.room.identifier,
     ),
-    roomPresence.value,
+    supervisorEntries.value,
     props.room.identifier,
   )
 );
