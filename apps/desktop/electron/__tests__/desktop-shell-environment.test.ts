@@ -62,6 +62,29 @@ test("desktop PATH hydration imports login-shell CLI locations without rewriting
   assert.equal(desktopRuntimeEnvironment(env).PATH, result.environment.PATH);
 });
 
+test("desktop PATH hydration preserves the active NVM runtime ahead of stale global CLIs", async () => {
+  resetDesktopShellEnvironmentForTests();
+  const env: NodeJS.ProcessEnv = {
+    PATH: "/usr/local/bin:/Users/ada/.nvm/versions/node/v22/bin:/usr/bin",
+    NVM_BIN: "/Users/ada/.nvm/versions/node/v22/bin",
+    SHELL: "/bin/zsh",
+  };
+
+  const result = await hydrateDesktopShellEnvironment({
+    env,
+    platform: "darwin",
+    homeDirectory: "/Users/ada",
+    runCommand: async () => (
+      "__LETAGENTS_PATH_START__\n/usr/local/bin:/Users/ada/.nvm/versions/node/v22/bin:/usr/bin\n__LETAGENTS_PATH_END__\n"
+    ),
+  });
+
+  assert.equal(
+    result.environment.PATH,
+    "/Users/ada/.nvm/versions/node/v22/bin:/usr/local/bin:/usr/bin:/Users/ada/.local/bin:/Users/ada/.volta/bin:/Users/ada/.bun/bin:/opt/homebrew/bin",
+  );
+});
+
 test("desktop PATH hydration is non-fatal when shell discovery fails", async () => {
   resetDesktopShellEnvironmentForTests();
   const env: NodeJS.ProcessEnv = { PATH: "/usr/bin:/bin" };
