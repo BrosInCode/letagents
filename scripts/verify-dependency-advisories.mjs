@@ -23,7 +23,7 @@ const transientFailurePattern = new RegExp(
     "network timeout",
     "fetch failed",
     "HTTP(?:\\s+error)?\\s+(?:408|429|500|502|503|504)\\b",
-    "(?:408|429|500|502|503|504)\\s+(?:Bad Gateway|Gateway Timeout|Internal Server Error|Service Unavailable|Too Many Requests)",
+    "(?:408|429|500|502|503|504)\\s+(?:Bad Gateway|Gateway Timeout|Internal Server Error|Request Timeout|Service Unavailable|Too Many Requests)",
   ].join("|"),
   "i",
 );

@@ -38,11 +38,16 @@ let count = 0;
 try { count = Number.parseInt(readFileSync(${JSON.stringify(countPath)}, "utf8"), 10) || 0; } catch {}
 count += 1;
 writeFileSync(${JSON.stringify(countPath)}, String(count));
-if (
+const shouldEmitTransientFailure =
   (${JSON.stringify(mode)} === "transient" && count < 3) ||
-  ${JSON.stringify(mode)} === "transient-always"
-) {
-  console.error("npm error 503 Service Unavailable - POST audit endpoint returned an error");
+  ${JSON.stringify(mode)} === "transient-always" ||
+  (${JSON.stringify(mode)} === "request-timeout" && count < 3);
+if (shouldEmitTransientFailure) {
+  console.error(
+    ${JSON.stringify(mode)} === "request-timeout"
+      ? "npm warn audit 408 Request Timeout"
+      : "npm error 503 Service Unavailable - POST audit endpoint returned an error",
+  );
   process.exit(1);
 }
 if (["vulnerability", "vulnerability-with-transient-text"].includes(${JSON.stringify(mode)})) {
@@ -84,6 +89,15 @@ test("retries bounded transient registry failures and then succeeds", async () =
   assert.equal(result.status, 0, result.stderr);
   assert.equal(await readFile(fixture.countPath, "utf8"), "3");
   assert.match(result.stderr, /Temporary registry failure/);
+});
+
+test("retries npm's 408 Request Timeout diagnostic", async () => {
+  const fixture = await createAuditFixture("request-timeout");
+  const result = runFixture(fixture);
+
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(await readFile(fixture.countPath, "utf8"), "3");
+  assert.match(result.stderr, /408 Request Timeout/);
 });
 
 test("fails closed without retrying an advisory finding", async () => {

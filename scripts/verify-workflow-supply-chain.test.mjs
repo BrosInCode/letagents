@@ -7,6 +7,43 @@ const workflowPaths = [
   ".github/workflows/desktop-release.yml",
 ];
 
+function workflowRunCommandsFromText(workflow) {
+  const lines = workflow.split("\n");
+  const commands = [];
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const match = lines[index].match(/^(\s*)(?:-\s+)?run:\s*(.*)$/);
+    if (!match) {
+      continue;
+    }
+
+    const runIndent = match[1].length;
+    const inlineCommand = match[2].trim();
+    if (inlineCommand && !/^[>|]/.test(inlineCommand)) {
+      commands.push(inlineCommand);
+      continue;
+    }
+
+    for (index += 1; index < lines.length; index += 1) {
+      const line = lines[index];
+      if (line.trim() && line.match(/^\s*/)[0].length <= runIndent) {
+        index -= 1;
+        break;
+      }
+      const command = line.trim();
+      if (command && !command.startsWith("#")) {
+        commands.push(command);
+      }
+    }
+  }
+
+  return commands;
+}
+
+function workflowRunCommands(path) {
+  return workflowRunCommandsFromText(readFileSync(path, "utf8"));
+}
+
 test("external GitHub Actions are pinned to immutable commits", () => {
   for (const path of workflowPaths) {
     const workflow = readFileSync(path, "utf8");
@@ -28,25 +65,51 @@ test("the OIDC publishing job never bootstraps mutable npm latest", () => {
   assert.match(workflow, /npm install -g npm@11\.6\.2/);
 });
 
+test("workflow policy inspects commands instead of matching comments", () => {
+  const commands = workflowRunCommandsFromText(`
+steps:
+  - run: echo audit-disabled # node scripts/verify-dependency-advisories.mjs .
+  - run: |
+      npm --prefix apps/desktop audit --audit-level=low
+`);
+
+  assert.deepEqual(commands, [
+    "echo audit-disabled # node scripts/verify-dependency-advisories.mjs .",
+    "npm --prefix apps/desktop audit --audit-level=low",
+  ]);
+  assert.equal(
+    commands.filter((command) =>
+      command.startsWith("node scripts/verify-dependency-advisories.mjs"),
+    ).length,
+    0,
+  );
+  assert.match(commands[1], /--audit-level(?:=|\s+)low\b/);
+});
+
 test("dependency advisory checks use the pinned supported audit client", () => {
-  const ciWorkflow = readFileSync(".github/workflows/ci.yml", "utf8");
-  const releaseWorkflow = readFileSync(".github/workflows/desktop-release.yml", "utf8");
+  const ciCommands = workflowRunCommands(".github/workflows/ci.yml");
+  const releaseCommands = workflowRunCommands(".github/workflows/desktop-release.yml");
 
   assert.equal(
-    (ciWorkflow.match(/npm install -g npm@11\.6\.2/g) ?? []).length,
+    ciCommands.filter((command) => command === "npm install -g npm@11.6.2").length,
     1,
     "only the publishing job should globally replace npm",
   );
   assert.equal(
-    (ciWorkflow.match(/--prefix "\$\{RUNNER_TEMP\}\/dependency-audit-npm" npm@11\.6\.2/g) ?? [])
-      .length,
+    ciCommands.filter(
+      (command) =>
+        command ===
+        'npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2',
+    ).length,
     2,
     "build and integration jobs must install isolated pinned audit clients",
   );
   assert.equal(
-    (releaseWorkflow.match(
-      /--prefix "\$\{RUNNER_TEMP\}\/dependency-audit-npm" npm@11\.6\.2/g,
-    ) ?? []).length,
+    releaseCommands.filter(
+      (command) =>
+        command ===
+        'npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2',
+    ).length,
     1,
     "the release build must install an isolated pinned audit client",
   );
@@ -58,21 +121,27 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "node scripts/verify-dependency-advisories.mjs .",
     "node scripts/verify-dependency-advisories.mjs .",
   ];
-  const actualCiAudits = ciWorkflow.match(/node scripts\/verify-dependency-advisories\.mjs[^\n]*/g) ?? [];
-  assert.deepEqual(actualCiAudits.map((command) => command.trim()), expectedCiAudits);
-  assert.match(
-    releaseWorkflow,
-    /node scripts\/verify-dependency-advisories\.mjs \. apps\/desktop/,
+  const actualCiAudits = ciCommands.filter((command) =>
+    command.startsWith("node scripts/verify-dependency-advisories.mjs"),
+  );
+  assert.deepEqual(actualCiAudits, expectedCiAudits);
+  assert.deepEqual(
+    releaseCommands.filter((command) =>
+      command.startsWith("node scripts/verify-dependency-advisories.mjs"),
+    ),
+    ["node scripts/verify-dependency-advisories.mjs . apps/desktop"],
   );
 
-  for (const [path, workflow] of [
-    [".github/workflows/ci.yml", ciWorkflow],
-    [".github/workflows/desktop-release.yml", releaseWorkflow],
+  for (const [path, commands] of [
+    [".github/workflows/ci.yml", ciCommands],
+    [".github/workflows/desktop-release.yml", releaseCommands],
   ]) {
-    assert.doesNotMatch(
-      workflow,
-      /npm audit --audit-level=low/,
-      `${path} must not bypass the bounded audit runner`,
-    );
+    for (const command of commands) {
+      assert.doesNotMatch(
+        command,
+        /--audit-level(?:=|\s+)low\b/,
+        `${path} must not bypass the bounded audit runner: ${command}`,
+      );
+    }
   }
 });
