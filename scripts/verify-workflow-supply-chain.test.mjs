@@ -386,15 +386,23 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "npm audit signatures\nnpm audit signatures --prefix apps/desktop",
   ]);
 
-  const installCommands = [...ciScripts, ...releaseScripts]
-    .flatMap((script) => script.split("\n"))
-    .filter((line) => /\bnpm ci\b/.test(line));
-  assert.equal(installCommands.length, 7, "all workflow dependency installs must be covered");
-  for (const command of installCommands) {
-    assert.match(
-      command,
-      /(?:^|\s)--no-audit(?:\s|$)/,
-      "npm ci must not run an implicit unbounded audit before the explicit dependency gate",
-    );
-  }
+  assert.deepEqual(
+    ciScripts.filter((script) => /\bnpm ci\b/.test(script)),
+    [
+      "npm ci --ignore-scripts --no-audit",
+      "cd src/web && npm ci --ignore-scripts --no-audit",
+      "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+      "npm ci --ignore-scripts --no-audit",
+      "npm ci --ignore-scripts --no-audit",
+    ],
+    "CI installs must disable npm's implicit unbounded audit",
+  );
+  assert.deepEqual(
+    releaseScripts.filter((script) => /\bnpm ci\b/.test(script)),
+    [
+      "npm ci --ignore-scripts --no-audit\n" +
+        "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
+    ],
+    "release installs must disable npm's implicit unbounded audit",
+  );
 });
