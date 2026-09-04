@@ -52,6 +52,12 @@ import {
   CURSOR_SESSION_ID_PATTERN,
 } from "./cursor-provider-constants.js";
 import { safeCursorTerminalErrorDetail } from "./cursor-provider-evidence.js";
+import { cursorLiveDisplayProjections } from "./cursor-live-display.js";
+export { cursorLiveDisplayProjections } from "./cursor-live-display.js";
+import {
+  cursorNativeToolEnvelope,
+  cursorNativeToolTerminalResult,
+} from "./cursor-native-tool.js";
 import {
   assertCursorPersonalIdentity,
   CursorIdentityAuthRequiredError,
@@ -402,96 +408,6 @@ function cursorStreamKind(message: CursorStreamMessage): ProviderStreamEventKind
   return "provider_event";
 }
 
-type CursorLiveDisplayProjection = {
-  method: "item/agentMessage/delta" | "item/toolCall/updated";
-  kind: "text_delta" | "tool_lifecycle";
-  payload: Record<string, unknown>;
-};
-
-function cursorRecord(value: unknown): Record<string, unknown> | null {
-  return value && typeof value === "object" && !Array.isArray(value)
-    ? value as Record<string, unknown>
-    : null;
-}
-
-function cursorToolError(value: unknown): string | null {
-  if (typeof value === "string") return value;
-  if (value === null || value === undefined) return null;
-  try { return JSON.stringify(value, null, 2); }
-  catch { return "Cursor reported an unreadable tool error."; }
-}
-
-/**
- * Project an already-redacted/bounded Cursor event into the renderer's
- * provider-neutral display contract. Raw provider evidence is published
- * separately and remains untouched for daemon coordination.
- */
-export function cursorLiveDisplayProjections(
-  safeProviderPayload: unknown,
-  exactTurnNamespace: string,
-  eventNamespace: string,
-): CursorLiveDisplayProjection[] {
-  const message = cursorRecord(safeProviderPayload);
-  if (!message || !exactTurnNamespace) return [];
-  if (message.type === "assistant") {
-    const body = cursorRecord(message.message);
-    if (body?.role !== "assistant") return [];
-    const delta = typeof body.content === "string"
-      ? body.content
-      : Array.isArray(body.content)
-        ? body.content.flatMap((candidate) => {
-          const block = cursorRecord(candidate);
-          return block?.type === "text" && typeof block.text === "string" && block.text
-            ? [block.text]
-            : [];
-        }).join("")
-        : "";
-    return delta
-      ? [{
-        method: "item/agentMessage/delta" as const,
-        kind: "text_delta" as const,
-        payload: {
-          partId: `cursor:${exactTurnNamespace}:assistant:${eventNamespace}`,
-          delta,
-        },
-      }]
-      : [];
-  }
-  if (message.type !== "tool_call") return [];
-  if (message.subtype !== "started" && message.subtype !== "completed") return [];
-  if (typeof message.call_id !== "string" || !message.call_id.trim()) return [];
-  const toolCalls = cursorRecord(message.tool_call);
-  if (!toolCalls) return [];
-  // Cursor may include object-valued metadata before the actual tool envelope.
-  // Only documented `*ToolCall` keys name a callable operation; choosing the
-  // first object would turn metadata into a fake tool card.
-  const toolEntry = Object.entries(toolCalls).find(([key, value]) => /ToolCall$/.test(key) && cursorRecord(value));
-  if (!toolEntry) return [];
-  const [tool, rawCall] = toolEntry;
-  const call = cursorRecord(rawCall)!;
-  const result = cursorRecord(call.result);
-  const failure = result && (Object.hasOwn(result, "error")
-    ? result.error
-    : Object.hasOwn(result, "failure") ? result.failure : undefined);
-  const completed = message.subtype === "completed";
-  const error = completed ? cursorToolError(failure) : null;
-  const output = completed && result && Object.hasOwn(result, "success")
-    ? result.success
-    : completed && failure === undefined ? call.result ?? null : null;
-  return [{
-    method: "item/toolCall/updated",
-    kind: "tool_lifecycle",
-    payload: {
-      callID: `cursor:${exactTurnNamespace}:${message.call_id.trim()}`,
-      tool,
-      status: error ? "error" : completed ? "completed" : "running",
-      input: call.args ?? null,
-      output,
-      error,
-    },
-  }];
-}
-
 function streamMethod(message: CursorStreamMessage): string {
   const type = typeof message.type === "string" ? message.type : "unknown";
   const subtype = typeof message.subtype === "string" ? message.subtype : null;
@@ -549,7 +465,7 @@ interface LiveTurn {
   /** Writable turns own one private generation until its immutable tree is reconciled. */
   workspaceGeneration: SupervisedWorkspaceGenerationHandle | null;
   workspaceGenerationManifestPath: string | null;
-  liveDisplayTools: Map<string, { tool: string; input: unknown }>;
+  liveDisplayTools: Map<string, { tool: string; input: unknown; completed: boolean }>;
   executionTools: Map<string, { tool: string; completed: boolean }>;
   executionTurnFinished: boolean;
   executionRuntimeFinished: boolean;
@@ -2856,12 +2772,16 @@ export class CursorProviderAdapter implements ProviderAdapter {
           const callId = typeof projection.payload.callID === "string" ? projection.payload.callID : null;
           if (callId) {
             if (projection.payload.status === "running") {
+              if (turn.liveDisplayTools.has(callId)) continue;
               turn.liveDisplayTools.set(callId, {
                 tool: typeof projection.payload.tool === "string" ? projection.payload.tool : "tool",
                 input: projection.payload.input ?? null,
+                completed: false,
               });
             } else {
-              turn.liveDisplayTools.delete(callId);
+              const active = turn.liveDisplayTools.get(callId);
+              if (!active || active.completed || active.tool !== projection.payload.tool) continue;
+              active.completed = true;
             }
           }
         }
@@ -2892,6 +2812,7 @@ export class CursorProviderAdapter implements ProviderAdapter {
 
   private interruptLiveDisplayTools(handle: CursorProviderHandle, turn: LiveTurn): void {
     for (const [callID, tool] of turn.liveDisplayTools) {
+      if (tool.completed) continue;
       this.publishStream(handle, "item/toolCall/updated", {
         callID,
         tool: tool.tool,
@@ -2956,51 +2877,26 @@ export class CursorProviderAdapter implements ProviderAdapter {
       };
       return nativeLifecycle;
     }
-    if (message.type !== "tool_call" || !nativeExecutionId(message.call_id)) return null;
-    const calls = cursorRecord(message.tool_call);
-    if (!calls) return null;
-    // Only exact native envelopes have defined operation semantics. Unknown
-    // variants remain diagnostics rather than inferring execution from text.
-    const operations = { shellToolCall: "command", readToolCall: "file_read", writeToolCall: "file_change" } as const;
-    const entries = Object.entries(operations).filter(([name]) => cursorRecord(calls[name]));
-    if (entries.length !== 1 || Object.keys(calls).filter((key) => key.endsWith("ToolCall")).length !== 1) return null;
-    const [tool, operation] = entries[0]!;
-    const call = cursorRecord(calls[tool])!;
-    const identity = { domain: "execution" as const, executionId: message.call_id, operation, ...nativeTurn };
-    const sideEffects = operation === "file_read" ? "none" as const : "possible" as const;
-    const prior = turn.executionTools.get(message.call_id);
-    if (message.subtype === "started" && !prior) {
+    const nativeTool = cursorNativeToolEnvelope(message as Record<string, unknown>);
+    if (!nativeTool) return null;
+    const { executionId, subtype, tool, operation } = nativeTool;
+    const identity = { domain: "execution" as const, executionId, operation, ...nativeTurn };
+    const prior = turn.executionTools.get(executionId);
+    if (subtype === "started" && !prior) {
       // Native toolCallStarted precedes permission/spawn outcomes. It proves
       // request identity, not that a process ran or a file was touched.
-      turn.executionTools.set(message.call_id, { tool, completed: false });
-    } else if (message.subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
-      const result = cursorRecord(call.result);
-      if (!result) return null;
-      const variants = (operation === "command"
-        ? ["success", "failure", "timeout", "rejected", "permissionDenied", "spawnError"]
-        : ["success", "error", "failure"]).filter((key) => Object.hasOwn(result, key));
-      if (variants.length !== 1 || !cursorRecord(result[variants[0]!])) return null;
-      const variant = variants[0]!;
-      let exitCode: number | undefined;
-      if (operation === "command") {
-        // Cursor 2026.07.09's ShellResult uses foreground success/failure
-        // records with an int32 exitCode (protobuf JSON emits default zero).
-        // A background handoff is not command completion.
-        if (result.isBackground !== undefined && typeof result.isBackground !== "boolean") return null;
-        if (result.isBackground === true || variant === "timeout") return null;
-        if (variant === "rejected" || variant === "permissionDenied" || variant === "spawnError") {
-          prior.completed = true;
-          emit({ ...identity, kind: "completed", outcome: variant === "spawnError" ? "failed" : "denied_before_start", sideEffects: "none" });
-          return null;
-        }
-        const terminal = cursorRecord(result[variant])!;
-        if (!Number.isInteger(terminal.exitCode)
-          || (terminal.exitCode as number) < -2_147_483_648 || (terminal.exitCode as number) > 2_147_483_647) return null;
-        exitCode = terminal.exitCode as number;
-      }
+      turn.executionTools.set(executionId, { tool, completed: false });
+    } else if (subtype === "completed" && prior && !prior.completed && prior.tool === tool) {
+      const terminal = cursorNativeToolTerminalResult(nativeTool);
+      if (!terminal) return null;
       prior.completed = true;
-      emit({ ...identity, kind: "completed", outcome: variant === "success" && (exitCode === undefined || exitCode === 0)
-        ? "succeeded" : "failed", ...(exitCode === undefined ? {} : { exitCode }), sideEffects });
+      emit({
+        ...identity,
+        kind: "completed",
+        outcome: terminal.outcome,
+        ...(terminal.exitCode === undefined ? {} : { exitCode: terminal.exitCode }),
+        sideEffects: terminal.sideEffects,
+      });
     }
     return null;
   }
