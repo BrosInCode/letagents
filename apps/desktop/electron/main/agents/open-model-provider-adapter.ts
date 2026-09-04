@@ -169,8 +169,35 @@ function safeRuntimeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);
 }
 
+const runtimeLaunchTails = new Map<string, Promise<void>>();
+
+async function withRuntimeLaunchOwnership<T>(
+  runtimePath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = runtimeLaunchTails.get(runtimePath) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  runtimeLaunchTails.set(runtimePath, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (runtimeLaunchTails.get(runtimePath) === current) runtimeLaunchTails.delete(runtimePath);
+  }
+}
+
 type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
+  startupIntent?: {
+    url: string;
+  };
+  startupProcess?: {
+    url: string;
+    pid: number;
+    processIdentity: string | null;
+  };
   connection?: {
     url: string;
     pid: number;
@@ -441,6 +468,35 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
 
   capabilities(): ProviderAdapterCapabilities { return { ...CAPABILITIES }; }
 
+  private async assertPriorStartupProcessGone(authPath: string): Promise<void> {
+    let control: OpenCodeRuntimeControl;
+    try {
+      control = await readRuntimeControl(authPath);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    if (control.startupIntent) {
+      throw new Error(
+        "The previous OpenCode startup intent has no durable process identity; refusing to start a competing runtime. An operator must verify the prior runtime is gone before clearing the sidecar.",
+      );
+    }
+    for (const process of [control.startupProcess, control.connection]) {
+      if (!process) continue;
+      const currentIdentity = this.deps.getProcessIdentity(process.pid);
+      if (currentIdentity === null) continue;
+      if (!process.processIdentity || currentIdentity === undefined) {
+        throw new Error(
+          "The previous OpenCode startup process identity could not be verified; refusing to start a competing runtime.",
+        );
+      }
+      if (!sameProcessBirthIdentity(currentIdentity, process.processIdentity)) continue;
+      throw new Error(
+        "The previous OpenCode startup process is still running; refusing to start a competing runtime.",
+      );
+    }
+  }
+
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
     const lifecycleAuthorityMode = req.lifecycleAuthorityMode ?? "typed_shadow";
     if (lifecycleAuthorityMode === "typed" && req.deliveryMode !== "daemon_inbox") {
@@ -453,17 +509,32 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       throw new Error("Open Model is waiting for its desktop-held endpoint credential.");
     }
     const credential = req.providerCredential;
+    const runtimeRoot = join(this.runtimeRoot, safeRuntimeId(req.workAttemptId));
+    // The daemon singleton owns one provider router per live process. This
+    // target-local queue therefore serializes every live admission for one
+    // runtime path, while startupIntent remains the cross-process crash fence.
+    return withRuntimeLaunchOwnership(runtimeRoot, () =>
+      this.spawnWithRuntimeOwnership(req, lifecycleAuthorityMode, credential, runtimeRoot));
+  }
+
+  private async spawnWithRuntimeOwnership(
+    req: ProviderSpawnRequest,
+    lifecycleAuthorityMode: NonNullable<ProviderSpawnRequest["lifecycleAuthorityMode"]>,
+    credential: NonNullable<ProviderSpawnRequest["providerCredential"]>,
+    runtimeRoot: string,
+  ): Promise<ProviderHandle> {
     const appliedConfigurationRevision = attestProviderSpawnPolicy("open-model", req);
     void appliedConfigurationRevision;
-    const runtimeRoot = join(this.runtimeRoot, safeRuntimeId(req.workAttemptId));
     await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
     await chmod(runtimeRoot, 0o700);
     const authPath = join(runtimeRoot, "server-auth.json");
+    await this.assertPriorStartupProcessGone(authPath);
     const auth: OpenCodeRuntimeAuth = {
       username: OPENCODE_SERVER_USERNAME,
       password: randomBytes(32).toString("base64url"),
     };
-    await writeRuntimeControl(authPath, { ...auth, lifecycleAuthorityMode });
+    const initialControl: OpenCodeRuntimeControl = { ...auth, lifecycleAuthorityMode };
+    await writeRuntimeControl(authPath, initialControl);
     const pluginPath = join(runtimeRoot, "credential-boundary.mjs");
     await writeFile(pluginPath, credentialBoundaryPluginSource(), {
       encoding: "utf8",
@@ -507,6 +578,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
     });
+    const intentControl: OpenCodeRuntimeControl = {
+      ...initialControl,
+      startupIntent: { url },
+    };
+    await writeRuntimeControl(authPath, intentControl);
     const launch = this.deps.launch({
       binary: this.binary,
       args: ["serve", "--hostname", "127.0.0.1", "--port", String(port)],
@@ -515,40 +591,72 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
     });
     if (launch.child.pid === undefined || launch.child.pid === null) {
       await launch.exited;
+      try {
+        const currentControl = await readRuntimeControl(authPath);
+        if (currentControl.username !== intentControl.username
+          || currentControl.password !== intentControl.password
+          || currentControl.lifecycleAuthorityMode !== intentControl.lifecycleAuthorityMode
+          || currentControl.startupIntent?.url !== intentControl.startupIntent?.url
+          || currentControl.startupProcess
+          || currentControl.connection) {
+          throw new Error("The durable startup intent no longer matches this launch.");
+        }
+        await writeRuntimeControl(authPath, initialControl);
+      } catch (error) {
+        throw new Error(
+          "OpenCode launch failed without a process id, but its startup intent could not be safely cleared; automatic recovery remains blocked.",
+          { cause: error },
+        );
+      }
       throw new Error("OpenCode launch did not expose a process id.");
     }
     const pid = launch.child.pid;
-    const identity = this.deps.getProcessIdentity(pid);
-    if (!identity) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
-      throw new Error("OpenCode process identity could not be verified.");
-    }
-    const client = new OpenCodeServerClient(url, auth, this.deps.fetch);
-    const ready = await this.waitForHealth(client, launch.exited);
-    if (!ready) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
-      throw new OpenCodeStartTimeoutError();
-    }
-    const session = await client.createSession(
-      req.agentDisplayName?.trim() || "LetAgents Open Model",
-    );
-    const sessionId = typeof session.id === "string" ? session.id : "";
-    if (!sessionId) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
-      throw new Error("OpenCode did not return a session id.");
-    }
-    const connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }> = {
-      kind: "opencode_server",
-      url,
-      pid,
-      processIdentity: identity,
-      serverAuthPath: authPath,
-    };
     await writeRuntimeControl(authPath, {
       ...auth,
       lifecycleAuthorityMode,
-      connection: { url, pid, processIdentity: identity },
+      startupProcess: { url, pid, processIdentity: null },
     });
+    const identity = this.deps.getProcessIdentity(pid);
+    if (!identity) {
+      throw new Error("OpenCode process identity could not be verified.");
+    }
+    const client = new OpenCodeServerClient(url, auth, this.deps.fetch);
+    let sessionId: string;
+    let connection: Extract<ProviderConnectionRef, { kind: "opencode_server" }>;
+    try {
+      await writeRuntimeControl(authPath, {
+        ...auth,
+        lifecycleAuthorityMode,
+        startupProcess: { url, pid, processIdentity: identity },
+      });
+      const ready = await this.waitForHealth(client, launch.exited);
+      if (!ready) throw new OpenCodeStartTimeoutError();
+      const session = await client.createSession(
+        req.agentDisplayName?.trim() || "LetAgents Open Model",
+      );
+      sessionId = typeof session.id === "string" ? session.id : "";
+      if (!sessionId) {
+        throw new Error("OpenCode did not return a session id.");
+      }
+      connection = {
+        kind: "opencode_server",
+        url,
+        pid,
+        processIdentity: identity,
+        serverAuthPath: authPath,
+      };
+      await writeRuntimeControl(authPath, {
+        ...auth,
+        lifecycleAuthorityMode,
+        connection: { url, pid, processIdentity: identity },
+      });
+    } catch (error) {
+      await terminateFreshLaunch({ pid, exited: launch.exited, processIdentity: identity }, this.deps, this.stopGraceMs);
+      if (error instanceof Error && error.name === "TimeoutError") {
+        throw new OpenCodeStartTimeoutError();
+      }
+      throw error;
+    }
     const handle = new OpenModelHandle(
       req.workAttemptId,
       pid,
@@ -1704,6 +1812,23 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
     && value.lifecycleAuthorityMode !== "typed") {
     throw new Error("OpenCode server authentication sidecar contains an invalid lifecycle authority.");
   }
+  if (value.startupIntent !== undefined
+    && (typeof value.startupIntent !== "object"
+      || typeof value.startupIntent.url !== "string"
+      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupIntent.url))) {
+    throw new Error("OpenCode server authentication sidecar contains an invalid startup intent.");
+  }
+  if (value.startupProcess !== undefined
+    && (typeof value.startupProcess !== "object"
+      || typeof value.startupProcess.url !== "string"
+      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupProcess.url)
+      || !Number.isSafeInteger(value.startupProcess.pid)
+      || value.startupProcess.pid < 1
+      || (value.startupProcess.processIdentity !== null
+        && (typeof value.startupProcess.processIdentity !== "string"
+          || !value.startupProcess.processIdentity)))) {
+    throw new Error("OpenCode server authentication sidecar contains invalid startup process evidence.");
+  }
   if (value.connection !== undefined
     && (typeof value.connection !== "object"
       || typeof value.connection.url !== "string"
@@ -1718,6 +1843,8 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
     username: value.username,
     password: value.password,
     ...(value.lifecycleAuthorityMode ? { lifecycleAuthorityMode: value.lifecycleAuthorityMode } : {}),
+    ...(value.startupIntent ? { startupIntent: value.startupIntent } : {}),
+    ...(value.startupProcess ? { startupProcess: value.startupProcess } : {}),
     ...(value.connection ? { connection: value.connection } : {}),
   };
 }
@@ -1730,7 +1857,6 @@ async function writeRuntimeControl(path: string, value: OpenCodeRuntimeControl):
   });
   await chmod(temporaryPath, 0o600);
   await rename(temporaryPath, path);
-  await chmod(path, 0o600);
 }
 
 function terminalFromExit(
