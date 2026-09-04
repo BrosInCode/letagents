@@ -199,7 +199,13 @@ export class SupervisorDaemon {
       isHandoffScheduled: () => this.handoffScheduled,
       drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
-    this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath);
+    // start() owns the one protected schema preparation before any lazy store
+    // is used. Operational handles must not replay that work independently.
+    const schemaManagedByDaemonStart = true;
+    this.store = new ManifestStore(
+      paths.manifestPath, paths.legacyManifestPath, undefined, undefined,
+      schemaManagedByDaemonStart,
+    );
     this.legacyLanes = new LegacyLaneCoordinator({
       storage: { load: () => this.store.load() },
       commit: {
@@ -266,6 +272,8 @@ export class SupervisorDaemon {
       undefined,
       undefined,
       paths.manifestPath,
+      undefined,
+      schemaManagedByDaemonStart,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
     this.ephemeralProvisioner = new EphemeralWorkspaceProvisioner(root);
@@ -273,6 +281,8 @@ export class SupervisorDaemon {
       paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
       (commit) => this.fenceDaemonCommit(commit),
       paths.manifestPath,
+      undefined,
+      schemaManagedByDaemonStart,
     );
     this.nativeActivity = new NativeActivityPublicationCoordinator({
       bindings: this.workerBindings,
@@ -318,6 +328,7 @@ export class SupervisorDaemon {
       paths.manifestPath,
       undefined,
       () => this.notifyStateChanged(),
+      schemaManagedByDaemonStart,
     );
     this.workerAuthority = new WorkerAuthorityCoordinator({
       store: this.store,
