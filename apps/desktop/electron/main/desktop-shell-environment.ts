@@ -157,6 +157,7 @@ async function discoverDesktopPath(options: DesktopShellEnvironmentOptions): Pro
       }
     }
     return mergeDesktopPath([
+      env.NVM_BIN,
       discoveredPath,
       join(homeDirectory, ".local", "bin"),
       join(homeDirectory, ".volta", "bin"),
