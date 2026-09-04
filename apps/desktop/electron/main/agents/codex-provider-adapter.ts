@@ -539,6 +539,7 @@ function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
 }
 
 class CodexProviderHandle implements ProviderHandle {
+  subscriptionAfterMaterialization = false;
   custodyLaunchAgentSessionId?: string;
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
@@ -997,6 +998,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       });
       assertRuntimeAvailable();
       if (!turn.turn?.id) throw new Error("Codex did not acknowledge the redirected turn.");
+      await this.subscribeMaterializedThread(handle);
       handle.setLiveState("working");
     }
     assertRuntimeAvailable();
@@ -1149,6 +1151,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       const id = result?.turn?.id;
       if (!nativeExecutionId(id)) throw new Error("Custodial polling activation returned no exact native turn ID.");
       await options.checkpointTurnStarted(id);
+      await this.subscribeMaterializedThread(handle);
       return { providerTurnId: id };
     } finally { this.pollingDispatches.delete(handle); }
   }
@@ -1946,6 +1949,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity)) {
         throw new Error("durable endpoint process identity no longer matches its recorded birth");
       }
+      const loadedThread = ["idle", "active", "systemError"].includes(String(recordValue(read.thread?.status)?.type));
+      if (!continuationMissing && !exactEmptyFallback && loadedThread) {
+        // thread/read verifies identity but does not subscribe this connection
+        // to turn items or approval requests. Resume the exact existing thread
+        // without configuration overrides or starting/replaying a turn.
+        const subscribed = await client.request<CodexThreadResult>("thread/resume", {
+          threadId: ref.providerContinuationId,
+        });
+        if (subscribed.thread?.id !== ref.providerContinuationId) {
+          throw new Error("Codex subscription resolved a different durable continuation thread.");
+        }
+        // A turn can finish between the first read and subscription without
+        // sending this connection a notification. Reconstruct from a fresh
+        // snapshot after subscribing so that gap cannot retain a stale turn.
+        read = await client.request<ThreadReadResult>("thread/read", {
+          threadId: ref.providerContinuationId, includeTurns: true,
+        });
+        if (read.thread?.id !== ref.providerContinuationId) {
+          throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
+        }
+      }
       const observedExit = this.deps.observeProcessExit(
         connection.pid,
         connection.processIdentity,
@@ -1970,6 +1994,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         turnPolicy,
       );
       handle.setLiveState(continuationMissing ? "idle" : "working");
+      handle.subscriptionAfterMaterialization = exactEmptyFallback;
       this.handles.set(ref.workAttemptId, handle);
       this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
       const queuedTurnLifecycle = pendingNotifications.some(notification =>
@@ -2397,12 +2422,30 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error("Codex did not prove the active turn reached an interrupted boundary.");
   }
 
+  private async subscribeMaterializedThread(handle: CodexProviderHandle): Promise<boolean> {
+    if (!handle.subscriptionAfterMaterialization) return false;
+    const threadId = handle.providerContinuationId;
+    const subscribed = await handle.client.request<CodexThreadResult>("thread/resume", { threadId });
+    if (subscribed.thread?.id !== threadId) throw new Error("Codex subscription resolved a different materialized thread.");
+    handle.subscriptionAfterMaterialization = false;
+    return true;
+  }
+
   /** Terminal correlation is event-driven and deliberately thread+turn exact. */
   private async waitForExactRoomTurnTerminal(
     handle: CodexProviderHandle,
     turnId: string,
     detachSignal?: AbortSignal,
   ): Promise<{ status: string; turn: ThreadReadTurn }> {
+    if (await this.subscribeMaterializedThread(handle)) {
+      const snapshot = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: handle.providerContinuationId, includeTurns: true,
+      });
+      if (snapshot.thread?.id !== handle.providerContinuationId) throw new Error("Codex materialized snapshot resolved a different thread.");
+      const turn = snapshot.thread.turns?.find(turn => turn.id === turnId);
+      const status = typeof turn?.status === "string" ? turn.status : turn?.status?.status;
+      if (turn && status && /^(?:completed|failed|interrupted|cancelled|stopped)$/i.test(status)) return { status, turn };
+    }
     const status = await this.waitForExactTurnNotification(handle, exactTurnKey(handle.providerContinuationId, turnId), detachSignal);
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
