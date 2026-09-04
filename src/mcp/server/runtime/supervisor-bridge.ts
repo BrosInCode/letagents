@@ -10,7 +10,7 @@ import type { StoredAgentSessionState } from "../../local-state.js";
 import { getCurrentSupervisedRoomAuthority } from "./supervised-room-authority.js";
 
 const NEGOTIATION_PROTOCOL_VERSION = 1;
-const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2]);
+const SUPPORTED_SUPERVISOR_PROTOCOL_VERSIONS = new Set([1, 2, 3]);
 const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 const CONFIRMED_BINDING_VERIFY_TIMEOUT_MS = 250;
 const SUPERVISOR_CONTEXT_FILE = ".letagents-supervisor-context.json";
