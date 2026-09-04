@@ -10,9 +10,10 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "../..");
 const bundle = join(root, "release", "LetAgents-darwin", "LetAgents.app");
 const executable = join(bundle, "Contents", "MacOS", "LetAgents");
 const developmentDaemon = join(root, "dist-daemon", "main.js");
+const daemonTypes = await import(pathToFileURL(join(root, "dist-daemon", "types.js")).href);
 const home = await mkdtemp(join(tmpdir(), "letagents-packaged-smoke-"));
 const socketPath = join(home, ".letagents", "daemon.sock");
-const protocolVersion = 2;
+const protocolVersion = daemonTypes.DAEMON_PROTOCOL_VERSION;
 
 async function assertPackagedDaemonExecutorSeal() {
   const appRoot = join(bundle, "Contents", "Resources", "app");
