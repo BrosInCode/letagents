@@ -72,17 +72,24 @@ function workflowJobsFromText(workflow) {
       continue;
     }
 
-    const stepMatch = line.match(/^ {6}-\s+(name|run|uses):\s*(.*)$/);
+    const stepMatch = line.match(/^ {6}-\s+([a-zA-Z0-9_-]+):\s*(.*)$/);
     if (stepMatch) {
       currentStep = {
         condition: null,
         continueOnError: null,
-        name: stepMatch[1] === "name" ? stepMatch[2].trim() : null,
+        name: null,
         run: null,
       };
       currentJob.steps.push(currentStep);
-      if (stepMatch[1] === "run") {
-        const result = readRunScript(lines, index, 6, stepMatch[2]);
+      const [key, value] = stepMatch.slice(1);
+      if (key === "name") {
+        currentStep.name = value.trim();
+      } else if (key === "if") {
+        currentStep.condition = value.trim();
+      } else if (key === "continue-on-error") {
+        currentStep.continueOnError = value.trim();
+      } else if (key === "run") {
+        const result = readRunScript(lines, index, 6, value);
         currentStep.run = result.script;
         index = result.nextIndex;
       }
@@ -250,6 +257,19 @@ ${stepSetting}        run: node scripts/verify-dependency-advisories.mjs .
 
     assert.throws(() => assertAuditStepsAreMandatory(jobs, "fixture"), mutation.expected);
   }
+
+  const leadingCondition = workflowJobsFromText(`
+jobs:
+  build:
+    steps:
+      - run: echo before
+      - if: false
+        run: node scripts/verify-dependency-advisories.mjs .
+`);
+  assert.throws(
+    () => assertAuditStepsAreMandatory(leadingCondition, "fixture"),
+    /must not skip its audit/,
+  );
 });
 
 test("dependency advisory checks use the pinned supported audit client", () => {
