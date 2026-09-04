@@ -732,7 +732,9 @@ test("stdio loss on a verified-live child fences the exact child instead of synt
   const adapter = new ClaudeCodeProviderAdapter({ dependencies: harness.dependencies });
   const handle = await adapter.spawn(spawnRequest());
   const terminals: ProviderTerminalPayload[] = [];
+  const observations: NativeExecutionObservation[] = [];
   adapter.onExit(handle, (terminal) => terminals.push(terminal));
+  adapter.onExecution(handle, (event) => observations.push(event));
 
   harness.children[0]!.disconnect();
   await flush();
@@ -740,6 +742,14 @@ test("stdio loss on a verified-live child fences the exact child instead of synt
   assert.deepEqual(harness.signals, [{ pid: 4100, signal: "SIGTERM" }], "the exact live child is fenced");
   assert.equal(terminals.length, 0, "stdio loss alone cannot make a live writer restartable");
   assert.equal(harness.children[0]!.alive, true);
+  assert.deepEqual(observations.at(-1), {
+    sourceId: observations.at(-1)?.sourceId,
+    sequence: 2,
+    observedAtMs: 1_700_000_000_000,
+    fact: { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+    nativeProcessIdentity: birthIdentity(4100),
+    nativeProcessPid: 4100,
+  }, "stdio loss degrades typed control without inventing runtime death");
 
   // Only real identity disappearance becomes terminal.
   harness.identities.set(4100, null);
@@ -747,6 +757,10 @@ test("stdio loss on a verified-live child fences the exact child instead of synt
   await flush();
   assert.equal(terminals.length, 1);
   assert.equal(terminals[0]!.terminalCause, "crashed");
+  assert.deepEqual(observations.slice(-2).map(({ fact }) => fact), [
+    { domain: "control", kind: "state_changed", state: "lost", sideEffects: "none", controlEvidence: "process_exit" },
+    { domain: "runtime", kind: "state_changed", state: "exited", sideEffects: "none", controlEvidence: "process_exit" },
+  ], "verified process exit remains the only hard-loss boundary");
 });
 
 test("a quiet daemon-owned Claude continuation stays idle between turns", async () => {
