@@ -63,6 +63,10 @@ if (${JSON.stringify(mode)}.startsWith("http-")) {
   console.error("npm error " + status + " permanent audit endpoint failure");
   process.exit(1);
 }
+if (${JSON.stringify(mode)} === "timeout-success") {
+  process.on("SIGTERM", () => process.exit(0));
+  setInterval(() => {}, 1000);
+}
 console.log("found 0 vulnerabilities");
 `,
   );
@@ -70,14 +74,14 @@ console.log("found 0 vulnerabilities");
   return { countPath, fakeNpmPath, packageDirectory };
 }
 
-function runFixture(fixture) {
+function runFixture(fixture, { timeoutMs = 5000 } = {}) {
   return spawnSync(process.execPath, [runnerPath, fixture.packageDirectory], {
     encoding: "utf8",
     env: {
       ...process.env,
       LETAGENTS_AUDIT_NPM_BIN: fixture.fakeNpmPath,
       LETAGENTS_AUDIT_RETRY_DELAY_MS: "1",
-      LETAGENTS_AUDIT_TIMEOUT_MS: "5000",
+      LETAGENTS_AUDIT_TIMEOUT_MS: String(timeoutMs),
     },
   });
 }
@@ -127,6 +131,15 @@ test("fails closed after exhausting transient registry retries", async () => {
   assert.equal(result.status, 1);
   assert.equal(await readFile(fixture.countPath, "utf8"), "3");
   assert.match(result.stderr, /Dependency advisory audit/);
+});
+
+test("does not accept a timed-out child that exits successfully on SIGTERM", async () => {
+  const fixture = await createAuditFixture("timeout-success");
+  const result = runFixture(fixture, { timeoutMs: 1500 });
+
+  assert.equal(result.status, 1);
+  assert.equal(await readFile(fixture.countPath, "utf8"), "3");
+  assert.match(result.stderr, /timed out/);
 });
 
 for (const status of [400, 401, 403]) {

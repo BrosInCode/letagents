@@ -128,7 +128,7 @@ async function auditTarget(npmCommand, target, { timeoutMs, retryDelayMs }) {
       { cwd: targetDirectory, timeoutMs },
     );
 
-    if (result.code === 0) {
+    if (result.code === 0 && !result.timedOut) {
       return;
     }
 
