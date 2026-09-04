@@ -8,6 +8,10 @@ import {
 import { isClearedRoomAgentWorkSummary, parseRoomAgentWorkSummary, type RoomAgentWorkSummary } from "../../../shared/room-agent-work.mjs";
 
 const DEFAULT_ROOM_POLL_MAX_MS = 180_000;
+// Public deployments commonly terminate idle upstream requests at 60 seconds.
+// Keep the daemon's individual observation requests below that boundary; the
+// delivery loop immediately opens the next poll, so this does not add latency.
+const SUPERVISED_ROOM_POLL_TIMEOUT_MS = 25_000;
 const MAX_ROOM_POLL_MAX_MS = 24 * 60 * 60 * 1_000;
 const LIVENESS_GRACE_MS = 30_000;
 export const NATIVE_LIVENESS_STALE_AFTER_MS = 90_000;
@@ -207,11 +211,11 @@ export async function publishRoomWork(input: RoomWorkPublishInput): Promise<Room
 export const productionSupervisedDeliveryHttp: SupervisedDeliveryHttp = {
   admissionOwnsInitialCursor: true,
   async poll(input) {
-    const query = new URLSearchParams({ timeout: String(DEFAULT_ROOM_POLL_MAX_MS) });
+    const query = new URLSearchParams({ timeout: String(SUPERVISED_ROOM_POLL_TIMEOUT_MS) });
     if (input.afterMessageId) query.set("after", input.afterMessageId);
     const response = await fetch(`${input.apiUrl}/rooms/${supervisedRoomPath(input.roomId)}/messages/poll?${query}`, {
       headers: { authorization: `Bearer ${input.bearer}` },
-      signal: boundedCloudSignal(input.signal, DEFAULT_ROOM_POLL_MAX_MS + 20_000),
+      signal: boundedCloudSignal(input.signal, SUPERVISED_ROOM_POLL_TIMEOUT_MS + 20_000),
     });
     if (!response.ok) throw new Error(`Supervised room poll failed with HTTP ${response.status}.`);
     return await response.json() as SupervisedPollResponse;

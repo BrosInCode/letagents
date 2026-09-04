@@ -405,6 +405,34 @@ test("workplace reachability outlives the configured room long poll", () => {
   assert.equal(workplaceLivenessStaleAfterMs("invalid"), 210_000);
 });
 
+test("production room observation polls stay below common proxy idle cutoffs", async () => {
+  const previousFetch = globalThis.fetch;
+  try {
+    let requestedUrl = "";
+    globalThis.fetch = (async (url) => {
+      requestedUrl = String(url);
+      return new Response(JSON.stringify({ messages: [] }), {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      });
+    }) as typeof fetch;
+
+    await productionSupervisedDeliveryHttp.poll({
+      roomId: "github.com/example/repo",
+      apiUrl: "https://letagents.test",
+      bearer: "worker-secret",
+      afterMessageId: "msg_42",
+      signal: new AbortController().signal,
+    });
+
+    const request = new URL(requestedUrl);
+    assert.equal(request.searchParams.get("timeout"), "25000");
+    assert.equal(request.searchParams.get("after"), "msg_42");
+  } finally {
+    globalThis.fetch = previousFetch;
+  }
+});
+
 test("continuation repair resumes every uncommitted journal phase from the original missing conversation", () => {
   const inboxItemId = "inbox_1";
   const originalContinuation = "thread_missing";
