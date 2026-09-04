@@ -20,6 +20,7 @@ import {
   type ProviderActionTerminal,
 } from "./provider-action-port.js";
 import { deriveProviderConfigurationSnapshot } from "./provider-configuration.js";
+import { isCursorChildConnection } from "./provider-state-policy.js";
 import {
   lifecycleAuthorityModeForProvider,
   lifecycleAuthorityProviderSchema,
@@ -1148,11 +1149,17 @@ export class ProviderExecutionCoordinator {
     const grant = this.options.host.currentGrant(entry);
     const daemonGeneration = this.options.authority.currentDaemonGeneration();
     const controlEpoch = this.options.concurrency.currentControlEpoch(entry.id);
+    const cursorChildConnectionIsVolatile = entry.provider === "cursor"
+      && entry.delivery_mode === "daemon_inbox"
+      && isCursorChildConnection(ref?.provider_connection)
+      && isCursorChildConnection(handle.providerConnection)
+      && handle.pid === handle.providerConnection.pid;
     if (!ref || !grant || entry.work_attempt_id !== ref.work_attempt_id
       || this.options.streams.get(entry.id) !== handle
       || handle.workAttemptId !== ref.work_attempt_id
       || handle.providerContinuationId !== ref.provider_continuation_id
-      || !sameProviderActionConnectionSnapshot(ref.provider_connection, handle.providerConnection)) return false;
+      || (!cursorChildConnectionIsVolatile
+        && !sameProviderActionConnectionSnapshot(ref.provider_connection, handle.providerConnection))) return false;
     const binding = await this.options.bindings.get(entry.id);
     if (!binding || binding.entry_id !== entry.id || binding.room_id !== entry.room_id
       || binding.work_attempt_id !== ref.work_attempt_id
@@ -1177,8 +1184,12 @@ export class ProviderExecutionCoordinator {
       && current.provider_ref.execution_generation_id === ref.execution_generation_id
       && current.provider_ref.provider_continuation_id === ref.provider_continuation_id
       && sameProviderActionConnectionSnapshot(current.provider_ref.provider_connection, ref.provider_connection)
+      && handle.workAttemptId === ref.work_attempt_id
       && handle.providerContinuationId === ref.provider_continuation_id
-      && sameProviderActionConnectionSnapshot(handle.providerConnection, ref.provider_connection)
+      && (sameProviderActionConnectionSnapshot(handle.providerConnection, ref.provider_connection)
+        || (cursorChildConnectionIsVolatile
+          && isCursorChildConnection(handle.providerConnection)
+          && handle.pid === handle.providerConnection.pid))
       && this.options.streams.get(entry.id) === handle
       && this.options.host.currentGrant(current) === grant
       && this.options.concurrency.currentControlEpoch(entry.id) === controlEpoch);

@@ -18,7 +18,20 @@ export function isLiveCursorConnection(
 ): connection is Extract<ProviderActionConnectionRef, { kind: "cursor_cli" }> {
   return connection?.kind === "cursor_cli"
     && connection.pid !== null
+    && Number.isSafeInteger(connection.pid)
+    && connection.pid > 0
     && Boolean(connection.processIdentity?.trim());
+}
+
+/**
+ * Cursor's CLI child is born and retired per turn. Its PID and process birth
+ * are therefore not durable authority when the caller has already fenced the
+ * stable handle, continuation, work attempt, and execution generation.
+ */
+export function isCursorChildConnection(
+  connection: ProviderActionConnectionRef | null | undefined,
+): connection is Extract<ProviderActionConnectionRef, { kind: "cursor_cli" }> {
+  return isIdleCursorConnection(connection) || isLiveCursorConnection(connection);
 }
 
 export function isAllowedCursorProviderStateTransition(
