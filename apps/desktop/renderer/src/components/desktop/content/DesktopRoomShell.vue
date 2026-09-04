@@ -384,6 +384,7 @@ import {
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
+import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import { roomMentionCandidates } from "../../../domain/participants";
 import {
@@ -1550,23 +1551,12 @@ async function skipRoomDelivery(agentId: string, sourceMessageId: string): Promi
 
 async function revealRoomMessage(messageId: string): Promise<void> {
   if (messageId.startsWith("desktop-initial-message:")) {
-    const entry = supervisorEntries.value.find((candidate) =>
-      candidate.roomId === props.room.identifier
-      && messageId === `desktop-initial-message:${candidate.id}`);
-    if (!entry) {
+    const request = initialMessageInspectorRequest(messageId, props.room.identifier, supervisorEntries.value);
+    if (!request) {
       emit("message-reveal-unavailable", messageId);
       return;
     }
-    openAgentDetailRequest({
-      kind: "supervised",
-      supervisorEntryId: entry.id,
-      target: {
-        messageId: null, clientMessageId: null, messageSource: null,
-        actorLabel: entry.displayName, displayName: entry.displayName,
-        ownerAttribution: null, ideLabel: null, sender: entry.displayName,
-        agentKey: entry.agentKey ?? null, agentSessionId: entry.agentSessionId ?? null,
-      },
-    });
+    openAgentDetailRequest(request);
     agentInspectorInitialTab.value = "work";
     selectAgentInspectorWorkSource(messageId);
     return;

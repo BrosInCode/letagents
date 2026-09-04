@@ -9,7 +9,7 @@ import {
   roomAgentDeliveryGroup,
   roomAgentDeliverySummary,
 } from "../src/domain/room-agent-delivery";
-import { roomMessageRevealDestination } from "../src/domain/room-message-reveal";
+import { initialMessageInspectorRequest, roomMessageRevealDestination } from "../src/domain/room-message-reveal";
 import type {
   DesktopRoomAgentConnectionState,
   DesktopRoomAgentInboxState,
@@ -35,14 +35,14 @@ describe("durable room delivery UI contracts", () => {
     const initialTab = { value: "overview" };
     const revealedMessageId = { value: null as string | null };
     const reveal = new Function("supervisorEntries", "props", "emit", "openAgentDetailRequest",
-      "agentInspectorInitialTab", "selectAgentInspectorWorkSource", "revealMessage", "revealedMessageId", "nextTick",
+      "agentInspectorInitialTab", "selectAgentInspectorWorkSource", "revealMessage", "revealedMessageId", "nextTick", "initialMessageInspectorRequest",
       `${handler}; return revealRoomMessage;`)(
       { value: [{ id: "agent-a", roomId: "room-a", displayName: "CedarRidge" },
         { id: "agent-b", roomId: "room-b", displayName: "CedarRidge" }] },
       { room: { identifier: "room-a" } }, (_event: string, id: string) => unavailable.push(id),
       (request: { supervisorEntryId: string }) => opened.push(request), initialTab,
       (id: string) => selected.push(id), async (id: string) => { revealed.push(id); return true; },
-      revealedMessageId, async () => undefined,
+      revealedMessageId, async () => undefined, initialMessageInspectorRequest,
     ) as (id: string) => Promise<void>;
     await reveal("desktop-initial-message:agent-a");
     assert.equal(opened[0]?.supervisorEntryId, "agent-a");
