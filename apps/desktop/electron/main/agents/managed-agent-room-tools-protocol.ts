@@ -113,7 +113,7 @@ export function parseManagedAgentRoomToolRequest(
 }
 
 export function hasManagedAgentRoomToolRequestLine(value: string | null | undefined): boolean {
-  return nonEmptyLines(String(value ?? "")).some(isPotentialManagedAgentRoomToolRequestLine);
+  return String(value ?? "").includes(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX);
 }
 
 export function buildManagedAgentRoomToolResultPrompt(
@@ -170,25 +170,4 @@ function requestPayloadFromLine(line: string): string | null {
     return null;
   }
   return candidate.slice(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX.length).trim() || null;
-}
-
-function isPotentialManagedAgentRoomToolRequestLine(line: string): boolean {
-  const candidate = stripManagedAgentRoomToolRequestDecoration(line);
-  if (!candidate.startsWith(MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX)) {
-    return false;
-  }
-  const next = candidate[MANAGED_AGENT_ROOM_TOOL_REQUEST_PREFIX.length];
-  return !next || /\s/.test(next) || next === ":" || next === "{";
-}
-
-function stripManagedAgentRoomToolRequestDecoration(line: string): string {
-  let candidate = line.trim();
-  while (candidate.startsWith(">")) {
-    candidate = candidate.slice(1).trimStart();
-  }
-  const listPrefix = /^(?:[-*+]\s+|\d+[.)]\s+)/.exec(candidate);
-  if (listPrefix) {
-    candidate = candidate.slice(listPrefix[0].length).trimStart();
-  }
-  return candidate;
 }
