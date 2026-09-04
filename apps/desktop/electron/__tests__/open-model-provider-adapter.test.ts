@@ -1306,6 +1306,71 @@ test("Open Model persists an ambiguous startup birth and fences replacement unti
     pid: 6105,
     processIdentity: "opencode-birth-6105",
   });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /previous OpenCode startup process is still running/,
+  );
+  assert.equal(launches, 2, "connection-only crash recovery cannot launch beside the live runtime birth");
+});
+
+test("Open Model persists and fences a fresh pid whose birth is initially unverifiable", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-unknown-startup-birth-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const neverExits = new Promise<ProviderProcessExit>(() => {});
+  let launches = 0;
+  let firstIdentity: string | null | undefined;
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    ...harness.dependencies,
+    launch() {
+      launches += 1;
+      const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+      Object.assign(child, { pid: launches === 1 ? 6106 : 6107, unref() {} });
+      return { child, exited: neverExits };
+    },
+    getProcessIdentity(pid) {
+      return pid === 6106 ? firstIdentity : "opencode-birth-6107";
+    },
+    signalProcess() {
+      assert.fail("a pid without a captured birth identity must never be signaled");
+    },
+  };
+  const createAdapter = () => new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /OpenCode process identity could not be verified/,
+  );
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  assert.deepEqual(
+    (JSON.parse(await readFile(authPath, "utf8")) as { startupProcess?: unknown }).startupProcess,
+    {
+      url: "http://127.0.0.1:43821",
+      pid: 6106,
+      processIdentity: null,
+    },
+    "the sidecar durably records startup ambiguity before identity capture",
+  );
+
+  firstIdentity = "some-live-birth";
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /previous OpenCode startup process identity could not be verified/,
+  );
+  assert.equal(launches, 1, "a later identity cannot be attributed to the uncaptured startup birth");
+
+  firstIdentity = null;
+  const recovered = await createAdapter().spawn(spawnRequest());
+  assert.equal(launches, 2, "replacement waits until the ambiguous pid is conclusively absent");
+  assert.equal(recovered.pid, 6107);
 });
 
 test("fresh launch cleanup never signals a recycled or unverifiable pid", async () => {

@@ -174,7 +174,7 @@ type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
   startupProcess?: {
     url: string;
     pid: number;
-    processIdentity: string;
+    processIdentity: string | null;
   };
   connection?: {
     url: string;
@@ -444,19 +444,20 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
-    const startupProcess = control.startupProcess;
-    if (!startupProcess) return;
-    const currentIdentity = this.deps.getProcessIdentity(startupProcess.pid);
-    if (currentIdentity === null || (typeof currentIdentity === "string"
-      && !sameProcessBirthIdentity(currentIdentity, startupProcess.processIdentity))) return;
-    if (currentIdentity === undefined) {
+    for (const process of [control.startupProcess, control.connection]) {
+      if (!process) continue;
+      const currentIdentity = this.deps.getProcessIdentity(process.pid);
+      if (currentIdentity === null) continue;
+      if (!process.processIdentity || currentIdentity === undefined) {
+        throw new Error(
+          "The previous OpenCode startup process identity could not be verified; refusing to start a competing runtime.",
+        );
+      }
+      if (!sameProcessBirthIdentity(currentIdentity, process.processIdentity)) continue;
       throw new Error(
-        "The previous OpenCode startup process identity could not be verified; refusing to start a competing runtime.",
+        "The previous OpenCode startup process is still running; refusing to start a competing runtime.",
       );
     }
-    throw new Error(
-      "The previous OpenCode startup process is still running; refusing to start a competing runtime.",
-    );
   }
 
   async spawn(req: ProviderSpawnRequest): Promise<ProviderHandle> {
@@ -534,9 +535,13 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       throw new Error("OpenCode launch did not expose a process id.");
     }
     const pid = launch.child.pid;
+    await writeRuntimeControl(authPath, {
+      ...auth,
+      lifecycleAuthorityMode,
+      startupProcess: { url, pid, processIdentity: null },
+    });
     const identity = this.deps.getProcessIdentity(pid);
     if (!identity) {
-      await terminateFreshLaunch({ pid, exited: launch.exited }, this.deps, this.stopGraceMs);
       throw new Error("OpenCode process identity could not be verified.");
     }
     const client = new OpenCodeServerClient(url, auth, this.deps.fetch);
@@ -1707,8 +1712,9 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
       || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupProcess.url)
       || !Number.isSafeInteger(value.startupProcess.pid)
       || value.startupProcess.pid < 1
-      || typeof value.startupProcess.processIdentity !== "string"
-      || !value.startupProcess.processIdentity)) {
+      || (value.startupProcess.processIdentity !== null
+        && (typeof value.startupProcess.processIdentity !== "string"
+          || !value.startupProcess.processIdentity)))) {
     throw new Error("OpenCode server authentication sidecar contains invalid startup process evidence.");
   }
   if (value.connection !== undefined
