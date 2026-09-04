@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +18,10 @@ import {
   type ProviderSpawnRequest,
   type ProviderStreamEvent,
 } from "../main/agents/provider-adapter.js";
-import type { ProviderProcessExit } from "../main/agents/provider-evidence.js";
+import {
+  terminateFreshLaunch,
+  type ProviderProcessExit,
+} from "../main/agents/provider-evidence.js";
 import type { NativeExecutionObservation } from "../../shared/execution-protocol.js";
 import {
   OpenCodePermissionReplyError,
@@ -1194,6 +1198,406 @@ test("Open Model launch honors its startup budget even when a health request han
     "the launch budget stays authoritative despite the hung health request",
   );
   assert.ok(signals.length > 0, "the unhealthy launch is terminated");
+});
+
+test("Open Model terminates and retries a fresh server when session creation times out", async () => {
+  const harness = createHarness();
+  const baseFetch = harness.dependencies.fetch;
+  let exitLaunch!: (exit: ProviderProcessExit) => void;
+  const launchExited = new Promise<ProviderProcessExit>((resolve) => { exitLaunch = resolve; });
+  const signals: Array<NodeJS.Signals> = [];
+  let identityChecks = 0;
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot: await mkdtemp(join(tmpdir(), "letagents-opencode-session-timeout-")),
+    dependencies: {
+      ...harness.dependencies,
+      launch() {
+        const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+        Object.assign(child, { pid: 6103, unref() {} });
+        return { child, exited: launchExited };
+      },
+      getProcessIdentity: (pid) => {
+        identityChecks += 1;
+        return pid === 6103 ? "opencode-birth-6103" : null;
+      },
+      signalProcess(_pid, signal) {
+        signals.push(signal);
+        exitLaunch({ type: "exit", code: null, signal });
+      },
+      async fetch(input, init) {
+        const url = new URL(input);
+        if (url.pathname === "/session" && init?.method === "POST") {
+          throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+        }
+        return baseFetch(input, init);
+      },
+    },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  await assert.rejects(
+    adapter.spawn(spawnRequest()),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.equal(
+        (error as Error & { transientProviderStart?: boolean }).transientProviderStart,
+        true,
+        "a session-control timeout must be retried as a clean provider start",
+      );
+      return true;
+    },
+  );
+  assert.deepEqual(signals, ["SIGTERM"], "the ambiguous fresh runtime is fenced before retry");
+  assert.equal(identityChecks, 2, "cleanup re-verifies the captured process birth before signaling");
+});
+
+test("Open Model durably fences the crash window between detached launch and PID capture", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-startup-intent-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  let launches = 0;
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    ...harness.dependencies,
+    launch() {
+      launches += 1;
+      assert.deepEqual(
+        (JSON.parse(readFileSync(authPath, "utf8")) as { startupIntent?: unknown }).startupIntent,
+        { url: "http://127.0.0.1:43821" },
+        "the intent is durable before a detached process can start",
+      );
+      // Model a launcher that has detached the process but fails before it can
+      // return the PID needed for exact birth evidence.
+      throw new Error("simulated crash after detached OpenCode launch");
+    },
+  };
+  const createAdapter = () => new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /simulated crash after detached OpenCode launch/,
+  );
+  assert.deepEqual(
+    (JSON.parse(await readFile(authPath, "utf8")) as { startupIntent?: unknown }).startupIntent,
+    { url: "http://127.0.0.1:43821" },
+    "the unresolved launch remains durable without invented PID evidence",
+  );
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /startup intent has no durable process identity; refusing to start a competing runtime/,
+  );
+  assert.equal(launches, 1, "intent-only recovery must not launch a replacement");
+});
+
+test("Open Model clears its exact intent after a real no-pid launch failure", async (t) => {
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-no-pid-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const request = spawnRequest({ cwd: runtimeRoot });
+  const missingBinaryAdapter = new OpenModelProviderAdapter({
+    binary: join(runtimeRoot, "missing-opencode"),
+    runtimeRoot,
+    dependencies: { allocatePort: async () => 43821 },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(
+    missingBinaryAdapter.spawn(request),
+    /OpenCode launch did not expose a process id/,
+  );
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  const clearedControl = JSON.parse(await readFile(authPath, "utf8")) as {
+    startupIntent?: unknown;
+    startupProcess?: unknown;
+    connection?: unknown;
+  };
+  assert.equal(clearedControl.startupIntent, undefined);
+  assert.equal(clearedControl.startupProcess, undefined);
+  assert.equal(clearedControl.connection, undefined);
+
+  const harness = createHarness();
+  const recoveredAdapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: harness.dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+  const handle = await recoveredAdapter.spawn(request);
+  assert.equal(handle.pid, 6101);
+  assert.equal(harness.launches.length, 1, "a fixed environment can retry after conclusive no-pid failure");
+});
+
+test("Open Model serializes A/B startup ownership for the same runtime path", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-startup-owner-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  let launches = 0;
+  let markFirstLaunch!: () => void;
+  const firstLaunchStarted = new Promise<void>((resolve) => { markFirstLaunch = resolve; });
+  let settleFirstExit!: (exit: ProviderProcessExit) => void;
+  const firstExited = new Promise<ProviderProcessExit>((resolve) => { settleFirstExit = resolve; });
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: {
+      ...harness.dependencies,
+      launch(input) {
+        launches += 1;
+        if (launches === 1) {
+          const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+          Object.assign(child, { pid: undefined, unref() {} });
+          markFirstLaunch();
+          return { child, exited: firstExited };
+        }
+        return harness.dependencies.launch(input);
+      },
+    },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const launchA = adapter.spawn(spawnRequest());
+  await firstLaunchStarted;
+  const launchB = adapter.spawn(spawnRequest());
+  let launchBSettled = false;
+  void launchB.then(
+    () => { launchBSettled = true; },
+    () => { launchBSettled = true; },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(launches, 1, "B cannot enter launch while A still owns the runtime");
+  assert.equal(launchBSettled, false, "B remains queued behind A's complete cleanup");
+
+  settleFirstExit({ type: "error", error: new Error("missing binary") });
+  await assert.rejects(launchA, /OpenCode launch did not expose a process id/);
+  const recovered = await launchB;
+  assert.equal(recovered.pid, 6101);
+  assert.equal(launches, 2);
+  const connection = recovered.providerConnection;
+  assert.ok(connection?.kind === "opencode_server");
+  const control = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as {
+    startupIntent?: unknown;
+    connection?: { pid?: number; processIdentity?: string };
+  };
+  assert.equal(control.startupIntent, undefined);
+  assert.deepEqual(control.connection, {
+    url: "http://127.0.0.1:43821",
+    pid: 6101,
+    processIdentity: "opencode-birth-6101",
+  }, "A cannot clear or overwrite B's promoted connection");
+});
+
+test("Open Model persists an ambiguous startup birth and fences replacement until it is gone", async (t) => {
+  const harness = createHarness();
+  const baseFetch = harness.dependencies.fetch;
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-startup-fence-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const neverExits = new Promise<ProviderProcessExit>(() => {});
+  let launches = 0;
+  let priorIdentity: string | null | undefined = "opencode-birth-6104";
+  let failSessionCreation = true;
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    ...harness.dependencies,
+    launch() {
+      launches += 1;
+      const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+      Object.assign(child, { pid: launches === 1 ? 6104 : 6105, unref() {} });
+      return { child, exited: neverExits };
+    },
+    getProcessIdentity(pid) {
+      if (pid === 6104) return priorIdentity;
+      return pid === 6105 ? "opencode-birth-6105" : null;
+    },
+    signalProcess() {
+      assert.fail("an unverifiable or recycled startup birth must never be signaled");
+    },
+    async fetch(input, init) {
+      const url = new URL(input);
+      if (failSessionCreation && url.pathname === "/session" && init?.method === "POST") {
+        priorIdentity = undefined;
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+      return baseFetch(input, init);
+    },
+  };
+  const createAdapter = () => new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /process identity could not be verified during cleanup/,
+  );
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  assert.deepEqual(
+    (JSON.parse(await readFile(authPath, "utf8")) as { startupProcess?: unknown }).startupProcess,
+    {
+      url: "http://127.0.0.1:43821",
+      pid: 6104,
+      processIdentity: "opencode-birth-6104",
+    },
+    "the exact startup birth is durable before cleanup can become ambiguous",
+  );
+
+  const replacement = createAdapter();
+  await assert.rejects(
+    replacement.spawn(spawnRequest()),
+    /previous OpenCode startup process identity could not be verified/,
+  );
+  priorIdentity = "opencode-birth-6104";
+  await assert.rejects(
+    replacement.spawn(spawnRequest()),
+    /previous OpenCode startup process is still running/,
+  );
+  assert.equal(launches, 1, "explicit recovery cannot launch while the exact prior birth is possible");
+
+  priorIdentity = "recycled-birth-6104";
+  failSessionCreation = false;
+  const handle = await replacement.spawn(spawnRequest());
+  assert.equal(launches, 2, "a replacement may launch after the exact prior birth is conclusively gone");
+  assert.equal(handle.pid, 6105);
+  const recoveredControl = JSON.parse(await readFile(authPath, "utf8")) as {
+    startupProcess?: unknown;
+    connection?: { pid?: number; processIdentity?: string };
+  };
+  assert.equal(recoveredControl.startupProcess, undefined);
+  assert.deepEqual(recoveredControl.connection, {
+    url: "http://127.0.0.1:43821",
+    pid: 6105,
+    processIdentity: "opencode-birth-6105",
+  });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /previous OpenCode startup process is still running/,
+  );
+  assert.equal(launches, 2, "connection-only crash recovery cannot launch beside the live runtime birth");
+});
+
+test("Open Model persists and fences a fresh pid whose birth is initially unverifiable", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-unknown-startup-birth-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const neverExits = new Promise<ProviderProcessExit>(() => {});
+  let launches = 0;
+  let firstIdentity: string | null | undefined;
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    ...harness.dependencies,
+    launch() {
+      launches += 1;
+      const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+      Object.assign(child, { pid: launches === 1 ? 6106 : 6107, unref() {} });
+      return { child, exited: neverExits };
+    },
+    getProcessIdentity(pid) {
+      return pid === 6106 ? firstIdentity : "opencode-birth-6107";
+    },
+    signalProcess() {
+      assert.fail("a pid without a captured birth identity must never be signaled");
+    },
+  };
+  const createAdapter = () => new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /OpenCode process identity could not be verified/,
+  );
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  assert.deepEqual(
+    (JSON.parse(await readFile(authPath, "utf8")) as { startupProcess?: unknown }).startupProcess,
+    {
+      url: "http://127.0.0.1:43821",
+      pid: 6106,
+      processIdentity: null,
+    },
+    "the sidecar durably records startup ambiguity before identity capture",
+  );
+
+  firstIdentity = "some-live-birth";
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /previous OpenCode startup process identity could not be verified/,
+  );
+  assert.equal(launches, 1, "a later identity cannot be attributed to the uncaptured startup birth");
+
+  firstIdentity = null;
+  const recovered = await createAdapter().spawn(spawnRequest());
+  assert.equal(launches, 2, "replacement waits until the ambiguous pid is conclusively absent");
+  assert.equal(recovered.pid, 6107);
+});
+
+test("fresh launch cleanup never signals a recycled or unverifiable pid", async () => {
+  const exited = new Promise<ProviderProcessExit>(() => {});
+  const signals: Array<NodeJS.Signals> = [];
+  const dependencies = {
+    getProcessIdentity: () => "replacement-birth",
+    signalProcess: (_pid: number, signal: NodeJS.Signals) => { signals.push(signal); },
+  };
+
+  await terminateFreshLaunch(
+    { pid: 6103, exited, processIdentity: "opencode-birth-6103" },
+    dependencies,
+    1,
+  );
+  assert.deepEqual(signals, [], "a recycled pid is treated as the original process already being gone");
+
+  await assert.rejects(
+    terminateFreshLaunch(
+      { pid: 6103, exited, processIdentity: "opencode-birth-6103" },
+      { ...dependencies, getProcessIdentity: () => undefined },
+      1,
+    ),
+    /process identity could not be verified during cleanup/,
+  );
+  assert.deepEqual(signals, [], "an unverifiable pid remains ambiguous and is never signaled");
+});
+
+test("fresh launch cleanup rechecks process birth before kill escalation", async () => {
+  const exited = new Promise<ProviderProcessExit>(() => {});
+  const signals: Array<NodeJS.Signals> = [];
+  let identity = "opencode-birth-6103";
+  const keepAlive = setInterval(() => undefined, 25);
+
+  try {
+    await terminateFreshLaunch(
+      { pid: 6103, exited, processIdentity: "opencode-birth-6103" },
+      {
+        getProcessIdentity: () => identity,
+        signalProcess: (_pid, signal) => {
+          signals.push(signal);
+          if (signal === "SIGTERM") identity = "replacement-birth";
+        },
+      },
+      1,
+    );
+  } finally {
+    clearInterval(keepAlive);
+  }
+
+  assert.deepEqual(signals, ["SIGTERM"], "a recycled pid is not killed after the grace period");
 });
 
 test("Open Model bounded turns time out without polling transcript history", async () => {

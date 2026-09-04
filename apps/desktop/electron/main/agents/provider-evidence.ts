@@ -263,7 +263,7 @@ export function observeFencedExit<E extends ProviderProcessExit>(
  * real exit awaited BEFORE the launch error is thrown.
  */
 export async function terminateFreshLaunch(
-  launch: { pid: number | null; exited: Promise<unknown> },
+  launch: { pid: number | null; exited: Promise<unknown>; processIdentity?: string },
   deps: ProviderProcessEvidenceDeps,
   graceMs = DEFAULT_STOP_GRACE_MS,
 ): Promise<void> {
@@ -273,12 +273,34 @@ export async function terminateFreshLaunch(
   await Promise.resolve();
   if (alreadyExited) return;
 
+  if (launch.processIdentity) {
+    const identityBeforeTerm = deps.getProcessIdentity(launch.pid);
+    if (identityBeforeTerm === undefined) {
+      throw new Error("Fresh provider process identity could not be verified during cleanup.");
+    }
+    if (
+      identityBeforeTerm === null
+      || !sameProcessBirthIdentity(identityBeforeTerm, launch.processIdentity)
+    ) return;
+  }
+
   deps.signalProcess(launch.pid, "SIGTERM");
   const graceful = await Promise.race([
     launch.exited.then(() => true),
     delay(graceMs).then(() => false),
   ]);
   if (graceful) return;
+
+  if (launch.processIdentity) {
+    const identityBeforeKill = deps.getProcessIdentity(launch.pid);
+    if (identityBeforeKill === undefined) {
+      throw new Error("Fresh provider process identity could not be verified before escalation.");
+    }
+    if (
+      identityBeforeKill === null
+      || !sameProcessBirthIdentity(identityBeforeKill, launch.processIdentity)
+    ) return;
+  }
 
   deps.signalProcess(launch.pid, "SIGKILL");
   await launch.exited;
