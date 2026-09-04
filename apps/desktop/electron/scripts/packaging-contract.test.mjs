@@ -24,6 +24,8 @@ test("packaging preserves APNs plist behavior and rebrands every Electron helper
   assert.match(packager, /qualifier: " \(Plugin\)"/);
   assert.match(packager, /qualifier: " \(Renderer\)"/);
   assert.match(smoke, /"Contents", "MacOS", "LetAgents"/);
+  assert.match(smoke, /daemonTypes\.DAEMON_PROTOCOL_VERSION/);
+  assert.doesNotMatch(smoke, /const protocolVersion = \d+/);
 });
 
 test("packaging rejects a non-square application icon before generating the iconset", async () => {
