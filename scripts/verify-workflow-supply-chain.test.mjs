@@ -142,7 +142,8 @@ function workflowRunScripts(jobs) {
 }
 
 function containsDirectNpmAudit(script) {
-  return script
+  const conservativeScript = script.replace(/["'\\]/g, "");
+  return conservativeScript
     .split(/&&|\|\||[;|\n]/)
     .some((segment) => {
       const tokens = segment.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
@@ -241,6 +242,7 @@ jobs:
           echo prefix\\
           #; npm audit --audit-level=low
       - run: echo prefix\\ #; npm audit --audit-level=low
+      - run: npm a""udit --audit-level=low
       - name: Disabled audit step
         if: false
         continue-on-error: true
@@ -256,6 +258,7 @@ jobs:
     'echo "registry # diagnostic"; npm --prefix apps/desktop audit',
     "echo prefix\\\n#; npm audit --audit-level=low",
     "echo prefix\\ #; npm audit --audit-level=low",
+    'npm a""udit --audit-level=low',
     "node scripts/verify-dependency-advisories.mjs .",
   ]);
   assert.equal(scripts[2].startsWith("node scripts/verify-dependency-advisories.mjs"), false);
@@ -266,6 +269,7 @@ jobs:
     scripts[4],
     scripts[5],
     scripts[6],
+    scripts[7],
   ]);
   assert.throws(() => assertAuditStepsAreMandatory(jobs, "fixture"), /must not skip/);
 });
