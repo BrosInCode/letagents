@@ -1222,6 +1222,92 @@ test("Open Model terminates and retries a fresh server when session creation tim
   assert.equal(identityChecks, 2, "cleanup re-verifies the captured process birth before signaling");
 });
 
+test("Open Model persists an ambiguous startup birth and fences replacement until it is gone", async (t) => {
+  const harness = createHarness();
+  const baseFetch = harness.dependencies.fetch;
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-startup-fence-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const neverExits = new Promise<ProviderProcessExit>(() => {});
+  let launches = 0;
+  let priorIdentity: string | null | undefined = "opencode-birth-6104";
+  let failSessionCreation = true;
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    ...harness.dependencies,
+    launch() {
+      launches += 1;
+      const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+      Object.assign(child, { pid: launches === 1 ? 6104 : 6105, unref() {} });
+      return { child, exited: neverExits };
+    },
+    getProcessIdentity(pid) {
+      if (pid === 6104) return priorIdentity;
+      return pid === 6105 ? "opencode-birth-6105" : null;
+    },
+    signalProcess() {
+      assert.fail("an unverifiable or recycled startup birth must never be signaled");
+    },
+    async fetch(input, init) {
+      const url = new URL(input);
+      if (failSessionCreation && url.pathname === "/session" && init?.method === "POST") {
+        priorIdentity = undefined;
+        throw new DOMException("The operation was aborted due to timeout", "TimeoutError");
+      }
+      return baseFetch(input, init);
+    },
+  };
+  const createAdapter = () => new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+    stopGraceMs: 5,
+  });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /process identity could not be verified during cleanup/,
+  );
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  assert.deepEqual(
+    (JSON.parse(await readFile(authPath, "utf8")) as { startupProcess?: unknown }).startupProcess,
+    {
+      url: "http://127.0.0.1:43821",
+      pid: 6104,
+      processIdentity: "opencode-birth-6104",
+    },
+    "the exact startup birth is durable before cleanup can become ambiguous",
+  );
+
+  const replacement = createAdapter();
+  await assert.rejects(
+    replacement.spawn(spawnRequest()),
+    /previous OpenCode startup process identity could not be verified/,
+  );
+  priorIdentity = "opencode-birth-6104";
+  await assert.rejects(
+    replacement.spawn(spawnRequest()),
+    /previous OpenCode startup process is still running/,
+  );
+  assert.equal(launches, 1, "explicit recovery cannot launch while the exact prior birth is possible");
+
+  priorIdentity = "recycled-birth-6104";
+  failSessionCreation = false;
+  const handle = await replacement.spawn(spawnRequest());
+  assert.equal(launches, 2, "a replacement may launch after the exact prior birth is conclusively gone");
+  assert.equal(handle.pid, 6105);
+  const recoveredControl = JSON.parse(await readFile(authPath, "utf8")) as {
+    startupProcess?: unknown;
+    connection?: { pid?: number; processIdentity?: string };
+  };
+  assert.equal(recoveredControl.startupProcess, undefined);
+  assert.deepEqual(recoveredControl.connection, {
+    url: "http://127.0.0.1:43821",
+    pid: 6105,
+    processIdentity: "opencode-birth-6105",
+  });
+});
+
 test("fresh launch cleanup never signals a recycled or unverifiable pid", async () => {
   const exited = new Promise<ProviderProcessExit>(() => {});
   const signals: Array<NodeJS.Signals> = [];
