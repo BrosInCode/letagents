@@ -279,6 +279,7 @@ import { Check, CircleAlert, Copy, CornerUpLeft, LocateFixed, MessageSquare } fr
 import type { DesktopRoomMessage } from "../../../../../electron/ipc-types";
 import { desktopIpc } from "../../../ipc/index.js";
 import { useCopyIndicator } from "../../../composables/useCopyIndicator";
+import { safeUserVisibleErrorDetail } from "../../../domain/user-visible-error";
 import { resolveExternalWebHref } from "./desktop-chat-message/message-links";
 import DesktopGitHubEventCard from "./desktop-chat-message/DesktopGitHubEventCard.vue";
 import DesktopMessageAttachments from "./desktop-chat-message/DesktopMessageAttachments.vue";
@@ -383,7 +384,7 @@ function receiptNeedsAttention(state: string): boolean {
 }
 
 function receiptErrorLabel(error: string | null): string | null {
-  const normalized = error?.replace(/\s+/g, " ").trim();
+  const normalized = safeUserVisibleErrorDetail(error, "");
   if (!normalized) return null;
   return normalized.length > 180 ? `${normalized.slice(0, 179)}…` : normalized;
 }
