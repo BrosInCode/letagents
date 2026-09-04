@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -1220,6 +1221,51 @@ test("Open Model terminates and retries a fresh server when session creation tim
   );
   assert.deepEqual(signals, ["SIGTERM"], "the ambiguous fresh runtime is fenced before retry");
   assert.equal(identityChecks, 2, "cleanup re-verifies the captured process birth before signaling");
+});
+
+test("Open Model durably fences the crash window between detached launch and PID capture", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-startup-intent-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  const authPath = join(runtimeRoot, "work-attempt-open-model-1", "server-auth.json");
+  let launches = 0;
+  const dependencies: OpenModelProviderAdapterDependencies = {
+    ...harness.dependencies,
+    launch() {
+      launches += 1;
+      assert.deepEqual(
+        (JSON.parse(readFileSync(authPath, "utf8")) as { startupIntent?: unknown }).startupIntent,
+        { url: "http://127.0.0.1:43821" },
+        "the intent is durable before a detached process can start",
+      );
+      // Model a launcher that has detached the process but fails before it can
+      // return the PID needed for exact birth evidence.
+      throw new Error("simulated crash after detached OpenCode launch");
+    },
+  };
+  const createAdapter = () => new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies,
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /simulated crash after detached OpenCode launch/,
+  );
+  assert.deepEqual(
+    (JSON.parse(await readFile(authPath, "utf8")) as { startupIntent?: unknown }).startupIntent,
+    { url: "http://127.0.0.1:43821" },
+    "the unresolved launch remains durable without invented PID evidence",
+  );
+
+  await assert.rejects(
+    createAdapter().spawn(spawnRequest()),
+    /startup intent has no durable process identity; refusing to start a competing runtime/,
+  );
+  assert.equal(launches, 1, "intent-only recovery must not launch a replacement");
 });
 
 test("Open Model persists an ambiguous startup birth and fences replacement until it is gone", async (t) => {

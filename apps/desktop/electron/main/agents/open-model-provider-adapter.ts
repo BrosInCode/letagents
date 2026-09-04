@@ -171,6 +171,9 @@ function safeRuntimeId(value: string): string {
 
 type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
+  startupIntent?: {
+    url: string;
+  };
   startupProcess?: {
     url: string;
     pid: number;
@@ -444,6 +447,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
       throw error;
     }
+    if (control.startupIntent) {
+      throw new Error(
+        "The previous OpenCode startup intent has no durable process identity; refusing to start a competing runtime. An operator must verify the prior runtime is gone before clearing the sidecar.",
+      );
+    }
     for (const process of [control.startupProcess, control.connection]) {
       if (!process) continue;
       const currentIdentity = this.deps.getProcessIdentity(process.pid);
@@ -523,6 +531,11 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       XDG_CONFIG_HOME: join(runtimeRoot, "config"),
       XDG_STATE_HOME: join(runtimeRoot, "state"),
       BUN_INSTALL_CACHE_DIR: join(sharedCacheRoot, "bun-install"),
+    });
+    await writeRuntimeControl(authPath, {
+      ...auth,
+      lifecycleAuthorityMode,
+      startupIntent: { url },
     });
     const launch = this.deps.launch({
       binary: this.binary,
@@ -1706,6 +1719,12 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
     && value.lifecycleAuthorityMode !== "typed") {
     throw new Error("OpenCode server authentication sidecar contains an invalid lifecycle authority.");
   }
+  if (value.startupIntent !== undefined
+    && (typeof value.startupIntent !== "object"
+      || typeof value.startupIntent.url !== "string"
+      || !/^http:\/\/127\.0\.0\.1:\d+$/.test(value.startupIntent.url))) {
+    throw new Error("OpenCode server authentication sidecar contains an invalid startup intent.");
+  }
   if (value.startupProcess !== undefined
     && (typeof value.startupProcess !== "object"
       || typeof value.startupProcess.url !== "string"
@@ -1731,6 +1750,7 @@ async function readRuntimeControl(path: string): Promise<OpenCodeRuntimeControl>
     username: value.username,
     password: value.password,
     ...(value.lifecycleAuthorityMode ? { lifecycleAuthorityMode: value.lifecycleAuthorityMode } : {}),
+    ...(value.startupIntent ? { startupIntent: value.startupIntent } : {}),
     ...(value.startupProcess ? { startupProcess: value.startupProcess } : {}),
     ...(value.connection ? { connection: value.connection } : {}),
   };
