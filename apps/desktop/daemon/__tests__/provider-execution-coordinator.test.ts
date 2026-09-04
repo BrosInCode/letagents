@@ -1012,3 +1012,28 @@ test("attach terminal evidence is durable before the execution fence is released
   assert.deepEqual(ordered, ["terminal", "release"]);
   assert.equal(runtime.installed.length, 0);
 });
+
+test("Codex reattachment carries only the exact applied permission configuration", async () => {
+  for (const pendingEdit of [false, true]) {
+    const current = baseEntry();
+    current.permission_profile_id = "ask_before_write";
+    current.provider_ref = { work_attempt_id: "attempt-1", execution_generation_id: "generation-1",
+      provider_continuation_id: "continuation-1", provider_connection: returnedHandle.providerConnection };
+    let attachedPolicy: unknown = "not called";
+    const runtime = harness({ entry: current, provider: provider({ attach: async ref => {
+      attachedPolicy = ref.launchPolicy;
+      return null;
+    } }) });
+    runtime.executionGenerations.push({ execution_generation_id: "generation-1", work_attempt_id: "attempt-1",
+      started_at: "2026-08-26T00:00:00.000Z", actor: "daemon-provider", generation: 1, terminal: null });
+    if (pendingEdit) {
+      const { options } = runtime.coordinator as unknown as { options: ProviderExecutionCoordinatorOptions };
+      const original = options.store.getAgentConfiguration;
+      options.store.getAgentConfiguration = async id => ({ ...(await original(id))!, config_revision: 2 });
+    }
+    await runtime.coordinator.attachLiveProvider(current);
+    assert.deepEqual(attachedPolicy, pendingEdit ? undefined : {
+      approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false },
+    }, "an unapplied edit cannot overwrite the surviving runtime's permission authority");
+  }
+});

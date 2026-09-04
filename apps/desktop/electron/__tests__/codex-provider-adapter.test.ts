@@ -902,23 +902,66 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
 });
 
-test("Codex supervised ask-before-write maps to the native read-only thread boundary", async () => {
+test("Codex ask-before-write remains read-only at turn dispatch after reattachment", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-  await adapter.spawn(spawnRequest({
+  const launchPolicy = {
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "readOnly", networkAccess: false },
+  };
+  const first = await adapter.spawn(spawnRequest({
     deliveryMode: "daemon_inbox",
     permissionProfileId: "ask_before_write",
     configurationRevision: 1,
-    launchPolicy: {
-      approvalPolicy: "on-request",
-      sandboxPolicy: { type: "readOnly", networkAccess: false },
-    },
+    launchPolicy,
   }));
 
   const params = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
   assert.equal(params.approvalPolicy, "on-request");
   assert.equal(params.sandbox, "read-only");
   assert.equal(Object.hasOwn(params, "sandboxPolicy"), false);
+
+  const attachedAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await attachedAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection, launchPolicy });
+  assertProviderHandle(attached);
+  // Caller mutation and permissive user defaults cannot widen a captured launch contract.
+  launchPolicy.sandboxPolicy.type = "dangerFullAccess";
+  launchPolicy.approvalPolicy = "never";
+  for (const [runtime, handle, client] of [[adapter, first, harness.clients[0]!], [attachedAdapter, attached, harness.clients[1]!]] as const) {
+    await runtime.runRoomTurn(handle, { inboxItemId: "approval-retest", actionId: "approval-retest", sourceMessage: {}, activation: {} }, {
+      checkpointTurnStarted: async (turnId) => {
+        client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } });
+      },
+    });
+    const turn = requestByMethod(client, "turn/start").params as Record<string, unknown>;
+    assert.equal(turn.approvalPolicy, "on-request");
+    assert.deepEqual(turn.sandboxPolicy, { type: "readOnly", networkAccess: false });
+    assert.equal(Object.hasOwn(turn, "sandbox"), false, "turn/start uses its native sandboxPolicy shape");
+  }
+
+  const unknownAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const unknown = await unknownAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(unknown);
+  let dispatched = false;
+  await assert.rejects(unknownAdapter.runRoomTurn(unknown, {
+    inboxItemId: "unknown-policy", actionId: "unknown-policy", sourceMessage: {}, activation: {},
+  }, { beforeNativeDispatch: async () => { dispatched = true; } }), /exact applied permission policy/);
+  assert.equal(dispatched, false, "an unverified attach remains observable but cannot start work");
+  assert.equal(harness.clients[2]!.requests.some(request => request.method === "turn/start"), false);
+  const verified = await unknownAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
+  assert.equal(verified, unknown, "verified configuration binds to the already observed exact native process");
+  await unknownAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
+    launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } });
+  await unknownAdapter.controlTurn(unknown, "Continue after permission recovery.");
+  const recoveredTurn = requestByMethod(harness.clients[2]!, "turn/start").params as Record<string, unknown>;
+  assert.equal(recoveredTurn.approvalPolicy, "on-request");
+  assert.deepEqual(recoveredTurn.sandboxPolicy, { type: "readOnly", networkAccess: false },
+    "the first verified contract remains immutable across subsequent attaches");
 });
 
 test("Codex fresh spawn does not let a fatal placeholder resume probe block thread/start", async () => {
@@ -1862,7 +1905,7 @@ test("explicit custodial activation dispatches once after intent and checkpoints
     if (scenario === "recovered" || scenario === "recovered_session_mismatch") {
       adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
       const attached = await adapter.attach({ workAttemptId: handle.workAttemptId,
-        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! });
+        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection!, launchPolicy: request.launchPolicy });
       assertProviderHandle(attached);
       handle = attached;
     }

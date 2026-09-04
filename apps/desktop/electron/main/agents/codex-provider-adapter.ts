@@ -214,6 +214,18 @@ function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
   throw new Error("Codex launchPolicy contains an unsupported thread sandbox policy.");
 }
 
+function codexTurnPolicy(value: unknown): Readonly<Record<string, unknown>> {
+  normalizeLaunchPolicy(value);
+  const policy = value as Record<string, unknown>;
+  if (!["never", "on-request"].includes(String(policy.approvalPolicy)) || !recordValue(policy.sandboxPolicy)) {
+    throw new Error("Codex turn requires its exact applied approval and sandbox policy.");
+  }
+  return Object.freeze({
+    approvalPolicy: policy.approvalPolicy,
+    sandboxPolicy: Object.freeze(structuredClone(policy.sandboxPolicy as Record<string, unknown>)),
+  });
+}
+
 /**
  * Give the LetAgents MCP workplace the work-attempt cwd while preserving the
  * user's installed command, auth, and environment. No bearer or curated HOME
@@ -566,6 +578,7 @@ class CodexProviderHandle implements ProviderHandle {
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
     now: () => string,
+    private turnPolicy: Readonly<Record<string, unknown>> | null,
   ) {
     this.providerContinuationId = providerContinuationId;
     this.execution = new ProviderExecutionObserver(now);
@@ -575,6 +588,17 @@ class CodexProviderHandle implements ProviderHandle {
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
         providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined);
     });
+  }
+
+  requireTurnPolicy(): Readonly<Record<string, unknown>> {
+    if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
+    return this.turnPolicy;
+  }
+
+  bindTurnPolicy(policy: unknown): void {
+    // Observation-only recovery may attach before the daemon supplies the
+    // applied configuration. Bind once; later settings cannot change this birth.
+    if (this.turnPolicy === null && policy !== undefined) this.turnPolicy = codexTurnPolicy(policy);
   }
 
   replaceContinuation(providerContinuationId: string): void {
@@ -660,6 +684,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
+    ref = { ...ref, ...(ref.launchPolicy === undefined ? {} : { launchPolicy: codexTurnPolicy(ref.launchPolicy) }) };
     const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
     const handle = this.handles.get(ref.workAttemptId);
     if (
@@ -671,6 +696,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ) {
       if (handle) return null;
     } else {
+      handle.bindTurnPolicy(ref.launchPolicy);
       return handle;
     }
     const connection = ref.providerConnection;
@@ -684,7 +710,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
         || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
       ) return null;
-      return pending.promise;
+      const attached = await pending.promise;
+      if (attached instanceof CodexProviderHandle) attached.bindTurnPolicy(ref.launchPolicy);
+      return attached;
     }
     const attaching = this.attachRunning(ref, connection).finally(() => {
       if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
@@ -884,6 +912,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
     assertRuntimeAvailable();
     const text = correction?.trim() || null;
+    const turnPolicy = text ? handle.requireTurnPolicy() : null;
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
       includeTurns: true,
@@ -962,6 +991,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         assertRuntimeAvailable();
       }
       const turn = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text, text_elements: [] }],
       });
@@ -1071,6 +1101,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   async activateCustodialPolling(providerHandle: ProviderHandle, request: CustodialPollingActivationRequest,
     options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }> {
     const handle = this.requireHandle(providerHandle);
+    const turnPolicy = handle.requireTurnPolicy();
     const input = structuredClone(request);
     const receipt = input.launchReceipt;
     const launch = this.pollingLaunches.get(handle);
@@ -1111,6 +1142,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
       await options.beforeNativeDispatch();
       assertCurrent();
       const result = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: continuation, cwd: input.cwd,
         input: [{ type: "text", text: buildCustodialPollingPrompt(input) }],
       });
@@ -1193,6 +1225,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     if (!request.inboxItemId.trim() || !request.actionId.trim()) throw new Error("Bounded Codex room turn requires durable inbox and action ids.");
+    const turnPolicy = handle.requireTurnPolicy();
     const assertRuntimeAvailable = () => {
       if (handle.terminal || isCodexRuntimeUnavailable(handle.state)) {
         throw new Error("Codex runtime is unavailable; no bounded room turn can start.");
@@ -1205,6 +1238,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     let started: TurnStartResult;
     try {
       started = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
       });
@@ -1595,7 +1629,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex spawn requires the durable agent display name from the manifest.");
     }
 
-    const policy = normalizeLaunchPolicy(attestProviderSpawnPolicy("codex", req));
+    const attestedPolicy = attestProviderSpawnPolicy("codex", req);
+    const policy = normalizeLaunchPolicy(attestedPolicy);
+    const turnPolicy = codexTurnPolicy(attestedPolicy);
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,
@@ -1760,6 +1796,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         client,
         observedLaunch,
         this.deps.now,
+        turnPolicy,
       );
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
@@ -1810,6 +1847,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           : {}),
       });
       const turn = await client.request<TurnStartResult>("turn/start", {
+        ...handle.requireTurnPolicy(),
         threadId,
         cwd: req.cwd,
         input: [{ type: "text", text: prompt, text_elements: [] }],
@@ -1832,6 +1870,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ref: ProviderContinuationRef,
     connection: Extract<ProviderConnectionRef, { kind: "codex_app_server" }>,
   ): Promise<CodexProviderHandle | ProviderAttachTerminal | null> {
+    const turnPolicy = ref.launchPolicy === undefined ? null : codexTurnPolicy(ref.launchPolicy);
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
         "Codex app-server attach is ambiguous; refusing to launch a second writer: the durable endpoint has no verified process identity.",
@@ -1928,6 +1967,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         client,
         launch,
         this.deps.now,
+        turnPolicy,
       );
       handle.setLiveState(continuationMissing ? "idle" : "working");
       this.handles.set(ref.workAttemptId, handle);

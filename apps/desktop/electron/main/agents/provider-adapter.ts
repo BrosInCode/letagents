@@ -144,6 +144,8 @@ export interface ProviderTerminalPayload {
 export interface ProviderContinuationRef {
   workAttemptId: string;
   providerContinuationId: string;
+  /** Exact applied launch policy, supplied only when its durable revision is current. */
+  launchPolicy?: unknown;
   /** Frozen lifecycle authority for this exact native process birth. */
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   /** Durable native process endpoint used to reconnect without creating a second writer. */
