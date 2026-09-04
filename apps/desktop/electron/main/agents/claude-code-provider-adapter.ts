@@ -571,7 +571,17 @@ class ClaudeProviderHandle implements ProviderHandle {
     readonly child: ClaudeCliChild,
     readonly exitEvidence: Promise<ProviderProcessExit>,
     now: () => string,
-  ) { this.execution = new ProviderExecutionObserver(now); }
+  ) {
+    this.execution = new ProviderExecutionObserver(now);
+    child.onDisconnect(() => {
+      if (this.executionExitObserved) return;
+      this.execution.emit(
+        { domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
+        providerConnection.kind === "claude_cli" ? providerConnection.processIdentity ?? undefined : undefined,
+        providerConnection.kind === "claude_cli" ? providerConnection.pid ?? undefined : undefined,
+      );
+    });
+  }
 
   observedState(): ProviderObservedState {
     return this.state;

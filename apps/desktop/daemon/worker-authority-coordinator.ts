@@ -24,6 +24,7 @@ import {
   WorkerCredentialMintError,
 } from "./daemon-error-policy.js";
 import { sameProviderActionConnectionSnapshot, type ProviderActionHandle } from "./provider-action-port.js";
+import { isCursorChildConnection } from "./provider-state-policy.js";
 import { resolveReadyReachedAt } from "./provider-stream-policy.js";
 import type { SupervisedDeliveryHttp } from "./supervised-agent-delivery.js";
 import type { DaemonAgentConfiguration, DaemonManifestEntry, TaskWorkAttempt } from "./types.js";
@@ -514,7 +515,13 @@ export class WorkerAuthorityCoordinator {
     const providerContinuationId = entry.provider_ref.provider_continuation_id;
     const providerConnection = structuredClone(entry.provider_ref.provider_connection ?? null);
     const pid = handle?.pid;
+    const handleProviderConnection = structuredClone(handle?.providerConnection ?? null);
+    let confirmsDurableCursorBinding = false;
     const assertEntryCurrent = (current: DaemonManifestEntry | null | undefined): void => {
+      const currentHandleConnection = handle?.providerConnection ?? null;
+      const currentCursorChildMatchesHandle = confirmsDurableCursorBinding
+        && isCursorChildConnection(currentHandleConnection)
+        && handle?.pid === currentHandleConnection.pid;
       if (!current || current.room_id !== input.room_id
         || current.work_attempt_id !== input.work_attempt_id
         || current.provider_ref?.work_attempt_id !== input.work_attempt_id
@@ -529,8 +536,9 @@ export class WorkerAuthorityCoordinator {
         || this.options.runtime.currentHandle(entry.id) !== handle
         || (handle && (handle.workAttemptId !== input.work_attempt_id
           || handle.providerContinuationId !== providerContinuationId
-          || handle.pid !== pid
-          || !sameProviderActionConnectionSnapshot(handle.providerConnection, providerConnection)))) {
+          || (!currentCursorChildMatchesHandle && (handle.pid !== pid
+            || !sameProviderActionConnectionSnapshot(handle.providerConnection, handleProviderConnection)
+            || !sameProviderActionConnectionSnapshot(handleProviderConnection, providerConnection)))))) {
         throw new Error("Worker binding authority changed before readiness.");
       }
     };
@@ -557,6 +565,12 @@ export class WorkerAuthorityCoordinator {
       && (!input.credential_ref?.trim() || currentBinding.credential_ref === input.credential_ref.trim())
       && currentCredential === input.agent_session_token
       && currentBinding.api_url === normalizedApiUrl);
+    confirmsDurableCursorBinding = exactCurrentBinding
+      && entry.provider === "cursor"
+      && entry.delivery_mode === "daemon_inbox"
+      && isCursorChildConnection(providerConnection)
+      && isCursorChildConnection(handleProviderConnection)
+      && pid === handleProviderConnection.pid;
     await assertAuthorityCurrent();
     const binding = exactCurrentBinding && currentBinding
       ? currentBinding

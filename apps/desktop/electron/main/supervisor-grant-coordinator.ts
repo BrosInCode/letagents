@@ -7,12 +7,14 @@ import {
   getOrProvisionDesktopSupervisorGrantForAgent,
   readDesktopSupervisorGrantAgentKeyForEntry,
   readDesktopSupervisorGrantForAgent,
+  readDesktopSupervisorGrantRevocationAttestationForEntry,
   replaceDesktopSupervisorGrantForAgent,
   revokeDesktopSupervisorGrantForEntry,
   revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
   type DesktopSupervisorGrantAuthority,
   type DesktopSupervisorGrantMetadata,
 } from "./supervisor-grant.js";
+import { desktopRetirementDurablyCompleted } from "./supervisor-retirement-operations.js";
 import { onSupervisorDaemonGeneration, supervisorDaemonClient, type SupervisorDaemonClient } from "./supervisor-daemon.js";
 import { getJoinedRoomInfo } from "./rooms/room-info.js";
 import {
@@ -74,6 +76,7 @@ export type SupervisorGrantCoordinatorOperations = {
   provision: typeof getOrProvisionDesktopSupervisorGrantForAgent;
   readEntryAgentKey: typeof readDesktopSupervisorGrantAgentKeyForEntry;
   readGrant: typeof readDesktopSupervisorGrantForAgent;
+  readRevocationAttestation: typeof readDesktopSupervisorGrantRevocationAttestationForEntry;
   replaceGrant: typeof replaceDesktopSupervisorGrantForAgent;
   revokeEntry: typeof revokeDesktopSupervisorGrantForEntry;
   revokeEntryWithoutWorkerSession: typeof revokeDesktopSupervisorGrantForEntryWithoutWorkerSession;
@@ -84,6 +87,7 @@ const defaultOperations: SupervisorGrantCoordinatorOperations = {
   provision: getOrProvisionDesktopSupervisorGrantForAgent,
   readEntryAgentKey: readDesktopSupervisorGrantAgentKeyForEntry,
   readGrant: readDesktopSupervisorGrantForAgent,
+  readRevocationAttestation: readDesktopSupervisorGrantRevocationAttestationForEntry,
   replaceGrant: replaceDesktopSupervisorGrantForAgent,
   revokeEntry: revokeDesktopSupervisorGrantForEntry,
   revokeEntryWithoutWorkerSession: revokeDesktopSupervisorGrantForEntryWithoutWorkerSession,
@@ -363,7 +367,7 @@ export class SupervisorGrantCoordinator {
       .filter((entry) => requiresSupervisorGrant(entry)
         && (entry.desiredState === "running" || entry.desiredState === "stopped"))
       .map((entry) => entry.desiredState === "stopped"
-        ? this.retireStoppedEntry(entry.id, status.generation)
+        ? this.retireStoppedEntry(entry, status.generation)
         : this.reconcileEntry(
             entry,
             status.generation,
@@ -398,11 +402,13 @@ export class SupervisorGrantCoordinator {
   }
 
   /** Startup cleanup must not retire an entry resumed after its stale list snapshot. */
-  private async retireStoppedEntry(entryId: string, daemonGeneration: number): Promise<void> {
-    await this.serialize(entryId, async () => {
-      const current = (await this.daemon.list(null)).find((entry) => entry.id === entryId);
+  private async retireStoppedEntry(entry: DesktopSupervisorManifestEntry, daemonGeneration: number): Promise<void> {
+    await this.serialize(entry.id, async () => {
+      const attestation = await this.operations.readRevocationAttestation(entry.id);
+      if (attestation !== null && desktopRetirementDurablyCompleted(entry, true)) return;
+      const current = (await this.daemon.list(null)).find((candidate) => candidate.id === entry.id);
       if (!current || current.desiredState !== "stopped") return;
-      await this.retireEntryWithinEntryTail(entryId, daemonGeneration);
+      await this.retireEntryWithinEntryTail(entry.id, daemonGeneration);
     });
   }
 

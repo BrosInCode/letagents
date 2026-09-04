@@ -91,14 +91,17 @@ export function resolveProviderConfigurationSnapshot(input: ConfigurationInput):
     if (input.reasoningEffort !== null) {
       throw new Error("Open Model reasoning effort is controlled by the selected endpoint and model.");
     }
-    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access"]);
-    requirePolicyMatch(policy, "permission", { "*": "allow" }, provider);
+    const profile = resolveProfile(provider, input.permissionProfileId, "full_access", ["full_access", "ask_before_write"]);
+    const permission = profile === "ask_before_write"
+      ? { "*": "allow", edit: "ask", bash: "ask" }
+      : { "*": "allow" };
+    requirePolicyMatch(policy, "permission", permission, provider);
     return {
       provider,
       model: normalizedModel,
       reasoningEffort: null,
       permissionProfileId: profile,
-      launchPolicy: { ...policy, permission: { "*": "allow" } },
+      launchPolicy: { ...policy, permission },
       configurationRevision: input.configurationRevision,
     };
   }

@@ -515,7 +515,12 @@ export class SupervisedAgentInboxStore {
       }
       if (next === "acknowledged_failed") {
         this.assertCurrentHead(database, item);
-        if (Object.keys(patch).length || !nativeFailure) {
+        const patchKeys = Object.keys(patch);
+        const hasOnlyFailureDetail = patchKeys.length === 1
+          && patchKeys[0] === "last_error"
+          && typeof patch.last_error === "string"
+          && patch.last_error.trim().length > 0;
+        if ((patchKeys.length > 0 && !hasOnlyFailureDetail) || !nativeFailure) {
           throw new Error("Failed settlement requires unchanged exact native terminal evidence.");
         }
       }
@@ -773,6 +778,7 @@ export class SupervisedAgentInboxStore {
     outcome: "reply" | "no_reply" | "unreadable" | "failed" | "interrupted";
     text: string | null;
     evidence: "transcript" | "stream" | "none";
+    failure_detail?: string | null;
     terminal_evidence: unknown;
   }): Promise<SupervisedInboxItem> {
     return this.exclusive(async (database) => this.transaction(database, () => {
@@ -792,12 +798,17 @@ export class SupervisedAgentInboxStore {
         throw new Error("Normalized terminal evidence does not match the durable provider-turn authority binding.");
       }
       const nativeFailure = input.outcome === "failed" || input.outcome === "interrupted";
+      if (!nativeFailure && input.failure_detail) {
+        throw new Error("Only an exact native terminal failure may retain a failure detail.");
+      }
       if (nativeFailure) {
         const evidence = input.terminal_evidence as Record<string, unknown> | null;
+        const failureDetail = input.failure_detail?.trim() || undefined;
         if (input.text !== null || input.evidence === "none" || !evidence
           || evidence.outcome !== input.outcome || evidence.turnId !== input.provider_turn_id
           || evidence.text !== null || evidence.evidence !== input.evidence
-          || evidence.providerContinuationId !== binding.provider_continuation_id) {
+          || evidence.providerContinuationId !== binding.provider_continuation_id
+          || evidence.error !== failureDetail) {
           throw new Error("Native terminal failure requires exact continuation, turn, and terminal evidence.");
         }
       }
@@ -824,7 +835,10 @@ export class SupervisedAgentInboxStore {
         ON CONFLICT(inbox_item_id) DO UPDATE SET outcome=excluded.outcome,normalized_text=excluded.normalized_text,evidence_source=excluded.evidence_source,terminal_evidence_json=excluded.terminal_evidence_json,updated_at=excluded.updated_at`),
         input.inbox_item_id, input.agent_id, input.execution_generation_id, input.provider_turn_id, input.outcome, input.text, input.evidence, JSON.stringify(input.terminal_evidence), timestamp, timestamp);
       const outcome = JSON.stringify({ kind: input.outcome, text: input.text, evidence: input.evidence });
-      run(database.prepare("UPDATE supervised_agent_inbox SET outcome=?,updated_at=? WHERE inbox_item_id=?"), outcome, timestamp, input.inbox_item_id);
+      const failureDetail = nativeFailure ? input.failure_detail?.trim() || null : item.last_error;
+      run(database.prepare(`UPDATE supervised_agent_inbox
+        SET outcome=?,last_error=?,updated_at=? WHERE inbox_item_id=?`),
+        outcome, failureDetail, timestamp, input.inbox_item_id);
       this.recordEvent(database, input.inbox_item_id, `turn_finished:${item.attempt_count}:${input.provider_turn_id}`, "turn_finished", timestamp, input.evidence);
       if (input.outcome === "unreadable") {
         this.recordEvent(database, input.inbox_item_id, `result_unreadable:${input.provider_turn_id}`, "result_unreadable", timestamp, "Re-reading the same completed provider turn.");
@@ -1649,7 +1663,7 @@ export class SupervisedAgentInboxStore {
       const timestamp = this.now();
       if (readDurableNativeFailure(database, inboxItemId)) {
         run(database.prepare(`UPDATE supervised_agent_inbox SET state='acknowledged_failed',
-          last_error=NULL,failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
+          failure_code=NULL,blocked_by_inbox_item_id=NULL,next_attempt_at_ms=NULL,updated_at=?,acknowledged_at=? WHERE inbox_item_id=?`), timestamp, timestamp, inboxItemId);
         this.settleTerminalItem(database, item, timestamp);
         this.pruneAgentHistory(database, item.agent_id);
         return rowToItem(database.prepare("SELECT * FROM supervised_agent_inbox WHERE inbox_item_id=?").get(inboxItemId) as Row);
@@ -1704,7 +1718,7 @@ export class SupervisedAgentInboxStore {
         let error: string | null = item.last_error;
         if (readDurableNativeFailure(database, item.inbox_item_id)) {
           next = "acknowledged_failed";
-          error = null;
+          error = item.last_error;
         } else if (item.state === "result_recovery") {
           next = "result_recovery";
           error = "Re-reading the same completed provider turn; no new model turn will start.";

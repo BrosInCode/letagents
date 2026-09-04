@@ -39,6 +39,7 @@ export type NativeProviderAdapter = {
   replyPermission?(handle: NativeHandle, request: CodexNativePermissionRequest | OpenCodeNativePermissionRequest, reply: "once" | "reject", options?: ProviderPermissionDispatchOptions): Promise<{ outcome: "sent"; scope: "request" } | { outcome: "processed"; nativeScope: "request" | "session_pending" }>;
   correlatePermissionTurn?(handle: NativeHandle, request: OpenCodeNativePermissionRequest): Promise<{ outcome: "correlation_unproven" } | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string }>;
   inspectPermissionFileChanges?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<readonly CodexPermissionFileChange[] | null>;
+  inspectPermissionProfile?(handle: NativeHandle, request: CodexNativePermissionRequest): Promise<Record<string, unknown> | null>;
   activateCustodialPolling?(handle: NativeHandle, request: CustodialPollingActivationRequest, options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }>;
   inspectCustodialPollingActivation?(handle: NativeHandle, providerTurnId: string): Promise<{ state: "active" | "unknown" } | { state: "terminal"; outcome: "completed" | "failed" | "interrupted" }>;
   onExecution?(handle: NativeHandle, listener: (event: NativeExecutionObservation) => void): NativeExecutionSubscription;
@@ -248,11 +249,18 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       if (request.provider === "codex") {
         const params = request.native.params as Record<string, unknown> | null;
         const kind = request.native.method === "item/commandExecution/requestApproval" ? "command"
-          : request.native.method === "item/fileChange/requestApproval" ? "file_change" : null;
+          : request.native.method === "item/fileChange/requestApproval" ? "file_change"
+            : request.native.method === "item/permissions/requestApproval" ? "network" : null;
         if (!kind || !params || Array.isArray(params) || params.threadId !== continuation
           || typeof params.turnId !== "string" || !params.turnId.trim() || params.turnId.length > 512
           || typeof params.itemId !== "string" || !params.itemId.trim() || params.itemId.length > 512
           || !Number.isSafeInteger(params.startedAtMs) || (params.startedAtMs as number) < 0) return { outcome: "correlation_unproven" };
+        if (kind === "network") {
+          const adapter = await this.adapter(remembered.provider);
+          if (!current() || !adapter.inspectPermissionProfile) return { outcome: "correlation_unproven" };
+          const profile = await adapter.inspectPermissionProfile(remembered.handle, request.native);
+          if (!current() || !profile) return { outcome: "correlation_unproven" };
+        }
         if (kind === "file_change") {
           const adapter = await this.adapter(remembered.provider);
           if (!current() || !adapter.inspectPermissionFileChanges) return { outcome: "correlation_unproven" };

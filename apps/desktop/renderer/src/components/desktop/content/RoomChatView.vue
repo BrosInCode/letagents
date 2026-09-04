@@ -260,7 +260,7 @@ const props = defineProps<{
   threadMessages: DesktopRoomMessage[];
   messageNamespace: string;
   localAgentWork: ManagedAgentWorkIndicator[];
-  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
+  deliveryReceiptsByMessage: Record<string, Array<{ agentId: string; agentName: string; state: string; blockedByMessageId: string | null; error: string | null; failureCode: string | null; terminalReason: string | null; attemptCount: number; providerTurnId: string | null }> >;
   deliveryRecoveryAvailable?: boolean;
   continuationRepairAvailable?: boolean;
   roomDeliverySkipAvailable?: boolean;

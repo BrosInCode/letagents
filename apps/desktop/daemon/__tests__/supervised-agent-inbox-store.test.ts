@@ -1572,9 +1572,11 @@ test("exact native failures settle without replay and preserve terminal winners 
           messages: ["1", "2"].map((source_message_id) => ({ source_message_id, source_message: {}, activation: {} })) });
         await store.claimHead("native");
         await store.checkpointTurnStarted(item!.inbox_item_id, "native-turn", TEST_PROVIDER_TURN_AUTHORITY);
-        const proof = { turnId: "native-turn", providerContinuationId: "continuation", outcome: kind, text: null, evidence: "stream" };
+        const failureDetail = "Provider rejected this turn.";
+        const proof = { turnId: "native-turn", providerContinuationId: "continuation", outcome: kind, text: null, evidence: "stream", error: failureDetail };
         const checkpoint = { inbox_item_id: item!.inbox_item_id, agent_id: "native", execution_generation_id: "generation",
-          provider_turn_id: "native-turn", outcome: kind, text: null, evidence: "stream" as const, terminal_evidence: proof };
+          provider_turn_id: "native-turn", outcome: kind, text: null, evidence: "stream" as const,
+          failure_detail: failureDetail, terminal_evidence: proof };
         await assert.rejects(() => store.transition(item!.inbox_item_id, "acknowledged_failed"), /exact native terminal/);
         await assert.rejects(() => store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind })), /exact terminal checkpoint/);
         await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, terminal_evidence: { ...proof, providerContinuationId: "wrong" } }), /exact continuation/);
@@ -1582,7 +1584,7 @@ test("exact native failures settle without replay and preserve terminal winners 
         await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, execution_generation_id: "other-generation" }), /authority binding/);
         if (winner === "reply" || winner === "no_reply") {
           await store.checkpointNormalizedTerminal({ ...checkpoint, outcome: winner,
-            text: winner === "reply" ? "saved reply" : null, terminal_evidence: {} });
+            text: winner === "reply" ? "saved reply" : null, failure_detail: null, terminal_evidence: {} });
           await store.checkpointNormalizedTerminal(checkpoint);
           assert.equal(await store.nativeFailure(item!.inbox_item_id), null);
           assert.equal(JSON.parse((await store.get(item!.inbox_item_id))!.outcome!).kind, winner);
@@ -1590,17 +1592,24 @@ test("exact native failures settle without replay and preserve terminal winners 
         }
         await store.checkpointNormalizedTerminal(checkpoint);
         await store.checkpointNormalizedTerminal(checkpoint);
-        await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, outcome: "reply", text: "late reply" }), /already accepted/);
+        await assert.rejects(() => store.checkpointNormalizedTerminal({ ...checkpoint, outcome: "reply", text: "late reply", failure_detail: null }), /already accepted/);
         await assert.rejects(() => store.transition(item!.inbox_item_id, "awaiting_result", { outcome: JSON.stringify({ kind: "reply", text: "spoof" }) }), /overwritten/);
         await assert.rejects(() => store.checkpointTerminalOutcome(item!.inbox_item_id, JSON.stringify({ kind: "no_reply" })), /overwritten/);
+        await assert.rejects(() => store.transition(item!.inbox_item_id, "acknowledged_failed", { last_error: null }), /unchanged exact native terminal/);
         if (winner === "stop") {
-          assert.equal((await store.cancelInterruptedTurn(item!.inbox_item_id))?.state, "acknowledged_failed");
+          const settled = await store.cancelInterruptedTurn(item!.inbox_item_id);
+          assert.equal(settled?.state, "acknowledged_failed");
+          assert.equal(settled?.last_error, failureDetail);
         } else if (winner === "transition") {
-          assert.equal((await store.transition(item!.inbox_item_id, "acknowledged_failed"))?.state, "acknowledged_failed");
+          const settled = await store.transition(item!.inbox_item_id, "acknowledged_failed", { last_error: "Provider rejected this turn." });
+          assert.equal(settled.state, "acknowledged_failed");
+          assert.equal(settled.last_error, "Provider rejected this turn.");
         }
         await store.close(); store = new SupervisedAgentInboxStore(env.database);
         await store.normalizeStartupRecovery("native");
-        assert.equal((await store.get(item!.inbox_item_id))?.state, "acknowledged_failed");
+        const recoveredFailure = await store.get(item!.inbox_item_id);
+        assert.equal(recoveredFailure?.state, "acknowledged_failed");
+        assert.equal(recoveredFailure?.last_error, failureDetail);
         assert.equal(await store.nativeFailure(item!.inbox_item_id), kind);
         assert.equal((await store.head("native"))?.inbox_item_id, tail!.inbox_item_id);
         assert.equal((await store.cursor("native"))?.last_observed_message_id, "2");

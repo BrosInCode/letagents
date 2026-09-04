@@ -19,7 +19,7 @@ export type CodexPermissionFileChange = {
   diff: string;
 };
 export type ProviderPermissionCorrelation = { outcome: "correlation_unproven" }
-  | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string; kind: "command" | "file_change";
+  | { outcome: "correlated"; providerContinuationId: string; providerTurnId: string; kind: "command" | "file_change" | "network";
     fileChanges?: readonly CodexPermissionFileChange[] };
 export type ProviderPermissionDispatchOptions = { beforeNativeDispatch: () => Promise<void>; assertNativeDispatch?: () => void;
   expectedFileChanges?: readonly CodexPermissionFileChange[] };

@@ -358,9 +358,19 @@ export class OpenCodeRuntimeGoneError extends Error {
 
 class OpenCodeTerminalTurnError extends Error {
   // A provider-declared terminal error is authoritative evidence that this
-  // exact turn produced no publishable answer. Block it without rerunning the
-  // model; a human can correct the provider account/model and send new work.
+  // exact turn produced no publishable answer. The exact result is checkpointed
+  // before this error leaves the adapter so delivery can settle without replay.
   readonly roomTurnRecoveryOutcome = "terminal_failure" as const;
+
+  constructor(
+    message: string,
+    readonly terminalResult: (Extract<ProviderRoomTurnResult, { providerContinuationId: string }> & {
+      outcome: "failed";
+    }) | null,
+  ) {
+    super(message);
+    this.name = "OpenCodeTerminalTurnError";
+  }
 }
 
 function safeProviderErrorMessage(message: OpenCodeMessage | null): string | null {
@@ -544,6 +554,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       cwd: req.cwd,
       mcpCommand,
       mcpEnvironment,
+      permissionProfileId: req.permissionProfileId === "ask_before_write"
+        ? "ask_before_write"
+        : "full_access",
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;
@@ -841,6 +854,17 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.activeRoomTurnId = null;
       return result;
     } catch (error) {
+      if (error instanceof OpenCodeTerminalTurnError && error.terminalResult) {
+        try {
+          await options.checkpointTerminalResult?.(error.terminalResult);
+        } finally {
+          if (handle.activeRoomTurnId === turnId) {
+            handle.activeRoomTurnId = null;
+            handle.setState("idle");
+          }
+        }
+        throw error;
+      }
       if (error instanceof OpenCodeBoundedTurnError) {
         await this.abortBoundedTurn(handle, turnId, error);
       } else if (handle.activeRoomTurnId === turnId) {
@@ -869,6 +893,17 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       handle.setState("idle");
       return result;
     } catch (error) {
+      if (error instanceof OpenCodeTerminalTurnError && error.terminalResult) {
+        try {
+          await options.checkpointTerminalResult?.(error.terminalResult);
+        } finally {
+          if (handle.activeRoomTurnId === request.providerTurnId) {
+            handle.activeRoomTurnId = null;
+            handle.setState("idle");
+          }
+        }
+        throw error;
+      }
       if (error instanceof OpenCodeBoundedTurnError) {
         await this.abortBoundedTurn(handle, request.providerTurnId, error);
       } else if (handle.activeRoomTurnId === request.providerTurnId) {
@@ -1408,8 +1443,16 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       const exactSession = finalInfo?.sessionID === undefined || finalInfo.sessionID === handle.providerContinuationId;
       const terminalError = safeProviderErrorMessage(finalAssistant);
       if (terminalError) {
-        if (exactSession) this.emitTurnTerminal(handle, turnId, "failed");
-        throw new OpenCodeTerminalTurnError(terminalError);
+        const terminalResult = exactSession ? {
+          turnId,
+          providerContinuationId: handle.providerContinuationId,
+          outcome: "failed" as const,
+          text: null,
+          evidence: "transcript" as const,
+          error: terminalError,
+        } : null;
+        if (terminalResult) this.emitTurnTerminal(handle, turnId, "failed");
+        throw new OpenCodeTerminalTurnError(terminalError, terminalResult);
       }
       const result = finalAssistant && messageCompleted(finalAssistant) ? classifyTurn(turnId, messageText(finalAssistant)) : null;
       return {

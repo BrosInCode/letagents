@@ -47,6 +47,7 @@ function storageOperations(): SupervisorGrantCoordinatorOperations {
       getOrProvisionDesktopSupervisorGrantForAgent(input, { ...options, storage: keychain }),
     readEntryAgentKey: readDesktopSupervisorGrantAgentKeyForEntry,
     readGrant: async (agentKey) => readDesktopSupervisorGrantForAgent(agentKey, { storage: keychain }),
+    readRevocationAttestation: async () => null,
     replaceGrant: async (input) => replaceDesktopSupervisorGrantForAgent(input, { storage: keychain }),
     revokeEntry: async (entryId, agentSessionId, options) =>
       revokeDesktopSupervisorGrantForEntry(entryId, agentSessionId, { ...options, storage: keychain }),
@@ -113,6 +114,7 @@ function harness(overrides: Partial<SupervisorGrantCoordinatorOperations> = {}) 
       const stored = grants.get(key);
       return stored ? { ...stored, authority: stored.authority ?? null } : null;
     },
+    async readRevocationAttestation() { return null; },
     async replaceGrant(input) {
       events.push(`replace:${input.lastInstalledDaemonGeneration ?? "none"}`);
       grants.set(input.agentKey, { metadata: input.metadata, authority: input.authority ?? null, token: input.token, entryId: input.entryId!, lastInstalledDaemonGeneration: input.lastInstalledDaemonGeneration ?? null });
@@ -516,8 +518,23 @@ test("custodial polling stays unactivated when secure grant storage is unavailab
   assert.deepEqual(h.bootstrapMessages, []);
 });
 
-test("reconciliation revokes a stopped entry instead of reinstalling ghost room authority", async () => {
-  const h = harness();
+test("reconciliation skips a stopped entry whose local and remote retirement are durably complete", async () => {
+  const h = harness({ readRevocationAttestation: async () => "exact" });
+  const stopped = {
+    ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const,
+    agentSessionId: null, agentSessionBindingState: "none" as const, providerPid: null,
+  };
+  let listCalls = 0;
+  h.daemon.list = async () => { listCalls += 1; return [stopped]; };
+
+  await h.coordinator.reconcileDesiredRunning();
+
+  assert.equal(listCalls, 1, "durable completion avoids a per-entry global manifest read");
+  assert.equal(h.events.some((event) => event.startsWith("retire:") || event.startsWith("revoke:")), false);
+});
+
+test("durable revocation does not skip a stopped entry with a retained active binding", async () => {
+  const h = harness({ readRevocationAttestation: async () => "exact" });
   const stopped = { ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const, providerPid: null };
   h.grants.set("owner/supervised_launch_1234567", { metadata: metadata("owner/supervised_launch_1234567"), token: "secret_same", entryId: "supervised_launch_1234567", lastInstalledDaemonGeneration: 7 });
   const daemon = { ...h.daemon, async list() { h.events.push("list"); return [stopped]; } };
@@ -528,7 +545,48 @@ test("reconciliation revokes a stopped entry instead of reinstalling ghost room 
     "revoke:supervised_launch_1234567:session_1",
     "retire:supervised_launch_1234567:7:session_1",
   ]);
+  assert.equal(h.events.filter((event) => event === "list").length, 2, "incomplete retirement retains the fresh safety read");
   assert.equal(stopped.desiredState, "stopped", "retirement cleanup does not revive a stopped provider");
+});
+
+test("missing durable revocation keeps stopped binding-free entries on the recovery path", async () => {
+  const h = harness({ readRevocationAttestation: async () => null });
+  const stopped = {
+    ...entry(), desiredState: "stopped" as const, observedState: "stopped" as const,
+    agentSessionId: null, agentSessionBindingState: "none" as const, providerPid: null,
+  };
+  const daemon = { ...h.daemon, async list() { h.events.push("list"); return [stopped]; } };
+  const coordinator = new SupervisorGrantCoordinator(
+    daemon as never,
+    (async () => { throw new Error("unexpected request"); }) as never,
+    () => "host_1",
+    h.operations,
+    async () => "room_1",
+  );
+
+  await coordinator.reconcileDesiredRunning();
+
+  assert.equal(h.events.filter((event) => event === "list").length, 2, "missing remote proof retains the fresh safety read");
+  assert.equal(h.events.some((event) => event.startsWith("retire:")), true);
+});
+
+test("completed stopped history performs one global list regardless of entry count", async () => {
+  const h = harness({ readRevocationAttestation: async () => "none" });
+  const stoppedEntries = Array.from({ length: 50 }, (_, index) => ({
+    ...entry(`supervised_retired_${String(index).padStart(2, "0")}`),
+    desiredState: "stopped" as const,
+    observedState: "stopped" as const,
+    agentSessionId: null,
+    agentSessionBindingState: "none" as const,
+    providerPid: null,
+  }));
+  let listCalls = 0;
+  h.daemon.list = async () => { listCalls += 1; return stoppedEntries; };
+
+  await h.coordinator.reconcileDesiredRunning();
+
+  assert.equal(listCalls, 1);
+  assert.equal(h.events.some((event) => event.startsWith("retire:") || event.startsWith("revoke:")), false);
 });
 
 test("a stale startup cleanup cannot retire an entry while resume commits fresh authority", async () => {
@@ -549,10 +607,13 @@ test("a stale startup cleanup cannot retire an entry while resume commits fresh 
   let signalActivation!: () => void;
   const activationEntered = new Promise<void>((resolve) => { signalActivation = resolve; });
   const activationReleased = new Promise<void>((resolve) => { releaseActivation = resolve; });
+  let revocationAttestation: "exact" | null = "exact";
+  let listCalls = 0;
   let firstList = true;
   const daemon = {
     ...h.daemon,
     async list() {
+      listCalls += 1;
       if (firstList) {
         firstList = false;
         signalStartupList();
@@ -566,11 +627,19 @@ test("a stale startup cleanup cannot retire an entry while resume commits fresh 
       return { outcome: "retired" as const };
     },
   };
+  const operations: SupervisorGrantCoordinatorOperations = {
+    ...h.operations,
+    async readRevocationAttestation() { return revocationAttestation; },
+    async replaceGrant(input) {
+      revocationAttestation = null;
+      await h.operations.replaceGrant(input);
+    },
+  };
   const coordinator = new SupervisorGrantCoordinator(
     daemon as never,
     (async () => { throw new Error("unexpected request"); }) as never,
     () => "host_1",
-    h.operations,
+    operations,
     async () => "room_1",
   );
   const startup = coordinator.reconcileDesiredRunning();
@@ -588,6 +657,7 @@ test("a stale startup cleanup cannot retire an entry while resume commits fresh 
   assert.equal((await activation).desiredState, "running");
   await startup;
   assert.equal(current.desiredState, "running");
+  assert.equal(listCalls, 2, "receipt clearing forces the stale cleanup to re-read the resumed state");
   assert.equal(h.events.includes("unexpected-retire"), false);
 });
 
@@ -1029,6 +1099,7 @@ test("daemon successor rotates then persists the replacement before exact-genera
     resolveIdentity: async () => key, provision: async () => { throw new Error("must not reprovision"); },
     readEntryAgentKey: async () => key,
     readGrant: async () => ({ ...replacementHarness.grants.get(key)!, authority: replacementHarness.grants.get(key)?.authority ?? null }),
+    readRevocationAttestation: async () => null,
     replaceGrant: async (input) => {
       replacementHarness.events.push(`replace:${input.lastInstalledDaemonGeneration ?? "none"}`);
       replacementHarness.grants.set(key, {
@@ -1195,7 +1266,8 @@ test("canonical room reuse avoids alias-triggered reprovision while independent 
   const independent = new SupervisorGrantCoordinator(daemon as never, (async () => { throw new Error("unexpected"); }) as never, () => "host_1", {
     resolveIdentity: async ({ entryId }) => `owner/${entryId}`,
     provision: async () => { throw new Error("must reuse"); }, readEntryAgentKey: async (id) => `owner/${id}`,
-    readGrant: async (key) => grants.get(key) ?? null, replaceGrant: async () => {},
+    readGrant: async (key) => grants.get(key) ?? null, readRevocationAttestation: async () => null,
+    replaceGrant: async () => {},
     revokeEntry: async () => { throw new Error("no stopped entries expected"); },
     revokeEntryWithoutWorkerSession: async () => { throw new Error("no stopped entries expected"); },
   }, async () => "room_canonical");

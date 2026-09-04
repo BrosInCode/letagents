@@ -69,6 +69,17 @@ test("provider configuration maps permission profiles to native launch authority
   }).permissionProfileId, "read_only");
 
   assert.deepEqual(resolveProviderConfigurationSnapshot({
+    provider: "open-model",
+    model: "qwen-next",
+    reasoningEffort: null,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: {},
+    configurationRevision: 4,
+  }).launchPolicy, {
+    permission: { "*": "allow", edit: "ask", bash: "ask" },
+  });
+
+  assert.deepEqual(resolveProviderConfigurationSnapshot({
     provider: "cursor",
     model: null,
     reasoningEffort: null,
@@ -178,6 +189,14 @@ test("trusted profile selection replaces only native authority and preserves pro
   });
 
   assert.deepEqual(deriveProviderConfigurationSnapshot({
+    provider: "open-model", model: "qwen-next", reasoningEffort: null, permissionProfileId: "ask_before_write", configurationRevision: 9,
+  }, {
+    permission: { "*": "allow" }, experimental: true,
+  }).launchPolicy, {
+    experimental: true, permission: { "*": "allow", edit: "ask", bash: "ask" },
+  });
+
+  assert.deepEqual(deriveProviderConfigurationSnapshot({
     provider: "cursor", model: null, reasoningEffort: null, permissionProfileId: "read_only", configurationRevision: 6,
   }, { mode: "ask", force: false, sandbox: null }).launchPolicy, {
     mode: "ask", force: false,
@@ -272,6 +291,7 @@ test("supervised profile contract gates Claude prompt approval without changing 
   assert.equal(codex.find((profile) => profile.id === "ask_before_write")?.status, "available");
   assert.match(codex.find((profile) => profile.id === "ask_before_write")?.detail ?? "", /network-disabled sandbox/);
   assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "full_access")?.status, "available");
+  assert.equal(supervisedPermissionProfilesForProvider("open-model").find((profile) => profile.id === "ask_before_write")?.status, "available");
   const cursor = supervisedPermissionProfilesForProvider("cursor");
   assert.equal(cursor.find((profile) => profile.id === "read_only")?.status, "available");
   assert.equal(cursor.find((profile) => profile.id === "ask_before_write")?.status, "gated");

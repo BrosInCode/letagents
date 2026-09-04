@@ -552,6 +552,10 @@ test("managed agent permission profiles map provider-specific available and gate
     assertManagedAgentPermissionProfileAvailable("codex", "ask_before_write", "supervised").status,
     "available",
   );
+  assert.equal(
+    assertManagedAgentPermissionProfileAvailable("open-model", "ask_before_write", "supervised").status,
+    "available",
+  );
 
   assert.equal(managedAgentPermissionProfileForProvider("claude-code", null).id, "read_only");
   assert.equal(managedAgentPermissionProfileForProvider("cursor", null).id, "read_only");
