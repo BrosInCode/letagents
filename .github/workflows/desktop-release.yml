@@ -63,8 +63,8 @@ jobs:
 
       - name: Install dependencies without lifecycle scripts
         run: |
-          npm ci --ignore-scripts
-          npm ci --ignore-scripts --prefix apps/desktop
+          npm ci --ignore-scripts --no-audit
+          npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Verify dependency signatures
         run: |

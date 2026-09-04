@@ -44,7 +44,7 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
@@ -73,7 +73,7 @@ jobs:
         run: npm run test:package-runtime
 
       - name: Install Vue dependencies without lifecycle scripts
-        run: cd src/web && npm ci --ignore-scripts
+        run: cd src/web && npm ci --ignore-scripts --no-audit
 
       - name: Verify Vue dependency signatures
         run: cd src/web && npm audit signatures
@@ -97,7 +97,7 @@ jobs:
         run: npm run build:web
 
       - name: Install desktop dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --prefix apps/desktop
+        run: npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Verify desktop dependency signatures
         run: npm audit signatures --prefix apps/desktop
@@ -162,7 +162,7 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
@@ -394,7 +394,7 @@ jobs:
 
       - name: Install dependencies without lifecycle scripts
         if: steps.version.outputs.publish == 'true'
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         if: steps.version.outputs.publish == 'true'
