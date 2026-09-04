@@ -25,7 +25,9 @@
         <button type="button" class="desktop-composer-permission-deny" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
           @click="decideHostApproval(approval.id, 'deny')">Deny</button>
         <button type="button" class="desktop-composer-permission-allow" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"
-          @click="decideHostApproval(approval.id, 'allow_once')">{{ hostApprovalBusy === approval.id ? 'Recording…' : 'Allow once' }}</button>
+          @click="decideHostApproval(approval.id, 'allow_once')">{{ hostApprovalBusy === approval.id
+            ? 'Recording…'
+            : approval.presentation.title === 'Grant for this turn' ? 'Grant for this turn' : 'Allow once' }}</button>
       </div>
       <div v-else-if="approval.status === 'decision_recorded' && approval.retryDecision" class="desktop-composer-permission-actions">
         <button type="button" class="desktop-composer-permission-detail" :disabled="hostApprovalBusy !== null || hostApprovalError !== null"

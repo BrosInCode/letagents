@@ -70,7 +70,7 @@ export type NativeTurnBoundary =
 export type NativeExecutionCapabilities = {
   controlProbe: "rpc" | "http" | "unsupported";
   approvals: {
-    kinds: readonly ("command" | "file_change")[];
+    kinds: readonly ("command" | "file_change" | "network")[];
     recovery: "connection_only" | "native_instance_only" | "unsupported";
     denyScope: "request" | "session" | "unsupported";
   };

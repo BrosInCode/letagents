@@ -91,6 +91,34 @@ test("permission routing preserves frozen Codex request identity and fences nati
   await assert.rejects(router.replyPermission({ ...handle, providerConnection: { ...handle.providerConnection!, processIdentity: "forged" } }, request, "once", { beforeNativeDispatch: async () => {} }), /binding changed/);
 });
 
+test("Codex generic permission routing requires an exact bounded current-turn profile", async () => {
+  const adapter = fakeAdapter("codex", []);
+  const router = new ProviderActionPortRouter({ codex: async () => adapter });
+  const handle = await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+  const native = Object.freeze({ id: 1, method: "item/permissions/requestApproval", connectionId: "socket-1",
+    params: Object.freeze({ threadId: handle.providerContinuationId, turnId: "turn", itemId: "item", startedAtMs: 1,
+      cwd: "/repo", permissions: { network: { enabled: true } } }) });
+  adapter.inspectPermissionProfile = async (_handle, expected) => expected === native
+    ? structuredClone(native.params.permissions) : null;
+  assert.deepEqual(await router.correlatePermissionTurn(handle, { provider: "codex", native }), {
+    outcome: "correlated", providerContinuationId: handle.providerContinuationId, providerTurnId: "turn", kind: "network",
+  });
+  for (const params of [
+    { ...native.params, permissions: undefined },
+    { ...native.params, permissions: "network" },
+    { ...native.params, permissions: { network: { enabled: true }, reason: "x".repeat(24 * 1024) } },
+  ]) {
+    assert.deepEqual(await router.correlatePermissionTurn(handle, { provider: "codex", native: { ...native, params } }),
+      { outcome: "correlation_unproven" });
+  }
+  adapter.inspectPermissionProfile = async () => {
+    await router.spawn({ provider: "codex", workAttemptId: "permission", roomId: "room", cwd: "/repo", launchPolicy: {} });
+    return structuredClone(native.params.permissions);
+  };
+  assert.deepEqual(await router.correlatePermissionTurn(handle, { provider: "codex", native }),
+    { outcome: "correlation_unproven" });
+});
+
 test("permission routing snapshots OpenCode payloads and refuses replacement during broker checkpoint", async () => {
   const adapter = fakeAdapter("open-model", []);
   const router = new ProviderActionPortRouter({ "open-model": async () => adapter });

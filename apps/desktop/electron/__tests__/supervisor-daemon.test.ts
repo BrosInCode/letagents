@@ -161,6 +161,9 @@ test("host approval client rejects stale recorded hashes, foreign actors, malfor
   const client = new SupervisorDaemonClient({ socketPath: env.socketPath, loadApprovalSigner: async () => signer });
   try {
     const original = (await client.listHostApprovals("room_1")).approvals[0]!;
+    candidates = [{ ...base, presentation: { ...base.presentation, title: "Grant for this turn" } }];
+    const generic = await client.listHostApprovals("room_1");
+    assert.equal(generic.available, true); assert.equal(generic.approvals[0]!.presentation.title, "Grant for this turn");
     for (const extra of [{ projectionSha256: "f".repeat(64) }, { expected: base.reference }, { actorId: "renderer" }, { decisionId: "renderer" }, { key: "renderer" }]) {
       await assert.rejects(client.decideHostApproval({ id: original.id, decision: "allow_once", ...extra }), /Invalid approval/);
     }

@@ -30,7 +30,7 @@ const reference = z.strictObject({
   connectionId: executionIdentity, nativeRequestId: z.union([executionIdentity, z.number().int().min(0).max(Number.MAX_SAFE_INTEGER)]),
 });
 const requestDetails = reference.extend({
-  kind: z.enum(["command", "file_change"]), risk: z.enum(["low", "medium", "high"]),
+  kind: z.enum(["command", "file_change", "network"]), risk: z.enum(["low", "medium", "high"]),
   recoveryBoundary: z.enum(["none", "connection", "runtime"]), createdAtMs: time, expiresAtMs: time,
 });
 const admission = requestDetails.refine(v => v.expiresAtMs > v.createdAtMs);
@@ -87,7 +87,7 @@ function requireForeignKeys(db: DatabaseSync): void {
   if (db.prepare("PRAGMA foreign_keys").get()?.foreign_keys !== 1) reject("missing_turn");
 }
 function requestFromRow(row: Row): ExecutionApprovalRecord["request"] {
-  if (![0, 1].includes(Number(row.delegatable)) || (row.kind !== "command" && row.kind !== "file_change")
+  if (![0, 1].includes(Number(row.delegatable)) || !["command", "file_change", "network"].includes(String(row.kind))
     || (row.delegatable === 1 && (row.kind !== "file_change" || row.risk !== "low"))) reject("identity_mismatch");
   return {
     requestId: String(row.request_id), requestVersion: Number(row.request_version), requestSha256: String(row.request_sha256),

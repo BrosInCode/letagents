@@ -327,7 +327,7 @@ const approvalCandidate = z.strictObject({
     turnId: approvalId, providerContinuationId: approvalId, providerTurnId: approvalId, connectionId: approvalId,
     nativeRequestId: z.union([approvalId, z.number().int().nonnegative().safe()]) }).nullable(),
   presentation: z.strictObject({ agentId: approvalId, displayName: z.string().max(256),
-    provider: z.enum(["codex", "open-model"]), title: z.enum(["Run a command", "Change files", "Approval unavailable"]),
+    provider: z.enum(["codex", "open-model"]), title: z.enum(["Run a command", "Change files", "Grant for this turn", "Approval unavailable"]),
     details: z.string().max(24 * 1024), denyScope: z.enum(["request", "session_pending"]) }),
   status: approvalStatus, detail: z.string().max(1024).nullable(),
   recordedDecision: z.strictObject({ decisionId: approvalId, actorId: approvalId,
