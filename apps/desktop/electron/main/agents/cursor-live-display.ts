@@ -59,20 +59,19 @@ export function cursorLiveDisplayProjections(
   const { executionId, subtype, tool, call } = nativeTool;
   const terminal = subtype === "completed" ? cursorNativeToolTerminalResult(nativeTool) : null;
   if (subtype === "completed" && !terminal) return [];
-  const failure = terminal && (terminal.variant === "error" || terminal.variant === "failure")
-    ? terminal.detail
-    : undefined;
-  const error = terminal ? toolError(failure) : null;
-  const output = terminal?.variant === "success"
-    ? terminal.detail
-    : terminal && failure === undefined ? call.result ?? null : null;
+  const error = terminal && terminal.outcome !== "succeeded"
+    ? toolError(terminal.detail)
+    : null;
+  const output = terminal?.outcome === "succeeded" ? terminal.detail : null;
   return [{
     method: "item/toolCall/updated",
     kind: "tool_lifecycle",
     payload: {
       callID: `cursor:${exactTurnNamespace}:${executionId}`,
       tool,
-      status: error ? "error" : terminal ? "completed" : "running",
+      status: terminal
+        ? terminal.outcome === "succeeded" ? "completed" : "error"
+        : "running",
       input: call.args ?? null,
       output,
       error,

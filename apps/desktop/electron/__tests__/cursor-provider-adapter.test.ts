@@ -7155,6 +7155,23 @@ test("documented Cursor stream-json shapes project to namespaced response and to
       input: { path: "README.md" }, output: { totalLines: 54 }, error: null,
     },
   }]);
+  for (const [callId, result, detail] of [
+    ["rejected", { rejected: { reason: "not approved" } }, { reason: "not approved" }],
+    ["permission-denied", { permissionDenied: { error: "permission denied" } }, { error: "permission denied" }],
+    ["spawn-error", { spawnError: { error: "spawn failed" } }, { error: "spawn failed" }],
+    ["nonzero-exit", { success: { exitCode: 1 } }, { exitCode: 1 }],
+  ] as const) {
+    assert.deepEqual(cursorLiveDisplayProjections({
+      type: "tool_call", subtype: "completed", call_id: callId,
+      tool_call: { shellToolCall: { args: { command: "false" }, result } },
+      session_id: "session-exact",
+    }, "turn-exact", `event-${callId}`), [{
+      method: "item/toolCall/updated", kind: "tool_lifecycle", payload: {
+        callID: `cursor:turn-exact:${callId}`, tool: "shellToolCall", status: "error",
+        input: { command: "false" }, output: null, error: JSON.stringify(detail, null, 2),
+      },
+    }], `${callId} uses the shared typed outcome instead of visually completing`);
+  }
   assert.deepEqual(cursorLiveDisplayProjections({
     type: "user", message: { role: "user", content: [{ type: "text", text: "prompt echo" }] },
   }, "turn-exact", "event-4"), [], "the user event is never misrendered as a tool");
