@@ -150,7 +150,13 @@ function containsDirectNpmSubcommand(script, subcommand) {
     .some((segment) => {
       const tokens = segment.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
       const normalized = tokens.map((token) => token.replace(/^["']|["']$/g, ""));
-      const npmIndex = normalized.indexOf("npm");
+      const npmIndex = normalized.findIndex((token) => {
+        const executable = token.replace(
+          /^[^a-zA-Z0-9_./-]+|[^a-zA-Z0-9_./-]+$/g,
+          "",
+        );
+        return executable.split("/").at(-1) === "npm";
+      });
       return npmIndex >= 0 && normalized.slice(npmIndex + 1).includes(subcommand);
     });
 }
@@ -287,6 +293,8 @@ jobs:
     scripts[8],
   ]);
   assert.equal(containsDirectNpmCi("npm --prefix . ci --ignore-scripts --audit"), true);
+  assert.equal(containsDirectNpmCi("/usr/local/bin/npm ci --no-audit"), true);
+  assert.equal(containsDirectNpmCi("$(command -v npm) ci --no-audit"), true);
   assert.equal(containsDirectNpmCi("npm --prefix . install --ignore-scripts"), false);
   assert.throws(() => assertAuditStepsAreMandatory(jobs, "fixture"), /must not skip/);
 });
