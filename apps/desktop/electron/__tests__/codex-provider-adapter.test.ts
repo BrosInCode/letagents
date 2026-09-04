@@ -283,7 +283,7 @@ function createHarness(options: {
       launch.processIdentity = processIdentity ?? `fake-process-${launch.pid}-birth-1`;
       launches.push(launch);
       launchOptions.push({ serverUrl, codexBin, options });
-      return launch;
+      return { pid: launch.pid, exited: launch.exited };
     },
     waitForServer: async () => true,
     createRpcClient: (_serverUrl, notify) => {
