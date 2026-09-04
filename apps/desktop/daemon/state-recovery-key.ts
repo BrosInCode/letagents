@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import type { DatabaseSync } from "node:sqlite";
 import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
 import { prepareStateRecoveryBackup, markStateRecoveryBackupValidated, cleanupStateRecoveryBackup, recordStateRecoveryBackupWarning, StateRecoveryError } from "./state-recovery-backup.js";
 
@@ -44,20 +45,23 @@ export function requestHostApprovalVerifier(): Promise<string | null> {
 export async function withProtectedStateUpgrade<T>(
   path: string, initialize: () => Promise<T>, bootstrap: StateRecoveryBootstrap,
 ): Promise<T> {
+  let database: DatabaseSync | null = null;
   try {
     const freshBackup = await prepareStateRecoveryBackup(path, DAEMON_STATE_SCHEMA_VERSION, bootstrap.getBackupKey ?? requestStateRecoveryKey);
+    database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
     const result = await initialize();
-    const verified = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
-    try {
-      const validation = await markStateRecoveryBackupValidated(path, verified, { freshBackup });
-      if (validation.status !== "unverified") {
-        try { await cleanupStateRecoveryBackup(path, verified); }
-        catch { recordStateRecoveryBackupWarning(verified, "recovery_snapshot_cleanup_failed"); }
-      }
-    } finally { verified.close(); }
+    new DaemonStateSchema().validateCurrentShape(database);
+    const validation = await markStateRecoveryBackupValidated(path, database, { freshBackup });
+    if (validation.status !== "unverified") {
+      try { await cleanupStateRecoveryBackup(path, database); }
+      catch { recordStateRecoveryBackupWarning(database, "recovery_snapshot_cleanup_failed"); }
+    }
+    database.close();
+    database = null;
     await bootstrap.onPrepared?.();
     return result;
   } catch (error) {
+    try { database?.close(); } catch { /* preserve the triggering error */ }
     await bootstrap.onPrepared?.(true);
     throw error;
   }

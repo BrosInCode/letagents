@@ -2,7 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { chmod, readFile, rename } from "node:fs/promises";
 import { dirname } from "node:path";
-import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import {
   beginExecutionApprovalDispatch, getExecutionApproval, loseExecutionApproval,
   recordExecutionApprovalOutcome, selectHostApproval, validateExecutionApprovalAuthority, readLatestExecutionApproval, listExecutionApprovals,
@@ -194,6 +194,7 @@ export class ManifestStore {
     private readonly legacyJsonPath?: string,
     private readonly permissionHousekeeping?: (paths: string[]) => Promise<void>,
     private readonly schemaInitializationHook?: (database: DatabaseSync) => void,
+    private readonly schemaPrepared = false,
   ) {}
 
   /** Initialise/upgrade the shared daemon database without retaining a handle. */
@@ -2593,10 +2594,12 @@ export class ManifestStore {
   private async initialize(): Promise<DatabaseSync> {
     let database: DatabaseSync | null = null;
     try {
-      database = await openDaemonStateDatabase(this.path, async (opened) => {
-        await this.secureDatabaseFiles();
-        this.createSchema(opened);
-      });
+      database = this.schemaPrepared
+        ? await openPreparedDaemonStateDatabase(this.path)
+        : await openDaemonStateDatabase(this.path, async (opened) => {
+          await this.secureDatabaseFiles();
+          this.createSchema(opened);
+        });
       await this.importLegacyManifest(database);
       this.database = database;
       return database;

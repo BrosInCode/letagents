@@ -350,7 +350,11 @@ async function realStateFixture(t: test.TestContext) {
   };
   return { directory, path, backup: `${path}.recovery.enc`, getBackupKey, initialize, inspect,
     keyRequests: () => keyRequests,
-    start: () => withProtectedStateUpgrade(path, initialize, { getBackupKey }),
+    start: () => withProtectedStateUpgrade(path, async () => {
+      const current = new DatabaseSync(path, { readOnly: true });
+      try { return current.prepare("PRAGMA user_version").get()!.user_version; }
+      finally { current.close(); }
+    }, { getBackupKey }),
   };
 }
 
@@ -381,6 +385,21 @@ test("real startup keeps valid retention unchanged and remains healthy after cip
   ]);
   assert.deepEqual(await readFile(env.backup), malformed);
   assert.equal(env.keyRequests(), 1, "healthy current-schema restart never requests a replacement key");
+});
+
+test("protected startup refuses callback schema damage without blessing its recovery snapshot", async (t) => {
+  const env = await realStateFixture(t);
+  await assert.rejects(withProtectedStateUpgrade(env.path, async () => {
+    const damaged = new DatabaseSync(env.path);
+    try {
+      const schemaVersion = Number(damaged.prepare("PRAGMA schema_version").get()!.schema_version);
+      damaged.exec("PRAGMA writable_schema=ON");
+      damaged.prepare("UPDATE sqlite_master SET sql=replace(sql, ?, '') WHERE name='supervised_agent_inbox'").run(",'acknowledged_failed'");
+      damaged.exec(`PRAGMA writable_schema=OFF; PRAGMA schema_version=${schemaVersion + 1}`);
+    }
+    finally { damaged.close(); }
+  }, { getBackupKey: env.getBackupKey }), /reserved failed-delivery terminal state/i);
+  assert.deepEqual(env.inspect("SELECT checksum,imported_at FROM migration_records WHERE migration_key='encrypted-state-recovery-backup'"), []);
 });
 
 test("post-commit/pre-receipt crash retains one unverified snapshot without fake expiry authority", async (t) => {

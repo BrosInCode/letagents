@@ -3,7 +3,7 @@ import { chmod, link, open, readFile, readdir, rename, unlink } from "node:fs/pr
 import { basename, dirname } from "node:path";
 import { DatabaseSync, type StatementSync } from "node:sqlite";
 
-import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 
 export interface WorkerSessionBinding {
   entry_id: string;
@@ -74,6 +74,7 @@ export class WorkerBindingStore {
     private readonly databasePath = defaultDatabasePath(legacyJsonPath),
     /** Test-only seam for the narrow committed-record / backup-finalization window. */
     private readonly legacyBackupFinalizationHook?: () => Promise<void>,
+    private readonly schemaPrepared = false,
   ) {}
 
   async close(): Promise<void> {
@@ -514,7 +515,7 @@ export class WorkerBindingStore {
     }
   }
   private async getDatabase(): Promise<DatabaseSync> { if (this.closed) throw new Error("WorkerBindingStore is closed."); if (this.database) return this.database; if (!this.initializing) this.initializing = this.initialize(); return this.initializing; }
-  private async initialize(): Promise<DatabaseSync> { let database: DatabaseSync | null = null; try { database = await openDaemonStateDatabase(this.databasePath, (opened) => new DaemonStateSchema().createSchema(opened)); await this.importLegacy(database); this.database = database; return database; } catch (error) { database?.close(); this.initializing = null; throw error; } }
+  private async initialize(): Promise<DatabaseSync> { let database: DatabaseSync | null = null; try { database = this.schemaPrepared ? await openPreparedDaemonStateDatabase(this.databasePath) : await openDaemonStateDatabase(this.databasePath, (opened) => new DaemonStateSchema().createSchema(opened)); await this.importLegacy(database); this.database = database; return database; } catch (error) { database?.close(); this.initializing = null; throw error; } }
   private async importLegacy(database: DatabaseSync): Promise<void> {
     const key = `legacy-worker-bindings:${this.legacyJsonPath}`;
     const backup = `${this.legacyJsonPath}.migrated-backup`;

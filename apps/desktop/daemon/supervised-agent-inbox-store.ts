@@ -3,7 +3,7 @@ import { DatabaseSync, type StatementSync } from "node:sqlite";
 import { ExecutionShadowStore } from "./execution-shadow-store.js";
 import type { RetainedExecutionDetail } from "../shared/execution-protocol.js";
 
-import { DaemonStateSchema, openDaemonStateDatabase } from "./daemon-state-database.js";
+import { DaemonStateSchema, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 import { assertDeliveryDrainIngressAllowed, assertNoDeliveryDrain, deliveryDrainAllowsAdmission } from "./delivery-drain.js";
 import { assertNoPollingActivation } from "./custodial-polling-activation.js";
 import {
@@ -180,6 +180,7 @@ export class SupervisedAgentInboxStore {
     private readonly databasePath: string,
     private readonly now: () => string = () => new Date().toISOString(),
     private readonly onMutation: () => void = () => undefined,
+    private readonly schemaPrepared = false,
   ) {}
 
   async close(): Promise<void> {
@@ -1924,7 +1925,10 @@ export class SupervisedAgentInboxStore {
   private async getDatabase(): Promise<DatabaseSync> {
     if (this.closed) throw new Error("Supervised inbox store is closed.");
     if (this.database) return this.database;
-    if (!this.initializing) this.initializing = openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)).then((database) => { this.database = database; return database; });
+    if (!this.initializing) this.initializing = (this.schemaPrepared
+      ? openPreparedDaemonStateDatabase(this.databasePath)
+      : openDaemonStateDatabase(this.databasePath, (database) => new DaemonStateSchema().createSchema(database)))
+      .then((database) => { this.database = database; return database; });
     return this.initializing;
   }
   private require(value: string, field: string): void { if (!value?.trim()) throw new Error(`Supervised inbox ${field} is required.`); }

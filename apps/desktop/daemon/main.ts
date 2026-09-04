@@ -199,7 +199,7 @@ export class SupervisorDaemon {
       isHandoffScheduled: () => this.handoffScheduled,
       drive: (entryId, signal) => this.deliveryCutoverExecution.drive(entryId, signal),
     });
-    this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath);
+    this.store = new ManifestStore(paths.manifestPath, paths.legacyManifestPath, undefined, undefined, /* schemaPrepared */ true);
     this.legacyLanes = new LegacyLaneCoordinator({
       storage: { load: () => this.store.load() },
       commit: {
@@ -265,14 +265,14 @@ export class SupervisorDaemon {
       undefined,
       undefined,
       undefined,
-      paths.manifestPath,
+      paths.manifestPath, undefined, /* schemaPrepared */ true,
     );
     this.provisioner = new WorkspaceProvisioner(root, gitCommand);
     this.ephemeralProvisioner = new EphemeralWorkspaceProvisioner(root);
     this.workerBindings = new WorkerBindingStore(
       paths.workerBindingsPath ?? `${paths.manifestPath}.worker-bindings`,
       (commit) => this.fenceDaemonCommit(commit),
-      paths.manifestPath,
+      paths.manifestPath, undefined, /* schemaPrepared */ true,
     );
     this.nativeActivity = new NativeActivityPublicationCoordinator({
       bindings: this.workerBindings,
@@ -315,9 +315,7 @@ export class SupervisorDaemon {
     // path is a legacy JSON import source and must never become a second SQLite
     // authority for delivery receipts.
     this.supervisedInbox = new SupervisedAgentInboxStore(
-      paths.manifestPath,
-      undefined,
-      () => this.notifyStateChanged(),
+      paths.manifestPath, undefined, () => this.notifyStateChanged(), /* schemaPrepared */ true,
     );
     this.workerAuthority = new WorkerAuthorityCoordinator({
       store: this.store,
