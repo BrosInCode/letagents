@@ -354,6 +354,7 @@ test("delegation lifecycle eagerly starts, wakes, and fences approval publicatio
 
 test("room wakes reconcile decisions even when grant inventory fails", async () => {
   const events: string[] = [];
+  const freshIntent = { ...intent(), decided_at: new Date().toISOString() };
   const coordinator = new ExecutionDelegationCoordinator({
     entries: {
       getEntry: async () => entry,
@@ -375,14 +376,14 @@ test("room wakes reconcile decisions even when grant inventory fails", async () 
       applyRecordedDecision: async (_input, select) => {
         await select({ expected, presentation: { agentId: entry.id, displayName: "Agent", provider: "codex",
           title: "Change files", details: "details", denyScope: "request" }, approvalAuthority,
-        approval: approval(intent()), assertCurrent: () => {} });
+        approval: approval(freshIntent), assertCurrent: () => {} });
         events.push("decision:applied");
       },
     },
     remote: {
       listExecutionDelegationIds: async () => { throw new Error("grant inventory unavailable"); },
-      listExecutionDelegationDecisionIds: async () => ({ decisionIds: [intent().decision_id], nextCursor: null }),
-      getExecutionDelegationDecision: async () => intent(),
+      listExecutionDelegationDecisionIds: async () => ({ decisionIds: [freshIntent.decision_id], nextCursor: null }),
+      getExecutionDelegationDecision: async () => freshIntent,
     },
     requestConvergence: () => {},
     diagnostic: (domain, _entryId, error) => { events.push(`${domain}:${String(error)}`); },
