@@ -141,7 +141,7 @@ function workflowRunScripts(jobs) {
   return jobs.flatMap((job) => job.steps.map((step) => step.run).filter(Boolean));
 }
 
-function containsDirectNpmAudit(script) {
+function containsDirectNpmSubcommand(script, subcommand) {
   const conservativeScript = script
     .replace(/\\\r?\n\s*/g, "")
     .replace(/["'\\]/g, "");
@@ -151,8 +151,16 @@ function containsDirectNpmAudit(script) {
       const tokens = segment.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
       const normalized = tokens.map((token) => token.replace(/^["']|["']$/g, ""));
       const npmIndex = normalized.indexOf("npm");
-      return npmIndex >= 0 && normalized.slice(npmIndex + 1).includes("audit");
+      return npmIndex >= 0 && normalized.slice(npmIndex + 1).includes(subcommand);
     });
+}
+
+function containsDirectNpmAudit(script) {
+  return containsDirectNpmSubcommand(script, "audit");
+}
+
+function containsDirectNpmCi(script) {
+  return containsDirectNpmSubcommand(script, "ci");
 }
 
 function assertAuditStepsAreMandatory(jobs, workflowPath) {
@@ -278,6 +286,8 @@ jobs:
     scripts[7],
     scripts[8],
   ]);
+  assert.equal(containsDirectNpmCi("npm --prefix . ci --ignore-scripts --audit"), true);
+  assert.equal(containsDirectNpmCi("npm --prefix . install --ignore-scripts"), false);
   assert.throws(() => assertAuditStepsAreMandatory(jobs, "fixture"), /must not skip/);
 });
 
@@ -387,7 +397,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
   ]);
 
   assert.deepEqual(
-    ciScripts.filter((script) => /\bnpm ci\b/.test(script)),
+    ciScripts.filter(containsDirectNpmCi),
     [
       "npm ci --ignore-scripts --no-audit",
       "cd src/web && npm ci --ignore-scripts --no-audit",
@@ -398,7 +408,7 @@ test("dependency advisory checks use the pinned supported audit client", () => {
     "CI installs must disable npm's implicit unbounded audit",
   );
   assert.deepEqual(
-    releaseScripts.filter((script) => /\bnpm ci\b/.test(script)),
+    releaseScripts.filter(containsDirectNpmCi),
     [
       "npm ci --ignore-scripts --no-audit\n" +
         "npm ci --ignore-scripts --no-audit --prefix apps/desktop",
