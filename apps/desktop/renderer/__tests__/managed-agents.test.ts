@@ -1926,6 +1926,48 @@ test("presence restores message-history identity before supervisor rows are proj
     "agent:EmmyMay/desktop-codex-dawn",
     "agent:OtherOwner/desktop-codex-dawn",
   ]);
+
+  const owners = ["Alice", "Bob"];
+  const ownerHistory = owners.map((owner) => ({
+    ...history[0],
+    participantKey: `agent:dawnhaven:${owner}`,
+    actorLabel: `DawnHaven | ${owner}'s agent | Codex`,
+    ownerLabel: owner,
+    activityState: "offline" as const,
+  }));
+  const ownerPresence = ownerHistory.map((item) => ({
+    ...live[0], actorLabel: item.actorLabel, ownerLabel: item.ownerLabel,
+    agentKey: `${item.ownerLabel}/dawn`,
+  })).reverse();
+  const ownerEntries = owners.map((owner) => ({
+    ...entries[0], id: `supervised_${owner}`, agentKey: `${owner}/dawn`,
+  }));
+  const ownerParticipants = mergeDesktopSupervisorAgentParticipants(
+    mergeDesktopManagedAgentParticipants(
+      mergeReachableAgentPresenceParticipants(ownerHistory, ownerPresence, "room_1"), [], "room_1",
+    ), ownerEntries, "room_1",
+  );
+  assert.deepEqual(ownerParticipants.map((item) => [item.ownerLabel, item.agentKey]), [
+    ["Alice", "Alice/dawn"], ["Bob", "Bob/dawn"],
+  ]);
+  assert.deepEqual(roomMentionCandidates(ownerParticipants, "dawn").map((item) => item.insertText), [
+    "agent:Alice/dawn", "agent:Bob/dawn",
+  ]);
+});
+
+test("presence matches canonical identity before ambiguous actor labels", () => {
+  const participants = ["Alice", "Bob"].map((owner) => participant({
+    participantKey: `agent:${owner}`, displayName: "DawnHaven", actorLabel: "DawnHaven",
+    agentKey: `${owner}/dawn`, ownerLabel: owner, activityState: "offline",
+  }));
+  const result = mergeReachableAgentPresenceParticipants(participants, [presence({
+    actorLabel: "DawnHaven", displayName: "DawnHaven", agentKey: "Bob/dawn", ownerLabel: "Bob",
+    freshness: "active", activityState: "active", status: "working", sourceFlags: ["delivery", "presence"],
+  })], "room_1");
+  assert.equal(result.length, 2);
+  assert.equal(result[0].activityState, "offline");
+  assert.equal(result[1].activityState, "active");
+  assert.equal(result[1].agentKey, "Bob/dawn");
 });
 
 test("Open Model supervisor participants use the product provider label", () => {
