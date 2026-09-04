@@ -169,6 +169,25 @@ function safeRuntimeId(value: string): string {
   return value.replace(/[^A-Za-z0-9._-]/g, "_").slice(0, 160);
 }
 
+const runtimeLaunchTails = new Map<string, Promise<void>>();
+
+async function withRuntimeLaunchOwnership<T>(
+  runtimePath: string,
+  operation: () => Promise<T>,
+): Promise<T> {
+  const previous = runtimeLaunchTails.get(runtimePath) ?? Promise.resolve();
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => { release = resolve; });
+  runtimeLaunchTails.set(runtimePath, current);
+  await previous;
+  try {
+    return await operation();
+  } finally {
+    release();
+    if (runtimeLaunchTails.get(runtimePath) === current) runtimeLaunchTails.delete(runtimePath);
+  }
+}
+
 type OpenCodeRuntimeControl = OpenCodeRuntimeAuth & {
   lifecycleAuthorityMode?: "legacy" | "typed_shadow" | "typed";
   startupIntent?: {
@@ -480,9 +499,22 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       throw new Error("Open Model is waiting for its desktop-held endpoint credential.");
     }
     const credential = req.providerCredential;
+    const runtimeRoot = join(this.runtimeRoot, safeRuntimeId(req.workAttemptId));
+    // The daemon singleton owns one provider router per live process. This
+    // target-local queue therefore serializes every live admission for one
+    // runtime path, while startupIntent remains the cross-process crash fence.
+    return withRuntimeLaunchOwnership(runtimeRoot, () =>
+      this.spawnWithRuntimeOwnership(req, lifecycleAuthorityMode, credential, runtimeRoot));
+  }
+
+  private async spawnWithRuntimeOwnership(
+    req: ProviderSpawnRequest,
+    lifecycleAuthorityMode: NonNullable<ProviderSpawnRequest["lifecycleAuthorityMode"]>,
+    credential: NonNullable<ProviderSpawnRequest["providerCredential"]>,
+    runtimeRoot: string,
+  ): Promise<ProviderHandle> {
     const appliedConfigurationRevision = attestProviderSpawnPolicy("open-model", req);
     void appliedConfigurationRevision;
-    const runtimeRoot = join(this.runtimeRoot, safeRuntimeId(req.workAttemptId));
     await mkdir(runtimeRoot, { recursive: true, mode: 0o700 });
     await chmod(runtimeRoot, 0o700);
     const authPath = join(runtimeRoot, "server-auth.json");

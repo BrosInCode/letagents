@@ -1307,6 +1307,66 @@ test("Open Model clears its exact intent after a real no-pid launch failure", as
   assert.equal(harness.launches.length, 1, "a fixed environment can retry after conclusive no-pid failure");
 });
 
+test("Open Model serializes A/B startup ownership for the same runtime path", async (t) => {
+  const harness = createHarness();
+  const runtimeRoot = await mkdtemp(join(tmpdir(), "letagents-opencode-startup-owner-"));
+  t.after(() => rm(runtimeRoot, { recursive: true, force: true }));
+  let launches = 0;
+  let markFirstLaunch!: () => void;
+  const firstLaunchStarted = new Promise<void>((resolve) => { markFirstLaunch = resolve; });
+  let settleFirstExit!: (exit: ProviderProcessExit) => void;
+  const firstExited = new Promise<ProviderProcessExit>((resolve) => { settleFirstExit = resolve; });
+  const adapter = new OpenModelProviderAdapter({
+    binary: "/opt/letagents/opencode",
+    runtimeRoot,
+    dependencies: {
+      ...harness.dependencies,
+      launch(input) {
+        launches += 1;
+        if (launches === 1) {
+          const child = new EventEmitter() as ReturnType<OpenModelProviderAdapterDependencies["launch"]>["child"];
+          Object.assign(child, { pid: undefined, unref() {} });
+          markFirstLaunch();
+          return { child, exited: firstExited };
+        }
+        return harness.dependencies.launch(input);
+      },
+    },
+    startTimeoutMs: 100,
+    turnTimeoutMs: 100,
+  });
+
+  const launchA = adapter.spawn(spawnRequest());
+  await firstLaunchStarted;
+  const launchB = adapter.spawn(spawnRequest());
+  let launchBSettled = false;
+  void launchB.then(
+    () => { launchBSettled = true; },
+    () => { launchBSettled = true; },
+  );
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  assert.equal(launches, 1, "B cannot enter launch while A still owns the runtime");
+  assert.equal(launchBSettled, false, "B remains queued behind A's complete cleanup");
+
+  settleFirstExit({ type: "error", error: new Error("missing binary") });
+  await assert.rejects(launchA, /OpenCode launch did not expose a process id/);
+  const recovered = await launchB;
+  assert.equal(recovered.pid, 6101);
+  assert.equal(launches, 2);
+  const connection = recovered.providerConnection;
+  assert.ok(connection?.kind === "opencode_server");
+  const control = JSON.parse(await readFile(connection.serverAuthPath, "utf8")) as {
+    startupIntent?: unknown;
+    connection?: { pid?: number; processIdentity?: string };
+  };
+  assert.equal(control.startupIntent, undefined);
+  assert.deepEqual(control.connection, {
+    url: "http://127.0.0.1:43821",
+    pid: 6101,
+    processIdentity: "opencode-birth-6101",
+  }, "A cannot clear or overwrite B's promoted connection");
+});
+
 test("Open Model persists an ambiguous startup birth and fences replacement until it is gone", async (t) => {
   const harness = createHarness();
   const baseFetch = harness.dependencies.fetch;
