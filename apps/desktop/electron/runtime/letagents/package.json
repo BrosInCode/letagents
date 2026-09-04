@@ -3,14 +3,14 @@
   "private": true,
   "version": "0.0.0",
   "dependencies": {
-    "letagents": "0.12.13"
+    "letagents": "0.12.14"
   },
   "overrides": {
     "@hono/node-server": "2.0.10",
     "@esbuild-kit/core-utils": {
       "esbuild": "^0.25.12"
     },
-    "fast-uri": "3.1.5",
+    "fast-uri": "3.1.6",
     "hono": "4.12.34",
     "ip-address": "10.3.1"
   }
