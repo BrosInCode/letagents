@@ -1391,9 +1391,17 @@ export function mergeReachableAgentPresenceParticipants(
       continue;
     }
 
-    const existingIndex = merged.findIndex((participant) =>
-      participantMatchesAgentPresence(participant, presence)
-    );
+    const canonicalIndex = merged.findIndex((participant) =>
+      participant.kind === "agent" && sameSpecificAgentKey(participant.agentKey, presence.agentKey));
+    const actorIndex = canonicalIndex === -1 ? merged.findIndex((participant) =>
+      sameNormalized(participant.actorLabel, presence.actorLabel)
+      && participantMatchesAgentPresence(participant, presence)) : -1;
+    const fallbackIndices = canonicalIndex === -1 && actorIndex === -1
+      ? merged.flatMap((participant, index) => participantMatchesAgentPresence(participant, presence) ? [index] : [])
+      : [];
+    const existingIndex = canonicalIndex !== -1 ? canonicalIndex
+      : actorIndex !== -1 ? actorIndex
+      : fallbackIndices.length === 1 ? fallbackIndices[0] : -1;
     if (existingIndex === -1) {
       merged.push(agentPresenceToParticipant(presence));
       continue;
@@ -1546,8 +1554,12 @@ function participantMatchesAgentPresence(
   presence: DesktopAgentPresence,
 ): boolean {
   if (participant.kind !== "agent") return false;
+  const participantKey = specificAgentKey(participant.agentKey);
+  const presenceKey = specificAgentKey(presence.agentKey);
+  if (participantKey && presenceKey) return participantKey === presenceKey;
+  if (participant.ownerLabel?.trim() && presence.ownerLabel?.trim()
+    && !sameNormalized(participant.ownerLabel, presence.ownerLabel)) return false;
   if (sameNormalized(participant.actorLabel, presence.actorLabel)) return true;
-  if (sameSpecificAgentKey(participant.agentKey, presence.agentKey)) return true;
   if (!sameNormalized(participant.displayName, presence.displayName)) return false;
   return Boolean(
     sameNormalized(participant.ideLabel, presence.ideLabel)
