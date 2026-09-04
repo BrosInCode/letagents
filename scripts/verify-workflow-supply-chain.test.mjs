@@ -133,8 +133,52 @@ function workflowRunScripts(jobs) {
   return jobs.flatMap((job) => job.steps.map((step) => step.run).filter(Boolean));
 }
 
+function stripShellComments(script) {
+  let result = "";
+  let quote = null;
+  let escaped = false;
+
+  for (let index = 0; index < script.length; index += 1) {
+    const character = script[index];
+    if (escaped) {
+      result += character;
+      escaped = false;
+      continue;
+    }
+    if (character === "\\" && quote !== "'") {
+      result += character;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      result += character;
+      if (character === quote) {
+        quote = null;
+      }
+      continue;
+    }
+    if (character === "'" || character === '"') {
+      result += character;
+      quote = character;
+      continue;
+    }
+    if (character === "#" && (index === 0 || /[\s;|&()]/.test(script[index - 1]))) {
+      const newline = script.indexOf("\n", index);
+      if (newline === -1) {
+        break;
+      }
+      result += "\n";
+      index = newline;
+      continue;
+    }
+    result += character;
+  }
+
+  return result;
+}
+
 function containsDirectNpmAudit(script) {
-  const withoutShellComments = script.replace(/\s+#.*$/gm, "");
+  const withoutShellComments = stripShellComments(script);
   return withoutShellComments
     .split(/&&|\|\||[;|\n]/)
     .some((segment) => {
@@ -208,7 +252,7 @@ test("workflow policy inspects whole run scripts instead of matching comments", 
 jobs:
   build:
     steps:
-      - run: echo audit-disabled # node scripts/verify-dependency-advisories.mjs .
+      - run: echo audit-disabled # node scripts/verify-dependency-advisories.mjs .; npm audit
       - run: |
           npm --prefix apps/desktop audit --audit-level='low'
       - run: |
@@ -216,6 +260,7 @@ jobs:
             node scripts/verify-dependency-advisories.mjs .
           fi
       - run: if true; then npm --prefix apps/desktop audit; fi
+      - run: echo "registry # diagnostic"; npm --prefix apps/desktop audit
       - name: Disabled audit step
         if: false
         continue-on-error: true
@@ -224,15 +269,16 @@ jobs:
   const scripts = workflowRunScripts(jobs);
 
   assert.deepEqual(scripts, [
-    "echo audit-disabled # node scripts/verify-dependency-advisories.mjs .",
+    "echo audit-disabled # node scripts/verify-dependency-advisories.mjs .; npm audit",
     "npm --prefix apps/desktop audit --audit-level='low'",
     "if false; then\nnode scripts/verify-dependency-advisories.mjs .\nfi",
     "if true; then npm --prefix apps/desktop audit; fi",
+    'echo "registry # diagnostic"; npm --prefix apps/desktop audit',
     "node scripts/verify-dependency-advisories.mjs .",
   ]);
   assert.equal(scripts[2].startsWith("node scripts/verify-dependency-advisories.mjs"), false);
   assert.match(scripts[1].replace(/["']/g, ""), /--audit-level(?:=|\s+)low\b/);
-  assert.deepEqual(scripts.filter(containsDirectNpmAudit), [scripts[1], scripts[3]]);
+  assert.deepEqual(scripts.filter(containsDirectNpmAudit), [scripts[1], scripts[3], scripts[4]]);
   assert.throws(() => assertAuditStepsAreMandatory(jobs, "fixture"), /must not skip/);
 });
 
