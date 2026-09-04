@@ -4451,6 +4451,43 @@ export async function openDaemonStateDatabase(path: string, initializeSchema: (d
   throw new Error("Daemon state initialization retry loop exited unexpectedly.");
 }
 
+/**
+ * Opens an operational handle after the singleton owner completed the protected
+ * schema upgrade. Critical authority is still checked before the handle can be
+ * used, but the historical repair/validation chain is not repeated per store.
+ */
+export async function openPreparedDaemonStateDatabase(path: string): Promise<DatabaseSync> {
+  // The protected upgrade already created and migrated this file. Inspect it
+  // read-only first so a missing, replaced, or non-WAL database cannot be
+  // created or changed by an operational store racing after preparation.
+  const inspection = new DatabaseSync(path, { readOnly: true });
+  try {
+    inspection.exec("PRAGMA busy_timeout = 0");
+    if (assertDaemonStateVersionSupported(inspection) !== SCHEMA_VERSION) {
+      throw new Error("Daemon operational storage requires the already-current schema.");
+    }
+    if (String(inspection.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon operational storage requires existing WAL journal mode.");
+    }
+  } finally { inspection.close(); }
+
+  const uri = pathToFileURL(path);
+  uri.searchParams.set("mode", "rw");
+  const database = new DatabaseSync(uri.href);
+  try {
+    database.exec("PRAGMA busy_timeout = 5000");
+    if (assertDaemonStateVersionSupported(database) !== SCHEMA_VERSION
+      || String(database.prepare("PRAGMA journal_mode").get()!.journal_mode).toLowerCase() !== "wal") {
+      throw new Error("Daemon operational storage changed after preparation.");
+    }
+    configureDaemonStateConnection(database);
+    return database;
+  } catch (error) {
+    try { database.close(); } catch { /* preserve the triggering error */ }
+    throw error;
+  }
+}
+
 function isSqliteBusyOrLocked(error: unknown): boolean {
   const candidate = error as NodeJS.ErrnoException;
   const code = String(candidate?.code ?? "").toUpperCase();

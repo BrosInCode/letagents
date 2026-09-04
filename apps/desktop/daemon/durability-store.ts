@@ -8,7 +8,7 @@ import { redactCredentialText } from "./credential-redaction.js";
 import { isEphemeralWorkspaceMarker } from "./ephemeral-workspace-provisioner.js";
 import { assertCredentialFreeRemote, normalizeRemote, WORKSPACE_MARKER, type GitCommand, type WorkspaceMarker } from "./workspace-provisioner.js";
 import { acquireWorkspaceFence, WorkspaceFenceError, type WorkspaceFenceHandle } from "./workspace-fence.js";
-import { ensureDaemonStateDatabase, openDaemonStateDatabase } from "./daemon-state-database.js";
+import { ensureDaemonStateDatabase, openDaemonStateDatabase, openPreparedDaemonStateDatabase } from "./daemon-state-database.js";
 
 const STORE_VERSION = 2;
 type StoredAttempts = { version: typeof STORE_VERSION; attempts: TaskWorkAttempt[]; checksum: string };
@@ -125,7 +125,7 @@ export class WorkDurabilityStore {
   private closed = false;
   private readonly databasePath: string;
 
-  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks, databasePath?: string, private readonly migrationHooks?: LegacyAttemptMigrationHooks) {
+  constructor(readonly path: string, readonly attemptsRoot: string, private readonly now: () => string = () => new Date().toISOString(), workspaceRoot = join(dirname(attemptsRoot), "worktrees"), private readonly beforeGcDelete?: (attempt: TaskWorkAttempt) => Promise<void>, private readonly git?: GitCommand, private readonly quiesceForGc?: GcQuiesce, private supervisorFence?: SupervisorFenceIdentity, private readonly quiescenceHooks?: GcQuiescenceHooks, databasePath?: string, private readonly migrationHooks?: LegacyAttemptMigrationHooks, private readonly schemaPrepared = false) {
     this.workspaceRoot = resolve(workspaceRoot);
     this.databasePath = databasePath ?? join(dirname(path), "daemon-state.sqlite");
   }
@@ -891,10 +891,12 @@ export class WorkDurabilityStore {
 
   private async initializeDatabase(): Promise<DatabaseSync> {
     // The neutral state-schema owner serializes all daemon-state upgrades.
-    await ensureDaemonStateDatabase(this.databasePath);
+    if (!this.schemaPrepared) await ensureDaemonStateDatabase(this.databasePath);
     let database: DatabaseSync | null = null;
     try {
-      database = await openDaemonStateDatabase(this.databasePath, () => {});
+      database = this.schemaPrepared
+        ? await openPreparedDaemonStateDatabase(this.databasePath)
+        : await openDaemonStateDatabase(this.databasePath, () => {});
       await this.importLegacyAttempts(database);
       this.database = database;
       return database;

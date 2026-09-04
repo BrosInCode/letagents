@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import test from "node:test";
 
-import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase, openDaemonStateObservationDatabase } from "../daemon-state-database.js";
+import { DAEMON_STATE_SCHEMA_VERSION, DaemonStateSchema, openDaemonStateDatabase, openDaemonStateObservationDatabase, openPreparedDaemonStateDatabase } from "../daemon-state-database.js";
 import { applyExecutionStorageSchema, validateExecutionStorageSchema } from "../execution-storage-schema.js";
 import { applyPollingActivationSchema, applyPollingOfferSchema, validatePollingActivationSchema, validatePollingOfferSchema } from "../custodial-polling-activation.js";
 import { RoomWorkPublicationStore, validateRoomWorkPublicationSchema } from "../room-work-publication-store.js";
@@ -663,6 +663,70 @@ test("future schema refusal precedes WAL conversion and initializer writes", asy
     const inspection = new DatabaseSync(path, { readOnly: true });
     try { assert.equal((inspection.prepare("PRAGMA journal_mode").get() as Row).journal_mode, "delete"); }
     finally { inspection.close(); }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("prepared operational opener requires an already-current schema without migrating it", async () => {
+  const env = await fixture();
+  try {
+    const prepared = await openPreparedDaemonStateDatabase(env.path);
+    try {
+      assert.deepEqual(versionPair(prepared), versionPair(env.database));
+      assert.equal(prepared.prepare("PRAGMA foreign_keys").get()!.foreign_keys, 1);
+      assert.equal(prepared.prepare("PRAGMA synchronous").get()!.synchronous, 2);
+    } finally { prepared.close(); }
+
+    env.database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION - 1} WHERE singleton=1;
+      PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION - 1}`);
+    const before = {
+      version: versionPair(env.database),
+      schema: env.database.prepare("SELECT * FROM sqlite_master ORDER BY name").all(),
+    };
+    await assert.rejects(openPreparedDaemonStateDatabase(env.path), /already-current schema/);
+    assert.deepEqual(versionPair(env.database), before.version);
+    assert.deepEqual(env.database.prepare("SELECT * FROM sqlite_master ORDER BY name").all(), before.schema);
+  } finally { await env.cleanup(); }
+});
+
+test("prepared operational opener never creates missing state and preserves rejected versions and journal mode", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-prepared-existing-"));
+  try {
+    await assert.rejects(openPreparedDaemonStateDatabase(join(directory, "missing.sqlite")), /unable to open database file/);
+    await assert.rejects(openPreparedDaemonStateDatabase(join(directory, "missing-directory", "state.sqlite")), /unable to open database file/);
+    assert.deepEqual(await readdir(directory), []);
+
+    for (const invalid of ["older", "future", "non_wal"] as const) {
+      const path = join(directory, `${invalid}.sqlite`);
+      const database = await openDaemonStateDatabase(path, (opened) => new DaemonStateSchema().createSchema(opened));
+      if (invalid === "older") database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION - 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION - 1}`);
+      if (invalid === "future") database.exec(`UPDATE manifest_metadata SET schema_version=${DAEMON_STATE_SCHEMA_VERSION + 1}; PRAGMA user_version=${DAEMON_STATE_SCHEMA_VERSION + 1}`);
+      database.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+      if (invalid === "non_wal") database.exec("PRAGMA journal_mode=DELETE");
+      const before = await readFile(path);
+      const mode = database.prepare("PRAGMA journal_mode").get()!.journal_mode;
+      const versions = versionPair(database);
+      await assert.rejects(openPreparedDaemonStateDatabase(path), /already-current schema|Unsupported daemon state schema|existing WAL journal mode/);
+      assert.deepEqual(await readFile(path), before);
+      assert.deepEqual(versionPair(database), versions);
+      assert.equal(database.prepare("PRAGMA journal_mode").get()!.journal_mode, mode);
+      database.close();
+    }
+  } finally { await rm(directory, { recursive: true, force: true }); }
+});
+
+test("prepared operational opener escapes URI metacharacters in existing paths", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "letagents-prepared-uri-"));
+  try {
+    const path = join(directory, "state space?#%.sqlite");
+    const owner = await openDaemonStateDatabase(path, (database) => new DaemonStateSchema().createSchema(database));
+    try {
+      const prepared = await openPreparedDaemonStateDatabase(path);
+      try {
+        prepared.exec("BEGIN IMMEDIATE; INSERT INTO execution_generations VALUES('prepared-uri-proof','agent',1); COMMIT");
+        assert.ok(owner.prepare("SELECT 1 FROM execution_generations WHERE execution_generation_id='prepared-uri-proof'").get());
+      } finally { prepared.close(); }
+      assert.ok((await readdir(directory)).every((name) => name.startsWith("state space?#%.sqlite")));
+    } finally { owner.close(); }
   } finally { await rm(directory, { recursive: true, force: true }); }
 });
 
