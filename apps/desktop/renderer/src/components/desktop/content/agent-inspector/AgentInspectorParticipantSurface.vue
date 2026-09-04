@@ -344,6 +344,14 @@ function resultMatchesFence(
     && agentInspectorManagedSessionIdentity(session) === fence.sessionIdentity;
 }
 
+function workerStopResultMatchesFence(
+  session: DesktopManagedAgentSession,
+  fence: ParticipantActionFence,
+): boolean {
+  return session.id === fence.sessionId
+    && managedAgentSessionMatchesRoom(session, fence.roomIdentifier);
+}
+
 function emitSessionUpdate(session: DesktopManagedAgentSession, fence: ParticipantActionFence): boolean {
   if (!fenceIsCurrent(fence) || !resultMatchesFence(session, fence)) return false;
   emit("session-updated", {
@@ -410,6 +418,13 @@ function stopSession(stopMode: "turn" | "worker"): Promise<void> {
     const result = await desktopIpc.workers.stopManagedAgent({ sessionId: fence.sessionId, stopMode });
     if (!fenceIsCurrent(fence)) return false;
     if (!result) throw new Error(stopMode === "turn" ? "No active turn was stopped." : "The local agent could not be stopped.");
+    if (stopMode === "worker") {
+      if (!workerStopResultMatchesFence(result, fence)) {
+        throw new Error("The local agent identity changed before the stop completed.");
+      }
+      emit("close");
+      return true;
+    }
     if (!emitSessionUpdate(result, fence)) throw new Error("The local agent identity changed before the stop completed.");
     return true;
   }, stopMode === "turn" ? "Turn stopped." : "Local agent stopped.");

@@ -206,6 +206,13 @@ test("participant actions invalidate on room, request, identity, and unmount bef
   assert.doesNotMatch(surface, /managedSessionsContext\.upsert/);
 });
 
+test("worker stop accepts only the same stable session and room before closing the inspector", async () => {
+  const surface = await readFile(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue", import.meta.url), "utf8");
+  assert.match(surface, /function workerStopResultMatchesFence\([\s\S]*session\.id === fence\.sessionId[\s\S]*managedAgentSessionMatchesRoom\(session, fence\.roomIdentifier\)/);
+  assert.match(surface, /if \(stopMode === "worker"\) \{[\s\S]*workerStopResultMatchesFence\(result, fence\)[\s\S]*emit\("close"\);[\s\S]*return true;/);
+  assert.match(surface, /if \(stopMode === "worker"\)[\s\S]*\}[\s\S]*if \(!emitSessionUpdate\(result, fence\)\)/);
+});
+
 test("participant parity keeps exact local changes and published progress without false success", async () => {
   const surface = await readFile(new URL("../src/components/desktop/content/agent-inspector/AgentInspectorParticipantSurface.vue", import.meta.url), "utf8");
   assert.match(surface, /ManagedAgentChangeSummaryCard/);
