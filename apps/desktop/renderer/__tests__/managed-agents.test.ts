@@ -1599,6 +1599,22 @@ test("supervised Codex presents ask-before-write without changing the legacy cat
   assert.match(supervised.detail ?? "", /read-only, network-disabled sandbox/);
 });
 
+test("supervised Open Model presents its native approval bridge without changing the legacy catalog", () => {
+  const legacy = {
+    id: "ask_before_write" as const,
+    label: "Ask before writes",
+    description: "Not wired.",
+    status: "gated" as const,
+    risk: "medium" as const,
+    detail: "Requires an approval bridge.",
+    isDefault: false,
+  };
+  const supervised = supervisedPermissionProfilePresentation("open-model", legacy);
+  assert.equal(legacy.status, "gated");
+  assert.equal(supervised.status, "available");
+  assert.match(supervised.detail ?? "", /each shell command and file edit/);
+});
+
 test("managed permission profile selection is scoped by provider", () => {
   const cursorProvider = provider({
     id: "cursor",

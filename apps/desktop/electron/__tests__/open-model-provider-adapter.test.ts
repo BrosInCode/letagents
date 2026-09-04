@@ -380,6 +380,7 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
   assert.equal(mcpEnvironment.LETAGENTS_EXECUTION_PROFILE, "supervised_room_turn");
   assert.equal(mcpEnvironment.LETAGENTS_SUPERVISOR_PROVIDER, "open-model");
   assert.equal(mcpEnvironment.LETAGENTS_SUPERVISOR_ENTRY_ID, "supervised-open-model-1");
+  assert.deepEqual(config.permission, { "*": "allow" });
 
   const connection = handle.providerConnection;
   assert.ok(connection?.kind === "opencode_server");
@@ -403,6 +404,15 @@ test("Open Model launches a dedicated OpenCode server without putting the provid
       lifecycleAuthorityMode: "typed_shadow",
     },
   );
+});
+
+test("Open Model launches ask-before-write with native shell and edit approvals", async () => {
+  const { harness } = await spawnAdapter({
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { permission: { "*": "allow", edit: "ask", bash: "ask" } },
+  });
+  const config = JSON.parse(harness.launches[0]!.env.OPENCODE_CONFIG_CONTENT ?? "{}") as Record<string, unknown>;
+  assert.deepEqual(config.permission, { "*": "allow", edit: "ask", bash: "ask" });
 });
 
 test("Open Model freezes lifecycle authority across spawn, attach, and resume", async () => {

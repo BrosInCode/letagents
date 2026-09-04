@@ -1182,7 +1182,16 @@ export function supervisedPermissionProfilePresentation(
   profile: DesktopManagedAgentPermissionProfile,
 ): DesktopManagedAgentPermissionProfile {
   if (providerId === "cursor") return supervisedCursorPermissionProfilePresentation(profile);
-  if (providerId !== "codex" || profile.id !== "ask_before_write") return profile;
+  if (profile.id !== "ask_before_write"
+    || (providerId !== "codex" && providerId !== "open-model")) return profile;
+  if (providerId === "open-model") {
+    return {
+      ...profile,
+      status: "available",
+      description: "Requires approval before OpenCode can run shell commands or change files.",
+      detail: "OpenCode asks for each shell command and file edit; read and daemon-mediated room tools remain available.",
+    };
+  }
   return {
     ...profile,
     status: "available",

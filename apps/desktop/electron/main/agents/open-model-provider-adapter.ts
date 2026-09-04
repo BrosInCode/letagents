@@ -473,6 +473,9 @@ export class OpenModelProviderAdapter implements ProviderAdapter {
       cwd: req.cwd,
       mcpCommand,
       mcpEnvironment,
+      permissionProfileId: req.permissionProfileId === "ask_before_write"
+        ? "ask_before_write"
+        : "full_access",
     });
     const port = await this.deps.allocatePort();
     const url = `http://127.0.0.1:${port}`;

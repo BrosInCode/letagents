@@ -65,6 +65,14 @@ test("managed provider spawn attestation preserves the resolved native authority
     force: true,
     sandbox: "enabled",
   });
+
+  assert.deepEqual(attestProviderSpawnPolicy("open-model", {
+    ...request,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { permission: { "*": "allow", edit: "ask", bash: "ask" } },
+  }), {
+    permission: { "*": "allow", edit: "ask", bash: "ask" },
+  });
 });
 
 test("managed provider spawn attestation rejects downgraded or unsupported authority", () => {
@@ -112,5 +120,11 @@ test("managed provider spawn attestation rejects downgraded or unsupported autho
   assert.throws(() => attestProviderSpawnPolicy("cursor", {
     ...request,
     launchPolicy: { force: false, sandbox: "disabled" },
+  }), /permission-profile authority/);
+
+  assert.throws(() => attestProviderSpawnPolicy("open-model", {
+    ...request,
+    permissionProfileId: "ask_before_write",
+    launchPolicy: { permission: { "*": "allow", bash: "ask" } },
   }), /permission-profile authority/);
 });

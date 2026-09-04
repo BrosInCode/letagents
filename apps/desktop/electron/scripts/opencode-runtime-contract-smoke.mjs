@@ -314,9 +314,8 @@ const config = openCodeConfig({
   cwd: join(runtimeRoot, "worktree"),
   mcpCommand: [process.execPath, mcpPath],
   mcpEnvironment: {},
+  permissionProfileId: "ask_before_write",
 });
-// Fixture-only prompting: production still launches with its unchanged full-access policy.
-config.permission = { "*": "allow", bash: "ask" };
 const environment = minimalOpenCodeEnvironment(process.env, {
   OPENCODE_SERVER_USERNAME: auth.username,
   OPENCODE_SERVER_PASSWORD: auth.password,
@@ -355,6 +354,11 @@ try {
     nativeFetch,
   );
   await waitForHealth(client, child, output);
+  assert.deepEqual((await client.config()).permission, {
+    "*": "allow",
+    edit: "ask",
+    bash: "ask",
+  }, "the pinned runtime must retain the supervised ask-before-write policy");
   const initial = await client.createSession("LetAgents live contract");
   const sessionId = typeof initial.id === "string" ? initial.id : "";
   if (!sessionId) throw new Error("OpenCode live contract did not create a session.");
@@ -489,6 +493,7 @@ try {
     nativeAbortAccepted: true,
     sameProcessRepair: true,
     permissionAskAndExactList: true,
+    permissionEditAndShellPolicy: true,
     permissionExactUserTurnCorrelation: true,
     permissionMissingMessageIsNotSessionLoss: true,
     permissionReconnectWithoutReplay: true,
