@@ -44,13 +44,18 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
 
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
       - name: Audit dependency advisories
-        run: npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
@@ -68,13 +73,13 @@ jobs:
         run: npm run test:package-runtime
 
       - name: Install Vue dependencies without lifecycle scripts
-        run: cd src/web && npm ci --ignore-scripts
+        run: cd src/web && npm ci --ignore-scripts --no-audit
 
       - name: Verify Vue dependency signatures
         run: cd src/web && npm audit signatures
 
       - name: Audit Vue dependency advisories
-        run: cd src/web && npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs src/web
 
       - name: Run verified Vue dependency lifecycle scripts
         run: cd src/web && npm rebuild
@@ -92,13 +97,13 @@ jobs:
         run: npm run build:web
 
       - name: Install desktop dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts --prefix apps/desktop
+        run: npm ci --ignore-scripts --no-audit --prefix apps/desktop
 
       - name: Verify desktop dependency signatures
         run: npm audit signatures --prefix apps/desktop
 
       - name: Audit desktop dependency advisories
-        run: npm audit --audit-level=low --prefix apps/desktop
+        run: node scripts/verify-dependency-advisories.mjs apps/desktop
 
       - name: Run verified desktop dependency lifecycle scripts
         run: npm rebuild --prefix apps/desktop
@@ -157,13 +162,18 @@ jobs:
         run: npm run verify:dependency-age
 
       - name: Install dependencies without lifecycle scripts
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         run: npm audit signatures
 
+      - name: Install pinned dependency audit client
+        run: |
+          npm install --global --ignore-scripts --prefix "${RUNNER_TEMP}/dependency-audit-npm" npm@11.6.2
+          echo "LETAGENTS_AUDIT_NPM_BIN=${RUNNER_TEMP}/dependency-audit-npm/bin/npm" >> "${GITHUB_ENV}"
+
       - name: Audit dependency advisories
-        run: npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         run: npm rebuild
@@ -384,7 +394,7 @@ jobs:
 
       - name: Install dependencies without lifecycle scripts
         if: steps.version.outputs.publish == 'true'
-        run: npm ci --ignore-scripts
+        run: npm ci --ignore-scripts --no-audit
 
       - name: Verify dependency signatures
         if: steps.version.outputs.publish == 'true'
@@ -392,7 +402,7 @@ jobs:
 
       - name: Audit dependency advisories
         if: steps.version.outputs.publish == 'true'
-        run: npm audit --audit-level=low
+        run: node scripts/verify-dependency-advisories.mjs .
 
       - name: Run verified dependency lifecycle scripts
         if: steps.version.outputs.publish == 'true'
