@@ -21,7 +21,7 @@ function readRunScript(lines, startIndex, runIndent, inlineValue) {
       break;
     }
     const command = line.trim();
-    if (command && !command.startsWith("#")) {
+    if (command) {
       blockCommands.push(command);
     }
   }
@@ -45,7 +45,7 @@ function workflowJobsFromText(workflow) {
       continue;
     }
 
-    const jobMatch = line.match(/^ {2}([a-zA-Z0-9_-]+):\s*$/);
+    const jobMatch = line.match(/^ {2}([a-zA-Z0-9_-]+)\s*:\s*$/);
     if (jobMatch) {
       currentJob = {
         condition: null,
@@ -61,24 +61,25 @@ function workflowJobsFromText(workflow) {
       continue;
     }
 
-    const jobCondition = line.match(/^ {4}if:\s*(.+)$/);
+    const jobCondition = line.match(/^ {4}if\s*:\s*(.+)$/);
     if (jobCondition) {
       currentJob.condition = jobCondition[1].trim();
       continue;
     }
-    const jobContinueOnError = line.match(/^ {4}continue-on-error:\s*(.+)$/);
+    const jobContinueOnError = line.match(/^ {4}continue-on-error\s*:\s*(.+)$/);
     if (jobContinueOnError) {
       currentJob.continueOnError = jobContinueOnError[1].trim();
       continue;
     }
 
-    const stepMatch = line.match(/^ {6}-\s+([a-zA-Z0-9_-]+):\s*(.*)$/);
+    const stepMatch = line.match(/^ {6}-\s+([a-zA-Z0-9_-]+)\s*:\s*(.*)$/);
     if (stepMatch) {
       currentStep = {
         condition: null,
         continueOnError: null,
         name: null,
         run: null,
+        shell: null,
       };
       currentJob.steps.push(currentStep);
       const [key, value] = stepMatch.slice(1);
@@ -92,6 +93,8 @@ function workflowJobsFromText(workflow) {
         const result = readRunScript(lines, index, 6, value);
         currentStep.run = result.script;
         index = result.nextIndex;
+      } else if (key === "shell") {
+        currentStep.shell = value.trim();
       }
       continue;
     }
@@ -99,22 +102,27 @@ function workflowJobsFromText(workflow) {
       continue;
     }
 
-    const stepName = line.match(/^ {8}name:\s*(.+)$/);
+    const stepName = line.match(/^ {8}name\s*:\s*(.+)$/);
     if (stepName) {
       currentStep.name = stepName[1].trim();
       continue;
     }
-    const stepCondition = line.match(/^ {8}if:\s*(.+)$/);
+    const stepCondition = line.match(/^ {8}if\s*:\s*(.+)$/);
     if (stepCondition) {
       currentStep.condition = stepCondition[1].trim();
       continue;
     }
-    const stepContinueOnError = line.match(/^ {8}continue-on-error:\s*(.+)$/);
+    const stepContinueOnError = line.match(/^ {8}continue-on-error\s*:\s*(.+)$/);
     if (stepContinueOnError) {
       currentStep.continueOnError = stepContinueOnError[1].trim();
       continue;
     }
-    const stepRun = line.match(/^ {8}run:\s*(.*)$/);
+    const stepShell = line.match(/^ {8}shell\s*:\s*(.+)$/);
+    if (stepShell) {
+      currentStep.shell = stepShell[1].trim();
+      continue;
+    }
+    const stepRun = line.match(/^ {8}run\s*:\s*(.*)$/);
     if (stepRun) {
       const result = readRunScript(lines, index, 8, stepRun[1]);
       currentStep.run = result.script;
@@ -133,53 +141,8 @@ function workflowRunScripts(jobs) {
   return jobs.flatMap((job) => job.steps.map((step) => step.run).filter(Boolean));
 }
 
-function stripShellComments(script) {
-  let result = "";
-  let quote = null;
-  let escaped = false;
-
-  for (let index = 0; index < script.length; index += 1) {
-    const character = script[index];
-    if (escaped) {
-      result += character;
-      escaped = false;
-      continue;
-    }
-    if (character === "\\" && quote !== "'") {
-      result += character;
-      escaped = true;
-      continue;
-    }
-    if (quote) {
-      result += character;
-      if (character === quote) {
-        quote = null;
-      }
-      continue;
-    }
-    if (character === "'" || character === '"') {
-      result += character;
-      quote = character;
-      continue;
-    }
-    if (character === "#" && (index === 0 || /[\s;|&()]/.test(script[index - 1]))) {
-      const newline = script.indexOf("\n", index);
-      if (newline === -1) {
-        break;
-      }
-      result += "\n";
-      index = newline;
-      continue;
-    }
-    result += character;
-  }
-
-  return result;
-}
-
 function containsDirectNpmAudit(script) {
-  const withoutShellComments = stripShellComments(script);
-  return withoutShellComments
+  return script
     .split(/&&|\|\||[;|\n]/)
     .some((segment) => {
       const tokens = segment.match(/"[^"]*"|'[^']*'|[^\s]+/g) ?? [];
@@ -222,8 +185,21 @@ function assertAuditStepsAreMandatory(jobs, workflowPath) {
         step.continueOnError === null || step.continueOnError === "false",
         `${workflowPath}:${job.name}:${step.name ?? "unnamed"} must fail the job`,
       );
+      assert.equal(
+        step.shell,
+        null,
+        `${workflowPath}:${job.name}:${step.name ?? "unnamed"} must use the default shell`,
+      );
     }
   }
+}
+
+function assertNoWorkflowRunDefaults(workflow, workflowPath) {
+  assert.doesNotMatch(
+    workflow,
+    /^\s*defaults\s*:/m,
+    `${workflowPath} must not override the shell inherited by dependency gates`,
+  );
 }
 
 test("external GitHub Actions are pinned to immutable commits", () => {
@@ -252,7 +228,7 @@ test("workflow policy inspects whole run scripts instead of matching comments", 
 jobs:
   build:
     steps:
-      - run: echo audit-disabled # node scripts/verify-dependency-advisories.mjs .; npm audit
+      - run: echo audit-disabled # node scripts/verify-dependency-advisories.mjs .
       - run: |
           npm --prefix apps/desktop audit --audit-level='low'
       - run: |
@@ -261,6 +237,10 @@ jobs:
           fi
       - run: if true; then npm --prefix apps/desktop audit; fi
       - run: echo "registry # diagnostic"; npm --prefix apps/desktop audit
+      - run: |
+          echo prefix\\
+          #; npm audit --audit-level=low
+      - run: echo prefix\\ #; npm audit --audit-level=low
       - name: Disabled audit step
         if: false
         continue-on-error: true
@@ -269,25 +249,36 @@ jobs:
   const scripts = workflowRunScripts(jobs);
 
   assert.deepEqual(scripts, [
-    "echo audit-disabled # node scripts/verify-dependency-advisories.mjs .; npm audit",
+    "echo audit-disabled # node scripts/verify-dependency-advisories.mjs .",
     "npm --prefix apps/desktop audit --audit-level='low'",
     "if false; then\nnode scripts/verify-dependency-advisories.mjs .\nfi",
     "if true; then npm --prefix apps/desktop audit; fi",
     'echo "registry # diagnostic"; npm --prefix apps/desktop audit',
+    "echo prefix\\\n#; npm audit --audit-level=low",
+    "echo prefix\\ #; npm audit --audit-level=low",
     "node scripts/verify-dependency-advisories.mjs .",
   ]);
   assert.equal(scripts[2].startsWith("node scripts/verify-dependency-advisories.mjs"), false);
   assert.match(scripts[1].replace(/["']/g, ""), /--audit-level(?:=|\s+)low\b/);
-  assert.deepEqual(scripts.filter(containsDirectNpmAudit), [scripts[1], scripts[3], scripts[4]]);
+  assert.deepEqual(scripts.filter(containsDirectNpmAudit), [
+    scripts[1],
+    scripts[3],
+    scripts[4],
+    scripts[5],
+    scripts[6],
+  ]);
   assert.throws(() => assertAuditStepsAreMandatory(jobs, "fixture"), /must not skip/);
 });
 
 test("dependency advisory gates cannot be skipped or made non-blocking", () => {
   const mutations = [
     { job: "if: false", expected: /must not skip dependency gates/ },
+    { job: "if : false", expected: /must not skip dependency gates/ },
     { job: "continue-on-error: true", expected: /must fail when a dependency gate fails/ },
     { step: "if: false", expected: /must not skip its audit/ },
+    { step: "if : false", expected: /must not skip its audit/ },
     { step: "continue-on-error: true", expected: /must fail the job/ },
+    { step: "shell: true {0}", expected: /must use the default shell/ },
   ];
 
   for (const mutation of mutations) {
@@ -309,7 +300,7 @@ jobs:
   build:
     steps:
       - run: echo before
-      - if: false
+      - if : false
         run: node scripts/verify-dependency-advisories.mjs .
 `);
   assert.throws(
@@ -319,11 +310,15 @@ jobs:
 });
 
 test("dependency advisory checks use the pinned supported audit client", () => {
+  const ciWorkflow = readFileSync(".github/workflows/ci.yml", "utf8");
+  const releaseWorkflow = readFileSync(".github/workflows/desktop-release.yml", "utf8");
   const ciJobs = workflowJobs(".github/workflows/ci.yml");
   const releaseJobs = workflowJobs(".github/workflows/desktop-release.yml");
   const ciScripts = workflowRunScripts(ciJobs);
   const releaseScripts = workflowRunScripts(releaseJobs);
 
+  assertNoWorkflowRunDefaults(ciWorkflow, ".github/workflows/ci.yml");
+  assertNoWorkflowRunDefaults(releaseWorkflow, ".github/workflows/desktop-release.yml");
   assertAuditStepsAreMandatory(ciJobs, ".github/workflows/ci.yml");
   assertAuditStepsAreMandatory(releaseJobs, ".github/workflows/desktop-release.yml");
 
