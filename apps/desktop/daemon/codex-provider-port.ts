@@ -86,7 +86,12 @@ export class CodexProviderActionPort implements ProviderActionPort {
 
   async attach(ref: ProviderActionRef): Promise<ProviderActionHandle | ProviderActionAttachTerminal | null> {
     const current = this.handles.get(ref.workAttemptId);
-    if (current) return publicHandle(current);
+    if (current) {
+      if (ref.launchPolicy !== undefined && await (await this.adapter()).attach({
+        ...ref, providerConnection: ref.providerConnection ?? current.providerConnection,
+      }) !== current) return null;
+      return publicHandle(current);
+    }
     const handle = await (await this.adapter()).attach(ref);
     if (!handle || isAttachTerminal(handle)) return handle;
     this.handles.set(ref.workAttemptId, handle);

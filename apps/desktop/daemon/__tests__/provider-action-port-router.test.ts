@@ -630,6 +630,15 @@ test("provider router accepts a missing connection only for the exact remembered
   };
 
   assert.deepEqual(await router.attach(alphaRef), alpha);
+  const policy = { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } };
+  const nativeAttach = adapter.attach.bind(adapter);
+  let forwardedPolicy: unknown;
+  let forwardedConnection: unknown;
+  adapter.attach = async ref => { forwardedPolicy = ref.launchPolicy; forwardedConnection = ref.providerConnection; return nativeAttach(ref); };
+  assert.deepEqual(await router.attach({ ...alphaRef, launchPolicy: policy }), alpha);
+  assert.deepEqual(forwardedPolicy, policy, "cached port handles must forward recovered permission authority to the native adapter");
+  assert.deepEqual(await router.attach({ ...alphaRef, providerConnection: null, launchPolicy: policy }), alpha);
+  assert.deepEqual(forwardedConnection, alpha.providerConnection, "verified policy preserves repair from the exact cached connection");
   assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: "typed_shadow" }), null);
   assert.equal(await router.attach({ ...alphaRef, lifecycleAuthorityMode: undefined }), null);
   assert.equal(await router.attach({ ...alphaRef, providerContinuationId: bravo.providerContinuationId! }), null);
@@ -658,6 +667,8 @@ test("provider router accepts a missing connection only for the exact remembered
   assert.deepEqual(calls, [
     "codex:spawn:alpha-attempt",
     "codex:spawn:bravo-attempt",
+    "codex:attach:alpha-attempt",
+    "codex:attach:alpha-attempt",
   ], "connection mismatches are rejected by the router instead of delegated to an adapter");
 });
 
