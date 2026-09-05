@@ -30,12 +30,12 @@
         <p id="agent-inspector-context-title">Room and work</p>
       </div>
       <dl class="agent-inspector-context-list">
-        <div v-if="runtimeControl">
+        <div>
           <dt>Provider status</dt>
-          <dd :data-state="runtimeControl.state" :title="runtimeControl.observedAt || undefined">
-            <strong>{{ runtimeControl.label }}</strong>
-            <span>{{ runtimeControl.detail }}</span>
-            <small v-if="runtimeControl.observedAt">Checked {{ formatFullTimestamp(runtimeControl.observedAt) }}</small>
+          <dd class="agent-inspector-provider-status" :data-state="runtimeControl?.state ?? 'unavailable'" :title="runtimeControl?.observedAt || undefined">
+            <strong>{{ runtimeControl?.label ?? (runtimeControlPending ? "Checking provider" : "Provider status unavailable") }}</strong>
+            <span>{{ runtimeControl?.detail ?? (runtimeControlPending ? "Waiting for a fresh provider check." : "No current provider check is available.") }}</span>
+            <small :aria-hidden="!runtimeControl?.observedAt || undefined">{{ runtimeControl?.observedAt ? `Checked ${formatFullTimestamp(runtimeControl.observedAt)}` : "\u00a0" }}</small>
           </dd>
         </div>
         <div><dt>Current room</dt><dd>{{ projection.roomId }}</dd></div>
@@ -70,6 +70,7 @@ const props = defineProps<{
   projection: AgentInspectorProjection;
   busy: boolean;
   runtimeControl: DesktopSupervisorAgentInspectorDetail["runtime_control"] | null;
+  runtimeControlPending: boolean;
 }>();
 const runtimeControl = computed(() => describeAgentInspectorRuntimeControl(props.runtimeControl));
 const emit = defineEmits<{
