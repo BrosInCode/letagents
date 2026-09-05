@@ -132,7 +132,24 @@ export interface StoredAgentSessionState {
   ended_at?: string | null;
 }
 
+export interface StoredMcpWorker {
+  worker_id: string;
+  scope: string;
+  registration_key_hash: string;
+  display_name: string;
+  rooms: Record<string, {
+    session_id?: string;
+    pending?: {
+      operation_id: string;
+      connection_token: string;
+      predecessor_id?: string;
+      predecessor_token?: string;
+    };
+  }>;
+}
+
 export interface LetagentsLocalState {
+  mcp_workers?: Record<string, StoredMcpWorker>;
   auth?: StoredAuthState;
   pending_device_auth?: PendingDeviceAuthState;
   agent_identity?: StoredAgentIdentityState;

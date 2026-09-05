@@ -55,6 +55,11 @@ export function readLocalState(): LetagentsLocalState {
   return readLocalStateSnapshot().state;
 }
 
+/** Hold the existing state lock through a short synchronous local effect. */
+export function withLocalStateReadLock<T>(callback: (snapshot: LocalStateSnapshot) => T): T {
+  return withStateLock((statePath) => callback(readLocalStateSnapshotFromPath(statePath)));
+}
+
 function sleepSync(ms: number): void {
   if (ms > 0) {
     Atomics.wait(STATE_LOCK_SLEEP_BUFFER, 0, 0, ms);
@@ -64,7 +69,7 @@ function sleepSync(ms: number): void {
 function writeLocalStateUnlocked(statePath: string, state: LetagentsLocalState): void {
   const tempPath = `${statePath}.${process.pid}.${randomBytes(6).toString("hex")}.tmp`;
   try {
-    writeFileSync(tempPath, JSON.stringify(state, null, 2) + "\n", "utf-8");
+    writeFileSync(tempPath, JSON.stringify(state, null, 2) + "\n", { encoding: "utf-8", mode: 0o600 });
     renameSync(tempPath, statePath);
   } finally {
     rmSync(tempPath, { force: true });

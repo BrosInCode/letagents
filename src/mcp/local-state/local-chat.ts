@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import { mkdir, readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
+import { withWorkerStateFence } from "../worker-call-context.js";
 
 import {
   type ActivationIdentity,
@@ -573,18 +574,6 @@ async function hydrateRows(
   );
 }
 
-function beginImmediate(database: SqliteDatabase): void {
-  database.exec("BEGIN IMMEDIATE");
-}
-
-function rollback(database: SqliteDatabase): void {
-  try {
-    database.exec("ROLLBACK");
-  } catch {
-    // The transaction may already be closed by SQLite after an error.
-  }
-}
-
 function allocateLocalMessageNumber(database: SqliteDatabase, roomId: string): number {
   database
     .prepare(`
@@ -761,7 +750,7 @@ export async function addLocalChatMessage(
   }
 
   const timestamp = new Date().toISOString();
-  const row = await runLocalSqliteWriteTransactionAsync(database, () => {
+  const row = await runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => {
     const number = allocateLocalMessageNumber(database, trimmedRoomId);
     const insertedRow: LocalMessageRow = {
       room_id: trimmedRoomId,
@@ -807,7 +796,7 @@ export async function addLocalChatMessage(
       );
     projectLocalThreadRoutingMessage(database, insertedRow);
     return insertedRow;
-  });
+  }));
 
   return {
     room_id: trimmedRoomId,
@@ -1020,8 +1009,7 @@ export async function addLocalTask(
   const database = await getDb();
   const now = new Date().toISOString();
   let taskId = "";
-  beginImmediate(database);
-  try {
+  await runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => {
     taskId = allocateLocalTaskId(database, trimmedRoomId);
     database
       .prepare(`
@@ -1043,11 +1031,7 @@ export async function addLocalTask(
         now,
         now,
       );
-    database.exec("COMMIT");
-  } catch (error) {
-    rollback(database);
-    throw error;
-  }
+  }));
   const task = await getLocalTask(trimmedRoomId, taskId);
   if (!task) throw new Error("Local task could not be created.");
   return task;
@@ -1179,7 +1163,7 @@ export async function updateLocalTask(
       : JSON.stringify(Array.isArray(patch.workflow_artifacts) ? patch.workflow_artifacts : []);
   const now = new Date().toISOString();
   const database = await getDb();
-  database
+  await runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => database
     .prepare(`
       UPDATE local_tasks
       SET status = ?,
@@ -1204,7 +1188,7 @@ export async function updateLocalTask(
       now,
       roomId,
       taskId,
-    );
+    )));
   const updated = await getLocalTask(roomId, taskId);
   if (!updated) throw new Error("Task not found.");
   return updated;
@@ -1240,7 +1224,7 @@ export async function claimLocalTaskReviewLease(
   const database = await getDb();
   const now = new Date().toISOString();
   const leaseId = currentReviewLease?.id || `local_review_${Date.now()}_${Math.random().toString(36).slice(2)}`;
-  database
+  await runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => database
     .prepare(`
       UPDATE local_tasks
       SET review_lease_id = ?,
@@ -1260,7 +1244,7 @@ export async function claimLocalTaskReviewLease(
       now,
       roomId,
       taskId,
-    );
+    )));
   const task = await getLocalTask(roomId, taskId);
   const lease = task?.active_leases?.find((entry) => entry.id === leaseId);
   if (!task || !lease) throw new Error("Review authority could not be claimed.");
@@ -1287,7 +1271,7 @@ export async function releaseLocalTaskReviewLease(
   }
   const database = await getDb();
   const now = new Date().toISOString();
-  database
+  await runLocalSqliteWriteTransactionAsync(database, () => withWorkerStateFence(() => database
     .prepare(`
       UPDATE local_tasks
       SET review_lease_id = NULL,
@@ -1298,7 +1282,7 @@ export async function releaseLocalTaskReviewLease(
           updated_at = ?
       WHERE room_id = ? AND task_id = ?
     `)
-    .run(now, roomId, taskId);
+    .run(now, roomId, taskId)));
   const task = await getLocalTask(roomId, taskId);
   if (!task) throw new Error("Task not found.");
   return {
