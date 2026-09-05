@@ -12,7 +12,7 @@ import type {
   PolicyCondition,
   ReconciliationNotice,
 } from "./types.js";
-import { UnusableSourceRepositoryError } from "./workspace-provisioner.js";
+import { RepositoryNetworkError, UnusableSourceRepositoryError } from "./workspace-provisioner.js";
 
 const PROVIDER_START_RETRY_LIMIT = 3;
 const WORKER_MINT_RECOVERY_RETRY_LIMIT = 5;
@@ -114,7 +114,7 @@ export class ProviderSchedulerFailureCoordinator {
       const observedState = !entry.work_attempt_id && !entry.provider_ref
         ? "failed"
         : entry.observed_state;
-      const lastError = error instanceof UnusableSourceRepositoryError
+      const lastError = error instanceof UnusableSourceRepositoryError || error instanceof RepositoryNetworkError
         ? error.message
         : `convergence scheduler failure: ${message}`;
       await this.ports.transitionOnce(

@@ -32,7 +32,8 @@ const TEST_PROVIDER_TURN_AUTHORITY = {
 } as const;
 import { SupervisedAgentInboxStore } from "../supervised-agent-inbox-store.js";
 import type { SupervisedDeliveryHttp, SupervisedIngressAgent } from "../supervised-agent-delivery.js";
-import { createGitCommand, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
+import { createGitCommand, RepositoryNetworkError, repositoryStorageKey, WorkspaceProvisioner } from "../workspace-provisioner.js";
+import { ProviderSchedulerFailureCoordinator } from "../provider-scheduler-failure-coordinator.js";
 import { acquireWorkspaceFence, withWorkspaceFence } from "../workspace-fence.js";
 import { CRASH_LOOP_EXIT_LIMIT, decideReconciliation, restartBackoffMs } from "../reconciler-policy.js";
 import { ProviderReconciler } from "../reconciler-runner.js";
@@ -10914,6 +10915,41 @@ test("workspace provisioner refreshes an existing bare clone before resolving a 
     });
     assert.equal((await execFileAsync("git", ["-C", first.path, "rev-parse", "HEAD"])).stdout.trim(), firstRevision);
 
+    let remoteCalls = 0;
+    const networkFailure = Object.assign(new Error("git fetch failed"), {
+      stderr: "ssh: connect to host github.com port 22: Operation timed out\nfatal: Could not read from remote repository.",
+    });
+    const offline = new WorkspaceProvisioner(daemonRoot, async (args) => {
+      if (args.includes("clone") || (args.includes("fetch") && args.includes("origin"))) {
+        remoteCalls += 1;
+        throw networkFailure;
+      }
+      return createGitCommand(daemonRoot)(args);
+    });
+    const reused = await offline.provision({
+      repo: "repo", workAttemptId: first.identity.work_attempt_id,
+      taskId: "task_first", remoteUrl: remote, revision: "moved-branch",
+    });
+    assert.equal(reused.reused, true);
+    assert.equal(reused.identity.resolved_revision, firstRevision);
+    const cached = await offline.provision({
+      repo: "repo", workAttemptId: randomUUID(), taskId: "cached",
+      remoteUrl: remote, revision: firstRevision,
+    });
+    assert.equal(cached.identity.resolved_revision, firstRevision);
+    assert.equal(remoteCalls, 0, "verified workspaces and cached exact commits need no network");
+    await assert.rejects(offline.provision({
+      repo: "repo", workAttemptId: first.identity.work_attempt_id,
+      taskId: "wrong-task", remoteUrl: remote, revision: firstRevision,
+    }), /Workspace identity does not match/);
+    for (const revision of ["main", "f".repeat(40)]) {
+      await assert.rejects(offline.provision({
+        repo: "repo", workAttemptId: randomUUID(), taskId: "needs_remote",
+        remoteUrl: remote, revision,
+      }), (error: unknown) => error instanceof RepositoryNetworkError && error.cause === networkFailure);
+    }
+    assert.equal(remoteCalls, 2, "symbolic revisions and missing objects must still refresh");
+
     await writeFile(join(source, "README.md"), "second\n");
     await execFileAsync("git", ["-C", source, "add", "README.md"]);
     await execFileAsync("git", ["-C", source, "commit", "-m", "second"]);
@@ -10977,6 +11013,52 @@ test("workspace provisioner refreshes an existing bare clone before resolving a 
       (await execFileAsync("git", ["--git-dir", join(daemonRoot, "repos", "repo.git"), "rev-parse", "refs/letagents/tags/release-only^{commit}"])).stdout.trim(),
       tagOnlyRevision,
     );
+  } finally { await env.cleanup(); }
+});
+
+test("repository transport errors get friendly bounded recovery, but auth failures do not", async () => {
+  const env = await fixture();
+  try {
+    const failures = [
+      "ssh: connect to host github.com port 22: Operation timed out",
+      "fatal: unable to access remote: Could not resolve host: github.com",
+      "Connection reset by peer",
+      "git@github.com: Permission denied (publickey).",
+      "ERROR: Repository not found.",
+    ];
+    const scheduled: string[] = [];
+    const messages: string[] = [];
+    const coordinator = new ProviderSchedulerFailureCoordinator({
+      nativeHeartbeatIntervalMs: 1000, currentDaemonGeneration: () => 1, nowMs: () => 0,
+      serializeEntry: async (_id, operation) => operation(),
+      serializeManifest: async (operation) => operation(),
+      manifest: { load: async () => ({ entries: [entry] }), updateEntry: async (_id, update) => update(entry) },
+      transitionOnce: async (_id, _state, _condition, message) => { messages.push(message); },
+      audit: { append: async () => {} },
+      scheduleRecovery: (id, delay) => { assert.equal(delay, 1000); scheduled.push(id); },
+    });
+    for (const [index, stderr] of failures.entries()) {
+      const original = Object.assign(new Error("Command failed: git clone"), { stderr });
+      const provisioner = new WorkspaceProvisioner(join(env.root, String(index)), async () => { throw original; });
+      let failure: unknown;
+      await assert.rejects(provisioner.provision({
+        repo: "repo", workAttemptId: randomUUID(), taskId: "task", remoteUrl: "git@github.com:owner/repo.git", revision: TEST_OID,
+      }), (error: unknown) => { failure = error; return true; });
+      const transient = index < 3;
+      assert.equal(failure instanceof RepositoryNetworkError, transient);
+      if (!transient) assert.equal(failure, original, "auth errors retain their original classification");
+      const before = scheduled.length;
+      coordinator.clearSuccessfulRecovery(entry.id);
+      for (let attempt = 0; attempt < 5; attempt += 1) await coordinator.record(entry.id, failure, "test");
+      assert.equal(scheduled.length - before, transient ? 3 : 0, "recovery is bounded and transport-only");
+      if (transient) {
+        assert.match(messages.at(-1)!, /Check your network or VPN/);
+        assert.doesNotMatch(messages.at(-1)!, /convergence scheduler|git clone|port 22/);
+        coordinator.clearSuccessfulRecovery(entry.id);
+        await coordinator.record(entry.id, failure, "test");
+        assert.equal(scheduled.length - before, 4, "successful recovery resets the retry budget");
+      }
+    }
   } finally { await env.cleanup(); }
 });
 
