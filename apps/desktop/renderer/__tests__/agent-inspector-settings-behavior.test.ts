@@ -530,6 +530,25 @@ test("mounted Overview retirement stays contextual and requires explicit confirm
   assert.match(textContent(mounted.root), /may still be working/);
   assert.match(textContent(mounted.root), /Checked/);
   assert.equal(descendants(mounted.root).some((node) => node.props.role === "alert"), false);
+  const providerRow = () => descendants(mounted.root).find(node => node.type === "dt" && textContent(node) === "Provider status")?.parent;
+  const initialProviderRow = providerRow();
+  assert.ok(initialProviderRow);
+  const timestampSlot = descendants(initialProviderRow).find(node => node.type === "small");
+  assert.ok(timestampSlot);
+  for (let refresh = 0; refresh < 2; refresh += 1) {
+    workResource.value = { status: "refreshing", detail: { ...runtimeDetail, runtime_control: null }, error: null, sourceMessageId: null };
+    await nextTick();
+    assert.equal(providerRow(), initialProviderRow, "refresh retains the provider row instead of unmounting it");
+    assert.match(textContent(initialProviderRow), /Checking provider/);
+    assert.equal(descendants(initialProviderRow).find(node => node.type === "small"), timestampSlot);
+    assert.equal(timestampSlot.props["aria-hidden"], true, "the empty timestamp slot is reserved without exposing stale text");
+    assert.doesNotMatch(textContent(initialProviderRow), /Provider check inconclusive|Checked/,
+      "a refresh placeholder never repeats invalidated process health or its timestamp");
+    workResource.value = { status: "ready", detail: runtimeDetail, error: null, sourceMessageId: null };
+    await nextTick();
+    assert.equal(providerRow(), initialProviderRow);
+    assert.match(textContent(initialProviderRow), /Provider check inconclusive/);
+  }
   projectionResource.value = { ...projection, entry: { ...projection.entry, providerPid: null } };
   workResource.value = {
     status: "error",
@@ -538,7 +557,9 @@ test("mounted Overview retirement stays contextual and requires explicit confirm
     sourceMessageId: null,
   };
   await nextTick();
-  assert.doesNotMatch(textContent(mounted.root), /Provider status|Provider check inconclusive|Checked/,
+  assert.equal(providerRow(), initialProviderRow);
+  assert.match(textContent(initialProviderRow), /Provider status unavailable/);
+  assert.doesNotMatch(textContent(initialProviderRow), /Checking provider|Provider check inconclusive|Checked/,
     "failed reconciliation cannot leave health from an absent process birth visible");
   const retire = buttonByText(mounted.root, "Retire agent");
   retire.focus();
