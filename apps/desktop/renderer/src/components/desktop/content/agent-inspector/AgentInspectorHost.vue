@@ -102,6 +102,7 @@ const props = defineProps<{
   liveFeed: { events: readonly DesktopAgentStreamEvent[]; ended: boolean; droppedEvents: number };
   roomIdentifier: string;
   requestVersion: number;
+  initialTab?: "overview" | "work";
   managedSessions: readonly DesktopManagedAgentSession[];
   reasoningSessions: readonly DesktopReasoningSession[];
 }>();
@@ -182,6 +183,8 @@ function surfaceProps(compactPresentation: boolean): Record<string, unknown> {
   if (props.projection) {
     return {
       projection: props.projection,
+      initialTab: props.initialTab,
+      requestVersion: props.requestVersion,
       actionState: props.actionState,
       compact: compactPresentation,
       workResource: props.workResource,
