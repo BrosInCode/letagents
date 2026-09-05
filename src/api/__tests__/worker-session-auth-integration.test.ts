@@ -216,6 +216,110 @@ function sessionCredentials(session: CreatedSession): Record<string, string> {
   };
 }
 
+test("durable MCP workers keep identity and name through retries, crashes, and clean reconnects", {
+  skip: requiresDatabase,
+}, async () => {
+  const { room } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  const register = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+  const disconnect = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions\\/([^/]+)\\/disconnect$/");
+  const body = {
+    actor_key: agentIdentity.canonical_key, display_name: "Atlas", requested_base_display_name: "Atlas",
+    agent_instance_id: `worker_${"a".repeat(32)}`, session_kind: "worker", ide_label: "Agent",
+    runtime: "codex", connection_token: "a".repeat(43),
+  };
+  const joinWorker = (value: Record<string, unknown>) => invoke(register, ownerTokenRequest(value, { params: { 0: room.id } }));
+  const first = await joinWorker(body);
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  let current = first.body as CreatedSession;
+  const task = await createTask!(room.id, "Durable chat owns its work across reconnects", "Human");
+  await updateTask!(room.id, task.id, { status: "accepted" });
+  const assigned = await invoke(handlers.patch.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/"),
+    ownerTokenRequest({ status: "assigned", assignee: current.actor_label, ...sessionCredentials(current) },
+      { params: { 0: room.id, 1: task.id }, query: {} }));
+  assert.equal(assigned.statusCode, 200, JSON.stringify(assigned.body));
+  await createTaskLease!({ room_id: room.id, task_id: task.id, kind: "work", agent_key: current.agent_key,
+    agent_session_id: current.session_id, actor_label: current.actor_label, created_by: "durable_worker_test" });
+  const retry = await joinWorker(body);
+  assert.equal(retry.statusCode, 201, JSON.stringify(retry.body));
+  assert.equal((retry.body as CreatedSession).session_id, current.session_id);
+  assert.equal((retry.body as CreatedSession).session_token, current.session_token);
+
+  // A stale heartbeat is never sufficient proof to take over a durable worker.
+  await pool!.query("UPDATE room_agent_sessions SET last_seen_at = NOW() - INTERVAL '1 day' WHERE session_id = $1", [current.session_id]);
+  assert.equal((await joinWorker({ ...body, connection_token: "b".repeat(43) })).statusCode, 409);
+  for (let i = 0; i < 4; i++) {
+    const old = current;
+    if (i % 2 === 0) {
+      const ended = await invoke(disconnect, ownerTokenRequest(sessionCredentials(old), { params: { 0: room.id, 1: old.session_id } }));
+      assert.equal(ended.statusCode, 200, JSON.stringify(ended.body));
+    }
+    const resumed = await joinWorker({ ...body, display_name: "Ignored rename", connection_token: String(i).repeat(43),
+      replace_agent_session_id: old.session_id, replace_agent_session_token: old.session_token });
+    assert.equal(resumed.statusCode, 201, JSON.stringify(resumed.body));
+    current = resumed.body as CreatedSession;
+    assert.equal(current.session_id, old.session_id);
+    assert.equal(current.agent_key, old.agent_key);
+    assert.equal(current.display_name, "Atlas");
+    assert.equal(current.actor_label, old.actor_label);
+    assert.notEqual(current.session_token, old.session_token);
+    // A delayed disconnect authenticated before rotation must not end its successor.
+    assert.equal(await endRoomAgentSession!({ session_id: old.session_id, room_id: room.id,
+      credential_fence: { kind: "session_token", token_hash: hashToken(old.session_token) } }), null);
+    const staleDisconnect = await invoke(disconnect, ownerTokenRequest(sessionCredentials(old), { params: { 0: room.id, 1: old.session_id } }));
+    assert.ok([401, 403].includes(staleDisconnect.statusCode), JSON.stringify(staleDisconnect.body));
+  }
+  const rows = await pool!.query("SELECT * FROM room_agent_sessions WHERE agent_instance_id = $1", [body.agent_instance_id]);
+  assert.equal(rows.rowCount, 1, "reconnects do not add historical worker rows");
+  assert.equal(rows.rows[0].ended_at, null);
+  const continued = await invoke(handlers.patch.get("/^\\/rooms\\/(.+)\\/tasks\\/([^/]+)$/"),
+    ownerTokenRequest({ status: "in_progress", ...sessionCredentials(current) },
+      { params: { 0: room.id, 1: task.id }, query: {} }));
+  assert.equal(continued.statusCode, 200, JSON.stringify(continued.body));
+  const leases = await pool!.query("SELECT agent_session_id FROM task_leases WHERE task_id = $1 AND status = 'active'", [task.id]);
+  assert.deepEqual(leases.rows, [{ agent_session_id: current.session_id }]);
+});
+
+test("separate durable chats reserve different names even when one is offline", { skip: requiresDatabase }, async () => {
+  const { room } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  const register = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+  const joinWorker = (value: Record<string, unknown>) => invoke(register, ownerTokenRequest(value, { params: { 0: room.id } }));
+  const now = new Date().toISOString();
+  const secondKey = "EmmyMay/second-chat";
+  await db!.insert(agents!).values({ ...agentIdentity, id: "agent_second_chat", canonical_key: secondKey,
+    name: "second-chat", created_at: now, updated_at: now });
+  const common = { display_name: "Atlas", requested_base_display_name: "Atlas", session_kind: "worker", runtime: "codex", ide_label: "Agent" };
+  const first = await joinWorker({ ...common, actor_key: agentIdentity.canonical_key,
+    agent_instance_id: `worker_${"a".repeat(32)}`, connection_token: "a".repeat(43) });
+  assert.equal(first.statusCode, 201, JSON.stringify(first.body));
+  const one = first.body as CreatedSession;
+  await endRoomAgentSession!({ room_id: room.id, session_id: one.session_id });
+  const second = await joinWorker({ ...common, actor_key: secondKey,
+    agent_instance_id: `worker_${"b".repeat(32)}`, connection_token: "b".repeat(43) });
+  assert.equal(second.statusCode, 201, JSON.stringify(second.body));
+  const two = second.body as CreatedSession;
+  assert.notEqual(two.agent_key, one.agent_key);
+  assert.notEqual(two.display_name, one.display_name);
+  assert.notEqual(two.session_id, one.session_id);
+  const resumed = await joinWorker({ ...common, actor_key: one.agent_key, agent_instance_id: one.agent_instance_id,
+    connection_token: "c".repeat(43), replace_agent_session_id: one.session_id, replace_agent_session_token: one.session_token });
+  assert.equal(resumed.statusCode, 201, JSON.stringify(resumed.body));
+  assert.equal((resumed.body as CreatedSession).display_name, one.display_name);
+});
+
+test("concurrent durable registration retries converge on one connection", { skip: requiresDatabase }, async () => {
+  const { room } = await seedHarness();
+  const handlers = registerRoutesForRoom(room);
+  const register = handlers.post.get("/^\\/rooms\\/(.+)\\/agent-sessions$/");
+  const body = { actor_key: agentIdentity.canonical_key, display_name: "Juniper", session_kind: "worker",
+    agent_instance_id: `worker_${"c".repeat(32)}`, connection_token: "c".repeat(43) };
+  const replies = await Promise.all(Array.from({ length: 4 }, () => invoke(register, ownerTokenRequest(body, { params: { 0: room.id } }))));
+  for (const result of replies) assert.equal(result.statusCode, 201, JSON.stringify(result.body));
+  assert.equal(new Set(replies.map((result) => (result.body as CreatedSession).session_id)).size, 1);
+  assert.equal(new Set(replies.map((result) => (result.body as CreatedSession).display_name)).size, 1);
+});
+
 function requestWithDeliveryHeaders(session: CreatedSession, extra: Record<string, unknown> = {}) {
   const headers = new Map<string, string>([
     [LETAGENTS_AGENT_SESSION_ID_HEADER.toLowerCase(), session.session_id],

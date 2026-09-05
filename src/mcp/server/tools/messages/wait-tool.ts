@@ -1,4 +1,5 @@
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { assertWorkerConnection } from "../../../worker-call-context.js";
 import { z } from "zod";
 import { getPollTimeoutCapMs } from "../../../../shared/poll-timeout-cap.js";
 import { encodeRoomIdPath } from "../../../room-id.js";
@@ -662,6 +663,7 @@ export function registerWaitForMessagesTool(server: McpServer): void {
               limit: MAX_WAIT_MESSAGES_PER_CALL,
               include_prompt_only: true,
             });
+        assertWorkerConnection(agentSession ?? undefined);
         const messages = await attachLocalActivationMetadata(effectiveLocalRoomId, result.messages, agentSession, {
           includeTaskOwnerLeases: !replayingExistingMessages,
           activeSessionRoomId: cloudRoomId || sessionRoomId,

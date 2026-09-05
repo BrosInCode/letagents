@@ -11,6 +11,7 @@ import { maybeHandleRepoRoomAuthRequired } from "./device-auth.js";
 import { getLastMessageId } from "./messages.js";
 import { currentRoom, getCurrentSupervisedRoomAuthority } from "./room-state.js";
 import { hasSupervisedWorkerAuthority } from "./worker-bearer.js";
+import { currentWorkerCall } from "../../worker-call-context.js";
 
 export async function roomScopedApiCall<T>(input: {
   room_id?: string | null;
@@ -37,8 +38,8 @@ export async function roomScopedApiCall<T>(input: {
   if (exactRoomAuthority) {
     if (originHeaderKey) delete headers[originHeaderKey];
     headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = exactRoomAuthority;
-  } else if (currentRoom?.room_id && !originHeaderKey) {
-    headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = currentRoom.room_id;
+  } else if ((currentWorkerCall()?.room_id || currentRoom?.room_id) && !originHeaderKey) {
+    headers[LETAGENTS_ORIGIN_ROOM_ID_HEADER] = currentWorkerCall()?.room_id ?? currentRoom!.room_id;
   }
   const options = {
     ...input.options,
