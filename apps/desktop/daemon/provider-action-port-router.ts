@@ -136,6 +136,10 @@ export class ProviderActionPortRouter implements ProviderActionPort {
       // omitted a provider connection it did not know how to serialize; the
       // remembered native handle is the authority needed to repair that
       // manifest, never permission to launch a replacement.
+      if (provider === "codex" && ref.launchPolicy !== undefined
+        && await (await this.adapter(provider)).attach({
+          ...ref, providerConnection: ref.providerConnection ?? handle.providerConnection,
+        }) !== handle) return null;
       return publicHandle(handle);
     }
     const handle = await (await this.adapter(provider)).attach(ref);

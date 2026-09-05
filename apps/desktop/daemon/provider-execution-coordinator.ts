@@ -775,9 +775,19 @@ export class ProviderExecutionCoordinator {
           configurationRevision: appliedRevision!,
         })
       : null;
-    const attachment = await this.options.provider.attach(
-      this.providerRef(entry, frozenAuthority ?? undefined),
-    );
+    const attachRef = this.providerRef(entry, frozenAuthority ?? undefined);
+    // Pending Inspector edits are a future launch contract. Never apply them
+    // to a surviving runtime whose original configuration is no longer stored.
+    if (entry.provider === "codex" && configuration!.config_revision === appliedRevision) {
+      attachRef.launchPolicy = deriveProviderConfigurationSnapshot({
+        provider: configuration!.provider,
+        model: configuration!.model,
+        reasoningEffort: configuration!.reasoning_effort ?? null,
+        permissionProfileId: configuration!.permission_profile_id,
+        configurationRevision: appliedRevision!,
+      }, configuration!.provider_launch_policy).launchPolicy;
+    }
+    const attachment = await this.options.provider.attach(attachRef);
     if (!attachment) return null;
     if (this.isAttachTerminal(attachment)) {
       const terminal = attachment.terminal;

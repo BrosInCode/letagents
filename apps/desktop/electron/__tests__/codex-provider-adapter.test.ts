@@ -902,23 +902,66 @@ test("Codex adapter launches app-server, maps attested thread policy, and boots 
   await assert.rejects(adapter.poke(handle, "wake up"), /not enabled/);
 });
 
-test("Codex supervised ask-before-write maps to the native read-only thread boundary", async () => {
+test("Codex ask-before-write remains read-only at turn dispatch after reattachment", async () => {
   const harness = createHarness();
   const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
-  await adapter.spawn(spawnRequest({
+  const launchPolicy = {
+    approvalPolicy: "on-request",
+    sandboxPolicy: { type: "readOnly", networkAccess: false },
+  };
+  const first = await adapter.spawn(spawnRequest({
     deliveryMode: "daemon_inbox",
     permissionProfileId: "ask_before_write",
     configurationRevision: 1,
-    launchPolicy: {
-      approvalPolicy: "on-request",
-      sandboxPolicy: { type: "readOnly", networkAccess: false },
-    },
+    launchPolicy,
   }));
 
   const params = requestByMethod(harness.clients[0]!, "thread/start").params as Record<string, unknown>;
   assert.equal(params.approvalPolicy, "on-request");
   assert.equal(params.sandbox, "read-only");
   assert.equal(Object.hasOwn(params, "sandboxPolicy"), false);
+
+  const attachedAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await attachedAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection, launchPolicy });
+  assertProviderHandle(attached);
+  // Caller mutation and permissive user defaults cannot widen a captured launch contract.
+  launchPolicy.sandboxPolicy.type = "dangerFullAccess";
+  launchPolicy.approvalPolicy = "never";
+  for (const [runtime, handle, client] of [[adapter, first, harness.clients[0]!], [attachedAdapter, attached, harness.clients[1]!]] as const) {
+    await runtime.runRoomTurn(handle, { inboxItemId: "approval-retest", actionId: "approval-retest", sourceMessage: {}, activation: {} }, {
+      checkpointTurnStarted: async (turnId) => {
+        client.emit({ method: "turn/completed", params: { threadId: handle.providerContinuationId, turnId } });
+      },
+    });
+    const turn = requestByMethod(client, "turn/start").params as Record<string, unknown>;
+    assert.equal(turn.approvalPolicy, "on-request");
+    assert.deepEqual(turn.sandboxPolicy, { type: "readOnly", networkAccess: false });
+    assert.equal(Object.hasOwn(turn, "sandbox"), false, "turn/start uses its native sandboxPolicy shape");
+  }
+
+  const unknownAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const unknown = await unknownAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(unknown);
+  let dispatched = false;
+  await assert.rejects(unknownAdapter.runRoomTurn(unknown, {
+    inboxItemId: "unknown-policy", actionId: "unknown-policy", sourceMessage: {}, activation: {},
+  }, { beforeNativeDispatch: async () => { dispatched = true; } }), /exact applied permission policy/);
+  assert.equal(dispatched, false, "an unverified attach remains observable but cannot start work");
+  assert.equal(harness.clients[2]!.requests.some(request => request.method === "turn/start"), false);
+  const verified = await unknownAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
+    launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
+  assert.equal(verified, unknown, "verified configuration binds to the already observed exact native process");
+  await unknownAdapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
+    launchPolicy: { approvalPolicy: "never", sandboxPolicy: { type: "dangerFullAccess" } } });
+  await unknownAdapter.controlTurn(unknown, "Continue after permission recovery.");
+  const recoveredTurn = requestByMethod(harness.clients[2]!, "turn/start").params as Record<string, unknown>;
+  assert.equal(recoveredTurn.approvalPolicy, "on-request");
+  assert.deepEqual(recoveredTurn.sandboxPolicy, { type: "readOnly", networkAccess: false },
+    "the first verified contract remains immutable across subsequent attaches");
 });
 
 test("Codex fresh spawn does not let a fatal placeholder resume probe block thread/start", async () => {
@@ -1862,7 +1905,7 @@ test("explicit custodial activation dispatches once after intent and checkpoints
     if (scenario === "recovered" || scenario === "recovered_session_mismatch") {
       adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
       const attached = await adapter.attach({ workAttemptId: handle.workAttemptId,
-        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection! });
+        providerContinuationId: handle.providerContinuationId!, providerConnection: handle.providerConnection!, launchPolicy: request.launchPolicy });
       assertProviderHandle(attached);
       handle = attached;
     }
@@ -2219,6 +2262,146 @@ test("Codex resume reopens the exact native thread and preserves the same launch
       && event.summary === "Transcript checkpoint persisted."));
 });
 
+test("reattachment subscribes the exact thread and observes native approvals without replay or policy overrides", async () => {
+  const harness = createHarness();
+  const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const first = await firstAdapter.spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown) => {
+      const result = await request<T>(method, params);
+      if (method === "thread/resume") client.askPermission(approvalParams());
+      return result;
+    };
+    return client;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(attached);
+  const client = harness.clients[1]!;
+  assert.deepEqual(requestByMethod(client, "thread/resume").params, { threadId: first.providerContinuationId });
+  assert.equal(client.requests.some(request => request.method === "turn/start" || request.method === "thread/start"), false);
+  const events: CodexPermissionObservation[] = [];
+  const controller = new AbortController();
+  const observation = adapter.observePermissions(attached, event => events.push(event), controller.signal);
+  await flush();
+  assert.ok(events.some(event => event.type === "snapshot" && event.requests.length === 1));
+  assert.equal(client.permissionResponses.length, 0);
+  controller.abort();
+  await observation;
+});
+
+test("reattachment reconstructs a turn that completed before subscription without a notification", async () => {
+  const harness = createHarness();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies })
+    .spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    client.turnStatus = "inProgress";
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown) => {
+      if (method === "thread/resume") client.turnStatus = "completed";
+      return request<T>(method, params);
+    };
+    return client;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(attached);
+  const observations: NativeExecutionObservation[] = [];
+  const subscription = adapter.onExecution(attached, event => observations.push(event));
+  assert.ok(observations.some(event => event.fact.domain === "turn"
+    && event.fact.state === "terminal" && event.fact.turnOutcome === "completed"));
+  subscription.dispose();
+});
+
+test("observation attachment does not cold-resume an unloaded thread with process defaults", async () => {
+  const harness = createHarness();
+  const first = await new CodexProviderAdapter({ dependencies: harness.dependencies })
+    .spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+  const createRpcClient = harness.dependencies.createRpcClient;
+  harness.dependencies.createRpcClient = (serverUrl, notify) => {
+    const client = createRpcClient(serverUrl, notify) as FakeRpc;
+    const request = client.request.bind(client);
+    client.request = async <T>(method: string, params?: unknown) => {
+      const result = await request<T>(method, params);
+      if (method === "thread/read") (result as { thread: { status: unknown } }).thread.status = { type: "notLoaded" };
+      return result;
+    };
+    return client;
+  };
+  const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+  const attached = await adapter.attach({ workAttemptId: first.workAttemptId,
+    providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection });
+  assertProviderHandle(attached);
+  assert.equal(harness.clients[1]!.requests.some(request => request.method === "thread/resume"), false);
+});
+
+test("empty reattachment subscribes after first-turn checkpoint and never replays on subscription failure", async () => {
+  for (const { failSubscription, status } of [
+    { failSubscription: false, status: "completed" },
+    { failSubscription: false, status: "cancelled" },
+    { failSubscription: false, status: "STOPPED" },
+    { failSubscription: true, status: "completed" },
+  ]) {
+    const harness = createHarness();
+    const first = await new CodexProviderAdapter({ dependencies: harness.dependencies })
+      .spawn(spawnRequest({ deliveryMode: "daemon_inbox" }));
+    const createRpcClient = harness.dependencies.createRpcClient;
+    let materialized = false;
+    let checkpointed = false;
+    let subscriptionFailed = false;
+    harness.dependencies.createRpcClient = (serverUrl, notify) => {
+      const client = createRpcClient(serverUrl, notify) as FakeRpc;
+      const request = client.request.bind(client);
+      client.request = async <T>(method: string, params?: unknown) => {
+        if (method === "thread/read" && !materialized && (params as { includeTurns?: boolean }).includeTurns) {
+          throw new Error(`thread ${first.providerContinuationId} is not materialized yet; includeTurns is unavailable before first user message`);
+        }
+        if (method === "turn/start") { materialized = true; client.turnStatus = "inProgress"; }
+        if (method === "thread/resume") {
+          assert.ok(materialized, "resume cannot read history before the first turn");
+          assert.ok(checkpointed, "native acknowledgement is durable before subscription can fail");
+          if (failSubscription && !subscriptionFailed) {
+            subscriptionFailed = true;
+            throw new Error("subscription unavailable");
+          }
+          client.askPermission(approvalParams());
+          // Fast completion before subscription has no corresponding notification.
+          client.turnStatus = status;
+        }
+        return request<T>(method, params);
+      };
+      return client;
+    };
+    const adapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
+    const attached = await adapter.attach({ workAttemptId: first.workAttemptId,
+      providerContinuationId: first.providerContinuationId!, providerConnection: first.providerConnection,
+      launchPolicy: { approvalPolicy: "on-request", sandboxPolicy: { type: "readOnly", networkAccess: false } } });
+    assertProviderHandle(attached);
+    const result = adapter.runRoomTurn(attached, { inboxItemId: "first-turn", actionId: "first-turn", sourceMessage: {}, activation: {} }, {
+      checkpointTurnStarted: async () => { checkpointed = true; },
+    });
+    if (failSubscription) {
+      await assert.rejects(result, /subscription unavailable/);
+      await adapter.recoverRoomTurn(attached, { inboxItemId: "first-turn", providerTurnId: `turn-${first.providerContinuationId}` });
+    }
+    else if (status !== "completed") await assert.rejects(result, /ended (?:cancelled|STOPPED)/);
+    else await result;
+    const client = harness.clients[1]!;
+    assert.equal(client.requests.filter(request => request.method === "turn/start").length, 1);
+    assert.equal(client.permissionResponses.length, 0);
+    const policy = requestByMethod(client, "turn/start").params as Record<string, unknown>;
+    assert.deepEqual(policy.sandboxPolicy, { type: "readOnly", networkAccess: false });
+    assert.equal(client.listPendingRequests().length, 1);
+  }
+});
+
 test("fresh adapter reattaches the durable app-server endpoint without launching a duplicate child", async () => {
   const harness = createHarness();
   const firstAdapter = new CodexProviderAdapter({ dependencies: harness.dependencies });
@@ -2488,9 +2671,11 @@ test("queued lifecycle cannot erase unreadable or contradictory Codex attach evi
       const client = createRpcClient(serverUrl, notify) as FakeRpc;
       client.turnStatus = "futureStatus";
       const read = client.request.bind(client);
+      let queued = false;
       client.request = async <T>(method: string, params?: unknown): Promise<T> => {
         const result = await read<T>(method, params);
-        if (method === "thread/read" && (params as { includeTurns?: boolean }).includeTurns === true) {
+        if (!queued && method === "thread/read" && (params as { includeTurns?: boolean }).includeTurns === true) {
+          queued = true;
           const turnId = `turn-${first.providerContinuationId}`;
           client.emit({ method: "turn/started", params: {
             threadId: first.providerContinuationId,
@@ -2740,6 +2925,8 @@ test("fresh attach proves an empty unmaterialized daemon-inbox thread without la
   const subscription = adapter.onExecution(attached, event => observations.push(event));
   assert.equal(attached.providerContinuationId, first.providerContinuationId);
   assert.equal(harness.launches.length, 1, "the verified existing writer must be retained");
+  assert.equal(harness.clients[1]!.requests.some(entry => entry.method === "thread/resume"), false,
+    "an empty thread may have no stored history for resume; preserve metadata-only attachment");
   assert.deepEqual(
     harness.clients[1]!.requests
       .filter((entry) => entry.method === "thread/read")

@@ -214,6 +214,18 @@ function normalizeLaunchPolicy(value: unknown): Record<string, unknown> {
   throw new Error("Codex launchPolicy contains an unsupported thread sandbox policy.");
 }
 
+function codexTurnPolicy(value: unknown): Readonly<Record<string, unknown>> {
+  normalizeLaunchPolicy(value);
+  const policy = value as Record<string, unknown>;
+  if (!["never", "on-request"].includes(String(policy.approvalPolicy)) || !recordValue(policy.sandboxPolicy)) {
+    throw new Error("Codex turn requires its exact applied approval and sandbox policy.");
+  }
+  return Object.freeze({
+    approvalPolicy: policy.approvalPolicy,
+    sandboxPolicy: Object.freeze(structuredClone(policy.sandboxPolicy as Record<string, unknown>)),
+  });
+}
+
 /**
  * Give the LetAgents MCP workplace the work-attempt cwd while preserving the
  * user's installed command, auth, and environment. No bearer or curated HOME
@@ -527,6 +539,7 @@ function isCodexRuntimeUnavailable(state: ProviderObservedState): boolean {
 }
 
 class CodexProviderHandle implements ProviderHandle {
+  subscriptionAfterMaterialization = false;
   custodyLaunchAgentSessionId?: string;
   readonly execution: ProviderExecutionObserver;
   readonly nativeActiveTurns = new Map<string, { providerContinuationId: string; providerTurnId: string }>();
@@ -566,6 +579,7 @@ class CodexProviderHandle implements ProviderHandle {
     readonly client: CodexAdapterRpc,
     readonly launch: CodexAppServerLaunch,
     now: () => string,
+    private turnPolicy: Readonly<Record<string, unknown>> | null,
   ) {
     this.providerContinuationId = providerContinuationId;
     this.execution = new ProviderExecutionObserver(now);
@@ -575,6 +589,17 @@ class CodexProviderHandle implements ProviderHandle {
       this.execution.emit({ domain: "control", kind: "state_changed", state: "degraded", sideEffects: "none" },
         providerConnection.processIdentity ?? undefined, providerConnection.pid ?? undefined);
     });
+  }
+
+  requireTurnPolicy(): Readonly<Record<string, unknown>> {
+    if (!this.turnPolicy) throw new Error("Codex cannot start a turn without its exact applied permission policy; restart the agent to apply its configuration.");
+    return this.turnPolicy;
+  }
+
+  bindTurnPolicy(policy: unknown): void {
+    // Observation-only recovery may attach before the daemon supplies the
+    // applied configuration. Bind once; later settings cannot change this birth.
+    if (this.turnPolicy === null && policy !== undefined) this.turnPolicy = codexTurnPolicy(policy);
   }
 
   replaceContinuation(providerContinuationId: string): void {
@@ -660,6 +685,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   }
 
   async attach(ref: ProviderContinuationRef): Promise<ProviderHandle | ProviderAttachTerminal | null> {
+    ref = { ...ref, ...(ref.launchPolicy === undefined ? {} : { launchPolicy: codexTurnPolicy(ref.launchPolicy) }) };
     const authorityMode = ref.lifecycleAuthorityMode ?? "typed_shadow";
     const handle = this.handles.get(ref.workAttemptId);
     if (
@@ -671,6 +697,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ) {
       if (handle) return null;
     } else {
+      handle.bindTurnPolicy(ref.launchPolicy);
       return handle;
     }
     const connection = ref.providerConnection;
@@ -684,7 +711,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
         || (pending.ref.lifecycleAuthorityMode ?? "typed_shadow") !== authorityMode
         || !sameProviderConnectionIdentity(pending.ref.providerConnection, connection)
       ) return null;
-      return pending.promise;
+      const attached = await pending.promise;
+      if (attached instanceof CodexProviderHandle) attached.bindTurnPolicy(ref.launchPolicy);
+      return attached;
     }
     const attaching = this.attachRunning(ref, connection).finally(() => {
       if (this.pendingAttaches.get(ref.workAttemptId)?.promise === attaching) {
@@ -884,6 +913,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     };
     assertRuntimeAvailable();
     const text = correction?.trim() || null;
+    const turnPolicy = text ? handle.requireTurnPolicy() : null;
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
       includeTurns: true,
@@ -962,11 +992,13 @@ export class CodexProviderAdapter implements ProviderAdapter {
         assertRuntimeAvailable();
       }
       const turn = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text, text_elements: [] }],
       });
       assertRuntimeAvailable();
       if (!turn.turn?.id) throw new Error("Codex did not acknowledge the redirected turn.");
+      await this.subscribeMaterializedThread(handle);
       handle.setLiveState("working");
     }
     assertRuntimeAvailable();
@@ -1071,6 +1103,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   async activateCustodialPolling(providerHandle: ProviderHandle, request: CustodialPollingActivationRequest,
     options: CustodialPollingActivationOptions): Promise<{ providerTurnId: string }> {
     const handle = this.requireHandle(providerHandle);
+    const turnPolicy = handle.requireTurnPolicy();
     const input = structuredClone(request);
     const receipt = input.launchReceipt;
     const launch = this.pollingLaunches.get(handle);
@@ -1111,12 +1144,14 @@ export class CodexProviderAdapter implements ProviderAdapter {
       await options.beforeNativeDispatch();
       assertCurrent();
       const result = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: continuation, cwd: input.cwd,
         input: [{ type: "text", text: buildCustodialPollingPrompt(input) }],
       });
       const id = result?.turn?.id;
       if (!nativeExecutionId(id)) throw new Error("Custodial polling activation returned no exact native turn ID.");
       await options.checkpointTurnStarted(id);
+      await this.subscribeMaterializedThread(handle);
       return { providerTurnId: id };
     } finally { this.pollingDispatches.delete(handle); }
   }
@@ -1193,6 +1228,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
   ): Promise<ProviderRoomTurnResult> {
     const handle = this.requireHandle(providerHandle);
     if (!request.inboxItemId.trim() || !request.actionId.trim()) throw new Error("Bounded Codex room turn requires durable inbox and action ids.");
+    const turnPolicy = handle.requireTurnPolicy();
     const assertRuntimeAvailable = () => {
       if (handle.terminal || isCodexRuntimeUnavailable(handle.state)) {
         throw new Error("Codex runtime is unavailable; no bounded room turn can start.");
@@ -1205,6 +1241,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     let started: TurnStartResult;
     try {
       started = await handle.client.request<TurnStartResult>("turn/start", {
+        ...turnPolicy,
         threadId: handle.providerContinuationId,
         input: [{ type: "text", text: boundedRoomTurnPrompt(request), text_elements: [] }],
       });
@@ -1595,7 +1632,9 @@ export class CodexProviderAdapter implements ProviderAdapter {
       throw new Error("Codex spawn requires the durable agent display name from the manifest.");
     }
 
-    const policy = normalizeLaunchPolicy(attestProviderSpawnPolicy("codex", req));
+    const attestedPolicy = attestProviderSpawnPolicy("codex", req);
+    const policy = normalizeLaunchPolicy(attestedPolicy);
+    const turnPolicy = codexTurnPolicy(attestedPolicy);
     const supervisorCoordinates = [
       req.supervisorEntryId,
       req.supervisorSocketPath,
@@ -1760,6 +1799,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
         client,
         observedLaunch,
         this.deps.now,
+        turnPolicy,
       );
       handle.setLiveState("idle");
       this.emitNativeExecution(handle, {
@@ -1810,6 +1850,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
           : {}),
       });
       const turn = await client.request<TurnStartResult>("turn/start", {
+        ...handle.requireTurnPolicy(),
         threadId,
         cwd: req.cwd,
         input: [{ type: "text", text: prompt, text_elements: [] }],
@@ -1832,6 +1873,7 @@ export class CodexProviderAdapter implements ProviderAdapter {
     ref: ProviderContinuationRef,
     connection: Extract<ProviderConnectionRef, { kind: "codex_app_server" }>,
   ): Promise<CodexProviderHandle | ProviderAttachTerminal | null> {
+    const turnPolicy = ref.launchPolicy === undefined ? null : codexTurnPolicy(ref.launchPolicy);
     if (connection.pid === null || !connection.processIdentity) {
       throw new Error(
         "Codex app-server attach is ambiguous; refusing to launch a second writer: the durable endpoint has no verified process identity.",
@@ -1907,6 +1949,27 @@ export class CodexProviderAdapter implements ProviderAdapter {
       if (currentIdentity === null || !sameProcessBirthIdentity(currentIdentity, connection.processIdentity)) {
         throw new Error("durable endpoint process identity no longer matches its recorded birth");
       }
+      const loadedThread = ["idle", "active", "systemError"].includes(String(recordValue(read.thread?.status)?.type));
+      if (!continuationMissing && !exactEmptyFallback && loadedThread) {
+        // thread/read verifies identity but does not subscribe this connection
+        // to turn items or approval requests. Resume the exact existing thread
+        // without configuration overrides or starting/replaying a turn.
+        const subscribed = await client.request<CodexThreadResult>("thread/resume", {
+          threadId: ref.providerContinuationId,
+        });
+        if (subscribed.thread?.id !== ref.providerContinuationId) {
+          throw new Error("Codex subscription resolved a different durable continuation thread.");
+        }
+        // A turn can finish between the first read and subscription without
+        // sending this connection a notification. Reconstruct from a fresh
+        // snapshot after subscribing so that gap cannot retain a stale turn.
+        read = await client.request<ThreadReadResult>("thread/read", {
+          threadId: ref.providerContinuationId, includeTurns: true,
+        });
+        if (read.thread?.id !== ref.providerContinuationId) {
+          throw new Error("Codex subscription snapshot resolved a different durable continuation thread.");
+        }
+      }
       const observedExit = this.deps.observeProcessExit(
         connection.pid,
         connection.processIdentity,
@@ -1928,8 +1991,10 @@ export class CodexProviderAdapter implements ProviderAdapter {
         client,
         launch,
         this.deps.now,
+        turnPolicy,
       );
       handle.setLiveState(continuationMissing ? "idle" : "working");
+      handle.subscriptionAfterMaterialization = exactEmptyFallback;
       this.handles.set(ref.workAttemptId, handle);
       this.exitPromises.set(handle, launch.exited.then((exit) => this.observeExit(handle!, exit)));
       const queuedTurnLifecycle = pendingNotifications.some(notification =>
@@ -2357,12 +2422,30 @@ export class CodexProviderAdapter implements ProviderAdapter {
     throw new Error("Codex did not prove the active turn reached an interrupted boundary.");
   }
 
+  private async subscribeMaterializedThread(handle: CodexProviderHandle): Promise<boolean> {
+    if (!handle.subscriptionAfterMaterialization) return false;
+    const threadId = handle.providerContinuationId;
+    const subscribed = await handle.client.request<CodexThreadResult>("thread/resume", { threadId });
+    if (subscribed.thread?.id !== threadId) throw new Error("Codex subscription resolved a different materialized thread.");
+    handle.subscriptionAfterMaterialization = false;
+    return true;
+  }
+
   /** Terminal correlation is event-driven and deliberately thread+turn exact. */
   private async waitForExactRoomTurnTerminal(
     handle: CodexProviderHandle,
     turnId: string,
     detachSignal?: AbortSignal,
   ): Promise<{ status: string; turn: ThreadReadTurn }> {
+    if (await this.subscribeMaterializedThread(handle)) {
+      const snapshot = await handle.client.request<ThreadReadResult>("thread/read", {
+        threadId: handle.providerContinuationId, includeTurns: true,
+      });
+      if (snapshot.thread?.id !== handle.providerContinuationId) throw new Error("Codex materialized snapshot resolved a different thread.");
+      const turn = snapshot.thread.turns?.find(turn => turn.id === turnId);
+      const status = typeof turn?.status === "string" ? turn.status : turn?.status?.status;
+      if (turn && status && /^(?:completed|failed|interrupted|cancelled|stopped)$/i.test(status)) return { status, turn };
+    }
     const status = await this.waitForExactTurnNotification(handle, exactTurnKey(handle.providerContinuationId, turnId), detachSignal);
     const read = await handle.client.request<ThreadReadResult>("thread/read", {
       threadId: handle.providerContinuationId,
