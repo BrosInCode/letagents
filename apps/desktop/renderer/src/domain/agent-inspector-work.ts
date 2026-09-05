@@ -22,11 +22,67 @@ export function agentInspectorRuntimeControlMatchesFence(
   control: RuntimeControl | null | undefined,
   executionGenerationId: string | null,
   daemonGeneration: number | null,
+  runtimeGenerationId?: string | null,
 ): boolean {
   return Boolean(control
     && executionGenerationId
     && control.execution_generation_id === executionGenerationId
-    && Number(control.daemon_generation_id) === daemonGeneration);
+    && Number(control.daemon_generation_id) === daemonGeneration
+    && runtimeGenerationId?.trim()
+    && control.runtime_generation_id === runtimeGenerationId);
+}
+
+/** Durable work changes refresh promptly; liveness timestamps do not. */
+export function agentInspectorDetailRevision(entry: DesktopSupervisorManifestEntry): string {
+  return JSON.stringify([entry.observedState, entry.condition, entry.lastError,
+    entry.workAttemptId, entry.providerContinuationId, entry.lastTurnControlSequence,
+    entry.roomAgentState?.inbox, entry.roomAgentState?.turn, entry.roomAgentState?.task,
+    entry.deliveryReceipts, entry.turnControl, entry.lastTerminal]);
+}
+
+/** Collapse background bursts without starving a same-runtime response. */
+export function createAgentInspectorBackgroundRefresh(now: () => number = Date.now) {
+  type Request = { key: string; revision: string; run: () => Promise<boolean> };
+  let active: (Request & { next: Request | null; promise: Promise<void> }) | null = null;
+  let completed: { key: string; revision: string; at: number } | null = null;
+  const refresh = (key: string, revision: string, run: Request["run"]): Promise<void> => {
+    if (active?.key === key) {
+      active.next = active.revision !== revision ? { key, revision, run } : null;
+      return active.promise;
+    }
+    if (completed && completed.key !== key) completed = null;
+    // Health can change without manifest changes. Recheck at least every five
+    // seconds while snapshots arrive, even when this entry is unchanged.
+    if (completed?.key === key && completed.revision === revision && now() - completed.at < 5_000) return Promise.resolve();
+    const request = { key, revision, run, next: null as Request | null, promise: Promise.resolve() };
+    active = request;
+    request.promise = Promise.resolve().then(run).catch(() => false).then(async success => {
+      if (active !== request) return;
+      if (success) completed = { key, revision, at: now() };
+      const next = request.next;
+      active = null;
+      if (next) await refresh(next.key, next.revision, next.run);
+    });
+    return request.promise;
+  };
+  return { refresh, reset() { active = null; completed = null; } };
+}
+
+export function createAgentInspectorDetailRequest() {
+  let active: { key: string; followDefaultSource: boolean; promise: Promise<void> } | null = null;
+  return {
+    run(key: string, followDefaultSource: boolean, read: (intent: { followDefaultSource: boolean }) => Promise<void>): Promise<void> {
+      if (active?.key === key) {
+        active.followDefaultSource ||= followDefaultSource;
+        return active.promise;
+      }
+      const request = { key, followDefaultSource, promise: Promise.resolve() };
+      active = request;
+      request.promise = read(request).finally(() => { if (active === request) active = null; });
+      return request.promise;
+    },
+    reset() { active = null; },
+  };
 }
 
 /** Control health explains reachability only; it never claims work succeeded or failed. */

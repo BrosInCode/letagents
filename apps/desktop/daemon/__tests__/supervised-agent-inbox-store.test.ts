@@ -2103,7 +2103,7 @@ test("inspector detail isolates unavailable optional execution capture from oper
       });
       assert.deepEqual(captured.runtime_control, {
         control_state: "responsive", runtime_state: "ready", observed_at: "1970-01-01T00:00:00.102Z",
-        execution_generation_id: "generation", daemon_generation_id: "daemon",
+        execution_generation_id: "generation", daemon_generation_id: "daemon", runtime_generation_id: runtime,
       });
       assert.deepEqual(captured.recorded_execution, { availability: "available", truncated: false, evidenceIncomplete: false,
         turns: [{ turnId: `captured-turn:${item!.inbox_item_id}`, state: "active", outcome: null, operations: [] }] });

@@ -108,6 +108,7 @@ function structuredRoomTurnCompletionResult(completion: StructuredRoomTurnComple
 export type AgentInspectorDetail = {
   recorded_execution?: RetainedExecutionDetail;
   runtime_control: {
+    runtime_generation_id?: string;
     control_state: "connecting" | "responsive" | "degraded" | "lost" | "unprobeable";
     runtime_state: "starting" | "ready" | "stopping" | "exited";
     observed_at: string | null;
@@ -422,7 +423,7 @@ export class SupervisedAgentInboxStore {
       let runtimeControl: AgentInspectorDetail["runtime_control"] = null;
       try { if (runtimeFence !== null) {
         const runtime = database.prepare(`SELECT r.control_state,r.runtime_state,
-          o.observer_execution_generation_id,o.daemon_generation_id,
+          o.observer_execution_generation_id,o.observer_runtime_generation_id,o.daemon_generation_id,
           (SELECT MAX(f.observed_at_ms) FROM execution_facts f
             WHERE f.agent_id=o.agent_id
               AND f.execution_generation_id=o.observer_execution_generation_id
@@ -454,6 +455,7 @@ export class SupervisedAgentInboxStore {
             observed_at: observedAt,
             execution_generation_id: String(runtime.observer_execution_generation_id),
             daemon_generation_id: String(runtime.daemon_generation_id),
+            runtime_generation_id: String(runtime.observer_runtime_generation_id),
           };
         }
       } } catch {
