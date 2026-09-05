@@ -382,6 +382,8 @@
 .agent-inspector-context-list dt { color: var(--text-secondary, #a1a1aa); font-size: 0.7rem; }
 .agent-inspector-context-list dd { margin: 0; color: var(--text-secondary, #a1a1aa); font-size: 0.73rem; line-height: 1.4; }
 .agent-inspector-context-list dd span { display: block; }
+.agent-inspector-context-list .agent-inspector-provider-status { min-block-size: 3lh; }
+.agent-inspector-provider-status small { display: block; min-block-size: 1lh; }
 
 .agent-inspector-diagnostics { display: grid; gap: 12px; }
 .agent-inspector-diagnostics-copy { min-height: 44px; padding: 0 10px; border: 1px solid rgba(255,255,255,.14); border-radius: 9px; background: rgba(255,255,255,.055); color: var(--text,#fafafa); font: inherit; font-size: .7rem; font-weight: 670; cursor: pointer; transition: background-color 140ms ease, border-color 140ms ease; }

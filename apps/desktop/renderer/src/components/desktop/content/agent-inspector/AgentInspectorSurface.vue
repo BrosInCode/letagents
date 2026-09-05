@@ -68,6 +68,7 @@
           :projection="projection"
           :busy="actionState?.status === 'running'"
           :runtime-control="workResource.detail?.runtime_control ?? null"
+          :runtime-control-pending="workResource.status === 'loading' || workResource.status === 'refreshing'"
           @stop-turn="emitTurnControl('stop_turn')"
           @correct-turn="emitTurnControl('steer_turn', $event)"
           @retry-turn-control="emitTurnControl('retry_turn_control')"
