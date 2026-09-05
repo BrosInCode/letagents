@@ -20,6 +20,7 @@ import {
 } from "../../../shared/agent-presence.js";
 import {
   createGlobalAgentAddressResolver,
+  humanConversationFallback,
   decideAgentMessageActivation,
   isUntrustedExternalActivationSource,
   isTaskOwnerFollowUpMessageText,
@@ -44,6 +45,7 @@ import { hydrateMessageReplies } from "./history.js";
 import {
   createAccountRoutingTargetBudget,
   getBoundedActiveWorkLeaseOwners,
+  getRecentHumanConversationRecipient,
   getMessageAccountAgentRouting,
   MAX_ACCOUNT_ROUTING_ENVELOPE_BYTES,
   MAX_ACCOUNT_ROUTING_TARGETS,
@@ -426,6 +428,10 @@ export async function addMessageWithCreateStatus(
     // querying just those keys/sessions avoids enumerating a large room twice
     // for an ordinary one-recipient continuation.
     const routingShape = createGlobalAgentAddressResolver([])(messageForRouting);
+    const humanConversationEligible = createdMessage.source === "browser"
+      && Boolean(createdMessage.publisher_account_id) && !createdMessage.publisher_agent_key
+      && !routingShape.broadcast && !routingShape.hasMention
+      && createdMessage.reply_to_number === null && createdMessage.thread_root_number === null;
     const candidateAgentKeys = new Set<string>();
     const candidateSessionIds = new Set<string>();
     if (replyToMessage?.publisher_agent_key && replyToMessage.publisher_account_id) {
@@ -440,7 +446,8 @@ export async function addMessageWithCreateStatus(
       if (lease.agent_session_id) candidateSessionIds.add(lease.agent_session_id);
       if (!lease.agent_key && !lease.agent_session_id) leaseNeedsCompletePopulation = true;
     }
-    const needsCompletePopulation = routingShape.broadcast
+    const needsCompletePopulation = humanConversationEligible
+      || routingShape.broadcast
       || routingShape.hasMention
       || createdMessage.thread_root_number !== null
       || (
@@ -636,6 +643,22 @@ export async function addMessageWithCreateStatus(
         }
       }
 
+      const recentRecipient = humanConversationEligible && sessionsByAgentKey.size > 2
+        ? await getRecentHumanConversationRecipient(tx, roomId, {
+            number: createdMessage.number, timestamp: createdMessage.timestamp,
+            publisher_account_id: createdMessage.publisher_account_id!,
+          }) : null;
+      const humanFallback = humanConversationFallback({
+        source: createdMessage.source, publisherAccountId: createdMessage.publisher_account_id,
+        publisherAgentKey: createdMessage.publisher_agent_key,
+        explicitlyAddressed: !humanConversationEligible,
+        // Registration is durable; transport freshness must not change room size.
+        // Paused workers remain registered until their server session ends.
+        registeredAgentKeys: [...sessionsByAgentKey.keys()],
+        recentAgentKey: recentRecipient && ownerScopeByAgentKey.get(recentRecipient.agentKey) === recentRecipient.ownerAccountId
+          ? recentRecipient.agentKey : null,
+      });
+
       // Receipts are keyed by durable agent identity: several live sessions
       // (duplicates, mid-rotation overlap) may share one agent_key, but the
       // agent was asked once. The earliest session represents it; the unique
@@ -689,7 +712,12 @@ export async function addMessageWithCreateStatus(
             session: representative,
             activation: { decision: "activate", reason: "thread_participant", addressed: true },
           };
-        } else if (taskOwnerFollowUp) {
+        } else if (humanFallback?.agentKeys.includes(agentKey)) {
+          selectedActivation = {
+            session: representative,
+            activation: { decision: "activate", reason: humanFallback.reason, addressed: true },
+          };
+        } else if (!humanFallback && taskOwnerFollowUp) {
           selectedActivation = group.identities
             .map((identity, index) => ({
               session: group.sessions[index]!,
