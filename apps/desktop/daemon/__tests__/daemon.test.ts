@@ -2153,7 +2153,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
       sequence: 2,
       kind: "text_delta",
       method: "item/agentMessage/delta",
-      payload: { delta: "late evidence" },
+      payload: { threadId: handle.providerContinuationId!, turnId: "turn_exact", itemId: "message_exact", delta: "late evidence" },
     });
     current = await env.internals.store.getEntry(env.id);
     assert.ok(current);
@@ -2167,7 +2167,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
       method: "item/reasoning/summaryTextDelta",
       summary: "Checking the durable room delivery path.",
       payload: {
-        threadId: "thread_exact",
+        threadId: handle.providerContinuationId!,
         turnId: "turn_exact",
         itemId: "reasoning_exact",
         summaryIndex: 0,
@@ -2188,7 +2188,7 @@ test("failed room waits remain retryable for one healthy provider execution", as
       method: "item/reasoning/textDelta",
       summary: "Codex raw reasoning text is streaming.",
       payload: {
-        threadId: "thread_exact",
+        threadId: handle.providerContinuationId!,
         turnId: "turn_exact",
         itemId: "reasoning_exact",
         delta: "private chain of thought must never enter Live",
