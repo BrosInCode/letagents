@@ -289,6 +289,7 @@
       :live-feed="agentInspectorLiveFeed"
       :room-identifier="room.identifier"
       :request-version="selectedAgentDetailRequestVersion"
+      :initial-tab="agentInspectorInitialTab"
       :managed-sessions="roomManagedAgentSessions"
       :reasoning-sessions="reasoningSessions"
       @close="closeAgentDetail"
@@ -383,6 +384,7 @@ import {
 import { buildLetAgentsFocusRoomUrl, buildLetAgentsRoomCopyValue } from "../../../domain/room-urls";
 import { shouldSkipPollTick } from "../../../domain/visibility-polling";
 import { createRoomDeliveryRetryCoordinator } from "../../../domain/room-delivery-retry";
+import { initialMessageInspectorRequest } from "../../../domain/room-message-reveal";
 import { supervisedAgentDisplayLabel } from "../../../domain/codenames";
 import { roomMentionCandidates } from "../../../domain/participants";
 import {
@@ -549,6 +551,7 @@ const actionPanelOpen = ref(false);
 const addAgentModalOpen = ref(false);
 const selectedAgentDetailRequest = ref<AgentInspectorRequest | null>(null);
 const selectedAgentDetailRequestVersion = ref(0);
+const agentInspectorInitialTab = ref<"overview" | "work">("overview");
 const agentInspectorActionState = ref<AgentInspectorActionState | null>(null);
 const agentInspectorCompact = ref(false);
 // Cap the retained live-feed tail so a long turn can't grow the renderer
@@ -1549,6 +1552,17 @@ async function skipRoomDelivery(agentId: string, sourceMessageId: string): Promi
 }
 
 async function revealRoomMessage(messageId: string): Promise<void> {
+  if (messageId.startsWith("desktop-initial-message:")) {
+    const request = initialMessageInspectorRequest(messageId, props.room.identifier, supervisorEntries.value);
+    if (!request) {
+      emit("message-reveal-unavailable", messageId);
+      return;
+    }
+    openAgentDetailRequest(request);
+    agentInspectorInitialTab.value = "work";
+    selectAgentInspectorWorkSource(messageId);
+    return;
+  }
   const revealed = await revealMessage(messageId);
   if (!revealed) {
     emit("message-reveal-unavailable", messageId);
@@ -1944,6 +1958,7 @@ async function openAgentDetailFromParticipant(target: AgentModalTarget): Promise
 }
 
 function openAgentDetailRequest(request: AgentInspectorRequest): void {
+  agentInspectorInitialTab.value = "overview";
   selectedAgentDetailRequestVersion.value += 1;
   selectedAgentDetailRequest.value = request;
   agentInspectorActionState.value = null;
