@@ -438,6 +438,7 @@ import {
   readAgentInspectorWorkDetail,
   agentInspectorWorkArtifacts,
   defaultAgentInspectorWorkSource,
+  canRevealAgentInspectorWorkMessage,
   emptyAgentInspectorWorkResource,
   type AgentInspectorWorkResource,
 } from "../../../domain/agent-inspector-work";
@@ -2024,6 +2025,7 @@ function openAgentInspectorLive(): void {
   if (!projection) return;
   agentInspectorLiveFeed.value = { events: [], ended: false, droppedEvents: 0 };
   void loadAgentInspectorProviders();
+  openAgentInspectorWork();
   void desktopIpc.supervisor?.watchAgentStream?.(projection.entryId);
 }
 
@@ -2575,7 +2577,7 @@ async function loadAgentInspectorWorkDetail(
 async function revealAgentInspectorWorkMessage(canonicalMessageId: string): Promise<void> {
   const detail = agentInspectorWorkResource.value.detail;
   const target = selectedAgentDetailTarget.value;
-  if (!canonicalMessageId.trim() || !detail || target?.kind !== "supervised" || detail.entry_id !== target.supervisorEntryId || detail.room_id !== props.room.identifier || detail.publication?.canonical_message_id !== canonicalMessageId) return;
+  if (target?.kind !== "supervised" || !canRevealAgentInspectorWorkMessage(detail, target.supervisorEntryId, props.room.identifier, canonicalMessageId)) return;
   activeTab.value = "chat";
   await revealRoomMessage(canonicalMessageId);
   if (agentInspectorCompact.value) closeAgentDetail();
