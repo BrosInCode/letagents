@@ -1,4 +1,6 @@
-import { readLocalState, readLocalStateSnapshot, updateLocalState } from "./storage.js";
+import { getLocalStatePath, readLocalState, readLocalStateSnapshot, updateLocalState } from "./storage.js";
+import { isMcpWorkerId } from "../../shared/mcp-worker.js";
+import { pinnedWorkerConnection } from "../worker-call-context.js";
 import type { StoredAgentSessionState } from "./types.js";
 
 export function getStoredAgentSession(
@@ -8,7 +10,16 @@ export function getStoredAgentSession(
     return null;
   }
   const state = readLocalState();
-  return state.agent_sessions?.[sessionId] ?? null;
+  const stored = state.agent_sessions?.[sessionId] ?? null;
+  if (stored && isMcpWorkerId(stored.agent_instance_id)) {
+    // A replaced process must never borrow its successor's credential from disk.
+    const pinned = pinnedWorkerConnection(getLocalStatePath(), sessionId);
+    if (!pinned || stored.session_token !== pinned.session_token) {
+      throw new Error("This worker connection was replaced. Reconnect explicitly with its worker_id.");
+    }
+    return { ...pinned, ended_at: stored.ended_at };
+  }
+  return stored;
 }
 
 export function getCurrentAgentSession(roomId?: string | null): StoredAgentSessionState | null {
@@ -146,12 +157,17 @@ export function replaceLocalWorkerAgentSession(
 
 export function endStoredAgentSession(
   sessionId: string,
-  endedAt = new Date().toISOString()
+  endedAt = new Date().toISOString(),
+  expectedConnectionToken?: string,
 ): StoredAgentSessionState | null {
   let endedSession: StoredAgentSessionState | null = null;
   updateLocalState((state) => {
     const session = state.agent_sessions?.[sessionId];
     if (!session) {
+      return state;
+    }
+    if (isMcpWorkerId(session.agent_instance_id)
+      && expectedConnectionToken !== session.session_token) {
       return state;
     }
 
