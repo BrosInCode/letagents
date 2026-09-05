@@ -5,6 +5,7 @@ import {
   attachAgentMessageActivations,
   createGlobalAgentAddressResolver,
   decideAgentMessageActivation,
+  humanConversationFallback,
 } from "../../shared/activation-routing.js";
 
 const worker = {
@@ -851,4 +852,24 @@ test("routing aliases use version-independent ASCII folding and exact non-ASCII"
   assert.equal(participantDecision("Ⓐgent", "ⓐgent").reason, "unaddressed");
   assert.equal(participantDecision("İpek", "ipek").reason, "unaddressed");
   assert.equal(participantDecision("ΟΣ", "ΟΣ").reason, "thread_participant");
+});
+
+
+test("send-time human fallback counts distinct registered workers and honors explicit routing", () => {
+  const input = { source: "browser", publisherAccountId: "human", publisherAgentKey: null,
+    explicitlyAddressed: false, registeredAgentKeys: ["oak", "oak", "pine"] };
+  assert.deepEqual(humanConversationFallback(input), { reason: "small_room", agentKeys: ["oak", "pine"] });
+  assert.equal(humanConversationFallback({ ...input, registeredAgentKeys: [] }), null);
+  const larger = { ...input, registeredAgentKeys: ["oak", "pine", "ash"] };
+  assert.equal(humanConversationFallback(larger), null);
+  assert.deepEqual(humanConversationFallback({ ...larger, recentAgentKey: "pine" }), {
+    reason: "recent_conversation", agentKeys: ["pine"],
+  });
+  assert.equal(humanConversationFallback({ ...larger, recentAgentKey: "retired" }), null);
+  for (const source of ["agent", "github", "system", "managed_agent_failure", null]) {
+    assert.equal(humanConversationFallback({ ...input, source }), null);
+  }
+  assert.equal(humanConversationFallback({ ...input, publisherAccountId: null }), null);
+  assert.equal(humanConversationFallback({ ...input, publisherAgentKey: "oak" }), null);
+  assert.equal(humanConversationFallback({ ...input, explicitlyAddressed: true }), null);
 });
