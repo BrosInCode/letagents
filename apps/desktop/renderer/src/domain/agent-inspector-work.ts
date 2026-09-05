@@ -3,6 +3,7 @@ import type {
   DesktopRoomSharedArtifact,
   DesktopSupervisorAgentInspectorDetail,
   DesktopSupervisorManifestEntry,
+  DesktopSupervisorStateSnapshot,
   DesktopTaskSummary,
 } from "../../../electron/ipc-types";
 import { roomArtifactTimelineItems, type RoomArtifactTimelineItem } from "./room-artifacts";
@@ -22,11 +23,120 @@ export function agentInspectorRuntimeControlMatchesFence(
   control: RuntimeControl | null | undefined,
   executionGenerationId: string | null,
   daemonGeneration: number | null,
+  runtimeGenerationId?: string | null,
 ): boolean {
   return Boolean(control
     && executionGenerationId
     && control.execution_generation_id === executionGenerationId
-    && Number(control.daemon_generation_id) === daemonGeneration);
+    && Number(control.daemon_generation_id) === daemonGeneration
+    && runtimeGenerationId?.trim()
+    && control.runtime_generation_id === runtimeGenerationId);
+}
+
+/** Durable work changes refresh promptly; liveness timestamps do not. */
+export function agentInspectorDetailRevision(entry: DesktopSupervisorManifestEntry): string {
+  return JSON.stringify([entry.observedState, entry.condition, entry.lastError,
+    entry.workAttemptId, entry.providerContinuationId, entry.lastTurnControlSequence,
+    entry.roomAgentState?.inbox, entry.roomAgentState?.turn, entry.roomAgentState?.task,
+    entry.deliveryReceipts, entry.turnControl, entry.lastTerminal]);
+}
+
+export function agentInspectorDetailKey(entry: DesktopSupervisorManifestEntry, source: string | null, generation: number): string {
+  return JSON.stringify([entry.id, entry.roomId, source, entry.executionGenerationId, generation, entry.runtimeGenerationId ?? null]);
+}
+
+export function agentInspectorDetailRequestIsCurrent(key: string, token: number, current: {
+  entry: DesktopSupervisorManifestEntry | null | undefined; roomId: string; source: string | null;
+  generation: number | null; snapshotGeneration: number; token: number;
+}): boolean {
+  return Boolean(current.entry && current.entry.roomId === current.roomId && token === current.token
+    && current.generation !== null && current.snapshotGeneration <= current.generation
+    && agentInspectorDetailKey(current.entry, current.source, current.generation) === key);
+}
+
+export function invalidateAgentInspectorRuntimeControl(resource: AgentInspectorWorkResource,
+  snapshot: DesktopSupervisorStateSnapshot, entryId: string, roomId: string): AgentInspectorWorkResource {
+  const entry = snapshot.entries.find(candidate => candidate.id === entryId);
+  const detail = resource.detail;
+  if (detail?.runtime_control && (!entry || entry.roomId !== roomId || !agentInspectorRuntimeControlMatchesFence(
+    detail.runtime_control, entry.executionGenerationId, snapshot.daemonGeneration, entry.runtimeGenerationId ?? null))) {
+    return { ...resource, detail: { ...detail, runtime_control: null } };
+  }
+  return resource;
+}
+
+/** Retain exact history during a refresh, but never retain unfenced health. */
+export async function readAgentInspectorWorkDetail(input: {
+  entry: DesktopSupervisorManifestEntry; source: string | null; generation: number;
+  previous: AgentInspectorWorkResource;
+  read: () => Promise<DesktopSupervisorAgentInspectorDetail>;
+  isCurrent: () => boolean;
+  write: (resource: AgentInspectorWorkResource) => void;
+}): Promise<DesktopSupervisorAgentInspectorDetail | null> {
+  const { entry, source, generation } = input;
+  const fenceHealth = (detail: DesktopSupervisorAgentInspectorDetail) => detail.runtime_control
+    && !agentInspectorRuntimeControlMatchesFence(detail.runtime_control, entry.executionGenerationId, generation, entry.runtimeGenerationId ?? null)
+    ? { ...detail, runtime_control: null } : detail;
+  const cached = input.previous.detail;
+  const previous = input.previous.sourceMessageId === source && cached
+    && isCurrentAgentInspectorWorkResponse(cached, entry.id, entry.roomId, source) ? fenceHealth(cached) : null;
+  input.write({ status: previous ? "refreshing" : "loading", detail: previous, error: null, sourceMessageId: source });
+  try {
+    const detail = await input.read();
+    if (!input.isCurrent() || !isCurrentAgentInspectorWorkResponse(detail, entry.id, entry.roomId, source)) return null;
+    const current = fenceHealth(detail);
+    input.write({ status: "ready", detail: current, error: null, sourceMessageId: source });
+    return current;
+  } catch (error) {
+    if (input.isCurrent()) input.write({ status: "error", detail: previous ? { ...previous, runtime_control: null } : null,
+      error: error instanceof Error ? error.message : "Could not load retained work.", sourceMessageId: source });
+    return null;
+  }
+}
+
+/** Collapse background bursts without starving a same-runtime response. */
+export function createAgentInspectorBackgroundRefresh(now: () => number = Date.now) {
+  type Request = { key: string; revision: string; run: () => Promise<boolean> };
+  let active: (Request & { next: Request | null; promise: Promise<void> }) | null = null;
+  let completed: { key: string; revision: string; at: number } | null = null;
+  const refresh = (key: string, revision: string, run: Request["run"]): Promise<void> => {
+    if (active?.key === key) {
+      active.next = active.revision !== revision ? { key, revision, run } : null;
+      return active.promise;
+    }
+    if (completed && completed.key !== key) completed = null;
+    // Health can change without manifest changes. Recheck at least every five
+    // seconds while snapshots arrive, even when this entry is unchanged.
+    if (completed?.key === key && completed.revision === revision && now() - completed.at < 5_000) return Promise.resolve();
+    const request = { key, revision, run, next: null as Request | null, promise: Promise.resolve() };
+    active = request;
+    request.promise = Promise.resolve().then(run).catch(() => false).then(async success => {
+      if (active !== request) return;
+      if (success) completed = { key, revision, at: now() };
+      const next = request.next;
+      active = null;
+      if (next) await refresh(next.key, next.revision, next.run);
+    });
+    return request.promise;
+  };
+  return { refresh, reset() { active = null; completed = null; } };
+}
+
+export function createAgentInspectorDetailRequest() {
+  let active: { key: string; followDefaultSource: boolean; promise: Promise<void> } | null = null;
+  return {
+    run(key: string, followDefaultSource: boolean, read: (intent: { followDefaultSource: boolean }) => Promise<void>): Promise<void> {
+      if (active?.key === key) {
+        active.followDefaultSource ||= followDefaultSource;
+        return active.promise;
+      }
+      const request = { key, followDefaultSource, promise: Promise.resolve() };
+      active = request;
+      request.promise = read(request).finally(() => { if (active === request) active = null; });
+      return request.promise;
+    },
+    reset() { active = null; },
+  };
 }
 
 /** Control health explains reachability only; it never claims work succeeded or failed. */

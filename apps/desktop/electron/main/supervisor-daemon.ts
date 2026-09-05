@@ -41,7 +41,7 @@ export const SUPERVISOR_DAEMON_PROTOCOL_VERSION = 3;
 // Keep in sync with daemon/types.ts. Protocol compatibility permits a clean
 // handoff; implementation equality decides whether the already-running daemon
 // actually contains this desktop build's fixes.
-export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.135";
+export const SUPERVISOR_DAEMON_IMPLEMENTATION_VERSION = "2.0.136";
 const REQUEST_TIMEOUT_MS = 3_000;
 const MANIFEST_LIST_REQUEST_TIMEOUT_MS = 15_000;
 // Once configuration application is admitted, the daemon may already be
@@ -150,6 +150,7 @@ export function onSupervisorDaemonGeneration(
 
 type WireResponse = { version: number; id?: string; ok: boolean; result?: unknown; error?: string };
 type WireEntry = {
+  runtime_generation_id?: string | null;
   id: string;
   room_id: string;
   display_name: string;
@@ -2065,7 +2066,8 @@ export function mapAgentInspectorDetail(value: Record<string, unknown>, input: i
       const daemonGenerationId = nonEmptyString(row.daemon_generation_id);
       if (controlState && runtimeState && observedAt !== undefined && executionGenerationId && daemonGenerationId) {
         runtimeControl = { control_state: controlState, runtime_state: runtimeState, observed_at: observedAt,
-          execution_generation_id: executionGenerationId, daemon_generation_id: daemonGenerationId };
+          execution_generation_id: executionGenerationId, daemon_generation_id: daemonGenerationId,
+          ...(nonEmptyString(row.runtime_generation_id) ? { runtime_generation_id: nonEmptyString(row.runtime_generation_id)! } : {}) };
       }
     }
   }
@@ -2108,6 +2110,7 @@ export function mapEntry(entry: WireEntry): DesktopSupervisorManifestEntry {
     executionGenerationId: entry.provider_ref?.execution_generation_id ?? null,
     providerContinuationId: entry.provider_ref?.provider_continuation_id ?? null,
     providerPid: entry.provider_ref?.provider_connection?.pid ?? null,
+    runtimeGenerationId: nonEmptyString(entry.runtime_generation_id) ?? null,
     workplaceLiveness: {
       state: entry.workplace_liveness?.state ?? "unknown",
       observedAt: entry.workplace_liveness?.observed_at ?? null,
