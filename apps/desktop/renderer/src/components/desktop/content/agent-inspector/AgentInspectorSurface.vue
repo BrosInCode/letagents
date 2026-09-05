@@ -252,7 +252,7 @@ function containsFocus(): boolean {
 
 defineExpose({ focusInitial, containsFocus });
 
-watch(() => [props.projection.entryId, props.requestVersion, props.initialTab], () => {
+watch([() => props.projection.entryId, () => props.requestVersion, () => props.initialTab], () => {
   selectedTab.value = props.initialTab ?? "overview";
   confirmRetire.value = false;
 });
